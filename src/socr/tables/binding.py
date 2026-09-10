@@ -80,12 +80,12 @@ precision (``1.10`` normalises to itself, not ``1.1``; A3 comes for free).
 
 from __future__ import annotations
 
-import html
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
+from socr.tables.label_canonical import decode_label_cell
 from socr.tables.native_verifier import (
     _WELL_SEPARATED_GAP_PT,
     _cluster_x_positions,
@@ -185,12 +185,15 @@ def _split_row(line: str) -> tuple[str, ...]:
 #     drops, never merges).
 # --------------------------------------------------------------------------
 
-_LEADING_WS_RE = re.compile(r"^[\s ]+")
-
 
 def _normalize_label_cell(text: str) -> str:
-    """Decode HTML entities and strip leading whitespace (incl. U+00A0)."""
-    return _LEADING_WS_RE.sub("", html.unescape(text))
+    """Decode HTML entities and strip leading whitespace (incl. U+00A0).
+
+    #688: delegated to ``tables.label_canonical``, which is also the shared
+    boundary that rewrites the SHIPPED page bytes. One function, so the
+    binder's view of a label and the corpus text can never disagree again.
+    """
+    return decode_label_cell(text)
 
 
 def _is_spacer_row(row: tuple[str, ...]) -> bool:

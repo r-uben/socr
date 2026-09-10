@@ -17,8 +17,11 @@ authoritative. This module:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 _PIPE_LINE = re.compile(r"^\s*\|?.*\|.*$")  # a markdown table row contains a pipe
 _SEP_CELL = re.compile(r"^:?-{1,}:?$")  # ---, :---, ---:, :---: separator cell
@@ -752,6 +755,94 @@ def table_syntax_line_indices(lines: list[str]) -> set[int]:
     if run_start is not None:
         _close(run_start, len(lines))
     return syntax
+
+
+def _aligned_content_lines(lines: list[str]) -> list[str] | None:
+    """``_markdown_content_lines``' mask, index-aligned to *lines*.
+
+    #688. ``_markdown_content_lines`` re-splits with ``str.splitlines``, which
+    recognises boundaries ``split("\n")`` does not (VT, FF, FS/GS/RS, NEL,
+    U+2028, U+2029). Callers that hold their own ``split("\n")`` list cannot
+    use its output as an index map. This applies the same two blanking passes
+    directly to the caller's list.
+
+    An unclosed ``<!--`` truncates the masked text (deliberately, see
+    ``_strip_html_comments``). Round 3: rather than abandon the whole page,
+    keep the prefix that IS mapped -- dropping its last, possibly partial line
+    -- and blank the unmapped tail, so a table above the malformed comment is
+    still reachable while nothing below it is touched. ``None`` means not even
+    a prefix survives.
+    """
+    head = _strip_html_comments("\n".join(lines)).split("\n")
+    if len(head) > len(lines):  # defensive: the mask may only shrink
+        return None
+    if len(head) < len(lines):
+        head = head[:-1]  # the truncation can cut mid-line
+        if not head:
+            return None
+    masked = _strip_fenced_regions(head)
+    if len(masked) != len(head):
+        return None
+    masked = ["" if _INDENTED_CODE.match(line) else line for line in masked]
+    return masked + [""] * (len(lines) - len(masked))
+
+
+def table_body_row_indices(lines: list[str]) -> set[int]:
+    """Indices of *lines* that are BODY rows of a genuine markdown table.
+
+    #688. The same boundary discipline as :func:`table_syntax_line_indices`
+    -- a table is anchored to its strict separator row, and the body is the
+    run of DELIMITED lines below it -- but header band and separator are
+    excluded, because the one caller (``tables.label_canonical``) rewrites
+    ROW-LABEL cells only, exactly the cells ``binding.parse_grid``
+    normalises. Header cells are column titles; the binder leaves them
+    alone, so this must too.
+
+    Anchoring to the separator rather than to a run of pipe-bearing lines is
+    what keeps a pipe-carrying sentence next to a table out of the set.
+    """
+    # A grid inside a fence or an HTML comment is a code SAMPLE, not a reading
+    # of the page, and its labels are not this transform's business. The mask
+    # is built against the CALLER's own line split, never against
+    # ``str.splitlines`` -- #688 round 2: a U+2028 in prose above the fence
+    # makes the two disagree, and the old length test then silently dropped
+    # the fence exclusion and rewrote the code sample. When the mask cannot be
+    # aligned (an unclosed comment truncates the text), abstain: no indices,
+    # so no rewrite.
+    masked = _aligned_content_lines(lines)
+    if masked is None:
+        logger.debug("#688: no line mapping for this text; no label cell is canonicalised")
+        return set()
+    if masked.count("") > lines.count(""):
+        logger.debug("#688: label canonicalisation narrowed to the mapped prefix of this text")
+    lines = masked
+
+    body: set[int] = set()
+    run_start: int | None = None
+
+    def _close(start: int, end: int) -> None:
+        separators = [idx for idx in range(start, end) if _is_separator_row(_split_row(lines[idx]))]
+        for separator in separators:
+            idx = separator + 1
+            while idx < end:
+                stripped = lines[idx].strip()
+                if not (stripped.startswith("|") and stripped.endswith("|")):
+                    break
+                if not _is_separator_row(_split_row(lines[idx])):
+                    body.add(idx)
+                idx += 1
+
+    for idx, line in enumerate(lines):
+        if _is_table_line(line):
+            if run_start is None:
+                run_start = idx
+            continue
+        if run_start is not None:
+            _close(run_start, idx)
+            run_start = None
+    if run_start is not None:
+        _close(run_start, len(lines))
+    return body
 
 
 def _parse_grid(rows: list[str]) -> list[list[str]]:
