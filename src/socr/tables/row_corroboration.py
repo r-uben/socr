@@ -434,6 +434,15 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     genuine attempt still corroborates, while the table, its wrapped labels and
     its entire header block are attributed to the table.
 
+    Round 5 (Astra, 2026-09-10) closes the two ways that walk still turned an
+    UNPROVEN gap into positive prose attribution. Stopping at a step larger
+    than the anchors' pitch says only that the step is unexplained; the band
+    beyond it is admitted as EVIDENCE only if the page separately shows it to
+    be a block of its own (:func:`_separated_prose_runs`), because the mean
+    step between neighbouring anchors is not an upper bound on the individual
+    steps inside one table. And an empty anchor list is no longer read as an
+    empty page: see the no-anchor branch below.
+
     Over-exclusion is still the safe direction and its cost is bounded anyway:
     since #649, refusing corroboration no longer loses the page's prose, it
     ships the native layer's own text instead. A page whose prose is set solid
@@ -455,9 +464,26 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     )
 
     if not anchors:
-        # No numeric row anywhere: there is no table on this page to confuse a
-        # band with, so every prose band is unambiguously prose. Nothing to
-        # attribute, nothing to abstain from.
+        # No recognised numeric ROW is not "no table" (#652 round 5, Astra).
+        # ``_is_genuine_numeric`` is a row-MATCHING predicate and deliberately
+        # rejects printed forms that are unmistakably values -- a maturity
+        # date (``12/04/89``) above all -- so a table of institution names and
+        # maturity dates carries zero anchors while the SHIPPING partition
+        # correctly withholds every one of its date bands. Reading that
+        # absence as positive evidence of a prose-only page put the table's
+        # own bank names into the witness and corroborated an invented
+        # sentence built from them.
+        #
+        # So ask the exhaustive question the shipping side has already
+        # answered rather than adding a second numeric detector: does ANY band
+        # on this page carry a printed digit (``bears_printed_numeral``, via
+        # ``partition_prose_bands``)? If one does, this page has withheld
+        # numeric bands that the narrower structural matcher cannot recognise,
+        # its table's extent is unmeasured, and there is nothing here to
+        # attribute a band to a block with -- abstain. Only a page with no
+        # printed numeric content ANYWHERE is unambiguously prose.
+        if any(not is_prose for is_prose, _band in bands):
+            return [], [word for _is_prose, band in bands for word in band]
         return [word for is_prose, band in bands if is_prose for word in band], []
 
     # A LONE anchor is the opposite case. With one numeric row there is no row
@@ -506,10 +532,12 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
                 attributed.add(idx)
                 idx += step
 
+    separated = _separated_prose_runs(centers, attributed, len(bands))
+
     witness: list = []
     unresolved: list = []
     for idx, (is_prose, band) in enumerate(bands):
-        if idx in attributed:
+        if idx in attributed or idx not in separated:
             unresolved.extend(band)
         elif is_prose:
             witness.extend(band)
@@ -518,6 +546,58 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
         # nothing here vouches for it, and not table vocabulary either, so
         # subtracting its ordinary words from the witness would be wrong.
     return witness, unresolved
+
+
+def _separated_prose_runs(centers: list[float], attributed: set[int], total: int) -> set[int]:
+    """The bands the PAGE ITSELF shows to be a block of their own.
+
+    #652 round 5 (Astra, 2026-09-10). Stopping the anchored walk at a step
+    larger than the table's own pitch says the step is unexplained; it does
+    not say the band beyond it is prose. The two are not the same claim, and
+    the average step between neighbouring anchors is not an upper bound on the
+    individual steps INSIDE one table: a units caption printed tight under its
+    row label ("Austrian National Bank" / 18pt / "Maturity schedule" / 6pt /
+    "250.0", the reviewer's measured counterexample) makes the label's own
+    18pt step exceed the 12pt pitch its rows average. The walk stopped there,
+    the label became "prose", and the fabricated sentence built from it
+    shipped. Nothing outside the table had to change for that.
+
+    Where the extent cannot be established, the repo's rule is to abstain, and
+    abstaining is cheap here: since #649, refusing corroboration costs no page
+    text -- the native layer's own prose ships flagged either way.
+
+    So a band enters the witness only on POSITIVE evidence of belonging to
+    another block, measured from the page's own geometry: it must sit in a run
+    of consecutive unattributed bands that is separated from the attributed
+    bands on either side by a gap strictly GREATER than the widest step inside
+    the run itself. The run's own widest internal step is the upper bound this
+    needs and the mean was not -- it is a distance this block is observed to
+    take between its own lines, so a separation that exceeds it is a step the
+    block never takes.
+
+    A LONE unattributed band has no internal step, so no bound exists to
+    measure its separation against and it is never admitted. That is exactly
+    the counterexample's shape (a single label stranded above the table), and
+    the cost of it is a genuine one-line paragraph or heading next to a table
+    being treated as unresolved rather than as evidence -- over-exclusion, the
+    safe direction, and #649 still ships the line.
+    """
+    admitted: set[int] = set()
+    run: list[int] = []
+    for idx in range(total + 1):
+        if idx < total and idx not in attributed:
+            run.append(idx)
+            continue
+        if len(run) >= 2:
+            widest = max(centers[b] - centers[a] for a, b in zip(run, run[1:]))
+            above = run[0] - 1
+            below = run[-1] + 1
+            clear_above = above < 0 or abs(centers[run[0]] - centers[above]) > widest
+            clear_below = below >= total or abs(centers[below] - centers[run[-1]]) > widest
+            if clear_above and clear_below:
+                admitted.update(run)
+        run = []
+    return admitted
 
 
 def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
