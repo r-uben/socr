@@ -271,3 +271,183 @@ def test_a_marker_printed_right_of_the_value_makes_the_adoption_abstain():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _wrapped_heading_page(style: str) -> tuple[fitz.Page, str, str]:
+    """Astra's reproducer: a TWO-line heading printed left of a boundary pair.
+
+    Three real layouts, all built with PyMuPDF's own text placement so the
+    geometry is measured rather than asserted:
+
+    ``centered``
+        ``ALTERNATE`` over ``MEMBERS``, centred in one textbox. Their left
+        edges differ by 4.17pt against a 2.78pt word space, and PyMuPDF splits
+        them into two separate blocks.
+    ``indented``
+        ``STAFF:`` over an indented ``advisers`` in one textbox.
+    ``positioned``
+        the same two lines placed with ``insert_text`` at explicitly different
+        x, so the left-edge difference exceeds a word space by measurement.
+
+    In every one of them the second line is the first line's continuation, so
+    the first line may not be torn off and moved into the run's unit.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 100, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 560, 200),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    ys = sorted({w[1] for w in page.get_text("words") if w[4] == "Mr."})
+    first = ys[-1] + ys[-1] - ys[-2]
+    if style == "centered":
+        page.insert_textbox(
+            fitz.Rect(10, first, 88, first + 80), "ALTERNATE\nMEMBERS", fontsize=10, align=1
+        )
+        titles = ("ALTERNATE", "MEMBERS")
+    elif style == "positioned":
+        page.insert_text((40, first + 10.75), "STAFF:", fontsize=10)
+        page.insert_text((50, first + 10.75 + (ys[-1] - ys[-2])), "advisers", fontsize=10)
+        titles = ("STAFF:", "advisers")
+    else:
+        page.insert_textbox(
+            fitz.Rect(40, first, 150, first + 80), "STAFF:\n    advisers", fontsize=10
+        )
+        titles = ("STAFF:", "advisers")
+    page.insert_textbox(fitz.Rect(x, first, 130, first + 80), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, first, 560, first + 80),
+        "Burns\nGillum, Deputy Assistant Secretary",
+        fontsize=10,
+    )
+    return page, titles[0], titles[1]
+
+
+@pytest.mark.parametrize("style", ["centered", "indented", "positioned"])
+def test_a_wrapped_headings_first_line_is_not_torn_off_its_continuation(style):
+    """Astra's P1 against 545de02, reproduced in the repository suite.
+
+    The shared-left-edge test that shipped in 545de02 called the first line of
+    each of these headings standalone, adopted it into the pair's unit, and
+    left the rest of the heading behind in block order. Widening the word-space
+    tolerance would only move the indentation at which that happens; what a
+    continuation cannot avoid is being printed over the same horizontal ground,
+    so the rule now abstains on horizontal intersection with an adjacent band.
+    """
+    page, upper, lower = _wrapped_heading_page(style)
+    if style == "positioned":
+        heading = [w for w in page.get_text("words") if w[4] in ("STAFF:", "advisers")]
+        assert abs(heading[0][0] - heading[1][0]) > bd._median_word_space_width(
+            page.get_text("words")
+        ), "the fixture must actually break the left-edge test"
+
+    lines = _emitted(page)
+
+    assert lines[lines.index(upper) + 1] == lower, lines
+    assert lines.index(lower) < lines.index("Burns")
+
+
+def test_a_centered_headings_first_line_is_refused_whatever_the_run_pitch():
+    """Astra's focused probe, on the helper itself.
+
+    The two centred lines are ``ALTERNATE`` (x0 19.55) and ``MEMBERS``
+    (x0 23.72) and PyMuPDF puts them in two separate blocks, so neither a
+    shared left edge nor shared block membership sees them as one heading.
+    Their x-extents intersect, and both lie wholly left of the label lane, so
+    the refusal holds even with the run pitch set to zero -- it does not depend
+    on how far apart the two bands are.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_textbox(fitz.Rect(10, 100, 88, 160), "ALTERNATE\nMEMBERS", fontsize=10, align=1)
+    records = []
+    for bi, block in enumerate(page.get_text("dict")["blocks"]):
+        for li, line in enumerate(block["lines"]):
+            x0, y0, x1, y1 = line["bbox"]
+            records.append(
+                dict(
+                    bi=bi,
+                    li=li,
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    text="".join(s["text"] for s in line["spans"]),
+                )
+            )
+    bands = bd._line_baseline_bands(records)
+    assert [it["text"] for band in bands for it in band] == ["ALTERNATE", "MEMBERS"]
+    upper = bands[0][0]
+    label = dict(bi=9, li=0, x0=90, x1=105, y0=upper["y0"], y1=upper["y1"], text="Mr.")
+
+    assert bd._beside_heading_lines([upper], label, bands, 0, 0.0) is None
+
+
+def _wide_continuation_page() -> fitz.Page:
+    """A heading whose SECOND line runs past the label lane.
+
+    ``STAFF AND OTHER`` sits wholly left of the label lane; its continuation
+    ``ATTENDEES AT THE MEETING`` wraps across that lane, at the roster's own
+    leading. The continuation is therefore not itself "left of the pair", and
+    only its proximity -- one band away, within the run's row pitch -- marks it
+    as the same material.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 240
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 100, 280, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 560, 200),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    ys = sorted({w[1] for w in page.get_text("words") if w[4] == "Mr."})
+    pitch = ys[-1] - ys[-2]
+    first = ys[-1] + pitch
+    page.insert_text((40, first + 10.75), "STAFF AND OTHER", fontsize=10)
+    page.insert_text(
+        (40, first + 10.75 + pitch), "ATTENDEES AT THE MEETING OF THE COMMITTEE", fontsize=10
+    )
+    page.insert_textbox(fitz.Rect(x, first, 280, first + 80), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, first, 560, first + 80),
+        "Burns\nGillum, Deputy Assistant Secretary",
+        fontsize=10,
+    )
+    return page
+
+
+def test_a_continuation_that_crosses_the_label_lane_still_refuses_the_adoption():
+    """The other half of the intersection test, and its only witness.
+
+    A neighbour is dismissed only when it is BOTH outside the ground left of
+    the pair AND further away than the run's row pitch. Here the continuation
+    crosses the label lane, so the first condition alone would dismiss it and
+    the heading's first line would be torn off; its proximity is what refuses
+    the adoption.
+    """
+    lines = _emitted(_wide_continuation_page())
+
+    assert (
+        lines[lines.index("STAFF AND OTHER") + 1] == "ATTENDEES AT THE MEETING OF THE COMMITTEE"
+    ), lines
+    assert lines.index("ATTENDEES AT THE MEETING OF THE COMMITTEE") < lines.index("Burns")

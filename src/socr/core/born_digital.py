@@ -840,9 +840,9 @@ def _adoptable_pair(
 def _beside_heading_lines(
     extras: list[dict],
     label: dict,
-    block_lines: dict[int, list[dict]],
-    unit_keys: set[tuple[int, int]],
-    word_space_width: float,
+    bands: list[list[dict]],
+    index: int,
+    pitch: float,
 ) -> list[dict] | None:
     """``extras`` when every one is a standalone heading printed BESIDE the pair.
 
@@ -865,23 +865,51 @@ def _beside_heading_lines(
       is unambiguous and it overlaps neither the label nor the value;
     * it is baseline-aligned with the label (their vertical extents overlap),
       so it is printed on that row rather than merely near it;
-    * it is not a line being detached from an independent multi-line column.
-      Block membership cannot answer that -- this module already treats a block
-      as a segmentation accident, and both directions are observed here.
-      1977-11-15's ``PRESENT:`` shares one 13-line block with the whole roster's
-      ``Mr.`` labels, because that block IS the label column; on the synthetic
-      ``STAFF:`` fixture PyMuPDF lumps the heading together with two unrelated
-      columns into one 6-line block. What does answer it is the LEFT EDGE: a
-      paragraph or a column is a stack of lines sharing a starting x, so the
-      test is whether any OTHER line of the heading's block starts within one
-      word space of it and is not already in this emission unit. ``PRESENT:``
-      and ``STAFF:`` each stand alone at their x; a prose column's line, or a
-      numbered marker column's, does not.
+    * nothing printed immediately above or below it may be its own
+      continuation. A heading or paragraph that carries on across a line break
+      must not have its first line torn off and moved.
 
-      A heading whose block holds it alone is therefore accepted, and so is a
-      genuinely unrelated single-line block printed left of the pair on the same
-      baseline. No evidence on the page separates those two. The tolerance is
-      one measured word space, not a threshold.
+    That last test is NOT block membership and NOT a shared left edge, and both
+    of those were tried and are wrong.
+
+    Block membership is a segmentation accident, in both directions:
+    1977-11-15's ``PRESENT:`` shares one 13-line block with the whole roster's
+    ``Mr.`` labels because that block IS the label column, while PyMuPDF splits
+    a two-line ``STAFF:`` / ``advisers`` heading into two separate blocks
+    (Astra review of 545de02).
+
+    A shared left edge is not proof either, and widening its tolerance only
+    moves the boundary rather than removing it: a CENTRED two-line heading
+    (``ALTERNATE`` over ``MEMBERS``) starts its second line 4.17pt right of its
+    first against a 2.78pt word space, and an indented continuation does the
+    same by construction. What a continuation cannot avoid is being printed
+    over the same horizontal ground: it INTERSECTS the first line's x-extent
+    however it is aligned within the column. So the test is horizontal
+    intersection with the immediately adjacent bands, above and below, across
+    every block -- and it carries no threshold of its own.
+
+    A neighbour that intersects is disqualifying when it could belong to the
+    same column, which is either of:
+
+    * it too lies wholly left of the label, i.e. it occupies the same ground
+      left of the pair that a wrapped heading would occupy; or
+    * its band is no further from this one than the run's own row pitch, so it
+      is printed at this material's own leading rather than at some unrelated
+      distance.
+
+    Both must fail before a neighbour is dismissed. That is what keeps
+    1977-11-15 correct: the line above ``PRESENT:`` is the last line of the
+    meeting's opening paragraph, ``1977, at 9:30 a.m.``, which does intersect
+    it -- but it runs past the label lane (x1 235.12 against the lane's 214.0)
+    and its band is 23.8pt away against a 12.4pt run pitch. It is neither a
+    heading beside the roster nor printed at the roster's leading. Below,
+    ``Mr.`` / ``Volcker`` are in the run's own lanes, to the RIGHT of
+    ``PRESENT:``, and intersect nothing.
+
+    No line is exempt from the test, the run's own rows included. A run row
+    cannot in practice disqualify a heading anyway -- the extras are wholly
+    left of the label and a run's rows are in its lanes, at or right of it --
+    and exempting a class of lines would be an unmeasured licence to adopt.
 
     Returns None when any extra fails, and the caller then ABSTAINS from
     adopting the pair at all. Ambiguity here is not a licence to fall back on
@@ -892,12 +920,16 @@ def _beside_heading_lines(
             return None
         if extra["y1"] <= label["y0"] or label["y1"] <= extra["y0"]:
             return None
-        for sibling in block_lines.get(extra["bi"], ()):
-            key = (sibling["bi"], sibling["li"])
-            if key == (extra["bi"], extra["li"]) or key in unit_keys:
+        for offset in (-1, 1):
+            neighbour = index + offset
+            if not 0 <= neighbour < len(bands):
                 continue
-            if abs(sibling["x0"] - extra["x0"]) <= word_space_width:
-                return None
+            near = abs(_band_center(bands[neighbour]) - _band_center(bands[index])) <= pitch
+            for other in bands[neighbour]:
+                if other["x1"] <= extra["x0"] or extra["x1"] <= other["x0"]:
+                    continue
+                if near or other["x1"] <= label["x0"]:
+                    return None
     return extras
 
 
@@ -1190,14 +1222,6 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                 }
             )
 
-    # The lines each block holds, for GH-709's "is this heading being detached
-    # from a column?" test. Built from ``all_lines`` rather than ``flat_lines``:
-    # a line with no measurable word extent is still a line of its block, and
-    # treating it as absent would make a column look like a lone heading.
-    block_lines: dict[int, list[dict]] = {}
-    for it in all_lines:
-        block_lines.setdefault(it["bi"], []).append(it)
-
     flat_lines.sort(key=lambda it: it["y0"])
     bands = _line_baseline_bands(flat_lines)
 
@@ -1287,7 +1311,6 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
             }
         ]
         run_items = [it for band in bands[start : end + 1] for it in band]
-        run_keys = {(it["bi"], it["li"]) for it in run_items}
         lanes = _run_column_lanes(run_items)
         pitch = _run_row_pitch(bands, start, end)
         vocabulary = _run_label_vocabulary(run_items)
@@ -1348,10 +1371,7 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                         break
                     unit = pair
                     if extras:
-                        unit_keys = run_keys | pair_keys | {(it["bi"], it["li"]) for it in extras}
-                        beside = _beside_heading_lines(
-                            extras, pair[0], block_lines, unit_keys, word_space_width
-                        )
+                        beside = _beside_heading_lines(extras, pair[0], bands, index, pitch)
                         if beside is None:
                             break
                         unit = beside + pair
