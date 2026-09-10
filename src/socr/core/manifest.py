@@ -1805,6 +1805,28 @@ def _attempt_prose_text(attempt_text: str) -> str:
     return "\n".join(line for idx, line in enumerate(lines) if idx not in dropped)
 
 
+def _page_prose_partition(p) -> list:
+    """The one authoritative prose/table partition of a page's native words.
+
+    #652 round 9. Two decisions read this page's layout: whether a model's
+    prose may be corroborated (``_prose_corroboration_ok``) and what #649
+    ships when it may not (``native_prose_floor_text``). They ran on different
+    populations -- the corroboration side partitioned only the words OUTSIDE
+    the detected table bboxes, the shipping side partitioned all of them -- so
+    an incomplete bbox could hide a page's numerals from the refusal gate
+    while the shipping side still withheld those very bands. Both now come
+    through here, on every native word the page has, and
+    :func:`partition_prose_bands` is deterministic, so the two cannot disagree
+    about what is on the page.
+    """
+    from socr.tables.row_corroboration import partition_prose_bands
+
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return []
+    return partition_prose_bands(words)
+
+
 def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     """B1 / #591: geometric-only corroboration for ``UNVERIFIABLE_TABLE_SCANNED``.
 
@@ -1862,13 +1884,44 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     permissions are kept apart: ``corroboration_witness_words`` abstains
     wherever prose/table attribution is unresolved, and every token the
     withheld region itself contains is subtracted on top of that.
+
+    Round 9 (Astra, 2026-09-10): that abstention is a claim about a PAGE, and
+    this function was evaluating it on a REGION -- the words left after the
+    detected table bboxes were filtered out. An incomplete bbox therefore
+    decided the question it was supposed to be subject to. The order is now
+    gate first, on the whole page, filter second.
     """
     words = getattr(p, "native_words", None) or []
     if not words:
         return False
+
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.row_corroboration import witness_from_prose_partition
+
+    # Round 9 (Astra, 2026-09-10): the refusal gate reads the WHOLE-PAGE
+    # partition, before any bbox filtering. It used to read the partition of
+    # what survived the bbox filter, and on a page whose detected bbox covered
+    # the numeric bands but not the labels that deleted every digit before the
+    # check: the labels became a full witness and the attempt's fabricated
+    # sentence shipped. The gate's claim is about the page ("no withheld
+    # numeric band anywhere"), so the page is what it must be evaluated on --
+    # a filtered region with no numerals is not a page with no numerals. The
+    # partition is the same object ``native_prose_floor_text`` ships from, so
+    # the two decisions cannot see different populations.
+    witness_words, unresolved_words = witness_from_prose_partition(_page_prose_partition(p))
+    if not witness_words:
+        return False
+
+    # The bbox exclusion still runs, but only on a page the gate has already
+    # cleared, and it is NOT dead there: clearing the gate means no band bears
+    # a printed numeral, which a detected table of purely TEXTUAL cells also
+    # satisfies. Such a table's vocabulary is exactly what must not vouch for
+    # a model's prose, and its bbox is the only evidence available that it is
+    # a table at all. Applied after the gate the filter can only shrink a
+    # witness, never admit one.
     bboxes = getattr(p, "detected_table_bboxes", None) or []
     outside_table: list = []
-    for w in words:
+    for w in witness_words:
         x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
@@ -1876,13 +1929,7 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
         outside_table.append(w)
     if not outside_table:
         return False
-
-    from socr.core.born_digital import text_layer_trusted
-    from socr.tables.row_corroboration import corroboration_witness_words
-
-    witness_words, unresolved_words = corroboration_witness_words(outside_table)
-    if not witness_words:
-        return False
+    witness_words = outside_table
     if not text_layer_trusted(native_region_text(witness_words)):
         return False
 
@@ -2007,13 +2054,12 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     its failure mode; only the body changes.
     """
     from socr.core.born_digital import text_layer_trusted
-    from socr.tables.row_corroboration import partition_prose_bands
 
     words = getattr(p, "native_words", None) or []
     if not words:
         return None
 
-    bands = partition_prose_bands(words)
+    bands = _page_prose_partition(p)
     prose_bands = [band for is_prose, band in bands if is_prose]
     if not prose_bands or all(is_prose for is_prose, _band in bands):
         return None

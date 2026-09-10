@@ -456,7 +456,26 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     ``manifest._prose_corroboration_ok`` -- so a third, silent case would let a
     band be neither evidence nor subtracted.
     """
-    bands = partition_prose_bands(words, row_shape_min)
+    return witness_from_prose_partition(partition_prose_bands(words, row_shape_min))
+
+
+def witness_from_prose_partition(bands: list) -> tuple[list, list]:
+    """:func:`corroboration_witness_words` over an ALREADY-COMPUTED partition.
+
+    Round 9 (Astra, 2026-09-10): the rule above is a statement about a PAGE
+    ("no withheld numeric band anywhere"), so it is only sound when the
+    partition it reads covers the page. ``manifest._prose_corroboration_ok``
+    used to filter every word inside a detected table bbox away FIRST and
+    partition what was left; a bbox that covered a scan's numeric bands but
+    not its labels therefore deleted every digit before the check, the labels
+    became a full witness, and a fabricated sentence shipped. A filtered
+    region with no numerals is not a page with no numerals.
+
+    Taking the partition as an argument lets the caller build ONE authoritative
+    partition of the page's native words and hand the same object to both the
+    corroboration decision and ``manifest.native_prose_floor_text``, so the
+    two cannot be reading different populations of the same page.
+    """
     if not bands:
         return [], []
 

@@ -324,3 +324,24 @@ spans — not another threshold. Whether native fallback is lossless across all 
 is also unestablished; one unchanged Fed page is not that measurement, and any claim
 that model prose reads better needs source-judged comparison rather than fluency or
 vocabulary overlap.
+
+### Round 9 — the gate was asked about the wrong population
+
+Astra's re-review at `b9f45f4` found round 8's rule intact in the helper and
+defeated in the caller. `_prose_corroboration_ok` dropped every word whose
+centroid fell inside a detected table bbox and *then* partitioned what was
+left, while `native_prose_floor_text` partitioned all of `p.native_words`. On a
+scan whose bbox covered the amount bands but not the bank-name bands, every
+printed digit was gone before the check that asks whether the page prints any:
+the labels became a full witness and the sentence fabricated from them shipped.
+A filtered region with no numerals is not a page with no numerals.
+
+Both decisions now come through one `_page_prose_partition(p)` over every native
+word the page has, and `witness_from_prose_partition` takes that partition as an
+argument, so the corroboration verdict and the shipped body cannot be reading
+different populations of the same page. The bbox exclusion is kept, moved to
+*after* the gate, and is not dead there: clearing the gate means no band bears a
+printed numeral, which a detected table of purely textual cells also satisfies,
+and its bbox is then the only evidence that those names are a table. Applied
+after the gate it can only shrink a witness, never admit one — pinned as a
+difference in `test_the_bbox_filter_still_excludes_a_wordless_tables_vocabulary`.

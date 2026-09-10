@@ -1,4 +1,4 @@
-"""#652 rounds 5-7: where a block's role is unproven, the witness abstains.
+"""#652 rounds 5-9: where a block's role is unproven, the witness abstains.
 
 Two reproduced findings (Astra review at ff5ed74), both in
 ``tables/row_corroboration.corroboration_witness_words`` and both the same
@@ -33,6 +33,13 @@ ships in its place. The one page that still yields a witness is the pure-prose
 scan with no printed numeral anywhere; it is pinned in
 ``tests/pipeline/test_page_failed_marker_scope.py`` alongside the floor it
 exercises.
+
+Round 9 moves the same rule from the helper into the caller, where it was
+being asked of the wrong population: ``_prose_corroboration_ok`` filtered the
+detected table bboxes away and then partitioned the remainder, so an
+incomplete bbox could delete a page's numerals before the check that asks
+whether the page has any. A filtered region with no numerals is not a page
+with no numerals.
 
 The reviewer's reproducers are kept verbatim in behaviour; the controls around
 them pin what must NOT change. Abstaining costs no page text: since #649 the
@@ -330,3 +337,89 @@ def test_real_fixture_abstains_in_full_without_losing_its_prose() -> None:
     assert MARKER in shipped
     for amount in ("1,000.0", "6,000.0", "1,250.0"):
         assert amount not in shipped, amount
+
+
+def test_a_table_bbox_cannot_hide_the_pages_numerals_from_the_gate() -> None:
+    """Round 9 (Astra re-review at b9f45f4), reproduced in the caller.
+
+    The refusal round 8 installed is a claim about a PAGE: no withheld numeric
+    band anywhere. ``_prose_corroboration_ok`` used to evaluate it on what
+    survived the detected-table bbox filter, so a bbox drawn over this scan's
+    two amount bands but not over its bank-name bands deleted every printed
+    digit BEFORE the check -- the labels became a full witness and the sentence
+    fabricated from them shipped. The gate now reads the whole-page partition,
+    the same one #649 ships from.
+
+    Pinned as a difference: the bbox is the only thing that changes between the
+    two runs, and the outcome must not."""
+    ps = _page()
+    ps.native_words = []
+    for text, y in [
+        ("Austrian National Bank", 0),
+        ("German Federal Bank Swiss National Bank", 6),
+        ("250.0", 30),
+        ("300.0", 66),
+    ]:
+        ps.native_words += words(text, y, height=4)
+
+    without_bbox = _attempt(ps)
+    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
+    assert FABRICATION not in without_bbox
+
+    ps.detected_table_count = 1
+    ps.detected_table_bboxes = [(-5, 25, 300, 80)]
+    with_bbox = _attempt(ps)
+    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
+    assert FABRICATION not in with_bbox
+    assert with_bbox == without_bbox
+
+
+def test_the_bbox_filter_still_excludes_a_wordless_tables_vocabulary() -> None:
+    """Why the bbox exclusion is kept AFTER the gate rather than deleted as
+    dead code. A page clears the gate when no band bears a printed numeral --
+    which a detected table of purely TEXTUAL cells also satisfies. Its bbox is
+    then the only evidence on the page that those bank names are a table, and
+    without the filter they are a full witness for a sentence invented from
+    them.
+
+    The difference under test is the bbox alone."""
+    ps = _page()
+    ps.native_words = []
+    for text, y in [
+        ("Austrian National Bank", 0),
+        ("German Federal Bank Swiss National Bank", 6),
+    ]:
+        ps.native_words += words(text, y, height=4)
+    ps.best_output.text = LABEL + " " + FABRICATION
+
+    assert _prose_corroboration_ok(ps, ps.best_output.text) is True
+
+    ps.detected_table_count = 1
+    ps.detected_table_bboxes = [(-5, -5, 600, 20)]
+    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
+
+
+def test_a_page_whose_only_numeral_is_its_page_number_keeps_its_prose() -> None:
+    """The refusal's blast radius, measured on the page shape most likely to
+    trip it by accident. A folio number is a numeric band like any other, so
+    the model attempt is refused -- and #649 still ships both genuine
+    paragraphs under the unverified-scan banner, with the attempt's invented
+    table value withheld. Refusal collapses no page to a bare marker."""
+    from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
+
+    lines = [
+        "The committee discussed monetary policy and reviewed economic conditions.",
+        "Members agreed to continue monitoring developments across financial markets.",
+    ]
+    ps = _page(prose_above=lines, table_rows=["3"], prose_below=[])
+    ps.best_output.text = (
+        "\n".join(lines) + "\n\n| Item | Value |\n| --- | --- |\n| Invented | 999 |\n"
+    )
+
+    assert not _prose_corroboration_ok(ps, ps.best_output.text)
+    shipped = _ship(ps)
+    assert shipped.text.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
+    for line in lines:
+        assert line in shipped.text
+    assert shipped.scanned_prose_recovered
+    assert "999" not in shipped.text
