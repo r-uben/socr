@@ -1887,10 +1887,11 @@ _NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 #: ``#`` ATX heading; ``>`` block quote; ``-`` bullet, and the ``---`` setext
 #: underline and thematic break; ``+`` bullet; ``=`` setext underline.
 #:
-#: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and this
-#: path runs only where every band is prose, which at the shipping
-#: ``row_shape_min`` of 1 means no band carries a printed digit at all. If that
-#: floor is ever loosened, this set needs the ordered form added.
+#: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and only
+#: PROSE bands are escaped in either lane. A prose band is one carrying fewer
+#: than ``row_shape_min`` numeral-bearing tokens, which at the shipping value of
+#: 1 means none at all, so no escaped line can open with a digit. If that floor
+#: is ever loosened, this set needs the ordered form added.
 _NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
 
 
@@ -2006,6 +2007,12 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     that failed here failed on structure, and re-deriving prose from it would
     put the reordered text back on the page. The page keeps ERROR status and
     its failure mode; only the body changes.
+
+    Those bytes are backslash-escaped on the way out (#712), by the same
+    ``_escaped_native_line`` the no-numeral lane uses and over the same
+    character sets: the page authored none of the structure its characters
+    would otherwise open, and this lane promised literal text while emitting
+    active markdown.
     """
     from socr.core.born_digital import text_layer_trusted
 
@@ -2030,8 +2037,17 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     in_withheld_run = False
 
     def _flush() -> None:
+        # #712. Escaped HERE, at flush, and not where the line is collected:
+        # ``table_syntax_line_indices`` below must read the page's raw pipes to
+        # find a table's boundaries, and an escaped ``\|`` is not a pipe to it.
+        # The lane promises the same literal native bytes as ``_all_native_text``
+        # and shipped them unescaped until now, so on any scan that withholds a
+        # numeral -- the ticket's own Fed 1989-11-14 p3 among them -- a native
+        # ``<!--`` line hid the sentence after it and ``# ...`` became an ``<h1>``
+        # in every CommonMark consumer of the shipped ``.md``, not only the
+        # review viewer.
         if paragraph:
-            blocks.append("\n".join(paragraph))
+            blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
             paragraph.clear()
 
     from socr.tables.reconcile import table_syntax_line_indices
