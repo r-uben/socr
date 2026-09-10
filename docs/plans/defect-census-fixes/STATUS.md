@@ -1,6 +1,6 @@
 # STATUS — defect-census fixes
 
-Last updated: 2026-09-10
+Last updated: 2026-09-10 (overnight)
 
 ## Stage
 Waves 1-9 merged: A1a #630, C1 #631, D1 #632, A1b #640, A1c #644, A2 #647, B1 #651, E1 #654,
@@ -11,6 +11,15 @@ chart+table page) merged as PR #672. F1a (#625, ditto marks) merged as PR #686. 
 #601 are both closed, but the decode does not survive to the shipped `.md` — that remainder is
 tracked as the still-open #688. #643 (recurring column lanes) remains parked: PR #663 is open
 as a draft. D2 (route cost measurement) and F1b (derived-cell provenance) are still TODO.
+
+Overnight 2026-09-10 (Codex-reviewed, one Astra round per finding): #592 round 2 merged as PR #704
+(bounded immediate-band adoption; `Refs`, remainder #706) and its continuation as PR #710 (closes
+#706); #696 merged as PR #699 (flatten spanning headers, nine rounds; a same-column lower table or a
+footnote carrying the leaf row's distinct tokens freezes the fold as a no-op, never a deletion); BoE
+third-institution census merged as PR #705 (#703 filed). #695 (#652/#649) merged after sixteen rounds:
+model-prose corroboration deleted by ruling (no band-gap geometry proves a block's role), a scan's own
+native layer ships flagged, and the review viewer now honours CommonMark escapes. Filed: #707 (measure native-fallback
+fidelity on the six Fed minutes), #709 (#704's immediate band hoists a staff row above a beside-heading).
 
 ## Base state (clean before tickets)
 - `main@eb14c82`; census + plan on branch `docs/fed-ecb-census` (7015f46, d00fb11, 86db834, 7fea35a, +panel revision).
@@ -50,7 +59,7 @@ as a draft. D2 (route cost measurement) and F1b (derived-cell provenance) are st
 
 ## Next action
 D2 (route cost measurement) and F1b (derived-cell provenance) are the only remaining tickets
-on this board. Open issues still needing work: #649 (scanned page with no detected table
-geometry needs its own prose OCR attempt), #652 (B1 prose witness must not trust a
-corrupt/resume-empty native layer), #688 (decoded `&nbsp;` labels never reach the shipped
-`.md`), #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a draft).
+on this board. Open issues still needing work: #688 (decoded `&nbsp;` labels never reach the shipped
+`.md`), #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a draft), #707 (native
+fallback fidelity measurement, the only evidence behind #695's retention claim), #709 (#704 residual),
+#703 (text tables: A2's row-shortfall term floors a complete candidate). #649/#652 closed by PR #695.
