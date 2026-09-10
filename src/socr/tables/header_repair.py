@@ -1043,8 +1043,18 @@ def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list
       contained: printed here, ownership unproven. It certifies nothing, and
       it must still stop a deletion, because failing to prove a row belongs
       to this table is not proof that it belongs to the header.
-    * FOREIGN, outside the vertical run or horizontally disjoint from the
-      columns: another table's row or a footnote. No standing either way.
+    * FOREIGN, past the first vertical gap wider than this table's own
+      largest inter-row step, or horizontally disjoint from the columns:
+      another table's row or a footnote. No standing either way.
+
+    Foreign has to owe BOTH conditions, because "below the last attributed
+    numeric row" is not far away. A trailing ``Total`` row printed one band
+    under the body, in these very columns, is this table's; calling it
+    foreign restored the round-7 deletion for any such row whose words the
+    band happens to print. The gap that separates a table from what follows
+    it is measured from the table's own row pitch, not from a constant, and
+    when there are too few attributed rows to measure one, nothing below the
+    band can be proven foreign at all.
 
     Round 6 collapsed the last two, and exclusion from the body witness
     silently became permission to delete: a body row whose label began 8pt
@@ -1059,13 +1069,18 @@ def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list
     if extent is None:
         return [], []
     left, right = extent
-    bottom = max(geom.data_ys)
+    ys = sorted(geom.data_ys)
+    bottom = ys[-1]
+    steps = [later - earlier for earlier, later in zip(ys, ys[1:])]
+    reach = bottom + max(steps) if steps else None
     owned: list[list] = []
     unresolved: list[list] = []
     for y, row in geom.rows_by_y.items():
-        if not row or y > bottom or not all(w[1] > band_floor for w in row):
+        if not row or not all(w[1] > band_floor for w in row):
             continue
-        if all(left <= w[0] and w[2] <= right for w in row):
+        if reach is not None and y > reach:
+            continue
+        if y <= bottom and all(left <= w[0] and w[2] <= right for w in row):
             owned.append(row)
         elif any(w[0] <= right and w[2] >= left for w in row):
             unresolved.append(row)

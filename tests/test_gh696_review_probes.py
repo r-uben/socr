@@ -829,3 +829,75 @@ def test_a_foreign_row_still_has_no_say_either_way():
     assert find_table_blocks(after)[0].grid[1:] == [
         [label, *values] for label, values in _DATA_ROWS
     ]
+
+
+# --------------------------------------------------------------------------
+# Finding 7b — "below the last numeric row" was read as "another table"
+# --------------------------------------------------------------------------
+
+
+def test_a_row_one_band_under_the_body_is_not_another_table():
+    """A printed row just past the last numeric row still belongs to this table.
+
+    Round 7 made foreign mean "outside the rectangle", and the rectangle's
+    bottom is the last row the numeric walk attributed. A row printed one
+    band below it, in these very columns, was therefore foreign — no standing
+    to block anything — so a candidate row whose words the header band prints
+    was deleted with both of its printed ``18``s. Foreign now owes a gap
+    wider than the table's own largest row step, measured from the attributed
+    rows, so this row is unresolved and the repair abstains instead.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 287), "Overall", fontsize=_FONT_SIZE)
+    for x in _DATA_XS[:2]:
+        page.insert_text((x, 287), "18", fontsize=_FONT_SIZE)
+    row = ["Overall", "18", "18"] + [""] * 8
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(row) + " |")
+    before = "\n".join(lines)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert row in find_table_blocks(after)[0].grid
+    if not count:
+        assert after == before
+
+
+def test_a_trailing_total_row_ships_with_the_body():
+    """The ordinary shape of that row: a total under the last printed line.
+
+    It never reaches the boundary walk, because the walk stops at the first
+    owned body row above it, and everything below ships verbatim. The point
+    of the probe is that the fold still happens and the row still arrives
+    with both values in their own cells.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 287), "Total", fontsize=_FONT_SIZE)
+    for x in _DATA_XS[:2]:
+        page.insert_text((x, 287), "18", fontsize=_FONT_SIZE)
+    row = ["Total", "18", "18"] + [""] * 8
+    before = _padded_markdown() + "| " + " | ".join(row) + " |\n"
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[-1] == row
+
+
+def test_a_row_above_the_first_numeric_row_stays_this_tables():
+    """The mirror of the trailing case, from round 1: the panel row is owned.
+
+    The window opens at the header band's floor rather than at the first
+    numeric row, so a label-only row printed between the two is inside the
+    rectangle, not foreign. It settles itself as body and the walk stops
+    there, which is what kept it in the document in the first place.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 211), "IMPORTANT PANEL", fontsize=_FONT_SIZE)
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| IMPORTANT PANEL |" + " |" * 10)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), "\n".join(lines))
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1][0] == "IMPORTANT PANEL"
