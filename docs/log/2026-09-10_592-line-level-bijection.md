@@ -600,12 +600,10 @@ Each condition was checked by deleting it from a copy of the source and re-runni
   250pt below the roster at its exact lane starts and carries an out-of-lane marker that stops
   `_find_aligned_runs` from absorbing it.
 
-`test_the_walk_continues_only_while_each_band_brings_its_own_evidence` is the non-accumulation
-witness. Its fixture has two reachable leading bands; with both labelled from the run's
-vocabulary the walk crosses both, and changing ONLY the outer label to one the run never saw
-stops the walk there while the inner band is still adopted.
 `test_1990_measures_every_alternate_member_band_the_walk_crosses` pins the table above from
-the real page.
+the real page, and is the non-accumulation witness: three consecutive bands, each measured
+against the ORIGINAL run. (Round 2 of the review removed the synthetic counterpart -- see
+below for why one cannot be built.)
 
 ### Residuals
 
@@ -619,3 +617,99 @@ the real page.
   the refused `Bernard` trails the run). Unchanged, and still without a real-page reproducer.
 - The within-row sort still assumes left-to-right. Unchanged.
 - The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).
+
+## GH-706 round 2 — a pair may not continue a run out of a band that carries a heading
+
+Astra reviewed the rebased continuation (`28b78a1`) and **accepted the frozen-measurement
+walk** as a legitimate separately-reviewed proposal: each new pair is checked against the
+ORIGINAL lanes, pitch and whole-label vocabulary, so permissive evidence cannot accumulate,
+and `_run_row_pitch` is compared directly against the run's own observed maximum with no added
+slack. One P1.
+
+### The defect
+
+Freezing the measurements prevents accumulation but says nothing about **section membership**.
+A continuation band can satisfy every condition and still carry, out of both lanes, the
+printed content that gives its pair a section — `STAFF:` beside the first staff row. The pair
+is adopted into the run's emitted group while the heading stays behind in block order, so the
+member is printed ABOVE the heading that introduces it. Every token survives; the section
+affiliation does not. That is the class of loss GH-592 exists to prevent.
+
+Astra's reproducer is differential against the merged base `223a171`: there `STAFF:` precedes
+`Gillum`, at `28b78a1` `Gillum` precedes `STAFF:`. The base's immediate-band rule already
+misplaces the FIRST staff row (`Burns`); the review does not claim the baseline layout was
+correct, only that #706 extended the misplacement to a member the base had placed correctly.
+
+### The fix
+
+Conservative, and stated as two clauses on the same fact — whether the band held anything in
+neither lane:
+
+- a band may only **continue** the run when the pair is alone in it;
+- after adopting any band, the walk **stops** if that band held anything else.
+
+The band immediately at the run boundary is the single exception to the first clause, because
+that is GH-704's rule and it is unchanged and separately reviewed here. 1977-11-15's
+`PRESENT:` / `Mr.` / `Burns, Chairman` band is exactly such a band, and there the heading
+precedes its pair in block order, so adopting the pair does not move it across the heading.
+Adoption still happens; only the walk past it stops.
+
+Headings are never reordered. Nothing else in the emission plan changed.
+
+### Measurement
+
+1990-11-13 p1's three `Alternate Members` bands are **pair-only** — two lines each, nothing
+outside the lanes:
+
+```
+start-1  ['Mr.  ', 'Gillum, Deputy Assistant Secretary ']
+start-2  ['Mr.  ', 'Bernard, Assistant Secretary ']
+start-3  ['Kohn, Secretary and Economist ', 'Mr.  ']
+```
+
+All three still recover. 1977-11-15 p1 still emits `PRESENT:` / `Mr.` / `Burns, Chairman` in
+that order.
+
+Fed sweep, 6 minutes documents × first 4 pages:
+
+- **vs `28b78a1`: 0 of 24 pages differ.** The heading fix costs nothing on this corpus.
+- vs `8a63646` (merged base): 1 page differs, 1990-11-13 p1, which is #706's intended recovery
+  of Kohn and Bernard.
+
+### Witnesses
+
+Each clause was checked by deleting it from a copy of the source and re-running:
+
+- deleting the **continuation** clause fails
+  `test_the_walk_stops_after_a_band_that_carried_out_of_lane_content`;
+- deleting the **stop-after** clause fails Astra's reproducer and both new GH-706 tests.
+
+Astra's probe is copied to `tests/test_gh706_section_heading_boundary.py`, alongside a witness
+that the refused band is otherwise fully adoptable and a synthetic pin that a BOUNDARY band
+carrying a heading is still adopted.
+
+### A witness that had to be given up
+
+`test_the_walk_continues_only_while_each_band_brings_its_own_evidence` used a fixture whose
+leading bands carry an out-of-lane marker in the left margin. That marker is what makes
+`_find_aligned_runs` decline those bands in the first place — without it the search simply
+absorbs a pair-only band into the run and there is nothing left to adopt. The new rule stops on
+exactly that marker, so the fixture can no longer demonstrate a multi-band walk, and no
+synthetic fixture can: a band cannot simultaneously be declined by the search and be pair-only.
+The test is rewritten to pin the new stop behaviour under its accurate name, and the multi-band
+continuation is now witnessed **only on the real 1990-11-13 page**. Recorded as a residual
+rather than papered over.
+
+### Residuals (GH-706 round 2)
+
+- The multi-band continuation has no corpus-free witness (above). A machine without the fed-01
+  fixtures verifies the stop rules but not the walk.
+- `Burns`, the first staff row in Astra's fixture, is still hoisted above `STAFF:` by GH-704's
+  immediate-band rule on the merged base. This branch does not change that and deliberately
+  does not fix it: it is a **#704 residual**, and the boundary-band exception is what keeps
+  1977-11-15 correct. A rule that distinguishes "heading above its pair" from "heading beside
+  its pair" would settle both, and does not exist yet.
+- Bands are built from lines with measurable word extents, so a whitespace-only line is
+  invisible to the out-of-lane test. It carries no tokens, so nothing can be lost through it,
+  but the pair-only claim is about visible content.
+- Everything listed under round 6 above still stands.

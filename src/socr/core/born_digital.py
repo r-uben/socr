@@ -1241,6 +1241,29 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     )
                     if pair is None:
                         break
+                    # GH-706 Astra P1: a band that also carries content in
+                    # NEITHER lane is carrying something the pair is
+                    # subordinate to -- a printed section heading ("STAFF:"),
+                    # a marker, a note. Adopting a pair out of such a band
+                    # moves it into the run's emitted group while the heading
+                    # stays behind in block order, so the member ends up ABOVE
+                    # the heading that introduces it. Every token survives and
+                    # the section affiliation is destroyed, which is the class
+                    # of loss GH-592 exists to prevent.
+                    #
+                    # The walk therefore does not CONTINUE past such a band,
+                    # and may not adopt one as a continuation at all: a pair
+                    # earns a place in the run only when it is alone in its
+                    # band. The one exception is the band immediately at the
+                    # boundary, whose behaviour is GH-704's, unchanged and
+                    # separately reviewed -- 1977-11-15's "PRESENT:" / "Mr." /
+                    # "Burns, Chairman" header is exactly that band, and its
+                    # heading precedes the pair in block order rather than
+                    # following it. Adoption there still happens; the walk
+                    # simply stops afterwards.
+                    pair_only = len(candidates) == len(pair)
+                    if index != first and not pair_only:
+                        break
                     for it in pair:
                         claimed[(it["bi"], it["li"])] = run_id
                         members.append(
@@ -1257,6 +1280,8 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     # the ORIGINAL run: its lanes, its row pitch, its label
                     # vocabulary. Nothing accumulates; a band that cannot
                     # stand on its own stops the walk.
+                    if not pair_only:
+                        break
                     boundary_center = center
                     index += step
         group_members[run_id] = members

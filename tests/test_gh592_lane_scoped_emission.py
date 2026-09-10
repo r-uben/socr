@@ -387,23 +387,27 @@ def _emitted(page: fitz.Page) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def test_the_walk_continues_only_while_each_band_brings_its_own_evidence():
-    """Adopting a band moves the boundary; it does not widen what counts.
+def test_the_walk_stops_after_a_band_that_carried_out_of_lane_content():
+    """GH-706 review fix, on the fixture that used to pin the opposite.
 
-    With both leading rows labelled from the run's vocabulary, the walk crosses
-    both. Change ONLY the outer row's label to one the run never observed and
-    the walk stops there -- the inner row is still adopted, the outer one keeps
-    block order. Adoption of the inner band buys the outer band nothing.
+    Both leading bands are reachable and both hold a pair whose label the run
+    observed, so before GH-706's heading fix the walk crossed both. Each band
+    here also carries an out-of-lane marker in the left margin -- which is what
+    makes the run search decline them in the first place -- and a band with
+    content in neither lane may no longer continue the run. The boundary band
+    is still adopted, under GH-704's separately reviewed immediate rule; the
+    outer one keeps block order.
+
+    Note what this costs: a synthetic fixture cannot both keep the run search
+    from absorbing a pair-only band AND leave that band adoptable, so the
+    multi-band continuation is now witnessed only on the real 1990-11-13 page
+    (``test_1990_measures_every_alternate_member_band_the_walk_crosses``).
     """
-    both = _emitted(_roster_with_leading_pairs("Mr.", "Mr."))
-    assert both[both.index("Gillum") - 1] == "Mr.", both
-    assert both[both.index("Bernard") - 1] == "Mr.", both
-
-    stopped = _emitted(_roster_with_leading_pairs("Dr.", "Mr."))
-    assert stopped[stopped.index("Gillum") - 1] == "Mr.", stopped
-    assert stopped.index("Bernard") > stopped.index(
-        "Mr. Corrigan, Vice Chairman of the Committee"
-    ), "the outer band must keep block order once its own evidence fails"
+    lines = _emitted(_roster_with_leading_pairs("Mr.", "Mr."))
+    assert lines[lines.index("Gillum") - 1] == "Mr.", lines
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee"), (
+        "the walk must not continue past the band that carried the marker"
+    )
 
 
 def test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused():
