@@ -1024,6 +1024,20 @@ def _below_band_tokens(geom: _TableGeometry, band_floor: float) -> set[str]:
     }
 
 
+def _row_word_counts(row: list) -> Counter:
+    """The multiset of casefolded word texts one printed row puts on the page."""
+    return Counter(w[4].strip().casefold() for w in row if w[4].strip())
+
+
+def _below_band_row_counts(geom: _TableGeometry, band_floor: float) -> list[Counter]:
+    """One multiset per printed row lying wholly below the header band."""
+    return [
+        _row_word_counts(row)
+        for row in geom.rows_by_y.values()
+        if row and all(w[1] > band_floor for w in row)
+    ]
+
+
 def _candidate_header_depth(
     grid: list[list[str]], band_rows: list[list], geom: _TableGeometry
 ) -> int | None:
@@ -1033,36 +1047,52 @@ def _candidate_header_depth(
     classified by where the page PRINTS it, and each side of the boundary owes
     positive evidence:
 
-    * a row every token of which the page prints BELOW the header band is
-      BODY. It and everything under it ship verbatim, and the walk stops --
-      no later row can be pulled back up into the header.
-    * otherwise a row every token of which the page prints INSIDE the band is
-      header, and the walk continues.
-    * a row accounted for by neither region is unclassifiable, and the whole
-      repair abstains rather than guess.
+    * a row every token of which the page prints BELOW the header band, and
+      none of which it prints inside the band, is BODY. It and everything
+      under it ship verbatim, and the walk stops.
+    * a row every token of which the page prints INSIDE the band, and not all
+      of which it prints below, is header, and the walk continues.
+    * a row accounted for by BOTH regions has no established role. Vocabulary
+      shared with the band cannot prove this occurrence is header material,
+      and vocabulary shared with the body cannot prove it is not, so the whole
+      repair abstains -- unless the page prints a row below the band whose
+      words are exactly this row's, which locates the occurrence itself and
+      settles it as body.
+    * a row accounted for by neither region is unclassifiable: abstain.
 
-    The body test comes first, and that ordering is the fix for #696 round 2.
-    Asking only whether a row's words appear in the header's vocabulary proves
-    the words occur there, not that THIS row does: the survey's own ``Overall``
-    printed again as a body label matched the group heading, was taken for
-    header material, and left the document -- carrying a printed ``18`` in its
-    value cell with it, because ``18`` also occurs in ``Apr 18``. A row is
-    removed here only when the page itself puts its content in the band.
+    The single escape hatch runs only in the direction that KEEPS content. An
+    exact match against a printed band row would locate an occurrence just as
+    well, but it would license deleting a row on a multiset coincidence, and
+    the cost of the two mistakes is not symmetric: a header row wrongly kept
+    is a visible duplicate, a body row wrongly folded is gone.
 
-    Misreading in the other direction costs nothing: a header row whose whole
-    vocabulary also appears below the band is called body, the depth drops to
-    one, and the caller declines to repair.
+    #696 round 2 established the body test; round 3 gave it priority over
+    vocabulary; this is round 4. Neither ordering is enough on its own,
+    because an ambiguous row does not become header material by arriving
+    late: a leaf band matching a footnote's words stopped the walk at depth
+    two, and the fold then shipped the flattened header AND kept the leaf row
+    underneath it as a sixth body row over five printed data rows.
     """
     band_tokens = _header_band_tokens(band_rows)
-    below_tokens = _below_band_tokens(geom, _band_floor(band_rows))
+    band_floor = _band_floor(band_rows)
+    below_tokens = _below_band_tokens(geom, band_floor)
+    below_rows = _below_band_row_counts(geom, band_floor)
     depth = 1
     for row in grid[1:]:
-        tokens = [tok.strip().casefold() for cell in row for tok in cell.split() if tok.strip()]
-        if not tokens:
+        counts = Counter(
+            tok.strip().casefold() for cell in row for tok in cell.split() if tok.strip()
+        )
+        if not counts:
             return None
-        if all(tok in below_tokens for tok in tokens):
+        in_band = all(tok in band_tokens for tok in counts)
+        in_below = all(tok in below_tokens for tok in counts)
+        if in_band and in_below:
+            if counts in below_rows:
+                break
+            return None
+        if in_below:
             break
-        if any(tok not in band_tokens for tok in tokens):
+        if not in_band:
             return None
         depth += 1
     # A candidate cannot carry more header bands than the page prints.

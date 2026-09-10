@@ -469,3 +469,74 @@ def test_already_flattened_header_is_byte_identical():
     assert first_count == 1
     assert second_count == 0
     assert twice == once
+
+
+# --------------------------------------------------------------------------
+# Finding 4 — an ambiguous boundary row authorised a partial fold
+# --------------------------------------------------------------------------
+
+
+def test_footnote_vocabulary_cannot_stop_the_walk_half_way():
+    """The reviewer's round-4 reproducer: a footnote makes the leaf band ambiguous.
+
+    ``Apr Jul 18`` printed below the table accounts for every word of the
+    printed leaf band. Under a body-first vocabulary test that row was called
+    body -- but the repeated group row above it had already advanced the depth
+    to two, so the repair folded the group bands and kept the leaf row as a
+    sixth body row above five printed data rows, with ``R1C2`` naming
+    ``Apr 18`` instead of the first printed value.
+
+    Either outcome is correct: fold the three header rows completely, or leave
+    the table alone. Shipping a flattened header with a header row still in
+    the body is neither.
+    """
+    page = _survey_page()
+    page.insert_text((72, 400), "Apr Jul 18", fontsize=_FONT_SIZE)
+    base = _padded_markdown().splitlines()
+    before = "\n".join([base[0], base[1], base[0], *base[2:]])
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    if count:
+        assert find_table_blocks(after)[0].grid[1:] == [
+            [label, *values] for label, values in _DATA_ROWS
+        ]
+    else:
+        assert after == before
+
+
+def test_the_ambiguous_two_row_shape_stays_untouched():
+    """The same footnote on the ordinary two-band candidate: an unchanged no-op.
+
+    Nothing here has been established, so nothing is rewritten. This control
+    is what makes the partial fold above easy to miss: the shallow case was
+    already conservative.
+    """
+    page = _survey_page()
+    page.insert_text((72, 400), "Apr Jul 18", fontsize=_FONT_SIZE)
+    before = _padded_markdown()
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert count == 0
+    assert after == before
+
+
+def test_a_row_combining_two_printed_bands_still_folds():
+    """One candidate row carrying both bands' words is header, and folds.
+
+    No footnote, so no word of that row is printed below the band: the row is
+    accounted for by the header alone and the ambiguity rule never fires.
+    """
+    page = _survey_page()
+    base = _padded_markdown().splitlines()
+    cells = find_table_blocks(_padded_markdown())[0].grid
+    combined = [f"{upper} {lower}".strip() for upper, lower in zip(cells[0], cells[1])]
+    before = "\n".join([base[0], base[1], "| " + " | ".join(combined) + " |", *base[3:]])
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1:] == [
+        [label, *values] for label, values in _DATA_ROWS
+    ]
