@@ -1629,9 +1629,24 @@ def _line_is_in_region_text(line: dict, region_tokens: Counter) -> bool:
 
     A line with no word tokens (pure punctuation, a rule) is droppable: it
     carries nothing to lose.
+
+    #716/#718 follow-up: the region's markdown is CANONICAL (its label cells'
+    leading indentation run was already deleted at the boundary in
+    ``extract_structured`` — see ``canonicalize_table_labels``), but this line
+    comes from the raw PyMuPDF dict walk and still carries that run verbatim.
+    ``&nbsp;&nbsp;Swiss francs`` tokenises to ``["nbsp", "nbsp", "Swiss",
+    "francs"]`` — the entity NAME reads as a word — and the canonical
+    replacement no longer has an ``"nbsp"`` token to match against, so an
+    already-shipped label line looked uncovered and doubled as prose. Run the
+    SAME leading-run deletion over the raw line before tokenising so both
+    sides of the comparison agree on what the label actually says; this only
+    strips a leading indentation run (never interior content), matching what
+    the boundary already did to the region's own text.
     """
     text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
-    tokens = _WORD_TOKEN_RE.findall(text)
+    from socr.tables.label_canonical import canonicalize_label_cell
+
+    tokens = _WORD_TOKEN_RE.findall(canonicalize_label_cell(text))
     if not tokens:
         return True
     return all(region_tokens.get(t, 0) > 0 for t in tokens)

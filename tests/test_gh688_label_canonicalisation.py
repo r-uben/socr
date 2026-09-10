@@ -974,11 +974,15 @@ def test_gh718_a_ruled_region_with_literal_nbsp_entities_is_canonical_before_ver
 
     blocks = find_table_blocks(text)
     assert blocks, "the ruled region must have been found as a table"  # region was detected
-    # Scoped to the TABLE REGION bytes -- the extraction-site canonicalize call
-    # is about the region markdown ``_verify_regions`` hashes and interleaves,
-    # not about the raw dict-walk text elsewhere on the page (a block whose
-    # RAW glyphs no longer literally match the now-canonical region markdown
-    # is a separate, pre-existing interleaving concern, out of scope for #718).
+    # #716 follow-up: the raw dict-walk text elsewhere on the page must not
+    # leak the SAME label back in as duplicate prose. The interleaver's
+    # "already represented" test tokenises a region's CANONICAL markdown and
+    # a raw line's LITERAL glyphs; before that comparison was made
+    # entity-aware, ``&nbsp;&nbsp;Swiss francs`` tokenised to a spurious
+    # ``"nbsp"`` word the canonical replacement no longer had, so the raw
+    # line looked uncovered and doubled as prose beneath the table.
+    assert text.count("Swiss francs") == 1, text
+    assert "&nbsp;" not in text, text
     from socr.tables.reconcile import table_grid_identity
 
     block_identities = [table_grid_identity(block.grid) for block in blocks]
@@ -998,6 +1002,13 @@ def test_gh718_a_ruled_region_with_literal_nbsp_entities_is_canonical_before_ver
         "the identity _verify_regions recorded must key the SHIPPED (canonical) "
         "region bytes, not a pre-canonicalisation reading"
     )
+
+    state = _state_with(path, text)
+    shipped = _pipeline()._phase_assemble(state, path.parent / "out718").markdown
+    assert shipped.count("Swiss francs") == 1, (
+        f"the complete emitted page must not duplicate a canonical label as raw prose: {shipped!r}"
+    )
+    assert "&nbsp;" not in shipped, shipped
 
 
 # ---------------------------------------------------------------------------
