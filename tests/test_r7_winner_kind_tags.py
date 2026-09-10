@@ -45,10 +45,17 @@ def _tag_names(ret: ast.Return) -> list[str]:
     """The SelectionProvenance names an ending can yield, in source order."""
     v = ret.value
     assert isinstance(v, ast.Tuple) and len(v.elts) == 2, f"untagged return @{ret.lineno}"
-    tag = v.elts[1]
-    parts = [tag.body, tag.orelse] if isinstance(tag, ast.IfExp) else [tag]
+
+    # #714 round 2: the floor's tag is now a NESTED conditional (three reasons,
+    # one set of bytes), so flatten to arbitrary depth in source order rather
+    # than assuming a single level.
+    def _flatten(node: ast.expr) -> list[ast.expr]:
+        if isinstance(node, ast.IfExp):
+            return _flatten(node.body) + _flatten(node.orelse)
+        return [node]
+
     names = []
-    for node in parts:
+    for node in _flatten(v.elts[1]):
         assert isinstance(node, ast.Attribute), f"non-SelectionProvenance tag @{ret.lineno}"
         assert isinstance(node.value, ast.Name) and node.value.id == "SelectionProvenance"
         names.append(node.attr)
@@ -90,9 +97,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 20, "two endings share a tag or tag count != 20"
+    assert len(used) == len(set(used)) == 21, "two endings share a tag or tag count != 21"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 20
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 21
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -181,14 +188,15 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 20
-    assert len(list(SelectionProvenance)) == 20
+    # 1. Total count of mapped provenance members must be exactly 21
+    assert len(list(SelectionProvenance)) == 21
 
     # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
     #    the credentialed timeout ending is a structure-class MODEL_OUTPUT, and the
     #    timeout floor is a structure-class FAIL_CLOSED_MARKER -- deliberately, so
-    #    the floor keeps every document-level surface it already had.
+    #    the floor keeps every document-level surface it already had. #714 round 2's
+    #    text-table floor joins that same floor group on the same reasoning.
     assert len(by_disposition) == 14
 
     expected_multi_dispositions = {
@@ -204,6 +212,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         PageDisposition(PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS): {
             SelectionProvenance.STRUCTURE_CLASS_FLOOR,
             SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
+            SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR,
         },
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT): {
             SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
@@ -229,6 +238,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
             SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
             SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
+            SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR,
         },
         PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE: {
             SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,

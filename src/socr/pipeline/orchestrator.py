@@ -10405,9 +10405,14 @@ class UnifiedPipeline:
             # different reason, so it forfeits the content-terminal exception on
             # exactly the same grounds. Keying this on one enum value alone would
             # have re-opened the hole the moment the floor gained a second mode.
+            # #714 round 2: the text-table floor ships those same fail-closed
+            # bytes under a third reason and forfeits the exception on the same
+            # grounds. (This is the "keying on one enum value alone" hole the
+            # comment above warns about, opening a second time.)
             floor_shipped = winning.get("failure_mode") in (
                 FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value,
                 FailureMode.PAGE_JUDGE_TIMEOUT.value,
+                FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE.value,
             )
             # P1 (owner ruling Q2): WITHHELD is a CONTENT terminal for exactly
             # the same reason REJECTED is -- the readers looked and said no, and
@@ -11530,6 +11535,15 @@ class UnifiedPipeline:
             for r in pre_records
             if r.output.failure_mode is FailureMode.PAGE_JUDGE_TIMEOUT
         )
+        # #714 round 2: the page whose only corroborating grid candidate is a
+        # text-bearing table the numeric-row route cannot speak for. Read the
+        # same way, additive the same way: it is already a structure-class floor
+        # page and keeps every bucket it had; this only adds the reason.
+        text_table_floor_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.failure_mode is FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE
+        )
         # TICKET-A1c (#641): pages whose shipped winner is A1b's row-
         # corroboration fallback (``FailureMode.HEADER_BINDING_UNVERIFIED``,
         # stamped unconditionally in ``manifest._select_page_output_tagged``
@@ -12254,6 +12268,25 @@ class UnifiedPipeline:
                         data={"page_judge_timeout_floor": True},
                     )
                 )
+            for n in text_table_floor_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="row_shape_not_reconcilable_text_table_floor",
+                        engine="native",
+                        detail=(
+                            "this page's only corroborating grid candidate is a TEXT table "
+                            "-- prose cells with a small numeric subset -- and the native "
+                            "page shows no recurring numeric column lanes, so A1b's row-shape "
+                            "reconciliation does not apply and the numeric-row corroboration "
+                            "route cannot carry it: matching numeric rows are not evidence "
+                            "for prose cells. Nothing REFUSED this reading. It ships only on "
+                            "evidence that can speak for text: a completed page-judge "
+                            "acceptance, or a table-acceptance credential"
+                        ),
+                        data={"row_shape_not_reconcilable_text_table_floor": True},
+                    )
+                )
             for n in structure_class_floor_pages:
                 state.events.append(
                     AuditEvent(
@@ -12372,6 +12405,14 @@ class UnifiedPipeline:
                         f"  [red]{len(page_judge_timeout_floor_pages)} page(s) failed closed on "
                         f"a PAGE-JUDGE TIMEOUT (nothing refused the reading -- nothing judged "
                         f"it; no acceptance credential): {page_judge_timeout_floor_pages}[/red]"
+                    )
+                if text_table_floor_pages:
+                    console.print(
+                        f"  [red]{len(text_table_floor_pages)} page(s) failed closed on a TEXT "
+                        f"TABLE the numeric-row corroboration route cannot verify (prose cells; "
+                        f"no recurring numeric column lanes; nothing refused the reading). "
+                        f"Needs a completed page-judge acceptance or a table-acceptance "
+                        f"credential: {text_table_floor_pages}[/red]"
                     )
                 if structure_class_floor_pages:
                     console.print(
@@ -13177,6 +13218,11 @@ class UnifiedPipeline:
         verified credential are different facts, and neither is the ordinary
         "every candidate was refused" floor.
 
+        #714 round 2 adds a fourth sentence on the same principle: a page that
+        failed closed because its only corroborating candidate is a text table
+        did not exhaust a ladder either, so it is excluded from the exhausted
+        sentence and gets its own.
+
         ``None`` (every pre-#713 caller) keeps the old behaviour exactly.
         """
         try:
@@ -13184,6 +13230,7 @@ class UnifiedPipeline:
 
             timeout_floor: set[int] = set()
             credentialed: set[int] = set()
+            text_table_floor: set[int] = set()
             for record in records or []:
                 mode = getattr(getattr(record, "output", None), "failure_mode", None)
                 page_num = getattr(getattr(record, "output", None), "page_num", None)
@@ -13193,12 +13240,17 @@ class UnifiedPipeline:
                     timeout_floor.add(page_num)
                 elif mode is FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED:
                     credentialed.add(page_num)
+                elif mode is FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE:
+                    # #714 round 2: same exclusion, same reason as the timeout
+                    # floor -- this page did not exhaust a ladder either.
+                    text_table_floor.add(page_num)
             exhausted = sorted(
                 page_num
                 for page_num, page_state in state.pages.items()
                 if structure_class_floor_applies(page_state)
                 and page_num not in timeout_floor
                 and page_num not in credentialed
+                and page_num not in text_table_floor
             )
             parts: list[str] = []
             if exhausted:
@@ -13220,6 +13272,15 @@ class UnifiedPipeline:
                     "the page judge TIMED OUT; the ladder-accepted reading shipped "
                     "FLAGGED under a verified table-acceptance credential — the "
                     "tables were accepted, the page-level check is INCOMPLETE"
+                )
+            if text_table_floor:
+                parts.append(
+                    f"page(s) {', '.join(str(n) for n in sorted(text_table_floor))}: "
+                    "the only corroborating candidate is a TEXT table (prose cells, no "
+                    "recurring numeric column lanes) which the numeric-row corroboration "
+                    "route cannot verify; fail-closed floor shipped (marker plus page "
+                    "image) — needs a completed page-judge acceptance or a "
+                    "table-acceptance credential"
                 )
             return "; ".join(parts) or None
         except Exception as exc:

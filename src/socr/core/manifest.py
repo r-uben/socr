@@ -1105,7 +1105,31 @@ def _union_bbox(
 REGION_COVERAGE_MIN_SHARE: float = 0.75
 
 
-def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
+class RowShapeOutcome(str, Enum):
+    """TICKET (#714) round 2: what A1b's row-shape reconciliation found.
+
+    Three-valued because two different facts previously shared one ``False``,
+    and one of them is not a refusal at all. ``SHORTFALL`` means the page has
+    numeric column lanes and the candidate's row count does not reconcile with
+    the native one -- rows were dropped. ``NOT_RECONCILABLE_TEXT_TABLE`` means
+    the comparison does not apply to this page, so the numeric-row
+    corroboration route cannot carry this candidate and some other route must.
+    Both decline admission; only the second is recoverable by evidence of a
+    different kind, which is why it is surfaced separately all the way to the
+    CLI.
+    """
+
+    #: counts reconcile -- no objection from this check
+    RECONCILED = "reconciled"
+    #: the page has lanes and the candidate is short of the native row count
+    SHORTFALL = "row_shape_shortfall"
+    #: no recurring numeric column lanes: this check does not apply here.
+    #: Value matches ``FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` so
+    #: the reason reads the same in the sidecar as in the audit stream.
+    NOT_RECONCILABLE_TEXT_TABLE = "row_shape_not_reconcilable_text_table"
+
+
+def _row_shape_reconciliation(words: list, markdown: str) -> RowShapeOutcome:
     """TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): closes the
     A1->A2 truncation window with a SHAPE-based check, not a geometric one.
 
@@ -1158,31 +1182,51 @@ def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
     reconcile -- the second table's rows are lost content, same as any
     other dropped rows.
 
-    TICKET (#714): this reconciliation ABSTAINS unless the native page shows
-    recurring numeric column lanes (``structure_check._native_page_has_column_lanes``,
-    the eligibility rule #703 settled for A2's term (b), reused here rather
-    than re-derived). Same defect, same page, different call site: on a text
-    table -- a comparison box whose cells are sentences carrying zero or one
-    number each -- ``row_shape_min`` collapses to 1, at which every native
+    TICKET (#714) round 2 (Astra P1): where the native page shows no recurring
+    numeric column lanes (``structure_check._native_page_has_column_lanes``,
+    the eligibility rule #703 settled for A2's term (b), reused rather than
+    re-derived), this reconciliation is NOT APPLICABLE and reports
+    ``ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` -- which declines the route, it
+    does not acquit.
+
+    Round 1 got the defect right and the remedy wrong. The defect is real: on a
+    text table -- a comparison box whose cells are sentences carrying zero or
+    one number each -- ``row_shape_min`` collapses to 1, at which every native
     prose band that mentions a figure counts as a table row, and a complete
     candidate reads as a massive row shortfall. Measured on the real BoE 2018
-    Inflation Report box page: 2 candidate rows against 19 "native table
-    rows", so this returned False on a candidate holding 23/23 of the page's
-    numbers.
+    Inflation Report box page: 2 candidate rows against 19 "native table rows".
+    But round 1 mapped that to True, and True here means ADMIT: the candidate
+    then shipped on the strength of A1a's numeric-row corroboration alone.
+    Astra measured what that admits -- replace one prose row of that same real
+    candidate with "The Bank guarantees permanent prosperity without any risk."
+    and the corroboration is byte-identical (bound=2, total=2, 0 extras,
+    0 skipped), because the fabricated row contributes nothing to the
+    denominator. Two matching numeric rows cannot validate arbitrary prose
+    cells, and A1c is disclosure, not verification. Removing a wrong veto is
+    not a licence to admit without evidence.
 
-    **Abstain maps to True, and that is the honest mapping, not a shortcut.**
-    This predicate's contract is a VETO, not a vote: its sole caller does
-    ``if not _row_shape_reconciliation_ok(...): continue``, dropping the
-    candidate from the corroboration pool, and nothing reports the outcome
-    separately (``_apply_row_corroboration_disclosure`` surfaces the
-    ``RowCorroboration``, not this check). "No evidence either way" is
-    therefore "do not veto", which is exactly how the two pre-existing
-    abstentions below already behave (no candidate numeric rows, no
-    table-shaped native rows both ``return True``). A tri-state would add a
-    value no caller can act on differently. The candidate still has to clear
-    A1a's ``corroborate_rows`` gate above and A1c's binding checks
-    downstream; abstaining here removes one veto, it does not admit anything
-    on its own.
+    So the outcome is three-valued, and the invalid row-count comparison is NOT
+    restored as an accidental defence:
+
+    * ``RECONCILED`` -- the page has lanes and the counts reconcile: admit.
+    * ``SHORTFALL`` -- the page has lanes and they do not: the genuine A1b
+      refusal, unchanged in behaviour and in reach.
+    * ``ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` -- no lanes, so this route
+      cannot carry this candidate. Distinguishable from ``SHORTFALL`` at every
+      surface (page ``failure_mode``, sidecar, document buckets, CLI) precisely
+      so it is not read as the old false refusal.
+
+    Both non-``RECONCILED`` outcomes decline admission, which is why
+    ``_row_shape_reconciliation_ok`` below stays a plain veto for its callers.
+    What changes is where the declined candidate goes: a text table falls
+    through to the routes that CAN carry authority for prose cells -- a
+    completed page-judge acceptance, or #713's table-acceptance credential --
+    instead of being ushered through the numeric one.
+
+    The two pre-existing abstentions (no candidate numeric rows, no
+    table-shaped native rows) keep returning ``RECONCILED``. They are reached
+    only on a page that HAS lanes, where the comparison genuinely has nothing
+    to say, and they are unchanged by this ticket.
     """
     from socr.tables import structure_check
     from socr.tables.row_corroboration import (
@@ -1193,20 +1237,109 @@ def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
     )
 
     if not structure_check._native_page_has_column_lanes(words):
-        return True
+        return RowShapeOutcome.NOT_RECONCILABLE_TEXT_TABLE
 
     candidate_rows = [
         row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
     ]
     if not candidate_rows:
-        return True
+        return RowShapeOutcome.RECONCILED
 
     row_shape_min = min(len(row) for row in candidate_rows)
     native_table_rows = table_shaped_native_row_count(words, row_shape_min)
     if native_table_rows <= 0:
-        return True
+        return RowShapeOutcome.RECONCILED
 
-    return len(candidate_rows) >= math.ceil(native_table_rows * ROW_CORROBORATION_MIN)
+    if len(candidate_rows) >= math.ceil(native_table_rows * ROW_CORROBORATION_MIN):
+        return RowShapeOutcome.RECONCILED
+    return RowShapeOutcome.SHORTFALL
+
+
+def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
+    """TICKET-A1b (#634): the veto face of ``_row_shape_reconciliation``.
+
+    True only for ``RECONCILED``. Both other outcomes decline the
+    numeric-row-corroboration route; callers that need to tell them apart --
+    because a declined TEXT table is recoverable by a completed page
+    acceptance or a #713 credential, while a shortfall is not -- ask for the
+    outcome itself.
+    """
+    return _row_shape_reconciliation(words, markdown) is RowShapeOutcome.RECONCILED
+
+
+def _row_corroboration_scan(p):
+    """TICKET-A1b (#634) / #714 round 2: score every grid-reading candidate on
+    this page against the native rows, once.
+
+    Returns ``(scored, declined)``. ``scored`` holds
+    ``(PageOutput, RowCorroboration, region_kind, coverage_share)`` for each
+    candidate that cleared A1a's corroboration AND reconciled its row shape --
+    the pool ``_row_corroborated_grid_winner`` picks its winner from.
+    ``declined`` holds ``(PageOutput, RowShapeOutcome)`` for each candidate
+    that cleared A1a and was then turned away by the row-shape check, with the
+    reason it was turned away for.
+
+    Factored out so the winner and the declined-route reason are read from ONE
+    evaluation of one pool. A second predicate re-deriving "which candidates
+    would this route have looked at" is exactly the mirror-predicate drift
+    ``SelectionProvenance``'s own docstring records as the failure mode here.
+
+    ``None`` when the page has no native words or no detected table bbox, and
+    when no grid-reading candidate survives the truncation drop -- the same
+    abstentions the winner has always had.
+    """
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return None
+    bbox_region = _union_bbox(list(getattr(p, "detected_table_bboxes", None) or []))
+    if bbox_region is None:
+        return None
+
+    from socr.tables.row_corroboration import corroborate_rows
+
+    seen_ids: set[int] = set()
+    candidates: list[PageOutput] = []
+    for out in [p.best_output, *p.attempts]:
+        if out is None or id(out) in seen_ids or not _grid_reading_attempt(out):
+            continue
+        seen_ids.add(id(out))
+        candidates.append(out)
+
+    truncated_ids = _truncated_grid_reading_ids(p)
+    if truncated_ids:
+        candidates = [out for out in candidates if id(out) not in truncated_ids]
+    if not candidates:
+        return None
+
+    scored = []
+    declined: list[tuple[PageOutput, RowShapeOutcome]] = []
+    for out in candidates:
+        text = out.text or ""
+        rc_bbox = corroborate_rows(words, text, bbox_region)
+        region_kind = "bbox_union"
+        coverage_share = None
+        rc = rc_bbox
+        if rc_bbox.total > 0:
+            coverage_share = rc_bbox.native_numeric_rows / rc_bbox.total
+            if coverage_share < REGION_COVERAGE_MIN_SHARE:
+                region_kind = "page"
+                rc = corroborate_rows(words, text, None)
+        if rc.clears is not True:
+            continue
+        # TICKET-A1b round 3 (owner redesign, 2026-09-06): shape-based row
+        # reconciliation, always scored against the whole page regardless
+        # of ``region_kind`` -- see ``_row_shape_reconciliation``'s own
+        # docstring for why neither the bbox nor a distance-bounded region
+        # around it can anchor this check on the real fixtures.
+        #
+        # #714 round 2: the outcome, not the veto, so the caller below can tell
+        # a candidate this route REFUSED from one it was never eligible for.
+        outcome = _row_shape_reconciliation(words, text)
+        if outcome is not RowShapeOutcome.RECONCILED:
+            declined.append((out, outcome))
+            continue
+        scored.append((out, rc, region_kind, coverage_share))
+    return scored, declined
 
 
 def _row_corroborated_grid_winner(p):
@@ -1286,51 +1419,10 @@ def _row_corroborated_grid_winner(p):
     so this pool must not turn around and score that same truncated
     candidate back in.
     """
-    words = getattr(p, "native_words", None) or []
-    if not words:
+    scan = _row_corroboration_scan(p)
+    if scan is None:
         return None
-    bbox_region = _union_bbox(list(getattr(p, "detected_table_bboxes", None) or []))
-    if bbox_region is None:
-        return None
-
-    from socr.tables.row_corroboration import corroborate_rows
-
-    seen_ids: set[int] = set()
-    candidates: list[PageOutput] = []
-    for out in [p.best_output, *p.attempts]:
-        if out is None or id(out) in seen_ids or not _grid_reading_attempt(out):
-            continue
-        seen_ids.add(id(out))
-        candidates.append(out)
-
-    truncated_ids = _truncated_grid_reading_ids(p)
-    if truncated_ids:
-        candidates = [out for out in candidates if id(out) not in truncated_ids]
-    if not candidates:
-        return None
-
-    scored = []
-    for out in candidates:
-        text = out.text or ""
-        rc_bbox = corroborate_rows(words, text, bbox_region)
-        region_kind = "bbox_union"
-        coverage_share = None
-        rc = rc_bbox
-        if rc_bbox.total > 0:
-            coverage_share = rc_bbox.native_numeric_rows / rc_bbox.total
-            if coverage_share < REGION_COVERAGE_MIN_SHARE:
-                region_kind = "page"
-                rc = corroborate_rows(words, text, None)
-        if rc.clears is not True:
-            continue
-        # TICKET-A1b round 3 (owner redesign, 2026-09-06): shape-based row
-        # reconciliation, always scored against the whole page regardless
-        # of ``region_kind`` -- see ``_row_shape_reconciliation_ok``'s own
-        # docstring for why neither the bbox nor a distance-bounded region
-        # around it can anchor this check on the real fixtures.
-        if not _row_shape_reconciliation_ok(words, text):
-            continue
-        scored.append((out, rc, region_kind, coverage_share))
+    scored, _declined = scan
     if not scored:
         return None
 
@@ -1373,6 +1465,43 @@ def structure_class_grid_corroboration(p):
         return None
     _out, rc, region_kind, coverage_share = corroborated
     return rc, region_kind, coverage_share
+
+
+def structure_class_text_table_declined(p) -> bool:
+    """TICKET (#714) round 2: did the numeric-row corroboration route turn a
+    candidate away because the page is a TEXT table it cannot speak for?
+
+    True when this page reaches the structure-class branch, the strict
+    grid-authored pool is empty (so the corroboration fallback is the route
+    that would have run), that route seated no winner, and at least one
+    candidate which HAD cleared A1a's row corroboration was declined with
+    ``RowShapeOutcome.NOT_RECONCILABLE_TEXT_TABLE``.
+
+    Clearing A1a first is what makes this a distinct fact rather than a
+    restatement of "nothing corroborated". A candidate with no bindable
+    numeric rows at all never reaches the row-shape check: A1a returns
+    ``clears=None`` and it is dropped earlier, so the page floors under the
+    ordinary exhausted reason, which is the truthful one for it. What this
+    predicate names is narrower and is the case Astra measured: a text-bearing
+    table whose small numeric subset DOES corroborate, so the route would have
+    admitted it, while nothing in that evidence speaks to its prose cells.
+
+    Read by ``_select_page_output_tagged``'s floor to stamp the page's own
+    ``FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` and selection tag,
+    so an operator reads "this page needs a page acceptance or a table
+    credential" instead of "every model failed".
+    """
+    if not _reaches_structure_class_branch(p):
+        return False
+    if _strict_grid_authored_pool(p):
+        return False
+    scan = _row_corroboration_scan(p)
+    if scan is None:
+        return False
+    scored, declined = scan
+    if scored:
+        return False
+    return any(outcome is RowShapeOutcome.NOT_RECONCILABLE_TEXT_TABLE for _out, outcome in declined)
 
 
 def _table_block_layout(markdown: str) -> list[dict]:
@@ -2678,6 +2807,15 @@ class SelectionProvenance(str, Enum):
     #: refused or absent" and "nothing ever judged the candidate" are different
     #: facts and demand different operator actions.
     STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR = "structure_class_page_judge_timeout_floor"
+    #: #714 round 2: the SAME fail-closed floor again, for the page whose only
+    #: corroborating grid candidate is a TEXT table -- prose cells with a small
+    #: numeric subset -- which A1b's row-shape reconciliation cannot speak for.
+    #: Split from ``STRUCTURE_CLASS_FLOOR`` on #713's grounds: "every candidate
+    #: was refused or absent" and "one candidate corroborated numerically but
+    #: that is not evidence for its prose" are different facts and demand
+    #: different operator actions (here: a completed page acceptance, or a
+    #: table-acceptance credential).
+    STRUCTURE_CLASS_TEXT_TABLE_FLOOR = "structure_class_text_table_floor"
     #: native layer deficient, recovery tried and never passed: native as FALLBACK,
     #: shipped WARNING / audit_passed=False
     NATIVE_FALLBACK = "native_fallback"
@@ -2749,6 +2887,13 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     # the page's own ``failure_mode`` and on this provenance tag, both of which
     # assemble reads to emit the timeout-specific event and CLI line.
     SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    # #714 round 2: same reasoning as #713's entry directly above -- the public
+    # disposition stays the floor's, so every existing document-level surfacing
+    # keyed on this pair keeps counting this page, and the new fact rides on the
+    # page's ``failure_mode`` and this provenance tag.
+    SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
     ),
     SelectionProvenance.NATIVE_FALLBACK: PageDisposition(
@@ -3337,7 +3482,22 @@ def _select_page_output_tagged(
             # the reason is legible at page status, in the sidecar, in the
             # document-level buckets and on the CLI, and an operator reads
             # "re-run me" instead of "every model failed".
+            #
+            # #714 round 2: and it stops lying about a THIRD why. When the only
+            # corroborating candidate is a text-bearing table, the numeric-row
+            # route declined it because that route's evidence cannot speak for
+            # prose cells -- not because anything refused the reading. That page
+            # fails closed under ``ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` and
+            # its own tag, and an operator reads "this needs a page acceptance
+            # or a table credential", not "every model failed".
+            #
+            # Precedence when both hold: the timeout. The recovery for a
+            # declined text table IS a completed page acceptance, and a timed-out
+            # page judge is precisely what denied it -- so the timeout is both
+            # the earlier cause and the one whose remedy (re-run the judge)
+            # subsumes the other's.
             timed_out = page_judge_timeout_attempt(p) is not None
+            text_table_declined = not timed_out and structure_class_text_table_declined(p)
             floor_text = structure_class_floor_text(p, page_num)
             return PageOutput(
                 page_num=page_num,
@@ -3347,16 +3507,24 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 failure_mode=(
                     FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
-                    if not timed_out
-                    else FailureMode.PAGE_JUDGE_TIMEOUT
+                    if not (timed_out or text_table_declined)
+                    else (
+                        FailureMode.PAGE_JUDGE_TIMEOUT
+                        if timed_out
+                        else FailureMode.ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE
+                    )
                 ),
             ), (
                 # Written "base case first" so the tag order in this expression
                 # matches ``SelectionProvenance``'s declaration order, which the
                 # R7 drift guard requires of every ending in the cascade.
                 SelectionProvenance.STRUCTURE_CLASS_FLOOR
-                if not timed_out
-                else SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR
+                if not (timed_out or text_table_declined)
+                else (
+                    SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR
+                    if timed_out
+                    else SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR
+                )
             )
 
         # An enhancement page (native layer known deficient) whose recovery was

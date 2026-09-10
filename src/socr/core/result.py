@@ -163,6 +163,21 @@ class FailureMode(str, Enum):
     #: ``HEADER_BINDING_UNVERIFIED`` (rows corroborated, header binding never
     #: checked): here the ladder positively accepted every table.
     JUDGE_TIMEOUT_LADDER_ACCEPTED = "judge_timeout_ladder_accepted"
+    #: #714 round 2 (Astra P1): the page's only grid candidate is a TEXT-bearing
+    #: table -- prose cells, a small numeric subset, and no recurring numeric
+    #: column lanes on the native page -- so A1b's row-shape reconciliation is
+    #: not applicable to it and the numeric-row corroboration route cannot carry
+    #: it. Two matching numeric rows are not evidence for arbitrary prose cells:
+    #: measured, replacing one text row of the real BoE 2018 p1 candidate with a
+    #: fabricated sentence leaves the corroboration byte-identical
+    #: (bound=2, total=2, 0 extras). Deliberately NOT
+    #: ``STRUCTURE_CLASS_LADDER_EXHAUSTED`` (which claims every candidate was
+    #: refused or absent -- here one was declined a route it was never eligible
+    #: for) and NOT ``HEADER_BINDING_UNVERIFIED`` (which SHIPS a candidate; this
+    #: one withholds). The page is recoverable by evidence that CAN speak for
+    #: text cells: a completed page-judge acceptance, or #713's table-acceptance
+    #: credential.
+    ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE = "row_shape_not_reconcilable_text_table"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
