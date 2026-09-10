@@ -1009,31 +1009,65 @@ def _header_band_tokens(band_rows: list[list]) -> set[str]:
     return {w[4].strip().casefold() for row in band_rows for w in row if w[4].strip()}
 
 
-def _candidate_header_depth(grid: list[list[str]], band_rows: list[list]) -> int:
-    """How many leading rows of *grid* the page's header band accounts for.
+def _band_floor(band_rows: list[list]) -> float:
+    """The y of the lowest word in the header band: everything under it is body."""
+    return max(w[1] for row in band_rows for w in row)
 
-    Row 0 is the markdown header and is header material by construction. Every
-    further row is header material only while every token it carries is one the
-    page prints in the band -- and never when the row reads as data. The first
-    row that fails ends the header; everything from there down is BODY and must
-    survive the rewrite verbatim, printed panel row or not. Deciding the
-    boundary by "the first sufficiently numeric row" instead deleted any
-    label-only row a table sets between its leaf headings and its first value.
+
+def _below_band_tokens(geom: _TableGeometry, band_floor: float) -> set[str]:
+    """Casefolded word texts the page prints BELOW its header band."""
+    return {
+        w[4].strip().casefold()
+        for row in geom.rows_by_y.values()
+        for w in row
+        if w[1] > band_floor and w[4].strip()
+    }
+
+
+def _candidate_header_depth(
+    grid: list[list[str]], band_rows: list[list], geom: _TableGeometry
+) -> int | None:
+    """How many leading rows of *grid* are header. ``None`` to abstain.
+
+    Row 0 is the markdown header by construction. Every row below it is
+    classified by where the page PRINTS it, and each side of the boundary owes
+    positive evidence:
+
+    * a row every token of which the page prints BELOW the header band is
+      BODY. It and everything under it ship verbatim, and the walk stops --
+      no later row can be pulled back up into the header.
+    * otherwise a row every token of which the page prints INSIDE the band is
+      header, and the walk continues.
+    * a row accounted for by neither region is unclassifiable, and the whole
+      repair abstains rather than guess.
+
+    The body test comes first, and that ordering is the fix for #696 round 2.
+    Asking only whether a row's words appear in the header's vocabulary proves
+    the words occur there, not that THIS row does: the survey's own ``Overall``
+    printed again as a body label matched the group heading, was taken for
+    header material, and left the document -- carrying a printed ``18`` in its
+    value cell with it, because ``18`` also occurs in ``Apr 18``. A row is
+    removed here only when the page itself puts its content in the band.
+
+    Misreading in the other direction costs nothing: a header row whose whole
+    vocabulary also appears below the band is called body, the depth drops to
+    one, and the caller declines to repair.
     """
     band_tokens = _header_band_tokens(band_rows)
+    below_tokens = _below_band_tokens(geom, _band_floor(band_rows))
     depth = 1
     for row in grid[1:]:
-        numeric_cells = sum(
-            1
-            for cell in row
-            if cell.strip() and _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
-        )
-        if numeric_cells >= _MIN_DATA_NUMERIC_CELLS:
-            break
         tokens = [tok.strip().casefold() for cell in row for tok in cell.split() if tok.strip()]
-        if not tokens or any(tok not in band_tokens for tok in tokens):
+        if not tokens:
+            return None
+        if all(tok in below_tokens for tok in tokens):
             break
+        if any(tok not in band_tokens for tok in tokens):
+            return None
         depth += 1
+    # A candidate cannot carry more header bands than the page prints.
+    if depth > len(band_rows):
+        return None
     return depth
 
 
@@ -1195,8 +1229,8 @@ def flatten_multiband_header(
     # The header/body boundary comes from the page, not from "the first row
     # with enough numbers in it": a row the candidate prints and the header
     # band does not account for is BODY, and folding it away is content loss.
-    data_start = _candidate_header_depth(grid, band_rows)
-    if data_start < 2 or data_start >= len(grid):
+    data_start = _candidate_header_depth(grid, band_rows, geom)
+    if data_start is None or data_start < 2 or data_start >= len(grid):
         return None
 
     body_rows: list[list[str]] = []

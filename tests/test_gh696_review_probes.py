@@ -28,7 +28,7 @@ from test_gh696_spanning_header_flatten import (
 )
 
 from socr.judge.table_verdict import resolve_cell_refs
-from socr.pipeline.agentic import NativeTableVerifierJudge
+from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
 from socr.tables.header_repair import (
     _candidate_header_depth,
     _claim_lanes,
@@ -93,6 +93,31 @@ class TestBodyRowsSurviveTheRewrite:
         assert body[0][0] == "IMPORTANT PANEL"
         assert body[1:] == [[label] + values for label, values in _DATA_ROWS]
 
+    @pytest.mark.parametrize("value", ["", "18"])
+    def test_body_tokens_repeated_in_header_do_not_erase_body(self, value):
+        """A body row whose words also occur in the header is still a body row.
+
+        The survey's own ``Overall`` printed again as a body label matched the
+        group heading's vocabulary, and a vocabulary test read that as header
+        material and deleted the row. With ``18`` in its first value cell the
+        printed value went with it, because ``18`` occurs in ``Apr 18`` --
+        native corroboration on both the row and the number, and both gone.
+        The boundary now asks where the page prints THIS row, not whether its
+        words appear in the header somewhere.
+        """
+        page = _survey_page()
+        page.insert_text((58.5, 211), "Overall", fontsize=_FONT_SIZE)
+        if value:
+            page.insert_text((211.8, 211), value, fontsize=_FONT_SIZE)
+        row = ["Overall", value] + [""] * 9
+        lines = _padded_markdown().splitlines()
+        lines.insert(3, "| " + " | ".join(row) + " |")
+
+        after, count = repair_table_headers_in_text(page.get_text("words"), "\n".join(lines))
+
+        assert count == 1
+        assert find_table_blocks(after)[0].grid[1] == row
+
     def test_extra_body_cell_is_not_silently_deleted(self):
         page = _survey_page()
         lines = _padded_markdown().splitlines()
@@ -115,7 +140,7 @@ class TestBodyRowsSurviveTheRewrite:
         spanning = _spanning_header_bands(geom)
         assert spanning is not None
 
-        assert _candidate_header_depth(grid, spanning[1]) == 2
+        assert _candidate_header_depth(grid, spanning[1], geom) == 2
 
 
 # --------------------------------------------------------------------------
@@ -211,8 +236,6 @@ class _RecordingInnerJudge:
         self.seen: list[str] = []
 
     def assess(self, output, provider):
-        from socr.core.result import AcceptDecision
-
         self.seen.append(output.text)
         return AcceptDecision(accept=True, reason="stub", confidence=1.0)
 
@@ -231,7 +254,8 @@ class TestCoordinateContract:
 
         What the ruling's "coordinates must not shift" constraint therefore
         protects is that no reference is ever resolved across the rewrite —
-        pinned by ``test_repair_precedes_every_rncm_emitter`` below — plus the
+        pinned by ``test_inner_judge_observes_repaired_coordinates`` below —
+        plus the
         column contract, which does hold exactly: same column count, same
         column for every value.
         """
@@ -245,7 +269,7 @@ class TestCoordinateContract:
         from socr.tables.header_repair import _spanning_header_bands, _table_geometry
 
         geom = _table_geometry(grid_before, page.get_text("words"))
-        folded_bands = _candidate_header_depth(grid_before, _spanning_header_bands(geom)[1])
+        folded_bands = _candidate_header_depth(grid_before, _spanning_header_bands(geom)[1], geom)
         shift = folded_bands - 1
         assert shift == 1
 
@@ -310,32 +334,59 @@ class TestCoordinateContract:
         assert (output.text != before) is bool(count)
         assert all(seen == expected_text for seen in inner.seen)
 
-    def test_the_repair_runs_before_the_inner_judge_is_consulted(self):
-        """Source-order pin, because the fixture above ships on EXACT_PASS.
+    def test_inner_judge_observes_repaired_coordinates(self):
+        """The behavioural ordering pin, on a page that really does delegate.
 
-        On the survey page the deterministic verifier passes and the inner
-        judge is never reached, so an assertion over what the inner judge saw
-        would be vacuous there. This reads ``assess`` itself: the repair call
-        must precede every ``self._inner.assess`` on the table-page path. If
-        someone moves the repair below a delegation, an ``RnCm`` minted by a
-        judge on that path would name a row the shipped bytes no longer have.
+        The survey fixture ships on the verifier's EXACT_PASS, so the inner
+        judge is never reached there and an assertion over what it saw would be
+        vacuous. Forcing the verifier onto its AMBIGUOUS branch — and only
+        that; the repair, the page and the markdown are all real — makes the
+        delegation happen. The inner judge is called exactly once, sees exactly
+        the repaired bytes, and an ``R1C2`` minted at that moment resolves to
+        the first printed data value rather than to the leaf heading it would
+        have named before the fold.
         """
-        import inspect
+        from unittest.mock import patch
 
-        source = inspect.getsource(NativeTableVerifierJudge.assess)
-        verify_at = source.index("vr = verify_native_table(")
-        repair_at = source.index("_maybe_repair_collapsed_headers")
-        delegations = [
-            index for index in range(len(source)) if source.startswith("self._inner.assess(", index)
-        ]
-        on_the_geometry_path = [index for index in delegations if index > verify_at]
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.result import PageOutput, PageStatus
+        from socr.tables.native_verifier import VerifierResult
 
-        assert delegations, "assess no longer delegates to the inner judge"
-        assert verify_at < repair_at, "the repair no longer follows the verifier it repairs for"
-        assert on_the_geometry_path, "no delegation left on the born-digital table path"
-        assert all(index > repair_at for index in on_the_geometry_path), (
-            "a delegation on the born-digital table path now precedes the header repair"
+        page = _survey_page()
+        before = _padded_markdown()
+        expected_text, _count = repair_table_headers_in_text(page.get_text("words"), before)
+
+        seen: list[str] = []
+        resolved_at_delegation: list[list[str]] = []
+
+        class _Inner:
+            def assess(self, output, provider):
+                seen.append(output.text)
+                resolved_at_delegation.append(
+                    list(resolve_cell_refs(output.text, ["R1C2"]).values())
+                )
+                return AcceptDecision(accept=True, reason="stub", confidence=1.0)
+
+        judge = NativeTableVerifierJudge(
+            inner=_Inner(),
+            get_fitz_page=lambda _pn: page,
+            is_table_page=lambda _pn: True,
         )
+        output = PageOutput(
+            page_num=1,
+            text=before,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+        )
+
+        with patch(
+            "socr.tables.native_verifier.verify_native_table",
+            return_value=VerifierResult(warn=True, output_col_count=11),
+        ):
+            judge.assess(output, PROFILE_QWEN_LOCAL)
+
+        assert seen == [expected_text]
+        assert resolved_at_delegation == [["0"]]
 
     def test_the_ladder_witness_is_built_from_the_repaired_output(self):
         """The one ``resolve_cell_refs`` consumer reads ``best_output.text``.
@@ -378,3 +429,43 @@ def test_two_blocks_different_header_depths_preserve_flat_one():
 def test_fixture_page_is_a_real_pdf_page():
     """Grounding canary: the geometry under every probe is a rendered page."""
     assert isinstance(_survey_page(), fitz.Page)
+
+
+# --------------------------------------------------------------------------
+# Round-3 controls
+# --------------------------------------------------------------------------
+
+
+def test_three_candidate_header_rows_shift_two_and_reversed_order():
+    """Three emitted header rows fold to one, so the body shifts by two.
+
+    Both orderings of the printed header vocabulary are accepted: nothing on
+    the page is printed below the band to contradict them, so they stay header
+    and the arithmetic follows the count of bands folded, not their order.
+    """
+    page = _survey_page()
+    base = _padded_markdown().splitlines()
+    groups, separator, leaves = base[0], base[1], base[2]
+
+    for headers in ([groups, groups, leaves], [leaves, groups, groups]):
+        before = "\n".join([headers[0], separator, *headers[1:], *base[3:]])
+
+        after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+        assert count == 1
+        for row in range(1, len(_DATA_ROWS) + 1):
+            for col in range(1, 12):
+                moved = resolve_cell_refs(after, [f"R{row}C{col}"])
+                original = resolve_cell_refs(before, [f"R{row + 2}C{col}"])
+                assert list(moved.values()) == list(original.values())
+
+
+def test_already_flattened_header_is_byte_identical():
+    """Repairing the repaired output is a no-op: the fold is idempotent."""
+    page = _survey_page()
+    once, first_count = repair_table_headers_in_text(page.get_text("words"), _padded_markdown())
+    twice, second_count = repair_table_headers_in_text(page.get_text("words"), once)
+
+    assert first_count == 1
+    assert second_count == 0
+    assert twice == once
