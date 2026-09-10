@@ -397,70 +397,123 @@ let cur = 0, raw = false, zoom = 100;
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-// #652 rounds 13-14. This renderer is regex-based, so a CommonMark backslash
+// #652 rounds 13-15. This renderer is regex-based, so a CommonMark backslash
 // escape used to be read twice over: the backslash survived into the output
 // and the character it was protecting still activated ('\*emphasis\*'
-// rendered as '\<i>emphasis\</i>'). Native recovery now emits exactly that
+// rendered as '\<i>emphasis\</i>'). Native recovery emits exactly that
 // encoding for every line of a scanned page's own text layer, so a literal
 // asterisk on the page became italics in socr's own review instrument.
 //
-// One contract, applied before anything else parses: '\' + an ASCII
-// punctuation character is lifted out of the text and replaced by a
-// placeholder token, and the literal character is put back at the very end.
+// The escapes are honoured by lifting each escaped character out before
+// anything else parses and putting it back at the very end. Two earlier
+// codecs failed, and both failures are worth keeping in view:
 //
-// The token namespace is generated per render and CHECKED ABSENT from this
-// document's own source (round 14). Round 13 used a fixed private-use range
-// as the sentinel, which decoded any source character in U+E021-U+E07E into
-// the punctuation it happened to encode -- a page's own U+E031 glyph became
-// the digit '1' in the instrument used to judge digit fidelity, and it did so
-// inside code fences too, because the decode pass ran over the whole rendered
-// output. A reserved range is still representable input, so no other fixed
-// range is a fix; the token is generated instead, and restoration only ever
-// touches tokens this render created. Source characters, private-use or not,
-// in a fence or out of one, are never rewritten.
+//   Round 13 parked each escape at a fixed private-use codepoint and decoded
+//   the whole of U+E021-U+E07E off the output. That range is representable
+//   input -- this corpus carries private-use glyphs from math and symbol
+//   fonts -- so a page printing U+E031 was shown the digit '1', in the
+//   instrument whose job is judging digit fidelity, inside code fences too.
 //
-// The token is lowercase ASCII letters only, so no rule below can see it: not
-// the block tests (it never starts a line), not the table splitter, not the
-// number marker (no digits), not emphasis or code (no punctuation), and esc()
-// leaves letters alone. Restoration goes THROUGH esc(), so an escaped '<'
-// still arrives as '&lt;' and the untrusted-HTML boundary is exactly where it
-// was.
+//   Round 14 generated a random letter run and checked it absent from the
+//   source. Absence from the source does not survive concatenation with it:
+//   a source letter abutting a token extends the run, the scan opens a token
+//   one character early, and the real token is swallowed by an unrecognised
+//   match and displayed raw.
 //
-// Fenced blocks are skipped when protecting: CommonMark does not process
-// escapes inside a code fence, and a fence's content here is a model's code
-// sample that must keep its own backslashes. A code SPAN is not skipped --
-// unprotecting inside one drops a backslash the spec would keep -- which
-// cannot reach the native lane (its backticks are escaped, so no span can
-// form there) and is noted as the known divergence rather than hidden.
-function letterKey(n){
+// What follows is the third codec, and the comment on protect() gives the
+// argument that it cannot be defeated the same way.
+
+// The delimiter list, in the fixed order tried. Twenty-nine C0 control
+// characters plus DEL: every code point below 0x20 except tab, newline and
+// carriage return, which are the only three a Markdown page legitimately
+// carries. socr's own writers never emit the rest, and a page would have to
+// contain ALL twenty-nine before the codec runs out of choices.
+let ESC_DELIMS = (() => {
+  const codes = [];
+  for(let n = 1; n <= 8; n++) codes.push(n);
+  codes.push(11, 12);
+  for(let n = 14; n <= 31; n++) codes.push(n);
+  codes.push(127);
+  return codes.map(n => String.fromCharCode(n));
+})();
+
+// An index in lowercase letters, not decimals: the number marker below would
+// wrap a decimal index in <mark> and split the token apart.
+function letterIndex(n){
   let s = '';
   do { s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26); } while(n > 0);
   return s;
 }
 
+// protect lifts every escaped character out of the text, leaving a token in
+// its place; unprotect puts the characters back once the regexes below have
+// finished. Round 14 built the token out of a random letter run checked
+// absent from the source, which is NOT enough: a source letter sitting next
+// to the token extends the run, so the scan can open a token one character
+// early, swallow the real one inside an unrecognised match and leave it on
+// the page. Absence from the source does not survive concatenation WITH the
+// source.
+//
+// The token is therefore bracketed: d + <letter index> + d, where d is the
+// first delimiter in ESC_DELIMS that does not occur in the source. That is
+// chosen deterministically -- no randomness, so a failure reproduces from the
+// input alone.
+//
+// Why it is unambiguous, which is the property round 14 lacked:
+//   1. d does not occur in the source, so after protection EVERY d in the
+//      text was written by protect, and they were written in pairs.
+//   2. Between a pair, protect wrote only lowercase letters, and nothing
+//      below rewrites letters or control characters: esc() passes both, the
+//      number marker needs a digit, emphasis and code need punctuation, the
+//      block tests need their marker at the start of a line (a token starts
+//      with d, not with #, > or -), and the table splitter needs a pipe.
+//   3. Scanning left to right for d, then letters, then d: the letters cannot
+//      run past the closing d, because d is not a letter, and they cannot
+//      start before the opening d, because the character before it is either
+//      source (not d, by 1) or a previous token's closing d, already consumed
+//      by that token's own match. So each match is exactly one token, whatever
+//      text abuts it on either side.
+// The proof needs only (1); it does not depend on which delimiter was picked,
+// which is the invariant the tests pin -- every choice renders identically.
+//
+// If a source somehow contains all twenty-nine delimiters, protect returns the
+// text untouched and no escape is honoured. That page renders as it did before
+// #652 round 13 -- backslashes visible, escaped syntax active -- which is a
+// visible defect rather than a silent rewrite of the page's characters.
+//
+// Restoration puts the literal back THROUGH esc(), so an escaped '<' still
+// arrives as '&lt;' and the untrusted-HTML boundary is exactly where it was.
+//
+// Fenced blocks are skipped when protecting: CommonMark does not process
+// escapes inside a code fence, and a fence's content here is a model's code
+// sample that must keep its own backslashes. No token is written there, and
+// no d occurs there either, so unprotect cannot touch fenced source. A code
+// SPAN is not skipped -- unprotecting inside one drops a backslash the spec
+// would keep -- which cannot reach the native lane (its backticks are
+// escaped, so no span can form there) and is noted as the known divergence
+// rather than hidden.
 function protect(src){
-  let base = '';
-  do {
-    base = '';
-    for(let k = 0; k < 16; k++) base += String.fromCharCode(97 + Math.floor(Math.random() * 26));
-  } while(src.indexOf(base) !== -1);
+  const delim = ESC_DELIMS.find(d => src.indexOf(d) === -1);
+  if(delim === undefined) return {text: src, delim: null, literals: Object.create(null)};
   const literals = Object.create(null);
+  let count = 0;
   let fence = false;
   const text = src.split('\n').map(line => {
     if(/^```/.test(line)){ fence = !fence; return line; }
     return fence ? line : line.replace(/\\([!-\/:-@\[-`{-~])/g, (m, ch) => {
-      const key = letterKey(ch.charCodeAt(0));
+      const key = letterIndex(count++);
       literals[key] = ch;
-      return base + key + base;
+      return delim + key + delim;
     });
   }).join('\n');
-  return {text: text, base: base, literals: literals};
+  return {text: text, delim: delim, literals: literals};
 }
 
 function unprotect(html, state){
-  // Lazy: a document may be lowercase letters end to end, so a greedy run
-  // would swallow the text between two tokens and match neither.
-  const re = new RegExp(state.base + '([a-z]+?)' + state.base, 'g');
+  if(state.delim === null) return html;
+  const re = new RegExp(state.delim + '([a-z]+)' + state.delim, 'g');
+  // Exact key match against the keys THIS render stored, in a map with no
+  // prototype, so nothing but a token this render wrote is ever restored.
   return html.replace(re, (m, key) => key in state.literals ? esc(state.literals[key]) : m);
 }
 

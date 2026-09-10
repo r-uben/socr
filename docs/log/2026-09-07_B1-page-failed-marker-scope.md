@@ -559,3 +559,49 @@ run only shows the ordinary path is untouched. The behavioural difference shows
 on synthetic pages: a private-use glyph in prose and the same glyph inside a
 fence both change from decoded punctuation to the printed character, while
 model prose and an escaped literal render byte-identically.
+
+## Round 15 — absence from the source does not survive concatenation with it
+
+Round 14's token was a random letter run checked absent from the source. Astra
+forced the valid choice of sixteen `a` characters and rendered `a\*`: the
+source's leading `a` abuts the token's prefix, the scan opens a token one
+character early, reads a key nobody stored, and leaves the real token on the
+page as raw letters. The check was on the source alone, and the token has to be
+safe against the source it is inserted *into*.
+
+The codec is now bracketed and deterministic. `ESC_DELIMS` lists twenty-nine
+control characters — everything below 0x20 except tab, newline and carriage
+return, plus DEL — and `protect` takes the first one the source does not
+contain. A token is that delimiter, a letter index, and that delimiter again.
+Randomness is gone, so any failure reproduces from the input alone.
+
+The unambiguity argument is written into the comment above `protect`, and it
+needs only one premise. The delimiter does not occur in the source, so after
+protection every occurrence of it was written by `protect`, in pairs. Between a
+pair there are only lowercase letters, and nothing in the renderer rewrites
+letters or control characters: the number marker needs a digit, emphasis and
+code need punctuation, the block tests need their marker at the start of a line
+and a token starts with the delimiter, and the table splitter needs a pipe.
+Scanning left to right, the letters cannot run past the closing delimiter
+because it is not a letter, and cannot start before the opening one because the
+character before it is either source, which is not the delimiter, or a previous
+token's closing delimiter already consumed. Each match is exactly one token
+whatever abuts it. The argument does not depend on which delimiter was picked,
+which is what the tests pin: every candidate, forced in turn, renders the same
+page.
+
+The index is letters rather than decimals because the number marker would wrap a
+decimal index in `<mark>` and split the token in half. Restoration matches the
+exact keys this render stored, in a prototype-less map, and still goes through
+`esc`.
+
+If a page contains all twenty-nine delimiters, `protect` returns the text
+untouched and no escape is honoured. That page renders as it did before round
+13, with visible backslashes and active syntax — a visible defect rather than a
+silent rewrite of the page's own characters. It is pinned as such.
+
+Differential against round 14 over 169 corpus pages plus four synthetic ones
+covering model prose, escapes, a private-use glyph and a fence: zero
+differences. Round 14 was already correct on everything real; the failure it
+had was reachable only by forcing the namespace, which is exactly why the new
+argument is a proof rather than a probability.

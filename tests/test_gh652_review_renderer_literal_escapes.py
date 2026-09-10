@@ -1,4 +1,4 @@
-"""#652 rounds 13-14: the review viewer must render a recovered scan's escaped
+"""#652 rounds 13-15: the review viewer must render a recovered scan's escaped
 native text as the characters that were printed.
 
 ``review.html`` does not use markdown-it-py. It embeds its own regex renderer
@@ -17,6 +17,14 @@ corpus carries them from math and symbol fonts -- into the punctuation they
 happened to encode. The placeholder namespace is now generated per render and
 verified absent from the source, and only the tokens a render created are
 restored.
+
+Round 15 replaced the codec again. A namespace checked absent from the source
+can still be formed across the boundary between the source and an inserted
+token: with a source letter abutting the token, the scan opens a token one
+character early and swallows the real one. The token is now bracketed by a
+delimiter chosen deterministically as the first control character the source
+does not contain, which makes every occurrence of that delimiter one this
+render wrote, and the pairing unambiguous whatever text abuts the token.
 
 These tests run the ACTUAL JavaScript socr ships, extracted from the template
 and executed under Node, which is the only way to test the renderer that
@@ -48,10 +56,13 @@ _DRIVER = (
 )
 
 
-def _render(markdown: str) -> str:
-    """*markdown* through the review viewer's own renderMd, under Node."""
+def _render(markdown: str, *, setup: str = "") -> str:
+    """*markdown* through the review viewer's own renderMd, under Node.
+
+    *setup* is JavaScript run after the renderer's own source and before it is
+    called, which is how a test forces one particular delimiter choice."""
     return subprocess.run(
-        ["node", "-e", _RENDERER_JS + _DRIVER],
+        ["node", "-e", _RENDERER_JS + "\n" + setup + _DRIVER],
         input=json.dumps(markdown),
         text=True,
         capture_output=True,
@@ -202,3 +213,91 @@ def test_a_long_run_of_letters_in_the_source_is_not_mistaken_for_a_token() -> No
     source = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb " + _escaped_native_line("*x*")
 
     assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb *x*" in _visible(_render(source))
+
+
+#: Every delimiter the codec will try, in the order it tries them, read out of
+#: the renderer itself rather than restated here.
+_DELIMS = [chr(n) for n in list(range(1, 9)) + [11, 12] + list(range(14, 32)) + [127]]
+
+
+def _force(delims: list[str]) -> str:
+    """JavaScript that replaces the candidate list with *delims*."""
+    return "ESC_DELIMS = " + json.dumps(delims) + ";"
+
+
+def test_the_renderer_tries_the_delimiters_this_file_names() -> None:
+    """The list above is a copy, so it is checked against the shipped one. If
+    the renderer's candidates change, the pins below must be re-derived."""
+    reported = json.loads(
+        subprocess.run(
+            ["node", "-e", _RENDERER_JS + "\nprocess.stdout.write(JSON.stringify(ESC_DELIMS));"],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    )
+
+    assert reported == _DELIMS
+
+
+#: Astra's prose14 counterexample, in the shape the delimiter codec takes it:
+#: a source character abutting the token on the left, and a token whose index
+#: letters could extend into the text on the right.
+_ABUTTING = "a" + _escaped_native_line("*") + "b"
+
+
+@pytest.mark.parametrize("delim", _DELIMS, ids=[f"U+{ord(d):04X}" for d in _DELIMS])
+def test_every_delimiter_choice_renders_the_same_page(delim: str) -> None:
+    """The invariant round 14 violated. Which delimiter gets picked is an
+    implementation detail of the source, so it must not be observable in the
+    output -- and the abutting case is the one that made namespace choice
+    observable before."""
+    source = _ABUTTING + "\n\n" + "\n".join(_escaped_native_line(line) for line in _NATIVE_LINES)
+
+    assert _render(source, setup=_force([delim])) == _render(source, setup=_force(_DELIMS))
+
+
+def test_the_source_character_beside_a_token_is_not_eaten() -> None:
+    """The counterexample read directly: both neighbours survive and the
+    escaped asterisk comes back as itself."""
+    assert _visible(_render(_ABUTTING, setup=_force([_DELIMS[0]]))) == "a*b"
+
+
+def test_adjacent_tokens_each_restore_themselves() -> None:
+    """Astra's companion control. Four escapes with nothing between them: the
+    delimiters pair off left to right and no match spans two tokens."""
+    assert _visible(_render(_escaped_native_line("*&<["))) == "*&<["
+
+
+def test_a_source_holding_every_delimiter_but_the_last_uses_the_last() -> None:
+    """The fallback walk. A page carrying twenty-eight of the twenty-nine
+    candidates still gets a clean codec from the one it does not carry."""
+    source = "".join(_DELIMS[:-1]) + "\n\n" + _ABUTTING
+
+    assert "a*b" in _visible(_render(source))
+
+
+def test_digits_beside_an_escape_keep_their_own_marking() -> None:
+    """The index is letters because a decimal index would be swallowed by the
+    number marker below. A real number next to a token is still marked, and
+    the token still restores."""
+    rendered = _render("Rate 17.5% " + _escaped_native_line("*starred*") + " on 2019")
+
+    assert "<mark>17.5%</mark>" in rendered
+    assert "<mark>2019</mark>" in rendered
+    assert "*starred*" in _visible(rendered)
+
+
+def test_a_source_holding_every_delimiter_falls_back_to_no_protection() -> None:
+    """The stated giving-up point. With no delimiter left, escapes are not
+    honoured and the page renders as it did before round 13 -- a visible
+    defect, not a silent rewrite of the page's own characters. The characters
+    that exhausted the list are themselves untouched."""
+    source = "".join(_DELIMS) + _escaped_native_line("*x*")
+    rendered = _render(source)
+
+    assert "<i>" in rendered
+    assert "\\" in rendered
+    for delim in _DELIMS:
+        assert delim in rendered, hex(ord(delim))
