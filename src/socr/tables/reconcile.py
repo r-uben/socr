@@ -693,21 +693,6 @@ def _is_table_line(line: str) -> bool:
     return "|" in line and bool(_PIPE_LINE.match(line))
 
 
-def is_table_syntax_line(line: str) -> bool:
-    """Public name for :func:`_is_table_line`, for callers outside this package.
-
-    #649 round 2: ``manifest.native_prose_floor_text`` must never emit a native
-    line that parses as markdown table syntax as if it were prose -- the rows
-    beneath it are withheld, so shipping it assembles a header and a separator
-    over content the floor just refused to verify. It needs the LINE-level
-    question, which ``find_table_blocks`` cannot answer: a lone separator row
-    parses to an empty grid and is reported as no table at all. Crossing a
-    package boundary for a private name is a layering violation
-    (``test_package_layering``), so the boundary gets a name.
-    """
-    return _is_table_line(line)
-
-
 def _parse_grid(rows: list[str]) -> list[list[str]]:
     """Parse markdown rows into a cell grid, dropping the separator row."""
     grid: list[list[str]] = []

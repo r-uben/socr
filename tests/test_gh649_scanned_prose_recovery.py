@@ -291,11 +291,65 @@ class TestTheRecoverySurvivesRestore:
         assert replayed.output.text == original.output.text
         assert replayed.output.audit_notes == original.output.audit_notes
 
+    def test_a_model_note_quoting_the_credential_cannot_forge_a_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        """#649 round 3 (Astra), and the reason the credential is a TYPED field
+        rather than a string in ``audit_notes``.
+
+        ``orchestrator`` appends ``dual-pass {action}: {summary}`` for every
+        reconciliation disagreement, and that summary quotes the page and crop
+        cell values verbatim -- model-controlled text. An attempt carrying the
+        banner at the top and the recovery note inside a table cell therefore
+        put its own credential into ``audit_notes`` through a real code path,
+        and the substring check accepted it: the invented sentence and its
+        invented numbers shipped as an already-finalized recovery.
+
+        Everything here is real except the unrelated PDF-backed crop-repair
+        eligibility check: real reconciliation, the real summary, the real note
+        append, real selection. No note is injected by the test."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from test_gh659_label_unverified_finalization import _pipeline, _state
+
+        from socr.core.manifest import (
+            SCANNED_PROSE_RECOVERED_FLAG,
+            SCANNED_PROSE_RECOVERED_NOTE,
+        )
+
+        ps = _page(with_words=False)
+        ps.best_output.text = (
+            SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1)
+            + "\n\nInvented settlement terms.\n\n| Label | Value |\n| --- | --- |\n| "
+            + SCANNED_PROSE_RECOVERED_NOTE
+            + " | 10.0 |\n"
+        )
+        state = _state(tmp_path, page_count=1)
+        state.pages[1] = ps
+
+        pipeline = _pipeline()
+        pipeline.config.auto_patch_tables = False
+        crop = SimpleNamespace(
+            markdown="| Label | Value |\n| --- | --- |\n| Different label | 10.0 |\n",
+            source="ruled",
+        )
+        with patch("socr.tables.crop_repair.page_needs_crop_repair_fallback", return_value=False):
+            pipeline._reread_page_tables(state, 1, [crop], extractor=object())
+
+        # The fixture premise: the model's own text really did reach a note.
+        assert any(SCANNED_PROSE_RECOVERED_NOTE in n for n in ps.best_output.audit_notes)
+        # And it buys nothing.
+        assert ps.best_output.scanned_prose_recovered is False
+        shipped = _ship(ps).text
+        assert "Invented settlement terms." not in shipped
+        assert "10.0" not in shipped
+
     def test_the_banner_alone_is_not_a_bypass(self, tmp_path: Path) -> None:
-        """The evidence is socr's own audit note, not the bytes. A model that
-        emitted the banner line verbatim must not get its whole output shipped
-        past the floor -- without the note there is nothing to reuse, and the
-        page falls back to recomputing (here, to the bare marker)."""
+        """The second factor on its own. A model that emitted the banner line
+        verbatim must not get its whole output shipped past the floor -- with
+        no credential there is nothing to reuse, and the page falls back to
+        recomputing (here, to the bare marker)."""
         from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
 
         ps = _page(with_words=False)
@@ -330,27 +384,27 @@ class TestNativeTableSyntaxNeverShipsAsProse:
         assert "10.0" not in recovered
         assert "following domestic policy directive:" in recovered
 
-    def test_a_prose_line_holding_a_literal_pipe_is_marked_not_dropped(self) -> None:
-        """The disclosed cost of that rule, pinned rather than assumed.
-
-        ``is_table_syntax_line`` matches on a single ``|``, so an ordinary
-        sentence containing a literal pipe is folded into the withheld run.
-        That is over-exclusion in the safe direction, and this module's stated
-        policy accepts it -- but only because the line is MARKED where it went,
-        never silently dropped. If the marker ever stopped landing there, this
-        would be a silent loss and the tradeoff would no longer hold."""
+    def test_an_ordinary_sentence_holding_a_pipe_still_ships(self) -> None:
+        """#649 round 3 (Astra). Round 2 asked ``_is_table_line``, whose regex
+        accepts any line containing a pipe, so this numeral-free sentence was
+        withheld -- avoidable prose loss, not safe over-exclusion. A lone pipe
+        is not a table."""
+        sentence = "The symbol | separates the alternatives in this paragraph."
         below = [
             "The committee reviewed the schedule in detail.",
-            "Options were listed as accept | defer in the minutes.",
+            sentence,
             "No dissenting votes were recorded at the meeting.",
         ]
         recovered = _ship(_page(prose_below=below)).text
 
-        assert "accept | defer" not in recovered
-        assert "The committee reviewed the schedule in detail." in recovered
-        assert "No dissenting votes were recorded at the meeting." in recovered
-        # Marked where it was elided: the table's run, plus this one.
-        assert recovered.count(MARKER) == 2
+        assert sentence in recovered
+        # Only the table's own run is marked; nothing in the prose was elided.
+        assert recovered.count(MARKER) == 1
+
+    def test_a_printed_dash_rule_still_ships(self) -> None:
+        """Control from the same probe: a printed rule carries no pipe and no
+        digit, and is ordinary page furniture."""
+        assert "--------" in _ship(_page(table_rows=["amount 10.0", "--------"])).text
 
 
 class TestWhenItMustAbstain:

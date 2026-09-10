@@ -1932,26 +1932,37 @@ SCANNED_PROSE_RECOVERED_NOTE = (
 def _is_restored_prose_recovery(p, page_num: int) -> bool:
     """Whether this page's winner IS an already-finalized prose recovery.
 
-    #649 round 2. Both halves of the evidence must hold, and neither alone is
-    enough:
+    #649 rounds 2-3. Both halves of the evidence must hold, and neither alone
+    is enough:
 
-    * the winner carries ``SCANNED_PROSE_RECOVERED_NOTE``. socr writes that
-      note; a model's output cannot contain it, so it is the half that cannot
-      be forged. It survives resume because the sidecar serialises the winning
-      output's ``audit_notes`` and ``_restore_terminal_page_state`` rebuilds
-      the ``PageOutput`` from that record -- no new persisted field is needed.
-    * the winner's text starts with this module's own banner. A note without
+    * the winner carries ``PageOutput.scanned_prose_recovered``, the TYPED
+      field this module sets when it builds such a body. It survives resume
+      because the sidecar serialises the winning output and
+      ``_restore_terminal_page_state`` rebuilds the ``PageOutput`` from that
+      record.
+    * the winner's text starts with this module's own banner. A flag without
       the banner would mean something rewrote the body after the recovery, and
       that body is not this function's to vouch for.
 
-    Requiring the note is what stops the banner from becoming a bypass: a
-    hallucinating model that emitted the banner line verbatim would otherwise
-    have its whole output shipped past the floor.
+    Round 2 asked whether a note SUBSTRING would do, and Astra showed it would
+    not: ``orchestrator`` appends ``dual-pass {action}: {summary}``, and that
+    summary quotes model-controlled cell text verbatim, so an attempt carrying
+    the banner at the top and the note text inside a table cell was shipped as
+    an already-finalized recovery -- invented sentence, invented numbers and
+    all. Every note author happens to prefix its text today, so an EXACT
+    standalone match would close that particular route, but a credential whose
+    soundness depends on auditing every present and future note formatter is
+    not a credential. A typed field cannot be reached by free text at all, and
+    the note stays for human and corpus visibility rather than as evidence.
+
+    The banner alone is likewise not enough, and for the same reason: a model
+    that echoes the banner line must not have its whole output shipped past
+    the floor.
     """
     out = getattr(p, "best_output", None)
     if out is None:
         return False
-    if not any(SCANNED_PROSE_RECOVERED_NOTE in note for note in (out.audit_notes or [])):
+    if getattr(out, "scanned_prose_recovered", False) is not True:
         return False
     return (out.text or "").startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num))
 
@@ -2021,18 +2032,35 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
             blocks.append("\n".join(paragraph))
             paragraph.clear()
 
-    from socr.tables.reconcile import is_table_syntax_line
+    from socr.tables.reconcile import find_table_blocks
 
-    for is_prose, band in bands:
-        line = " ".join(str(w[4]) for w in band).strip()
-        # A native line that parses as markdown TABLE SYNTAX can never ship as
-        # prose here, whatever its digits say. The rows beneath it are withheld
-        # by definition on this page, so emitting it would assemble a header
-        # and a separator with no body -- a table structure asserted over
-        # content the floor just refused to verify, and exactly what
-        # ``_apply_table_emission_guard`` exists to catch downstream. It joins
-        # the withheld run instead.
-        if is_prose and is_table_syntax_line(line):
+    # A native line that parses as markdown TABLE SYNTAX can never ship as
+    # prose here, whatever its digits say: the rows beneath it are withheld by
+    # definition on this page, so emitting it would assemble a header and a
+    # separator over content the floor just refused to verify -- exactly what
+    # ``_apply_table_emission_guard`` catches downstream. It joins the withheld
+    # run instead.
+    #
+    # #649 round 3 (Astra): "is this line table syntax" is a question about
+    # CONTEXT, not about the line. Round 2 asked ``_is_table_line``, whose
+    # regex accepts any line containing a pipe, so the numeral-free sentence
+    # "The symbol | separates the alternatives in this paragraph." was withheld
+    # -- avoidable prose loss, which is not what "over-exclusion in the safe
+    # direction" was meant to license. The structural question is asked of the
+    # page instead, by the same parser that defines a table block everywhere
+    # else in this file: a run of at least two consecutive pipe-bearing lines.
+    # A lone pipe in a sentence is not a table and ships; a header beside its
+    # separator is, and does not.
+    band_lines = [" ".join(str(w[4]) for w in band).strip() for _is_prose, band in bands]
+    table_syntax = {
+        idx
+        for block in find_table_blocks("\n".join(band_lines))
+        for idx in range(block.start, block.end + 1)
+    }
+
+    for idx, (is_prose, band) in enumerate(bands):
+        line = band_lines[idx]
+        if is_prose and idx in table_syntax:
             is_prose = False
         if is_prose:
             in_withheld_run = False
@@ -2464,6 +2492,10 @@ def _select_page_output_tagged(
             # page stays ERROR with its own failure mode either way -- prose
             # coming back does not mean the table was read.
             audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
+            # The credential the restore path actually reads (see
+            # ``_is_restored_prose_recovery``). The note above is for readers;
+            # this is for the machine, and only this module sets it.
+            scanned_prose_recovered=prose_recovered,
             # #658: this branch REBUILDS the shipped output from scratch, so a
             # fixed HALLUCINATION here overwrote the honest attempt-level reason
             # and the sidecar the corpus actually reads still said the model

@@ -255,6 +255,18 @@ class PageOutput:
     figures: list[FigureInfo] = field(default_factory=list)
     audit_passed: bool = True
     audit_notes: list[str] = field(default_factory=list)
+    #: #649 round 3: this body was built by
+    #: ``manifest.native_prose_floor_text`` -- the page's own trusted prose,
+    #: flagged, around a withheld table. A TYPED field rather than a string in
+    #: ``audit_notes`` deliberately: the recovery is reused verbatim when a
+    #: resumed page cannot recompute it, so its credential must be one no model
+    #: output can occupy. Astra reproduced the substring form being forged
+    #: through ``orchestrator``'s ``dual-pass {action}: {summary}`` note, which
+    #: quotes model-controlled cell text; every note author happens to prefix
+    #: its text today, but a credential that depends on auditing every present
+    #: and future formatter is not a credential. Nothing but this module sets
+    #: this field, and free text cannot reach it.
+    scanned_prose_recovered: bool = False
     escalated_from: str = ""  # engine that failed, triggering escalation
     cost_usd: float | None = 0.0  # estimated USD cost; None when the direct call is unmetered
     # Agentic routing provenance (B3) — empty for non-agentic runs
@@ -356,6 +368,13 @@ class PageOutput:
         }
         if self.table_corroboration is not None:
             d["table_corroboration"] = self.table_corroboration
+        # #649: same omit-when-unset convention, same reason -- this field
+        # postdates every already-terminal page's sidecar, and emitting it
+        # unconditionally would change the content-addressed fingerprint of
+        # every page in every corpus, none of which ships recovered prose.
+        # Its absence and ``False`` mean the same thing to ``from_dict``.
+        if self.scanned_prose_recovered:
+            d["scanned_prose_recovered"] = True
         # #659: same omit-when-empty convention as ``table_corroboration``
         # just above, and for the same reason -- this field postdates every
         # already-terminal page's sidecar, and emitting it unconditionally
@@ -386,6 +405,13 @@ class PageOutput:
             figures=[FigureInfo.from_dict(f) for f in d.get("figures", [])],
             audit_passed=d.get("audit_passed", True),
             audit_notes=list(d.get("audit_notes", [])),
+            # ``type(...) is bool`` rather than truthiness: a sidecar is parsed
+            # JSON, and only a real boolean written by this dataclass counts.
+            scanned_prose_recovered=(
+                d.get("scanned_prose_recovered")
+                if type(d.get("scanned_prose_recovered")) is bool
+                else False
+            ),
             escalated_from=d.get("escalated_from", ""),
             cost_usd=d.get("cost_usd", 0.0),
             provider_id=d.get("provider_id", ""),
