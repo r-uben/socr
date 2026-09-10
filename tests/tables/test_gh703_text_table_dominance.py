@@ -8,14 +8,18 @@ that minimum collapses to 1, so every prose line on the page that mentions a
 figure counts as a native "table row", and a complete, ladder-accepted
 candidate reads as a massive shortfall and is discarded.
 
-The gate added here (``structure_check._numeric_dominant``) restricts term (b)
-to candidates whose own body rows are numeric-dominant: a strict majority
-carrying at least two genuine numeric tokens. Term (a) (the style break) and
-the ladder verdict are untouched.
+Round 1 gated term (b) on the CANDIDATE's own row widths. Astra's review
+falsified that: a numeric table truncated down to two legitimately sparse rows
+loses its dominance together with the missing rows, term (b) abstains, and the
+truncated reading wins selection over the complete one -- exactly what A2
+exists to prevent. Round 2 asks the eligibility question on the NATIVE side,
+which a model cannot truncate: does the page show recurring numeric column
+lanes? A table's numerals recur in shared x-lanes down the page; prose figures
+scatter.
 
-Difference pins below monkeypatch ``_numeric_dominant`` to a constant ``True``,
-which restores the pre-#703 behaviour exactly (the gate is the only change to
-term (b)), and assert the one outcome that flips.
+Difference pins below monkeypatch ``_native_page_has_column_lanes`` to a
+constant ``True``, which restores the pre-#703 behaviour exactly (the gate is
+the only change to term (b)), and assert the one outcome that flips.
 """
 
 from __future__ import annotations
@@ -25,15 +29,23 @@ from pathlib import Path
 
 import pytest
 
+from socr.core.manifest import _strict_grid_authored_pool, structure_class_grid_winner
 from socr.tables import structure_check
 from socr.tables.reconcile import raw_table_block_lines
 from socr.tables.row_corroboration import numeric_body_rows, table_blocks
 from socr.tables.structure_check import (
     DEFECT_TABLE_TRUNCATED,
     _final_row_truncated,
-    _numeric_dominant,
+    _native_page_has_column_lanes,
     table_output_defect,
     table_truncated,
+)
+
+from test_structure_check_truncated import (  # noqa: I001  (pytest rootdir import)
+    BULLETIN_P2_COMPLETE,
+    _grid_reading_output,
+    _strict_grid_output,
+    _strict_page,
 )
 
 
@@ -47,36 +59,53 @@ def _row_words(y: float, tokens: list[str]) -> list[tuple]:
     return words
 
 
-# ---------------------------------------------------------------------------
-# The dominance rule itself
-# ---------------------------------------------------------------------------
-
-
-def test_all_single_numeric_rows_are_not_numeric_dominant() -> None:
-    """The #703 shape: prose cells, one number each."""
-    assert _numeric_dominant([("4%",), ("32.",)]) is False
-
-
-def test_wide_numeric_rows_are_numeric_dominant() -> None:
-    assert _numeric_dominant([("2018", "1.0", "2.0"), ("2019", "1.1", "2.1")]) is True
-
-
-def test_one_stray_single_numeric_row_does_not_disable_the_guard() -> None:
-    """Why a strict majority and not ``min(len(row)) >= 2``: a lone total or
-    footnote-marker row inside an otherwise numeric table would take the
-    minimum to 1 and switch term (b) off for the whole candidate.
+def _scattered_words(y: float, tokens: list[str], *, offset: float) -> list[tuple]:
+    """A prose line: tokens laid out by their own widths from *offset*, so
+    numerals land where the sentence happens to put them rather than in a
+    shared lane. This is what separates prose from a table.
     """
-    rows = [("2018", "1.0", "2.0"), ("2019", "1.1", "2.1"), ("7",)]
-    assert min(len(row) for row in rows) == 1
-    assert _numeric_dominant(rows) is True
-
-
-def test_empty_candidate_rows_are_not_dominant() -> None:
-    assert _numeric_dominant([]) is False
+    words = []
+    x = offset
+    for tok in tokens:
+        width = 5.0 * len(tok)
+        words.append((x, y, x + width, y + 10.0, tok))
+        x += width + 4.0
+    return words
 
 
 # ---------------------------------------------------------------------------
-# Hermetic synthetic text table
+# The lane rule itself
+# ---------------------------------------------------------------------------
+
+
+def test_aligned_numeric_grid_has_column_lanes() -> None:
+    words: list[tuple] = []
+    for i in range(6):
+        words += _row_words(20.0 * i, [f"20{10 + i}", str(100 + i), str(200 + i)])
+    assert _native_page_has_column_lanes(words) is True
+
+
+def test_scattered_prose_figures_have_no_column_lanes() -> None:
+    """Prose lines that each mention a figure: many numerals, no lane reuse."""
+    lines = [
+        ["Inflation", "rose", "to", "2.7%", "in", "the", "quarter"],
+        ["Unemployment", "fell", "to", "4%", "by", "year", "end"],
+        ["Average", "weekly", "hours", "worked", "were", "32"],
+        ["Participation", "held", "just", "under", "63.7", "percent"],
+        ["Productivity", "growth", "averaged", "0.25", "over", "the", "period"],
+    ]
+    words: list[tuple] = []
+    for i, line in enumerate(lines):
+        words += _scattered_words(20.0 * i, line, offset=float(3 * i))
+    assert _native_page_has_column_lanes(words) is False
+
+
+def test_no_words_has_no_column_lanes() -> None:
+    assert _native_page_has_column_lanes([]) is False
+
+
+# ---------------------------------------------------------------------------
+# Hermetic text table
 # ---------------------------------------------------------------------------
 
 # A two-column comparison box, cells are sentences. Two of the eight body rows
@@ -100,7 +129,8 @@ TEXT_TABLE_MD = (
 )
 
 # The page around that box: prose lines, most of which mention exactly one
-# figure. At row_shape_min == 1 every one of these counts as a native
+# figure, laid out as running text so the numerals do not share x-lanes. At
+# row_shape_min == 1 every one of these bands counts as a native
 # "table-shaped row" -- which is the whole defect.
 TEXT_TABLE_WORDS: list[tuple] = []
 for _i, _line in enumerate(
@@ -119,7 +149,7 @@ for _i, _line in enumerate(
         ["Total", "factor", "productivity", "since", "2014"],
     ]
 ):
-    TEXT_TABLE_WORDS += _row_words(10.0 + _i * 20.0, _line)
+    TEXT_TABLE_WORDS += _scattered_words(10.0 + _i * 20.0, _line, offset=float(2 * _i))
 
 
 def test_text_table_is_not_truncated() -> None:
@@ -128,19 +158,21 @@ def test_text_table_is_not_truncated() -> None:
         row for rows in table_blocks(TEXT_TABLE_MD) for row in numeric_body_rows(rows) if row
     ]
     assert candidate_rows, "fixture must have numeric body rows for term (b) to be reachable"
-    assert all(len(row) == 1 for row in candidate_rows), "fixture must be the text-table shape"
 
+    assert _native_page_has_column_lanes(TEXT_TABLE_WORDS) is False
     assert table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS) is False
     assert table_output_defect(TEXT_TABLE_MD, TEXT_TABLE_WORDS) != DEFECT_TABLE_TRUNCATED
 
 
-def test_text_table_difference_pin_term_b_ungated_vs_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_text_table_difference_pin_term_b_ungated_vs_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Same page, same words, same term (a): the ONLY thing that changes is
-    whether term (b)'s dominance gate is consulted.
+    whether term (b)'s native-lane gate is consulted.
     """
     gated = table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS)
 
-    monkeypatch.setattr(structure_check, "_numeric_dominant", lambda rows: True)
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
     ungated = table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS)
 
     assert (ungated, gated) == (True, False)
@@ -151,9 +183,9 @@ def test_text_table_difference_pin_term_b_ungated_vs_gated(monkeypatch: pytest.M
 def test_numeric_table_shortfall_is_unchanged_by_the_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other side of the difference pin: on a numeric-dominant candidate
-    the gate is inert -- gated and ungated verdicts are identical, truncated
-    and complete alike.
+    """The other side of the difference pin: on a page with column lanes the
+    gate is inert -- gated and ungated verdicts are identical, truncated and
+    complete alike.
     """
     rows = [(2000 + i, float(100 + i), float(200 + i)) for i in range(20)]
     header = "| Year | A | B |\n|---|---|---|\n"
@@ -164,10 +196,82 @@ def test_numeric_table_shortfall_is_unchanged_by_the_gate(
         words += _row_words(10.0 + i * 20.0, [str(year), str(a), str(b)])
 
     gated = (table_truncated(complete_md, words), table_truncated(truncated_md, words))
-    monkeypatch.setattr(structure_check, "_numeric_dominant", lambda candidate_rows: True)
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
     ungated = (table_truncated(complete_md, words), table_truncated(truncated_md, words))
 
     assert gated == ungated == (False, True)
+
+
+# ---------------------------------------------------------------------------
+# Astra's round-1 counterexample: a numeric table truncated to sparse rows
+# ---------------------------------------------------------------------------
+
+
+def _sparse_prefix_fixture() -> tuple[str, str, list[tuple]]:
+    """A numeric table with two legitimate one-number rows followed by
+    eighteen dense ones, and the same table truncated to only those two sparse
+    rows. Round 1's candidate-side dominance test called the truncated reading
+    a text table; the native words are an aligned grid throughout.
+    """
+    rows = [("Opening", "17", ""), ("Closing", "19", "")] + [
+        (f"Item{i}", str(100 + i), str(200 + i)) for i in range(18)
+    ]
+    header = "| Item | A | B |\n| --- | --- | --- |\n"
+    complete = header + "".join("| " + " | ".join(row) + " |\n" for row in rows)
+    truncated = header + "".join("| " + " | ".join(row) + " |\n" for row in rows[:2])
+    words: list[tuple] = []
+    for i, row in enumerate(rows):
+        words += _row_words(20.0 * i, [tok for tok in row if tok])
+    return complete, truncated, words
+
+
+def test_numeric_table_sparse_prefix_is_still_truncated() -> None:
+    """Astra reproducer 1: the surviving rows are sparse, the page is not."""
+    complete, truncated, words = _sparse_prefix_fixture()
+
+    surviving = [row for rows in table_blocks(truncated) for row in numeric_body_rows(rows) if row]
+    assert all(len(row) == 1 for row in surviving), "the truncated rows must look like prose rows"
+    assert _native_page_has_column_lanes(words) is True
+
+    assert table_truncated(complete, words) is False
+    assert table_truncated(truncated, words) is True
+
+
+def test_sparse_prefix_truncation_not_kept_in_the_strict_pool() -> None:
+    """Astra reproducer 2: it must still be dropped from S1's strict pool."""
+    complete, truncated, words = _sparse_prefix_fixture()
+    short = _strict_grid_output("qwen", truncated)
+    full = _grid_reading_output("gemini", complete)
+    page = _strict_page([short, full])
+    page.native_words = words
+
+    assert short not in _strict_grid_authored_pool(page)
+
+
+def test_sparse_prefix_truncation_does_not_win_over_complete_reading() -> None:
+    """Astra reproducer 3: the complete gemini reading still wins selection.
+
+    Round 1 flipped this winner to the truncated qwen reading.
+    """
+    complete, truncated, words = _sparse_prefix_fixture()
+    short = _strict_grid_output("qwen", truncated)
+    full = _grid_reading_output("gemini", complete)
+    page = _strict_page([short, full])
+    page.native_words = words
+
+    winner = structure_class_grid_winner(page)
+    assert winner is not None
+    assert winner.engine == "gemini"
+
+
+def test_ecb_p2_rows_are_all_wide() -> None:
+    """Astra's control: the ECB fixture cannot supply the sparse-prefix shape
+    by row deletion alone, which is why the synthetic one above is the
+    counterexample of record.
+    """
+    rows = [row for block in table_blocks(BULLETIN_P2_COMPLETE) for row in numeric_body_rows(block)]
+    assert rows
+    assert all(len(row) >= 2 for row in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +315,7 @@ def test_real_boe_p1_text_table_ships() -> None:
         row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
     ]
     assert candidate_rows == [("4%",), ("32.",)]
-    assert _numeric_dominant(candidate_rows) is False
+    assert _native_page_has_column_lanes(words) is False
 
     assert table_truncated(markdown, words) is False
     assert table_output_defect(markdown, words) != DEFECT_TABLE_TRUNCATED
@@ -228,7 +332,7 @@ def test_real_boe_p1_difference_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     markdown, words = _boe_p1()
 
     gated = table_truncated(markdown, words)
-    monkeypatch.setattr(structure_check, "_numeric_dominant", lambda candidate_rows: True)
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
     ungated = table_truncated(markdown, words)
 
     assert (ungated, gated) == (True, False)

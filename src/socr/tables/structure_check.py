@@ -290,47 +290,51 @@ def _final_row_truncated(block_lines: Sequence[str]) -> bool:
 _STRAY_HEADER_BAND_ALLOWANCE = 1
 
 
-#: TICKET (#703): the narrowest candidate row width at which the native
-#: row-shape reconciliation carries any information. ``row_shape_min`` of 1
-#: says "a band holding one genuine numeric token is a table row" -- which is
-#: true of essentially every prose line on a page that mentions a figure, so
-#: on a TEXT table (cells are sentences carrying zero or one number each) the
-#: native count is the page's prose line count and the shortfall is an
-#: artefact of the page being prose, not evidence of a dropped row. Two
-#: tokens is the smallest width that is a numeric SEQUENCE rather than a
-#: single mentioned value, i.e. the smallest width whose repetition down a
-#: page distinguishes a tabulated column run from running text. This is the
-#: floor of an existing derivation (``row_shape_min``, itself derived from the
-#: candidate), not a tuned threshold: below it the predicate is vacuous and
-#: there is no value between 1 and 2.
-_ROW_SHAPE_DISCRIMINATING_MIN = 2
+#: TICKET (#703) round 2: how many recurring numeric column lanes the NATIVE
+#: page must show before term (b)'s row-shape reconciliation says anything.
+#: The reconciliation compares row WIDTHS; a single recurring lane gives every
+#: native band width 1, which is the vacuous case #703 was filed for, so two is
+#: the smallest arity at which a native row has a shape to reconcile at all --
+#: an arity floor, not a fitted threshold. Deliberately WEAKER than the
+#: detector's own ``reconstruct._MIN_LANES_PER_ROW`` (3): this is an ABSTENTION
+#: gate on a content-loss guard, so a wrong "no lanes here" silently disarms A2
+#: while a wrong "lanes here" only leaves A2 armed as it was before #703.
+#: "Recurring" is not redefined -- ``has_recurring_numeric_columns`` keeps the
+#: existing GH-248 rule that a lane counts only if it appears on at least
+#: ``_MIN_TABLE_ROWS`` bands.
+_MIN_RECONCILABLE_LANES = 2
 
 
-def _numeric_dominant(candidate_rows: list[tuple[str, ...]]) -> bool:
-    """TICKET (#703): are this candidate's own body rows numeric-dominant --
-    a strict majority carrying at least ``_ROW_SHAPE_DISCRIMINATING_MIN``
-    genuine numeric tokens?
+def _native_page_has_column_lanes(words: list) -> bool:
+    """TICKET (#703) round 2: does the NATIVE page show recurring numeric
+    column lanes -- evidence that survives a truncated candidate?
 
-    Derived entirely from the candidate (no page-level or corpus constant),
-    exactly as ``row_shape_min`` itself is. Measured on the BoE 2018
-    Inflation Report Table 3.B fixture (#703): a two-column comparison box
-    whose cells are sentences, ``numeric_body_rows`` yields two rows of width
-    1 (``('4%',)``, ``('32.',)``) against 19 native "table-shaped" bands, and
-    a complete, ladder-accepted candidate was called truncated and floored to
-    0/23 numbers shipped. Both ECB economic-bulletin truncation fixtures
-    (p2, p3) are numeric-dominant -- every one of their numeric body rows
-    carries 3 or more tokens -- so the gate leaves those verdicts untouched.
+    Round 1 gated term (b) on the candidate's own row widths, which is
+    unsound: the dominance disappears together with the missing rows. A
+    numeric table whose surviving rows happen to be sparse (two one-number
+    rows retained, eighteen dense rows dropped) then reads as a text table and
+    the guard A2 exists for switches itself off -- measured, the truncated
+    reading wins selection over the complete one. Native geometry cannot be
+    truncated by a model, so the eligibility question is asked there instead.
 
-    A strict majority rather than ``min(...) >= 2`` deliberately: one stray
-    single-numeric row (a total line, a footnote-marker row that survived
-    ``numeric_body_rows``) inside an otherwise numeric table must not disable
-    the guard for the whole candidate, which is exactly what taking the
-    minimum would do.
+    The discriminator between "a table" and "prose that mentions figures" is
+    not how many numerals a band carries -- on the BoE #703 page the native
+    table-shaped count is 19/4/2 bands at widths 1/2/3, table-specific at no
+    width -- but ALIGNMENT: a table's numerals recur in shared x-lanes down
+    the page, prose figures scatter. Measured on that page: 16 x0-lanes, only
+    2 of them recurring, and NO band populating two recurring lanes at once.
+    The ECB bulletin p2/p3 truncation fixtures show 11 recurring lanes and 3
+    such bands; a mixed dense/sparse numeric table shows 2 lanes and 18.
+
+    Reuses ``reconstruct.has_recurring_numeric_columns`` (GH-248's lane-reuse
+    rule, both x0 and x1 anchors per GH-349) rather than a second
+    implementation of "column lane".
     """
-    if not candidate_rows:
+    if not words:
         return False
-    wide = sum(1 for row in candidate_rows if len(row) >= _ROW_SHAPE_DISCRIMINATING_MIN)
-    return wide * 2 > len(candidate_rows)
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES)
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
@@ -348,15 +352,26 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     ``table_output_defect`` supply none, matching every other geometry-needing
     term in this module.
 
-    Also abstains when the candidate's own rows are not numeric-dominant
-    (``_numeric_dominant``, #703): the reconciliation compares NUMERIC row
-    shapes, and on a text table (prose cells, zero or one number each) the
-    derived ``row_shape_min`` collapses to 1, at which point every prose line
-    carrying a figure counts as a native table row and a complete candidate
-    reads as a massive shortfall. Such candidates are left to term (a) and to
-    the ladder verdict.
+    Also abstains when the native page shows no recurring numeric column
+    lanes (``_native_page_has_column_lanes``, #703): the reconciliation
+    compares NUMERIC row shapes, and on a text table (prose cells, zero or one
+    number each) the candidate-derived ``row_shape_min`` collapses to 1, at
+    which point every prose line carrying a figure counts as a native table
+    row and a complete candidate reads as a massive shortfall. Such candidates
+    are left to term (a) and to the ladder verdict.
+
+    ``row_shape_min`` is still the candidate's own minimum, deliberately. The
+    lane gate has already established that this page HAS column structure, so
+    counting native bands with one or more numerals is no longer "every prose
+    line on a prose page" -- and keeping the minimum is what catches the
+    sparse-prefix truncation the lane gate was added for (2 surviving rows of
+    width 1 against 20 native bands). Substituting a lane-derived width would
+    change the native counts A2 measured on the ECB fixtures for no gain on
+    any page measured here.
     """
     if not words:
+        return False
+    if not _native_page_has_column_lanes(words):
         return False
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,
@@ -369,9 +384,6 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
     ]
     if not candidate_rows:
-        return False
-
-    if not _numeric_dominant(candidate_rows):
         return False
 
     row_shape_min = min(len(row) for row in candidate_rows)

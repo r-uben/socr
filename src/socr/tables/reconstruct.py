@@ -564,8 +564,25 @@ def has_numeric_columns(page) -> bool:
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
     except Exception:  # pragma: no cover - defensive
         return False
+    return has_recurring_numeric_columns(words)
+
+
+def has_recurring_numeric_columns(words: list, min_lanes_per_row: int = _MIN_LANES_PER_ROW) -> bool:
+    """``has_numeric_columns``' test on a WORD LIST rather than a page.
+
+    Factored out for #703 so a caller that already holds
+    ``page.get_text("words")`` can ask the same question without re-extracting
+    (the same factoring ``native_verifier._lane_count_from_words`` did for its
+    own page-level twin), and so a caller can ask for a weaker row arity than
+    the detector's ``_MIN_LANES_PER_ROW``.
+
+    *min_lanes_per_row* is how many COLUMN-LIKE lanes a band must populate at
+    once to count as a data row; "column-like" (recurrence over at least
+    ``_MIN_TABLE_ROWS`` bands) is unchanged and not a caller's choice. The
+    default reproduces ``has_numeric_columns`` exactly.
+    """
     numeric_words = [w for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
-    if len(numeric_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
+    if len(numeric_words) < min_lanes_per_row * _MIN_TABLE_ROWS:
         return False
 
     # GH-349: try BOTH edges as the column anchor. Keying lanes on x0 alone
@@ -579,10 +596,14 @@ def has_numeric_columns(page) -> bool:
     # 4 Glaeser noise pages). The same >= _MIN_TABLE_ROWS recurrence is required;
     # only the anchor changes. Scatter has neither a stable left nor a stable
     # right edge, so it still fails on both.
-    return any(_numeric_columns_on_anchor(numeric_words, edge) for edge in (0, 2))
+    return any(
+        _numeric_columns_on_anchor(numeric_words, edge, min_lanes_per_row) for edge in (0, 2)
+    )
 
 
-def _numeric_columns_on_anchor(numeric_words: list, edge: int) -> bool:
+def _numeric_columns_on_anchor(
+    numeric_words: list, edge: int, min_lanes_per_row: int = _MIN_LANES_PER_ROW
+) -> bool:
     """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
     nums = [(w[edge], round(w[1])) for w in numeric_words]
 
@@ -619,7 +640,7 @@ def _numeric_columns_on_anchor(numeric_words: list, edge: int) -> bool:
             lane_rows.setdefault(lane, set()).add(y)
     column_lanes = {lane for lane, ys in lane_rows.items() if len(ys) >= _MIN_TABLE_ROWS}
 
-    grid_rows = sum(1 for ls in row_lanes.values() if len(ls & column_lanes) >= _MIN_LANES_PER_ROW)
+    grid_rows = sum(1 for ls in row_lanes.values() if len(ls & column_lanes) >= min_lanes_per_row)
     return grid_rows >= _MIN_TABLE_ROWS
 
 
