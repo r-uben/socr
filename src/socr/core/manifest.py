@@ -1889,9 +1889,14 @@ _NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 #:
 #: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and only
 #: PROSE bands are escaped in either lane. A prose band is one carrying fewer
-#: than ``row_shape_min`` numeral-bearing tokens, which at the shipping value of
-#: 1 means none at all, so no escaped line can open with a digit. If that floor
-#: is ever loosened, this set needs the ordered form added.
+#: than ``row_shape_min`` numeral-bearing tokens, counted by
+#: :func:`~socr.tables.row_corroboration.bears_printed_numeral`, which matches
+#: any ASCII digit; at the shipping value of 1 that means none at all, so no
+#: escaped line can open with an ASCII digit. A line opening with a digit of
+#: another script (Arabic-Indic ``\u0661.``) can still be tagged prose, but
+#: CommonMark recognises only ASCII digits in an ordered-list marker, so it is
+#: not a list either way. If that floor is ever loosened, this set needs the
+#: ordered form added.
 _NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
 
 

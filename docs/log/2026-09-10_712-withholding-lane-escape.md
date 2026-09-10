@@ -29,13 +29,15 @@ ordered-list marker needs no rule because "this path runs only where every band
 is prose", which was true of the single caller and is not true of the second.
 The argument still holds, on a better premise: only PROSE bands are escaped in
 either lane, and a prose band carries fewer than `row_shape_min` numeral-bearing
-tokens, which at the shipping value of 1 means none, so no escaped line can open
-with a digit.
+tokens -- counted by `bears_printed_numeral`, which matches any ASCII digit --
+which at the shipping value of 1 means none, so no escaped line can open with an
+ASCII digit. A line opening with an Arabic-Indic digit can still be prose, but
+CommonMark's ordered-list marker is ASCII-only, so it is not a list either way.
 
 ## Fed 1989-11-14 p3
 
-Byte-identical, 1738 bytes before and after. The page's prose bands carry no
-character that would have been escaped. Measured by running the real fixture and
+Byte-identical: 1,738 characters, 1,750 UTF-8 bytes, before and after. The
+page's prose bands carry no character that would have been escaped. Measured by running the real fixture and
 its real cached nougat attempt through selection against `HEAD`'s manifest and
 against this branch's, not by inspecting the page. The same harness shows the
 synthetic active-character page changing, so it is not blind.
