@@ -145,3 +145,83 @@ credential minted by a different run.
   exists it belongs there, not in the exempt list.
 - **The cascade-halt probe still reads a substring.** Typing it is out of scope;
   the raised message preserves the existing signal deliberately.
+
+## Round 3 (2026-09-11)
+
+Astra's review of `4d3f3b0` (REQUEST_CHANGES, one P1 + two P2). The round-2 fixes
+hold; all three findings are about IDENTITY -- which bytes a refusal is about, and
+what counts as a refusal at all.
+
+**P1, candidate identity for supersession.** The restored ending asked
+`superseding_rejection` about `out.text`, which on a restored page is the
+FINALIZED body (note included). A later judge that completed a refusal of the
+ORIGINAL candidate is recorded over `candidate_sha256`, so it never matched, and
+the restored authority shipped over a live refusal of the very reading it vouches
+for. `reading_digests` now returns every digest that names one reading -- the
+body's, the credential's verified `candidate_sha256` and its `finalized_sha256` --
+and `rejection_of_reading` tests membership in that set. Widening the identity can
+only make MORE refusals applicable, never fewer.
+
+Two consequences the same finding asked for:
+
+- *Chronology survives the restore.* Position is no longer consulted at all.
+  Resume appends the restored output to a fresh `PageState`, so an authority
+  minted before a rejection lands positionally after it; ranking by index let a
+  reload out-vote a live refusal by arriving later in a list. Between a MISSING
+  verdict and a completed one there is nothing to sequence.
+- *The ledger gate looks at the live run.* A sidecar written before any rung
+  refused these bytes verifies against itself perfectly -- credential,
+  fingerprint and fragment digest all agree -- so nothing in `_load_terminal_page`
+  could see that a completed verdict has since refused this candidate. It now
+  calls `rejection_of_reading` over the live page and refuses, keyed to the
+  candidate identity the credential verified.
+
+**P2, the cascade-halt trigger is typed.** The deadline adapter re-raised an
+inner timeout UNCHANGED, so a judge raising `TimeoutError("timed out")` reached
+the trail as `judge raised: timed out` -- no contiguous "timeout" -- and
+`_had_timeout` was False, leaving the wedged-backend probe unarmed on exactly the
+pages this ticket is about. Two changes, deliberately both: the trigger's judge
+half now reads `JUDGE_OUTCOME_TIMEOUT`, so no wording is load-bearing; and the
+inner timeout is WRAPPED in `PageJudgeTimeoutError` like our own deadline, so both
+branches leave the adapter as one type with one vocabulary (the original is
+chained). The predicate moved into `_attempts_show_timeout` so the test pins the
+production expression rather than a copy. The provider half still scans the reason
+-- a provider timeout has nothing typed to read.
+
+`test_gh222_probe_host.py`'s scope guard pinned the old inline spelling. It was
+updated deliberately: #222 must not touch which attempts arm the halt, #713 round
+3 does, and the guard now pins that the loop calls THAT predicate and that the
+provider half is unchanged.
+
+**P2, a crashed verifier is not a verdict.** `_reject_unverified` returns a
+negative `AcceptDecision` when the deterministic table verifier RAISES, before the
+inner judge is consulted. The boundary stamped that `JUDGE_OUTCOME_COMPLETED`, so
+`superseding_rejection`'s class exemption one line above was bypassed by its own
+COMPLETED check and an infrastructure crash retired a credential nothing had
+contradicted. New typed outcome `JUDGE_OUTCOME_VERIFIER_ERROR`, written at the
+judge boundary and detected from the class this call SET (compared against a
+pre-call snapshot, so a stale `REJECTION_VERIFIER_ERROR` from an earlier rung
+cannot disguise a real refusal on this one). It joins TIMEOUT and EXCEPTION in
+`_MISSING_JUDGE_VERDICT_OUTCOMES`; it never retires a credential, and it never
+overwrites an existing typed timeout -- a missing verdict cannot retire another
+missing verdict.
+
+Also: `PageOutput.table_acceptance_credential` cited a nonexistent
+`core.page_credential.build_credential`; minting lives in
+`orchestrator._mint_table_acceptance_credential`.
+
+### Residuals
+
+- **Still no fresh BoE run.** Local credential/state fixtures throughout.
+- **The ledger's live-rejection check is inert on an ordinary resume.**
+  `_load_terminal_page` runs before the page is processed, so the live `PageState`
+  usually holds no attempts. It closes the hole for a partial-resume/reprocess
+  state that already carries a refusal, and it makes the two gates agree; the
+  ordinary protection remains the fingerprint plus reprocessing.
+- **`reading_digests` trusts the credential's own digests.** They are only used to
+  WIDEN what refusals apply, never to admit bytes, so a forged digest can withhold
+  a page but never ship one.
+- **The provider half of the cascade trigger is still a substring.** Provider
+  timeouts carry no typed outcome; typing them is a separate change.
+- **Blocking events are still not applicability-resolved** (unchanged from round
+  2), and witness bytes are still not re-rendered on resume.

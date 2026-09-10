@@ -36,8 +36,10 @@ from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
+    JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
+    REJECTION_VERIFIER_ERROR,
     PageOutput,
     PageStatus,
 )
@@ -317,6 +319,9 @@ def route_page(
         # the caller keeps; what changes is the candidate.
         canonicalize_candidate(output)
 
+        # #713 round 3 (Astra P2-3): read BEFORE the call so the class this call
+        # SETS can be told from one an earlier rung left on the same live object.
+        rejection_before = getattr(output, "rejection_class", None)
         try:
             decision = judge.assess(output, prof)
         except Exception as exc:  # a judge blowing up must not kill the document
@@ -368,9 +373,34 @@ def route_page(
         # reach it. Retiring the credential too is belt-and-braces on the same
         # fact -- authority to ship must never outlive the verdict that would
         # have refused it.
-        output.judge_outcome = JUDGE_OUTCOME_COMPLETED
-        if not decision.accept:
-            output.table_acceptance_credential = None
+        # #713 round 3 (Astra P2-3): a decision object is NOT proof a judge
+        # answered. ``_UnverifiedTableRejection._reject_unverified`` returns a
+        # negative ``AcceptDecision`` when the deterministic table VERIFIER
+        # RAISED, before the inner judge is ever consulted -- an infrastructure
+        # failure wearing a verdict's shape. Stamping it COMPLETED made every
+        # downstream reader ("a later completed verdict refused these bytes")
+        # retire a credential nothing had contradicted, and the page shipped the
+        # fail-closed floor on the strength of a crash.
+        #
+        # Detected from the class this call SET, never from the reason text and
+        # never from the class alone: comparing against the pre-call snapshot
+        # keeps a stale ``REJECTION_VERIFIER_ERROR`` from an earlier rung from
+        # disguising a real refusal on this one.
+        verifier_broke = (
+            not decision.accept
+            and getattr(output, "rejection_class", None) == REJECTION_VERIFIER_ERROR
+            and rejection_before != REJECTION_VERIFIER_ERROR
+        )
+        if verifier_broke:
+            # A missing verdict cannot retire an earlier missing verdict either:
+            # an already-typed timeout stands, so a verifier crashing on a LATER
+            # rung does not destroy the very stand-in this ticket exists for.
+            if output.judge_outcome != JUDGE_OUTCOME_TIMEOUT:
+                output.judge_outcome = JUDGE_OUTCOME_VERIFIER_ERROR
+        else:
+            output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+            if not decision.accept:
+                output.table_acceptance_credential = None
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,

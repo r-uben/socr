@@ -46,6 +46,7 @@ from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
+    JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     REJECTION_VERIFIER_ERROR,
@@ -1602,6 +1603,19 @@ CREDENTIAL_NON_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
 )
 
 
+#: #713 round 3: the typed page-judge outcomes that are NOT an answer. An
+#: attempt carrying one of these refused nothing -- the judge timed out, crashed,
+#: or never ran because the deterministic verifier raised first -- so it can
+#: never supersede another attempt's authority.
+_MISSING_JUDGE_VERDICT_OUTCOMES: frozenset[str] = frozenset(
+    {
+        JUDGE_OUTCOME_TIMEOUT,
+        JUDGE_OUTCOME_EXCEPTION,
+        JUDGE_OUTCOME_VERIFIER_ERROR,
+    }
+)
+
+
 def page_judge_timeout_attempt(p) -> PageOutput | None:
     """#713: the grid-authoring attempt whose PAGE judge TIMED OUT, if any.
 
@@ -1625,40 +1639,76 @@ def page_judge_timeout_attempt(p) -> PageOutput | None:
     return None
 
 
-def superseding_rejection(p, out) -> PageOutput | None:
-    """#713 round 2 (Astra P1-2): a LATER attempt that refused THESE bytes.
+def reading_digests(out) -> frozenset[str]:
+    """#713 round 3 (Astra P1): every digest that names THIS reading.
 
-    A page judge that timed out on one rung leaves a missing verdict. If a later
-    rung then COMPLETED a verdict over the same reading and refused it, that
-    answer is the applicable one and the older timeout carries no authority at
-    all -- yet the timeout search above walks past the rejection (it has no
-    typed timeout outcome) and hands back the older credentialed attempt, which
-    then ships. Astra's case (b).
+    A credentialed page exists in two byte-forms: the CANDIDATE the ladder and
+    the page judge were run against, and the FINALIZED body that shipped -- the
+    candidate plus the disclosure note. Resume restores the finalized form, so a
+    supersession test that hashes only ``out.text`` is asking about the wrong
+    bytes on every resumed page, and a later judge that refused the ORIGINAL
+    candidate never matched it. The restored authority then shipped over a live
+    refusal of the very reading it vouches for.
 
-    "The same reading" is decided by the candidate BYTES, never by position or
-    provider identity: a rejected DIFFERENT crop candidate is a verdict about
-    different text and must not invalidate an unchanged incumbent, which is why
-    a digest comparison and not "any rejection on this page" is the test.
-
-    "Completed" is read from the TYPED outcome and the rejection class, never
-    from reason text. ``REJECTION_VERIFIER_ERROR`` is excluded for the same
-    reason a timeout is: the verifier broke, it did not refuse.
+    Both digests name one reading, so both are returned. The credential's own
+    ``candidate_sha256`` is the verified identity -- it was checked against the
+    bytes before this page was ever admitted -- and ``finalized_sha256`` is what
+    finalization stamped over the shipped body. Widening the identity can only
+    make MORE refusals applicable, never fewer: nothing here admits anything.
     """
     from socr.core.page_credential import sha256_text
 
-    attempts = [a for a in (getattr(p, "attempts", None) or []) if a is not None]
-    idx = next((i for i, a in enumerate(attempts) if a is out), -1)
-    later = list(attempts[idx + 1 :]) if idx >= 0 else list(attempts)
+    digests = {sha256_text(getattr(out, "text", "") or "")}
+    cred = getattr(out, "table_acceptance_credential", None)
+    for key in ("candidate_sha256", "finalized_sha256"):
+        value = cred.get(key) if isinstance(cred, dict) else getattr(cred, key, None)
+        if value:
+            digests.add(str(value))
+    return frozenset(digests)
+
+
+def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
+    """#713: an attempt on ``p`` that COMPLETED a refusal of one of ``digests``.
+
+    A page judge that timed out on one rung left a missing verdict. If any rung
+    then completed a verdict over the same reading and refused it, that answer
+    is the applicable one and the timeout carries no authority at all -- yet the
+    timeout search hands back the older credentialed attempt, which then ships
+    (Astra round 2, case (b)).
+
+    "The same reading" is decided by the candidate BYTES (see
+    ``reading_digests``), never by position or provider identity: a rejected
+    DIFFERENT crop candidate is a verdict about different text and must not
+    invalidate an unchanged incumbent, which is why this is a digest comparison
+    and not "any rejection on this page".
+
+    ORDER IS NOT CONSULTED (Astra round 3). A restored credential is appended to
+    a fresh ``PageState`` on resume, so it lands positionally AFTER a rejection
+    that predates it; ranking by index would let the reload of an old authority
+    outrank a live refusal simply by arriving later in a list. Between a MISSING
+    verdict and a completed one there is nothing to sequence -- the completed
+    one is the only answer that exists -- so every attempt on the page is
+    considered and the direction of the test is fail-closed either way.
+
+    "Completed" is read from the TYPED outcome and the rejection class, never
+    from reason text. ``REJECTION_VERIFIER_ERROR`` and
+    ``JUDGE_OUTCOME_VERIFIER_ERROR`` are excluded for the same reason a timeout
+    is: the verifier broke, it did not refuse.
+    """
+    from socr.core.page_credential import sha256_text
+
+    if p is None or not digests:
+        return None
+    candidates = [a for a in (getattr(p, "attempts", None) or []) if a is not None]
     best = getattr(p, "best_output", None)
-    if best is not None and best is not out and not any(a is best for a in later):
-        later.append(best)
-    digest = sha256_text(out.text or "")
-    for att in later:
-        if att is out:
+    if best is not None and not any(a is best for a in candidates):
+        candidates.append(best)
+    for att in candidates:
+        if exclude is not None and att is exclude:
             continue
-        if getattr(att, "judge_outcome", "") in (JUDGE_OUTCOME_TIMEOUT, JUDGE_OUTCOME_EXCEPTION):
+        if getattr(att, "judge_outcome", "") in _MISSING_JUDGE_VERDICT_OUTCOMES:
             continue
-        if sha256_text(att.text or "") != digest:
+        if sha256_text(getattr(att, "text", "") or "") not in digests:
             continue
         rejection = getattr(att, "rejection_class", None)
         if rejection and rejection != REJECTION_VERIFIER_ERROR:
@@ -1666,6 +1716,11 @@ def superseding_rejection(p, out) -> PageOutput | None:
         if getattr(att, "judge_outcome", "") == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
             return att
     return None
+
+
+def superseding_rejection(p, out) -> PageOutput | None:
+    """#713: a completed refusal of the bytes ``out`` stands for, if any."""
+    return rejection_of_reading(p, reading_digests(out), exclude=out)
 
 
 def _credential_admission_refusal(state, p, page_num: int, out) -> str:

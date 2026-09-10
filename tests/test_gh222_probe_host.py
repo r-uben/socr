@@ -100,29 +100,34 @@ def test_explicit_host_argument_still_wins(recorded_urls, monkeypatch) -> None:
     assert recorded_urls == ["http://explicit:9999/api/tags"], recorded_urls
 
 
-def test_trigger_predicate_unchanged() -> None:
-    """Scope guard: this ticket must not touch WHICH attempts arm the halt.
+def test_trigger_predicate_is_the_one_the_loop_calls() -> None:
+    """Scope guard: #222 must not touch WHICH attempts arm the halt.
 
-    Narrowing ``_had_timeout`` needs the timed-out attempt to carry its backend
-    identity (#159), and #227 warns that fixing #221's probe alone makes
-    behaviour worse. The predicate stays exactly as it was; only the machine the
-    probe asks about changes.
+    Originally this pinned the SPELLING of an inline ``_had_timeout`` line, so
+    that a probe-host change could not quietly widen or narrow the trigger.
+    #713 round 3 changed the trigger DELIBERATELY -- the judge half now reads the
+    typed ``JUDGE_OUTCOME_TIMEOUT`` rather than a substring of an arbitrary
+    exception's text, because a judge raising ``TimeoutError("timed out")``
+    contains no contiguous "timeout" and never armed the probe -- and moved it
+    into ``_attempts_show_timeout`` so a test can pin the expression itself
+    rather than a copy of it.
 
-    This pins the SPELLING. On its own that is weak — it would still pass if a
-    second condition bypassed the predicate while the line survived — so
-    ``test_probe_is_consulted_only_after_a_timeout`` below pins the BEHAVIOUR.
+    What this still guards: the loop consults THAT predicate and nothing else,
+    and the provider half of it is untouched. ``test_probe_is_consulted_only_
+    after_a_timeout`` below pins the behaviour, and #713's own suite pins the
+    typed half.
     """
     import inspect
 
     from socr.pipeline import orchestrator
 
-    # Whitespace-normalised: the formatter may wrap this line at any indent depth.
-    src = " ".join(inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic).split())
-    predicate = '_had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)'
-    assert (
-        predicate in src
-        or predicate.replace("any(", "any( ").replace("attempts)", "attempts )") in src
+    loop = " ".join(inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic).split())
+    assert "_had_timeout = self._attempts_show_timeout(decision.attempts)" in loop
+
+    predicate = " ".join(
+        inspect.getsource(orchestrator.UnifiedPipeline._attempts_show_timeout).split()
     )
+    assert '"timeout" in (getattr(att, "reason", "") or "")' in predicate
 
 
 @pytest.mark.parametrize(

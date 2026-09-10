@@ -7132,6 +7132,26 @@ class UnifiedPipeline:
         if cleaned:
             state.pages[page_num].binding_adjudication = cleaned
 
+    @staticmethod
+    def _attempts_show_timeout(attempts) -> bool:
+        """PP-0 cascade-halt trigger: did anything on this page time out?
+
+        The JUDGE half reads the TYPED outcome (#713 round 3). The reason string
+        is built by interpolating an arbitrary exception, so a judge raising
+        builtin ``TimeoutError("timed out")`` produced "judge raised: timed out"
+        -- no contiguous "timeout" -- and the wedged-backend probe was never
+        armed on precisely the pages this ticket is about.
+
+        The PROVIDER half still scans the reason: a provider timeout is recorded
+        there and has nothing typed to read. Extracted from the loop so the test
+        can pin THIS expression rather than a copy of it.
+        """
+        return any(
+            getattr(getattr(att, "output", None), "judge_outcome", "") == JUDGE_OUTCOME_TIMEOUT
+            or "timeout" in (getattr(att, "reason", "") or "")
+            for att in attempts
+        )
+
     # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
@@ -7146,8 +7166,16 @@ class UnifiedPipeline:
         stamps the typed ``JUDGE_OUTCOME_TIMEOUT`` on the page output and
         escalates normally -- the same escalation the old rejection produced.
         If the backend is also not idle after the timeout, the caller should set
-        ``backend_degraded`` and halt (that probe reads the attempt reason, and
-        the raised message keeps the word "timeout" in it).
+        ``backend_degraded`` and halt. That probe reads the TYPED outcome for
+        the judge half of its trigger (#713 round 3), so no wording here is
+        load-bearing; the raised message still says "timeout" for the humans
+        reading the audit trail.
+
+        BOTH timeout branches leave as this one type: our own deadline, and a
+        timeout the inner judge raised itself (which arrives here as the same
+        exception class, since ``concurrent.futures.TimeoutError`` IS builtin
+        ``TimeoutError`` from 3.11). The inner one used to be re-raised verbatim
+        and reached the trail wearing the judge's own words.
 
         #713 round 2 (Astra P1-3): it used to return
         ``AcceptDecision(accept=False, reason="judge timeout")`` instead. That
@@ -7208,7 +7236,21 @@ class UnifiedPipeline:
                 future.cancel()
                 ex.shutdown(wait=False)
                 if inner_raised:
-                    raise
+                    # #713 round 3 (Astra P2): WRAPPED, not re-raised unchanged.
+                    # Both branches are the same outcome -- a page judge that
+                    # produced no verdict because time ran out -- so both must
+                    # leave this adapter as the same type carrying the same
+                    # vocabulary. Re-raising the inner exception verbatim let a
+                    # judge that raised builtin ``TimeoutError("timed out")``
+                    # reach the audit trail as "judge raised: timed out", which
+                    # every human-readable timeout surface then failed to
+                    # recognise. The original is chained, so nothing about its
+                    # identity is lost.
+                    logger.warning(
+                        "judge timed out on page %s (raised by the judge) — no verdict",
+                        output.page_num,
+                    )
+                    raise PageJudgeTimeoutError(f"page judge timeout: {exc}") from exc
                 logger.warning(
                     "judge timed out on page %s (%.2fs) — no verdict",
                     output.page_num,
@@ -7981,16 +8023,21 @@ class UnifiedPipeline:
 
                         # Cascade-halt check: did any attempt time out, and is the
                         # backend now unresponsive?  Use PP-0's probe_ollama_idle.
-                        # A judge timeout is encoded as
-                        # reason="judge raised: page judge timeout after N.NNs"
-                        # on the last attempt (#713 round 2: the deadline adapter
-                        # raises ``PageJudgeTimeoutError`` rather than returning a
-                        # rejection, and its message keeps the word "timeout" for
-                        # exactly this scan); a provider timeout is encoded
-                        # similarly.
-                        _had_timeout = any(
-                            "timeout" in (att.reason or "") for att in decision.attempts
-                        )
+                        #
+                        # #713 round 3 (Astra P2): the JUDGE half of this trigger
+                        # reads the TYPED outcome, not the reason text. The
+                        # deadline adapter re-raises an inner timeout UNCHANGED,
+                        # so a judge that raised builtin ``TimeoutError("timed
+                        # out")`` records reason "judge raised: timed out" -- the
+                        # contiguous substring "timeout" is absent, the probe was
+                        # never armed, and a wedged backend went unnoticed on
+                        # exactly the pages this ticket is about. Nothing about
+                        # an exception's wording is load-bearing any more.
+                        #
+                        # The substring scan stays for the PROVIDER half: a
+                        # provider timeout is recorded on the attempt's reason
+                        # and has no typed field of its own.
+                        _had_timeout = self._attempts_show_timeout(decision.attempts)
                         if _had_timeout and not self._probe_backend_idle():
                             backend_degraded = True
                             halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
@@ -10476,6 +10523,41 @@ class UnifiedPipeline:
                     logger.debug(
                         "#713: p%d fragment does not match the credential's finalized "
                         "body digest; revalidating",
+                        page_num,
+                    )
+                    return None
+
+                # #713 round 3 (Astra P1): the record on disk can be OLDER than
+                # what the live run knows. A sidecar written before any rung
+                # refused these bytes still verifies against itself perfectly --
+                # the credential, the fingerprint and the fragment digest all
+                # agree -- so nothing above can see that a completed verdict has
+                # since refused this exact candidate. Restoring it there would
+                # let a stale credential re-acquire authority the selection path
+                # already retires, and the two gates would disagree about the
+                # same page.
+                #
+                # The refusal is keyed to the CANDIDATE identity the credential
+                # verified, not to the finalized body, because a rejection is
+                # recorded over the bytes the judge was given.
+                from socr.core.manifest import rejection_of_reading
+
+                superseded = rejection_of_reading(
+                    state.pages.get(page_num),
+                    frozenset(
+                        d
+                        for d in (
+                            cred.candidate_sha256,
+                            cred.finalized_sha256,
+                            sha256_text(body),
+                        )
+                        if d
+                    ),
+                )
+                if superseded is not None:
+                    logger.debug(
+                        "#713: p%d ledger credential is superseded by a completed "
+                        "refusal of the same reading; revalidating",
                         page_num,
                     )
                     return None

@@ -229,6 +229,16 @@ JUDGE_OUTCOME_EXCEPTION = "page_judge_exception"
 #: Without this a page whose judge timed out on one rung and then REFUSED the
 #: same bytes on the next still shipped under the timeout exception.
 JUDGE_OUTCOME_COMPLETED = "page_judge_completed"
+#: #713 round 3 (Astra P2): the page judge never got to answer because the
+#: deterministic table VERIFIER raised, so ``_UnverifiedTableRejection`` returned
+#: a fail-closed negative decision INSTEAD of delegating to the inner judge (see
+#: ``REJECTION_VERIFIER_ERROR`` above). A decision object came back, so the
+#: boundary would otherwise stamp ``JUDGE_OUTCOME_COMPLETED`` and every gate that
+#: reads "a completed refusal of these bytes" would treat an infrastructure
+#: failure as a verdict -- retiring a credential the judge never contradicted.
+#: This is a MISSING verdict, in the same family as the two outcomes above, and
+#: it never supersedes anything.
+JUDGE_OUTCOME_VERIFIER_ERROR = "page_judge_verifier_error"
 
 
 @dataclass
@@ -376,8 +386,7 @@ class PageOutput:
     judge_outcome: str = ""
     #: #713: the persisted table-ladder acceptance credential for THIS
     #: candidate, or ``None``. Written only by
-    #: ``orchestrator._run_table_judge_gate`` (through
-    #: ``core.page_credential.build_credential``) when the ladder accepted
+    #: ``orchestrator._mint_table_acceptance_credential`` when the ladder accepted
     #: EVERY table this candidate emits and the page judge timed out on it.
     #: Shape: see ``core.page_credential.TableAcceptanceCredential``. It is the
     #: ONLY thing that can admit a timed-out candidate at selection, so a table
