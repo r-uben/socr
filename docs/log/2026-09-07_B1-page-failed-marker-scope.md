@@ -345,3 +345,39 @@ printed numeral, which a detected table of purely textual cells also satisfies,
 and its bbox is then the only evidence that those names are a table. Applied
 after the gate it can only shrink a witness, never admit one — pinned as a
 difference in `test_the_bbox_filter_still_excludes_a_wordless_tables_vocabulary`.
+
+### Round 10 — the guard is deleted, not narrowed again
+
+Astra's re-review at `8221d2d` reproduced the last shape the whole-page gate
+still admits: a text-only table. Institution names against `Member` statuses
+print no numeral, so the shipping partition withholds nothing, and on a scan
+with no detected geometry there is no bbox either — the table's own vocabulary
+became a full witness and `ratified quarterly dividends.` shipped beside the
+marker through real selection. A numeral-free layer establishes the absence of
+recognised numerals, not the absence of a table, and this branch is entered
+BECAUSE something flagged one.
+
+So `_prose_corroboration_ok`, `PROSE_CORROBORATION_MIN`, `_attempt_prose_text`
+and the witness helpers are gone, and the `scanned_table_evidence_failed`
+branch no longer consults the attempt at all: `d3_text` starts at `None`, and
+what ships is #649's native recovery or the bare marker. That was the guard's
+only caller, so nothing else changes; `_page_prose_partition` stays as the one
+named place a page's partition is taken, now with a single reader. #650's
+floor-calibration measurement is retired with the constant it thresholded.
+
+Seven rules were tried and each was reproduced as a fabrication path: page-wide
+median advance, anchors' mean pitch, separation alone, a one-sided anchor, a
+two-sided anchor, absorbed-band vouching, and finally "the page prints no
+numeral". They fail for one reason. A page in this branch offers no evidence
+that distinguishes a withheld table's vocabulary from its prose's, and every
+rule was a proxy for evidence that is not there.
+
+**The cost, measured.** A scan whose native layer is ALL prose now ships the
+bare marker where round 9 shipped the model's prose: #649's recovery declines a
+page with no withheld band, so nothing takes its place. Pinned in
+`test_a_pure_prose_scan_ships_no_model_prose_either`. It is a retention
+regression on that one layout, not a silent one — the marker says the page
+failed — and closing it means teaching #649's recovery to publish an all-prose
+scan's own layer, which belongs to that ticket. Model-prose salvage in general
+stays where round 8 left it: separate work needing independent source evidence
+for the region and its transcription, measured by #707.

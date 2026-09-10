@@ -1,8 +1,8 @@
-"""#652 rounds 5-9: where a block's role is unproven, the witness abstains.
+"""#652 rounds 5-10: where a block's role is unproven, nothing vouches.
 
-Two reproduced findings (Astra review at ff5ed74), both in
-``tables/row_corroboration.corroboration_witness_words`` and both the same
-mistake -- converting an UNPROVEN gap into positive prose attribution:
+Two reproduced findings (Astra review at ff5ed74), both in the witness the
+corroboration guard scored a model attempt against, and both the same mistake
+-- converting an UNPROVEN gap into positive prose attribution:
 
 * the average step between neighbouring anchors is not an upper bound on the
   individual steps inside one table, so an unevenly spaced table's own row
@@ -34,12 +34,21 @@ scan with no printed numeral anywhere; it is pinned in
 ``tests/pipeline/test_page_failed_marker_scope.py`` alongside the floor it
 exercises.
 
-Round 9 moves the same rule from the helper into the caller, where it was
-being asked of the wrong population: ``_prose_corroboration_ok`` filtered the
-detected table bboxes away and then partitioned the remainder, so an
-incomplete bbox could delete a page's numerals before the check that asks
-whether the page has any. A filtered region with no numerals is not a page
-with no numerals.
+Round 9 moved the same rule from the helper into the caller, where it was
+being asked of the wrong population: the guard filtered the detected table
+bboxes away and then partitioned the remainder, so an incomplete bbox could
+delete a page's numerals before the check that asks whether the page has any.
+A filtered region with no numerals is not a page with no numerals.
+
+Round 10 ends the guard. A page with no numerals at all is not a page with no
+table either -- a text-only Bank/Status table has neither numerals nor, on a
+scan with no detected geometry, a bbox -- and this branch is entered BECAUSE
+something flagged a table. No page-local evidence separates a withheld table's
+vocabulary from its prose's, so the vocabulary check is deleted rather than
+narrowed a seventh time and NO model attempt authors a body here. Every check
+below therefore reads the SHIPPING partition (``partition_prose_bands``, what
+#649 publishes from) or the shipped bytes, because the witness these tests
+once observed no longer exists.
 
 The reviewer's reproducers are kept verbatim in behaviour; the controls around
 them pin what must NOT change. Abstaining costs no page text: since #649 the
@@ -53,9 +62,9 @@ from pathlib import Path
 
 import pytest
 
-from socr.core.manifest import _prose_corroboration_ok
+from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
 from socr.tables.reconcile import table_syntax_line_indices
-from socr.tables.row_corroboration import corroboration_witness_words
+from socr.tables.row_corroboration import partition_prose_bands
 
 from test_gh649_scanned_prose_recovery import MARKER, _page, _ship
 
@@ -69,6 +78,27 @@ def words(line: str, y: float, x: float = 0, height: float = 8) -> list[tuple]:
         (x + i * 14, y, x + i * 14 + 12, y + height, tok, 0, 0, 0)
         for i, tok in enumerate(line.split())
     ]
+
+
+def _withheld_words(native_words: list) -> list:
+    """Every word the SHIPPING partition withholds from a page.
+
+    Round 10 removed the witness helper these tests used to call, so what they
+    assert about a layout is now taken from the one partition left --
+    ``partition_prose_bands``, the same call ``manifest.native_prose_floor_text``
+    ships from. The layouts and the findings are unchanged; only the observer
+    is, and it is now the observer production actually uses.
+    """
+    return [
+        word
+        for is_prose, band in partition_prose_bands(native_words)
+        if not is_prose
+        for word in band
+    ]
+
+
+def _withheld_band_count(native_words: list) -> int:
+    return sum(1 for is_prose, _band in partition_prose_bands(native_words) if not is_prose)
 
 
 def _attempt(ps) -> str:
@@ -146,9 +176,7 @@ def test_far_anchor_pair_paragraph_is_refused_but_still_ships() -> None:
     native += words("Reference total", 140) + words("300.0", 152)
     ps.native_words = native
 
-    witness, unresolved = corroboration_witness_words(native)
-    assert witness == []
-    assert len(unresolved) == len(native)
+    assert _withheld_band_count(native) == 2
 
     shipped = _attempt(ps)
     assert FABRICATION not in shipped
@@ -257,14 +285,19 @@ def test_date_table_between_numeric_anchors_is_not_prose() -> None:
     ]:
         ps.native_words += words(text, y, height=4)
 
-    witness, unresolved = corroboration_witness_words(ps.native_words)
-    assert not {w[4] for w in witness}
-    # The hole this closes: every band is in exactly one list, so the dates are
-    # subtracted from the witness rather than silently belonging to neither.
+    # The shipping partition withholds the dates as well as the two amounts,
+    # which is the fact rounds 5-6 got wrong at the witness: a page whose
+    # numeric bands the row MATCHER does not recognise is not a page without
+    # them. Nothing on it is evidence about its prose, and since round 10
+    # nothing on any page in this branch is.
+    withheld_text = " ".join(w[4] for w in _withheld_words(ps.native_words))
     for date in ("12/04/89", "12/05/90"):
-        assert date in {w[4] for w in unresolved}, date
+        assert date in withheld_text, date
 
-    assert FABRICATION not in _attempt(ps)
+    shipped = _attempt(ps)
+    assert FABRICATION not in shipped
+    for date in ("12/04/89", "12/05/90"):
+        assert date not in shipped, date
 
 
 def test_subtracted_shared_words_still_ship_from_native() -> None:
@@ -284,8 +317,9 @@ def test_subtracted_shared_words_still_ship_from_native() -> None:
     genuine = "Austrian National Bank\nGerman Federal Bank"
     ps.best_output.text = genuine + "\n\n| Bank | Amount |\n| --- | --- |\n| Bank | 250.0 |\n"
 
-    assert not _prose_corroboration_ok(ps, ps.best_output.text)
-    assert genuine in _ship(ps).text
+    shipped = _ship(ps).text
+    assert genuine in shipped
+    assert shipped.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
 
 
 FED_1989_P3 = Path.home() / "Data/socr/fed-sample-2026-09-05/in/fed-1989-11-14-minutes.pdf"
@@ -307,8 +341,8 @@ def test_real_fixture_abstains_in_full_without_losing_its_prose() -> None:
     page's 295 words in the witness and the genuine nougat attempt
     corroborated. Round 7's both-sides rule emptied the witness because the
     directive runs to the page bottom; round 8 empties it because the page
-    prints numeric bands at all. The witness is empty, every word is
-    unresolved, and corroboration is refused.
+    prints numeric bands at all; round 10 refuses every attempt in this branch
+    outright, so the page's shipped body no longer depends on the model at all.
 
     That refusal costs this page NOTHING, which is the point of the re-pin and
     was measured, not assumed: the page had already failed its table check, so
@@ -322,14 +356,12 @@ def test_real_fixture_abstains_in_full_without_losing_its_prose() -> None:
         native_words = doc[2].get_text("words")
     nougat_text = json.loads(FED_1989_P3_NOUGAT.read_text())["text"]
 
-    witness, unresolved = corroboration_witness_words(native_words)
-    assert witness == []
-    assert len(unresolved) == len(native_words)
+    # The whole page is withheld by the shipping partition: 295 words, not one
+    # band of which the floor is willing to publish as verified.
+    assert len(_withheld_words(native_words)) > 0
 
     ps = _page()
     ps.native_words = native_words
-    assert _prose_corroboration_ok(ps, nougat_text) is False
-
     ps.best_output.text = nougat_text
     shipped = _ship(ps).text
     assert "domestic policy directive:" in shipped
@@ -363,40 +395,72 @@ def test_a_table_bbox_cannot_hide_the_pages_numerals_from_the_gate() -> None:
         ps.native_words += words(text, y, height=4)
 
     without_bbox = _attempt(ps)
-    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
     assert FABRICATION not in without_bbox
 
     ps.detected_table_count = 1
     ps.detected_table_bboxes = [(-5, 25, 300, 80)]
     with_bbox = _attempt(ps)
-    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
     assert FABRICATION not in with_bbox
     assert with_bbox == without_bbox
 
 
-def test_the_bbox_filter_still_excludes_a_wordless_tables_vocabulary() -> None:
-    """Why the bbox exclusion is kept AFTER the gate rather than deleted as
-    dead code. A page clears the gate when no band bears a printed numeral --
-    which a detected table of purely TEXTUAL cells also satisfies. Its bbox is
-    then the only evidence on the page that those bank names are a table, and
-    without the filter they are a full witness for a sentence invented from
-    them.
+def test_a_text_only_table_cannot_vouch_for_fabricated_prose() -> None:
+    """Round 10 (Astra, re-review at 8221d2d), the finding that ended the
+    guard. Round 9 admitted a page whose partition withheld nothing, and a
+    table of institution names and Member statuses withholds nothing: no
+    printed numeral, and on a scan with no detected geometry, no bbox either.
+    Its own vocabulary therefore became a full witness and the sentence
+    invented from it shipped beside the marker.
 
-    The difference under test is the bbox alone."""
+    A numeral-free layer establishes the absence of recognised numerals, not
+    the absence of a table -- and this page is in the fail-closed branch
+    BECAUSE something flagged a table on it. Nothing page-local separates the
+    two readings, so no attempt authors a body here any more."""
     ps = _page()
     ps.native_words = []
     for text, y in [
-        ("Austrian National Bank", 0),
-        ("German Federal Bank Swiss National Bank", 6),
+        ("Austrian National Bank Member", 0),
+        ("German Federal Bank Swiss National Bank Member", 6),
+        ("National Bank of Belgium Member", 12),
+        ("Netherlands Bank Member", 18),
+        ("Bank of England Member", 24),
     ]:
         ps.native_words += words(text, y, height=4)
-    ps.best_output.text = LABEL + " " + FABRICATION
+    assert ps.detected_table_bboxes == []
+    assert _withheld_band_count(ps.native_words) == 0
 
-    assert _prose_corroboration_ok(ps, ps.best_output.text) is True
+    ps.best_output.text = (
+        LABEL
+        + " "
+        + FABRICATION
+        + "\n\n| Bank | Status |\n| --- | --- |\n"
+        + "| Austrian National Bank | Member |\n"
+    )
+    shipped = _ship(ps).text
 
-    ps.detected_table_count = 1
-    ps.detected_table_bboxes = [(-5, -5, 600, 20)]
-    assert _prose_corroboration_ok(ps, ps.best_output.text) is False
+    assert FABRICATION not in shipped
+    assert "| Bank | Status |" not in shipped
+
+
+def test_a_refused_page_keeps_its_own_words_on_resume() -> None:
+    """Astra's second round-10 probe. A page whose body was already finalized
+    ships those bytes again on resume, even though ``native_words`` is a
+    live-run cache the sidecar never carried -- so the partition is empty and
+    the branch can prove nothing about the page a second time. Absence of the
+    cache must not become either a fresh refusal that drops the text or a pass
+    that lets a model attempt in."""
+    from socr.core.manifest import _page_prose_partition
+    from socr.core.result import PageOutput
+
+    ps = _page()
+    saved = PageOutput.from_dict(_ship(ps).to_dict())
+
+    ps.native_words = []
+    ps.best_output = saved
+    ps.attempts = [saved]
+
+    assert _page_prose_partition(ps) == []
+    assert _ship(ps).text == saved.text
 
 
 def test_a_page_whose_only_numeral_is_its_page_number_keeps_its_prose() -> None:
@@ -405,8 +469,6 @@ def test_a_page_whose_only_numeral_is_its_page_number_keeps_its_prose() -> None:
     the model attempt is refused -- and #649 still ships both genuine
     paragraphs under the unverified-scan banner, with the attempt's invented
     table value withheld. Refusal collapses no page to a bare marker."""
-    from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
-
     lines = [
         "The committee discussed monetary policy and reviewed economic conditions.",
         "Members agreed to continue monitoring developments across financial markets.",
@@ -416,7 +478,6 @@ def test_a_page_whose_only_numeral_is_its_page_number_keeps_its_prose() -> None:
         "\n".join(lines) + "\n\n| Item | Value |\n| --- | --- |\n| Invented | 999 |\n"
     )
 
-    assert not _prose_corroboration_ok(ps, ps.best_output.text)
     shipped = _ship(ps)
     assert shipped.text.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
     for line in lines:

@@ -1736,29 +1736,6 @@ def table_floor_text_for_source(
     return spliced if spliced else whole_page
 
 
-#: Minimum share of an OCR attempt's outside-table vocabulary (tokens of 4+
-#: letters, lowercased) that must also appear among the page's native words
-#: for B1's ``UNVERIFIABLE_TABLE_SCANNED`` prose-corroboration guard
-#: (``_prose_corroboration_ok``) to allow splicing that attempt's prose
-#: around the withheld table region, rather than fail closed to the bare
-#: marker. Unlike ``ROW_CORROBORATION_MIN`` / ``EXTRA_NUMBERS_MAX_SHARE``
-#: (row_corroboration.py), this is NOT set strictly between two measured
-#: anchors: the only two real fixtures checked (2026-09-07, see
-#: docs/log/2026-09-07_B1-page-failed-marker-scope.md) both measured 1.0 --
-#: Fed 1989-11-14 p3's nougat attempt (failure_mode=hallucination) read the
-#: page's real vocabulary but reordered it into the wrong table rows/columns,
-#: which token-overlap cannot see; ECB survey-2013 p1's genuine gemini
-#: attempt also measured 1.0. No fabricated-vocabulary fixture exists in the
-#: census set to anchor the low side. 0.5 is a defensive floor, not a
-#: calibrated threshold: an attempt whose outside-table vocabulary is
-#: majority-corroborated by the native text layer is accepted; one that
-#: shares less than half is refused. Flagged as a follow-up to calibrate
-#: against a genuine fabrication fixture when one turns up.
-PROSE_CORROBORATION_MIN: float = 0.5
-
-_PROSE_TOKEN_RE = re.compile(r"[a-z]{4,}")
-
-
 def native_region_text(words: list) -> str:
     """The printed text of *words*, one line per native baseline band.
 
@@ -1777,47 +1754,20 @@ def native_region_text(words: list) -> str:
     return "\n".join(line for line in lines if line.strip())
 
 
-def _attempt_prose_text(attempt_text: str) -> str:
-    """*attempt_text* with its markdown table blocks removed.
-
-    #652 P2b's necessary other half. ``PROSE_CORROBORATION_MIN``'s own comment
-    has always said "outside-table vocabulary", but the code tokenised the
-    whole attempt; that was harmless while the witness was also the whole page,
-    because both sides carried the table's words. Scoping the WITNESS to the
-    prose region and leaving the ATTEMPT whole would break the ratio in the
-    direction that loses content: a genuine attempt on a table-heavy page
-    would be scored on table tokens the witness can no longer contain, and the
-    page would fail closed for reproducing its table correctly. Both sides are
-    therefore prose. Blocks are located with ``find_table_blocks`` -- the same
-    parser ``table_floor_text_for_source`` counts blocks with, so "what is a
-    table block" has one definition here. #650 still owns the separate
-    question of what the 0.5 floor should BE; this only makes the two sides of
-    the ratio comparable.
-    """
-    text = attempt_text or ""
-    from socr.tables.reconcile import find_table_blocks
-
-    blocks = find_table_blocks(text)
-    if not blocks:
-        return text
-    lines = text.splitlines()
-    dropped = {idx for block in blocks for idx in range(block.start, block.end + 1)}
-    return "\n".join(line for idx, line in enumerate(lines) if idx not in dropped)
-
-
 def _page_prose_partition(p) -> list:
-    """The one authoritative prose/table partition of a page's native words.
+    """The prose/table partition of a page's native words, whole page.
 
-    #652 round 9. Two decisions read this page's layout: whether a model's
-    prose may be corroborated (``_prose_corroboration_ok``) and what #649
-    ships when it may not (``native_prose_floor_text``). They ran on different
-    populations -- the corroboration side partitioned only the words OUTSIDE
-    the detected table bboxes, the shipping side partitioned all of them -- so
-    an incomplete bbox could hide a page's numerals from the refusal gate
-    while the shipping side still withheld those very bands. Both now come
-    through here, on every native word the page has, and
-    :func:`partition_prose_bands` is deterministic, so the two cannot disagree
-    about what is on the page.
+    #652 round 9 introduced this because TWO decisions read a page's layout --
+    whether a model's prose could be corroborated, and what #649 ships when it
+    cannot -- on DIFFERENT populations: the corroboration side partitioned only
+    the words outside the detected table bboxes, so an incomplete bbox hid a
+    page's numerals from the very gate that asked whether it printed any.
+
+    Round 10 removed the corroboration reader outright (no model prose ships
+    from the scanned-table-failure branch at all), so one caller is left and
+    the two cannot diverge by construction. The function stays as the single
+    named place a page's partition is taken, on every native word it has --
+    never a filtered subset, which is the mistake worth keeping named.
     """
     from socr.tables.row_corroboration import partition_prose_bands
 
@@ -1825,136 +1775,6 @@ def _page_prose_partition(p) -> list:
     if not words:
         return []
     return partition_prose_bands(words)
-
-
-def _prose_corroboration_ok(p, attempt_text: str) -> bool:
-    """B1 / #591: geometric-only corroboration for ``UNVERIFIABLE_TABLE_SCANNED``.
-
-    ``UNVERIFIABLE_TABLE_SCANNED`` splices ``best_output.text`` -- an OCR
-    attempt the page's own audit already flagged (``failure_mode=
-    hallucination``) -- around the withheld table region with no coverage
-    guard at all. Unlike ``table_floor_text_for_source``, this branch has no
-    reconstructed native table to reconcile against (a scanned page reaches
-    it precisely because native table detection found nothing), so the only
-    available check is mechanical: does the attempt's own vocabulary overlap
-    words the page's native text layer actually contains?
-
-    Deliberately does NOT parse or trust the attempt's structure (row order,
-    column binding) -- it can only tell "these are real words on this page",
-    not "these words are attributed to the right place". That is why the
-    ``UNVERIFIABLE_TABLE_SCANNED`` marker still fires whenever
-    ``splice_all_table_regions`` can't find a markdown table block to work
-    around: this guard governs the PROSE around a spliced table, not the
-    table region itself.
-
-    No witness (``p.native_words`` empty, e.g. the page has no real text
-    layer, or the caching gate in ``orchestrator.py`` never ran for it) fails
-    closed -- absence of a check is not corroboration.
-
-    #652 P1 -- the witness must be a layer we TRUST. The orchestrator caches
-    ``native_words`` for every ``not is_born_digital`` page, and a page is
-    classified scanned precisely when its embedded layer is too corrupt to
-    route on (Fed 1989-11-14 p3: 6.6% encoding corruption). Corroborating an
-    attempt against that same broken layer is circular -- an attempt that
-    echoes the corruption would clear the guard the corruption caused. The
-    PROSE REGION's own text must pass ``born_digital.text_layer_trusted``, or
-    there is no witness and this fails closed. Measured on that fixture: the
-    whole page reads 6.6% (untrusted), its withheld numeric bands 33.3%, and
-    its prose region 0.5% -- the corruption is inside the table, and scoping
-    the trust question to the region actually used is what lets the guard
-    both refuse the corrupt half and keep the clean one.
-
-    #652 P2b -- the witness must be PROSE. Production
-    ``UNVERIFIABLE_TABLE_SCANNED`` pages routinely carry
-    ``detected_table_count == 0`` and no bbox at all (Fed p3 again), so the
-    bbox exclusion below removes nothing and every native token counted --
-    including the withheld table's own headers, row labels and values. A
-    faithful-table + fabricated-prose attempt then clears
-    ``PROSE_CORROBORATION_MIN`` on table vocabulary alone, corroborating the
-    one part of itself that was never in doubt. The witness is delimited by
-    native baseline band instead (owner ruling, 2026-09-10), so the withheld
-    table's vocabulary cannot vouch for fabricated prose. This composes WITH
-    the bbox exclusion; it does not replace it.
-
-    Round 2 (Astra, 2026-09-10): the witness is NOT the same partition #649
-    ships. Shipping an unattributed zero-numeral band, flagged, does not make
-    it trustworthy EVIDENCE about a model's prose -- a table whose labels sat
-    on their own baselines put its whole vocabulary back into the witness and
-    corroborated an invented sentence built from its own bank names. The two
-    permissions are kept apart: ``corroboration_witness_words`` abstains
-    wherever prose/table attribution is unresolved, and every token the
-    withheld region itself contains is subtracted on top of that.
-
-    Round 9 (Astra, 2026-09-10): that abstention is a claim about a PAGE, and
-    this function was evaluating it on a REGION -- the words left after the
-    detected table bboxes were filtered out. An incomplete bbox therefore
-    decided the question it was supposed to be subject to. The order is now
-    gate first, on the whole page, filter second.
-    """
-    words = getattr(p, "native_words", None) or []
-    if not words:
-        return False
-
-    from socr.core.born_digital import text_layer_trusted
-    from socr.tables.row_corroboration import witness_from_prose_partition
-
-    # Round 9 (Astra, 2026-09-10): the refusal gate reads the WHOLE-PAGE
-    # partition, before any bbox filtering. It used to read the partition of
-    # what survived the bbox filter, and on a page whose detected bbox covered
-    # the numeric bands but not the labels that deleted every digit before the
-    # check: the labels became a full witness and the attempt's fabricated
-    # sentence shipped. The gate's claim is about the page ("no withheld
-    # numeric band anywhere"), so the page is what it must be evaluated on --
-    # a filtered region with no numerals is not a page with no numerals. The
-    # partition is the same object ``native_prose_floor_text`` ships from, so
-    # the two decisions cannot see different populations.
-    witness_words, unresolved_words = witness_from_prose_partition(_page_prose_partition(p))
-    if not witness_words:
-        return False
-
-    # The bbox exclusion still runs, but only on a page the gate has already
-    # cleared, and it is NOT dead there: clearing the gate means no band bears
-    # a printed numeral, which a detected table of purely TEXTUAL cells also
-    # satisfies. Such a table's vocabulary is exactly what must not vouch for
-    # a model's prose, and its bbox is the only evidence available that it is
-    # a table at all. Applied after the gate the filter can only shrink a
-    # witness, never admit one.
-    bboxes = getattr(p, "detected_table_bboxes", None) or []
-    outside_table: list = []
-    for w in witness_words:
-        x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
-            continue
-        outside_table.append(w)
-    if not outside_table:
-        return False
-    witness_words = outside_table
-    if not text_layer_trusted(native_region_text(witness_words)):
-        return False
-
-    # Defence in depth behind ``corroboration_witness_words``'s own disclosed
-    # residual (a header block printed clear of its table): a token the
-    # withheld region ITSELF contains cannot vouch for prose no matter where
-    # else on the page it also appears. Subtracting is safe in the one
-    # direction that matters -- it can only shrink the witness, never admit
-    # something new -- and a genuine attempt does not need a word the table
-    # already owns in order to corroborate its prose.
-    unresolved_tokens: set[str] = set()
-    for w in unresolved_words:
-        unresolved_tokens.update(_PROSE_TOKEN_RE.findall(str(w[4]).lower()))
-
-    native_tokens: set[str] = set()
-    for w in witness_words:
-        native_tokens.update(_PROSE_TOKEN_RE.findall(str(w[4]).lower()))
-    native_tokens -= unresolved_tokens
-    if not native_tokens:
-        return False
-    attempt_tokens = set(_PROSE_TOKEN_RE.findall(_attempt_prose_text(attempt_text).lower()))
-    if not attempt_tokens:
-        return False
-    overlap = len(attempt_tokens & native_tokens) / len(attempt_tokens)
-    return overlap >= PROSE_CORROBORATION_MIN
 
 
 #: Banner stamped above prose recovered by ``native_prose_floor_text``. The
@@ -2470,8 +2290,6 @@ def _select_page_output_tagged(
         d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
         png_ref = getattr(p, "d3_floor_png_ref", "")
 
-        best_output_text = (p.best_output.text or "") if p.best_output else ""
-
         # B1 (#591): GH-520's four-condition coverage guard
         # (table_floor_text_for_source) cannot apply to this branch -- its
         # first condition requires detected_table_count > 0, but a page
@@ -2479,18 +2297,32 @@ def _select_page_output_tagged(
         # table DETECTION found nothing on it (measured: Fed 1989-11-14 p3,
         # detected_table_count=0, 0 detected bboxes) -- there is no detected
         # geometry to reconcile splice_all_table_regions's blocks against.
-        # The mechanical check available here instead is
-        # ``_prose_corroboration_ok``: does the attempt's own vocabulary
-        # overlap words the page's native text layer actually contains?
-        # Unguarded, this branch spliced ``best_output.text`` -- an attempt
-        # the page's own audit already flagged HALLUCINATION -- with nothing
-        # checking it against reality first.
-        if _prose_corroboration_ok(p, best_output_text):
-            d3_text = splice_all_table_regions(
-                best_output_text, marker_line=d3_marker, png_ref=png_ref
-            )
-        else:
-            d3_text = None
+        #
+        # #652 round 10 (Astra's ruling, 2026-09-10): NO attempt is spliced
+        # here at all. The mechanical check that used to stand in for the
+        # missing geometry -- does the attempt's vocabulary overlap the page's
+        # native words? -- was a corroboration guard, and #652 is the record of
+        # it failing that job in six different shapes. The last one closes the
+        # question rather than narrowing it again: a page in this branch is
+        # here BECAUSE something flagged a table on it, and a native layer with
+        # no printed numeral and no detected bbox does not establish that the
+        # table is absent -- a text-only Bank/Status table has neither, and its
+        # own institution names were vouching for an invented sentence beside
+        # the marker. Nothing available on this page distinguishes a table's
+        # vocabulary from its prose's, so the attempt is refused without
+        # consulting it: an OCR attempt whose audit already flagged
+        # HALLUCINATION ships no prose from this branch.
+        #
+        # This costs the page no TEXT. What the branch ships is #649's native
+        # recovery just below -- the page's own trusted text layer, flagged,
+        # with every withheld band replaced in place by the marker -- or the
+        # bare marker where even that cannot be proven. What is refused is the
+        # MODEL's wording, which is the only thing the corroboration check ever
+        # authorised. Model-prose salvage on such a page needs independent
+        # source evidence for the region AND its transcription (#707), not
+        # another vocabulary or geometry threshold.
+        d3_text = None
+        best_output_text = (p.best_output.text or "") if p.best_output else ""
 
         # #649: no attempt could be spliced -- on this page's own fixture
         # because the attempt emitted the table as column runs and authored no

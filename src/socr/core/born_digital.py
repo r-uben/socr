@@ -1219,13 +1219,14 @@ def count_digit_corruption(text: str) -> int:
 def text_layer_trusted(text: str) -> bool:
     """Whether an embedded PDF text layer is clean enough to be believed.
 
-    #652: ``manifest._prose_corroboration_ok`` corroborates an OCR attempt
-    against the page's own native words. A page classified SCANNED *because*
-    its text layer is corrupt (Fed 1989-11-14 p3: 6.6% encoding corruption,
-    above ``MAX_ENCODING_CORRUPTION``) would otherwise stand as the witness
-    for an attempt that may have been read off that same broken layer -- an
-    attempt echoing the corruption then corroborates itself, which is exactly
-    the fail-closed intent the guard exists to serve.
+    #652: a page classified SCANNED *because* its text layer is corrupt (Fed
+    1989-11-14 p3: 6.6% encoding corruption, above ``MAX_ENCODING_CORRUPTION``)
+    cannot have that same layer stand as a witness for what it says. The
+    original caller was the prose-corroboration guard, which #652 round 10
+    deleted; the live caller is ``manifest.native_prose_floor_text``, and the
+    question there is the same one asked of the same layer -- #649 ships a
+    scan's own prose bands as the page's body, so shipping a corrupt layer
+    would be the silent loss #652 exists to stop, wearing the opposite mask.
 
     The two disqualifiers are the SHIPPED detector's own, not a third
     definition of "corrupt": any eaten-leading-digit occurrence (#136), and

@@ -33,8 +33,7 @@ import pytest
 
 from socr.core.config import PipelineConfig
 from socr.core.manifest import (
-    PROSE_CORROBORATION_MIN,
-    _prose_corroboration_ok,
+    SCANNED_PROSE_RECOVERED_FLAG,
     _select_page_output_tagged,
     _table_bbox_sane,
     table_floor_text_for_source,
@@ -110,59 +109,98 @@ def _scanned_page(words: list[tuple]) -> PageState:
     return ps
 
 
+MARKER = "[page 1 failed: unverifiable table — see image]"
+
+
+def _shipped(ps: PageState, attempt_text: str) -> str:
+    """What the page ACTUALLY ships with *attempt_text* as its winning attempt.
+
+    #652 round 10 re-scoped this whole suite. Every check below used to call
+    ``manifest._prose_corroboration_ok``, the vocabulary-overlap guard on the
+    scanned-table-failure branch; the guard is gone, because nine rounds of
+    review showed no page-local evidence separates a withheld table's
+    vocabulary from its prose's. The findings each test pinned are unchanged
+    facts about layout, so they are re-asserted where they always mattered --
+    in the bytes the branch emits through real selection.
+    """
+    ps.best_output = PageOutput(
+        page_num=1,
+        text=attempt_text,
+        status=PageStatus.ERROR,
+        engine="nougat",
+        audit_passed=False,
+        failure_mode=FailureMode.HALLUCINATION,
+    )
+    ps.attempts = [ps.best_output]
+    state = DocumentState.__new__(DocumentState)
+    state.pages = {1: ps}
+    output, _provenance = _select_page_output_tagged(state, 1)
+    return output.text
+
+
+def _is_native_body(text: str) -> bool:
+    """Whether a shipped body came from the PAGE rather than from the model.
+
+    Only two bodies can leave this branch now: #649's native recovery, which
+    always opens with its banner, or the bare marker where even that cannot be
+    proven. A spliced attempt would open with the model's own first line, so
+    this predicate is what "the attempt was refused" means in bytes.
+    """
+    return text.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1)) or text == MARKER
+
+
 class TestP1TheWitnessMustBeATrustedLayer:
-    def test_a_corrupt_layer_refuses_the_attempt_that_echoes_it(self) -> None:
-        """The falsification. Both pages carry the SAME vocabulary and the
-        attempt echoes it word for word, so token overlap is 1.0 on both; the
-        only difference is whether the layer's own text is corrupt. Before the
-        fix both returned True -- the corrupt layer vouched for an attempt that
-        may have been read straight off it."""
-        corrupt = _scanned_page(_words(_CORRUPT_PROSE))
-        clean = _scanned_page(_words(_CLEAN_PROSE))
+    """RE-SCOPED in round 10 to the caller that still reads the layer.
 
-        corrupt_verdict = _prose_corroboration_ok(corrupt, _attempt_echoing(_CORRUPT_PROSE))
-        clean_verdict = _prose_corroboration_ok(clean, _attempt_echoing(_CLEAN_PROSE))
+    The corrupt-layer check was written for the corroboration guard: a page is
+    classified SCANNED precisely because its embedded layer is too corrupt to
+    route on, so scoring an OCR attempt against that same layer was circular.
+    The guard is gone; ``text_layer_trusted`` is not, because #649 SHIPS that
+    layer as the page's body. The circularity became a retention question with
+    the same answer -- a layer we do not trust is not published as the page's
+    own text either -- and that caller is reachable, which is why these two
+    checks stay.
 
-        assert clean_verdict is True, (
-            "control: a clean layer must still corroborate, or the pin below "
-            "passes for the wrong reason (everything refused)"
+    Both fixtures print one numeric row beneath the paragraph. Without it the
+    page has no withheld band, #649's recovery declines, and both bodies
+    collapse to the bare marker for a reason that has nothing to do with
+    corruption -- the round-10 residual recorded in the branch log.
+    """
+
+    _ROW = ["Nonfarm payroll index 118.4"]
+
+    def test_a_corrupt_layer_is_not_published_as_the_pages_own_text(self) -> None:
+        """The falsification, re-pinned in bytes. Both pages carry the SAME
+        sentences and the attempt echoes them word for word; the only
+        difference is whether the layer's own text is corrupt. The clean page
+        ships its paragraphs from its own layer, flagged; the corrupt page
+        ships the marker alone rather than publish the corruption that made it
+        a scan in the first place."""
+        corrupt = _scanned_page(_words(_CORRUPT_PROSE + self._ROW))
+        clean = _scanned_page(_words(_CLEAN_PROSE + self._ROW))
+
+        corrupt_body = _shipped(corrupt, _attempt_echoing(_CORRUPT_PROSE))
+        clean_body = _shipped(clean, _attempt_echoing(_CLEAN_PROSE))
+
+        assert "employment" in clean_body, (
+            "control: a clean layer must still ship its prose, or the pin "
+            "below passes for the wrong reason (everything refused)"
         )
-        assert corrupt_verdict is False
-        assert corrupt_verdict != clean_verdict
-
-    def test_the_refusal_reaches_the_page_that_ships(self) -> None:
-        """Wired through the production call site, not only the predicate: the
-        same two pages selected end to end must ship different bodies."""
-        from socr.core.manifest import _select_page_output_tagged
-
-        def _ship(lines: list[str]) -> str:
-            ps = _scanned_page(_words(lines))
-            attempt = PageOutput(
-                page_num=1,
-                # A parseable grid, so ``splice_all_table_regions`` has
-                # something to splice and the guard is the only thing that can
-                # refuse: without it this branch ships the prose unchecked.
-                text=_attempt_echoing(lines) + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n",
-                status=PageStatus.ERROR,
-                engine="nougat",
-                audit_passed=False,
-            )
-            ps.attempts = [attempt]
-            ps.best_output = attempt
-            state = DocumentState.__new__(DocumentState)
-            state.pages = {1: ps}
-            output, _provenance = _select_page_output_tagged(state, 1)
-            return output.text
-
-        corrupt_body = _ship(_CORRUPT_PROSE)
-        clean_body = _ship(_CLEAN_PROSE)
-
-        assert "payroll" in clean_body, "control: the clean page still ships its prose"
-        assert "payroll" not in corrupt_body, (
-            "the corrupt page must fail closed to the marker, not splice prose "
-            "corroborated against the corruption that made it a scan"
-        )
+        assert corrupt_body == MARKER
         assert corrupt_body != clean_body
+
+    def test_neither_layer_lets_the_model_author_the_body(self) -> None:
+        """The other half, which round 10 made unconditional: whatever the
+        layer's state, what ships is the page's own text or nothing. The
+        attempt here carries a parseable grid, so before #652 this branch
+        spliced it unchecked."""
+        for lines in (_CORRUPT_PROSE, _CLEAN_PROSE):
+            ps = _scanned_page(_words(lines + self._ROW))
+            body = _shipped(
+                ps, _attempt_echoing(lines) + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+            )
+            assert _is_native_body(body)
+            assert "| A | B |" not in body
 
 
 class TestP2bTheWitnessMustBeProse:
@@ -189,88 +227,75 @@ class TestP2bTheWitnessMustBeProse:
     def _page(self) -> PageState:
         return _scanned_page(_words(self._TABLE_LINES + [""] + self._PROSE_LINES))
 
+    _FABRICATED_ATTEMPT = (
+        "| Foreign Bank | Amount |\n| --- | --- |\n"
+        + "".join(f"| {line} |\n" for line in _TABLE_LINES)
+        + "\nQuarterly dividends were ratified.\n"
+    )
+    _GENUINE_ATTEMPT = (
+        "| Foreign Bank | Amount |\n| --- | --- |\n"
+        + "".join(f"| {line} |\n" for line in _TABLE_LINES)
+        + "\n"
+        + "\n".join(_PROSE_LINES)
+        + "\n"
+    )
+
     def test_a_faithful_table_cannot_vouch_for_fabricated_prose(self) -> None:
-        # Every prose word is invented; every table word is copied exactly.
-        fabricated = (
-            "| Foreign Bank | Amount |\n| --- | --- |\n"
-            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
-            + "\nQuarterly dividends were ratified.\n"
-        )
-        assert _prose_corroboration_ok(self._page(), fabricated) is False
+        """Every prose word in the attempt is invented; every table word is
+        copied exactly. The invented sentence must not reach the page."""
+        body = _shipped(self._page(), self._FABRICATED_ATTEMPT)
 
-    def test_the_same_attempt_with_genuine_prose_is_refused_at_the_page_edge(self) -> None:
-        """RE-PINNED in round 7 (Astra, re-review at 0c67d2d).
+        assert "Quarterly dividends were ratified" not in body
+        assert _is_native_body(body)
 
-        This was the difference pin: identical table half, real prose, accepted.
-        Rounds 7 and 8 both refuse it, for widening reasons: round 7 because
-        the paragraph is the last thing on the page and so has a recognised
-        numeric row on one side only, round 8 because the page has a withheld
-        numeric band at all. Band-gap geometry says where blocks break, never
-        what a block IS, so model-prose salvage is disabled wherever a table's
-        extent is in question.
+    def test_the_same_attempt_with_genuine_prose_ships_from_the_page_instead(self) -> None:
+        """RE-PINNED three times, and the shape of the whole ticket.
 
-        The difference the class exists to pin moves to
-        ``test_genuine_prose_between_two_row_blocks_is_refused_too`` below --
-        which round 8 re-pinned in turn, because flanking a block with rows
-        does not make it prose either. Refusal costs this page no text: since
-        #649 the native layer's own prose ships flagged either way."""
-        genuine = (
-            "| Foreign Bank | Amount |\n| --- | --- |\n"
-            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
-            + "\n"
-            + "\n".join(self._PROSE_LINES)
-            + "\n"
-        )
-        assert _prose_corroboration_ok(self._page(), genuine) is False
+        This was the difference pin: identical table half, real prose,
+        accepted. Round 7 refused it (a recognised row on one side only),
+        round 8 refused it (the page has a withheld numeric band at all), and
+        round 10 stopped asking -- no attempt authors a body in this branch.
 
-    def test_genuine_prose_between_two_row_blocks_is_refused_too(self) -> None:
-        """RE-PINNED in round 8. Round 7 added this as the proof that the guard
-        was not vacuous: with a recognised row on both sides of the paragraph,
-        the genuine attempt cleared and the fabricated one did not.
+        What the re-pin has to show is that refusing the MODEL is not losing
+        the PAGE, and here it is not: the paragraph still ships, from the
+        page's own layer, under #649's banner, while the attempt's table --
+        the half nothing verified -- does not."""
+        body = _shipped(self._page(), self._GENUINE_ATTEMPT)
 
-        Astra's ruling rejects the inference. A flanked block is not thereby
-        prose -- a section heading or a wrapped header sits between two numeric
-        sections just as readily -- and the same layout was reproduced as a
-        fabrication path at eccd394. So salvage is disabled on any page with a
-        withheld numeric band, this page included, and what survives here is
-        the measurement: both attempts refused, no printed value shipped, the
-        page's own prose still shipped flagged by #649."""
+        assert _is_native_body(body)
+        assert "authorized and directed" in body
+        assert "| Foreign Bank |" not in body
+        for withheld in ("250.0", "6,000.0"):
+            assert withheld not in body, withheld
+
+    def test_flanking_a_paragraph_with_rows_changes_nothing(self) -> None:
+        """RE-PINNED in rounds 8 and 10. Round 7 added this layout as proof the
+        guard was not vacuous: with a recognised row on both sides of the
+        paragraph, the genuine attempt cleared and the fabricated one did not.
+
+        Astra's ruling rejected the inference -- a flanked block is not thereby
+        prose, and the same layout was reproduced as a fabrication path -- so
+        what survives is the measurement. Both attempts are refused, the page's
+        own paragraph still ships, no printed value does."""
         page = _scanned_page(
             _words(self._TABLE_LINES[:3] + [""] + self._PROSE_LINES + [""] + self._TABLE_LINES[3:])
         )
-        genuine = (
-            "| Foreign Bank | Amount |\n| --- | --- |\n"
-            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
-            + "\n"
-            + "\n".join(self._PROSE_LINES)
-            + "\n"
+
+        fabricated_body = _shipped(page, self._FABRICATED_ATTEMPT)
+        genuine_body = _shipped(
+            _scanned_page(
+                _words(
+                    self._TABLE_LINES[:3] + [""] + self._PROSE_LINES + [""] + self._TABLE_LINES[3:]
+                )
+            ),
+            self._GENUINE_ATTEMPT,
         )
-        fabricated = (
-            "| Foreign Bank | Amount |\n| --- | --- |\n"
-            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
-            + "\nQuarterly dividends were ratified.\n"
-        )
-        assert _prose_corroboration_ok(page, genuine) is False
-        assert _prose_corroboration_ok(page, fabricated) is False
 
-    def test_the_table_half_alone_would_have_cleared_the_floor(self) -> None:
-        """Proves the refusal above is not vacuous. Scored the way the code
-        scored before this ticket -- every native token as witness, the whole
-        attempt as subject -- the fabricated attempt clears
-        ``PROSE_CORROBORATION_MIN`` on table vocabulary alone."""
-        import re
-
-        fabricated_attempt = " ".join(self._TABLE_LINES) + " Quarterly dividends were ratified."
-        tokens = lambda text: set(re.findall(r"[a-z]{4,}", text.lower()))  # noqa: E731
-
-        attempt_tokens = tokens(fabricated_attempt)
-        whole_page_witness = tokens(" ".join(self._TABLE_LINES + self._PROSE_LINES))
-        old_overlap = len(attempt_tokens & whole_page_witness) / len(attempt_tokens)
-
-        assert old_overlap >= PROSE_CORROBORATION_MIN, (
-            "the fixture must be one the old whole-page witness accepted, or "
-            "the refusal above pins nothing"
-        )
+        assert "Quarterly dividends were ratified" not in fabricated_body
+        for body in (fabricated_body, genuine_body):
+            assert _is_native_body(body)
+            assert "authorized and directed" in body
+            assert "| Foreign Bank |" not in body
 
 
 class TestWrappedLabelsAreNotEvidence:
@@ -323,30 +348,15 @@ class TestWrappedLabelsAreNotEvidence:
         return _scanned_page(_words(table + [""] + prose))
 
     @pytest.mark.parametrize("split", [False, True])
-    def test_the_same_fabrication_is_refused_either_way(self, split: bool) -> None:
-        """The falsification. Before this, ``split=True`` returned True."""
-        assert _prose_corroboration_ok(self._page(split=split), self._ATTEMPT) is False
-
-    @pytest.mark.parametrize("split", [False, True])
     def test_the_invented_sentence_never_ships(self, split: bool) -> None:
-        """Through real selection, not the predicate alone: baseline layout
-        must not decide what a page ships."""
-        ps = self._page(split=split)
-        ps.best_output = PageOutput(
-            page_num=1,
-            text=self._ATTEMPT,
-            status=PageStatus.ERROR,
-            engine="nougat",
-            audit_passed=False,
-            failure_mode=FailureMode.HALLUCINATION,
-        )
-        ps.attempts = [ps.best_output]
+        """The falsification, through real selection. Before #652, splitting
+        each row label onto its own baseline was enough for this attempt's
+        invented sentence to ship: baseline layout must not decide what a page
+        publishes."""
+        body = _shipped(self._page(split=split), self._ATTEMPT)
 
-        state = DocumentState.__new__(DocumentState)
-        state.pages = {1: ps}
-        output, _provenance = _select_page_output_tagged(state, 1)
-
-        assert "ratified quarterly dividends" not in output.text
+        assert "ratified quarterly dividends" not in body
+        assert _is_native_body(body)
 
     # Astra's round-3 reproducer, verbatim in shape: ONE row whose label sits
     # two bands from its value, and a fabrication built from that label.
@@ -385,34 +395,23 @@ class TestWrappedLabelsAreNotEvidence:
         own advance. The witness abstains rather than admit the label on its
         distance alone -- and abstaining costs no page text, because #649 ships
         the native prose either way."""
-        page = self._captioned_page(rows=1)
-        assert _prose_corroboration_ok(page, self._CAPTIONED_ATTEMPT) is False
-        assert _prose_corroboration_ok(page, " ".join(self._CAPTIONED_PROSE)) is False
+        fabricated_body = _shipped(self._captioned_page(rows=1), self._CAPTIONED_ATTEMPT)
+        genuine_body = _shipped(self._captioned_page(rows=1), " ".join(self._CAPTIONED_PROSE))
+
+        assert "ratified quarterly dividends" not in fabricated_body
+        for body in (fabricated_body, genuine_body):
+            assert _is_native_body(body)
+            assert "250.0" not in body
 
     def test_a_label_two_bands_from_its_value_is_not_evidence_either(self) -> None:
         """#652 round 3 (Astra). The first fix walked one hop, so a single
         intervening zero-digit band -- a units caption, ordinary layout -- put
         the label straight back into the witness and this returned True: the
         same fabrication class, one line away."""
-        assert _prose_corroboration_ok(self._captioned_page(), self._CAPTIONED_ATTEMPT) is False
+        body = _shipped(self._captioned_page(), self._CAPTIONED_ATTEMPT)
 
-    def test_the_invented_sentence_never_ships_across_the_caption_either(self) -> None:
-        """Through real selection, the way the leak was reproduced."""
-        ps = self._captioned_page()
-        ps.best_output = PageOutput(
-            page_num=1,
-            text=self._CAPTIONED_ATTEMPT,
-            status=PageStatus.ERROR,
-            engine="nougat",
-            audit_passed=False,
-            failure_mode=FailureMode.HALLUCINATION,
-        )
-        ps.attempts = [ps.best_output]
-        state = DocumentState.__new__(DocumentState)
-        state.pages = {1: ps}
-        output, _provenance = _select_page_output_tagged(state, 1)
-
-        assert "ratified quarterly dividends" not in output.text
+        assert "ratified quarterly dividends" not in body
+        assert _is_native_body(body)
 
     def test_a_paragraph_across_a_real_gap_needs_a_row_on_both_sides(self) -> None:
         """RE-PINNED in round 7. This control kept the round-3 fix from being
@@ -432,7 +431,7 @@ class TestWrappedLabelsAreNotEvidence:
         layer's own prose ships flagged either way, and the fabrication built
         from the table's label is still refused on both layouts."""
         genuine = " ".join(self._CAPTIONED_PROSE) + "."
-        assert _prose_corroboration_ok(self._captioned_page(), genuine) is False
+        assert _is_native_body(_shipped(self._captioned_page(), genuine))
 
         sandwiched = _scanned_page(
             _words(
@@ -443,8 +442,10 @@ class TestWrappedLabelsAreNotEvidence:
                 + ["German Federal Bank", self._CAPTION, "6,000.0"]
             )
         )
-        assert _prose_corroboration_ok(sandwiched, genuine) is False
-        assert _prose_corroboration_ok(sandwiched, self._CAPTIONED_ATTEMPT) is False
+        assert _is_native_body(_shipped(sandwiched, genuine))
+        fabricated_body = _shipped(sandwiched, self._CAPTIONED_ATTEMPT)
+        assert "ratified quarterly dividends" not in fabricated_body
+        assert _is_native_body(fabricated_body)
 
     @pytest.mark.parametrize("footnote_pitch", [12.0, 6.0])
     def test_text_elsewhere_on_the_page_cannot_redraw_the_table(
@@ -472,8 +473,10 @@ class TestWrappedLabelsAreNotEvidence:
                 y0=120.0 + idx * footnote_pitch,
             )
 
-        ps = _scanned_page(table + footnotes)
-        assert _prose_corroboration_ok(ps, self._CAPTIONED_ATTEMPT) is False
+        body = _shipped(_scanned_page(table + footnotes), self._CAPTIONED_ATTEMPT)
+
+        assert "ratified quarterly dividends" not in body
+        assert _is_native_body(body)
 
     def test_genuine_prose_on_the_split_layout_needs_a_row_on_both_sides(self) -> None:
         """RE-PINNED in round 7, same reason as the captioned control above:
@@ -491,7 +494,7 @@ class TestWrappedLabelsAreNotEvidence:
             "authorized and directed until otherwise directed by the Committee "
             "to execute transactions in the System Account in accordance."
         )
-        assert _prose_corroboration_ok(self._page(split=True), genuine) is False
+        assert _is_native_body(_shipped(self._page(split=True), genuine))
 
         sandwiched = _scanned_page(
             _words(
@@ -505,8 +508,10 @@ class TestWrappedLabelsAreNotEvidence:
                 + [line for label in self._LABELS[3:] for line in (label, "250.0")]
             )
         )
-        assert _prose_corroboration_ok(sandwiched, genuine) is False
-        assert _prose_corroboration_ok(sandwiched, self._ATTEMPT) is False
+        assert _is_native_body(_shipped(sandwiched, genuine))
+        fabricated_body = _shipped(sandwiched, self._ATTEMPT)
+        assert "ratified quarterly dividends" not in fabricated_body
+        assert _is_native_body(fabricated_body)
 
 
 class TestP2aMissingEvidenceIsNotSanity:

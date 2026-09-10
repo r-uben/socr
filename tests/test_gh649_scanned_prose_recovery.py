@@ -26,7 +26,6 @@ import pytest
 
 from socr.core.manifest import (
     SelectionProvenance,
-    _prose_corroboration_ok,
     _select_page_output_tagged,
     is_page_failed_marker,
     native_prose_floor_text,
@@ -504,8 +503,14 @@ class TestTwoColumnPagesFailSafe:
         assert MARKER in recovered
 
     def test_a_shared_band_cannot_vouch_for_a_fabrication(self) -> None:
-        fabricated = "The committee reviewed the swap arrangements ratified quarterly dividends."
-        assert _prose_corroboration_ok(self._page(), fabricated) is False
+        """Re-scoped in #652 round 10 to what ships. The corroboration guard
+        this used to call is gone -- no attempt's prose leaves this branch at
+        all -- so the pin is on the bytes, where it was always the point."""
+        ps = self._page()
+        ps.best_output.text = (
+            "The committee reviewed the swap arrangements ratified quarterly dividends."
+        )
+        assert "ratified quarterly dividends" not in _ship(ps).text
 
 
 class TestWhenItMustAbstain:

@@ -384,107 +384,6 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     return bands
 
 
-def corroboration_witness_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
-    """``(witness_words, unresolved_words)`` -- the prose a MODEL may be scored
-    against, and the prose that is real page text but proves nothing.
-
-    A page yields a witness ONLY when the shipping partition
-    (:func:`partition_prose_bands`) finds no withheld numeric band anywhere on
-    it. One withheld band and every band on the page is unresolved: there is
-    then no witness, corroboration refuses, and #649's native recovery ships
-    the page's own prose flagged with the numeric bands withheld. Model-prose
-    salvage is disabled on exactly the pages where a table's extent is in
-    question, which is what #652 asks for.
-
-    #652 round 8 (Astra's ruling, 2026-09-10) replaced the geometric admission
-    rule this function carried through rounds 2-7. FIVE successive variants of
-    it were reproduced as fabrication paths, each on a real selection run and
-    each shipping an invented sentence built from a table's own row labels:
-
-    * the page-wide MEDIAN line advance as the walk's stopping step. Tightening
-      an unrelated footnote block to 6pt pulled the median down, the table's
-      own unchanged 12pt step became a "block break", and its label entered the
-      witness. Text elsewhere must not redraw a table's extent.
-    * the ANCHORS' OWN MEAN PITCH as that step. An average is not an upper
-      bound on the individual steps inside one table: a units caption printed
-      18pt under a row label, in a table whose rows average 12pt, stops the
-      walk inside the table.
-    * SEPARATION alone -- a run of unattributed bands with larger gaps around
-      it. Separation proves a BLOCK exists, not that the block is prose. A
-      table label wrapped over two lines is such a block, and so is a whole
-      date table printed between two numeric rows.
-    * a recognised numeric row on ONE side of the run. That proves a table is
-      NEARBY. Two bank-name bands at the page edge, 6pt apart, with an amount
-      24pt below them satisfied it.
-    * a recognised numeric row on BOTH sides. Narrower, still not prose: a
-      section heading or a wrapped header sits between two numeric sections
-      just as readily as a paragraph does (250.0 / two bank-name bands / 300.0,
-      the reviewer's reproduction at eccd394).
-    * and the lever considered instead of this rewrite -- letting an ABSORBED
-      band vouch for a side -- was reproduced as a fabrication path too: put a
-      units caption at each end of that same geometry and the walk absorbs the
-      captions, so the intervening label block becomes admissible again.
-
-    The lesson is not that some sixth variant is waiting. Band-gap geometry
-    measures where blocks BREAK; it cannot say what a block IS, and the
-    printed page genuinely does not distinguish a two-line paragraph above a
-    table from that table's wrapped header. Reliable model-prose salvage needs
-    independent source evidence for the region AND for its transcription -- a
-    source-verified prose region, or conservative matching against trusted
-    source spans -- and that is separate work, not a threshold.
-
-    Refusing costs the page no text. Since #649 the native layer's own prose
-    ships flagged whether or not a model attempt corroborates, so the only
-    thing discarded on a refusal is the model's WORDING. That the guard
-    therefore accepts rarely is intended: #652 exists to stop unsupported model
-    prose passing corroboration, not to maximise acceptance.
-
-    The one page that still yields a witness is the pure-prose scan -- no
-    printed numeral anywhere, so the shipping partition withholds nothing and
-    there is no table whose extent could be in question. That case is asked
-    through the shipping partition rather than through a second numeric
-    detector, which is #652 round 5's finding: ``_is_genuine_numeric`` is a
-    row-MATCHING predicate and deliberately rejects printed forms that are
-    unmistakably values (a maturity date above all), so a table of institution
-    names and dates carries no anchor at all while the shipping side correctly
-    withholds every one of its bands. ``bears_printed_numeral``, via
-    :func:`partition_prose_bands`, is the safety predicate and the right one to
-    ask.
-
-    Both lists are exhaustive: every word lands in exactly one of them. The
-    caller subtracts unresolved tokens from the witness before scoring -- see
-    ``manifest._prose_corroboration_ok`` -- so a third, silent case would let a
-    band be neither evidence nor subtracted.
-    """
-    return witness_from_prose_partition(partition_prose_bands(words, row_shape_min))
-
-
-def witness_from_prose_partition(bands: list) -> tuple[list, list]:
-    """:func:`corroboration_witness_words` over an ALREADY-COMPUTED partition.
-
-    Round 9 (Astra, 2026-09-10): the rule above is a statement about a PAGE
-    ("no withheld numeric band anywhere"), so it is only sound when the
-    partition it reads covers the page. ``manifest._prose_corroboration_ok``
-    used to filter every word inside a detected table bbox away FIRST and
-    partition what was left; a bbox that covered a scan's numeric bands but
-    not its labels therefore deleted every digit before the check, the labels
-    became a full witness, and a fabricated sentence shipped. A filtered
-    region with no numerals is not a page with no numerals.
-
-    Taking the partition as an argument lets the caller build ONE authoritative
-    partition of the page's native words and hand the same object to both the
-    corroboration decision and ``manifest.native_prose_floor_text``, so the
-    two cannot be reading different populations of the same page.
-    """
-    if not bands:
-        return [], []
-
-    every_word = [word for _is_prose, band in bands for word in band]
-    if any(not is_prose for is_prose, _band in bands):
-        return [], every_word
-    return every_word, []
-
-
 def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
     """Split *words* into ``(prose_words, withheld_words)`` by baseline band.
 
@@ -521,7 +420,9 @@ def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[l
     dropped: #649's caller stamps a marker at every contiguous withheld run
     precisely so a line elided mid-paragraph is visible where it was elided.
     One fixture is not enough to calibrate anything looser; that calibration
-    is the same follow-up ``manifest.PROSE_CORROBORATION_MIN`` waits on.
+    belongs to #707's fallback-fidelity measurement (the prose-corroboration
+    floor this line used to point at was deleted in #652 round 10, along with
+    the guard it thresholded).
 
     Both lists are returned in PAGE READING ORDER (bands top to bottom, words
     left to right within a band), not in the input order of *words*: #649's
