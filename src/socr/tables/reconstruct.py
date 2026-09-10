@@ -643,55 +643,78 @@ def _adjacent_lane_of(xs: list[float]) -> dict[float, int]:
 
 
 def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[float, int]:
-    """Recurrence-seeded clustering (#703): only a recurring x founds a lane.
+    """Recurrence-seeded clustering (#703): only a recurring x founds a lane,
+    and two columns that appear together on a row are never merged.
 
-    Three steps, none of which introduces a threshold of its own:
+    Four steps, none of which introduces a threshold of its own:
 
-    1. **Seed.** An x position is a seed when the bands (rounded y) carrying a
-       numeral within ``_LANE_X_TOL_PT`` of it number at least
-       ``_MIN_TABLE_ROWS`` -- the same recurrence already required of a
-       column-like lane downstream. A footnote value printed once is not a seed.
-    2. **Found lanes.** Seeds are taken in order of decreasing recurrence
-       (ties by x, so the result is deterministic) and each founds a new lane
-       unless it lies within the tolerance of an already-founded one. Lane
-       identity is therefore a distance to a fixed centre, never a chain: two
-       centres more than the tolerance apart can never be merged, by a one-off
-       position or by another seed.
-    3. **Assign.** Every remaining x joins the nearest centre within the
-       tolerance (ties by lane order); an x within reach of no centre is
-       dropped, contributing to no row's lane set.
+    1. **Quantise.** An x is reduced to a POSITION with ``round``, the same
+       rounding the band key already applies to y. Sub-point extraction jitter
+       within one printed column therefore lands on one position; anything
+       coarser is left to step 3's tolerance.
+    2. **Qualify.** A position is recurring when tokens sit at THAT position on
+       at least ``_MIN_TABLE_ROWS`` bands -- its own occupancy, never the union
+       over a neighbourhood. Round 3 counted the neighbourhood, so a footnote
+       value printed once between two columns borrowed both columns' support
+       (21 + 20 bands -> 22), outranked both, and founded the only centre.
+       A position occurring once now cannot found a lane at any ranking.
+    3. **Found.** Recurring positions are taken in order of decreasing
+       occupancy (ties by x) and each founds a lane unless it is within
+       ``_LANE_X_TOL_PT`` of one already founded AND does not CO-OCCUR with it:
+       two recurring positions carrying distinct numerals on the same band, on
+       at least ``_MIN_TABLE_ROWS`` bands, are separate columns by direct
+       evidence whatever their x distance, because one column cannot hold two
+       cells of the same row. Co-occurrence therefore overrides the tolerance;
+       without that, two genuine columns printed 5pt apart merged into one
+       centre on eighteen dense rows.
+    4. **Assign.** Every other x joins the nearest centre within the tolerance
+       (ties by lane order); an x within reach of no centre is dropped and
+       contributes to no row's lane set.
 
-    The returned mapping therefore need not cover *xs*.
+    The returned mapping is keyed on the ORIGINAL x values and need not cover
+    all of *xs*.
     """
+    position = {x: float(round(x)) for x in xs}
+
     bands_at: dict[float, set] = {}
     for x, y in nums:
-        bands_at.setdefault(x, set()).add(y)
+        bands_at.setdefault(position[x], set()).add(y)
+    recurring = {pos for pos, ys in bands_at.items() if len(ys) >= _MIN_TABLE_ROWS}
 
-    seed_bands: dict[float, int] = {}
-    for i, x in enumerate(xs):  # xs is sorted, so the neighbourhood is a window
-        near_bands: set = set()
-        for j in range(i, -1, -1):
-            if x - xs[j] > _LANE_X_TOL_PT:
-                break
-            near_bands |= bands_at[xs[j]]
-        for j in range(i + 1, len(xs)):
-            if xs[j] - x > _LANE_X_TOL_PT:
-                break
-            near_bands |= bands_at[xs[j]]
-        if len(near_bands) >= _MIN_TABLE_ROWS:
-            seed_bands[x] = len(near_bands)
+    # Same-band co-occurrence between recurring positions: direct evidence of
+    # two cells of one row, i.e. of two columns.
+    together: dict[tuple[float, float], int] = {}
+    band_positions: dict[float, set] = {}
+    for x, y in nums:
+        if position[x] in recurring:
+            band_positions.setdefault(y, set()).add(position[x])
+    for present in band_positions.values():
+        ordered = sorted(present)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1 :]:
+                together[(a, b)] = together.get((a, b), 0) + 1
+
+    def _distinct_columns(a: float, b: float) -> bool:
+        return together.get((a, b) if a < b else (b, a), 0) >= _MIN_TABLE_ROWS
 
     centres: list[float] = []
-    for x in sorted(seed_bands, key=lambda seed: (-seed_bands[seed], seed)):
-        if all(abs(x - centre) > _LANE_X_TOL_PT for centre in centres):
-            centres.append(x)
+    for pos in sorted(recurring, key=lambda seed: (-len(bands_at[seed]), seed)):
+        if all(
+            abs(pos - centre) > _LANE_X_TOL_PT or _distinct_columns(pos, centre)
+            for centre in centres
+        ):
+            centres.append(pos)
 
     lane_of: dict[float, int] = {}
     for x in xs:
+        pos = position[x]
+        if pos in centres:
+            lane_of[x] = centres.index(pos)
+            continue
         reachable = [
-            (abs(x - centre), lane)
+            (abs(pos - centre), lane)
             for lane, centre in enumerate(centres)
-            if abs(x - centre) <= _LANE_X_TOL_PT
+            if abs(pos - centre) <= _LANE_X_TOL_PT
         ]
         if reachable:
             lane_of[x] = min(reachable)[1]

@@ -204,12 +204,81 @@ scans have no text layer, so term (b) already abstained at `if not words`.
 Pinned by `test_real_boe_2003_pages_are_prose_not_tables`, which asserts the
 annex heading and the absence of any table before asserting the verdicts.
 
+## Round 4: seed by own occupancy, split by co-occurrence
+
+Astra reproduced two further defects in round 3's seeding, both ending in the
+truncated candidate winning selection over the complete one.
+
+**Seeding counted the neighbourhood, not the position.** A seed qualified on the
+union of bands anywhere within `_LANE_X_TOL_PT` of it, so a position occurring
+ONCE could borrow both neighbouring columns' support and outrank each of them.
+Add a legitimate final row holding only the second column's value, so column 12's
+bands no longer subsume column 24's, then print one numeral at x=18:
+
+| position | bands it actually occupies | bands in its neighbourhood |
+| --- | ---: | ---: |
+| 12 | 20 | 21 |
+| 18 (the bridge) | 1 | 22 |
+| 24 | 19 | 20 |
+
+The bridge is founded first and suppresses both real columns at distance 6.
+Fixed centres stopped later merging; they did not stop founding the wrong centre.
+Round 3's bridge test passed only because its column-12 bands happened to
+subsume column 24's, so the tie broke toward a genuine centre.
+
+**Tolerance merged two columns that share rows.** Two recurring anchors 5pt
+apart were collapsed into one centre even with eighteen rows carrying a distinct
+numeral in each. A tolerance calibrated for conservative positive detection is
+not evidence of absence.
+
+Round 4 replaces the seeding with four steps, still with no constant of its own:
+
+1. **Quantise** x with `round`, the same rounding the band key already applies
+   to y, so sub-point extraction jitter inside one printed column collapses to
+   one position.
+2. **Qualify** a position as recurring on its OWN occupancy: tokens at that
+   position on at least `_MIN_TABLE_ROWS` bands. A one-off position can no
+   longer found a lane at any ranking.
+3. **Found** lanes from recurring positions in decreasing occupancy order, each
+   founding a centre unless it is within the tolerance of an existing one AND
+   does not co-occur with it. Two recurring positions carrying distinct numerals
+   on the same band, on at least `_MIN_TABLE_ROWS` bands, are separate columns
+   by direct evidence: one column cannot hold two cells of one row. Co-occurrence
+   overrides the tolerance rather than shrinking it.
+4. **Assign** every other x to the nearest centre within the tolerance, or drop
+   it.
+
+### Corpus re-measure: three pages flip, all of them non-tables
+
+The 45-page sweep was re-run. Round 4 changes three verdicts against round 3,
+all True to False, and nothing else:
+
+| page | bands at width 2 | lanes | wide bands | round 3 | round 4 |
+| --- | ---: | ---: | ---: | --- | --- |
+| boe-meetings-2018 p2 | 12 | 2 | 0 | True | False |
+| boe-meetings-2018 p3 | 14 | 3 | 1 | True | False |
+| ecb-reports-2000 p3 | 5 | 2 | 2 | True | False |
+
+None is a table. The two BoE pages are Inflation Report prose sections carrying
+vector fan charts (58 and 28 drawing objects, no images); their recurring numeric
+positions are y-axis tick labels, `180/160/140` down one axis and `90/80/70/60/50`
+down another, each on a band of its own, and almost no band holds a cell in two
+of them. Round 3 read those two axes as a two-column grid through neighbourhood
+support. The ECB page is the Bulletin's imprint: a left-aligned block of address,
+telephone, fax and telex numbers. Pinned by
+`test_real_boe_2018_chart_pages_close_the_gate`.
+
+Every other verdict is unchanged, including the ticket page (False), ECB
+p2/p3 and the annex pages (False, prose -- Astra rendered all three and
+retracted the coverage claim).
+
 ## Residuals
 
 - **The gate's per-page verdicts over the census corpus** are tabulated in the
   round-3 section. Every page that closes it was measured to be prose or to
   have no text layer.
-- **Superseded in round 3.** The residual above described the round-2 gate.
+- **Superseded in round 3, refined in round 4.** The residual below described
+  the round-2 gate.
   Lane chaining is now eliminated for this use (see the round-3 section), and
   the pages the round-2 residual named as lost coverage were measured to be
   prose, not numeric tables. What remains true is narrower: term (b) is armed
@@ -238,3 +307,19 @@ annex heading and the absence of any table before asserting the verdicts.
   are untouched here and may reject this candidate independently.
 - This change adds no flag of its own; whether the page ships flagged is the
   ladder's and the verifier's business.
+
+### Round-4 residuals
+
+- **Exact-x recurrence alone is not usable**, which is why step 1 quantises.
+  Measured: requiring float-equal recurrence closes the gate on four real
+  tables in the corpus that round 3 opened, because their column anchors carry
+  sub-point jitter. Quantising to whole points (and to tenths -- both were
+  measured and agree on all 45 pages) keeps them.
+- **The tolerance still merges two columns that never share a row.** Two
+  recurring anchors within `_LANE_X_TOL_PT` are one lane unless co-occurrence
+  proves otherwise, so a table whose two columns are never both populated on
+  the same band is still read as one lane. That shape has no rows of width two,
+  so term (b) has nothing to reconcile there in any case.
+- Co-occurrence is counted between recurring positions only. A column that
+  recurs and one that does not can still be merged; the non-recurring one
+  contributes no lane of its own by design.

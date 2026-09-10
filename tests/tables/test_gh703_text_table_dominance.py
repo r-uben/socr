@@ -459,3 +459,147 @@ def test_real_boe_2003_pages_are_prose_not_tables() -> None:
     for text, words in pages:
         assert _native_page_has_column_lanes(words) is False
         assert has_recurring_numeric_columns(words, 2) is False
+
+
+# ---------------------------------------------------------------------------
+# Astra's round-3 counterexamples: seeding by neighbourhood, merging by tolerance
+# ---------------------------------------------------------------------------
+#
+# Round 3 stopped a one-off position from CHAINING two columns but not from
+# FOUNDING the lane that swallows both: seed recurrence counted the union of
+# bands anywhere in the tolerance neighbourhood, so the bridge borrowed both
+# columns' support and outranked each of them. And two genuine columns closer
+# together than the tolerance were merged unconditionally, however many rows
+# carried a cell in each. Round 4 qualifies a seed by its OWN occupancy and
+# lets same-band co-occurrence override the tolerance.
+
+
+def _bridge_with_complementary_row() -> tuple[str, str, list[tuple]]:
+    """Astra's geometry: the sparse-prefix table plus a legitimate final row
+    holding only the second column's value, then one unrelated numeral at
+    x=18. The final row is what stops column 12's bands from subsuming column
+    24's, so neighbourhood support makes the bridge the strongest seed.
+    """
+    complete, truncated, words = _sparse_prefix_fixture()
+    complete += "| Final | | 999 |\n"
+    words = words + [(0.0, 400.0, 8.0, 410.0, "Final"), (24.0, 400.0, 32.0, 410.0, "999")]
+    return complete, truncated, words + [(18.0, 500.0, 26.0, 510.0, "777")]
+
+
+def test_one_off_bridge_cannot_found_a_lane() -> None:
+    """The seeding difference itself: a position occupying one band founds no
+    lane however much support its neighbourhood has.
+    """
+    from socr.tables.reconstruct import _seeded_lane_of
+
+    _, _, words = _bridge_with_complementary_row()
+    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    lanes = _seeded_lane_of(nums, sorted({x for x, _ in nums}))
+
+    assert lanes[12.0] != lanes[24.0], "the two real columns must stay apart"
+    assert lanes[18.0] in {lanes[12.0], lanes[24.0]}, "the bridge joins, never founds"
+
+
+def test_one_off_bridge_with_complementary_sparse_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Astra reproducer 6: the complete gemini reading wins with the gate real
+    and with it forced open alike.
+    """
+    complete, truncated, bridged = _bridge_with_complementary_row()
+
+    def _winner():
+        page = _strict_page(
+            [_strict_grid_output("qwen", truncated), _grid_reading_output("gemini", complete)]
+        )
+        page.native_words = bridged
+        winner = structure_class_grid_winner(page)
+        return None if winner is None else winner.engine
+
+    assert _native_page_has_column_lanes(bridged) is True
+    gated = _winner()
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
+    assert (_winner(), gated) == ("gemini", "gemini")
+
+
+def _tight_columns() -> tuple[str, str, list[tuple]]:
+    """Astra's second geometry: the same table with its horizontal geometry
+    uniformly scaled by 5/12, so the columns start 5pt apart -- inside
+    ``_LANE_X_TOL_PT`` -- while the boxes still do not overlap.
+    """
+    complete, truncated, words = _sparse_prefix_fixture()
+    return (
+        complete,
+        truncated,
+        [(w[0] * 5 / 12, w[1], w[2] * 5 / 12, w[3], w[4]) for w in words],
+    )
+
+
+def test_co_occurrence_overrides_the_merge_tolerance() -> None:
+    """Two recurring positions carrying cells of the SAME row are separate
+    columns by direct evidence, whatever their x distance.
+    """
+    from socr.tables.reconstruct import _seeded_lane_of
+
+    _, _, words = _tight_columns()
+    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    xs = sorted({x for x, _ in nums})
+    lanes = _seeded_lane_of(nums, xs)
+
+    left, right = 5.0, 10.0
+    assert abs(right - left) < 6.0, "the fixture must sit inside the tolerance"
+    assert lanes[left] != lanes[right]
+
+
+def test_tight_disjoint_columns_keep_shortfall(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Astra reproducer 7: term (b) still catches the truncation at 5pt pitch."""
+    complete, truncated, words = _tight_columns()
+
+    def _winner():
+        page = _strict_page(
+            [_strict_grid_output("qwen", truncated), _grid_reading_output("gemini", complete)]
+        )
+        page.native_words = words
+        winner = structure_class_grid_winner(page)
+        return None if winner is None else winner.engine
+
+    assert _native_page_has_column_lanes(words) is True
+    assert table_truncated(truncated, words) is True
+    gated = _winner()
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
+    assert (_winner(), gated) == ("gemini", "gemini")
+
+
+def test_right_aligned_digit_widths_still_seed() -> None:
+    """Astra's GH-349 control: a right-aligned column whose x0 moves with the
+    digit count is still found, because the x1 anchor is attempted too.
+    """
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    words = []
+    for i, number in enumerate(["1", "22", "333", "4444", "55555"]):
+        for right in (100.0, 200.0):
+            words.append((right - 5.0 * len(number), 20.0 * i, right, 20.0 * i + 10.0, number))
+
+    assert has_recurring_numeric_columns(words, 2, seeded_lanes=True) is True
+
+
+@pytest.mark.skipif(not BOE_2018_PDF.exists(), reason="BoE census corpus not present")
+def test_real_boe_2018_chart_pages_close_the_gate() -> None:
+    """Round 4 flips these two pages from True to False. They are not tables.
+
+    Pages 2 and 3 of the Inflation Report excerpt are prose sections carrying
+    vector fan charts; their recurring numeric positions are y-axis tick
+    labels (``180/160/140`` down one axis, ``90/80/70/60/50`` down another),
+    each on a band of its own, and almost no band holds a cell in two of them.
+    Round 3 read the axes as columns through neighbourhood support.
+    """
+    import pymupdf
+
+    with pymupdf.open(BOE_2018_PDF) as doc:
+        pages = [(p.get_text(), p.get_drawings(), list(p.get_text("words"))) for p in doc]
+
+    for text, drawings, words in pages[1:]:
+        assert drawings, "these pages carry vector charts"
+        assert "|" not in text, "and no table"
+        assert _native_page_has_column_lanes(words) is False
