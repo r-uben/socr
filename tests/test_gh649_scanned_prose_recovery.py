@@ -26,6 +26,7 @@ import pytest
 
 from socr.core.manifest import (
     SCANNED_NATIVE_TEXT_FLAG,
+    SCANNED_PROSE_RECOVERED_FLAG,
     SelectionProvenance,
     _select_page_output_tagged,
     is_page_failed_marker,
@@ -552,6 +553,52 @@ class TestWhenItMustAbstain:
         assert shipped.text.count(MARKER) == 1
         assert shipped.text.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=1))
 
+    def test_the_pages_own_characters_never_become_structure(self) -> None:
+        """#652 round 12 (Astra's prose11 reproduction), through the installed
+        renderer rather than through a claim about escaping.
+
+        Round 11 escaped only the pipe, and two losses came straight back: a
+        native ``<!--`` line turned the sentence after it into an HTML comment
+        that a reading consumer never sees, and ``# Literal heading marker``
+        became an ``<h1>``. The page authored neither construct. Both lines --
+        and every other active character on the page -- must reach a reader as
+        the characters that were printed."""
+        markdown_it = pytest.importorskip("markdown_it")
+        actives = [
+            "<!--",
+            "The committee retained the original mandate.",
+            "# Literal heading marker",
+            "> quoted",
+            "- bulleted",
+            "*emphasis* and `code` and [link](x) and A & B",
+            "~~struck~~",
+        ]
+        shipped = _ship(_page(table_rows=[], prose_below=actives)).text
+        rendered = markdown_it.MarkdownIt().render(shipped)
+
+        assert "<!--" not in rendered
+        assert "The committee retained the original mandate." in rendered
+        for tag in ("<h1>", "<blockquote>", "<li>", "<em>", "<code>", "<a href", "<s>"):
+            assert tag not in rendered, tag
+        # The page's own characters, as characters: what a reader sees is the
+        # line that was printed, with the renderer's entity forms for < and &.
+        assert "# Literal heading marker" in rendered
+        assert "*emphasis* and `code` and [link](x) and A &amp; B" in rendered
+
+    def test_socrs_own_banner_and_notice_stay_outside_the_literal_body(self) -> None:
+        """The escaping covers the PAGE's characters. socr's banner, the
+        table-unverified notice and the image reference are socr's own
+        markdown and must not be mangled into literal text -- an escaped image
+        reference would stop being an image."""
+        ps = _page(table_rows=[])
+        ps.d3_floor_png_ref = "![Scanned page 1](figures/scanned_p1.png)"
+        shipped = _ship(ps).text
+
+        assert shipped.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=1))
+        assert MARKER in shipped
+        assert "![Scanned page 1](figures/scanned_p1.png)" in shipped
+        assert "\\!" not in shipped
+
     def test_a_text_only_table_ships_as_lines_not_as_a_grid(self) -> None:
         """No grid is reconstructed and no cell inferred. A text-only table's
         rows are literal baseline lines here, and a printed pipe is escaped so
@@ -610,7 +657,101 @@ class TestWhenItMustAbstain:
         assert is_page_failed_marker(_ship(ps).text) is True
 
 
+def _finalized_text(ps: PageState, tmp_path: Path) -> str:
+    """What the page's record carries after finalization, not just selection."""
+    from unittest.mock import patch
+
+    from socr.core.manifest import finalized_page_records
+    from socr.core.document import DocumentHandle
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=tmp_path / "doc.pdf", page_count=1)
+    state = DocumentState(handle=handle)
+    state.pages[1] = ps
+    return finalized_page_records(state)[0].output.text
+
+
+def test_the_trust_verdict_does_not_depend_on_which_reconstruction_is_judged() -> None:
+    """#652 round 12 (Astra's prose11 control), closing a round-11 residual.
+
+    The no-numeral lane judges the lines it is about to ship; the withholding
+    lane judges ``native_region_text`` over the prose words. I flagged the
+    divergence as a residual; it is not one. Both disqualifiers are token-local
+    or count-based, so the verdict is invariant to word order -- pinned by
+    reversing the word list, which changes both reconstructions and neither
+    verdict, on a clean page and a corrupt one."""
+    from socr.core.born_digital import text_layer_trusted
+    from socr.core.manifest import _band_line, _page_prose_partition, native_region_text
+
+    for ps in (
+        _page(table_rows=[]),
+        _page(table_rows=[], prose_above=_CORRUPT_PROSE_ABOVE, prose_below=[]),
+    ):
+        ps.native_words = list(reversed(ps.native_words))
+        lines = "\n".join(_band_line(band) for _is_prose, band in _page_prose_partition(ps))
+        assert text_layer_trusted(lines) == text_layer_trusted(native_region_text(ps.native_words))
+
+
+class TestFinalizationKeepsTheLiteralBody:
+    def test_the_escaped_body_survives_finalization_byte_for_byte(self, tmp_path: Path) -> None:
+        """#652 round 12. Escaping is only worth anything if the escaped bytes
+        are the bytes that ship: a finalization step that unescaped, re-wrapped
+        or re-parsed this body would hand the page's characters their
+        structural meaning back on the way out."""
+        ps = _page(
+            table_rows=[],
+            prose_below=["| Institution | Role |", "| --- | --- |", "| Bank | Member |"],
+        )
+        selected = _ship(ps).text
+        finalized = _finalized_text(
+            _page(
+                table_rows=[],
+                prose_below=["| Institution | Role |", "| --- | --- |", "| Bank | Member |"],
+            ),
+            tmp_path,
+        )
+
+        assert finalized == selected
+        assert "Bank" in finalized
+        assert "following domestic policy directive:" in finalized
+
+    def test_a_resumed_page_finalizes_to_the_same_bytes(self, tmp_path: Path) -> None:
+        """The round trip that actually happens in production: the page ships,
+        its sidecar is read back on the next run with ``native_words`` gone,
+        and finalization must produce what it produced the first time."""
+        first = _finalized_text(_page(table_rows=[]), tmp_path)
+
+        saved = PageOutput.from_dict(_ship(_page(table_rows=[])).to_dict())
+        resumed = _page(table_rows=[])
+        resumed.native_words = []
+        resumed.attempts = [saved]
+        resumed.best_output = saved
+
+        assert _finalized_text(resumed, tmp_path) == first
+
+
 class TestResumeKeepsWhatShipped:
+    def test_an_old_banner_without_the_credential_grants_nothing(self) -> None:
+        """#652 round 12 (Astra's prose11 control). The banner is bytes a model
+        could echo; the typed credential is not. A sidecar carrying the banner
+        with no credential and no native words to rebuild from is not reused --
+        the bare marker ships instead of unproven text."""
+        ps = _page(table_rows=[], with_words=False)
+        data = PageOutput(
+            page_num=1,
+            text=SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1) + "\n\nOld unproven prose",
+            status=PageStatus.ERROR,
+            engine="nougat",
+            audit_passed=False,
+        ).to_dict()
+        data.pop("scanned_prose_recovered", None)
+        ps.best_output = PageOutput.from_dict(data)
+        ps.attempts = [ps.best_output]
+
+        shipped = _ship(ps).text
+        assert is_page_failed_marker(shipped) is True
+        assert "Old unproven prose" not in shipped
+
     def test_a_no_numeral_recovery_survives_its_own_sidecar(self) -> None:
         """#652 round 11. The new lane has its OWN banner, and the restore
         path recognises the recovery by banner plus typed credential. A restore

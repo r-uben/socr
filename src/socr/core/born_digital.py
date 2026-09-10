@@ -1237,13 +1237,19 @@ def text_layer_trusted(text: str) -> bool:
 
     Note the deliberate abstention inherited from
     ``_encoding_corruption_ratio``: below 20 alpha tokens it returns 0.0
-    ("too little to judge") and this returns True. #652 round 11: that used to
-    be described as safe because a corroboration ratio refused such a region
-    anyway. No such ratio exists any more -- round 10 deleted it -- so the
-    abstention now stands alone: a handful of tokens ship unjudged by this
-    check, under the recovery banner that calls them unverified. What bounds
-    the exposure is the banner and the withheld numeric bands, not a second
-    gate.
+    ("too little to judge") and this returns True. #652 round 11 described
+    that as safe because a corroboration ratio refused such a region anyway;
+    no such ratio exists, round 10 deleted it, so the abstention stands alone.
+
+    #652 round 12 (Astra's ruling, 2026-09-10) settles what that means rather
+    than papering over it. Short native text IS published when no actual
+    disqualifier fires -- the page keeps its failed status, its provenance and
+    its unverified banner, and refusing solely because a layer is short would
+    recreate an avoidable loss without buying any stronger evidence. So read
+    this boolean as "eligible for flagged native retention", never as proof of
+    fidelity: on a short layer it says only that nothing disqualifying was
+    found, which is not the same as having looked. #707 measures the error
+    rate of short layers separately.
     """
     if not text or not text.strip():
         return False

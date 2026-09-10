@@ -1863,17 +1863,63 @@ def _band_line(band) -> str:
     return " ".join(str(w[4]) for w in band).strip()
 
 
-def _escaped_native_line(line: str) -> str:
-    """A native line that cannot manufacture markdown structure downstream.
+#: Characters that carry markdown or HTML meaning ANYWHERE in a line, and the
+#: construct each one would otherwise open on a page that authored none of
+#: them. All are ASCII punctuation, so a backslash in front of each is the
+#: CommonMark literal form (markdown-it-py, already a dependency, honours it):
+#:
+#: ``\\`` escape itself (must be handled with the rest, never after);
+#: ``\``` code span, and the ``\`\`\``` fence opener;
+#: ``*`` emphasis, bullet, and the ``***`` thematic break;
+#: ``_`` emphasis;
+#: ``[`` link, image (with a leading ``!``) and link-reference definition;
+#: ``<`` raw HTML, autolink, and the ``<!--`` comment opener that swallowed a
+#: whole sentence in Astra's prose11 reproduction;
+#: ``&`` character entity (``&nbsp;`` would render as a space, not as itself);
+#: ``|`` table cell -- the one this function used to handle alone;
+#: ``~`` strikethrough and the ``~~~`` fence opener.
+_NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 
-    #652 round 11: a text-only table's rows come back here as literal baseline
-    lines, and a page whose printed text happens to contain pipes would then
-    assemble into something a reader -- and every table consumer downstream --
-    would read as a verified markdown table. Nothing on this page was
-    verified. Escaping the pipe is the whole fix: without one, no run of lines
-    parses as a table, so no other markdown character can build a grid.
+#: Characters that open a BLOCK construct only as the line's first character.
+#: ``_band_line`` strips each line, so there is no leading whitespace to count
+#: and no four-space indented-code case to consider.
+#:
+#: ``#`` ATX heading; ``>`` block quote; ``-`` bullet, and the ``---`` setext
+#: underline and thematic break; ``+`` bullet; ``=`` setext underline.
+#:
+#: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and this
+#: path runs only where every band is prose, which at the shipping
+#: ``row_shape_min`` of 1 means no band carries a printed digit at all. If that
+#: floor is ever loosened, this set needs the ordered form added.
+_NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
+
+
+def _escaped_native_line(line: str) -> str:
+    """A native line that renders as its own characters and nothing else.
+
+    #652 rounds 11-12. The lane promises the page's literal text, so every
+    character that would otherwise be read as structure is backslash-escaped:
+    round 11 escaped only ``|``, and Astra reproduced two losses through the
+    installed renderer -- a native ``<!--`` line turned the sentence after it
+    into an HTML comment (invisible to a reader), and ``# Literal heading
+    marker`` became an ``<h1>``. Neither is a route back to model prose; both
+    give the source's characters a meaning this lane explicitly disclaims.
+
+    The two sets above name every character handled and what it would open.
+    Escaping is not conditional on context: a code span opener is active
+    mid-line, a heading marker only at the start, and guessing which one a
+    scan meant is the sort of inference this lane exists to refuse.
+
+    socr's own banner, notice and image reference are assembled OUTSIDE this
+    body and are never passed through here -- they are socr's markdown, not the
+    page's characters.
     """
-    return line.replace("|", "\\|")
+    out: list[str] = []
+    for idx, ch in enumerate(line):
+        if ch in _NATIVE_INLINE_ACTIVE or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE):
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
 
 
 def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
@@ -1897,6 +1943,12 @@ def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) ->
     text. An untrusted layer returns ``None`` and the caller's bare marker
     stands: the page is a scan because its layer is suspect, and shipping
     corruption as recovered text is the loss this lane exists to stop.
+
+    That check is a disqualifier, not a verification, and on a layer under 20
+    alpha tokens it abstains and passes the page (see its own docstring for
+    #652 round 12's ruling). Such a page ships UNVERIFIED, which is what the
+    banner, the retained notice and the unchanged ERROR status say; #707
+    measures how often a short layer is actually wrong.
     """
     from socr.core.born_digital import text_layer_trusted
 

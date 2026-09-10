@@ -428,3 +428,51 @@ live only on the new path.
 `test_a_pure_prose_scan_ships_its_own_layer_not_the_models`: both halves
 together, because either alone is a defect — the page's paragraphs come back
 AND the model's wording still does not.
+
+## Round 12 — the page's characters are content, not syntax
+
+Astra's closing review of round 11 accepted the retention fix and reproduced
+one remaining defect in it. `_escaped_native_line` escaped the pipe and
+nothing else, so a lane that promises literal native lines was still handing
+the page's characters structural meaning: a native `<!--` line turned the
+sentence after it into an HTML comment — invisible to a reading consumer,
+which is the silent loss this whole ticket is about — and `# Literal heading
+marker` rendered as an `<h1>`. Neither is a route back to model prose; both
+are socr inventing a construct the page never authored.
+
+The body is now escaped character by character, against two named sets with
+the construct each character would otherwise open: `\` ` * _ [ < & | ~`
+anywhere in a line, and `# > - + =` as a line's first character. Every one is
+ASCII punctuation, so a backslash is the CommonMark literal form and
+markdown-it-py — already a dependency, and the renderer Astra reproduced
+through — honours it. `_band_line` strips each line, so there is no leading
+whitespace to count and no indented-code case. An ordered marker (`1.`) needs
+no rule and the comment says why: it is digit-bearing, and at the shipping
+`row_shape_min` of 1 an all-prose page carries no printed digit at all.
+
+No existing escaper was reused. The nearest thing in the tree is #369's
+`fence_chart_axis_residue`, which wraps axis residue in an HTML comment — the
+opposite operation, hiding content from a renderer rather than making it
+visible. Nothing in `assembly` or `figures` escapes literal content, and
+markdown-it-py ships a parser, not an escaper. What went in is one small
+function with the table of characters it handles.
+
+socr's banner, the table-unverified notice and the image reference are
+assembled outside the literal body and never pass through the escaper — an
+escaped image reference would stop being an image. Pinned, along with a
+rendered-output check through the installed renderer, and finalization byte
+identity for the escaped body on a first run and on a resumed one.
+
+**Short layers, ruled rather than papered over.** `text_layer_trusted`
+abstains below 20 alpha tokens and returns True. Astra's ruling: such a page
+IS published, unverified, when no actual disqualifier fires — refusing solely
+because a layer is short would recreate an avoidable loss without buying
+better evidence. The boolean therefore means *eligible for flagged native
+retention*, never *verified*; on a short layer it says only that nothing
+disqualifying was found, not that anything was checked. Recorded in the
+function's own docstring. #707 measures short-layer error rates.
+
+One round-11 residual is retired rather than carried: the two lanes judge
+different reconstructions of the same words, and Astra showed that does not
+matter, because both disqualifiers are token-local or count-based. Pinned by
+reversing the word list and asserting both verdicts are unchanged.
