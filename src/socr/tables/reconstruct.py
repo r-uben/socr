@@ -661,12 +661,18 @@ def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[fl
     3. **Found.** Recurring positions are taken in order of decreasing
        occupancy (ties by x) and each founds a lane unless it is within
        ``_LANE_X_TOL_PT`` of one already founded AND does not CO-OCCUR with it:
-       two recurring positions carrying distinct numerals on the same band, on
-       at least ``_MIN_TABLE_ROWS`` bands, are separate columns by direct
-       evidence whatever their x distance, because one column cannot hold two
-       cells of the same row. Co-occurrence therefore overrides the tolerance;
-       without that, two genuine columns printed 5pt apart merged into one
-       centre on eighteen dense rows.
+       two recurring positions carrying distinct numerals on the same band are
+       separate columns by direct evidence whatever their x distance, because
+       one column cannot hold two cells of the same row. Co-occurrence
+       therefore overrides the tolerance; without that, two genuine columns
+       printed 5pt apart merged into one centre on eighteen dense rows.
+
+       Co-occurrence carries NO count of its own -- one shared band already
+       settles the question. Requiring it to recur over ``_MIN_TABLE_ROWS``
+       bands divides a column's evidence exactly the way step 1's rounding
+       can: a column whose anchor jitters across the boundary is two positions
+       sharing the neighbour's rows between them, and neither half reaches the
+       count even when four rows carry a cell in both columns.
     4. **Assign.** Every other x joins the nearest centre within the tolerance
        (ties by lane order); an x within reach of no centre is dropped and
        contributes to no row's lane set.
@@ -695,7 +701,7 @@ def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[fl
                 together[(a, b)] = together.get((a, b), 0) + 1
 
     def _distinct_columns(a: float, b: float) -> bool:
-        return together.get((a, b) if a < b else (b, a), 0) >= _MIN_TABLE_ROWS
+        return together.get((a, b) if a < b else (b, a), 0) > 0
 
     centres: list[float] = []
     for pos in sorted(recurring, key=lambda seed: (-len(bands_at[seed]), seed)):

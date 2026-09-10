@@ -272,6 +272,72 @@ Every other verdict is unchanged, including the ticket page (False), ECB
 p2/p3 and the annex pages (False, prose -- Astra rendered all three and
 retracted the coverage claim).
 
+## Round 5: co-occurrence carries no count
+
+Round 4's co-occurrence override required the sharing to recur over
+`_MIN_TABLE_ROWS` bands. Astra showed that this count divides a column's
+evidence exactly the way step 1's rounding can, so the fix and the defect
+cancel out.
+
+The reproduction has six rows, the first two carrying only the first column and
+the last four dense. The first column sits at x=12.49 with a tight neighbour at
+17.49. Move alternate first-column cells 0.02pt, to 12.51, and the column
+becomes two rounded positions of three bands each. Position 17 has four and
+founds first; each half then co-occurs with it on only two of the four dense
+rows, below the count, so both halves are suppressed and assigned to 17. One
+lane, gate closed, truncation missed:
+
+```
+fixed:  {12.49: 0, 17.49: 1}            gate=True,  truncated=True
+jitter: {12.49: 0, 12.51: 0, 17.49: 0}  gate=False, truncated=False
+```
+
+The fix is to drop the count. One band holding two distinct numerals already
+settles that two columns exist, because a column holds one cell per row; there
+is nothing a second and third such band add. With `> 0`, each half of the
+jittered column is distinct from 17 and founds its own centre, and the two
+halves -- which never share a band -- merge with each other under the
+tolerance. That is the intended reading of the geometry, and it needs no
+constant.
+
+### Why the prescribed reordering was not used
+
+The instruction was to chain by tolerance first and partition each chained
+group by co-occurrence afterwards, so that a column's jittered halves are never
+separated in the first place. I implemented that and measured it: it reopens
+the gate on the three pages round 4 closed and Astra visually confirmed as
+non-tables.
+
+| page | required | chain-then-partition | this change |
+| --- | --- | --- | --- |
+| boe-meetings-2018 p2 | False | True (6 lanes, 3 wide bands) | False |
+| boe-meetings-2018 p3 | False | True (8 lanes, 6 wide bands) | False |
+| ecb-reports-2000 p3 | False | True (3 lanes, 3 wide bands) | False |
+
+The cause is not the partitioning but the membership rule it implies. Chaining
+first maps EVERY position into a lane, so scattered prose and chart-axis
+numerals accumulate into chained lanes whose union recurrence then passes the
+GH-248 column-like test -- the scatter problem GH-248 exists to prevent. Round
+4's structure drops positions that do not themselves recur, which is what keeps
+those pages closed.
+
+Since the pins were binding and the one-line change satisfies every reproducer
+including the jitter case, I kept round 4's structure and removed the count.
+The 45-page table is byte-identical to round 4's, so the three pages stay
+closed, the ticket page stays closed and ECB p2/p3 stay open.
+
+### Recorded scope limitation: citation rows
+
+Astra's second probe stands and is deliberately not fixed here. Three ordinary
+numbered source citations on a text page -- markers at one x, years at another
+-- are three bands populating two recurring lanes, which is all the gate asks
+of a page, so a text table sharing the page with them is exposed to term (b)
+again. The citations are not part of the candidate's table; page-wide alignment
+does not establish that they are. This predates the gate, and narrowing it needs
+the region of the candidate's own table, which term (b) does not have. Pinned as
+a limitation by `test_citation_rows_on_a_text_page_are_a_known_scope_limitation`
+so any future change to it is deliberate.
+
 ## Residuals
 
 - **The gate's per-page verdicts over the census corpus** are tabulated in the
@@ -323,3 +389,16 @@ retracted the coverage claim).
 - Co-occurrence is counted between recurring positions only. A column that
   recurs and one that does not can still be merged; the non-recurring one
   contributes no lane of its own by design.
+
+### Round-5 residuals
+
+- **The rounding boundary still bounds recurrence, not merging.** A position
+  must occupy `_MIN_TABLE_ROWS` bands on its own to found a lane, so a column
+  with fewer than six rows whose anchor jitters across a whole-point boundary
+  can split into two halves that each fall below the count and found nothing.
+  Astra's fixture survives because each half has exactly three. Fixing that
+  needs the chain-first membership rule, which the measurement above rejects
+  for a different reason.
+- The gate remains page-wide, so any three aligned numeric bands anywhere on
+  the page arm term (b) for a candidate whose own table is elsewhere. The
+  citation case above is the measured instance.

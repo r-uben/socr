@@ -603,3 +603,115 @@ def test_real_boe_2018_chart_pages_close_the_gate() -> None:
         assert drawings, "these pages carry vector charts"
         assert "|" not in text, "and no table"
         assert _native_page_has_column_lanes(words) is False
+
+
+# ---------------------------------------------------------------------------
+# Astra's round-4 counterexample: half-point jitter across the rounding boundary
+# ---------------------------------------------------------------------------
+#
+# Round 4 required two positions to co-occur on _MIN_TABLE_ROWS bands before
+# the tolerance would stop merging them. That count divides one column's
+# evidence exactly the way the quantisation does: a column whose anchor jitters
+# across the rounding boundary is two positions, and each half co-occurs with
+# the neighbouring column on only half of the shared rows. Co-occurrence needs
+# no count -- one band holding two distinct numerals already settles that one
+# column cannot hold both, because a column holds one cell per row.
+
+
+def _jittered_tight_columns(*, jitter: bool) -> list[tuple]:
+    """Astra's geometry: six rows, the first two carrying only the first
+    column, the last four dense. The first column sits at x=12.49 and its tight
+    neighbour at x=17.49, with 2pt boxes. With *jitter*, alternate first-column
+    cells move 0.02pt to 12.51 -- across the whole-point rounding boundary.
+    """
+    _, _, original = _sparse_prefix_fixture()
+    words = []
+    for x0, y0, x1, y1, text in [w for w in original if w[1] < 120]:
+        if text.isdigit():
+            if x0 == 12:
+                x0 = 12.51 if jitter and int(y0 / 20) % 2 else 12.49
+            else:
+                x0 = 17.49
+            x1 = x0 + 2
+        words.append((x0, y0, x1, y1, text))
+    return words
+
+
+def test_jittered_column_halves_share_a_lane_with_its_neighbour_split() -> None:
+    """The lane mapping itself: the two halves of the jittered column land in
+    one lane, and the tight neighbour keeps its own.
+    """
+    from socr.tables.reconstruct import _seeded_lane_of
+
+    words = _jittered_tight_columns(jitter=True)
+    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    lanes = _seeded_lane_of(nums, sorted({x for x, _ in nums}))
+
+    assert lanes[12.49] == lanes[12.51], "one printed column, two rounded positions"
+    assert lanes[17.49] != lanes[12.49], "the neighbour shares four rows, so it is a column"
+
+
+def test_half_point_jitter_preserves_shortfall() -> None:
+    """Astra reproducer 8, as a difference: the 0.02pt move must not change
+    whether the truncation is caught.
+    """
+    _, truncated, _ = _sparse_prefix_fixture()
+
+    fixed = _jittered_tight_columns(jitter=False)
+    jittered = _jittered_tight_columns(jitter=True)
+
+    assert _native_page_has_column_lanes(fixed) is True
+    assert _native_page_has_column_lanes(jittered) is True
+    assert table_truncated(truncated, fixed) == table_truncated(truncated, jittered) is True
+
+
+def test_one_shared_band_is_enough_to_split_two_positions() -> None:
+    """Co-occurrence carries no count of its own.
+
+    Two recurring positions inside the merge tolerance that share a single
+    band are already two columns; requiring the sharing to recur is what lost
+    the jittered column above.
+    """
+    from socr.tables.reconstruct import _seeded_lane_of
+
+    words: list[tuple] = []
+    for i in range(4):  # four bands, both positions, but only one shared band
+        words.append((10.0, 20.0 * i, 12.0, 20.0 * i + 10.0, str(i)))
+    for i in range(4, 8):
+        words.append((14.0, 20.0 * i, 16.0, 20.0 * i + 10.0, str(i)))
+    words.append((14.0, 0.0, 16.0, 10.0, "9"))  # the single shared band
+
+    nums = [(w[0], round(w[1])) for w in words]
+    lanes = _seeded_lane_of(nums, sorted({x for x, _ in nums}))
+    assert abs(14.0 - 10.0) < 6.0, "inside the merge tolerance"
+    assert lanes[10.0] != lanes[14.0]
+
+
+def test_citation_rows_on_a_text_page_are_a_known_scope_limitation() -> None:
+    """DOCUMENTED LIMITATION, deliberately pinned rather than fixed (#703).
+
+    The gate asks its question of the WHOLE page. Three ordinary numbered
+    source citations -- markers at one x, years at another -- are three bands
+    populating two recurring lanes, which is all the gate asks for, so a text
+    table sharing the page with them is once again exposed to term (b). The
+    citations are not part of the candidate's table, and page-wide alignment
+    does not establish that they are.
+
+    This predates the gate (the same citations qualified under every revision)
+    and narrowing it needs the region of the candidate's own table, which this
+    change does not have. Recorded so the limitation is visible and any future
+    change to it is deliberate.
+    """
+    assert table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS) is False
+
+    citations: list[tuple] = []
+    for i in range(3):
+        y = 400.0 + 20.0 * i
+        citations += [
+            (50.0, y, 55.0, y + 10.0, str(i + 1)),
+            (65.0, y, 140.0, y + 10.0, "Source citation"),
+            (180.0, y, 200.0, y + 10.0, str(2016 + i)),
+        ]
+
+    assert _native_page_has_column_lanes(TEXT_TABLE_WORDS + citations) is True
+    assert table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS + citations) is True
