@@ -741,6 +741,27 @@ def _starts_in_a_lane(x0: float, lanes: tuple[tuple[float, float], ...]) -> bool
     return any(low <= x0 <= high for low, high in lanes)
 
 
+def _band_center(band: list[dict]) -> float:
+    """The vertical center of a baseline band, averaged over its own lines."""
+    return sum((it["y0"] + it["y1"]) / 2.0 for it in band) / len(band)
+
+
+def _run_row_pitch(bands: list[list[dict]], start: int, end: int) -> float | None:
+    """The largest vertical step between two CONSECUTIVE rows the run accepted.
+
+    The run's own row spacing, measured from the run itself -- not a constant
+    and not a tolerance. It is the yardstick for "the next band down is the
+    next row of this list": a band further from the run's edge than the run's
+    own widest row step is separated from it by something, most obviously the
+    blank space that ends the list. ``None`` when the run is a single band and
+    has no step to measure.
+    """
+    centers = [_band_center(band) for band in bands[start : end + 1]]
+    if len(centers) < 2:
+        return None
+    return max(b - a for a, b in zip(centers, centers[1:]))
+
+
 def _try_aligned_run(
     items: list[dict],
     word_space_width: float,
@@ -1101,10 +1122,14 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                 "run_id": run_id,
             }
         ]
-        lanes = _run_column_lanes([it for band in bands[start : end + 1] for it in band])
-        if lanes is not None:
-            for first, step in ((start - 1, -1), (end + 1, 1)):
+        run_items = [it for band in bands[start : end + 1] for it in band]
+        lanes = _run_column_lanes(run_items)
+        pitch = _run_row_pitch(bands, start, end)
+        adopted: list[dict] = []
+        if lanes is not None and pitch is not None:
+            for first, step, edge in ((start - 1, -1, start), (end + 1, 1, end)):
                 index = first
+                edge_center = _band_center(bands[edge])
                 while 0 <= index < len(bands):
                     picked = [
                         it
@@ -1114,6 +1139,19 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                         and _starts_in_a_lane(it["x0"], lanes)
                     ]
                     if not picked:
+                        break
+                    center = _band_center(bands[index])
+                    if abs(center - edge_center) > pitch:
+                        break
+                    if (
+                        _try_aligned_run(
+                            run_items + adopted + picked,
+                            word_space_width,
+                            ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+                            word_width,
+                        )
+                        is None
+                    ):
                         break
                     for it in picked:
                         claimed[(it["bi"], it["li"])] = run_id
@@ -1125,6 +1163,8 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                                 "text": it["text"],
                             }
                         )
+                    adopted.extend(picked)
+                    edge_center = center
                     index += step
         group_members[run_id] = members
 

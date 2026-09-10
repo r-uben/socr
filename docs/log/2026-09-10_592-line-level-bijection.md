@@ -432,3 +432,88 @@ Both reviewer files pass in full: `test_astra_592b.py` 5/5, `test_astra_592c.py`
   without a reproducer.
 - The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0); see the
   round-3 correction above.
+
+## Round 5 — an adopted band must pass as a row of that run (Astra re-review of df45222)
+
+### The finding
+
+Round 4 admitted a declined band on lane membership plus band reachability. Astra reproduced
+the hole on a real fitz page with no resegmentation: a roster at y≈100, then two independent
+paragraphs at y=250 starting at the roster's exact two lane x-starts. The blank gap between
+them holds no baseline band, so nothing stopped the outward walk; it adopted all six prose
+lines one at a time and interleaved them. The point is general — adopting lines individually
+bypasses the very guards that declined their paragraph, and x-start plus reachability is not
+evidence of association.
+
+### Change
+
+Adoption now requires the candidate band to pass as another row of that run, on the run's own
+terms. Walking outward one band at a time, a band is adopted only if **both**:
+
+1. **Pitch bound.** Its vertical step from the last adopted edge is no larger than the largest
+   step between consecutive rows INSIDE the run (`_run_row_pitch`). The run's own row spacing,
+   measured from the run — not a constant.
+2. **The run's own guards.** `_try_aligned_run` re-run on the run's accepted items plus
+   everything adopted so far plus this band's lane lines must still return a merge. This is
+   the identical predicate the search applied, not a reimplementation of "roster shape", so it
+   introduces nothing new: bijection, gap, `LABEL_COLUMN_WIDTH_SHARE`, `MEASURE_FILL_SHARE_MAX`.
+
+The walk stops at the first band failing either. Both fail closed to block order.
+
+### Measurements — one document changes, and it changes for the worse
+
+Fed byte-diff against df45222, first four pages of six documents: **five are byte-identical;
+1990-11-13 p1 changes.** The three "Alternate Members" rows are no longer adopted and revert
+to block order — three bare `Mr.` lines, then the merged run, then `Kohn, Secretary and
+Economist` / `Bernard, Assistant Secretary` / `Gillum, Deputy Assistant Secretary`. No token is
+lost; each label is separated from its name.
+
+Measured cause, on the real page: that band clears the pitch bound (step 12.12 against a run
+pitch of 12.34) and is refused by condition (2). Appending `Gillum, Deputy Assistant Secretary`
+takes the value column's fill share from **0.50 to 0.60** against `MEASURE_FILL_SHARE_MAX`
+= 0.5, with the run itself sitting exactly on the boundary. The wrapped-body-prose
+discriminator misfires on this genuine sub-list — the same misfire already recorded as an
+accepted residual in the round-2 log, and the same reason `_find_aligned_runs` declines the
+7-row window itself.
+
+**This is a real regression against df45222 on that page, not a neutral restriction.** It is
+the price of refusing to adopt on evidence weaker than the run's own guards. The pin
+`test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels` still asserts the
+CORRECT output and is now marked `xfail(strict=True)` with that reasoning, so the loss is
+surfaced as a tracked known defect and the test fails loudly the day the fill-share guard stops
+misfiring. It was not rewritten to bless the wrong output. Fixing it properly means revisiting
+`MEASURE_FILL_SHARE_MAX`, not loosening adoption.
+
+Burns is unaffected: 1977-11-15's band 8 clears the pitch bound (step 12.36, pitch 12.50) and
+its lane subset passes the guards.
+
+Full suite: 4623 passed, 5 xfailed. `uvx ruff@0.16.0 format --check .` clean. Reviewer probe
+files: 592b 5/5, 592c 2/2, 592d 1/1.
+
+### Both conditions are witnessed
+
+Each was checked by deleting it from a copy of the source and re-running:
+
+- Deleting the **guard** condition makes 1990's rows adopted again, so the strict xfail XPASSes
+  and fails. Also pinned directly and measured on the real page by
+  `test_1990_gillum_band_clears_the_pitch_bound_but_the_runs_guards_refuse_it`.
+- Deleting the **pitch** condition breaks
+  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused`: a second label/name
+  pair 250pt below the roster, at its exact lane starts, carrying an out-of-lane marker in its
+  row. The marker is what stops `_find_aligned_runs` from absorbing the pair into the run
+  itself, while the adoption walk's lane filter drops it — so the pair's lane subset genuinely
+  satisfies the guards and only the pitch bound refuses it.
+
+That second construction also shows why the pitch bound is hard to witness in general: a band
+the guards would accept is normally absorbed into the run by the search before adoption is ever
+consulted. It bites only where something the lane filter discards blocked that absorption.
+
+### Residuals
+
+- **1990-11-13's three Alternate-Members rows are lost to block order** (above). Tracked as a
+  strict xfail; the underlying cause is `MEASURE_FILL_SHARE_MAX`, outside this ticket.
+- A degenerate lane admits only one exact x, so start jitter fails closed. Unmeasured against a
+  corpus. Unchanged from round 4.
+- Groups still emit atomically at their first member in block order; the within-row sort still
+  assumes left-to-right. Both unchanged and still without reproducers.
+- The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).

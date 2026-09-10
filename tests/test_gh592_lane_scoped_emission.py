@@ -23,6 +23,8 @@ from __future__ import annotations
 from copy import deepcopy
 
 import fitz
+import pytest
+from test_born_digital_aligned_runs import _FED_1990_11_13_MINUTES
 from test_born_digital_aligned_runs import _build_attendee_list_page
 from test_gh592_scoped_positional_emission import _add_prose_columns, _prose_lines
 
@@ -192,3 +194,181 @@ def test_lane_match_across_an_intervening_row_does_not_travel_with_the_run():
     merged = next(i for i, line in enumerate(lines) if line.startswith("Mr. Angell"))
 
     assert merged < intervening < stray, lines
+
+
+def test_lane_aligned_paragraphs_are_not_interleaved(monkeypatch):
+    """GH-592 round 5 (Astra re-review of df45222): the reviewer's reproducer.
+
+    Two independent paragraphs begin far below a roster, at the roster's exact
+    two lane x-starts. Under round 4 the outward walk crossed the blank gap --
+    which holds no baseline band, so nothing stopped it -- and adopted all six
+    prose lines one at a time, interleaving them. Adopting lines individually
+    bypasses the very guards that declined their paragraph.
+
+    The monkeypatch only observes the real search's return value and passes it
+    through unchanged, to prove the prose is genuinely NOT in an accepted run.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    label = "Representative"
+    left = 90
+    right = (
+        left
+        + fitz.get_text_length(label, fontsize=10)
+        + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(left, 100, right - 2, 200), "\n".join([label] * 3), fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 595, 200),
+        "Michael Andrew Rutherford\nJonathan Edward Alexander\n"
+        "Christopher James Montgomery, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    page.insert_textbox(
+        fitz.Rect(left, 250, right - 5, 350), "LEFT one\nLEFT two\nLEFT three", fontsize=10
+    )
+    page.insert_textbox(
+        fitz.Rect(right, 250, 590, 350),
+        "RIGHT first independent paragraph line\nRIGHT second independent paragraph line\n"
+        "RIGHT third independent paragraph line",
+        fontsize=10,
+    )
+
+    accepted: list[str] = []
+    original = bd._find_aligned_runs
+
+    def record(*args):
+        result = original(*args)
+        accepted.extend(text for _start, _end, texts in result for text in texts)
+        return result
+
+    monkeypatch.setattr(bd, "_find_aligned_runs", record)
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None
+    assert accepted and not any("LEFT" in s or "RIGHT" in s for s in accepted), (
+        "the prose must be declined by the run search itself, or this proves nothing"
+    )
+    baseline = [
+        line for line in page.get_text("text").splitlines() if line.startswith(("LEFT", "RIGHT"))
+    ]
+    actual = [line for line in out.splitlines() if line.startswith(("LEFT", "RIGHT"))]
+    assert len(baseline) == 6
+    assert actual == baseline
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
+def test_1990_gillum_band_clears_the_pitch_bound_but_the_runs_guards_refuse_it():
+    """The measured case that isolates the second condition from the first.
+
+    On 1990-11-13 p1 the band holding ``Mr.`` / ``Gillum, Deputy Assistant
+    Secretary`` sits one row-pitch above the second run and starts in both of
+    its lanes, so it passes the pitch bound. It is refused because appending it
+    takes the value column's fill share from 0.50 to 0.60 against
+    ``MEASURE_FILL_SHARE_MAX`` -- the run's own wrapped-body-prose
+    discriminator. Pitch alone would have adopted it.
+
+    This is the trade-off recorded on
+    ``test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels``:
+    the guard misfires on this genuine sub-list, so refusing the band costs
+    that page three correctly-paired rows. Pinned here so the cost is measured
+    and visible, not inferred.
+    """
+    page = fitz.open(str(_FED_1990_11_13_MINUTES))[0]
+    words = page.get_text("words")
+    word_space_width = bd._median_word_space_width(words)
+    word_width = bd._median_word_width(words) or 0.0
+    extents = bd._line_word_extents(words)
+
+    flat = []
+    blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type", 0) == 0]
+    for bi, block in enumerate(blocks):
+        for li, line in enumerate(block.get("lines", []) or []):
+            bbox = line.get("bbox")
+            extent = extents.get((bi, li))
+            if not bbox or extent is None:
+                continue
+            flat.append(
+                {
+                    "bi": bi,
+                    "li": li,
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": extent[0],
+                    "x1": extent[1],
+                    "text": "".join(s.get("text", "") for s in line.get("spans", []) or []),
+                }
+            )
+    flat.sort(key=lambda it: it["y0"])
+    bands = bd._line_baseline_bands(flat)
+    runs = bd._find_aligned_runs(bands, word_space_width, word_width)
+
+    start, end, _merged = runs[-1]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    pitch = bd._run_row_pitch(bands, start, end)
+
+    candidate = bands[start - 1]
+    picked = [it for it in candidate if bd._starts_in_a_lane(it["x0"], lanes)]
+    step = abs(bd._band_center(candidate) - bd._band_center(bands[start]))
+
+    assert any("Gillum" in it["text"] for it in picked), [it["text"] for it in candidate]
+    assert step <= pitch, "the band is one row-pitch away; the pitch bound does NOT refuse it"
+    assert (
+        bd._try_aligned_run(
+            run_items + picked,
+            word_space_width,
+            bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+            word_width,
+        )
+        is None
+    ), "the run's own guards must be what refuses this band"
+
+
+def test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused():
+    """The witness for the pitch bound, isolated from the guard condition.
+
+    A second label/name pair sits 250pt below the roster, at the roster's exact
+    lane starts, and carries an extra out-of-lane marker in its row. The marker
+    is what stops ``_find_aligned_runs`` from absorbing the pair into the run
+    itself, and the adoption walk's lane filter drops it -- so the pair's lane
+    subset DOES satisfy the run's own guards. Only the pitch bound refuses it:
+    it is 250pt from the run's edge against a measured row pitch of ~15pt.
+
+    Without this bound the far pair would be hoisted up beside the roster,
+    which is the shape Astra's paragraph reproducer generalises.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(90, 104, 130, 260), "Mr.\nMr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 104, 560, 260),
+        "Angell\nGuffey\nSeger\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(60, 400, 80, 470), "1\n2", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 400, 130, 470), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 400, 560, 470), "Volcker\nPartee", fontsize=10)
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert "Mr. Volcker" not in lines, (
+        "the far pair must not be merged into the run it is 250pt away from"
+    )
+    assert lines.index("1") < lines.index("Volcker"), lines
+    assert lines.index("Mr. Corrigan, Vice Chairman of the Committee") < lines.index("1"), lines
