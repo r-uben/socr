@@ -715,3 +715,97 @@ def test_citation_rows_on_a_text_page_are_a_known_scope_limitation() -> None:
 
     assert _native_page_has_column_lanes(TEXT_TABLE_WORDS + citations) is True
     assert table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS + citations) is True
+
+
+# --- round 6: the rounding bin splits a SHORT column in half ----------------
+#
+# Round 5 rejoined the halves through the neighbour: the three-row half founds
+# a lane and the two-row half joins it. On a four-row grid split 2/2 neither
+# half reaches _MIN_TABLE_ROWS, so neither founds anything, both are assigned
+# to the neighbour, and the gate closes on a genuine numeric table. Positions
+# whose ORIGINAL x coordinates span at most one rounding bin and whose bands
+# are disjoint are now merged before the recurrence minimum is applied, so the
+# column is qualified by the union of its halves.
+
+
+def _short_jittered_grid(rows: int, *, jitter: bool) -> list[tuple]:
+    """Astra's 703e geometry: *rows* rows of a two-column numeric grid, the
+    first column alternating between x=12.49 and x=12.51 under *jitter*, the
+    second fixed at x=17.49. Boxes are 2pt wide and never overlap.
+    """
+    words: list[tuple] = []
+    for i in range(rows):
+        x = 12.51 if jitter and i % 2 else 12.49
+        words.append((0.0, i * 20.0, 8.0, i * 20.0 + 10.0, f"Item{i}"))
+        words.append((x, i * 20.0, x + 2.0, i * 20.0 + 10.0, str(10 + i)))
+        words.append((17.49, i * 20.0, 19.49, i * 20.0 + 10.0, str(20 + i)))
+    return words
+
+
+_SHORT_GRID_TRUNCATED = (
+    "| Item | A | B |\n| --- | --- | --- |\n| Item0 | 10 | 20 |\n| Item1 | 11 | 21 |\n"
+)
+
+
+@pytest.mark.parametrize("rows", [4, 5])
+def test_short_jittered_grid_keeps_its_truncation_guard(rows: int) -> None:
+    """Astra reproducer 703e, as a difference: moving alternate cells by
+    0.02pt must not change whether the two-row truncation is caught. The
+    five-row case passed at round 5; the four-row case is the round-6 fix.
+    """
+    fixed = _short_jittered_grid(rows, jitter=False)
+    jittered = _short_jittered_grid(rows, jitter=True)
+
+    assert _native_page_has_column_lanes(fixed) is True
+    assert _native_page_has_column_lanes(jittered) is True
+    assert table_truncated(_SHORT_GRID_TRUNCATED, fixed) is True
+    assert table_truncated(_SHORT_GRID_TRUNCATED, jittered) is True
+
+
+def test_split_halves_merge_only_within_the_rounding_bin() -> None:
+    """The span bound is the rounding bin, not the merge tolerance.
+
+    Two positions 0.02pt apart across the boundary are one column; two
+    positions 3pt apart -- well inside ``_LANE_X_TOL_PT``, well outside the
+    bin -- are not merged by this step, which is what keeps the three
+    inspected non-table pages closed.
+    """
+    from socr.tables.reconstruct import _ROUNDING_BIN_PT, _seeded_lane_of
+
+    assert _ROUNDING_BIN_PT == 1.0
+
+    words = _short_jittered_grid(4, jitter=True)
+    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    lanes = _seeded_lane_of(nums, sorted({x for x, _ in nums}))
+    assert lanes[12.49] == lanes[12.51], "one column split by the rounding bin"
+    assert lanes[17.49] != lanes[12.49]
+
+    spread: list[tuple] = []
+    for i in range(4):
+        x = 15.0 if i % 2 else 12.0  # 3pt apart: inside the tolerance, outside the bin
+        spread.append((x, i * 20.0, x + 2.0, i * 20.0 + 10.0, str(10 + i)))
+    nums = [(w[0], round(w[1])) for w in spread]
+    lanes = _seeded_lane_of(nums, sorted({x for x, _ in nums}))
+    assert lanes == {}, "two sub-recurring positions 3pt apart found no lane"
+
+
+def test_lane_seeding_is_independent_of_word_order() -> None:
+    """The grouping is deterministic: shuffling the input words changes
+    neither the lane mapping nor the gate.
+    """
+    import random
+
+    from socr.tables.reconstruct import _seeded_lane_of
+
+    words = _short_jittered_grid(4, jitter=True) + _jittered_tight_columns(jitter=True)
+    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    xs = sorted({x for x, _ in nums})
+    baseline = _seeded_lane_of(nums, xs)
+    gate = _native_page_has_column_lanes(words)
+
+    for seed in range(5):
+        shuffled_words = list(words)
+        random.Random(seed).shuffle(shuffled_words)
+        shuffled = [(w[0], round(w[1])) for w in shuffled_words if w[4].isdigit()]
+        assert _seeded_lane_of(shuffled, sorted({x for x, _ in shuffled})) == baseline
+        assert _native_page_has_column_lanes(shuffled_words) is gate

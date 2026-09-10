@@ -392,7 +392,8 @@ so any future change to it is deliberate.
 
 ### Round-5 residuals
 
-- **The rounding boundary still bounds recurrence, not merging.** A position
+- **CLOSED in round 6.** The rounding boundary still bounds recurrence, not
+  merging. A position
   must occupy `_MIN_TABLE_ROWS` bands on its own to found a lane, so a column
   with fewer than six rows whose anchor jitters across a whole-point boundary
   can split into two halves that each fall below the count and found nothing.
@@ -402,3 +403,71 @@ so any future change to it is deliberate.
 - The gate remains page-wide, so any three aligned numeric bands anywhere on
   the page arm term (b) for a candidate whose own table is elsewhere. The
   citation case above is the measured instance.
+
+## Round 6 — rejoin the halves the rounding bin split
+
+Astra (703e) reproduced the round-5 residual as a real loss, not a theoretical
+one: a genuine four-row, two-column numeric grid whose first column alternates
+between x=12.49 and x=12.51. Neither rounded half occupies `_MIN_TABLE_ROWS`
+bands, so neither founds a lane, both are assigned to the neighbouring column,
+the gate closes, and a two-row truncation of that grid passes term (b)
+unchallenged. The five-row 3/2 case passes at round 5 because one half still
+reaches three bands; the four-row 2/2 case has no such half. This is a
+four-row table, not a source below the three-row evidence minimum.
+
+**The rule, in one sentence:** before recurrence is tested, a position under
+the minimum joins a group whose members' *original* x coordinates span at most
+one rounding bin and whose bands are disjoint from its own, and the group's
+union then qualifies the seed; seeds, the co-occurrence override and the
+drop-non-recurring rule are unchanged.
+
+`_ROUNDING_BIN_PT` is derived from the same `round` call step 1 already uses
+(adjacent quantised positions differ by exactly one point) rather than written
+as a literal. It is still an explicit span boundary and is named as one in the
+code; calling it threshold-free would be dishonest.
+
+### Why the bin and not the merge tolerance
+
+Astra measured both grouping widths by monkeypatch, and the broad one fails:
+
+| Grouping width | Four-row jitter fixed | BoE 2018 p2 | BoE 2018 p3 | ECB 2000 p3 |
+| --- | --- | --- | --- | --- |
+| none (round 5) | no | False | False | False |
+| `_LANE_X_TOL_PT` (6pt) | yes | False | **True** | **True** |
+| one rounding bin (1pt) | yes | False | False | False |
+
+Grouping inside the 6pt tolerance distributes scattered positions across the
+tolerance and reopens two pages that were rendered and visually confirmed to be
+prose with vector charts (BoE 2018 p2/p3) and an imprint block (ECB 2000 p3).
+Both prototypes were re-measured on the shipped code; the shipped narrow
+version reproduces the third row.
+
+### Corpus
+
+The 45-page gate verdicts are unchanged from rounds 4 and 5: True on
+boe-speeches-2006 p2, boe-speeches-2019 p2, boe-speeches-2023 p2,
+ecb-meetings-2021 p1-3, ecb-reports-2003 p1-3, ecb-reports-2012 p2-3,
+ecb-speeches-2025 p1-2, ecb-surveys-2013 p1-3, ecb-surveys-2018 p1-3; False on
+every other page, including the ticket page (boe-meetings-2018 p1) and the
+three inspected non-tables.
+
+The internal lane counts are *not* identical, which is expected: merging split
+halves raises the lane count on five pages (BoE 2018 p2 2->3, ECB 2003 p2
+21->22, ECB 2012 p1 0->1 and p3 3->5) and lowers the wide-row count on one
+(ECB surveys 2013 p1 15->14). No page crosses the gate.
+
+### Round-6 residuals
+
+- **The round-5 residual is closed** for columns split by the rounding bin. A
+  column whose anchor drifts by *more* than one point between rows is still
+  two positions and still relies on a neighbour to rejoin them.
+- **Disjointness is required, so a column that genuinely repeats a band cannot
+  merge.** Two positions of one printed column that both carry a numeral on the
+  same band are treated as two columns; that is the same evidence the
+  co-occurrence override uses, and it is deliberate.
+- **The gate remains page-wide.** The citation-rows case
+  (`test_citation_rows_on_a_text_page_are_a_known_scope_limitation`) is
+  unchanged and remains a recorded scope limitation, not a fix.
+- **#643 / A1b (`manifest._row_shape_reconciliation_ok`) are still untouched**,
+  as are the judge-timeout and end-to-end BoE acceptance questions. Nothing
+  here claims the BoE page ships.

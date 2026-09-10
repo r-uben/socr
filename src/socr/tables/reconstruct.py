@@ -89,6 +89,13 @@ _MIN_DATA_ROW_FRAC = 0.5
 _LANE_X_TOL_PT = 6.0  # numeric tokens within this x distance share a lane
 _MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes
 _MIN_TABLE_ROWS = 3  # and there must be this many such rows
+
+# Width of the bin that ``round`` maps an x into: adjacent quantised positions
+# differ by exactly this, so two raw coordinates further apart than this were
+# never separated by the rounding alone. Derived from the same rounding call
+# rather than written as a literal -- but it IS an explicit span boundary, and
+# is named as one: the rounding-bin width, not a threshold-free quantity.
+_ROUNDING_BIN_PT = float(round(1.0)) - float(round(0.0))
 # A running-head row swept in from the page margin reads like a journal/volume
 # line. Matched with OCR tolerance because older PDFs carry corrupted text layers
 # (observed "Joumal" for "Journal", "(/997)" for "(1997)"): journal-name tokens
@@ -652,6 +659,18 @@ def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[fl
        rounding the band key already applies to y. Sub-point extraction jitter
        within one printed column therefore lands on one position; anything
        coarser is left to step 3's tolerance.
+    1b. **Rejoin the halves the rounding split.** Jitter of a hundredth of a
+       point across a bin BOUNDARY (12.49 / 12.51) lands one printed column on
+       two positions and halves its evidence, so a four-row column can leave
+       neither half on ``_MIN_TABLE_ROWS`` bands and found nothing. Before
+       qualifying, a position under the minimum joins a group whose members'
+       ORIGINAL x coordinates span at most ``_ROUNDING_BIN_PT`` -- one point,
+       the rounding-bin width, an explicit span boundary and the same quantity
+       step 1 already uses -- and whose bands are DISJOINT from its own: same
+       column, different rows. The group's union then qualifies the seed.
+       Grouping instead within ``_LANE_X_TOL_PT`` was measured and rejected:
+       it distributes scattered positions over six points and reopens two
+       inspected non-table pages (BoE 2018 p3, ECB 2000 p3).
     2. **Qualify.** A position is recurring when tokens sit at THAT position on
        at least ``_MIN_TABLE_ROWS`` bands -- its own occupancy, never the union
        over a neighbourhood. Round 3 counted the neighbourhood, so a footnote
@@ -681,6 +700,42 @@ def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[fl
     all of *xs*.
     """
     position = {x: float(round(x)) for x in xs}
+
+    # Step 1b: rejoin the halves of a column whose anchor straddles a bin
+    # boundary. Only a position UNDER the recurrence minimum may join, only a
+    # group whose raw x coordinates span at most one rounding bin, and only
+    # when their bands are disjoint (one column cannot hold two cells of a
+    # row). Deterministic in the input order: groups are founded by the
+    # recurring positions in x order, joiners taken by decreasing occupancy.
+    occupancy: dict[float, set] = {}
+    raw_at: dict[float, list[float]] = {}
+    for x, y in nums:
+        occupancy.setdefault(position[x], set()).add(y)
+        raw_at.setdefault(position[x], []).append(x)
+
+    def _raw_span(members: list[float]) -> float:
+        raw = [v for pos in members for v in raw_at[pos]]
+        return max(raw) - min(raw)
+
+    groups: list[list[float]] = [
+        [pos] for pos in sorted(occupancy) if len(occupancy[pos]) >= _MIN_TABLE_ROWS
+    ]
+    for pos in sorted(occupancy, key=lambda seed: (-len(occupancy[seed]), seed)):
+        if len(occupancy[pos]) >= _MIN_TABLE_ROWS:
+            continue
+        eligible = [
+            group
+            for group in groups
+            if _raw_span([*group, pos]) <= _ROUNDING_BIN_PT
+            and all(not (occupancy[pos] & occupancy[other]) for other in group)
+        ]
+        if eligible:
+            nearest = min(eligible, key=lambda g: min(abs(pos - other) for other in g))
+            nearest.append(pos)
+        else:
+            groups.append([pos])
+    representative = {pos: group[0] for group in groups for pos in group}
+    position = {x: representative[position[x]] for x in xs}
 
     bands_at: dict[float, set] = {}
     for x, y in nums:
