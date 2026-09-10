@@ -19,6 +19,8 @@ than a single word space, which is the actual discriminator the fix relies
 on.
 """
 
+from pathlib import Path
+
 import fitz
 import pytest
 
@@ -458,6 +460,340 @@ class TestWidthRatioThresholdBothSides:
     def test_width_ratio_0_8_does_not_merge(self):
         page = _build_uniform_width_ratio_page(0.8)
         assert _assemble_prose_with_aligned_runs(page) is None
+
+
+def _build_end_of_list_page() -> fitz.Page:
+    """GH-592 round-2 REVIEW finding repro: a block with a trailing unconsumed line.
+
+    Block A (one ``insert_textbox`` call, so ONE PyMuPDF block) holds three
+    "Mr." label rows immediately followed, in the same block and further
+    down the page, by a fourth, unrelated line "END OF LIST". Block B (a
+    separate block) holds the three matching names, forming a genuine
+    aligned run against block A's first three rows.
+
+    Emitting by BLOCK (the pre-review-fix approach: each block's unconsumed
+    lines first, then any run anchored at that block) put "END OF LIST"
+    ahead of the merged run, because it is an unconsumed line belonging to
+    block A, the run's own anchor block -- even though its true y-position
+    is BELOW every merged row. Emitting by page POSITION must instead keep
+    it last, after all three merged rows, matching where it actually sits.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    y0 = 72
+    page.insert_text(
+        (72, y0),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+        fontname="helv",
+    )
+
+    left_x = 90
+    label_w = fitz.get_text_length("Mr.", fontname="helv", fontsize=10)
+    space_w = fitz.get_text_length(" ", fontname="helv", fontsize=10)
+    gap = 1.2 * space_w
+    right_x = left_x + label_w + gap
+    row_start_y = y0 + 40
+
+    left_rect = fitz.Rect(left_x, row_start_y - 8, left_x + 200, row_start_y + 140)
+    right_rect = fitz.Rect(right_x, row_start_y - 8, right_x + 300, row_start_y + 140)
+    page.insert_textbox(left_rect, "Mr.\nMr.\nMr.\nEND OF LIST", fontsize=10, fontname="helv")
+    page.insert_textbox(
+        right_rect,
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+        fontname="helv",
+    )
+    return page
+
+
+class TestEmissionByPagePosition:
+    """GH-592 round-2 review blocker: emit merged runs by position, not block."""
+
+    def test_trailing_unconsumed_line_stays_after_the_merged_run(self):
+        page = _build_end_of_list_page()
+        assembled = _assemble_prose_with_aligned_runs(page)
+        assert assembled is not None
+        lines = assembled.splitlines()
+
+        assert "Mr. Angell" in lines
+        assert "Mr. Guffey" in lines
+        assert "Mr. Corrigan, Vice Chairman of Committee" in lines
+        assert "END OF LIST" in lines
+
+        last_merged_row = max(
+            lines.index("Mr. Angell"),
+            lines.index("Mr. Guffey"),
+            lines.index("Mr. Corrigan, Vice Chairman of Committee"),
+        )
+        assert lines.index("END OF LIST") > last_merged_row, (
+            "an unconsumed line positioned BELOW the merged run must be "
+            f"emitted after it, not before: {lines!r}"
+        )
+
+
+def _build_tight_gutter_equal_length_prose_page() -> fitz.Page:
+    """Adversarial negative control: tight gutter, equal-length prose lines.
+
+    Two independent paragraphs in adjacent narrow columns, each line padded
+    to near-identical width (mimicking justified typesetting) with a gutter
+    only slightly wider than a single word space -- the shape most likely to
+    fool a naive gap-only check, now probed against the position-based
+    emission path specifically (not just the search/merge guards already
+    covered by ``TestIndependentColumnsNeverMerge``).
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    left_rect = fitz.Rect(72, 100, 220, 220)
+    right_rect = fitz.Rect(226, 100, 374, 220)
+    page.insert_textbox(
+        left_rect,
+        "Economic activity expanded at a\nmoderate pace across most of\nthe regions surveyed this month.",
+        fontsize=10,
+        fontname="cour",
+    )
+    page.insert_textbox(
+        right_rect,
+        "Labor markets remained tight in\nseveral districts, with wage\ngrowth continuing to firm up.",
+        fontsize=10,
+        fontname="cour",
+    )
+    return page
+
+
+def _build_margin_paragraph_numbers_page() -> fitz.Page:
+    """Adversarial negative control: margin paragraph numbers beside prose.
+
+    A narrow left column of paragraph numbers ("1.", "2.", "3.") beside a
+    much wider column of genuinely multi-line paragraphs (more right-column
+    lines than left-column numbers) -- a real legal/regulatory-document
+    shape. The row counts on each side are unequal (3 numbers, 7 prose
+    lines), so this must fail the bijection outright and never reach the
+    guards at all.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_textbox(fitz.Rect(72, 100, 95, 240), "1.\n2.\n3.", fontsize=10, fontname="helv")
+    paragraph = [
+        "The committee shall meet not less than quarterly to review",
+        "the state of the account and any outstanding matters.",
+        "Each member is entitled to one vote on any resolution",
+        "properly brought before the committee for consideration.",
+        "Minutes of each meeting shall be circulated to all members",
+        "within ten business days of the meeting's conclusion.",
+        "",
+    ]
+    page.insert_textbox(
+        fitz.Rect(100, 100, 500, 240), "\n".join(paragraph), fontsize=10, fontname="helv"
+    )
+    return page
+
+
+def _build_toc_dot_leader_page() -> fitz.Page:
+    """Adversarial negative control: table of contents, dot leaders, page numbers.
+
+    Four rows, each a genuine two-block bijection (title-with-dot-leader as
+    one block, right-aligned page number as a second block, gap ~1.2 word
+    spaces -- inside the round-2 gap threshold). Must decline on
+    ``LABEL_COLUMN_WIDTH_SHARE``: the title+dots block is far WIDER than the
+    number block, the inverse of a genuine label/value pair (narrow label,
+    wide value), so the width-ratio guard rejects it the same way it accepts
+    the Fed roster shape.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+        fontname="helv",
+    )
+    entries = [
+        ("Chapter One: Introduction to the Subject .......................", "1"),
+        ("Chapter Two: Historical Background and Context .............", "14"),
+        ("Chapter Three: Methodology and Approach ......................", "37"),
+        ("Chapter Four: Results and Discussion .............................", "62"),
+    ]
+    space_w = fitz.get_text_length(" ", fontname="helv", fontsize=10)
+    gap = 1.2 * space_w
+    y = 100
+    for title_dots, num in entries:
+        title_w = fitz.get_text_length(title_dots, fontname="helv", fontsize=10)
+        page.insert_text((72, y), title_dots, fontsize=10, fontname="helv")
+        page.insert_text((72 + title_w + gap, y), num, fontsize=10, fontname="helv")
+        y += 14
+    return page
+
+
+def _build_bilingual_side_by_side_page() -> fitz.Page:
+    """Adversarial negative control: bilingual side-by-side translation columns.
+
+    Three lines of English prose beside their French translation, laid out
+    as two blocks with a gutter just over one word space -- a genuine
+    bilingual-document shape (e.g. a Basel/ECB communique) that shares the
+    "narrow tab-like gap, equal row count" signature of the Fed roster fix
+    but is two full independent sentences, not a label/value pair. Must
+    decline on ``LABEL_COLUMN_WIDTH_SHARE`` (the English column is not a
+    narrow label for the French one) and/or ``MEASURE_FILL_SHARE_MAX``.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    en = [
+        "The central bank reviewed recent developments in credit",
+        "markets and financial conditions across member countries,",
+        "noting a gradual improvement in overall market functioning.",
+    ]
+    fr = [
+        "La banque centrale a examine les evolutions recentes des",
+        "marches du credit et les conditions financieres dans les",
+        "pays membres, notant une amelioration progressive globale.",
+    ]
+    left_x = 72
+    space_w = fitz.get_text_length(" ", fontname="helv", fontsize=10)
+    max_left_w = max(fitz.get_text_length(line, fontname="helv", fontsize=10) for line in en)
+    right_x = left_x + max_left_w + 1.2 * space_w
+    y = 100
+    for line in en:
+        page.insert_text((left_x, y), line, fontsize=10, fontname="helv")
+        y += 14
+    y = 100
+    for line in fr:
+        page.insert_text((right_x, y), line, fontsize=10, fontname="helv")
+        y += 14
+    return page
+
+
+class TestAdversarialNegativeControls:
+    """GH-592 round-2 review: four adversarial shapes, byte-identical on/off."""
+
+    @pytest.mark.parametrize(
+        "build_page",
+        [
+            _build_tight_gutter_equal_length_prose_page,
+            _build_margin_paragraph_numbers_page,
+            _build_toc_dot_leader_page,
+            _build_bilingual_side_by_side_page,
+        ],
+    )
+    def test_assembler_declines(self, build_page):
+        page = build_page()
+        assert _assemble_prose_with_aligned_runs(page) is None
+
+    @pytest.mark.parametrize(
+        "build_page",
+        [
+            _build_tight_gutter_equal_length_prose_page,
+            _build_margin_paragraph_numbers_page,
+            _build_toc_dot_leader_page,
+            _build_bilingual_side_by_side_page,
+        ],
+    )
+    def test_output_is_byte_identical_with_assembler_forced_off(self, build_page, monkeypatch):
+        page = build_page()
+
+        with_assembler = BornDigitalDetector().extract_structured(page)
+
+        monkeypatch.setattr(
+            "socr.core.born_digital._assemble_prose_with_aligned_runs",
+            lambda _page: None,
+        )
+        without_assembler = BornDigitalDetector().extract_structured(page)
+
+        assert with_assembler == without_assembler, (
+            "an adversarial negative control must be byte-identical whether "
+            "the aligned-run assembler runs or is forced off"
+        )
+
+
+_FED_1977_11_15_MINUTES = Path(
+    "/Users/rubenffuertes/repos/research/central-bank-network/data/ocr-staging/"
+    "fed-01/pdf/fed-meetings-1977-1977-11-1977-11-15-minutes.pdf"
+)
+_FED_1990_11_13_MINUTES = Path(
+    "/Users/rubenffuertes/repos/research/central-bank-network/data/ocr-staging/"
+    "fed-01/pdf/fed-meetings-1990-1990-11-1990-11-13-minutes.pdf"
+)
+
+
+@pytest.mark.skipif(not _FED_1977_11_15_MINUTES.exists(), reason="fed-01 corpus not present")
+def test_1977_11_15_present_row_value_immediately_follows_its_own_label():
+    """GH-592 round-2 review repro: 'Burns, Chairman' must sit beside 'Mr.'.
+
+    The declined 3-column "PRESENT:" / "Mr." / "Burns, Chairman" header row
+    (a residual this round does not merge -- see the decision log) was, under
+    block-order emission, displaced 11 lines below its own label because it
+    shares a PyMuPDF block with lines that also feed the real aligned run
+    starting a few rows later. Position-based emission must keep it adjacent
+    to its own label regardless of that block membership.
+    """
+    doc = fitz.open(str(_FED_1977_11_15_MINUTES))
+    page = doc[0]
+    out = BornDigitalDetector().extract_structured(page)
+    lines = out.splitlines()
+
+    present_idx = lines.index("PRESENT:")
+    label_idx = next(i for i in range(present_idx, len(lines)) if lines[i].strip() == "Mr.")
+    value_idx = next(i for i in range(label_idx, len(lines)) if "Burns, Chairman" in lines[i])
+
+    assert label_idx == present_idx + 1, lines[present_idx : present_idx + 4]
+    assert value_idx == label_idx + 1, lines[label_idx : label_idx + 4]
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
+def test_1990_11_13_gillum_row_is_adopted_from_the_band_next_to_the_run():
+    """GH-592 round 6: the sub-list row ADJACENT to the run is recovered.
+
+    "Gillum, Deputy Assistant Secretary" is the value of the band immediately
+    above the second accepted run. It is longer than every name that run
+    accepted, which is why the per-row narrow-label check compares this row's
+    own two widths rather than the run's. It is adopted because it also clears
+    the run's own row pitch, is the sole candidate in each lane, and its label
+    "Mr." is a label the run already observed.
+    """
+    doc = fitz.open(str(_FED_1990_11_13_MINUTES))
+    out = BornDigitalDetector().extract_structured(doc[0])
+    lines = out.splitlines()
+
+    value_idx = next(i for i, line in enumerate(lines) if "Gillum" in line)
+    assert lines[value_idx - 1].strip() == "Mr.", lines[value_idx - 2 : value_idx + 1]
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GH-592 round 6: KNOWN, BOUNDED LOSS, deliberately surfaced rather than "
+        "removed. The 'Alternate Members' sub-list is three consecutive declined "
+        "bands (Kohn, Bernard, Gillum). Adoption is immediate-only -- exactly the "
+        "one band next to each run boundary, never a walk -- because an outward "
+        "walk is what let unrelated lane-aligned paragraphs be interleaved (Astra "
+        "P1 on df45222). Gillum, the adjacent band, IS now recovered (pinned "
+        "separately above); Kohn and Bernard are two and three bands out and keep "
+        "block order. No token is lost, but their bare 'Mr.' is separated from "
+        "the name. Recovering them needs those bands established as a separately "
+        "verified CONTINUATION with their own role evidence -- not a looser or "
+        "recursive adoption rule."
+    ),
+)
+def test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels():
+    """GH-592: Kohn/Bernard should sit beside their own 'Mr.' too.
+
+    Asserts the CORRECT output for the whole sub-list, and is marked
+    ``xfail(strict=True)`` so the day a verified continuation rule lands, this
+    fails loudly and gets un-marked rather than quietly staying red.
+    """
+    doc = fitz.open(str(_FED_1990_11_13_MINUTES))
+    page = doc[0]
+    out = BornDigitalDetector().extract_structured(page)
+    lines = out.splitlines()
+
+    for surname in ("Kohn", "Bernard"):
+        value_idx = next(i for i, line in enumerate(lines) if surname in line)
+        label_idx = value_idx - 1
+        assert lines[label_idx].strip() == "Mr.", (
+            f"{surname} at line {value_idx} must immediately follow a bare "
+            f"'Mr.' line, got: {lines[max(0, label_idx - 1) : value_idx + 1]!r}"
+        )
 
 
 if __name__ == "__main__":

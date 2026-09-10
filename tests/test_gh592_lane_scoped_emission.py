@@ -1,0 +1,521 @@
+"""GH-592 round 4 (Astra re-review of b8d5063): block membership is not evidence.
+
+Round 3 scoped positional emission to every unconsumed line of every PyMuPDF
+block a run contributes to. That is still authority granted by segmentation
+rather than by reading order: resegment the identical lines, words and bboxes
+so an unrelated LEFT prose column shares the label block and an unrelated
+RIGHT prose column shares the name block, and two independent paragraphs get
+interleaved line by line even though the four geometric guards in
+``_try_aligned_run`` correctly refuse to merge them.
+
+Round 4 repositions a declined line only when its own geometry says it belongs
+with the repaired rows: its start falls inside one of the run's two column
+lanes, and its baseline band is reachable from the run's band sequence without
+crossing a band that contributes no such line.
+
+The first two tests are the reviewer's reproducers, carried over verbatim in
+substance. The third pins the band-adjacency half of the criterion, which the
+reviewer's pair does not exercise.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+
+import fitz
+import pytest
+from test_born_digital_aligned_runs import _FED_1990_11_13_MINUTES
+from test_born_digital_aligned_runs import _build_attendee_list_page
+from test_gh592_scoped_positional_emission import _add_prose_columns, _prose_lines
+
+from socr.core import born_digital as bd
+
+
+def test_entangled_prose_columns_stay_column_major():
+    """Prose sharing a real text box with the roster keeps its own order.
+
+    Both columns are authored by ``insert_textbox`` so that the roster rows
+    and the paragraph lines below them genuinely land in the same PyMuPDF
+    blocks -- no resegmentation involved. The LEFT paragraph even starts at
+    the label column's own x, so it is the value lane and the band walk, not
+    block identity, that has to get this right.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    indent = " " * 80
+    page.insert_textbox(
+        fitz.Rect(90, 104, 300, 500),
+        "Mr.\nMr.\nMr.\n\nLEFT first paragraph line\nLEFT second paragraph line\n"
+        "LEFT third paragraph line",
+        fontsize=10,
+    )
+    page.insert_textbox(
+        fitz.Rect(right, 104, 590, 500),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee\n\n"
+        + "\n".join(
+            indent + s
+            for s in (
+                "RIGHT first paragraph line",
+                "RIGHT second paragraph line",
+                "RIGHT third paragraph line",
+            )
+        ),
+        fontsize=10,
+    )
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None, "the roster is a genuine run; the assembler must engage"
+    baseline = [
+        line.strip()
+        for line in page.get_text("text").splitlines()
+        if line.strip().startswith(("LEFT", "RIGHT"))
+    ]
+    actual = [
+        line.strip() for line in out.splitlines() if line.strip().startswith(("LEFT", "RIGHT"))
+    ]
+    assert len(baseline) == 6
+    assert actual == baseline
+
+
+def _resegmented(page: fitz.Page):
+    """The same page, with the prose columns folded into the roster's blocks.
+
+    Every line, word, text and bbox is unchanged; only the ``(block, line)``
+    identities are rewritten, consistently across the ``dict`` and ``words``
+    extractions. This is the segmentation a differently-authored PDF of the
+    same page could legitimately produce, and it must not change the output.
+    """
+    data = deepcopy(page.get_text("dict"))
+    blocks = [b for b in data["blocks"] if b.get("type", 0) == 0]
+
+    def block_text(block):
+        return "\n".join(
+            "".join(span.get("text", "") for span in line["spans"]) for line in block["lines"]
+        )
+
+    left_run = next(i for i, b in enumerate(blocks) if block_text(b).splitlines().count("Mr.") >= 3)
+    right_run = next(i for i, b in enumerate(blocks) if "Greenspan" in block_text(b))
+    left_prose = next(i for i, b in enumerate(blocks) if "LEFT paragraph" in block_text(b))
+    right_prose = next(i for i, b in enumerate(blocks) if "RIGHT paragraph" in block_text(b))
+    merges = {left_prose: left_run, right_prose: right_run}
+
+    new_blocks: list[dict] = []
+    remap: dict[int, tuple[int, int]] = {}
+    for bi, block in enumerate(blocks):
+        if bi in merges:
+            continue
+        new_index = len(new_blocks)
+        remap[bi] = (new_index, 0)
+        block = deepcopy(block)
+        for source, target in merges.items():
+            if target == bi:
+                remap[source] = (new_index, len(block["lines"]))
+                block["lines"].extend(deepcopy(blocks[source]["lines"]))
+        block["bbox"] = tuple(
+            fitz.Rect(block["lines"][0]["bbox"]) | fitz.Rect(block["lines"][-1]["bbox"])
+        )
+        block["number"] = new_index
+        new_blocks.append(block)
+    data["blocks"] = new_blocks
+
+    new_words = []
+    for word in page.get_text("words"):
+        new_index, offset = remap[word[5]]
+        new_words.append(tuple(word[:5]) + (new_index, word[6] + offset, word[7]))
+
+    class ResegmentedPage:
+        def get_text(self, kind):
+            if kind == "dict":
+                return data
+            if kind == "words":
+                return new_words
+            return page.get_text(kind)
+
+    return ResegmentedPage()
+
+
+def test_block_entanglement_does_not_authorize_prose_interleave():
+    """Sharing a block with a run must not reorder unrelated prose."""
+    page = _build_attendee_list_page()
+    _add_prose_columns(page)
+
+    out = bd._assemble_prose_with_aligned_runs(_resegmented(page))
+
+    assert out is not None, "the roster is still a genuine run after resegmentation"
+    assert _prose_lines(out) == [
+        f"{column} paragraph line {i}" for column in ("LEFT", "RIGHT") for i in range(1, 4)
+    ], f"resegmentation alone reordered the independent paragraphs: {_prose_lines(out)}"
+
+
+def test_lane_match_across_an_intervening_row_does_not_travel_with_the_run():
+    """Lane membership alone is not enough -- the band walk must stop.
+
+    A line that starts in the value lane but is separated from the run by an
+    ordinary full-width paragraph row belongs to whatever follows that row,
+    not to the roster. It must stay where block order puts it, i.e. AFTER the
+    intervening row, not hoisted up beside the merged rows.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(90, 104, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 104, 560, 200),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    page.insert_text(
+        (72, 200), "An ordinary full width paragraph row intervenes here.", fontsize=10
+    )
+    page.insert_text((right, 220), "STRAY LANE LINE", fontsize=10)
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    intervening = next(i for i, line in enumerate(lines) if line.startswith("An ordinary full"))
+    stray = lines.index("STRAY LANE LINE")
+    merged = next(i for i, line in enumerate(lines) if line.startswith("Mr. Angell"))
+
+    assert merged < intervening < stray, lines
+
+
+def test_lane_aligned_paragraphs_are_not_interleaved(monkeypatch):
+    """GH-592 round 5 (Astra re-review of df45222): the reviewer's reproducer.
+
+    Two independent paragraphs begin far below a roster, at the roster's exact
+    two lane x-starts. Under round 4 the outward walk crossed the blank gap --
+    which holds no baseline band, so nothing stopped it -- and adopted all six
+    prose lines one at a time, interleaving them. Adopting lines individually
+    bypasses the very guards that declined their paragraph.
+
+    The monkeypatch only observes the real search's return value and passes it
+    through unchanged, to prove the prose is genuinely NOT in an accepted run.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    label = "Representative"
+    left = 90
+    right = (
+        left
+        + fitz.get_text_length(label, fontsize=10)
+        + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(left, 100, right - 2, 200), "\n".join([label] * 3), fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 595, 200),
+        "Michael Andrew Rutherford\nJonathan Edward Alexander\n"
+        "Christopher James Montgomery, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    page.insert_textbox(
+        fitz.Rect(left, 250, right - 5, 350), "LEFT one\nLEFT two\nLEFT three", fontsize=10
+    )
+    page.insert_textbox(
+        fitz.Rect(right, 250, 590, 350),
+        "RIGHT first independent paragraph line\nRIGHT second independent paragraph line\n"
+        "RIGHT third independent paragraph line",
+        fontsize=10,
+    )
+
+    accepted: list[str] = []
+    original = bd._find_aligned_runs
+
+    def record(*args):
+        result = original(*args)
+        accepted.extend(text for _start, _end, texts in result for text in texts)
+        return result
+
+    monkeypatch.setattr(bd, "_find_aligned_runs", record)
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None
+    assert accepted and not any("LEFT" in s or "RIGHT" in s for s in accepted), (
+        "the prose must be declined by the run search itself, or this proves nothing"
+    )
+    baseline = [
+        line for line in page.get_text("text").splitlines() if line.startswith(("LEFT", "RIGHT"))
+    ]
+    actual = [line for line in out.splitlines() if line.startswith(("LEFT", "RIGHT"))]
+    assert len(baseline) == 6
+    assert actual == baseline
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
+def test_1990_measures_which_alternate_member_bands_adoption_can_reach():
+    """The measured real-page basis for the round-6 rule and its residual.
+
+    On 1990-11-13 p1 the ``Alternate Members`` sub-list is three consecutive
+    declined bands above the second run. This pins, from the page itself:
+
+    * the band immediately above the run (Gillum) satisfies every adoption
+      condition -- inside the pitch, one candidate per lane, and its label is
+      one the run observed; and
+    * the next band out (Bernard) is beyond the run's own row pitch from the
+      boundary row, so no bound short of a recursive walk reaches it.
+
+    The residual is therefore a property of the sub-list's geometry, not a
+    threshold that could be nudged.
+    """
+    page = fitz.open(str(_FED_1990_11_13_MINUTES))[0]
+    words = page.get_text("words")
+    word_space_width = bd._median_word_space_width(words)
+    word_width = bd._median_word_width(words) or 0.0
+    extents = bd._line_word_extents(words)
+
+    flat = []
+    blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type", 0) == 0]
+    for bi, block in enumerate(blocks):
+        for li, line in enumerate(block.get("lines", []) or []):
+            bbox = line.get("bbox")
+            extent = extents.get((bi, li))
+            if not bbox or extent is None:
+                continue
+            flat.append(
+                {
+                    "bi": bi,
+                    "li": li,
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": extent[0],
+                    "x1": extent[1],
+                    "text": "".join(s.get("text", "") for s in line.get("spans", []) or []),
+                }
+            )
+    flat.sort(key=lambda it: it["y0"])
+    bands = bd._line_baseline_bands(flat)
+    runs = bd._find_aligned_runs(bands, word_space_width, word_width)
+
+    start, end, _merged = runs[-1]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    pitch = bd._run_row_pitch(bands, start, end)
+    vocabulary = bd._run_label_vocabulary(run_items)
+
+    adjacent = bands[start - 1]
+    assert any("Gillum" in it["text"] for it in adjacent), [it["text"] for it in adjacent]
+    assert abs(bd._band_center(adjacent) - bd._band_center(bands[start])) <= pitch
+    assert (
+        bd._adoptable_pair(
+            adjacent,
+            lanes,
+            vocabulary,
+            word_space_width,
+            bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+        )
+        is not None
+    ), "the adjacent band must satisfy every adoption condition"
+
+    outer = bands[start - 2]
+    assert any("Bernard" in it["text"] for it in outer), [it["text"] for it in outer]
+    assert abs(bd._band_center(outer) - bd._band_center(bands[start])) > pitch, (
+        "the next band out must be beyond the run's own row pitch"
+    )
+
+
+def _roster_with_two_leading_pairs(label: str) -> fitz.Page:
+    """A 4-row roster with TWO declined label/value bands directly above it.
+
+    The roster is double-spaced, so its measured row pitch (~29.5pt) is wide
+    enough that BOTH leading bands fall inside it -- the outer one at ~29.0pt.
+    Each leading row also carries an out-of-lane marker in the left margin,
+    which is what stops ``_find_aligned_runs`` from simply absorbing the two
+    rows into the run (the marker column breaks the left/right bijection).
+
+    Every adoption condition except the two under test is therefore satisfied
+    by BOTH leading bands, which is what makes the tests below non-vacuous.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(60, 211, 80, 251), "1\n2", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 211, 130, 251), f"{label}\n{label}", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    return page
+
+
+def _bands_and_run(page: fitz.Page):
+    """The page's baseline bands and its single accepted run's parameters."""
+    words = page.get_text("words")
+    word_space_width = bd._median_word_space_width(words)
+    word_width = bd._median_word_width(words) or 0.0
+    extents = bd._line_word_extents(words)
+    flat = []
+    blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type", 0) == 0]
+    for bi, block in enumerate(blocks):
+        for li, line in enumerate(block.get("lines", []) or []):
+            bbox = line.get("bbox")
+            extent = extents.get((bi, li))
+            if not bbox or extent is None:
+                continue
+            flat.append(
+                {
+                    "bi": bi,
+                    "li": li,
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": extent[0],
+                    "x1": extent[1],
+                    "text": "".join(s.get("text", "") for s in line.get("spans", []) or []),
+                }
+            )
+    flat.sort(key=lambda it: it["y0"])
+    bands = bd._line_baseline_bands(flat)
+    runs = bd._find_aligned_runs(bands, word_space_width, word_width)
+    return bands, runs, word_space_width
+
+
+def test_only_the_band_adjacent_to_the_run_is_adopted():
+    """The witness for immediate-only adoption, isolated from the pitch bound.
+
+    Both leading bands are inside the run's own row pitch and both would pass
+    ``_adoptable_pair`` on their own -- asserted here, so the test cannot pass
+    for the wrong reason. Only the nearer one is adopted; the outer one keeps
+    block order. Nothing but the immediate-only rule refuses it, and without
+    that rule an outward walk would take it and then keep going.
+    """
+    page = _roster_with_two_leading_pairs("Mr.")
+    bands, runs, word_space_width = _bands_and_run(page)
+    start, end, _merged = runs[0]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    pitch = bd._run_row_pitch(bands, start, end)
+    vocabulary = bd._run_label_vocabulary(run_items)
+
+    for offset in (1, 2):
+        band = bands[start - offset]
+        distance = abs(bd._band_center(band) - bd._band_center(bands[start]))
+        assert distance <= pitch, (offset, distance, pitch)
+        assert (
+            bd._adoptable_pair(
+                band,
+                lanes,
+                vocabulary,
+                word_space_width,
+                bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+            )
+            is not None
+        ), f"band {offset} out must satisfy every condition except adjacency"
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    gillum = lines.index("Gillum")
+    assert lines[gillum - 1] == "Mr.", lines
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee"), (
+        "the outer band must keep block order; the walk must not continue"
+    )
+
+
+def test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused():
+    """The witness for the label-role condition, isolated from the geometry.
+
+    Byte-identical fixture to the test above apart from the leading rows'
+    label TEXT, which the run never observed. That difference alone must
+    refuse the adjacent band, leaving both leading rows in block order. This
+    is the evidence geometry cannot supply: an independent two-column sentence
+    pair can match the lanes, the pitch and the gap exactly.
+    """
+    page = _roster_with_two_leading_pairs("Dr.")
+    bands, runs, word_space_width = _bands_and_run(page)
+    start, end, _merged = runs[0]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    vocabulary = bd._run_label_vocabulary(run_items)
+    band = bands[start - 1]
+    assert all(bd._starts_in_a_lane(it["x0"], lanes) for it in band if it["text"] != "2"), band
+    assert (
+        bd._adoptable_pair(
+            band,
+            lanes,
+            vocabulary,
+            word_space_width,
+            bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+        )
+        is None
+    )
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[lines.index("Gillum") - 1] == "Bernard", (
+        "a label the run never observed is not evidence of the same role"
+    )
+
+
+def test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused():
+    """The witness for the pitch bound, isolated from the guard condition.
+
+    A second label/name pair sits 250pt below the roster, at the roster's exact
+    lane starts, and carries an extra out-of-lane marker in its row. The marker
+    is what stops ``_find_aligned_runs`` from absorbing the pair into the run
+    itself, and the adoption walk's lane filter drops it -- so the pair's lane
+    subset DOES satisfy the run's own guards. Only the pitch bound refuses it:
+    it is 250pt from the run's edge against a measured row pitch of ~15pt.
+
+    Without this bound the far pair would be hoisted up beside the roster,
+    which is the shape Astra's paragraph reproducer generalises.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(90, 104, 130, 260), "Mr.\nMr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 104, 560, 260),
+        "Angell\nGuffey\nSeger\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(60, 400, 80, 470), "1\n2", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 400, 130, 470), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 400, 560, 470), "Volcker\nPartee", fontsize=10)
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert "Mr. Volcker" not in lines, (
+        "the far pair must not be merged into the run it is 250pt away from"
+    )
+    assert lines.index("1") < lines.index("Volcker"), lines
+    assert lines.index("Mr. Corrigan, Vice Chairman of the Committee") < lines.index("1"), lines
