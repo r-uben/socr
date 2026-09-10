@@ -1011,6 +1011,70 @@ def test_gh718_a_ruled_region_with_literal_nbsp_entities_is_canonical_before_ver
     assert "&nbsp;" not in shipped, shipped
 
 
+def test_gh718b_an_unrelated_entity_prefixed_note_is_not_suppressed(monkeypatch) -> None:
+    """#718b (Astra): round 2's fix normalised EVERY overlapped line's leading
+    entity run before the bag-of-words "already represented" test, not just
+    a transformed table label's line. An unrelated note that happens to sit
+    under an overextended region rectangle (the #145 overrun risk) and
+    happens to start with ``&nbsp;`` had that prefix stripped too -- and if
+    its remaining words all occur somewhere in the region (in a different
+    row), the whole note vanished, even though its own PHRASE was never in
+    the table.
+
+    The fix is upstream, not in this function: ``_region_token_index`` is
+    now built from each region's RAW (pre-canonicalisation) markdown, so a
+    transformed label's raw line matches its region's raw tokens exactly as
+    it did before #716, and an unrelated entity-prefixed note is judged
+    against a raw region that never had an ``nbsp`` token to begin with --
+    surviving exactly as it did before #716 touched anything.
+    """
+    import fitz
+
+    from socr.core import born_digital as bd
+    from socr.tables import reconstruct
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 110), "Swiss francs 600.0", fontsize=10)
+    page.insert_text((72, 130), "Total 1804.5", fontsize=10)
+    note = "&nbsp;Total Swiss francs"
+    page.insert_text((72, 148), note, fontsize=10)
+    md = "| Item | Amount |\n| --- | --- |\n| Swiss francs | 600.0 |\n| Total | 1804.5 |\n"
+    # An overextended region rectangle reaching into the note below the
+    # table -- the already-documented #145 overrun risk, not a claim that
+    # ``find_tables`` naturally produces bounds this loose.
+    region = fitz.Rect(60, 90, 400, 145)
+    blocks = page.get_text("dict")["blocks"]
+    note_block = next(
+        b
+        for b in blocks
+        if any("nbsp" in s["text"] for line in b.get("lines", []) for s in line["spans"])
+    )
+    coverage = bd._rect_coverage(fitz.Rect(note_block["bbox"]), region)
+    assert coverage >= bd._REGION_COVERAGE_DROP, "fixture must exercise the coverage gate"
+
+    monkeypatch.setattr(reconstruct, "reconstruct_table_regions", lambda *a, **k: [(region, md)])
+    try:
+        text = bd.BornDigitalDetector().extract_structured(page)
+    finally:
+        doc.close()
+
+    assert note in text, (
+        f"an unrelated note must not be deleted just because a region overruns it: {text!r}"
+    )
+
+
+def test_gh718b_novel_and_interior_content_survives() -> None:
+    """A line with a word the region never had, or with a leading-entity /
+    interior-ampersand difference from the region's own reading, is not
+    "already represented" and must not be suppressed."""
+    from socr.core import born_digital as bd
+
+    idx = bd._region_token_index([(None, "| Swiss francs | 600.0 |\n| Total | 1804.5 |")])
+    for text in ("&nbsp;Swiss francs discussion", "Swiss &nbsp;francs", "Swiss francs &amp; Total"):
+        assert not bd._line_is_in_region_text({"spans": [{"text": text}]}, idx), text
+
+
 # ---------------------------------------------------------------------------
 # Round 3, finding 2: decoding is not meaning-preserving.
 # ---------------------------------------------------------------------------
