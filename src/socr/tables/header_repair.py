@@ -25,6 +25,7 @@ import logging
 import re
 import statistics
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 from socr.tables.native_verifier import (
     _numeric_multiset_from_tokens,
@@ -309,6 +310,7 @@ def _header_ys(
     split_threshold: float,
     lane_centers: list[float],
     data_start_x: float,
+    bands: list[tuple[float, float]] | None = None,
 ) -> list[int]:
     """Collect multi-line header y-groups directly above the data anchor.
 
@@ -323,26 +325,47 @@ def _header_ys(
 
     bridge_gap = _header_bridge_gap(local_ys, anchor_y, split_threshold)
 
+    # #696: the marker/connector requirement in ``_is_table_header_row`` was
+    # written for probability-bin bands ("0-2%", "5 or more") and does not
+    # recognise a period band ("Apr 18 | Jul 18 | ..."), which is the standard
+    # layout of every central-bank survey annex in the corpus — so the whole
+    # chain abstained on all nine pages issue #696 measured. ``_is_lane_band_row``
+    # is the disjunctive second term: runs that live inside the data columns
+    # and carry text. Both terms still reject prose, which straddles the left
+    # edge of the columns, and data rows, whose lane runs are all numeric.
+    #
+    # ``bands=None`` keeps the original predicate alone. The caller asks for the
+    # widened one ONLY to feed the flattening fold, which abstains on anything
+    # that is not a clean spanning band — so the legacy repair path never sees a
+    # row this term admitted and stays byte-identical.
+
+    def _is_header(y: int, min_runs: int) -> bool:
+        row_words = rows_by_y.get(y, [])
+        if _is_table_header_row(row_words, lane_centers, data_start_x):
+            return True
+        return bands is not None and _is_lane_band_row(row_words, bands, min_runs)
+
     # Start at the header row nearest to the anchor (label-only rows between
     # header and data are absent from local_ys).
     nearest: int | None = None
     for y in reversed(below):
         if anchor_y - y > bridge_gap:
             break
-        if _is_table_header_row(rows_by_y.get(y, []), lane_centers, data_start_x):
+        if _is_header(y, 2):
             nearest = y
             break
     if nearest is None:
         return []
 
-    # Collect contiguous header lines upward from the nearest band.
+    # Collect contiguous header lines upward from the nearest band. One run is
+    # enough here: a group heading that wraps ("Loans to small" over "and
+    # medium-sized enterprises") puts a single run on its topmost line.
     header: list[int] = [nearest]
     prev = nearest
     for y in reversed([y for y in below if y < nearest]):
         if prev - y > split_threshold:
             break
-        row_words = rows_by_y.get(y, [])
-        if _is_table_header_row(row_words, lane_centers, data_start_x):
+        if _is_header(y, 1):
             header.append(y)
             prev = y
         else:
@@ -350,29 +373,69 @@ def _header_ys(
     return sorted(header)
 
 
-def _derive_lane_centers(rows_by_y: dict[int, list], data_ys: list[int]) -> list[float]:
-    """Cluster numeric-token x-positions from native data rows into column lanes."""
-    num_xs: list[float] = []
+def _derive_lane_groups(
+    rows_by_y: dict[int, list], data_ys: list[int]
+) -> list[list[tuple[float, float]]]:
+    """Cluster numeric tokens from native data rows into column lanes.
+
+    Each lane is a list of ``(x0, x1)`` at DISTINCT x0 — the same distinct-x0
+    clustering ``_derive_lane_centers`` has always done, with the token's right
+    edge carried along so a caller can see how wide the printed column is.
+    """
+    per_row: list[list[tuple[float, float]]] = []
     for y in data_ys:
         row_words = rows_by_y.get(y, [])
         # Skip rows with fewer than _MIN_DATA_NUMERIC_CELLS — these are header
         # annotations or chart ticks, not probability-bin data values.
         if len(_row_numeric_multiset(row_words)) < _MIN_DATA_NUMERIC_CELLS:
             continue
-        for w in row_words:
-            if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4]):
-                num_xs.append(w[0])
-    if not num_xs:
+        per_row.append(
+            [
+                (w[0], w[2])
+                for w in row_words
+                if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
+            ]
+        )
+    if not per_row:
         return []
 
-    xs_sorted = sorted(set(num_xs))
+    # #696: ``_data_row_ys`` walks downward from the anchor and bridges rows it
+    # does not accept, so on a page whose footnotes sit within one row gap of
+    # the last data row it hands us a prose line as well. A footnote such as
+    # "(score of 1) ... weights from 1 to 5" carries enough numerals to clear
+    # _MIN_DATA_NUMERIC_CELLS and its numerals sit at x positions no data
+    # column occupies, inventing lanes on both sides of the table (measured on
+    # the 2018 BLS survey: 13 lanes derived for a 10-column table). Lanes are a
+    # property of the table's OWN rows, so derive them only from rows at least
+    # as wide as the modal accepted row. Ties resolve to the wider count, which
+    # can only ever keep more lanes, never fewer.
+    tally = Counter(len(xs) for xs in per_row)
+    modal_width = max(tally.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    right_of: dict[float, float] = {}
+    for row in per_row:
+        if len(row) < modal_width:
+            continue
+        for x0, x1 in row:
+            right_of[x0] = max(right_of.get(x0, x1), x1)
+    if not right_of:
+        return []
+
+    xs_sorted = sorted(right_of)
     lanes: list[list[float]] = []
     for x in xs_sorted:
         if lanes and x - lanes[-1][-1] <= _LANE_X_TOL_PT:
             lanes[-1].append(x)
         else:
             lanes.append([x])
-    return [sum(g) / len(g) for g in lanes]
+    return [[(x, right_of[x]) for x in group] for group in lanes]
+
+
+def _derive_lane_centers(rows_by_y: dict[int, list], data_ys: list[int]) -> list[float]:
+    """Cluster numeric-token x-positions from native data rows into column lanes."""
+    return [
+        sum(x0 for x0, _x1 in group) / len(group)
+        for group in _derive_lane_groups(rows_by_y, data_ys)
+    ]
 
 
 def _native_label_lane(grid: list[list[str]], label: str, words: list) -> int | None:
@@ -472,6 +535,342 @@ def _assign_words_to_lanes(
     return [label] + row_cells
 
 
+# --------------------------------------------------------------------------
+# #696 — spanning group headings, flattened into the columns beneath them
+#
+# Owner ruling (2026-09-10, issue #696): a group heading that spans several
+# data columns folds into each of them, so a two-level header ships as ONE
+# header row of per-column names ("Overall Apr 18", "Overall Jul 18", ...).
+# Markdown has no spanning cell, so the alternative — the model's own two-band
+# emission — is a header row narrower than its body, which is precisely the
+# `grid_shape` / `header_unattributed` refusal that lost 9 of 30 pages in the
+# 2026-09-06 ECB census.
+#
+# The span of a heading is read off geometry that is already here: the numeric
+# tokens this module already clusters into lanes, widened into contiguous
+# column BANDS at the middle of each printed gutter. Every column then goes to
+# the heading covering most of it — a comparison, not a tolerance, so no tuned
+# constant is involved and none is added.
+#
+# Segmentation into headings uses the (block, line) identity PyMuPDF already
+# attaches to every word, not an x-gap threshold: on the census pages each
+# group heading and each leaf label is its own (block, line), including the
+# ones that wrap over three typeset lines. A PDF whose producer emits every
+# word as its own line degrades to per-word spans rather than failing.
+# --------------------------------------------------------------------------
+
+
+def _lane_bands(lane_groups: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
+    """Widen lane token clusters into contiguous column bands.
+
+    An interior boundary is the middle of the GUTTER actually printed between
+    two columns — halfway from the right edge of the widest value on the left
+    to the left edge of the leftmost value on the right — not the midpoint
+    between lane centres.  Centres are computed from token x0 alone, so on a
+    table of right-aligned values of unequal width they sit left of the visual
+    column and a midpoint boundary lands inside the printed text of the column
+    to its right.  Measured on the 2018 BLS survey, that put the boundary 1.8pt
+    left of the end of the group heading "and medium-sized" and folded it into
+    a column it does not cover.
+
+    The outer edges extend by the same half-gutter, mirroring the outer
+    half-gap bound ``_native_label_lane`` already uses.  Returns ``[]`` for
+    fewer than two lanes, where "which columns does this heading span" has no
+    content.
+    """
+    if len(lane_groups) < 2:
+        return []
+    extents = [
+        (min(x0 for x0, _x1 in group), max(x1 for _x0, x1 in group)) for group in lane_groups
+    ]
+    interior = [(a[1] + b[0]) / 2 for a, b in zip(extents, extents[1:])]
+    left = extents[0][0] - (interior[0] - extents[0][1])
+    right = extents[-1][1] + (extents[-1][0] - interior[-1])
+    edges = [left] + interior + [right]
+    return list(zip(edges, edges[1:]))
+
+
+def _row_runs(row_words: list) -> list[tuple[float, float, str]]:
+    """Split one native row into headings, using PyMuPDF's own word grouping.
+
+    Returns ``(x0, x1, text)`` per run, left to right.  Words carry
+    ``(block_no, line_no)`` at indices 5 and 6; a word tuple short enough to
+    lack them (a hand-built fixture) is treated as its own run.
+    """
+    grouped: dict[tuple, list] = defaultdict(list)
+    order: list[tuple] = []
+    for i, w in enumerate(row_words):
+        key = (w[5], w[6]) if len(w) > 6 else ("_w", i)
+        if key not in grouped:
+            order.append(key)
+        grouped[key].append(w)
+
+    runs: list[tuple[float, float, str]] = []
+    for key in order:
+        ws = sorted(grouped[key], key=lambda w: w[0])
+        text = " ".join(w[4] for w in ws).strip()
+        if not text:
+            continue
+        runs.append((min(w[0] for w in ws), max(w[2] for w in ws), text))
+    return sorted(runs, key=lambda r: r[0])
+
+
+def _run_lane_span(run: tuple[float, float, str], bands: list[tuple[float, float]]) -> list[int]:
+    """Lane indices whose band overlaps *run*'s x-extent.
+
+    A coarse admission test, used to decide whether a row belongs to the header
+    band at all, and to drop a run reaching across every column (a table title,
+    which heads none of them).  ``_claim_lanes`` is what actually places a run,
+    and it resolves the slivers this returns.
+    """
+    x0, x1, _text = run
+    span = [i for i, (a, b) in enumerate(bands) if x0 < b and x1 > a]
+    if len(span) == len(bands) and len(bands) > 1:
+        return []
+    return span
+
+
+def _split_row_runs(
+    row_words: list,
+    bands: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float, str]], list[tuple[float, float, str]]] | None:
+    """Partition one row's runs into ``(label_runs, lane_runs)``.
+
+    Returns ``None`` when a run STRADDLES the left edge of the data columns.
+    That is the signature of prose — a sentence set in the label column that
+    runs on under the table's columns — and never of a header band, whose stub
+    head stops before the first column and whose headings start inside them.
+    """
+    if not bands:
+        return None
+    data_left = bands[0][0]
+    label_runs: list[tuple[float, float, str]] = []
+    lane_runs: list[tuple[float, float, str]] = []
+    for run in _row_runs(row_words):
+        x0, x1, _text = run
+        if x1 <= data_left:
+            label_runs.append(run)
+        elif x0 >= data_left:
+            lane_runs.append(run)
+        else:
+            return None
+    return label_runs, lane_runs
+
+
+def _is_lane_band_row(row_words: list, bands: list[tuple[float, float]], min_runs: int) -> bool:
+    """True when *row_words* is a header band lying inside the data columns.
+
+    Requires at least *min_runs* runs that span at least one lane, and at
+    least one non-numeric token among them.  An all-numeric lane row is a data
+    row (or a bare year band, which ``_is_table_header_row`` does not reach
+    either — this predicate is additive and widens nothing there).
+    """
+    split = _split_row_runs(row_words, bands)
+    if split is None:
+        return False
+    _label_runs, lane_runs = split
+    spanning = [run for run in lane_runs if _run_lane_span(run, bands)]
+    if len(spanning) < min_runs:
+        return False
+    return any(
+        not (_NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok))
+        for _x0, _x1, text in spanning
+        for tok in text.split()
+    )
+
+
+def _is_lane_data_row(row_words: list, bands: list[tuple[float, float]]) -> bool:
+    """True when every run inside the data columns is a bare numeric value."""
+    split = _split_row_runs(row_words, bands)
+    if split is None:
+        return False
+    _label_runs, lane_runs = split
+    if len(lane_runs) < 2:
+        return False
+    return all(
+        _NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok)
+        for _x0, _x1, text in lane_runs
+        for tok in text.split()
+    )
+
+
+def _top_data_y(
+    rows_by_y: dict[int, list],
+    anchor_y: int,
+    local_ys: list[int],
+    split_threshold: float,
+    bands: list[tuple[float, float]],
+) -> int:
+    """First data row of the table the anchor belongs to.
+
+    ``_best_anchor_y`` matches on a numeric multiset of at least
+    ``_MIN_DATA_NUMERIC_CELLS`` DISTINCT values, so on a table whose opening
+    rows are uniform (the ECB survey tables open with a row of ten zeroes) the
+    anchor is not the first data row and the header band sits a whole row
+    further up than the bridge gap allows. Walk up over rows that are nothing
+    but numbers in the data columns; the header band is the first row that is
+    not, and it stays where the caller can find it.
+    """
+    if not bands:
+        return anchor_y
+    top = anchor_y
+    for y in reversed([y for y in local_ys if y < anchor_y]):
+        if top - y > split_threshold:
+            break
+        if not _is_lane_data_row(rows_by_y.get(y, []), bands):
+            break
+        top = y
+    return top
+
+
+def _claim_lanes(
+    lane_runs: list[tuple[float, float, str]],
+    bands: list[tuple[float, float]],
+    unclaimed: set[int],
+) -> list[list[int]] | None:
+    """Give each still-unclaimed lane to the run of *lane_runs* covering most of it.
+
+    Returns one lane list per run, in the order the runs were given.  ``None``
+    when two runs cover a lane equally, or when a run wins a discontiguous set
+    of lanes — either way the row does not describe a column block and there is
+    nothing safe to fold.
+    """
+    claims: list[list[int]] = [[] for _ in lane_runs]
+    if not lane_runs:
+        return claims
+
+    for lane in sorted(unclaimed):
+        band_lo, band_hi = bands[lane]
+        overlaps = [max(0.0, min(x1, band_hi) - max(x0, band_lo)) for x0, x1, _t in lane_runs]
+        widest = max(overlaps)
+        if widest <= 0.0:
+            continue
+        if overlaps.count(widest) != 1:
+            return None
+        claims[overlaps.index(widest)].append(lane)
+
+    for claim in claims:
+        if claim and claim != list(range(claim[0], claim[-1] + 1)):
+            return None
+    return claims
+
+
+def _fold_header_bands_into_lanes(
+    header_rows_words: list[list],
+    bands: list[tuple[float, float]],
+) -> list[str] | None:
+    """Flatten a multi-band header into one cell per data lane.
+
+    *header_rows_words* is the native header band, top row first.  Each run is
+    appended to every lane it heads, so a group heading reaches every column
+    beneath it and a leaf label reaches only its own.  Returns
+    ``[label] + per-lane cells``, or ``None`` on any doubt.
+
+    Two stages, both read from the data upward.
+
+    First the LEAF row, the band nearest the data. It must resolve to exactly
+    one run per lane, covering every lane. Without that the leaf structure is
+    unknown and there is nothing to fold into — which is also what keeps a WIDE
+    LEAF label from being taken for a group heading: a probability-bin band
+    ("-14% to -22%") is typeset wider than its own column and reaches its
+    neighbours', so coverage alone would fold it sideways and corrupt a header
+    that was never spanning (measured on the GH-56 exchange-rate fixture).
+
+    Then the column BLOCKS, walking the bands above the leaf from the nearest
+    upward and letting each row claim only lanes no lower row has claimed. A
+    group heading is set on whichever typeset line its wrapping happens to end
+    on, so the blocks are not all declared by one row: on the 2013 survey the
+    five groups resolve over five different lines, one of which also carries a
+    continuation fragment of a group already blocked out below it. Once the
+    blocks are known, EVERY run — those that defined a block and those that
+    wrapped — is attached to the single block it covers most. That is what
+    stops a continuation line set a shade wider than the rest of its own
+    heading from claiming the neighbouring column outright, which it otherwise
+    does because nothing else on its line competes for it (measured at 2.4pt on
+    the 2018 survey's "and medium-sized").
+    """
+    if not bands or len(header_rows_words) < 2:
+        return None
+
+    parsed: list[tuple[list[str], list[tuple[float, float, str]]]] = []
+    for row_words in header_rows_words:
+        split = _split_row_runs(row_words, bands)
+        if split is None:
+            return None
+        label_runs, lane_runs = split
+        # A run reaching across every column is a table title, not a group
+        # heading: it carries no per-column information (``_run_lane_span``).
+        lane_runs = [run for run in lane_runs if _run_lane_span(run, bands)]
+        parsed.append(([text for _x0, _x1, text in label_runs], lane_runs))
+
+    leaf_claims = _claim_lanes(parsed[-1][1], bands, set(range(len(bands))))
+    if leaf_claims is None or any(len(claim) != 1 for claim in leaf_claims):
+        return None
+    if sorted(claim[0] for claim in leaf_claims) != list(range(len(bands))):
+        return None
+
+    blocks: list[list[int]] = []
+    unclaimed = set(range(len(bands)))
+    for _label_texts, lane_runs in reversed(parsed[:-1]):
+        if not unclaimed:
+            break
+        claims = _claim_lanes(lane_runs, bands, unclaimed)
+        if claims is None:
+            return None
+        for claim in claims:
+            if claim:
+                blocks.append(claim)
+                unclaimed -= set(claim)
+    # Columns no heading spans stand alone; a run over one attaches to it.
+    blocks.extend([lane] for lane in sorted(unclaimed))
+    blocks.sort()
+    if not blocks:
+        return None
+    extents = [(bands[block[0]][0], bands[block[-1]][1]) for block in blocks]
+
+    label_parts: list[str] = []
+    lane_parts: list[list[str]] = [[] for _ in bands]
+    saw_spanning = False
+    for index, (label_texts, lane_runs) in enumerate(parsed):
+        label_parts.extend(label_texts)
+        for run_index, (x0, x1, text) in enumerate(lane_runs):
+            if index == len(parsed) - 1:
+                targets = [leaf_claims[run_index]]
+            else:
+                covered = [max(0.0, min(x1, hi) - max(x0, lo)) for lo, hi in extents]
+                # A run that covers MOST of more than one block is a parent
+                # heading over all of them -- a third level above the group
+                # row, which reaches every column in every block it covers.
+                # Attaching it to one child by greatest overlap, as this did,
+                # silently drops it from the other children whenever the two
+                # overlaps differ by a hair. A run that covers most of exactly
+                # one block, or of none, is that block's own heading or a
+                # wrapped fragment of it, and goes to the block it covers most
+                # -- which is what keeps a continuation line set a shade wider
+                # than its siblings from claiming the neighbouring column.
+                majority = [
+                    i
+                    for i, overlap in enumerate(covered)
+                    if 2.0 * overlap > (extents[i][1] - extents[i][0])
+                ]
+                if len(majority) > 1:
+                    targets = [blocks[i] for i in majority]
+                else:
+                    widest = max(covered)
+                    if widest <= 0.0 or covered.count(widest) != 1:
+                        return None
+                    targets = [blocks[covered.index(widest)]]
+            if len(targets) > 1 or any(len(target) > 1 for target in targets):
+                saw_spanning = True
+            for target in targets:
+                for lane in target:
+                    lane_parts[lane].append(text)
+
+    if not saw_spanning:
+        return None
+    return [" ".join(label_parts).strip()] + [" ".join(parts).strip() for parts in lane_parts]
+
+
 def _merge_multiline_header_rows(header_rows: list[list[str]]) -> list[str]:
     """Merge geometry-derived header lines into one row, column by column."""
     if not header_rows:
@@ -530,23 +929,22 @@ def _data_row_ys(
     return data_ys
 
 
-def native_header_row(grid: list[list[str]], words: list) -> list[str] | None:
-    """Derive the header row implied by native word geometry.
+@dataclass(frozen=True)
+class _TableGeometry:
+    """The anchor -> lane -> band chain, computed once for a (grid, words) pair."""
 
-    Runs the SAME anchor -> lane -> header-band chain as
-    ``repair_collapsed_header``, but WITHOUT that function's
-    ``detect_header_column_collapse`` gate: header attribution (GH-200) must
-    also check tables whose header/data column counts already agree — that is
-    exactly the "destroyed but not collapsed" case (a header band replaced by
-    blanks, or shifted, while the column count stays put). Returns ``None`` on
-    any abstain in the chain: no anchor row with an exact numeric-multiset
-    match, fewer than 2 derived data lanes, or no lane-aligned header band
-    above the anchor. Callers must treat ``None`` as UNVERIFIABLE, never as a
-    pass or a fail.
+    rows_by_y: dict[int, list]
+    local_ys: list[int]
+    anchor_y: int
+    split_threshold: float
+    lane_centers: list[float]
+    data_start_x: float
+    bands: list[tuple[float, float]]
+    data_ys: list[int]
 
-    Result[0] is the label cell (words left of the first data lane);
-    result[1:] are the per-lane header cells, one per derived data column.
-    """
+
+def _table_geometry(grid: list[list[str]], words: list) -> _TableGeometry | None:
+    """Locate *grid* on the page and derive its data lanes. ``None`` on any abstain."""
     if not words:
         return None
     rows_by_y = _all_rows_by_y(words)
@@ -563,23 +961,277 @@ def native_header_row(grid: list[list[str]], words: list) -> list[str] | None:
     split_threshold = max(_SPLIT_GAP_MULT * _median_row_gap(local_ys), _SPLIT_GAP_MIN_PT)
 
     data_ys = _data_row_ys(rows_by_y, anchor_y_int, split_threshold, local_ys)
-    lane_centers = _derive_lane_centers(rows_by_y, data_ys)
+    lane_groups = _derive_lane_groups(rows_by_y, data_ys)
+    lane_centers = [sum(x0 for x0, _x1 in g) / len(g) for g in lane_groups]
     if len(lane_centers) < 2:
         logger.debug("header_repair: fewer than 2 data lanes derived")
         return None
 
-    data_start_x = lane_centers[0]
+    return _TableGeometry(
+        rows_by_y=rows_by_y,
+        local_ys=local_ys,
+        anchor_y=anchor_y_int,
+        split_threshold=split_threshold,
+        lane_centers=lane_centers,
+        data_start_x=lane_centers[0],
+        bands=_lane_bands(lane_groups),
+        data_ys=data_ys,
+    )
+
+
+def _spanning_header_bands(geom: _TableGeometry) -> tuple[list[str], list[list]] | None:
+    """Flatten the page's spanning header band (#696).
+
+    Returns ``(flattened_header, band_rows)`` -- the one-cell-per-lane header
+    and the native word rows it was folded from, top row first. The second half
+    is what tells a caller which rows of the MODEL's grid are header material:
+    the page prints those words above its data, and nothing else in the
+    candidate's header prefix is accounted for by them.
+    """
+    band_ys = _header_ys(
+        geom.rows_by_y,
+        geom.local_ys,
+        _top_data_y(geom.rows_by_y, geom.anchor_y, geom.local_ys, geom.split_threshold, geom.bands),
+        geom.split_threshold,
+        geom.lane_centers,
+        geom.data_start_x,
+        geom.bands,
+    )
+    if not band_ys:
+        return None
+    band_rows = [geom.rows_by_y[y] for y in band_ys]
+    flattened = _fold_header_bands_into_lanes(band_rows, geom.bands)
+    if flattened is None:
+        return None
+    return flattened, band_rows
+
+
+def _header_band_tokens(band_rows: list[list]) -> set[str]:
+    """Casefolded word texts the page prints inside its header band."""
+    return {w[4].strip().casefold() for row in band_rows for w in row if w[4].strip()}
+
+
+def _band_floor(band_rows: list[list]) -> float:
+    """The y of the lowest word in the header band: everything under it is body."""
+    return max(w[1] for row in band_rows for w in row)
+
+
+def _table_x_extent(geom: _TableGeometry) -> tuple[float, float] | None:
+    """The left and right edge of the rows this table's lanes were derived from.
+
+    Row labels live left of the first lane, so the lanes alone do not bound a
+    table horizontally; the attributed data rows do, and they are already
+    chosen. ``None`` when there are none to measure.
+    """
+    edges = [(w[0], w[2]) for y in geom.data_ys for w in geom.rows_by_y.get(y, [])]
+    if not edges:
+        return None
+    return min(x0 for x0, _x1 in edges), max(x1 for _x0, x1 in edges)
+
+
+def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list], list[list]]:
+    """Split the rows printed under this table's header band by ownership.
+
+    Returns ``(owned, unresolved)``. The rectangle is the vertical run the
+    lane derivation walked -- its walk already stops at the first gap too
+    large to belong here -- crossed with the horizontal extent of those same
+    attributed rows. Three states, not two (#696 round 7):
+
+    * OWNED, wholly inside the rectangle: this table's body, and the only
+      rows that can settle a candidate row AS body.
+    * UNRESOLVED, overlapping the columns but not contained in the rectangle:
+      printed here, ownership unproven. It certifies nothing, and it must
+      still stop a deletion, because failing to prove a row belongs to this
+      table is not proof that it belongs to the header.
+    * FOREIGN, horizontally disjoint from the columns: a neighbouring table
+      printed beside this one, or a footnote set outside the column run. No
+      standing either way.
+
+    Vertical distance does NOT make a row foreign (#696 round 8). Rounds 7
+    and 7b bounded the unresolved state by the table's own largest inter-row
+    step, and the boundary that bound created was itself unsupported: the
+    same trailing row that survives one step below the body was deleted with
+    both its printed values two steps below it. Being further down the page
+    than the last attributed row does not prove an occurrence belongs to
+    another table, so the only discriminator left is horizontal: a row that
+    shares no column span with this table cannot be one of its rows. The
+    accepted price is that a lower table in the SAME columns now leaves the
+    candidate unchanged instead of folding it -- a no-op, paid to keep
+    printed values.
+
+    Round 6 collapsed the last two, and exclusion from the body witness
+    silently became permission to delete: a body row whose label began 8pt
+    left of the dense rows was disowned, its words also occurred in the
+    header band, so the walker advanced through it and the row left the
+    document with its printed value. Widening the rectangle would only move
+    that boundary, so the missing state is kept as a state.
+    """
+    if not geom.data_ys:
+        return [], []
+    extent = _table_x_extent(geom)
+    if extent is None:
+        return [], []
+    left, right = extent
+    bottom = max(geom.data_ys)
+    owned: list[list] = []
+    unresolved: list[list] = []
+    for y, row in geom.rows_by_y.items():
+        if not row or not all(w[1] > band_floor for w in row):
+            continue
+        if y <= bottom and all(left <= w[0] and w[2] <= right for w in row):
+            owned.append(row)
+        elif any(w[0] <= right and w[2] >= left for w in row):
+            unresolved.append(row)
+    return owned, unresolved
+
+
+def _below_band_tokens(owned_rows: list[list]) -> set[str]:
+    """Casefolded word texts this table prints below its own header band.
+
+    Scoped to the table (#696 round 6). A footnote or a neighbouring table
+    saying the same words is not this table's body, so it can neither certify
+    a row as body nor withhold a repair the rest of the evidence justifies.
+    """
+    return {w[4].strip().casefold() for row in owned_rows for w in row if w[4].strip()}
+
+
+def _row_word_counts(row: list) -> Counter:
+    """The multiset of casefolded word texts one printed row puts on the page."""
+    return Counter(w[4].strip().casefold() for w in row if w[4].strip())
+
+
+def _candidate_header_depth(
+    grid: list[list[str]], band_rows: list[list], geom: _TableGeometry
+) -> int | None:
+    """How many leading rows of *grid* are header. ``None`` to abstain.
+
+    Row 0 is the markdown header by construction. Every row below it is
+    classified by where the page PRINTS it, and each side of the boundary owes
+    positive evidence:
+
+    * a row every token of which THIS TABLE prints below its header band, and
+      none of which the band itself prints, is BODY. It and everything
+      under it ship verbatim, and the walk stops.
+    * a row every token of which the page prints INSIDE the band, and not all
+      of which this table prints below it, is header, and the walk continues.
+    * a row accounted for by BOTH regions has no established role. Vocabulary
+      shared with the band cannot prove this occurrence is header material,
+      and vocabulary shared with the body cannot prove it is not, so the whole
+      repair abstains -- unless this table prints a row below the band whose
+      words are exactly this row's, which locates the occurrence itself and
+      settles it as body.
+    * a row accounted for by neither region is unclassifiable: abstain.
+      Absence from the narrowed body vocabulary is not positive proof of
+      header, so silence on both sides still buys nothing.
+    * a row the band accounts for is header only while NO printed row under
+      the band accounts for it -- including one whose ownership could not be
+      established. A candidate-compatible occurrence of unproven ownership
+      blocks the deletion and abstains. Compatibility there is measured on
+      DISTINCT words, not multiplicity (#696 round 9): a model that emits a
+      cell twice does not thereby prove the row is header material, and an
+      exact-multiset veto let that duplicate delete the one 18 the page
+      really prints. The direction still runs candidate into printed row, so
+      a printed row carrying a lone 18 still cannot veto the ten-label leaf
+      band -- it has no Apr and no Jul to support them.
+
+    The single escape hatch runs only in the direction that KEEPS content. An
+    exact match against a printed band row would locate an occurrence just as
+    well, but it would license deleting a row on a multiset coincidence, and
+    the cost of the two mistakes is not symmetric: a header row wrongly kept
+    is a visible duplicate, a body row wrongly folded is gone.
+
+    #696 round 2 established the body test; round 3 gave it priority over
+    vocabulary; this is round 4. Neither ordering is enough on its own,
+    because an ambiguous row does not become header material by arriving
+    late: a leaf band matching a footnote's words stopped the walk at depth
+    two, and the fold then shipped the flattened header AND kept the leaf row
+    underneath it as a sixth body row over five printed data rows.
+    """
+    band_tokens = _header_band_tokens(band_rows)
+    band_floor = _band_floor(band_rows)
+    owned_rows, unresolved_rows = _below_band_rows(geom, band_floor)
+    below_tokens = _below_band_tokens(owned_rows)
+    owned_counts = [_row_word_counts(row) for row in owned_rows]
+    unresolved_counts = [_row_word_counts(row) for row in unresolved_rows]
+    depth = 1
+    for row in grid[1:]:
+        counts = Counter(
+            tok.strip().casefold() for cell in row for tok in cell.split() if tok.strip()
+        )
+        if not counts:
+            return None
+        if counts in owned_counts:
+            break
+        in_band = all(tok in band_tokens for tok in counts)
+        in_below = all(tok in below_tokens for tok in counts)
+        if in_below:
+            if in_band:
+                return None
+            break
+        if not in_band:
+            return None
+        if any(not set(counts) - set(printed) for printed in unresolved_counts):
+            return None
+        depth += 1
+    # A candidate cannot carry more header bands than the page prints.
+    if depth > len(band_rows):
+        return None
+    return depth
+
+
+def native_header_row(
+    grid: list[list[str]], words: list, *, require_spanning: bool = False
+) -> list[str] | None:
+    """Derive the header row implied by native word geometry.
+
+    Runs the SAME anchor -> lane -> header-band chain as
+    ``repair_collapsed_header``, but WITHOUT that function's
+    ``detect_header_column_collapse`` gate: header attribution (GH-200) must
+    also check tables whose header/data column counts already agree — that is
+    exactly the "destroyed but not collapsed" case (a header band replaced by
+    blanks, or shifted, while the column count stays put). Returns ``None`` on
+    any abstain in the chain: no anchor row with an exact numeric-multiset
+    match, fewer than 2 derived data lanes, or no lane-aligned header band
+    above the anchor. Callers must treat ``None`` as UNVERIFIABLE, never as a
+    pass or a fail.
+
+    Result[0] is the label cell (words left of the first data lane);
+    result[1:] are the per-lane header cells, one per derived data column.
+
+    ``require_spanning`` (#696) narrows the result to the flattened form: with
+    it set, only a header the page really does typeset as a spanning band is
+    returned, and a single-level header abstains. A caller that rewrites a
+    header which is not otherwise broken needs that distinction; a caller
+    checking attribution does not.
+    """
+    geom = _table_geometry(grid, words)
+    if geom is None:
+        return None
+
+    # #696: a spanning group heading folds into every column beneath it. This
+    # runs first, on its own band scan, and abstains on anything that is not a
+    # clean spanning band; the legacy scan and repair below are untouched by it.
+    spanning = _spanning_header_bands(geom)
+    if spanning is not None:
+        return spanning[0]
+    if require_spanning:
+        return None
 
     hdr_ys = _header_ys(
-        rows_by_y, local_ys, anchor_y_int, split_threshold, lane_centers, data_start_x
+        geom.rows_by_y,
+        geom.local_ys,
+        geom.anchor_y,
+        geom.split_threshold,
+        geom.lane_centers,
+        geom.data_start_x,
     )
     if not hdr_ys:
-        logger.debug("header_repair: no header y-rows above anchor y=%d", anchor_y_int)
+        logger.debug("header_repair: no header y-rows above anchor y=%d", geom.anchor_y)
         return None
 
     header_grid: list[list[str]] = []
     for y in hdr_ys:
-        row_cells = _assign_words_to_lanes(rows_by_y[y], lane_centers, data_start_x)
+        row_cells = _assign_words_to_lanes(geom.rows_by_y[y], geom.lane_centers, geom.data_start_x)
         if any(c.strip() for c in row_cells):
             header_grid.append(row_cells)
 
@@ -642,6 +1294,65 @@ def repair_collapsed_header(
     return repaired
 
 
+def flatten_multiband_header(
+    grid: list[list[str]],
+    words: list,
+) -> list[list[str]] | None:
+    """Fold a full-width two-level header into one row of per-column names (#696).
+
+    The sibling of ``repair_collapsed_header`` for the case where the model did
+    NOT lose columns: it kept the body's width and expressed the spanning band
+    with padding cells, so ``detect_header_column_collapse`` sees nothing wrong
+    and the table still ships with a group heading over a blank and its leaf
+    labels one row down. Markdown cannot carry that, and the census pages where
+    it happened arrived with the leaf band shifted (2018 Q8: two leaf labels
+    missing, the remaining eight slid left), which is a silent header/value
+    rebinding, not a cosmetic one.
+
+    Deliberately narrow. It requires BOTH an emitted header of more than one
+    band -- the first data row is not ``grid[1]`` -- AND native geometry that
+    really does typeset a spanning band (``require_spanning``). A table with a
+    single header row is byte-identical to before, whatever its content.
+    """
+    if len(grid) < 3 or not words:
+        return None
+
+    collapsed, _header_cols, expected_cols = detect_header_column_collapse(grid)
+    if collapsed or expected_cols < 2 or len(grid[0]) != expected_cols:
+        return None
+
+    geom = _table_geometry(grid, words)
+    if geom is None:
+        return None
+    spanning = _spanning_header_bands(geom)
+    if spanning is None:
+        return None
+    header_row, band_rows = spanning
+    if len(header_row) != expected_cols:
+        return None
+    if not _header_is_faithful(header_row, expected_cols):
+        logger.debug("header_repair: declined flatten — empty lane in %r", header_row)
+        return None
+
+    # The header/body boundary comes from the page, not from "the first row
+    # with enough numbers in it": a row the candidate prints and the header
+    # band does not account for is BODY, and folding it away is content loss.
+    data_start = _candidate_header_depth(grid, band_rows, geom)
+    if data_start is None or data_start < 2 or data_start >= len(grid):
+        return None
+
+    body_rows: list[list[str]] = []
+    for row in grid[data_start:]:
+        if len(row) < expected_cols:
+            row = row + [""] * (expected_cols - len(row))
+        elif len(row) > expected_cols:
+            row = row[:expected_cols]
+        body_rows.append(row)
+
+    logger.debug("header_repair: flattened %d header band(s)", data_start)
+    return [header_row] + body_rows
+
+
 def repair_table_headers_in_text(
     words: list,
     markdown: str,
@@ -664,9 +1375,10 @@ def repair_table_headers_in_text(
         repaired = _repair_too_narrow_spanning_header(block.grid, words)
         if repaired is None:
             collapsed, _, _ = detect_header_column_collapse(block.grid)
-            if not collapsed:
-                continue
-            repaired = repair_collapsed_header(block.grid, words)
+            if collapsed:
+                repaired = repair_collapsed_header(block.grid, words)
+            else:
+                repaired = flatten_multiband_header(block.grid, words)
         if repaired is None:
             continue
         # assume_header: `repaired`'s row 0 is a header this module just rebuilt

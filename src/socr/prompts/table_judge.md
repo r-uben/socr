@@ -14,7 +14,11 @@ Findings use exactly one of these codes:
   (e.g. shifted into a neighboring lane, or a coefficient bound to the wrong
   variable).
 - HEADER_MANGLED: a column or row header is missing, merged, split, or does not
-  match what the image shows.
+  match what the image shows. A group heading the image spans over several
+  columns is REQUIRED to appear repeated in each column beneath it, joined to
+  that column's own label (`Overall Apr 18`, `Overall Jul 18` for a group
+  `Overall` above an `Apr 18`/`Jul 18` pair). That is the correct rendering of a
+  spanning header in Markdown, which has no spanning cell — it is not a finding.
 - STRUCTURE_MERGED: rows or columns that are visually distinct in the image have
   been collapsed into one in the markdown (e.g. a paired-column summary row
   flattened to fewer columns than the data rows).
