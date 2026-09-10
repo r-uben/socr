@@ -466,18 +466,20 @@ def test_a_continuation_printed_below_the_heading_always_refuses_the_adoption(wi
     assert lines.index(continuation) < lines.index("Burns")
 
 
-def test_a_short_paragraph_line_above_the_heading_no_longer_refuses_the_adoption():
-    """The recall round 3 recovers, and the shape 1977-11-15 would have had.
+def test_a_short_paragraph_line_above_the_heading_refuses_the_adoption():
+    """Round 4 gives this recall back, and the log records why.
 
-    Round 2 dismissed the line above the heading only if it ran PAST the label
-    lane, so a paragraph whose last line happens to be short vetoed the whole
-    adoption. Astra measured all six Fed minutes: the preceding line ends at
-    x1 235-481 against lane starts to its left, so no real page exercises it
-    either way, and the veto was a recall loss with nothing behind it.
+    Round 3 adopted here: two prose lines at x0 72 are a left-aligned stack the
+    heading at x0 30 is not part of, and that was taken as evidence enough.
+    Round 4's third condition withdraws it. A stack whose lines stop short of
+    the label lane is exactly the shape of a narrow display heading -- Astra's
+    ``STAFF``/``AND``/``OTHERS`` -- and nothing on the page tells the two apart.
 
-    What is evidence is that the line belongs to a left-aligned stack the
-    heading is not part of: here two prose lines at x0 72 above a heading at
-    x0 30. The heading is adopted with its pair.
+    Nothing measured is lost. Astra measured all six Fed opening paragraphs and
+    every line of every one of them is full measure, so no real page in the set
+    is a short stack. The abstention costs recall only on a shape the corpus
+    does not contain, and it stops a heading being torn on a shape it plausibly
+    could.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -509,8 +511,11 @@ def test_a_short_paragraph_line_above_the_heading_no_longer_refuses_the_adoption
 
     lines = _emitted(page)
 
-    assert lines[lines.index("Bernard") - 1] == "Mr."
-    assert lines.index("PRESENT:") < lines.index("Mr.")
+    assert lines.index("PRESENT:") < lines.index("Bernard")
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    )
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
 
 
 def _heading_above_the_pair_page(lines: list[str], centred: bool) -> fitz.Page:
@@ -643,4 +648,213 @@ def test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adopti
     assert lines.index("PRESENT:") < lines.index("Bernard")
     assert lines[lines.index("Bernard") - 1] != "Mr.", (
         "the pair must keep block order when the line above cannot be placed"
+    )
+
+
+@pytest.mark.parametrize("indent_middle", [True, False])
+def test_a_three_line_heading_whose_last_line_is_indented_stays_whole(indent_middle):
+    """Astra's round-3 reproducer, both halves of its pair.
+
+    A display heading need not end on the edge it began with. ``STAFF`` (30),
+    ``AND`` (30 or 40), ``OTHERS`` (40 beside the pair) is one heading either
+    way. Round 3 refused the hanging-indent half (30/40/40) because the extra
+    shared the preceding line's edge, but adopted the other half: ``STAFF`` and
+    ``AND`` share an edge that ``OTHERS`` does not, which the rule read as
+    evidence of an independent paragraph above. Two equal left edges followed
+    by a different one are not that evidence, and the heading was torn -- its
+    last line printed ahead of its first two.
+
+    The third condition settles it on this page's own geometry: the dismissing
+    stack must CROSS the label lane. ``STAFF``/``AND`` end far left of it
+    (x1 near 55 against a lane at x0 90), so they are a narrow heading block,
+    not the full-measure prose lines that a running paragraph is made of. No
+    dismissal, so the adoption abstains and the heading is left whole.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 211, 130, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_text((30, 186), "STAFF", fontsize=10)
+    page.insert_text((40 if indent_middle else 30, 199), "AND", fontsize=10)
+    page.insert_textbox(fitz.Rect(40, 211, 88, 251), "OTHERS", fontsize=10)
+
+    bands, _runs, _ws = _bands_and_run(page)
+    indices = [
+        next(i for i, band in enumerate(bands) if any(it["text"].strip() == title for it in band))
+        for title in ("STAFF", "AND", "OTHERS")
+    ]
+    assert indices == list(range(indices[0], indices[0] + 3)), indices
+    assert all(band[0]["x1"] < x for band in bands[indices[0] : indices[0] + 2]), (
+        "the fixture's heading lines must stay left of the label lane"
+    )
+
+    lines = _emitted(page)
+
+    start = lines.index("STAFF")
+    assert lines[start : start + 3] == ["STAFF", "AND", "OTHERS"], lines
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    )
+
+
+def _wide_display_heading_page(indent_last: bool = True) -> fitz.Page:
+    """A display heading whose first two lines are as wide as prose lines.
+
+    Two aligned lines at x0 30 running past the label lane at x0 200, then a
+    last line printed beside ``Mr.``/``Bernard``. ``indent_last`` starts that
+    line at x0 40, off the stack's edge, which is the counterexample to the
+    third condition; ``False`` starts it at x0 30, on the edge, which is the
+    ordinary full-measure paragraph whose last line happens to be short. The
+    roster objects are written FIRST so that block order cannot mask a wrong
+    adoption -- Astra's round-3 point.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 200
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 211, x + 40, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, x + 40, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_text((30, 186), "STAFF AND OTHER ATTENDEES AT THE", fontsize=10)
+    page.insert_text((30, 199), "NOVEMBER MEETING OF THE FEDERAL", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(40 if indent_last else 30, 211, x - 2, 251),
+        "OPEN MARKET COMMITTEE",
+        fontsize=10,
+    )
+    return page
+
+
+def test_a_full_measure_paragraphs_short_last_line_is_not_torn_off_its_paragraph():
+    """The shared-edge clause on its own, with nothing else able to refuse.
+
+    Three lines flush at x0 30 whose first two run past the label lane, so the
+    stack evidence and the third condition are both satisfied. What refuses the
+    adoption is that the last line starts on that same edge: it is a line OF
+    that paragraph, not a heading standing beside the pair. Without this clause
+    a paragraph ending on a short line would have that line moved into the
+    roster.
+    """
+    page = _wide_display_heading_page(indent_last=False)
+    bands, _runs, word_space = _bands_and_run(page)
+    stack = [bands[1][0], bands[2][0]]
+    extra, label = sorted(bands[3], key=lambda it: it["x0"])[:2]
+
+    assert extra["text"].strip() == "OPEN MARKET COMMITTEE"
+    assert abs(extra["x0"] - stack[1]["x0"]) <= word_space, "the last line shares the edge"
+    assert all(line["x1"] >= label["x0"] for line in stack), (
+        "and the lines above it cross the label lane, so only the shared edge can refuse"
+    )
+
+    lines = _emitted(page)
+
+    start = lines.index("STAFF AND OTHER ATTENDEES AT THE")
+    assert lines[start : start + 3] == [
+        "STAFF AND OTHER ATTENDEES AT THE",
+        "NOVEMBER MEETING OF THE FEDERAL",
+        "OPEN MARKET COMMITTEE",
+    ], lines
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    )
+
+
+def test_the_wide_display_heading_crosses_the_label_lane_like_prose_does():
+    """The measurement the residual rests on, pinned so it cannot drift.
+
+    This is the geometry that makes the counterexample a counterexample: the
+    heading's first two lines are indistinguishable from prose lines under all
+    three conditions. They share a left edge within the word space, the last
+    line does not share it, and both cross the label lane.
+    """
+    page = _wide_display_heading_page()
+    bands, _runs, word_space = _bands_and_run(page)
+    first, second = bands[1][0], bands[2][0]
+    extra, label = (
+        sorted(bands[3], key=lambda it: it["x0"])[0],
+        sorted(bands[3], key=lambda it: it["x0"])[1],
+    )
+
+    assert extra["text"].strip() == "OPEN MARKET COMMITTEE"
+    assert abs(first["x0"] - second["x0"]) <= word_space, "the first two lines are a stack"
+    assert abs(extra["x0"] - second["x0"]) > word_space, "the last line does not share that edge"
+    assert first["x1"] >= label["x0"] and second["x1"] >= label["x0"], (
+        "both stack lines cross the label lane, exactly as prose lines do"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GH-709 documented residual, round 4: a display heading whose aligned "
+        "lines are as wide as prose lines satisfies every condition the real "
+        "1977-11-15 page supplies, so its indented last line is still adopted "
+        "and torn off. Neither candidate discriminator survives measurement -- "
+        "see the round-4 section of docs/log/2026-09-10_709-beside-heading-unit.md"
+    ),
+)
+def test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it():
+    """The counterexample itself, asserting the behaviour we want, not the one we ship."""
+    lines = _emitted(_wide_display_heading_page())
+
+    start = lines.index("STAFF AND OTHER ATTENDEES AT THE")
+    assert lines[start : start + 3] == [
+        "STAFF AND OTHER ATTENDEES AT THE",
+        "NOVEMBER MEETING OF THE FEDERAL",
+        "OPEN MARKET COMMITTEE",
+    ], lines
+
+
+@pytest.mark.skipif(not _FED_1977_11_15_MINUTES.exists(), reason="Fed corpus not present")
+def test_the_1977_paragraph_crosses_the_label_lane_but_not_the_value_lane():
+    """The real page's measurement, and the discriminator it rules out.
+
+    The dismissal that recovers ``PRESENT:`` rests on the opening paragraph's
+    last two lines being full-measure prose. They are: both end past the label
+    lane at x0 214. They do NOT reach the value lane at x0 243 -- the last one
+    stops at 235.12 -- so "the stack crosses the VALUE lane" cannot be used to
+    tighten this rule. It would refuse 1977-11-15, which is the one real page
+    in the Fed set that exposes the heading beside the pair at all.
+    """
+    with fitz.open(_FED_1977_11_15_MINUTES) as doc:
+        bands, _runs, _ws = _bands_and_run(doc[0])
+        index = next(
+            i for i, band in enumerate(bands) if any("PRESENT:" in it["text"] for it in band)
+        )
+        extra, label, value = sorted(bands[index], key=lambda it: it["x0"])[:3]
+        stack = [bands[index - 1][0], bands[index - 2][0]]
+
+    assert extra["text"].strip() == "PRESENT:"
+    assert all(line["x1"] >= label["x0"] for line in stack), (
+        "the paragraph's lines cross the label lane"
+    )
+    assert not all(line["x1"] >= value["x0"] for line in stack), (
+        "they do not cross the value lane, so that cannot be a third condition"
     )

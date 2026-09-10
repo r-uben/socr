@@ -837,19 +837,20 @@ def _adoptable_pair(
     return [label, value]
 
 
-def _continues_a_left_aligned_stack(
+def _left_aligned_stack(
     line: dict,
     bands: list[list[dict]],
     index: int,
     word_space_width: float,
-) -> bool:
-    """Whether ``line`` (in ``bands[index]``) has another line of its own column
-    printed directly above it.
+) -> list[dict]:
+    """The lines of ``line``'s own left-aligned column, or ``[]`` if it has none.
 
     A running paragraph or a left-aligned column is a STACK: line n starts at
     the same left edge as line n-1. One line on its own carries no such
     evidence, and neither does a centred heading, whose lines each start
-    somewhere else.
+    somewhere else. The returned stack is ``line`` together with every line of
+    the band above it that shares its left edge within the page's own measured
+    word space.
 
     The stack is read from the baseline bands rather than from PyMuPDF's
     blocks, because on the page this exists for the blocks are not there.
@@ -862,8 +863,11 @@ def _continues_a_left_aligned_stack(
     """
     above = index - 1
     if above < 0:
-        return False
-    return any(abs(other["x0"] - line["x0"]) <= word_space_width for other in bands[above])
+        return []
+    aligned = [other for other in bands[above] if abs(other["x0"] - line["x0"]) <= word_space_width]
+    if not aligned:
+        return []
+    return [line, *aligned]
 
 
 def _beside_heading_lines(
@@ -917,18 +921,42 @@ def _beside_heading_lines(
       at all. Round 2 dismissed one that crossed the label lane at 1.5x the
       roster's pitch, and split a heading around its first member.
     * ABOVE, an intersecting line is dismissed only on independent evidence
-      that it is a paragraph's line rather than the extra's own heading: it
-      must continue a left-aligned stack of its own
-      (``_continues_a_left_aligned_stack``) that the extra does NOT belong to.
+      that it is a paragraph's line rather than the extra's own heading. Three
+      things together, and each is read off the page's own geometry:
+
+      1. it continues a left-aligned stack of its own (``_left_aligned_stack``);
+      2. the extra does NOT share that stack's edge, so it is not a line of it;
+      3. every line of that stack CROSSES the label lane.
+
+    Condition 3 is the round-4 correction (Astra review of 052a749). Two equal
+    left edges followed by a different one do not prove independence: a display
+    heading can run ``STAFF`` (x0 30), ``AND`` (30), ``OTHERS`` (40 beside the
+    pair), and rounds 1-3 read its first two lines as a paragraph and tore the
+    third off them. What a paragraph's lines have and a narrow heading block
+    does not is measure: prose fills the line, so it runs past the column the
+    roster's labels start in. ``STAFF``/``AND`` stop far short of it.
 
     That is what keeps 1977-11-15 correct, and it is the only real page in the
     Fed set that exercises the dismissal -- Astra measured all six, and the
     other five never expose ``PRESENT:`` as a line of its own beside the pair.
     ``1977, at 9:30 a.m.`` (x0 108.00) does intersect ``PRESENT:``
     (x0 142.00-198.64) horizontally, but it is the last line of a paragraph
-    left-aligned at x0 107-108 across four consecutive bands, and ``PRESENT:``
-    starts 34pt right of that edge. It is a paragraph carrying on above the
-    roster, not a heading over it.
+    left-aligned at x0 107-108 across four consecutive bands, ``PRESENT:``
+    starts 34pt right of that edge, and both its lines run past the label lane
+    (x1 235.12 and 543.08 against a lane at x0 214.00). It is a paragraph
+    carrying on above the roster, not a heading over it.
+
+    The lane in condition 3 is the LABEL's, not the value's. Measured on the
+    real page, the paragraph's last line stops at 235.12 and the value column
+    starts at 243.00, so a value-lane test would refuse 1977-11-15 -- the only
+    page in the Fed set that exposes this heading at all.
+
+    A residual survives all three conditions and is pinned as a strict xfail
+    (``test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it``):
+    a display heading whose aligned lines are themselves full measure supplies
+    every piece of evidence the real page does, and its indented last line is
+    still adopted. No discriminator with real-page support separates the two;
+    the round-4 log section records both that were measured and rejected.
 
     Everything else abstains. A centred heading above (its lines share no left
     edge), a left-aligned heading whose next line IS the extra (the extra
@@ -951,9 +979,12 @@ def _beside_heading_lines(
             for other in bands[above]:
                 if other["x1"] <= extra["x0"] or extra["x1"] <= other["x0"]:
                     continue
-                if not _continues_a_left_aligned_stack(other, bands, above, word_space_width):
+                stack = _left_aligned_stack(other, bands, above, word_space_width)
+                if not stack:
                     return None
                 if abs(extra["x0"] - other["x0"]) <= word_space_width:
+                    return None
+                if any(line["x1"] < label["x0"] for line in stack):
                     return None
     return extras
 

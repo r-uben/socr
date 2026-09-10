@@ -267,3 +267,101 @@ Fed 6 documents x 4 pages against `cf28858`: **0 of 24** pages differ.
 - A genuinely unrelated isolated single line printed beside the pair, with nothing intersecting
   it in either adjacent band, is still adopted as a heading.
 - The marker-column recovery #704 made is still refused (round 1).
+
+## Round 4 — the dismissing stack must be full-measure prose
+
+Astra's review of `052a749` (`astra-rev-709c-out.md`, reproducer
+`/private/tmp/test_astra_709c.py`) reproduced a third tear. A display heading
+reading `STAFF` (x0 30) / `AND` (30) / `OTHERS` (40, beside `Mr.`/`Bernard`)
+satisfied round 3's two conditions: `STAFF` and `AND` share a left edge within
+the page's 2.78pt word space, `OTHERS` does not share it, so the intersecting
+`AND` was dismissed as a paragraph's line and `OTHERS` was pulled ahead of the
+two lines it belongs under. The paired hanging-indent half (30/40/40) was
+already correct. Two equal left edges followed by a different one are not
+evidence of independence.
+
+The third condition is what the real page has and the heading fixtures do not:
+**every line of the dismissing stack must cross the label lane.** Prose fills
+its measure, so a paragraph's lines run past the column the roster's labels
+start in. A narrow heading block stops short of it. Dismissal above now needs
+all three: a stack of at least two consecutive bands sharing a left edge within
+the page's word space; an extra that does not share that edge; and every line
+of that stack ending at or past `label["x0"]`. Round 3's
+`_continues_a_left_aligned_stack` is now `_left_aligned_stack` and returns the
+stack's lines rather than a boolean, because the third condition has to read
+them.
+
+Measured on 1977-11-15 page 1:
+
+| Quantity | Value |
+| --- | ---: |
+| `PRESENT:` extent | 142.00–198.64 |
+| label lane (`Mr.`) x0 | 214.00 |
+| value lane (`Burns, Chairman`) x0 | 243.00 |
+| stack line `1977, at 9:30 a.m.` x1 | 235.12 |
+| stack line above it x1 | 543.08 |
+
+Both stack lines cross the label lane, so 1977-11-15 is still dismissed and
+`PRESENT:` still recovered.
+
+### The counterexample, built and measured
+
+The rule was not shipped on the reviewer's fixtures alone. A wide display
+heading was constructed to defeat it: `STAFF AND OTHER ATTENDEES AT THE`
+(x0 30, x1 224.47) / `NOVEMBER MEETING OF THE FEDERAL` (30, 223.92) /
+`OPEN MARKET COMMITTEE` (40, 175.57) beside a pair whose label lane starts at
+x0 200, with the roster objects written first so block order cannot mask the
+result. **It detaches.** Its first two lines supply every piece of evidence the
+real page supplies, and the last line is adopted and torn off them.
+
+Both candidate discriminators were measured and both fail:
+
+* **Stack crosses the VALUE lane too.** 1977's last paragraph line stops at
+  235.12 and the value column starts at 243.00, so this refuses the one real
+  page in the Fed set that exposes the heading at all. It does not even
+  separate the counterexample, whose stack (x1 223.92) clears its value lane at
+  217.78. Rejected on both counts.
+* **The pair's label sits directly under the stack's last line.** True on
+  1977-11-15 (label 214.00 inside 108.00–235.12) and equally true on the
+  counterexample (label 200.00 inside 30.00–223.92). No separation.
+
+No discriminator with real-page support separates them, so the three-condition
+rule ships and the counterexample is pinned as a strict xfail
+(`test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it`)
+for Astra to rule on. Its enabling geometry is pinned separately so it cannot
+drift into passing for the wrong reason.
+
+### Recall given back
+
+Round 3's recovered case is withdrawn. A stack whose lines stop short of the
+label lane is now refused, which is exactly Astra's `STAFF`/`AND`/`OTHERS`
+shape, so the short-paragraph fixture abstains again and its test pins that.
+Nothing measured is lost: Astra measured all six Fed opening paragraphs and
+every line of every one is full measure. The abstention costs recall only on a
+shape the corpus does not contain.
+
+### Deletion witnesses
+
+| Clause | Tests that fail without it |
+| --- | ---: |
+| extra wholly left of the label | 1 |
+| baseline overlap with the label | **0** |
+| below-branch intersection | 8 |
+| stack evidence | 2 |
+| extra shares the stack's edge | 1 |
+| **stack crosses the label lane** | **2** |
+| stack needs a line above | **0** |
+| whole above-branch | 7 |
+| abstain rather than adopt | 16 |
+
+### Residuals
+
+* The wide-display-heading counterexample above, pinned as a strict xfail.
+* The baseline-overlap clause still has no deletion witness, unchanged since
+  round 1.
+* `_left_aligned_stack`'s `above < 0` guard has no individual witness: on every
+  fixture the wrap-around lookup it prevents returns no aligned line, so the
+  stack-evidence clause refuses first. It is kept as a correctness guard.
+* Unchanged from round 3: an unrelated isolated line beside the pair is still
+  adopted; the marker column still abstains; "two or more bands away" means
+  beyond an intervening OCCUPIED band, not a distance.
