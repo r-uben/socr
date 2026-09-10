@@ -25,6 +25,7 @@ import logging
 import re
 import statistics
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 from socr.tables.native_verifier import (
     _numeric_multiset_from_tokens,
@@ -834,17 +835,36 @@ def _fold_header_bands_into_lanes(
         label_parts.extend(label_texts)
         for run_index, (x0, x1, text) in enumerate(lane_runs):
             if index == len(parsed) - 1:
-                target = leaf_claims[run_index]
+                targets = [leaf_claims[run_index]]
             else:
                 covered = [max(0.0, min(x1, hi) - max(x0, lo)) for lo, hi in extents]
-                widest = max(covered)
-                if widest <= 0.0 or covered.count(widest) != 1:
-                    return None
-                target = blocks[covered.index(widest)]
-            if len(target) > 1:
+                # A run that covers MOST of more than one block is a parent
+                # heading over all of them -- a third level above the group
+                # row, which reaches every column in every block it covers.
+                # Attaching it to one child by greatest overlap, as this did,
+                # silently drops it from the other children whenever the two
+                # overlaps differ by a hair. A run that covers most of exactly
+                # one block, or of none, is that block's own heading or a
+                # wrapped fragment of it, and goes to the block it covers most
+                # -- which is what keeps a continuation line set a shade wider
+                # than its siblings from claiming the neighbouring column.
+                majority = [
+                    i
+                    for i, overlap in enumerate(covered)
+                    if 2.0 * overlap > (extents[i][1] - extents[i][0])
+                ]
+                if len(majority) > 1:
+                    targets = [blocks[i] for i in majority]
+                else:
+                    widest = max(covered)
+                    if widest <= 0.0 or covered.count(widest) != 1:
+                        return None
+                    targets = [blocks[covered.index(widest)]]
+            if len(targets) > 1 or any(len(target) > 1 for target in targets):
                 saw_spanning = True
-            for lane in target:
-                lane_parts[lane].append(text)
+            for target in targets:
+                for lane in target:
+                    lane_parts[lane].append(text)
 
     if not saw_spanning:
         return None
@@ -909,6 +929,114 @@ def _data_row_ys(
     return data_ys
 
 
+@dataclass(frozen=True)
+class _TableGeometry:
+    """The anchor -> lane -> band chain, computed once for a (grid, words) pair."""
+
+    rows_by_y: dict[int, list]
+    local_ys: list[int]
+    anchor_y: int
+    split_threshold: float
+    lane_centers: list[float]
+    data_start_x: float
+    bands: list[tuple[float, float]]
+
+
+def _table_geometry(grid: list[list[str]], words: list) -> _TableGeometry | None:
+    """Locate *grid* on the page and derive its data lanes. ``None`` on any abstain."""
+    if not words:
+        return None
+    rows_by_y = _all_rows_by_y(words)
+    if not rows_by_y:
+        return None
+
+    anchor_y = _best_anchor_y(rows_by_y, grid)
+    if anchor_y is None:
+        logger.debug("header_repair: no anchor y-row with exact multiset match")
+        return None
+
+    anchor_y_int = round(anchor_y)
+    local_ys = _local_table_ys(rows_by_y, anchor_y_int)
+    split_threshold = max(_SPLIT_GAP_MULT * _median_row_gap(local_ys), _SPLIT_GAP_MIN_PT)
+
+    data_ys = _data_row_ys(rows_by_y, anchor_y_int, split_threshold, local_ys)
+    lane_groups = _derive_lane_groups(rows_by_y, data_ys)
+    lane_centers = [sum(x0 for x0, _x1 in g) / len(g) for g in lane_groups]
+    if len(lane_centers) < 2:
+        logger.debug("header_repair: fewer than 2 data lanes derived")
+        return None
+
+    return _TableGeometry(
+        rows_by_y=rows_by_y,
+        local_ys=local_ys,
+        anchor_y=anchor_y_int,
+        split_threshold=split_threshold,
+        lane_centers=lane_centers,
+        data_start_x=lane_centers[0],
+        bands=_lane_bands(lane_groups),
+    )
+
+
+def _spanning_header_bands(geom: _TableGeometry) -> tuple[list[str], list[list]] | None:
+    """Flatten the page's spanning header band (#696).
+
+    Returns ``(flattened_header, band_rows)`` -- the one-cell-per-lane header
+    and the native word rows it was folded from, top row first. The second half
+    is what tells a caller which rows of the MODEL's grid are header material:
+    the page prints those words above its data, and nothing else in the
+    candidate's header prefix is accounted for by them.
+    """
+    band_ys = _header_ys(
+        geom.rows_by_y,
+        geom.local_ys,
+        _top_data_y(geom.rows_by_y, geom.anchor_y, geom.local_ys, geom.split_threshold, geom.bands),
+        geom.split_threshold,
+        geom.lane_centers,
+        geom.data_start_x,
+        geom.bands,
+    )
+    if not band_ys:
+        return None
+    band_rows = [geom.rows_by_y[y] for y in band_ys]
+    flattened = _fold_header_bands_into_lanes(band_rows, geom.bands)
+    if flattened is None:
+        return None
+    return flattened, band_rows
+
+
+def _header_band_tokens(band_rows: list[list]) -> set[str]:
+    """Casefolded word texts the page prints inside its header band."""
+    return {w[4].strip().casefold() for row in band_rows for w in row if w[4].strip()}
+
+
+def _candidate_header_depth(grid: list[list[str]], band_rows: list[list]) -> int:
+    """How many leading rows of *grid* the page's header band accounts for.
+
+    Row 0 is the markdown header and is header material by construction. Every
+    further row is header material only while every token it carries is one the
+    page prints in the band -- and never when the row reads as data. The first
+    row that fails ends the header; everything from there down is BODY and must
+    survive the rewrite verbatim, printed panel row or not. Deciding the
+    boundary by "the first sufficiently numeric row" instead deleted any
+    label-only row a table sets between its leaf headings and its first value.
+    """
+    band_tokens = _header_band_tokens(band_rows)
+    depth = 1
+    for row in grid[1:]:
+        numeric_cells = sum(
+            1
+            for cell in row
+            if cell.strip() and _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
+        )
+        if numeric_cells >= _MIN_DATA_NUMERIC_CELLS:
+            break
+        tokens = [tok.strip().casefold() for cell in row for tok in cell.split() if tok.strip()]
+        if not tokens or any(tok not in band_tokens for tok in tokens):
+            break
+        depth += 1
+    return depth
+
+
 def native_header_row(
     grid: list[list[str]], words: list, *, require_spanning: bool = False
 ) -> list[str] | None:
@@ -934,60 +1062,34 @@ def native_header_row(
     header which is not otherwise broken needs that distinction; a caller
     checking attribution does not.
     """
-    if not words:
+    geom = _table_geometry(grid, words)
+    if geom is None:
         return None
-    rows_by_y = _all_rows_by_y(words)
-    if not rows_by_y:
-        return None
-
-    anchor_y = _best_anchor_y(rows_by_y, grid)
-    if anchor_y is None:
-        logger.debug("header_repair: no anchor y-row with exact multiset match")
-        return None
-
-    anchor_y_int = round(anchor_y)
-    local_ys = _local_table_ys(rows_by_y, anchor_y_int)
-    split_threshold = max(_SPLIT_GAP_MULT * _median_row_gap(local_ys), _SPLIT_GAP_MIN_PT)
-
-    data_ys = _data_row_ys(rows_by_y, anchor_y_int, split_threshold, local_ys)
-    lane_groups = _derive_lane_groups(rows_by_y, data_ys)
-    lane_centers = [sum(x0 for x0, _x1 in g) / len(g) for g in lane_groups]
-    if len(lane_centers) < 2:
-        logger.debug("header_repair: fewer than 2 data lanes derived")
-        return None
-
-    data_start_x = lane_centers[0]
 
     # #696: a spanning group heading folds into every column beneath it. This
     # runs first, on its own band scan, and abstains on anything that is not a
     # clean spanning band; the legacy scan and repair below are untouched by it.
-    bands = _lane_bands(lane_groups)
-    band_ys = _header_ys(
-        rows_by_y,
-        local_ys,
-        _top_data_y(rows_by_y, anchor_y_int, local_ys, split_threshold, bands),
-        split_threshold,
-        lane_centers,
-        data_start_x,
-        bands,
-    )
-    if band_ys:
-        flattened = _fold_header_bands_into_lanes([rows_by_y[y] for y in band_ys], bands)
-        if flattened is not None:
-            return flattened
+    spanning = _spanning_header_bands(geom)
+    if spanning is not None:
+        return spanning[0]
     if require_spanning:
         return None
 
     hdr_ys = _header_ys(
-        rows_by_y, local_ys, anchor_y_int, split_threshold, lane_centers, data_start_x
+        geom.rows_by_y,
+        geom.local_ys,
+        geom.anchor_y,
+        geom.split_threshold,
+        geom.lane_centers,
+        geom.data_start_x,
     )
     if not hdr_ys:
-        logger.debug("header_repair: no header y-rows above anchor y=%d", anchor_y_int)
+        logger.debug("header_repair: no header y-rows above anchor y=%d", geom.anchor_y)
         return None
 
     header_grid: list[list[str]] = []
     for y in hdr_ys:
-        row_cells = _assign_words_to_lanes(rows_by_y[y], lane_centers, data_start_x)
+        row_cells = _assign_words_to_lanes(geom.rows_by_y[y], geom.lane_centers, geom.data_start_x)
         if any(c.strip() for c in row_cells):
             header_grid.append(row_cells)
 
@@ -1077,15 +1179,24 @@ def flatten_multiband_header(
     if collapsed or expected_cols < 2 or len(grid[0]) != expected_cols:
         return None
 
-    data_start = _first_data_row_idx(grid, expected_cols)
-    if data_start < 2 or data_start >= len(grid):
+    geom = _table_geometry(grid, words)
+    if geom is None:
         return None
-
-    header_row = native_header_row(grid, words, require_spanning=True)
-    if header_row is None or len(header_row) != expected_cols:
+    spanning = _spanning_header_bands(geom)
+    if spanning is None:
+        return None
+    header_row, band_rows = spanning
+    if len(header_row) != expected_cols:
         return None
     if not _header_is_faithful(header_row, expected_cols):
         logger.debug("header_repair: declined flatten — empty lane in %r", header_row)
+        return None
+
+    # The header/body boundary comes from the page, not from "the first row
+    # with enough numbers in it": a row the candidate prints and the header
+    # band does not account for is BODY, and folding it away is content loss.
+    data_start = _candidate_header_depth(grid, band_rows)
+    if data_start < 2 or data_start >= len(grid):
         return None
 
     body_rows: list[list[str]] = []
