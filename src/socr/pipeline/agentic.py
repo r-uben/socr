@@ -33,11 +33,16 @@ from typing import Protocol
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
 from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_TIMEOUT,
+    JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     PageOutput,
     PageStatus,
 )
+from socr.judge.judge import is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -68,6 +73,23 @@ class AcceptDecision:
     reason: str = ""
     confidence: float = 0.0
     raw_verdict: object | None = None  # JudgeVerdict when a VLM judged
+    #: #713 round 4 (Astra P2): the TYPED outcome THIS invocation produced when
+    #: the decision is not a judge's answer at all. "" -- the default, and what
+    #: every real verdict carries -- means a judge looked and decided.
+    #:
+    #: Only ``_UnverifiedTableRejection._reject_unverified`` sets it today, to
+    #: ``JUDGE_OUTCOME_VERIFIER_ERROR``: the deterministic table verifier RAISED,
+    #: so the inner judge was never consulted and the negative decision is a
+    #: fail-closed refusal to proceed, not a refusal of the content.
+    #:
+    #: It rides on the DECISION rather than on the output because the outcome is
+    #: a fact about one call. The boundary previously inferred it by comparing
+    #: ``PageOutput.rejection_class`` before and after -- which cannot tell "the
+    #: verifier set this value again" from "the judge left a stale value
+    #: untouched", so a SECOND consecutive verifier crash on the same output was
+    #: recorded as a completed rejection and destroyed the credential (Astra
+    #: round 4). A value carried out of the call has no such blind spot.
+    judge_outcome: str = ""
 
 
 class PageJudge(Protocol):
@@ -323,6 +345,19 @@ def route_page(
             # never pulled) propagates out of the per-page loop in
             # ``_phase_agentic`` and takes the whole document with it (#133).
             logger.warning("judge failed on page %s at %s: %s", page_num, prof.engine.value, exc)
+            # #713: record the TYPED outcome on the attempt itself. The reason
+            # string below still carries the raw exception text for the audit
+            # trail, but no gate may key on it: it interpolates an arbitrary
+            # ``str(exc)``, so "timed out" in it proves nothing about who said
+            # it. Only this field separates an infrastructure timeout -- the
+            # one outcome #713's credentialed stand-in may act on -- from a
+            # judge defect, a refusal, or a malformed response, and it is set
+            # from the exception's TYPE. A completed rejection never reaches
+            # this branch at all (it returns a decision), and a provider blowing
+            # up is caught by the guard above, which never touches this field.
+            output.judge_outcome = (
+                JUDGE_OUTCOME_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_OUTCOME_EXCEPTION
+            )
             attempts.append(
                 ProviderAttempt(
                     engine=prof.engine,
@@ -337,6 +372,48 @@ def route_page(
             )
             continue
 
+        # #713 round 2 (Astra P1-2): the judge COMPLETED. Record that typed
+        # outcome on the attempt's own output BEFORE the attempt is appended,
+        # and on a refusal drop any acceptance credential riding on it.
+        #
+        # ``output`` is a live object a previous rung may already have stamped
+        # ``JUDGE_OUTCOME_TIMEOUT`` (and the table gate may already have minted a
+        # credential against). A completed verdict on these exact bytes is a
+        # LATER, applicable answer to the same question the timed-out judge never
+        # answered, so it supersedes it: the credentialed stand-in in
+        # ``manifest.credentialed_judge_timeout_winner`` admits only
+        # ``JUDGE_OUTCOME_TIMEOUT``, and after this line that page can no longer
+        # reach it. Retiring the credential too is belt-and-braces on the same
+        # fact -- authority to ship must never outlive the verdict that would
+        # have refused it.
+        # #713 (Astra rounds 2-4): a decision object is NOT proof a judge answered.
+        # ``_UnverifiedTableRejection._reject_unverified`` returns a negative
+        # ``AcceptDecision`` when the deterministic table VERIFIER RAISED, before
+        # the inner judge is ever consulted -- an infrastructure failure wearing
+        # a verdict's shape. Stamping it COMPLETED made every downstream reader
+        # ("a later completed verdict refused these bytes") retire a credential
+        # nothing had contradicted, and the page shipped the fail-closed floor on
+        # the strength of a crash.
+        #
+        # The outcome is read from the DECISION this call returned, never from
+        # the reason text and never from a before/after comparison of
+        # ``output.rejection_class``: that field persists across rungs, so a
+        # same-value assignment -- a second verifier crash on the same output --
+        # is invisible to a snapshot, and the second crash was recorded as a
+        # completed rejection (Astra round 4). A stale class from an earlier rung
+        # still cannot disguise a real refusal, because a real verdict carries no
+        # ``judge_outcome`` at all.
+        missing_verdict = decision.judge_outcome if not decision.accept else ""
+        if missing_verdict:
+            # A missing verdict cannot retire another missing verdict either: an
+            # already-typed timeout stands, so a verifier crashing on a LATER
+            # rung does not destroy the very stand-in this ticket exists for.
+            if output.judge_outcome != JUDGE_OUTCOME_TIMEOUT:
+                output.judge_outcome = missing_verdict
+        else:
+            output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+            if not decision.accept:
+                output.table_acceptance_credential = None
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,
@@ -482,6 +559,9 @@ class _UnverifiedTableRejection:
             accept=False,
             reason=f"table_verifier_error: {name} raised ({type(exc).__name__})",
             confidence=0.0,
+            # #713 round 4: this call produced no verdict. Carried on the result
+            # so ``route_page`` needs no inference about what the verifier did.
+            judge_outcome=JUDGE_OUTCOME_VERIFIER_ERROR,
         )
 
 

@@ -144,6 +144,25 @@ class FailureMode(str, Enum):
     #: with no tesseract. The page still fails closed under this mode; only the
     #: reason changes.
     NO_WITNESS_BACKEND = "no_witness_backend"
+    #: #713: the PAGE judge never returned a verdict for this candidate -- the
+    #: call timed out (infrastructure), so nothing rejected the reading and
+    #: nothing confirmed it either. Deliberately NOT a reuse of ``TIMEOUT``
+    #: (that one is a PROVIDER/extraction timeout, a page with no text at all)
+    #: and NOT of ``AUDIT_FAILED`` (a completed verdict that said no). A page
+    #: that fails closed because its only grid candidate carries this outcome
+    #: must say so instead of ``STRUCTURE_CLASS_LADDER_EXHAUSTED``, which
+    #: claims every candidate was refused or absent -- neither happened here.
+    PAGE_JUDGE_TIMEOUT = "page_judge_timeout"
+    #: #713: the page judge timed out on a candidate whose EVERY emitted table
+    #: was accepted by the table judge ladder, and a persisted acceptance
+    #: credential binds that acceptance to these exact candidate bytes. The
+    #: candidate ships, demoted, under this mode: its TABLE evidence passed
+    #: while the PAGE-level check remained incomplete. It never means the
+    #: surrounding prose was verified -- nothing verified it. Distinct from
+    #: ``MODEL_OUTPUT_FLAGGED`` (no rung accepted at all) and from
+    #: ``HEADER_BINDING_UNVERIFIED`` (rows corroborated, header binding never
+    #: checked): here the ladder positively accepted every table.
+    JUDGE_TIMEOUT_LADDER_ACCEPTED = "judge_timeout_ladder_accepted"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
@@ -180,6 +199,46 @@ REJECTION_JUDGE_ONLY = "judge_only"
 #: refusal, so it must not license shipping the reading over a fail-closed
 #: floor. The allowlists stay allowlists.
 REJECTION_VERIFIER_ERROR = "verifier_error"
+
+
+#: #713: the TYPED outcome of the PAGE judge for one attempt, recorded on the
+#: attempt's own ``PageOutput``. Empty means the page judge produced an ordinary
+#: verdict (accept or reject) or never ran at all -- exactly as before this
+#: ticket. The two values below are written ONLY by the judge-exception guard in
+#: ``pipeline.agentic.route_page``, from the exception's TYPE.
+#:
+#: A typed field rather than a substring match on ``judge_reason``: the reason
+#: string is built by interpolating an arbitrary exception's ``str()``, so any
+#: provider, judge backend or transport is free to put the word "timeout" in it,
+#: and a downstream gate that admits a candidate on that substring admits
+#: whatever a model or a remote service chose to say. Nothing but the guard
+#: writes these values, and free text cannot reach them.
+JUDGE_OUTCOME_TIMEOUT = "page_judge_timeout"
+#: The judge raised something that is NOT an availability timeout -- a defect, a
+#: refusal, a malformed response. Recorded so "the judge crashed" can never be
+#: read as "the judge timed out": only the value above licenses the #713
+#: credentialed stand-in, and an untyped empty string never does.
+JUDGE_OUTCOME_EXCEPTION = "page_judge_exception"
+#: #713 round 2 (Astra P1-2): the page judge COMPLETED and returned a verdict --
+#: accept or reject. Recorded at the judge boundary in
+#: ``pipeline.agentic.route_page`` on the attempt's own ``PageOutput``, which is
+#: the same object a previous rung may have stamped ``JUDGE_OUTCOME_TIMEOUT``.
+#: Writing it here RETIRES that earlier timeout authority: a completed verdict
+#: on this candidate supersedes a missing one, so the credentialed stand-in --
+#: which admits only ``JUDGE_OUTCOME_TIMEOUT`` -- can no longer fire for it.
+#: Without this a page whose judge timed out on one rung and then REFUSED the
+#: same bytes on the next still shipped under the timeout exception.
+JUDGE_OUTCOME_COMPLETED = "page_judge_completed"
+#: #713 round 3 (Astra P2): the page judge never got to answer because the
+#: deterministic table VERIFIER raised, so ``_UnverifiedTableRejection`` returned
+#: a fail-closed negative decision INSTEAD of delegating to the inner judge (see
+#: ``REJECTION_VERIFIER_ERROR`` above). A decision object came back, so the
+#: boundary would otherwise stamp ``JUDGE_OUTCOME_COMPLETED`` and every gate that
+#: reads "a completed refusal of these bytes" would treat an infrastructure
+#: failure as a verdict -- retiring a credential the judge never contradicted.
+#: This is a MISSING verdict, in the same family as the two outcomes above, and
+#: it never supersedes anything.
+JUDGE_OUTCOME_VERIFIER_ERROR = "page_judge_verifier_error"
 
 
 @dataclass
@@ -321,6 +380,21 @@ class PageOutput:
     #: doubt, so a later, cleaner candidate for the same page does not
     #: inherit a flag that no longer applies to what shipped.
     table_ditto_columns: list[dict] = field(default_factory=list)
+    #: #713: the TYPED page-judge outcome for THIS attempt -- see
+    #: ``JUDGE_OUTCOME_TIMEOUT`` / ``JUDGE_OUTCOME_EXCEPTION`` above. "" means
+    #: the page judge returned a verdict, or never ran.
+    judge_outcome: str = ""
+    #: #713: the persisted table-ladder acceptance credential for THIS
+    #: candidate, or ``None``. Written only by
+    #: ``orchestrator._mint_table_acceptance_credential`` when the ladder accepted
+    #: EVERY table this candidate emits and the page judge timed out on it.
+    #: Shape: see ``core.page_credential.TableAcceptanceCredential``. It is the
+    #: ONLY thing that can admit a timed-out candidate at selection, so a table
+    #: id or a markdown identity alone is deliberately not enough: the
+    #: credential carries a SHA-256 of the complete canonical candidate bytes
+    #: that were actually evaluated, plus the document checksum, page number,
+    #: witness identities and judge/provider/config provenance.
+    table_acceptance_credential: dict | None = None
 
     @property
     def word_count(self) -> int:
@@ -389,6 +463,15 @@ class PageOutput:
         # pages that carry no ditto mark, forcing a spurious resume reprocess.
         if self.table_ditto_columns:
             d["table_ditto_columns"] = self.table_ditto_columns
+        # #713: same omit-when-unset convention as every field above, same
+        # reason -- both postdate every already-terminal page's sidecar, and
+        # emitting them unconditionally would change the content-addressed
+        # fingerprint of every page in every corpus (none of which carries a
+        # page-judge timeout), forcing a spurious resume reprocess corpus-wide.
+        if self.judge_outcome:
+            d["judge_outcome"] = self.judge_outcome
+        if self.table_acceptance_credential is not None:
+            d["table_acceptance_credential"] = self.table_acceptance_credential
         return d
 
     @classmethod
@@ -423,6 +506,18 @@ class PageOutput:
             table_corroboration=d.get("table_corroboration"),
             table_label_unverified=d.get("table_label_unverified", ""),
             table_ditto_columns=list(d.get("table_ditto_columns", [])),
+            # #713: a sidecar is parsed JSON, so both are read defensively --
+            # a non-string outcome is no outcome, and a non-dict credential is
+            # no credential. Neither may be forged into existence by a shape
+            # this dataclass never wrote.
+            judge_outcome=(
+                d.get("judge_outcome") if isinstance(d.get("judge_outcome"), str) else ""
+            ),
+            table_acceptance_credential=(
+                d.get("table_acceptance_credential")
+                if isinstance(d.get("table_acceptance_credential"), dict)
+                else None
+            ),
         )
 
 

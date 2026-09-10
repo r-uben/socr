@@ -43,8 +43,13 @@ from ocr_output_contract import (
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
 from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_TIMEOUT,
+    JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
+    REJECTION_VERIFIER_ERROR,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -464,6 +469,30 @@ def kept_table_flag_note(state, page_num: int, text: str) -> str:
         + "; ".join(reasons)
         + " — verify against the source before citing]"
     )
+
+
+def judge_timeout_note(page_num: int) -> str:
+    """#713: the in-body disclosure a credentialed timeout page ships.
+
+    The page's status, failure mode and disposition all say what happened, but a
+    citation corpus is read as markdown far more often than as a sidecar, so the
+    body says it too. Worded to claim exactly what the credential proves and no
+    more: the TABLES were accepted against their own witness images; the
+    PAGE-level check never completed, so the prose is unverified.
+    """
+    return socr_marker(
+        f"page {page_num}: the page-level judge TIMED OUT and never returned a verdict. "
+        "Every table on this page was accepted by the table judge ladder against its own "
+        "witness image, and that acceptance is bound to these exact bytes -- but the "
+        "page-level check remains INCOMPLETE and the surrounding prose is unverified."
+    )
+
+
+def _credential_sha256_text(text: str) -> str:
+    """``page_credential.sha256_text``, imported lazily to keep the module edge thin."""
+    from socr.core.page_credential import sha256_text
+
+    return sha256_text(text)
 
 
 def flagged_model_page_output(p) -> PageOutput | None:
@@ -1495,6 +1524,360 @@ def structure_class_grid_winner(p) -> PageOutput | None:
     return corroborated[0] if corroborated is not None else None
 
 
+#: #713: the audit-event kinds that WITHHOLD the credentialed page-judge-timeout
+#: stand-in. Astra's ruling names four families of "outstanding applicable hard
+#: contradiction" -- value, structural, source-evidence, table-withholding -- and
+#: this is their enumeration.
+#:
+#: Deliberately a NARROWED subset of ``tables_trust.TABLE_DISTRUST_KINDS``, not
+#: that whole set. The drift guard in the tests pins BOTH directions -- the
+#: subset relation AND the exact complement -- so a distrust kind added later
+#: cannot be silently omitted from this policy by default. Exactly five kinds
+#: are excluded, and only these:
+#:
+#: * ``table_not_scorable`` -- it says socr could not SCORE the page, not that
+#:   anything contradicts it. Inability to measure is not a positive rejection.
+#: * the four S1 kinds emitted at ASSEMBLE time
+#:   (``structure_class_model_table_kept``,
+#:   ``structure_class_ladder_exhausted_floor``, ``structure_class_row_corroborated``,
+#:   ``structure_floor_overrode_ladder``) -- they are emitted BY the selection this
+#:   predicate feeds, from its own result, so reading them here would make
+#:   selection disagree with itself between the in-loop call and the assemble-time
+#:   call over the same state.
+#:
+#: #713 round 2 (Astra P1-4): ``table_unexplained_lanes`` was in that exempt
+#: list and no longer is. It is emitted when native lanes carry VALUES in
+#: matched rows that map to no emitted column -- a reported OMISSION from the
+#: shipped table, not an unscorable page. Admitting a stand-in over an
+#: outstanding one ships a table known to be missing values under a credential
+#: that says every table was accepted. Nothing retires it today, so it blocks;
+#: when an explicit applicable resolution exists, retire it there, not by
+#: exempting the kind.
+CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
+    {
+        # value
+        "dualpass_flagged",
+        "dualpass_crop_timeout",
+        "dualpass_crop_failed",
+        "native_table_verifier_warn",
+        "native_table_verifier_hard_fail",
+        "table_value_drift_unadjudicated",
+        "value_guard_row_count_warning",
+        # structural
+        "table_structure_failed",
+        "table_region_geometry_hard_fail",
+        "table_region_unverifiable",
+        "table_binding_boundary_unresolved",
+        "table_row_repetition_truncated",
+        "candidate_truncated",
+        "d3_floor_model_table_kept",
+        # source-evidence
+        "source_evidence_table_reject",
+        "source_evidence_table_label_unverified",
+        "source_evidence_no_witness_backend",
+        # ladder terminals other than acceptance, and the escalation failures
+        "table_ladder_rejected",
+        "table_ladder_unverified",
+        "table_ladder_withheld",
+        "table_escalation_refused",
+        "table_escalation_timeout",
+        # a shipped ditto mark nobody resolved
+        "table_ditto_unresolved",
+        # a reported native-lane omission (#713 round 2)
+        "table_unexplained_lanes",
+    }
+)
+
+#: #713 round 2: the EXACT complement of the set above within
+#: ``tables_trust.TABLE_DISTRUST_KINDS``. Written out rather than derived so the
+#: drift guard pins what is exempt, not only what blocks: deriving it would make
+#: every future distrust kind exempt by default and the guard would still pass.
+CREDENTIAL_NON_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
+    {
+        "table_not_scorable",
+        "structure_class_model_table_kept",
+        "structure_class_ladder_exhausted_floor",
+        "structure_class_row_corroborated",
+        "structure_floor_overrode_ladder",
+    }
+)
+
+
+#: #713 round 3: the typed page-judge outcomes that are NOT an answer. An
+#: attempt carrying one of these refused nothing -- the judge timed out, crashed,
+#: or never ran because the deterministic verifier raised first -- so it can
+#: never supersede another attempt's authority.
+_MISSING_JUDGE_VERDICT_OUTCOMES: frozenset[str] = frozenset(
+    {
+        JUDGE_OUTCOME_TIMEOUT,
+        JUDGE_OUTCOME_EXCEPTION,
+        JUDGE_OUTCOME_VERIFIER_ERROR,
+    }
+)
+
+
+def page_judge_timeout_attempt(p) -> PageOutput | None:
+    """#713: the grid-authoring attempt whose PAGE judge TIMED OUT, if any.
+
+    Reads the TYPED ``judge_outcome`` field only. A ``judge_reason`` that
+    happens to contain the words "timed out" proves nothing -- that string is
+    built by interpolating an arbitrary exception, so any provider or remote
+    service can put those words in it, and the pre-#713 caches in existing
+    corpora carry exactly that string with no typed outcome behind it.
+
+    Structural gate is ``_grid_shaped_attempt``: the attempt must be a
+    non-native reading that actually authored a table grid. A timed-out judge on
+    a page with no grid is not this ticket's case and gets no new surfacing.
+    """
+    for out in (p.best_output, *reversed(list(p.attempts))):
+        if out is None:
+            continue
+        if getattr(out, "judge_outcome", "") != JUDGE_OUTCOME_TIMEOUT:
+            continue
+        if _grid_shaped_attempt(out):
+            return out
+    return None
+
+
+def reading_digests(out) -> frozenset[str]:
+    """#713 round 3 (Astra P1): every digest that names THIS reading.
+
+    A credentialed page exists in two byte-forms: the CANDIDATE the ladder and
+    the page judge were run against, and the FINALIZED body that shipped -- the
+    candidate plus the disclosure note. Resume restores the finalized form, so a
+    supersession test that hashes only ``out.text`` is asking about the wrong
+    bytes on every resumed page, and a later judge that refused the ORIGINAL
+    candidate never matched it. The restored authority then shipped over a live
+    refusal of the very reading it vouches for.
+
+    Both digests name one reading, so both are returned. The credential's own
+    ``candidate_sha256`` is the verified identity -- it was checked against the
+    bytes before this page was ever admitted -- and ``finalized_sha256`` is what
+    finalization stamped over the shipped body. Widening the identity can only
+    make MORE refusals applicable, never fewer: nothing here admits anything.
+    """
+    from socr.core.page_credential import sha256_text
+
+    digests = {sha256_text(getattr(out, "text", "") or "")}
+    cred = getattr(out, "table_acceptance_credential", None)
+    for key in ("candidate_sha256", "finalized_sha256"):
+        value = cred.get(key) if isinstance(cred, dict) else getattr(cred, key, None)
+        if value:
+            digests.add(str(value))
+    return frozenset(digests)
+
+
+def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
+    """#713: an attempt on ``p`` that COMPLETED a refusal of one of ``digests``.
+
+    A page judge that timed out on one rung left a missing verdict. If any rung
+    then completed a verdict over the same reading and refused it, that answer
+    is the applicable one and the timeout carries no authority at all -- yet the
+    timeout search hands back the older credentialed attempt, which then ships
+    (Astra round 2, case (b)).
+
+    "The same reading" is decided by the candidate BYTES (see
+    ``reading_digests``), never by position or provider identity: a rejected
+    DIFFERENT crop candidate is a verdict about different text and must not
+    invalidate an unchanged incumbent, which is why this is a digest comparison
+    and not "any rejection on this page".
+
+    ORDER IS NOT CONSULTED (Astra round 3). A restored credential is appended to
+    a fresh ``PageState`` on resume, so it lands positionally AFTER a rejection
+    that predates it; ranking by index would let the reload of an old authority
+    outrank a live refusal simply by arriving later in a list. Between a MISSING
+    verdict and a completed one there is nothing to sequence -- the completed
+    one is the only answer that exists -- so every attempt on the page is
+    considered and the direction of the test is fail-closed either way.
+
+    "Completed" is read from the TYPED outcome and the rejection class, never
+    from reason text. ``REJECTION_VERIFIER_ERROR`` and
+    ``JUDGE_OUTCOME_VERIFIER_ERROR`` are excluded for the same reason a timeout
+    is: the verifier broke, it did not refuse.
+    """
+    from socr.core.page_credential import sha256_text
+
+    if p is None or not digests:
+        return None
+    candidates = [a for a in (getattr(p, "attempts", None) or []) if a is not None]
+    best = getattr(p, "best_output", None)
+    if best is not None and not any(a is best for a in candidates):
+        candidates.append(best)
+    for att in candidates:
+        if exclude is not None and att is exclude:
+            continue
+        if getattr(att, "judge_outcome", "") in _MISSING_JUDGE_VERDICT_OUTCOMES:
+            continue
+        if sha256_text(getattr(att, "text", "") or "") not in digests:
+            continue
+        rejection = getattr(att, "rejection_class", None)
+        if rejection and rejection != REJECTION_VERIFIER_ERROR:
+            return att
+        if getattr(att, "judge_outcome", "") == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
+            return att
+    return None
+
+
+def superseding_rejection(p, out) -> PageOutput | None:
+    """#713: a completed refusal of the bytes ``out`` stands for, if any."""
+    return rejection_of_reading(p, reading_digests(out), exclude=out)
+
+
+def _credential_admission_refusal(state, p, page_num: int, out) -> str:
+    """#713: why this timed-out attempt may NOT be admitted, or "" when it may.
+
+    The conditions that are independent of WHICH bytes are being verified --
+    the ladder's own reduction, the outstanding hard contradictions, and a later
+    completed rejection of the same reading. Shared by the fresh admission and
+    by the restored-page ending so the two can never drift apart: a page that
+    fails closed on the first run must not be admitted on the resume.
+    """
+    if getattr(p, "table_ladder_disposition", None) is not None:
+        return "adverse table-ladder disposition"
+    events = getattr(state, "events", None) or []
+    blocking = sorted(
+        {
+            getattr(ev, "kind", "")
+            for ev in events
+            if getattr(ev, "page_num", None) == page_num
+            and getattr(ev, "kind", "") in CREDENTIAL_BLOCKING_EVENT_KINDS
+        }
+    )
+    if blocking:
+        return f"outstanding contradiction ({', '.join(blocking)})"
+    if superseding_rejection(p, out) is not None:
+        return "a later completed verdict refused these bytes"
+    return ""
+
+
+def restored_credentialed_judge_timeout_winner(state, p, page_num: int) -> PageOutput | None:
+    """#713 round 2 (Astra P1-1): the already-FINALIZED credentialed page.
+
+    A credentialed page is written to the ledger as its SHIPPED body -- the
+    judged candidate plus the disclosure notes finalization appended. Resume
+    restores exactly those bytes and installs them as the page's attempt, and
+    then ``_phase_assemble`` runs selection over the restored state again.
+    ``credentialed_judge_timeout_winner`` verifies an UNFINALIZED candidate
+    against ``candidate_sha256``, and the restored body is not those bytes, so
+    the second selection refused it and the page collapsed to the fail-closed
+    floor -- a resume silently destroyed the reading the first run shipped.
+
+    This ending recognises the finalized body for what it is: verified against
+    ``finalized_sha256``, the digest finalization stamped for exactly this
+    purpose, and returned VERBATIM so no note is appended twice and the
+    reassembled document is byte-identical to the original one.
+
+    It is not a weaker check. The same refusals apply
+    (``_credential_admission_refusal``), the credential must still cover every
+    table the body emits with a real witness and a real rung, and an empty
+    ``finalized_sha256`` -- a credential that was never finalized -- never
+    verifies. Arbitrary finalized bytes are never blessed as judged bytes: the
+    only bytes that pass are the ones whose digest finalization recorded.
+    """
+    from socr.core.page_credential import verify_credential
+
+    out = page_judge_timeout_attempt(p)
+    if out is None or not (out.text or "").strip():
+        return None
+    if out.failure_mode is not FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED:
+        return None
+    if out.status is not PageStatus.WARNING or out.audit_passed:
+        return None
+    if out.table_acceptance_credential is None:
+        return None
+    refusal = _credential_admission_refusal(state, p, page_num, out)
+    if refusal:
+        logger.debug("#713: p%d restored credential refused (%s)", page_num, refusal)
+        return None
+    verdict = verify_credential(
+        out.table_acceptance_credential,
+        candidate_text=out.text,
+        finalized=True,
+        page_num=page_num,
+        document_checksum=getattr(getattr(state, "handle", None), "file_hash", "") or "",
+        engine=out.engine or "",
+        provider_id=out.provider_id or "",
+        provider_model=out.provider_model or "",
+        provider_backend=out.provider_backend or "",
+        judge_outcome=getattr(out, "judge_outcome", ""),
+    )
+    if not verdict.valid:
+        logger.debug(
+            "#713: p%d restored credential refused (%s); the page fails closed",
+            page_num,
+            verdict.reason,
+        )
+        return None
+    return out
+
+
+def credentialed_judge_timeout_winner(state, p, page_num: int) -> PageOutput | None:
+    """#713: the timed-out attempt a verified acceptance credential admits.
+
+    Astra's ruling (2026-09-10), option (a) as a narrowly typed, flagged
+    exception. A page judge that TIMED OUT rejected nothing -- yet today its
+    attempt carries ``audit_passed=False``, so every strict pool refuses it and
+    a page whose every table the ladder positively accepted ships the
+    fail-closed floor instead (#713, BoE 2018 p1: a 3,539-character verified
+    reading turned into total loss).
+
+    The stand-in is admitted ONLY on positive proof, never on the absence of an
+    adverse signal. Four conditions, all required:
+
+    1. the attempt carries the TYPED timeout outcome (not a reason substring);
+    2. a credential verifies against the bytes about to ship -- see
+       ``core.page_credential.verify_credential``, which recomputes the
+       candidate digest, document checksum, page number, attempt identity and
+       judge outcome, and requires a completed acceptance with a real witness
+       and a real rung for EVERY table the candidate emits. Selection does NOT
+       check the run fingerprint (#713 round 2, Astra): it is pure and has no
+       access to the live run's identity, and a caller that cannot compute it
+       must not be able to satisfy the check by passing ``None``. The fingerprint
+       is checked where it is known and where it matters -- the RESUME gate,
+       which is the only path that admits a credential minted by a DIFFERENT
+       run;
+    3. the page's ladder reduction is not adverse
+       (``PageState.table_ladder_disposition`` unset -- REJECTED, UNVERIFIED and
+       WITHHELD all void it); and
+    4. no blocking audit event stands against the page
+       (``CREDENTIAL_BLOCKING_EVENT_KINDS``).
+
+    ``audit_passed`` on the stored attempt is NOT touched, here or anywhere: it
+    is the winner-SELECTION flag, and flipping it discards the page (the #252
+    round-1 defect). The caller ships a demoted COPY.
+    """
+    from socr.core.page_credential import verify_credential
+
+    out = page_judge_timeout_attempt(p)
+    if out is None or not (out.text or "").strip():
+        return None
+    if out.table_acceptance_credential is None:
+        return None
+    refusal = _credential_admission_refusal(state, p, page_num, out)
+    if refusal:
+        logger.debug("#713: p%d timeout credential refused (%s)", page_num, refusal)
+        return None
+    verdict = verify_credential(
+        out.table_acceptance_credential,
+        candidate_text=out.text,
+        page_num=page_num,
+        document_checksum=getattr(getattr(state, "handle", None), "file_hash", "") or "",
+        engine=out.engine or "",
+        provider_id=out.provider_id or "",
+        provider_model=out.provider_model or "",
+        provider_backend=out.provider_backend or "",
+        judge_outcome=getattr(out, "judge_outcome", ""),
+    )
+    if not verdict.valid:
+        logger.debug(
+            "#713: p%d timeout credential refused (%s); the page fails closed",
+            page_num,
+            verdict.reason,
+        )
+        return None
+    return out
+
+
 def structure_class_floor_applies(p) -> bool:
     """S1/P2 case (iii): whether the structure-class branch demotes THIS
     page's winner to the fail-closed floor (ERROR/audit_passed=False).
@@ -2237,9 +2620,34 @@ class SelectionProvenance(str, Enum):
     STRUCTURE_CLASS_GRID_PASSING = "structure_class_grid_passing"
     #: structure-class: grid winner kept but demoted to WARNING
     STRUCTURE_CLASS_GRID_FLAGGED = "structure_class_grid_flagged"
+    #: #713 round 2: the credentialed page RESTORED from the ledger and selected
+    #: again at assemble time. Its body is already finalized (candidate plus the
+    #: disclosure notes), verified against the credential's ``finalized_sha256``
+    #: and shipped VERBATIM, so a resumed document is byte-identical to the run
+    #: that first shipped it. Its own member rather than a reuse of the fresh
+    #: ending below: that one MINTS the shipped body, this one only re-verifies
+    #: bytes that already exist, and conflating them would let a second note be
+    #: appended on every resume.
+    STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED = "structure_class_judge_timeout_restored"
+    #: #713: structure-class, and the ONE candidate that authored a grid had its
+    #: PAGE judge time out -- no verdict, negative or positive -- while the table
+    #: judge ladder positively accepted every table it emits, under a credential
+    #: bound to these exact bytes. Ships the candidate demoted to WARNING /
+    #: ``JUDGE_TIMEOUT_LADDER_ACCEPTED``. Deliberately its own member rather than
+    #: a reuse of ``STRUCTURE_CLASS_GRID_FLAGGED``: that one means "the judge
+    #: looked and refused", this one means "the judge never answered", and the
+    #: two must never be counted as the same ship reason.
+    STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED = "structure_class_judge_timeout_credentialed"
     #: structure-class (iii): no attempt authored a grid -- fail-closed floor
     #: (whole-page marker + image ref; no native byte ships)
     STRUCTURE_CLASS_FLOOR = "structure_class_floor"
+    #: #713: the SAME fail-closed floor, for the page whose only grid candidate
+    #: carries the typed page-judge timeout and whose credential did not verify
+    #: (or was never minted). Split from ``STRUCTURE_CLASS_FLOOR`` because the
+    #: floor's own reason is the thing #713 is about: "every candidate was
+    #: refused or absent" and "nothing ever judged the candidate" are different
+    #: facts and demand different operator actions.
+    STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR = "structure_class_page_judge_timeout_floor"
     #: native layer deficient, recovery tried and never passed: native as FALLBACK,
     #: shipped WARNING / audit_passed=False
     NATIVE_FALLBACK = "native_fallback"
@@ -2291,7 +2699,26 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
     ),
+    # #713 round 2: the same public disposition as the fresh credentialed
+    # ending, deliberately -- it is the same page, shipped again from the ledger.
+    SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
     SelectionProvenance.STRUCTURE_CLASS_FLOOR: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    # #713: the SAME public disposition as the ordinary floor, deliberately.
+    # The floor's document-level surfacing (the failed-page list, the
+    # ``structure_class_floor_pages`` bucket, the tables-trust entry, the
+    # AUDIT_FAILED contribution) is keyed on this pair, and a timed-out floor is
+    # every bit as fail-closed as a refused one -- moving it out of that bucket
+    # would DELETE surfacing in the name of adding some. The new fact rides on
+    # the page's own ``failure_mode`` and on this provenance tag, both of which
+    # assemble reads to emit the timeout-specific event and CLI line.
+    SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
     ),
     SelectionProvenance.NATIVE_FALLBACK: PageDisposition(
@@ -2825,6 +3252,45 @@ def _select_page_output_tagged(
                         else grid_winner.failure_mode
                     ),
                 ), SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED
+            # #713 (Astra, 2026-09-10): a candidate whose PAGE judge TIMED OUT
+            # was never refused by anything -- the verdict is missing, not
+            # negative -- so ``_grid_authored_attempt`` above discards it and the
+            # floor below claims "every usable grid candidate was refused or
+            # absent", which is false. Admitted here, AFTER the strict pool and
+            # A1b's corroboration fallback have both had their say, and only
+            # against a credential that positively proves the table judge ladder
+            # accepted EVERY table this candidate emits, bound to these exact
+            # bytes (see ``credentialed_judge_timeout_winner``).
+            #
+            # Shipped as a demoted COPY, never promoted: ``audit_passed`` stays
+            # False and the status is WARNING under its own failure mode. What
+            # passed is the TABLE evidence; the page-level check remains
+            # INCOMPLETE, and nothing here says the prose around the tables was
+            # verified, because nothing verified it.
+            # #713 round 2 (Astra P1-1): FIRST, the page restored from the
+            # ledger. Its body already carries the disclosure notes, so the fresh
+            # admission below -- which verifies unfinalized candidate bytes and
+            # then appends those notes -- can neither verify it nor rebuild it
+            # without duplicating them. Ships verbatim, byte-identical to the run
+            # that minted it.
+            restored = restored_credentialed_judge_timeout_winner(state, p, page_num)
+            if restored is not None:
+                return restored, SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED
+            credentialed = credentialed_judge_timeout_winner(state, p, page_num)
+            if credentialed is not None:
+                kept_text = credentialed.text
+                note = kept_table_flag_note(state, page_num, kept_text)
+                if note:
+                    kept_text = f"{kept_text.rstrip()}\n\n{note}\n"
+                kept_text = f"{kept_text.rstrip()}\n\n{judge_timeout_note(page_num)}\n"
+                return replace(
+                    credentialed,
+                    text=kept_text,
+                    status=PageStatus.WARNING,
+                    audit_passed=False,
+                    failure_mode=FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED,
+                ), SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED
+
             # (iii) no attempt authored a grid (R3's model-rung guarantee
             # found nothing usable, or -- under --native-only -- no rung ran
             # at all). P2 / GH-317: ship the fail-closed floor -- the whole-page
@@ -2832,6 +3298,16 @@ def _select_page_output_tagged(
             # ships: the region count that would license a regional splice
             # is produced by the same parser it would validate (cold review
             # round 2), so isolation is unprovable and the page fails closed.
+            #
+            # #713: the floor still ships, but it stops lying about WHY. When the
+            # only grid candidate carries the typed page-judge timeout and no
+            # credential cleared it, "every usable grid candidate was refused or
+            # absent" is not what happened -- nothing looked. That page fails
+            # closed under ``PAGE_JUDGE_TIMEOUT`` and its own selection tag, so
+            # the reason is legible at page status, in the sidecar, in the
+            # document-level buckets and on the CLI, and an operator reads
+            # "re-run me" instead of "every model failed".
+            timed_out = page_judge_timeout_attempt(p) is not None
             floor_text = structure_class_floor_text(p, page_num)
             return PageOutput(
                 page_num=page_num,
@@ -2839,8 +3315,19 @@ def _select_page_output_tagged(
                 status=PageStatus.ERROR,
                 engine="native",
                 audit_passed=False,
-                failure_mode=FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED,
-            ), SelectionProvenance.STRUCTURE_CLASS_FLOOR
+                failure_mode=(
+                    FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
+                    if not timed_out
+                    else FailureMode.PAGE_JUDGE_TIMEOUT
+                ),
+            ), (
+                # Written "base case first" so the tag order in this expression
+                # matches ``SelectionProvenance``'s declaration order, which the
+                # R7 drift guard requires of every ending in the cascade.
+                SelectionProvenance.STRUCTURE_CLASS_FLOOR
+                if not timed_out
+                else SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR
+            )
 
         # An enhancement page (native layer known deficient) whose recovery was
         # tried and never passed ships native text
@@ -3300,6 +3787,27 @@ def _select_and_finalize_page(
         # each only ever turns SUCCESS into WARNING and none of them upgrades --
         # but it is fixed here so the chain reads in one direction.
         output = _apply_chart_region_guard(output, p)
+
+    # #713: stamp the finalized body's digest onto the credential, HERE, after
+    # every guard above has had its say. The credential's ``candidate_sha256``
+    # binds the bytes the table ladder judged; those deliberately predate the
+    # disclosure notes selection appends and any rewrite a guard performs, so
+    # they cannot check the body that actually ships. Resume verifies the
+    # fragment on disk against this digest, and stamping it any earlier would
+    # record a body that a later guard could still change -- which is precisely
+    # the "vouches for bytes that are not there" failure the credential exists
+    # to prevent.
+    if (
+        output.failure_mode is FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED
+        and output.table_acceptance_credential is not None
+    ):
+        output = replace(
+            output,
+            table_acceptance_credential={
+                **output.table_acceptance_credential,
+                "finalized_sha256": _credential_sha256_text(output.text or ""),
+            },
+        )
 
     text = (output.text or "").strip()
 

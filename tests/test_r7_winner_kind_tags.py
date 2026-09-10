@@ -64,7 +64,15 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     fn = _cascade()
     loops = [n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While))]
     assert loops == [], "a loop in the cascade breaks one-ending-per-page"
-    assert len(_returns(fn)) == 16
+    # #713 added a 17th return: the credentialed page-judge-timeout ending, which
+    # ships a demoted candidate where the fail-closed floor used to. The floor's
+    # own return gained a second tag rather than a second return (the timeout
+    # floor and the ordinary floor ship the same bytes under different reasons).
+    # #713 round 2 added an 18th: the RESTORED credentialed ending, which ships
+    # an already-finalized body verbatim. It cannot share the fresh ending's
+    # return -- that one appends the disclosure notes, and appending them to a
+    # restored body would duplicate them on every resume.
+    assert len(_returns(fn)) == 18
 
 
 def test_every_ending_carries_a_tag() -> None:
@@ -82,9 +90,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 17, "two endings share a tag or tag count != 17"
+    assert len(used) == len(set(used)) == 20, "two endings share a tag or tag count != 20"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 17
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 20
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -173,10 +181,14 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 17
-    assert len(list(SelectionProvenance)) == 17
+    # 1. Total count of mapped provenance members must be exactly 20
+    assert len(list(SelectionProvenance)) == 20
 
     # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
+    #    #713's two new members join EXISTING groups rather than making new ones:
+    #    the credentialed timeout ending is a structure-class MODEL_OUTPUT, and the
+    #    timeout floor is a structure-class FAIL_CLOSED_MARKER -- deliberately, so
+    #    the floor keeps every document-level surface it already had.
     assert len(by_disposition) == 14
 
     expected_multi_dispositions = {
@@ -184,6 +196,14 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
             SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
             SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
+            # #713 round 2: the restored ending is the SAME page shipped again
+            # from the ledger, so it joins the same group rather than making one.
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
+        },
+        PageDisposition(PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS): {
+            SelectionProvenance.STRUCTURE_CLASS_FLOOR,
+            SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
         },
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT): {
             SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
@@ -195,7 +215,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
 
     single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
-    assert single_disposition_count == 12
+    assert single_disposition_count == 11
 
     # 3. Check primary reason equivalence groups (exactly 12 distinct primary reasons)
     assert len(by_reason) == 12
@@ -206,6 +226,9 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
             SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
             SelectionProvenance.STRUCTURE_CLASS_FLOOR,
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
+            SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
         },
         PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE: {
             SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,

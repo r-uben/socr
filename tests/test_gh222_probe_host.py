@@ -100,29 +100,34 @@ def test_explicit_host_argument_still_wins(recorded_urls, monkeypatch) -> None:
     assert recorded_urls == ["http://explicit:9999/api/tags"], recorded_urls
 
 
-def test_trigger_predicate_unchanged() -> None:
-    """Scope guard: this ticket must not touch WHICH attempts arm the halt.
+def test_trigger_predicate_is_the_one_the_loop_calls() -> None:
+    """Scope guard: #222 must not touch WHICH attempts arm the halt.
 
-    Narrowing ``_had_timeout`` needs the timed-out attempt to carry its backend
-    identity (#159), and #227 warns that fixing #221's probe alone makes
-    behaviour worse. The predicate stays exactly as it was; only the machine the
-    probe asks about changes.
+    Originally this pinned the SPELLING of an inline ``_had_timeout`` line, so
+    that a probe-host change could not quietly widen or narrow the trigger.
+    #713 round 3 changed the trigger DELIBERATELY -- the judge half now reads the
+    typed ``JUDGE_OUTCOME_TIMEOUT`` rather than a substring of an arbitrary
+    exception's text, because a judge raising ``TimeoutError("timed out")``
+    contains no contiguous "timeout" and never armed the probe -- and moved it
+    into ``_attempts_show_timeout`` so a test can pin the expression itself
+    rather than a copy of it.
 
-    This pins the SPELLING. On its own that is weak — it would still pass if a
-    second condition bypassed the predicate while the line survived — so
-    ``test_probe_is_consulted_only_after_a_timeout`` below pins the BEHAVIOUR.
+    What this still guards: the loop consults THAT predicate and nothing else,
+    and the provider half of it is untouched. ``test_probe_is_consulted_only_
+    after_a_timeout`` below pins the behaviour, and #713's own suite pins the
+    typed half.
     """
     import inspect
 
     from socr.pipeline import orchestrator
 
-    # Whitespace-normalised: the formatter may wrap this line at any indent depth.
-    src = " ".join(inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic).split())
-    predicate = '_had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)'
-    assert (
-        predicate in src
-        or predicate.replace("any(", "any( ").replace("attempts)", "attempts )") in src
+    loop = " ".join(inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic).split())
+    assert "_had_timeout = self._attempts_show_timeout(decision.attempts)" in loop
+
+    predicate = " ".join(
+        inspect.getsource(orchestrator.UnifiedPipeline._attempts_show_timeout).split()
     )
+    assert '"timeout" in (getattr(att, "reason", "") or "")' in predicate
 
 
 @pytest.mark.parametrize(
@@ -495,3 +500,48 @@ def test_an_unparseable_host_fails_the_probe_instead_of_raising(monkeypatch) -> 
 
     assert resolve_ollama_host() == "http://[::1:11434]"  # bracketed, still unparseable
     assert probe_ollama_idle() is False
+
+
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_a_timed_out_attempt_arms_the_halt_from_any_position(position) -> None:
+    """#713 round 4 (Astra): WHICH attempts arm the halt, over a mixed list.
+
+    The scope pin above says the loop consults one predicate; the behavioural
+    test says one attempt of each kind arms or does not. Neither pins the filter
+    over a MULTI-attempt page, which is the real shape: a ladder escalates, so a
+    timed-out rung sits among ordinary refusals and its position varies.
+
+    DIFFERENCE: the same three attempts, with the timed-out one moved through
+    every slot, plus an all-clean control. Position must not decide.
+    """
+    from socr.core.config import EngineType
+    from socr.core.result import JUDGE_OUTCOME_COMPLETED, JUDGE_OUTCOME_TIMEOUT, PageOutput
+    from socr.pipeline.agentic import ProviderAttempt
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    def _attempt(outcome: str, reason: str) -> ProviderAttempt:
+        return ProviderAttempt(
+            engine=EngineType.QWEN,
+            output=PageOutput(page_num=1, text="body", judge_outcome=outcome),
+            cost_usd=0.0,
+            accepted=False,
+            reason=reason,
+        )
+
+    clean = [
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: rows disagree"),
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: header lost"),
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: value drift"),
+    ]
+    assert UnifiedPipeline._attempts_show_timeout(clean) is False
+
+    # Reason wording deliberately carries NO "timeout": only the typed outcome
+    # separates this attempt from the refusals around it.
+    timed_out = _attempt(JUDGE_OUTCOME_TIMEOUT, "judge raised: timed out")
+    slot = {"first": 0, "middle": 1, "last": 3}[position]
+    mixed = clean[:slot] + [timed_out] + clean[slot:]
+    assert UnifiedPipeline._attempts_show_timeout(mixed) is True
+
+    # The provider half of the trigger, same list shape, no typed outcome at all.
+    provider = clean[:slot] + [_attempt("", "provider timeout after 120s")] + clean[slot:]
+    assert UnifiedPipeline._attempts_show_timeout(provider) is True
