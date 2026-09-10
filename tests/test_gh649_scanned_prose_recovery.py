@@ -671,6 +671,33 @@ def _finalized_text(ps: PageState, tmp_path: Path) -> str:
     return finalized_page_records(state)[0].output.text
 
 
+@pytest.mark.parametrize(
+    "line", ["\\&", "---", "***", "===", "```", "&nbsp;", "*emphasis*", "# literal", "<!--"]
+)
+def test_an_escaped_native_line_renders_back_to_itself(line: str) -> None:
+    """#652 round 13 (Astra's prose12 controls). Round-trip, not absence of
+    tags: what a reader sees must be the line that was printed, character for
+    character -- including a backslash the page itself printed, which must
+    survive as one backslash and not be eaten as an escape."""
+    from html.parser import HTMLParser
+
+    markdown_it = pytest.importorskip("markdown_it")
+
+    class _Visible(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: list[str] = []
+
+        def handle_data(self, data: str) -> None:
+            self.parts.append(data)
+
+    from socr.core.manifest import _escaped_native_line
+
+    parser = _Visible()
+    parser.feed(markdown_it.MarkdownIt().render(_escaped_native_line(line)))
+    assert "".join(parser.parts).strip() == line
+
+
 def test_the_trust_verdict_does_not_depend_on_which_reconstruction_is_judged() -> None:
     """#652 round 12 (Astra's prose11 control), closing a round-11 residual.
 

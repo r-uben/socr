@@ -1977,7 +1977,7 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     they were collateral of a table that could not be verified.
 
     With no table geometry to splice against, the prose region is delimited by
-    the page's own native baseline bands (``prose_region_words``): a band below
+    the page's own native baseline bands (``partition_prose_bands``): a band below
     ``ROW_SHAPE_MIN`` numeric tokens is prose and ships; every band at or above
     it is the table and is withheld, replaced in place by *marker_line*. The
     withheld half is exactly the numeric content the D3 floor exists to

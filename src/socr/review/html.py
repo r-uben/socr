@@ -397,6 +397,41 @@ let cur = 0, raw = false, zoom = 100;
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
+// #652 round 13. This renderer is regex-based, so a CommonMark backslash
+// escape used to be read twice over: the backslash survived into the output
+// and the character it was protecting still activated ('\*emphasis\*'
+// rendered as '\<i>emphasis\</i>'). Native recovery now emits exactly that
+// encoding for every line of a scanned page's own text layer, so a literal
+// asterisk on the page became italics in socr's own review instrument.
+//
+// One contract, applied before anything else parses: '\' + an ASCII
+// punctuation character becomes a single private-use codepoint (0xE000 + the
+// character), which no rule below matches -- not the block tests, not the
+// table splitter, not the number marker, not the emphasis or code regexes --
+// and which esc() leaves alone because it is neither & nor < nor >. The
+// literal character is put back at the very end, THROUGH esc(), so an escaped
+// '<' still arrives as '&lt;' and the untrusted-HTML boundary is exactly
+// where it was.
+//
+// Fenced blocks are skipped: CommonMark does not process escapes inside a
+// code fence, and a fence's content here is a model's code sample that must
+// keep its own backslashes. A code SPAN is not skipped -- unprotecting inside
+// one drops a backslash the spec would keep -- which cannot reach the native
+// lane (its backticks are escaped, so no span can form there) and is noted as
+// the known divergence rather than hidden.
+function protect(src){
+  let fence = false;
+  return src.split('\n').map(line => {
+    if(/^```/.test(line)){ fence = !fence; return line; }
+    return fence ? line
+      : line.replace(/\\([!-\/:-@\[-`{-~])/g, m => String.fromCharCode(0xE000 + m.charCodeAt(1)));
+  }).join('\n');
+}
+
+function unprotect(html){
+  return html.replace(/[\uE021-\uE07E]/g, c => esc(String.fromCharCode(c.charCodeAt(0) - 0xE000)));
+}
+
 // Numbers are the payload in a citation corpus, so they get marked for eye-scanning.
 // Wrapped after escaping so the markup cannot be injected from document text.
 function inline(s){
@@ -408,7 +443,7 @@ function inline(s){
 }
 
 function renderMd(src){
-  const lines = src.split('\n'); let out = '', i = 0;
+  const lines = protect(src).split('\n'); let out = '', i = 0;
   while(i < lines.length){
     const line = lines[i];
     if(/^```/.test(line)){
@@ -444,7 +479,7 @@ function renderMd(src){
       para.push(lines[i++]);
     out += '<p>'+inline(para.join(' '))+'</p>';
   }
-  return out;
+  return unprotect(out);
 }
 
 function head(){

@@ -476,3 +476,50 @@ One round-11 residual is retired rather than carried: the two lanes judge
 different reconstructions of the same words, and Astra showed that does not
 matter, because both disqualifiers are token-local or count-based. Pinned by
 reversing the word list and asserting both verdicts are unchanged.
+
+## Round 13 — the viewer socr actually ships honours the escapes
+
+Astra's closing check found the escaping correct and the integration wrong.
+`review.html` does not use markdown-it-py: it embeds its own regex renderer,
+and that renderer never implemented CommonMark backslash escapes. Fed
+`_escaped_native_line('*emphasis*')` it produced `<p>\<i>emphasis\</i></p>` —
+the backslashes leaked onto the page and the asterisks activated anyway. The
+defect predates this branch on arbitrary escaped Markdown, but native recovery
+now relies on that encoding for every line of a recovered scan, so it became
+this branch's to fix.
+
+Fixed in the renderer, not by weakening the escaper. One contract, applied
+before anything else parses: `protect` turns `\` plus an ASCII punctuation
+character into a single private-use codepoint (`0xE000 + the character`), and
+`unprotect` puts the literal character back at the very end. Nothing in
+between matches a private-use codepoint — not the block tests, not the table
+splitter, not the number marker, not the emphasis or code regexes — and `esc`
+leaves it alone because it is neither `&` nor `<` nor `>`. The restoration
+runs the literal THROUGH `esc`, so an escaped `<` still arrives as `&lt;` and
+the untrusted-HTML boundary is exactly where it was. Pinned with a script tag
+printed on a page's text layer.
+
+Fenced blocks are skipped, because CommonMark does not process escapes inside
+a fence and a fence here is a model's code sample that must keep its own
+backslashes. A code SPAN is not skipped, which is a real divergence from the
+spec and is written down rather than hidden: it cannot reach the native lane,
+whose backticks are escaped, so no span can form there.
+
+Verified the way Astra verified the defect — the actual JavaScript extracted
+from the template and run under Node, skipping cleanly where `node` is absent
+— on every construct the escaper protects. No emphasis, heading, quote, list,
+code, link, table or `pre`; no visible backslash; the sentence after the
+comment opener visible; each printed line recoverable character for character.
+
+Ordinary model prose is untouched. The old and new renderers were run under
+Node over 40 real corpus pages plus two synthetic documents and produced
+byte-identical HTML. None of those pages contains a backslash escape outside a
+fence, which is why the identity holds and also the honest limit of that
+check: it shows the placeholder pass is inert on documents with nothing to
+protect, not that escaped documents render the same, which is the point.
+
+**Cleanup.** `prose_region_words` had no caller outside documentation once
+#649's rebuild needed the interleaved form. It is deleted and its policy note
+— what "prose" means, why nothing else is withheld, and the disclosed cost of
+the default `row_shape_min` — moves to `partition_prose_bands`, the partition
+every live reader takes.

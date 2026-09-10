@@ -267,7 +267,7 @@ def cluster_band_words(words: list) -> list[list[tuple]]:
     """Cluster *words* into ordered baseline bands, keeping each band's WORDS.
 
     The clustering half of :func:`baseline_bands`, factored out (#652) so the
-    prose-region partition (:func:`prose_region_words`) can reach the words a
+    prose-region partition (:func:`partition_prose_bands`) can reach the words a
     band is made of rather than only its numeric tokens. ``baseline_bands``
     calls this and then reduces each band to its tokens, so the two can never
     disagree about where a printed line begins.
@@ -364,28 +364,10 @@ def bears_printed_numeral(text: str) -> bool:
 def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
 
-    The interleaved form of :func:`prose_region_words`, top of page to bottom.
-    #649's caller rebuilds the page from this: it has to put the fail-closed
-    marker where each withheld run actually sits, which the two flat lists
-    cannot say. See :func:`prose_region_words` for what "prose" means here and
-    for the disclosed cost of the default *row_shape_min*.
-
-    Counts tokens by :func:`bears_printed_numeral`, never by
-    ``_is_genuine_numeric`` -- see that function for why a row-matching
-    predicate is the wrong instrument for a withholding decision.
-    """
-    if row_shape_min is None:
-        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
-    bands: list[tuple[bool, list]] = []
-    for band in cluster_band_words(words):
-        numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
-        ordered = sorted(band, key=lambda w: w[0])
-        bands.append((numeral_count < row_shape_min, ordered))
-    return bands
-
-
-def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
-    """Split *words* into ``(prose_words, withheld_words)`` by baseline band.
+    Bands run top of page to bottom, words left to right inside each band --
+    page reading order, not the input order of *words*. #649's caller ships
+    these bands as text and has to put the fail-closed marker where each
+    withheld run actually sits, so the interleaving is the point.
 
     #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
     table geometry there is no bbox to scope prose with, so the prose region is
@@ -424,16 +406,24 @@ def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[l
     floor this line used to point at was deleted in #652 round 10, along with
     the guard it thresholded).
 
-    Both lists are returned in PAGE READING ORDER (bands top to bottom, words
-    left to right within a band), not in the input order of *words*: #649's
-    caller ships the prose half as text, and the band order is the only order
-    that reproduces the printed page.
+    Counts tokens by :func:`bears_printed_numeral`, never by
+    ``_is_genuine_numeric`` -- see that function for why a row-matching
+    predicate is the wrong instrument for a withholding decision.
+
+    #652 round 13: the policy half of this docstring came from
+    ``prose_region_words``, the flat ``(prose, withheld)`` wrapper that used to
+    own it. That wrapper had no caller left once #649's rebuild needed the
+    interleaved form, so it is deleted and its policy lives here, with the
+    partition every live reader takes.
     """
-    prose: list = []
-    withheld: list = []
-    for is_prose, band in partition_prose_bands(words, row_shape_min):
-        (prose if is_prose else withheld).extend(band)
-    return prose, withheld
+    if row_shape_min is None:
+        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
+    bands: list[tuple[bool, list]] = []
+    for band in cluster_band_words(words):
+        numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
+        ordered = sorted(band, key=lambda w: w[0])
+        bands.append((numeral_count < row_shape_min, ordered))
+    return bands
 
 
 #: A GFM separator/rule cell: optional leading/trailing ':' around one or
