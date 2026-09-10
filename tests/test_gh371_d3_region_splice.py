@@ -96,14 +96,28 @@ def _md_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def _native_words_for(text: str) -> list[tuple]:
-    """B1 (#591): synthetic native-word witness for
-    ``manifest._prose_corroboration_ok``, whose guard on
-    ``UNVERIFIABLE_TABLE_SCANNED`` requires the attempt's vocabulary to
-    overlap ``PageState.native_words``. Geometry is irrelevant here (these
-    fixtures never set ``detected_table_bboxes``, so nothing is excluded by
-    region) -- only the token text matters, so every word gets the same
-    placeholder bbox."""
-    return [(0.0, 0.0, 1.0, 1.0, tok, 0, 0, 0) for tok in text.split()]
+    """B1 (#591): synthetic native words for a page on the
+    ``UNVERIFIABLE_TABLE_SCANNED`` branch.
+
+    These stood in for the vocabulary-overlap guard's witness until #652
+    round 10 deleted that guard. They are still the page's text layer, and the
+    live reader is now ``manifest.native_prose_floor_text`` -- #649's native
+    recovery, which ships these words as the page's body.
+
+    #652 P2b: geometry is not irrelevant to either reader. Both delimit the
+    prose region by native baseline BAND (``row_corroboration``), so a witness
+    that stacks every word into one placeholder bbox models a page whose
+    entire text is a single printed line -- one band, holding the table's
+    numbers, withheld whole. Words are laid out one printed line per source
+    line, left to right, which is what the real ``get_text("words")`` witness
+    these fixtures stand in for looks like."""
+    words: list[tuple] = []
+    for line_idx, line in enumerate(text.splitlines()):
+        y0 = float(line_idx * 10)
+        for word_idx, tok in enumerate(line.split()):
+            x0 = float(word_idx * 10)
+            words.append((x0, y0, x0 + 8.0, y0 + 8.0, tok, 0, 0, 0))
+    return words
 
 
 # ---------------------------------------------------------------------------

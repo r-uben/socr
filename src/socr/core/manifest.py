@@ -1614,13 +1614,36 @@ def _table_bbox_sane(p) -> bool:
 
     Neither check is a licence on its own -- both run alongside the four
     coverage/reconstruction conditions below, and any one failing floors
-    the whole page. Returns True (no objection) when there is nothing to
-    check against, leaving the existing four conditions to decide.
+    the whole page. With no bbox claimed at all there is nothing to check
+    and this returns True, leaving the existing four conditions to decide
+    (they already floor a page whose ``detected_table_count`` is 0).
+
+    #652 P2a -- MISSING EVIDENCE IS NOT A PASS, AND RESUME MUST NOT RE-DECIDE.
+    ``native_words`` is a live-run cache: ``_restore_terminal_page_state``
+    restores ``detected_table_count`` and ``detected_table_bboxes`` from the
+    sidecar but never the words, and ``_select_and_finalize_page`` re-runs
+    selection over that restored state. So a resumed page reached this check
+    with bboxes but no words, the old ``return True`` skipped both sanity
+    checks, and the resumed run could stamp a different floor outcome than
+    the run that wrote the bytes. Two changes close it, in this order:
+
+    * the live run's verdict is PERSISTED (``PageState.table_bbox_sane``,
+      written to and restored from the sidecar) and is authoritative when
+      the words are gone -- resume replays the decision instead of retaking
+      it, so live and resumed reach the same outcome;
+    * with neither words nor a persisted verdict, this fails CLOSED. A bbox
+      was claimed and nothing can check it; absence of evidence is not
+      sanity.
     """
     words = getattr(p, "native_words", None) or []
     bboxes = getattr(p, "detected_table_bboxes", None) or []
-    if not words or not bboxes:
+    if not bboxes:
         return True
+    if not words:
+        persisted = getattr(p, "table_bbox_sane", None)
+        if persisted is None:
+            return False
+        return bool(persisted)
 
     from socr.tables.row_corroboration import baseline_bands, words_in_region
 
@@ -1636,6 +1659,18 @@ def _table_bbox_sane(p) -> bool:
         return False  # too small: the box captured no numeric row
     prose_bands = [b for b in bands if not b.tokens]
     return len(prose_bands) <= len(numeric_bands)  # too large otherwise
+
+
+def table_bbox_sanity_verdict(p) -> bool:
+    """Public entry for :func:`_table_bbox_sane`, for the orchestrator.
+
+    #652 P2a: the verdict has to be taken while ``native_words`` still exists
+    -- once the page is flushed and later resumed those words are gone -- so
+    the orchestrator evaluates it at extraction time and records it on the
+    page. Crossing a package boundary for a private name is a layering
+    violation (``test_package_layering``), so the boundary gets a name.
+    """
+    return _table_bbox_sane(p)
 
 
 def table_floor_text_for_source(
@@ -1701,71 +1736,354 @@ def table_floor_text_for_source(
     return spliced if spliced else whole_page
 
 
-#: Minimum share of an OCR attempt's outside-table vocabulary (tokens of 4+
-#: letters, lowercased) that must also appear among the page's native words
-#: for B1's ``UNVERIFIABLE_TABLE_SCANNED`` prose-corroboration guard
-#: (``_prose_corroboration_ok``) to allow splicing that attempt's prose
-#: around the withheld table region, rather than fail closed to the bare
-#: marker. Unlike ``ROW_CORROBORATION_MIN`` / ``EXTRA_NUMBERS_MAX_SHARE``
-#: (row_corroboration.py), this is NOT set strictly between two measured
-#: anchors: the only two real fixtures checked (2026-09-07, see
-#: docs/log/2026-09-07_B1-page-failed-marker-scope.md) both measured 1.0 --
-#: Fed 1989-11-14 p3's nougat attempt (failure_mode=hallucination) read the
-#: page's real vocabulary but reordered it into the wrong table rows/columns,
-#: which token-overlap cannot see; ECB survey-2013 p1's genuine gemini
-#: attempt also measured 1.0. No fabricated-vocabulary fixture exists in the
-#: census set to anchor the low side. 0.5 is a defensive floor, not a
-#: calibrated threshold: an attempt whose outside-table vocabulary is
-#: majority-corroborated by the native text layer is accepted; one that
-#: shares less than half is refused. Flagged as a follow-up to calibrate
-#: against a genuine fabrication fixture when one turns up.
-PROSE_CORROBORATION_MIN: float = 0.5
+def native_region_text(words: list) -> str:
+    """The printed text of *words*, one line per native baseline band.
 
-_PROSE_TOKEN_RE = re.compile(r"[a-z]{4,}")
-
-
-def _prose_corroboration_ok(p, attempt_text: str) -> bool:
-    """B1 / #591: geometric-only corroboration for ``UNVERIFIABLE_TABLE_SCANNED``.
-
-    ``UNVERIFIABLE_TABLE_SCANNED`` splices ``best_output.text`` -- an OCR
-    attempt the page's own audit already flagged (``failure_mode=
-    hallucination``) -- around the withheld table region with no coverage
-    guard at all. Unlike ``table_floor_text_for_source``, this branch has no
-    reconstructed native table to reconcile against (a scanned page reaches
-    it precisely because native table detection found nothing), so the only
-    available check is mechanical: does the attempt's own vocabulary overlap
-    words the page's native text layer actually contains?
-
-    Deliberately does NOT parse or trust the attempt's structure (row order,
-    column binding) -- it can only tell "these are real words on this page",
-    not "these words are attributed to the right place". That is why the
-    ``UNVERIFIABLE_TABLE_SCANNED`` marker still fires whenever
-    ``splice_all_table_regions`` can't find a markdown table block to work
-    around: this guard governs the PROSE around a spliced table, not the
-    table region itself.
-
-    No witness (``p.native_words`` empty, e.g. the page has no real text
-    layer, or the caching gate in ``orchestrator.py`` never ran for it) fails
-    closed -- absence of a check is not corroboration.
+    #652/#649: both the trusted-layer check and the recovered-prose body need
+    the region's text as it was PRINTED, not as a flat bag of words -- one
+    line per band, words left to right. Reuses ``cluster_band_words`` so this
+    reconstruction and the prose/table partition can never disagree about
+    where a line begins.
     """
+    from socr.tables.row_corroboration import cluster_band_words
+
+    lines = [
+        " ".join(str(w[4]) for w in sorted(band, key=lambda w: w[0]))
+        for band in cluster_band_words(words)
+    ]
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _page_prose_partition(p) -> list:
+    """The prose/table partition of a page's native words, whole page.
+
+    #652 round 9 introduced this because TWO decisions read a page's layout --
+    whether a model's prose could be corroborated, and what #649 ships when it
+    cannot -- on DIFFERENT populations: the corroboration side partitioned only
+    the words outside the detected table bboxes, so an incomplete bbox hid a
+    page's numerals from the very gate that asked whether it printed any.
+
+    Round 10 removed the corroboration reader outright (no model prose ships
+    from the scanned-table-failure branch at all), so one caller is left and
+    the two cannot diverge by construction. The function stays as the single
+    named place a page's partition is taken, on every native word it has --
+    never a filtered subset, which is the mistake worth keeping named.
+    """
+    from socr.tables.row_corroboration import partition_prose_bands
+
     words = getattr(p, "native_words", None) or []
     if not words:
+        return []
+    return partition_prose_bands(words)
+
+
+#: Banner stamped above prose recovered by ``native_prose_floor_text``. The
+#: page is still an unverified scan whose table was withheld, and the body no
+#: longer starts with a failure marker, so the flag is what tells a reader --
+#: and ``is_page_failed_marker``, which correctly stops calling this page
+#: marker-only -- that these paragraphs are unverified. Deliberately NOT
+#: matched by ``_PAGE_FAILED_ANY_RE``: this page ships content.
+SCANNED_PROSE_RECOVERED_FLAG = (
+    "[page {page_num}: unverified scan — the paragraphs below are this page's own "
+    "text layer; every numeric row is withheld]"
+)
+
+#: Banner for the OTHER shape ``native_prose_floor_text`` recovers: a scan that
+#: reached the table floor whose native layer prints no numeral anywhere, so
+#: there is no numeric band to withhold and nothing the marker can stand in
+#: place of. #652 round 11 (Astra's ruling, 2026-09-10): such a page still has
+#: trusted text, and collapsing it to the bare marker is an avoidable loss.
+#: What ships is the page's own baseline lines, verbatim, and this banner says
+#: exactly that -- the lines are UNVERIFIED and no table here was verified. It
+#: claims nothing about a table having been read, which is the claim the
+#: withholding banner's "every numeric row is withheld" would falsely imply on
+#: a page that withheld nothing.
+SCANNED_NATIVE_TEXT_FLAG = (
+    "[page {page_num}: unverified scan — the lines below are this page's own text "
+    "layer, verbatim and unverified; no table on this page could be verified]"
+)
+
+#: Audit note recorded on the rebuilt output, so the recovery is visible in the
+#: page sidecar and not only in the bytes.
+SCANNED_PROSE_RECOVERED_NOTE = (
+    "scanned_prose_recovered: no OCR attempt could be spliced around the "
+    "withheld table; the page's own trusted prose bands ship flagged instead"
+)
+
+
+def _is_restored_prose_recovery(p, page_num: int) -> bool:
+    """Whether this page's winner IS an already-finalized prose recovery.
+
+    #649 rounds 2-3. Both halves of the evidence must hold, and neither alone
+    is enough:
+
+    * the winner carries ``PageOutput.scanned_prose_recovered``, the TYPED
+      field this module sets when it builds such a body. It survives resume
+      because the sidecar serialises the winning output and
+      ``_restore_terminal_page_state`` rebuilds the ``PageOutput`` from that
+      record.
+    * the winner's text starts with this module's own banner. A flag without
+      the banner would mean something rewrote the body after the recovery, and
+      that body is not this function's to vouch for.
+
+    Round 2 asked whether a note SUBSTRING would do, and Astra showed it would
+    not: ``orchestrator`` appends ``dual-pass {action}: {summary}``, and that
+    summary quotes model-controlled cell text verbatim, so an attempt carrying
+    the banner at the top and the note text inside a table cell was shipped as
+    an already-finalized recovery -- invented sentence, invented numbers and
+    all. Every note author happens to prefix its text today, so an EXACT
+    standalone match would close that particular route, but a credential whose
+    soundness depends on auditing every present and future note formatter is
+    not a credential. A typed field cannot be reached by free text at all, and
+    the note stays for human and corpus visibility rather than as evidence.
+
+    The banner alone is likewise not enough, and for the same reason: a model
+    that echoes the banner line must not have its whole output shipped past
+    the floor.
+    """
+    out = getattr(p, "best_output", None)
+    if out is None:
         return False
-    bboxes = getattr(p, "detected_table_bboxes", None) or []
-    native_tokens: set[str] = set()
-    for w in words:
-        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
+    if getattr(out, "scanned_prose_recovered", False) is not True:
+        return False
+    text = out.text or ""
+    # #652 round 11: this lane now has TWO banners -- the withholding one and
+    # the all-native one -- and a restore that recognised only the first would
+    # replace a finalized no-numeral recovery with the bare marker on the next
+    # run, which is the exact resume loss #649 round 2 closed for the other
+    # shape. Both are this module's own bytes and neither is forgeable by a
+    # model attempt, because the typed credential above gates them both.
+    return text.startswith(
+        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)
+    ) or text.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num))
+
+
+def _band_line(band) -> str:
+    """One printed baseline band as its literal line of native text."""
+    return " ".join(str(w[4]) for w in band).strip()
+
+
+#: Characters that carry markdown or HTML meaning ANYWHERE in a line, and the
+#: construct each one would otherwise open on a page that authored none of
+#: them. All are ASCII punctuation, so a backslash in front of each is the
+#: CommonMark literal form (markdown-it-py, already a dependency, honours it):
+#:
+#: ``\\`` escape itself (must be handled with the rest, never after);
+#: ``\``` code span, and the ``\`\`\``` fence opener;
+#: ``*`` emphasis, bullet, and the ``***`` thematic break;
+#: ``_`` emphasis;
+#: ``[`` link, image (with a leading ``!``) and link-reference definition;
+#: ``<`` raw HTML, autolink, and the ``<!--`` comment opener that swallowed a
+#: whole sentence in Astra's prose11 reproduction;
+#: ``&`` character entity (``&nbsp;`` would render as a space, not as itself);
+#: ``|`` table cell -- the one this function used to handle alone;
+#: ``~`` strikethrough and the ``~~~`` fence opener.
+_NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
+
+#: Characters that open a BLOCK construct only as the line's first character.
+#: ``_band_line`` strips each line, so there is no leading whitespace to count
+#: and no four-space indented-code case to consider.
+#:
+#: ``#`` ATX heading; ``>`` block quote; ``-`` bullet, and the ``---`` setext
+#: underline and thematic break; ``+`` bullet; ``=`` setext underline.
+#:
+#: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and this
+#: path runs only where every band is prose, which at the shipping
+#: ``row_shape_min`` of 1 means no band carries a printed digit at all. If that
+#: floor is ever loosened, this set needs the ordered form added.
+_NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
+
+
+def _escaped_native_line(line: str) -> str:
+    """A native line that renders as its own characters and nothing else.
+
+    #652 rounds 11-12. The lane promises the page's literal text, so every
+    character that would otherwise be read as structure is backslash-escaped:
+    round 11 escaped only ``|``, and Astra reproduced two losses through the
+    installed renderer -- a native ``<!--`` line turned the sentence after it
+    into an HTML comment (invisible to a reader), and ``# Literal heading
+    marker`` became an ``<h1>``. Neither is a route back to model prose; both
+    give the source's characters a meaning this lane explicitly disclaims.
+
+    The two sets above name every character handled and what it would open.
+    Escaping is not conditional on context: a code span opener is active
+    mid-line, a heading marker only at the start, and guessing which one a
+    scan meant is the sort of inference this lane exists to refuse.
+
+    socr's own banner, notice and image reference are assembled OUTSIDE this
+    body and are never passed through here -- they are socr's markdown, not the
+    page's characters.
+    """
+    out: list[str] = []
+    for idx, ch in enumerate(line):
+        if ch in _NATIVE_INLINE_ACTIVE or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE):
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """The whole page's native text, flagged, when no band can be withheld.
+
+    #652 round 11 (Astra's ruling, 2026-09-10). This is the no-numeral scan:
+    every band is prose by the floor's own partition, so there is no numeric
+    row to hold back and the withholding lane above has nothing to build. The
+    page nevertheless reached the scanned-table floor, which means something
+    flagged a table on it that was never verified -- so the marker and the
+    page image are kept, ONCE, beside the text rather than in place of it.
+
+    What ships is the page's own baseline lines in recovered order, verbatim.
+    No grid is reconstructed and no cell is inferred: a text-only table's rows
+    are lines here, nothing more, and ``_escaped_native_line`` makes sure they
+    cannot become a markdown table on the way out. No model wording is
+    consulted -- round 10 deleted that route for this branch and this does not
+    reopen it.
+
+    ``text_layer_trusted`` is applied unchanged, to the reconstructed native
+    text. An untrusted layer returns ``None`` and the caller's bare marker
+    stands: the page is a scan because its layer is suspect, and shipping
+    corruption as recovered text is the loss this lane exists to stop.
+
+    That check is a disqualifier, not a verification, and on a layer under 20
+    alpha tokens it abstains and passes the page (see its own docstring for
+    #652 round 12's ruling). Such a page ships UNVERIFIED, which is what the
+    banner, the retained notice and the unchanged ERROR status say; #707
+    measures how often a short layer is actually wrong.
+    """
+    from socr.core.born_digital import text_layer_trusted
+
+    lines = [line for line in (_band_line(band) for _is_prose, band in bands) if line]
+    if not lines:
+        return None
+    if not text_layer_trusted("\n".join(lines)):
+        return None
+
+    blocks = [SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num)]
+    blocks.append(f"{marker_line}\n\n{png_ref}" if png_ref else marker_line)
+    blocks.append("\n".join(_escaped_native_line(line) for line in lines))
+    return "\n\n".join(blocks)
+
+
+def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """The page's own prose, flagged, around a withheld table -- or ``None``.
+
+    #649 (owner ruling, 2026-09-10). Fed 1989-11-14 p3 reaches
+    ``UNVERIFIABLE_TABLE_SCANNED`` with ``detected_table_count == 0`` and a
+    corrupt-but-usable text layer. Its only cached attempt read the page's real
+    vocabulary but emitted the swap-arrangement table as column runs with no
+    markdown table syntax at all, so ``splice_all_table_regions`` returns
+    ``None`` and the marker shipped alone -- taking three paragraphs of the
+    FOMC policy directive with it. Nothing was wrong with those paragraphs;
+    they were collateral of a table that could not be verified.
+
+    With no table geometry to splice against, the prose region is delimited by
+    the page's own native baseline bands (``partition_prose_bands``): a band below
+    ``ROW_SHAPE_MIN`` numeric tokens is prose and ships; every band at or above
+    it is the table and is withheld, replaced in place by *marker_line*. The
+    withheld half is exactly the numeric content the D3 floor exists to
+    protect, so this recovers prose without ever relaxing the floor.
+
+    A page whose native layer prints NO numeral has no band to withhold. #652
+    round 11 (Astra's ruling, 2026-09-10) rules that shape in rather than out:
+    round 10 removed the model-prose route from this branch, so refusing here
+    collapsed a scan carrying two clean policy paragraphs to the bare marker
+    with its own trusted text sitting unread. It ships through
+    ``_all_native_text`` below -- the page's baseline lines, verbatim, under a
+    banner that claims nothing about a table.
+
+    Two ways to abstain, both of which leave the caller's bare marker:
+
+    * no native words -- no page text to recover;
+    * the prose region's own text fails ``text_layer_trusted`` (#652). The
+      page is a scan because its layer is corrupt; shipping that corruption as
+      recovered text would be the silent loss this ticket is trying to stop,
+      wearing the opposite mask. Measured on the ticket's own fixture the
+      corruption is INSIDE the table -- prose region 0.5%, numeric bands 33.3%
+      -- which is why the check is applied to the region that ships rather
+      than to the page.
+
+    What ships is the native layer's own bytes, never a model's: the attempt
+    that failed here failed on structure, and re-deriving prose from it would
+    put the reordered text back on the page. The page keeps ERROR status and
+    its failure mode; only the body changes.
+    """
+    from socr.core.born_digital import text_layer_trusted
+
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return None
+
+    bands = _page_prose_partition(p)
+    prose_bands = [band for is_prose, band in bands if is_prose]
+    if not prose_bands:
+        return None
+    if all(is_prose for is_prose, _band in bands):
+        return _all_native_text(bands, page_num, marker_line=marker_line, png_ref=png_ref)
+
+    prose_words = [word for band in prose_bands for word in band]
+    if not text_layer_trusted(native_region_text(prose_words)):
+        return None
+
+    blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
+    marker_block = f"{marker_line}\n\n{png_ref}" if png_ref else marker_line
+    paragraph: list[str] = []
+    in_withheld_run = False
+
+    def _flush() -> None:
+        if paragraph:
+            blocks.append("\n".join(paragraph))
+            paragraph.clear()
+
+    from socr.tables.reconcile import table_syntax_line_indices
+
+    # A native line that parses as markdown TABLE SYNTAX can never ship as
+    # prose here, whatever its digits say: the rows beneath it are withheld by
+    # definition on this page, so emitting it would assemble a header and a
+    # separator over content the floor just refused to verify -- exactly what
+    # ``_apply_table_emission_guard`` catches downstream. It joins the withheld
+    # run instead.
+    #
+    # #649 rounds 3-4 (Astra): "is this line table syntax" is a question about
+    # CONTEXT, not about the line. Round 2 asked ``_is_table_line``, whose
+    # regex accepts any line containing a pipe, so a numeral-free sentence
+    # carrying one was withheld. Round 3 asked ``find_table_blocks``, which
+    # knows a run of pipe lines but not where that run's table BEGINS, so the
+    # same sentence still vanished when it sat directly before or after a real
+    # table. The boundaries come from the table's own structure -- the
+    # separator row, its header, and the delimited rows beneath it.
+    band_lines = [_band_line(band) for _is_prose, band in bands]
+    table_syntax = table_syntax_line_indices(band_lines)
+
+    for idx, (is_prose, band) in enumerate(bands):
+        line = band_lines[idx]
+        if is_prose and idx in table_syntax:
+            is_prose = False
+        if is_prose:
+            in_withheld_run = False
+            # Consecutive printed lines join into one paragraph rather than
+            # becoming one block each: these ARE the page's lines, and a
+            # directive split into twenty one-line paragraphs is not the page.
+            if line:
+                paragraph.append(line)
             continue
-        native_tokens.update(_PROSE_TOKEN_RE.findall(text.lower()))
-    if not native_tokens:
-        return False
-    attempt_tokens = set(_PROSE_TOKEN_RE.findall((attempt_text or "").lower()))
-    if not attempt_tokens:
-        return False
-    overlap = len(attempt_tokens & native_tokens) / len(attempt_tokens)
-    return overlap >= PROSE_CORROBORATION_MIN
+        if in_withheld_run:
+            continue
+        # #649 round 2 (Astra): ONE marker per contiguous withheld run, not one
+        # per page. The withholding predicate covers every printed digit, so a
+        # withheld band is no longer always inside the table -- a prose line
+        # carrying a printed value ("...remained around 5-1/4 percent...", the
+        # one such line on the ticket's fixture) is withheld mid-paragraph. A
+        # single marker at the top of the page would elide that line in
+        # silence, which is the exact loss this lane exists to stop. The marker
+        # names withheld content, not a table count: a run count is not a table
+        # count either, and this branch runs with ``detected_table_count == 0``,
+        # so no claim about how many tables the page holds is made anywhere.
+        _flush()
+        blocks.append(marker_block)
+        in_withheld_run = True
+
+    _flush()
+    return "\n\n".join(blocks)
 
 
 class PageEnding(str, Enum):
@@ -2108,8 +2426,6 @@ def _select_page_output_tagged(
         d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
         png_ref = getattr(p, "d3_floor_png_ref", "")
 
-        best_output_text = (p.best_output.text or "") if p.best_output else ""
-
         # B1 (#591): GH-520's four-condition coverage guard
         # (table_floor_text_for_source) cannot apply to this branch -- its
         # first condition requires detected_table_count > 0, but a page
@@ -2117,18 +2433,58 @@ def _select_page_output_tagged(
         # table DETECTION found nothing on it (measured: Fed 1989-11-14 p3,
         # detected_table_count=0, 0 detected bboxes) -- there is no detected
         # geometry to reconcile splice_all_table_regions's blocks against.
-        # The mechanical check available here instead is
-        # ``_prose_corroboration_ok``: does the attempt's own vocabulary
-        # overlap words the page's native text layer actually contains?
-        # Unguarded, this branch spliced ``best_output.text`` -- an attempt
-        # the page's own audit already flagged HALLUCINATION -- with nothing
-        # checking it against reality first.
-        if _prose_corroboration_ok(p, best_output_text):
-            d3_text = splice_all_table_regions(
-                best_output_text, marker_line=d3_marker, png_ref=png_ref
-            )
-        else:
-            d3_text = None
+        #
+        # #652 round 10 (Astra's ruling, 2026-09-10): NO attempt is spliced
+        # here at all. The mechanical check that used to stand in for the
+        # missing geometry -- does the attempt's vocabulary overlap the page's
+        # native words? -- was a corroboration guard, and #652 is the record of
+        # it failing that job in six different shapes. The last one closes the
+        # question rather than narrowing it again: a page in this branch is
+        # here BECAUSE something flagged a table on it, and a native layer with
+        # no printed numeral and no detected bbox does not establish that the
+        # table is absent -- a text-only Bank/Status table has neither, and its
+        # own institution names were vouching for an invented sentence beside
+        # the marker. Nothing available on this page distinguishes a table's
+        # vocabulary from its prose's, so the attempt is refused without
+        # consulting it: an OCR attempt whose audit already flagged
+        # HALLUCINATION ships no prose from this branch.
+        #
+        # This costs the page no TEXT. What the branch ships is #649's native
+        # recovery just below -- the page's own trusted text layer, flagged,
+        # with every withheld band replaced in place by the marker -- or the
+        # bare marker where even that cannot be proven. What is refused is the
+        # MODEL's wording, which is the only thing the corroboration check ever
+        # authorised. Model-prose salvage on such a page needs independent
+        # source evidence for the region AND its transcription (#707), not
+        # another vocabulary or geometry threshold.
+        d3_text = None
+        best_output_text = (p.best_output.text or "") if p.best_output else ""
+
+        # #649: no attempt could be spliced -- on this page's own fixture
+        # because the attempt emitted the table as column runs and authored no
+        # markdown table at all, so there was no block to work around. The
+        # marker then shipped ALONE and took the page's prose with it. Recover
+        # that prose from the page's own trusted text layer instead, with the
+        # withheld numeric bands replaced in place by the same marker. Returns
+        # None whenever it cannot prove what it would be shipping, which
+        # leaves the bare marker exactly as before.
+        prose_recovered = False
+        if d3_text is None and _is_restored_prose_recovery(p, page_num):
+            # #649 round 2 (Astra): a page RESTORED from its terminal sidecar
+            # has already shipped this recovery, and the words it was built
+            # from are gone -- ``native_words`` is a live-run cache the sidecar
+            # deliberately does not carry. Recomputing therefore returned None
+            # and the finalized body was replaced by the bare marker: a
+            # transient missing cache erased text that had already shipped.
+            # The frozen result stands. It is not recomputed and not
+            # second-guessed; the evidence that it IS this lane's own output
+            # is the audit note socr wrote on it, which a model attempt cannot
+            # forge, plus the banner in the bytes.
+            d3_text = best_output_text
+            prose_recovered = True
+        if d3_text is None:
+            d3_text = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+            prose_recovered = d3_text is not None
 
         if d3_text is None:
             d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
@@ -2139,6 +2495,15 @@ def _select_page_output_tagged(
             status=PageStatus.ERROR,
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
+            # #649: the recovery is a fact about what shipped, so it is
+            # recorded where the corpus reads it, not only in the bytes. The
+            # page stays ERROR with its own failure mode either way -- prose
+            # coming back does not mean the table was read.
+            audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
+            # The credential the restore path actually reads (see
+            # ``_is_restored_prose_recovery``). The note above is for readers;
+            # this is for the machine, and only this module sets it.
+            scanned_prose_recovered=prose_recovered,
             # #658: this branch REBUILDS the shipped output from scratch, so a
             # fixed HALLUCINATION here overwrote the honest attempt-level reason
             # and the sidecar the corpus actually reads still said the model

@@ -1654,10 +1654,15 @@ class UnifiedPipeline:
         # ``if pa.is_born_digital``), so a genuinely scanned-with-a-real-text-
         # -layer page (measured: Fed 1989-11-14 p3, 295 native words, 0
         # detected tables) would otherwise reach
-        # ``UNVERIFIABLE_TABLE_SCANNED``'s prose-corroboration guard with NO
-        # witness at all -- not "no evidence of corroboration", but no data
-        # to check in the first place. Widening this filter is what makes
-        # that guard able to fire on the exact fixture it exists to protect.
+        # ``UNVERIFIABLE_TABLE_SCANNED`` with NO native words at all -- not
+        # "no prose to recover", but no data to look at in the first place.
+        # #652 round 10 deleted the vocabulary-overlap guard this comment used
+        # to name; the reader that needs these words now is #649's native
+        # recovery (``manifest.native_prose_floor_text``), which ships the
+        # page's own text layer around its withheld bands. Widening this
+        # filter is what lets that recovery run on the exact fixture it exists
+        # to protect -- without these words it returns None and the page ships
+        # the bare marker.
         try:
             from socr.core.pdf import open_pdf
 
@@ -1676,6 +1681,22 @@ class UnifiedPipeline:
                         ps.native_words = doc[page_num - 1].get_text("words")
                 finally:
                     doc.close()
+                # #652 P2a: evaluate the bbox sanity verdict HERE, the one
+                # moment the words and the detected bboxes are both in hand,
+                # and record it on the page. ``_table_bbox_sane`` reads the
+                # recorded value on a resumed run, where the words are gone
+                # but the bboxes come back from the sidecar -- without it the
+                # check has no evidence and (now) fails closed, which would
+                # floor a page the live run spliced. Left ``None`` for a page
+                # with no detected bbox: there is nothing to be sane about,
+                # and that is the state the predicate reads as "no objection".
+                from socr.core.manifest import table_bbox_sanity_verdict
+
+                for page_num in pages_needing_words:
+                    ps = state.pages.get(page_num)
+                    if ps is None or not (getattr(ps, "detected_table_bboxes", None) or []):
+                        continue
+                    ps.table_bbox_sane = table_bbox_sanity_verdict(ps)
         except Exception:
             logger.warning(
                 "TICKET-A1b: failed to cache native words for %s", state.handle.path, exc_info=True
@@ -9879,6 +9900,19 @@ class UnifiedPipeline:
         if _timings:
             payload["timings_s"] = _timings
 
+        # #652 P2a: the live-run bbox sanity verdict, persisted precisely
+        # because ``native_words`` is NOT -- a resumed page restores the
+        # detected bboxes above and would otherwise have nothing to check them
+        # against, so the check would fail closed and stamp a floor outcome the
+        # live run did not reach. Sparse for the same reason the timings above
+        # are: the key's ABSENCE means "never evaluated" (no bbox on the page,
+        # or a sidecar older than this key) and ``_table_bbox_sane`` reads that
+        # as doubt, so a null carries nothing a missing key does not while
+        # churning every existing sidecar in the corpus.
+        _bbox_sane = getattr(ps, "table_bbox_sane", None) if ps is not None else None
+        if _bbox_sane is not None:
+            payload["table_bbox_sane"] = bool(_bbox_sane)
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
@@ -10440,6 +10474,12 @@ class UnifiedPipeline:
             ps.detected_table_count = (
                 raw_detected if type(raw_detected) is int and raw_detected >= 0 else 0
             )
+            # #652 P2a: restore the live run's bbox sanity verdict alongside
+            # the bboxes it was computed against. Only a real bool restores;
+            # a missing key (older sidecar) or anything else stays ``None``,
+            # which ``_table_bbox_sane`` reads as doubt and fails closed on.
+            raw_sane = meta.get("table_bbox_sane")
+            ps.table_bbox_sane = raw_sane if type(raw_sane) is bool else None
             raw_boxes = meta.get("detected_table_bboxes")
             restored_boxes: list[tuple[float, float, float, float]] = []
             # GH-572 (cubic P2 on #573): the CONTAINER counts as malformed too.

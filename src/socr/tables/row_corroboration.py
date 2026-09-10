@@ -263,14 +263,14 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
-def baseline_bands(words: list) -> list[_NativeBand]:
-    """Cluster *words* into ordered baseline bands (top to bottom).
+def cluster_band_words(words: list) -> list[list[tuple]]:
+    """Cluster *words* into ordered baseline bands, keeping each band's WORDS.
 
-    Clustering key is the word's y-centre, with a tolerance derived from
-    the region's own median word height (``_ROW_BAND_TOLERANCE_FRACTION``)
-    — never ``round(word_y0)`` (GH-600). A band's token list is its
-    genuine numeric tokens, left to right by x0; a band with none is kept
-    (it still occupies a line) but contributes nothing to matching.
+    The clustering half of :func:`baseline_bands`, factored out (#652) so the
+    prose-region partition (:func:`partition_prose_bands`) can reach the words a
+    band is made of rather than only its numeric tokens. ``baseline_bands``
+    calls this and then reduces each band to its tokens, so the two can never
+    disagree about where a printed line begins.
     """
     if not words:
         return []
@@ -292,9 +292,20 @@ def baseline_bands(words: list) -> list[_NativeBand]:
             raw_bands.append([word])
             band_y_sum = y_center
             band_y_count = 1
+    return raw_bands
 
+
+def baseline_bands(words: list) -> list[_NativeBand]:
+    """Cluster *words* into ordered baseline bands (top to bottom).
+
+    Clustering key is the word's y-centre, with a tolerance derived from
+    the region's own median word height (``_ROW_BAND_TOLERANCE_FRACTION``)
+    — never ``round(word_y0)`` (GH-600). A band's token list is its
+    genuine numeric tokens, left to right by x0; a band with none is kept
+    (it still occupies a line) but contributes nothing to matching.
+    """
     bands: list[_NativeBand] = []
-    for band_words in raw_bands:
+    for band_words in cluster_band_words(words):
         band_words_sorted = sorted(band_words, key=lambda w: w[0])
         tokens = []
         for word in band_words_sorted:
@@ -303,6 +314,115 @@ def baseline_bands(words: list) -> list[_NativeBand]:
                 tokens.append(normalized)
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
         bands.append(_NativeBand(tokens=tuple(tokens), y_center=y_center))
+    return bands
+
+
+#: The fail-closed limit of TICKET-A1b's per-candidate ``ROW_SHAPE_MIN``
+#: (``manifest._row_shape_reconciliation_ok``: the minimum numeric-token count
+#: over a CANDIDATE's own numeric body rows). #649's page has no candidate to
+#: derive it from -- the attempt emitted the table as column runs and authored
+#: no markdown grid at all -- so the partition below falls back to the
+#: strictest value the same formula can take: a band carrying ANY genuine
+#: numeric token is table-shaped and is withheld. Measured on the ticket's own
+#: fixture (Fed 1989-11-14 p3, 295 native words, 48 bands): every one of the
+#: 16 swap-arrangement rows carries 1-2 genuine numeric tokens and every one of
+#: the 32 prose/header bands carries 0, so this limit separates that page
+#: exactly. It is a limit of an existing derivation, not a tuned threshold: no
+#: value below 1 exists, and any value above it would ship printed numbers.
+PROSE_BAND_MAX_NUMERIC_TOKENS: int = 0
+
+_DIGIT_RE = re.compile(r"[0-9]")
+
+
+def bears_printed_numeral(text: str) -> bool:
+    """Whether *text* carries a printed digit of any form.
+
+    #649 round 2 (Astra, 2026-09-10). The withholding decision must NOT reuse
+    ``_is_genuine_numeric``: that predicate answers "is this token usable for
+    numeric ROW MATCHING", and it deliberately says no to forms that are very
+    much printed values -- a maturity date (``12/04/89``) is rejected outright,
+    and ``(1)``-style decoration is excluded as a footnote marker. A band
+    holding only ``12/04/89`` was therefore tagged prose and shipped verbatim
+    under the unverified-scan banner, breaking the one promise that lane makes.
+    The fixture tables' own maturity dates only vanished because a recognised
+    amount happened to share their baseline.
+
+    "Not useful for numeric row matching" is not "contains no printed value",
+    so withholding asks the exhaustive question instead: does the token show a
+    digit at all? Nothing about a digit's FORM can make it safe to ship off an
+    unverified scan, which is why this looks for the digit rather than for a
+    grammar of accepted numeric shapes -- there is no shape this could fail to
+    enumerate.
+
+    Deliberately NOT used for row matching, which still needs the narrower
+    predicate: this one would count a page number and a footnote marker as
+    table rows.
+    """
+    return bool(_DIGIT_RE.search(text or ""))
+
+
+def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
+    """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
+
+    Bands run top of page to bottom, words left to right inside each band --
+    page reading order, not the input order of *words*. #649's caller ships
+    these bands as text and has to put the fail-closed marker where each
+    withheld run actually sits, so the interleaving is the point.
+
+    #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
+    table geometry there is no bbox to scope prose with, so the prose region is
+    delimited by the page's own native baseline bands -- a band whose count of
+    digit-bearing tokens (:func:`bears_printed_numeral`) is below
+    *row_shape_min* is prose; every band at or above it is withheld, exactly
+    the printed numeric content the D3 floor protects.
+
+    *row_shape_min* defaults to ``PROSE_BAND_MAX_NUMERIC_TOKENS + 1`` (see that
+    constant for the derivation and the measurement behind it).
+
+    NOTHING ELSE is withheld, and that is a measured decision rather than an
+    omission. A withheld table's own zero-token lines -- the header block
+    above it, a wrapped row label inside it ("Bank for International" /
+    "Settlements-" on the ticket's fixture) -- do ship as prose. The obvious
+    fix, withholding every zero-token band inside the withheld bands' y-span,
+    was tried and rejected: on a two-table page it swallows the entire
+    paragraph printed BETWEEN the tables, and no threshold separates "wrapped
+    row label" from "paragraph between two tables" (the identical trap
+    ``manifest._row_shape_reconciliation_ok``'s docstring records for its own
+    distance-anchored rounds). Shipping a bare label is the cheaper error of
+    the two: it carries no printed value, so it cannot ship a wrong number,
+    and the fail-closed marker sits right beside it saying the table was
+    withheld. Losing a paragraph of policy text is the loss #649 exists to
+    stop.
+
+    The cost of the default *row_shape_min* runs the other way and is
+    disclosed too: a prose line carrying any printed digit ("...has remained
+    around 5-1/4 percent...", the one such line on the ticket's own fixture) is
+    withheld with the table. That is the intended direction -- it is a printed
+    value on a scan nothing verified -- and it is withheld, never silently
+    dropped: #649's caller stamps a marker at every contiguous withheld run
+    precisely so a line elided mid-paragraph is visible where it was elided.
+    One fixture is not enough to calibrate anything looser; that calibration
+    belongs to #707's fallback-fidelity measurement (the prose-corroboration
+    floor this line used to point at was deleted in #652 round 10, along with
+    the guard it thresholded).
+
+    Counts tokens by :func:`bears_printed_numeral`, never by
+    ``_is_genuine_numeric`` -- see that function for why a row-matching
+    predicate is the wrong instrument for a withholding decision.
+
+    #652 round 13: the policy half of this docstring came from
+    ``prose_region_words``, the flat ``(prose, withheld)`` wrapper that used to
+    own it. That wrapper had no caller left once #649's rebuild needed the
+    interleaved form, so it is deleted and its policy lives here, with the
+    partition every live reader takes.
+    """
+    if row_shape_min is None:
+        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
+    bands: list[tuple[bool, list]] = []
+    for band in cluster_band_words(words):
+        numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
+        ordered = sorted(band, key=lambda w: w[0])
+        bands.append((numeral_count < row_shape_min, ordered))
     return bands
 
 

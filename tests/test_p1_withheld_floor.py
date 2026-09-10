@@ -55,6 +55,14 @@ def _withheld_page(tmp_path: Path, *, detected: int, bboxes: int | None = None):
         (72.0, 100.0 + i * 200.0, 520.0, 250.0 + i * 200.0) for i in range(boxes)
     ]
     ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+    # #652 P2a: stand in for the verdict the live run records. This fixture's
+    # bboxes and its native text are both synthetic and share no geometry (the
+    # PDF carries one title line), so ``_table_bbox_sane`` has nothing real to
+    # measure here -- and it now fails CLOSED rather than shrugging when a
+    # claimed bbox has no words to check it against. The page this fixture
+    # stands for is a live born-digital page, whose words the orchestrator
+    # caches and whose verdict it records before selection ever runs.
+    ps.table_bbox_sane = True
     return state, ps
 
 

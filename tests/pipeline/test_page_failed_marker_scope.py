@@ -32,9 +32,7 @@ from pathlib import Path
 import pytest
 
 from socr.core.manifest import (
-    PROSE_CORROBORATION_MIN,
     SelectionProvenance,
-    _prose_corroboration_ok,
     _select_page_output_tagged,
     _table_bbox_sane,
     page_failed_marker,
@@ -103,6 +101,23 @@ def _words_for(prose_before: str, prose_after: str) -> list[tuple]:
 
 
 NATIVE_WORDS = _words_for(PROSE_BEFORE, PROSE_AFTER)
+
+
+def _words_prose_only() -> list[tuple]:
+    """The same two paragraphs with NO numeric row printed anywhere.
+
+    This is the no-withholding layout: nothing printed on any band is a
+    numeral, so the shipping partition holds nothing back. Rounds 8-9 used it
+    as the one shape where the vocabulary-overlap guard could still be
+    SATISFIED; round 10 deleted that guard and round 11 gave the shape its own
+    behaviour -- #649's recovery publishes the page's own layer here instead of
+    flooring to the marker. The fixture is unchanged; what it pins is now the
+    recovery, not the guard."""
+    tokens = (PROSE_BEFORE + " " + PROSE_AFTER).split()
+    return [_word(50.0, 85.0 + (i % 5) * 10.0, tok, i % 5) for i, tok in enumerate(tokens)]
+
+
+NATIVE_WORDS_PROSE_ONLY = _words_prose_only()
 
 
 def _no_text_marker_state(
@@ -414,11 +429,11 @@ def test_fed_1989_11_14_p3_has_no_native_text_to_recover():
 # ---------------------------------------------------------------------------
 # B1 (option 3, team-lead's post-CONSILIUM-GATE extension): the SAME
 # fail-closed philosophy applied to ``UNVERIFIABLE_TABLE_SCANNED``, which
-# splices ``best_output.text`` around a withheld table region with no
-# coverage or corroboration guard at all. ``_prose_corroboration_ok`` gates
-# that splice on the attempt's own outside-table vocabulary overlapping the
-# page's real native words -- geometric/mechanical only, it never trusts the
-# attempt's row/column structure.
+# spliced ``best_output.text`` around a withheld table region with no coverage
+# or corroboration guard at all. #652 fitted a vocabulary-overlap guard to that
+# splice and then spent nine rounds watching it authorise fabrications; round
+# 10 removes the splice instead. These tests are the measurements of what the
+# branch ships now -- never the model's wording, on any layout.
 # ---------------------------------------------------------------------------
 
 
@@ -473,34 +488,94 @@ FABRICATED_ATTEMPT_MD = (
 )
 
 
-def test_prose_corroboration_guard_satisfied_keeps_prose():
-    """The attempt's outside-table vocabulary is the page's own -- keep it."""
+def test_a_pure_prose_scan_ships_its_own_layer_not_the_models():
+    """#652 rounds 10 and 11 on the same layout: a scan whose native layer
+    prints no numeral anywhere.
+
+    Round 10 refuses every attempt in this branch, because a numeral-free
+    layer with no detected bbox does not establish that the flagged table is
+    absent -- a text-only table has neither (Astra, prose9). Round 10 alone
+    then shipped the bare marker here, which was an avoidable retention loss:
+    the page's own text was clean and unread. Round 11 (Astra's ruling)
+    extends #649's recovery to the no-withholding case, so the layer ships,
+    flagged, beside the unverified-table notice.
+
+    Both halves are pinned together, because each without the other is a
+    defect: the page's own paragraphs come back, and the model's wording still
+    does not."""
+    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS_PROSE_ONLY)
+
+    output, provenance = _tagged(ps)
+
+    assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    # Token-level, like its siblings: this fixture family stacks every prose
+    # word at one x across cycling bands to control band COUNTS, so the
+    # recovered line order is an artifact of the fixture, not of the page.
+    # Sentence-level retention is pinned on real per-line geometry in
+    # ``tests/test_gh649_scanned_prose_recovery.py``.
+    for token in (PROSE_BEFORE + " " + PROSE_AFTER).split():
+        assert token in output.text, token
+    # The table that failed here was never verified, and the notice for it
+    # survives once beside the text rather than in place of it.
+    assert "[page 1 failed: unverifiable table — see image]" in output.text
+    # Nothing the model authored reaches the page: no row, no cell, no grid.
+    assert "Decrease" not in output.text
+    assert "|" not in output.text.replace("\\|", "")
+
+
+def test_prose_corroboration_withheld_band_abstains_without_losing_prose():
+    """#652 round 8, the cost of disabling salvage, pinned where it lands.
+
+    ``NATIVE_WORDS`` prints three numeric rows, so the shipping partition
+    withholds three bands and the witness abstains for the WHOLE page --
+    paragraphs included, wherever they sit and whatever surrounds them. The
+    genuine attempt is therefore refused: the same attempt the pure-prose
+    layout above accepts.
+
+    Rounds 2-7 tried to admit those paragraphs from band-gap geometry and each
+    variant was reproduced as a fabrication path; round 10 stopped consulting
+    the attempt at all. Refusal is not loss on THIS layout: what ships instead
+    is the page's OWN text layer, flagged, with every numeric row still
+    withheld. Only the model's wording is discarded."""
     ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD)
 
-    assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is True
-
     output, provenance = _tagged(ps)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    assert PROSE_BEFORE in output.text
-    assert PROSE_AFTER in output.text
-    assert "Decrease" not in output.text  # table region still withheld
+    assert "survey" in output.text
+    assert "Respondents" in output.text
+    assert "78" not in output.text
+    assert "| Decrease |" not in output.text
 
 
-def test_prose_corroboration_guard_violated_ships_marker_only():
+def test_prose_corroboration_guard_violated_never_ships_the_invented_prose():
     """The attempt's vocabulary shares almost nothing with the page's real
-    native words -- fail closed to the bare marker rather than splice
-    invented prose around a withheld table."""
+    native words -- its prose must never be spliced around the withheld table.
+
+    #649 changed what fills the gap, not what is refused. The attempt's
+    invented sentences are still discarded; what ships in their place is the
+    page's OWN trusted text layer, flagged, with every numeric band withheld
+    behind the same marker. Losing the page's real prose was never part of
+    refusing the model's."""
     ps = _scanned_table_state(attempt_text=FABRICATED_ATTEMPT_MD)
 
-    assert _prose_corroboration_ok(ps, FABRICATED_ATTEMPT_MD) is False
-
     output, provenance = _tagged(ps)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    assert output.text == "[page 1 failed: unverifiable table — see image]"
+    assert "[page 1 failed: unverifiable table — see image]" in output.text
+    # The fabrication is gone.
     assert "quorum" not in output.text
     assert "municipal" not in output.text
+    # The page's own prose is not. Asserted token by token: this fixture's
+    # word grid round-robins each token onto its own baseline (see
+    # ``_words_for``, built to exercise band COUNTS), so the recovered body
+    # reproduces those synthetic bands rather than readable sentences.
+    assert "survey" in output.text
+    assert "responses" in output.text
+    assert "Respondents" in output.text
+    # And its numeric rows are still withheld.
+    assert "78" not in output.text
+    assert "| Decrease |" not in output.text
 
 
 def test_prose_corroboration_guard_no_witness_fails_closed():
@@ -509,92 +584,18 @@ def test_prose_corroboration_guard_no_witness_fails_closed():
     not corroboration; fail closed exactly like a violated guard."""
     ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=[])
 
-    assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is False
-
     output, _ = _tagged(ps)
     assert output.text == "[page 1 failed: unverifiable table — see image]"
 
 
-# ---------------------------------------------------------------------------
-# #650: PROSE_CORROBORATION_MIN=0.5 was set with no low anchor -- neither
-# census fixture (Fed p3 nougat, ECB survey p1) contained a fabrication, so
-# both measured overlap 1.0. FABRICATED_ATTEMPT_MD above is a real
-# low-anchor (measured ratio below), but its vocabulary shares almost
-# nothing with the page at all -- an easy case for ANY positive floor to
-# catch. The harder, more realistic case per the issue: a model that
-# *paraphrases* the page's own prose (reusing a good share of its real
-# vocabulary) while inventing sentences/claims the native layer does not
-# contain at all -- the way a hallucinating OCR attempt actually behaves,
-# not a wall of unrelated text. This fixture is built to land close to the
-# 0.5 floor rather than far below it, so the assertion actually exercises
-# the threshold rather than a case any cutoff would separate.
-# ---------------------------------------------------------------------------
-
-NEAR_FLOOR_FABRICATED_ATTEMPT_MD = (
-    "This quarter, respondents in section four reported that the survey "
-    "responses were quietly redirected to an undisclosed offshore account "
-    "before regulators could specify a reason for the missing funds.\n\n"
-    "| Category | Jan | Apr |\n"
-    "|---|---|---|\n"
-    "| Decrease | 41 | 39 |\n"
-    "|---|\n"
-)
-
-
-def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch):
-    """#650: measure both fixtures' overlap ratios directly (not just the
-    pass/fail verdict) and pin that the 0.5 floor is load-bearing -- with it
-    monkeypatched to 0.0, the same fabricated attempt's verdict flips.
-
-    Measured (via ``_PROSE_TOKEN_RE`` outside-table tokens, see manifest.py;
-    ``_scanned_table_state``'s default ``detected_table_bboxes=[]`` means
-    the table-row words also count as native vocabulary here, same as the
-    other tests in this section):
-      * genuine (``GENUINE_ATTEMPT_MD``): overlap ratio 0.947 -- passes 0.5.
-      * fabricated, paraphrase-style (``NEAR_FLOOR_FABRICATED_ATTEMPT_MD``):
-        overlap ratio 0.458 -- BELOW 0.5, but much closer to the floor than
-        ``FABRICATED_ATTEMPT_MD``'s 0.05 above, despite reusing a
-        substantial share of the page's real vocabulary (quarter, section,
-        four, respondents, survey, responses, specify, reason all appear
-        genuinely on the page), because it invents an entire unrelated
-        claim (an offshore account, missing funds, regulators) the native
-        layer does not contain. The floor separates this realistic,
-        near-boundary case, not just the far-below-floor wall-of-noise case
-        in ``test_prose_corroboration_guard_violated_ships_marker_only``.
-    """
-    from socr.core.manifest import _PROSE_TOKEN_RE
-
-    ps = _scanned_table_state(attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
-
-    def _measured_ratio(attempt_text: str) -> float:
-        bboxes = ps.detected_table_bboxes
-        native_tokens: set[str] = set()
-        for w in ps.native_words:
-            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-            if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
-                continue
-            native_tokens.update(_PROSE_TOKEN_RE.findall(text.lower()))
-        attempt_tokens = set(_PROSE_TOKEN_RE.findall(attempt_text.lower()))
-        return len(attempt_tokens & native_tokens) / len(attempt_tokens)
-
-    genuine_ratio = _measured_ratio(GENUINE_ATTEMPT_MD)
-    fabricated_ratio = _measured_ratio(NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
-
-    assert genuine_ratio == pytest.approx(0.9474, abs=0.001)
-    assert fabricated_ratio == pytest.approx(0.4583, abs=0.001)
-    assert fabricated_ratio < PROSE_CORROBORATION_MIN < genuine_ratio
-
-    # The floor separates the two cases at its real value...
-    assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is True
-    assert _prose_corroboration_ok(ps, NEAR_FLOOR_FABRICATED_ATTEMPT_MD) is False
-
-    # ...and is load-bearing: monkeypatching it to 0.0 flips the fabricated
-    # verdict (any nonzero overlap now clears the floor), proving the guard
-    # actually depends on PROSE_CORROBORATION_MIN rather than always failing
-    # closed for some unrelated reason.
-    monkeypatch.setattr("socr.core.manifest.PROSE_CORROBORATION_MIN", 0.0)
-    assert _prose_corroboration_ok(ps, NEAR_FLOOR_FABRICATED_ATTEMPT_MD) is True
+# #650 asked what ``PROSE_CORROBORATION_MIN`` should be, and this section
+# measured a near-floor paraphrase fabrication (0.417 overlap) against a
+# genuine attempt (0.789) to show the 0.5 floor separated them. #652 round 10
+# deleted the floor and the guard it thresholded: no vocabulary overlap
+# authorises model prose in this branch any more, at any value, so there is
+# nothing left to calibrate and the measurement is retired with the constant.
+# The unconditional refusal pinned above is what replaced it; what a scan's
+# fallback actually retains is #707's measurement, not a token ratio.
 
 
 @pytest.mark.skipif(not FED_1989_P3.exists(), reason="fixture not present on this machine")
@@ -611,18 +612,20 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     but emitted it with the swap-arrangement table's rows and columns
     reordered into one run per column rather than one row per line -- a
     STRUCTURAL defect the corroboration guard, being vocabulary-only by
-    design, correctly does not catch: ``_prose_corroboration_ok`` measures
-    True here (overlap 1.0, see the decision log's overlap table).
+    design, could never catch. The guard refuses this page anyway, for an
+    unrelated reason recorded at the assertion below: since #652 round 7 the
+    page supplies no witness to score that 1.0 overlap against.
 
-    The marker still ships alone, matching this fixture's real recorded
-    output (``pages/00003.json``): ``splice_all_table_regions`` finds no
-    markdown pipe-table syntax in nougat's raw text (it never emitted one)
-    and returns ``None``, so the whole-page fallback fires regardless of the
-    guard. This test pins BOTH findings without asserting prose recovery
-    B1 cannot currently deliver for this specific fixture -- the
-    corroboration guard protects a DIFFERENT failure shape (an attempt with
-    fabricated vocabulary AND parseable table syntax), which this fixture
-    does not exhibit."""
+    ``splice_all_table_regions`` finds no markdown pipe-table syntax in
+    nougat's raw text (it never emitted one) and returns ``None``, so no
+    attempt can be spliced here regardless of the guard.
+
+    #649: that used to end the page -- the D3 marker shipped ALONE and the
+    three paragraphs of the FOMC domestic policy directive printed below the
+    swap-arrangement table went with it. They now ship from the page's own
+    text layer, flagged, with every numeric band withheld behind the same
+    marker. Both halves are asserted: the directive comes back, and not one
+    of the table's printed values does."""
     import fitz
 
     from socr.core.manifest import splice_all_table_regions
@@ -660,7 +663,13 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     ps.attempts = [attempt]
     ps.best_output = attempt
 
-    assert _prose_corroboration_ok(ps, nougat_text) is True  # measured: overlap 1.0
+    # RE-PINNED across #652 rounds 7-10. The vocabulary overlap this page's
+    # attempt scores is still 1.0; round 7 emptied the witness it was scored
+    # against, and round 10 removed the scoring altogether. None of it changes
+    # a byte of what this test asserts below: the page had already failed its
+    # table check, and #649's native recovery is what ships either way. The
+    # attempt could not have been spliced regardless -- nougat emitted no
+    # markdown table syntax at all, which is this page's own #591 finding.
     assert splice_all_table_regions(nougat_text, marker_line="[x]", png_ref="") is None
 
     state = DocumentState.__new__(DocumentState)
@@ -668,7 +677,27 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     output, provenance = _select_page_output_tagged(state, 3)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    # matches the real recorded output (pages/00003.json): the D3-style
-    # scanned-table marker, not page_failed_marker (that's NO_TEXT_MARKER's
-    # marker -- a different branch, see the test above).
-    assert output.text == "[page 3 failed: unverifiable table — see image]"
+    # The D3-style scanned-table marker still stamps the withheld table -- not
+    # page_failed_marker (that's NO_TEXT_MARKER's marker, a different branch,
+    # see the test above) -- and the page keeps its ERROR ending.
+    assert "[page 3 failed: unverifiable table — see image]" in output.text
+    assert output.status is PageStatus.ERROR
+    assert output.audit_passed is False
+
+    # #649's own loss, recovered: the directive's three paragraphs.
+    assert "following domestic policy directive" in output.text
+    assert "The information reviewed at this meeting suggests" in output.text
+    assert "civilian unemployment rate" in output.text
+
+    # And nothing from the withheld swap-arrangement table. Every printed
+    # amount and every maturity date stays behind the marker.
+    for withheld_value in ("250.0", "1,000.0", "6,000.0", "4,000.0", "1,250.0"):
+        assert withheld_value not in output.text, withheld_value
+
+    # Recorded where the corpus reads it, not only in the bytes.
+    assert any("scanned_prose_recovered" in note for note in output.audit_notes)
+
+    # And the page is no longer counted as marker-only: it ships content now.
+    from socr.core.manifest import is_page_failed_marker
+
+    assert is_page_failed_marker(output.text) is False

@@ -1669,6 +1669,50 @@ def count_digit_corruption(text: str) -> int:
     return len(_DIGIT_CORRUPTION_RE.findall(text or ""))
 
 
+def text_layer_trusted(text: str) -> bool:
+    """Whether an embedded PDF text layer is clean enough to be believed.
+
+    #652: a page classified SCANNED *because* its text layer is corrupt (Fed
+    1989-11-14 p3: 6.6% encoding corruption, above ``MAX_ENCODING_CORRUPTION``)
+    cannot have that same layer stand as a witness for what it says. The
+    original caller was the prose-corroboration guard, which #652 round 10
+    deleted; the live caller is ``manifest.native_prose_floor_text``, and the
+    question there is the same one asked of the same layer -- #649 ships a
+    scan's own prose bands as the page's body, so shipping a corrupt layer
+    would be the silent loss #652 exists to stop, wearing the opposite mask.
+
+    The two disqualifiers are the SHIPPED detector's own, not a third
+    definition of "corrupt": any eaten-leading-digit occurrence (#136), and
+    encoding corruption above the ratio at which the pipeline itself stops
+    trusting a layer and routes the page to OCR. ``benchmark.ground_truth``
+    applies the identical pair for the identical reason; it keeps its own
+    copy only because it must also report WHICH disqualifier fired.
+
+    Note the deliberate abstention inherited from
+    ``_encoding_corruption_ratio``: below 20 alpha tokens it returns 0.0
+    ("too little to judge") and this returns True. #652 round 11 described
+    that as safe because a corroboration ratio refused such a region anyway;
+    no such ratio exists, round 10 deleted it, so the abstention stands alone.
+
+    #652 round 12 (Astra's ruling, 2026-09-10) settles what that means rather
+    than papering over it. Short native text IS published when no actual
+    disqualifier fires -- the page keeps its failed status, its provenance and
+    its unverified banner, and refusing solely because a layer is short would
+    recreate an avoidable loss without buying any stronger evidence. So read
+    this boolean as "eligible for flagged native retention", never as proof of
+    fidelity: on a short layer it says only that nothing disqualifying was
+    found, which is not the same as having looked. #707 measures the error
+    rate of short layers separately.
+    """
+    if not text or not text.strip():
+        return False
+    if count_digit_corruption(text) >= BornDigitalDetector.MAX_DIGIT_CORRUPTION_HITS:
+        return False
+
+    detector = BornDigitalDetector()
+    return detector._encoding_corruption_ratio(text) <= detector.MAX_ENCODING_CORRUPTION
+
+
 # Semantically-empty characters that publishers inject into the text layer for
 # justification / line-breaking. They carry no content but corrupt downstream use:
 # the soft hyphen splits words so search misses them ("hetero\xadgeneous" != the

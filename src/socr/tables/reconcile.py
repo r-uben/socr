@@ -693,6 +693,67 @@ def _is_table_line(line: str) -> bool:
     return "|" in line and bool(_PIPE_LINE.match(line))
 
 
+def table_syntax_line_indices(lines: list[str]) -> set[int]:
+    """Indices of *lines* that are genuine markdown TABLE SYNTAX.
+
+    #649 round 4 (Astra). ``find_table_blocks`` groups any run of two or more
+    consecutive pipe-bearing lines, which is the right instrument for locating
+    a MODEL's emitted tables but the wrong one for asking whether a line of a
+    scanned page's own text layer is table syntax. It has no notion of the
+    run's boundaries, so an ordinary sentence carrying a pipe -- "The symbol |
+    separates alternatives in this paragraph." -- was swallowed whole when it
+    happened to sit immediately before or after a real table, and
+    ``manifest.native_prose_floor_text`` withheld it as if it were a row.
+
+    Boundaries are established from the table's own structure instead:
+
+    * a run must contain a SEPARATOR row (``_is_separator_row``, the strict
+      grammar). Without one there is no GFM table, whatever the pipes suggest,
+      and the lines stay prose.
+    * the table is that separator, the line directly above it (its header),
+      and each following line that is DELIMITED -- one that opens and closes
+      with a pipe, the shape every table row in this codebase is written in.
+      The first line that is not stops the table, so a sentence trailing the
+      body is prose, and anything above the header is prose too.
+
+    Over-recognition here loses page text and under-recognition assembles a
+    header over a body the caller has withheld, so the rule is deliberately
+    anchored to the one element that cannot be mistaken for prose: the
+    separator.
+    """
+    run_start: int | None = None
+    syntax: set[int] = set()
+
+    def _close(start: int, end: int) -> None:
+        """Resolve the pipe run ``lines[start:end]`` into table syntax, if any."""
+        separators = [idx for idx in range(start, end) if _is_separator_row(_split_row(lines[idx]))]
+        if not separators:
+            return
+        for separator in separators:
+            if separator - 1 >= start:
+                syntax.add(separator - 1)  # the header the separator underlines
+            syntax.add(separator)
+            idx = separator + 1
+            while idx < end:
+                stripped = lines[idx].strip()
+                if not (stripped.startswith("|") and stripped.endswith("|")):
+                    break
+                syntax.add(idx)
+                idx += 1
+
+    for idx, line in enumerate(lines):
+        if _is_table_line(line):
+            if run_start is None:
+                run_start = idx
+            continue
+        if run_start is not None:
+            _close(run_start, idx)
+            run_start = None
+    if run_start is not None:
+        _close(run_start, len(lines))
+    return syntax
+
+
 def _parse_grid(rows: list[str]) -> list[list[str]]:
     """Parse markdown rows into a cell grid, dropping the separator row."""
     grid: list[list[str]] = []

@@ -277,3 +277,368 @@ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-b1/src ~/venvs/socr/bin/py
 uvx ruff@0.16.0 format --check .
 597 files already formatted
 ```
+
+## 2026-09-10 — #652 rounds 2-8: model-prose salvage disabled on unresolved scans
+
+The corroboration guard above scored a model attempt against a WITNESS built from
+the page's own native words. #652 asked whether that witness could be trusted, and
+the answer, after eight adversarial rounds against Astra, is that it cannot be built
+from page geometry at all. Every variant of the geometric admission rule was
+reproduced as a fabrication path — a real selection run shipping an invented
+sentence assembled from a table's own row labels:
+
+| Rejected rule | Reproducer shape that killed it |
+| --- | --- |
+| Page-wide MEDIAN line advance as the walk's stopping step | An unrelated footnote block tightened to 6pt pulled the median down; the table's own unchanged 12pt step became a "block break" and its label entered the witness. Text elsewhere must not redraw a table's extent. |
+| The anchors' own MEAN PITCH as that step | A units caption printed 18pt under a row label, in a table whose rows average 12pt: an average is not an upper bound on the individual steps inside one table, so the walk stopped inside it. |
+| SEPARATION alone (a run of unattributed bands with larger gaps around it) | A table label wrapped over two lines is such a block; so is a whole date table printed between two numeric rows, whose own dates then landed in neither list and were subtracted from nothing. |
+| A recognised numeric row on ONE side | Two bank-name bands at the page edge, 6pt apart, with an amount 24pt below them. A row on one side proves a table is NEARBY. |
+| A recognised numeric row on BOTH sides | 250.0 / two bank-name bands / 300.0. A section heading or wrapped header sits between two numeric sections as readily as a paragraph does. |
+| Letting an ABSORBED band vouch for a side (the lever considered instead of this rewrite) | The same geometry with a units caption at each end: the walk absorbs the captions, so the intervening label block becomes admissible again. |
+
+**Ruling (Astra, adopted by team-lead).** Band-gap geometry measures where blocks
+BREAK and cannot say what a block IS; the printed page does not distinguish a
+two-line paragraph above a table from that table's wrapped header. So model-prose
+salvage is DISABLED on any scanned page whose shipping partition withholds a
+numeric band. `corroboration_witness_words` now returns the whole page as witness
+only when `partition_prose_bands` withholds nothing anywhere (the pure-prose scan);
+otherwise every band is unresolved, corroboration refuses, and #649's native
+recovery ships the page's own prose flagged with the numeric bands withheld.
+`_separated_prose_runs` and the anchor walk are deleted.
+
+A rarely-accepting guard is the intended outcome: #652 exists to stop unsupported
+model prose passing corroboration, not to maximise acceptance, and refusal costs no
+page text — only the model's wording is discarded. The old control layouts are kept
+as MEASUREMENTS of refusal and fallback rather than deleted, and the round-7 flanked
+positive was re-pinned as refused, since flanking cannot establish that a block is
+prose. Measured on the ticket's own fixture (Fed 1989-11-14 p3, real PDF + cached
+nougat attempt): the witness goes from 185 words of 295 to none and the genuine
+attempt is refused, while the shipped `PageOutput` stays byte-identical to `ff5ed74`'s
+— the page had already failed its table check, so native recovery ships either way,
+the three directive paragraphs flagged and every printed amount withheld.
+
+**Not closed by this.** Reliable model-prose salvage remains open and is separate
+work: it needs independent source evidence for the region AND for its transcription
+— a source-verified prose region, or conservative matching against trusted source
+spans — not another threshold. Whether native fallback is lossless across all scans
+is also unestablished; one unchanged Fed page is not that measurement, and any claim
+that model prose reads better needs source-judged comparison rather than fluency or
+vocabulary overlap.
+
+### Round 9 — the gate was asked about the wrong population
+
+Astra's re-review at `b9f45f4` found round 8's rule intact in the helper and
+defeated in the caller. `_prose_corroboration_ok` dropped every word whose
+centroid fell inside a detected table bbox and *then* partitioned what was
+left, while `native_prose_floor_text` partitioned all of `p.native_words`. On a
+scan whose bbox covered the amount bands but not the bank-name bands, every
+printed digit was gone before the check that asks whether the page prints any:
+the labels became a full witness and the sentence fabricated from them shipped.
+A filtered region with no numerals is not a page with no numerals.
+
+Both decisions now come through one `_page_prose_partition(p)` over every native
+word the page has, and `witness_from_prose_partition` takes that partition as an
+argument, so the corroboration verdict and the shipped body cannot be reading
+different populations of the same page. The bbox exclusion is kept, moved to
+*after* the gate, and is not dead there: clearing the gate means no band bears a
+printed numeral, which a detected table of purely textual cells also satisfies,
+and its bbox is then the only evidence that those names are a table. Applied
+after the gate it can only shrink a witness, never admit one — pinned as a
+difference in `test_the_bbox_filter_still_excludes_a_wordless_tables_vocabulary`.
+
+### Round 10 — the guard is deleted, not narrowed again
+
+Astra's re-review at `8221d2d` reproduced the last shape the whole-page gate
+still admits: a text-only table. Institution names against `Member` statuses
+print no numeral, so the shipping partition withholds nothing, and on a scan
+with no detected geometry there is no bbox either — the table's own vocabulary
+became a full witness and `ratified quarterly dividends.` shipped beside the
+marker through real selection. A numeral-free layer establishes the absence of
+recognised numerals, not the absence of a table, and this branch is entered
+BECAUSE something flagged one.
+
+So `_prose_corroboration_ok`, `PROSE_CORROBORATION_MIN`, `_attempt_prose_text`
+and the witness helpers are gone, and the `scanned_table_evidence_failed`
+branch no longer consults the attempt at all: `d3_text` starts at `None`, and
+what ships is #649's native recovery or the bare marker. That was the guard's
+only caller, so nothing else changes; `_page_prose_partition` stays as the one
+named place a page's partition is taken, now with a single reader. #650's
+floor-calibration measurement is retired with the constant it thresholded.
+
+Seven rules were tried and each was reproduced as a fabrication path: page-wide
+median advance, anchors' mean pitch, separation alone, a one-sided anchor, a
+two-sided anchor, absorbed-band vouching, and finally "the page prints no
+numeral". They fail for one reason. A page in this branch offers no evidence
+that distinguishes a withheld table's vocabulary from its prose's, and every
+rule was a proxy for evidence that is not there.
+
+**The cost, measured.** A scan whose native layer is ALL prose now ships the
+bare marker where round 9 shipped the model's prose: #649's recovery declines a
+page with no withheld band, so nothing takes its place. Pinned in
+`test_a_pure_prose_scan_ships_no_model_prose_either`. It is a retention
+regression on that one layout, not a silent one — the marker says the page
+failed — and closing it means teaching #649's recovery to publish an all-prose
+scan's own layer, which belongs to that ticket. Model-prose salvage in general
+stays where round 8 left it: separate work needing independent source evidence
+for the region and its transcription, measured by #707.
+
+## Round 11 — the all-prose scan ships its own layer
+
+Astra reviewed round 10 (`0a9c59c`) and ruled the retention regression above
+back in scope: option (a), fix it here rather than ticket it. Ticketing a known
+avoidable loss while shipping it is not the preferred choice, and #707 measures
+fallback fidelity in general, it does not stand in for preserving a page whose
+loss has already been demonstrated.
+
+`native_prose_floor_text` had three abstentions; the middle one — *nothing
+withheld* — is gone. A scan whose native layer prints no numeral has no band to
+hold back, and round 10's deletion of the model-prose route left such a page
+with nothing at all: two clean policy paragraphs collapsed to the bare marker
+with the page's own trusted text sitting unread beside it. It now ships through
+`_all_native_text`, on the same three conditions Astra set: native words exist
+and reconstruct to non-empty text, the whole-page partition withholds nothing,
+and that text passes the UNCHANGED `text_layer_trusted` check. No native text
+or an untrusted layer still floors to the marker.
+
+What ships is the page's own baseline lines, verbatim, in recovered order.
+Nothing is reconstructed: a text-only table's rows are lines here, and
+`_escaped_native_line` escapes the pipe so they cannot assemble into a markdown
+table that nothing on this page verified. No attempt is consulted — round 10's
+deletion is not reopened, and the fabrication control from the same reproducer
+(`ratified quarterly dividends.`) is still refused, now because the branch
+never looks at the attempt rather than because a ratio declined it.
+
+The banner is its own (`SCANNED_NATIVE_TEXT_FLAG`). The withholding banner says
+*every numeric row is withheld*, which would be a false claim on a page that
+withheld nothing; this one says the lines are the page's own text layer,
+verbatim and unverified, and that no table here could be verified. The marker
+and the page image are kept once, beside the text rather than in place of it,
+because the table that failed is still unverified. Status stays `ERROR`,
+`audit_passed` stays `False`, the failure mode and the typed
+`scanned_prose_recovered` credential are unchanged — and `_is_restored_prose_
+recovery` now recognises both banners, or a resumed page would have had this
+body replaced by the bare marker on its next run.
+
+Numeric-withholding behaviour is untouched: same partition, same marker
+placement, same bytes (the real Fed 1989-11-14 p3 equality, the bbox control
+and the page-number control all stay green). The escaping and the second banner
+live only on the new path.
+
+`test_a_pure_prose_scan_ships_no_model_prose_either` is re-pinned as
+`test_a_pure_prose_scan_ships_its_own_layer_not_the_models`: both halves
+together, because either alone is a defect — the page's paragraphs come back
+AND the model's wording still does not.
+
+## Round 12 — the page's characters are content, not syntax
+
+Astra's closing review of round 11 accepted the retention fix and reproduced
+one remaining defect in it. `_escaped_native_line` escaped the pipe and
+nothing else, so a lane that promises literal native lines was still handing
+the page's characters structural meaning: a native `<!--` line turned the
+sentence after it into an HTML comment — invisible to a reading consumer,
+which is the silent loss this whole ticket is about — and `# Literal heading
+marker` rendered as an `<h1>`. Neither is a route back to model prose; both
+are socr inventing a construct the page never authored.
+
+The body is now escaped character by character, against two named sets with
+the construct each character would otherwise open: `\` ` * _ [ < & | ~`
+anywhere in a line, and `# > - + =` as a line's first character. Every one is
+ASCII punctuation, so a backslash is the CommonMark literal form and
+markdown-it-py — already a dependency, and the renderer Astra reproduced
+through — honours it. `_band_line` strips each line, so there is no leading
+whitespace to count and no indented-code case. An ordered marker (`1.`) needs
+no rule and the comment says why: it is digit-bearing, and at the shipping
+`row_shape_min` of 1 an all-prose page carries no printed digit at all.
+
+No existing escaper was reused. The nearest thing in the tree is #369's
+`fence_chart_axis_residue`, which wraps axis residue in an HTML comment — the
+opposite operation, hiding content from a renderer rather than making it
+visible. Nothing in `assembly` or `figures` escapes literal content, and
+markdown-it-py ships a parser, not an escaper. What went in is one small
+function with the table of characters it handles.
+
+socr's banner, the table-unverified notice and the image reference are
+assembled outside the literal body and never pass through the escaper — an
+escaped image reference would stop being an image. Pinned, along with a
+rendered-output check through the installed renderer, and finalization byte
+identity for the escaped body on a first run and on a resumed one.
+
+**Short layers, ruled rather than papered over.** `text_layer_trusted`
+abstains below 20 alpha tokens and returns True. Astra's ruling: such a page
+IS published, unverified, when no actual disqualifier fires — refusing solely
+because a layer is short would recreate an avoidable loss without buying
+better evidence. The boolean therefore means *eligible for flagged native
+retention*, never *verified*; on a short layer it says only that nothing
+disqualifying was found, not that anything was checked. Recorded in the
+function's own docstring. #707 measures short-layer error rates.
+
+One round-11 residual is retired rather than carried: the two lanes judge
+different reconstructions of the same words, and Astra showed that does not
+matter, because both disqualifiers are token-local or count-based. Pinned by
+reversing the word list and asserting both verdicts are unchanged.
+
+## Round 13 — the viewer socr actually ships honours the escapes
+
+Astra's closing check found the escaping correct and the integration wrong.
+`review.html` does not use markdown-it-py: it embeds its own regex renderer,
+and that renderer never implemented CommonMark backslash escapes. Fed
+`_escaped_native_line('*emphasis*')` it produced `<p>\<i>emphasis\</i></p>` —
+the backslashes leaked onto the page and the asterisks activated anyway. The
+defect predates this branch on arbitrary escaped Markdown, but native recovery
+now relies on that encoding for every line of a recovered scan, so it became
+this branch's to fix.
+
+Fixed in the renderer, not by weakening the escaper. One contract, applied
+before anything else parses: `protect` turns `\` plus an ASCII punctuation
+character into a single private-use codepoint (`0xE000 + the character`), and
+`unprotect` puts the literal character back at the very end. Nothing in
+between matches a private-use codepoint — not the block tests, not the table
+splitter, not the number marker, not the emphasis or code regexes — and `esc`
+leaves it alone because it is neither `&` nor `<` nor `>`. The restoration
+runs the literal THROUGH `esc`, so an escaped `<` still arrives as `&lt;` and
+the untrusted-HTML boundary is exactly where it was. Pinned with a script tag
+printed on a page's text layer.
+
+Fenced blocks are skipped, because CommonMark does not process escapes inside
+a fence and a fence here is a model's code sample that must keep its own
+backslashes. A code SPAN is not skipped, which is a real divergence from the
+spec and is written down rather than hidden: it cannot reach the native lane,
+whose backticks are escaped, so no span can form there.
+
+Verified the way Astra verified the defect — the actual JavaScript extracted
+from the template and run under Node, skipping cleanly where `node` is absent
+— on every construct the escaper protects. No emphasis, heading, quote, list,
+code, link, table or `pre`; no visible backslash; the sentence after the
+comment opener visible; each printed line recoverable character for character.
+
+Ordinary model prose is untouched. The old and new renderers were run under
+Node over 40 real corpus pages plus two synthetic documents and produced
+byte-identical HTML. None of those pages contains a backslash escape outside a
+fence, which is why the identity holds and also the honest limit of that
+check: it shows the placeholder pass is inert on documents with nothing to
+protect, not that escaped documents render the same, which is the point.
+
+**Cleanup.** `prose_region_words` had no caller outside documentation once
+#649's rebuild needed the interleaved form. It is deleted and its policy note
+— what "prose" means, why nothing else is withheld, and the disclosed cost of
+the default `row_shape_min` — moves to `partition_prose_bands`, the partition
+every live reader takes.
+
+## Round 14 — the placeholder may not be a character the page can print
+
+Round 13's escape holder was a fixed private-use codepoint: `\` + punctuation
+became `0xE000 + the character`, and the last pass decoded every codepoint in
+U+E021–U+E07E back to punctuation. That range is representable input. This
+corpus carries private-use glyphs from math and symbol fonts, so a page that
+printed U+E031 was shown the digit `1`, and U+E02A was shown `*` — in the
+instrument whose whole job is judging digit fidelity. It happened inside code
+fences too: `protect` skips fenced lines, but the decode pass ran over the
+entire rendered output, so skipping never protected the fence's own characters.
+
+No other fixed range fixes this, because every codepoint is something a font
+can emit. The placeholder is now generated per render: sixteen random lowercase
+letters, regenerated until the string does not occur in this document's source,
+with each escaped character stored under a letters-only key and the token
+written as `base + key + base`. Letters are invisible to every rule in the
+renderer — they never start a line, carry no digits for the number marker and no
+punctuation for emphasis, code or the table splitter, and `esc` leaves them
+alone. Restoration matches only that generated namespace, and only keys this
+render stored; it still goes through `esc`, so an escaped `<` still arrives as
+`&lt;`. The match is lazy, because a page can legitimately be lowercase letters
+end to end and a greedy run would swallow the text between two tokens.
+
+Source characters are now never rewritten, private-use or not, inside a fence or
+outside one. Astra's forged-sentinel probe changes verdict accordingly: under
+round 13 the forged glyphs decoded into `&lt;script&gt;`, and under round 14
+they pass through as the glyphs they are. No element is created either way, and
+not decoding them is the stricter behaviour.
+
+Differential against round 13 over sixty corpus pages: identical output, and
+those pages contain neither a private-use glyph nor a backslash escape, so that
+run only shows the ordinary path is untouched. The behavioural difference shows
+on synthetic pages: a private-use glyph in prose and the same glyph inside a
+fence both change from decoded punctuation to the printed character, while
+model prose and an escaped literal render byte-identically.
+
+## Round 15 — absence from the source does not survive concatenation with it
+
+Round 14's token was a random letter run checked absent from the source. Astra
+forced the valid choice of sixteen `a` characters and rendered `a\*`: the
+source's leading `a` abuts the token's prefix, the scan opens a token one
+character early, reads a key nobody stored, and leaves the real token on the
+page as raw letters. The check was on the source alone, and the token has to be
+safe against the source it is inserted *into*.
+
+The codec is now bracketed and deterministic. `ESC_DELIMS` lists twenty-nine
+control characters — everything below 0x20 except tab, newline and carriage
+return, plus DEL — and `protect` takes the first one the source does not
+contain. A token is that delimiter, a letter index, and that delimiter again.
+Randomness is gone, so any failure reproduces from the input alone.
+
+The unambiguity argument is written into the comment above `protect`, and it
+needs only one premise. The delimiter does not occur in the source, so after
+protection every occurrence of it was written by `protect`, in pairs. Between a
+pair there are only lowercase letters, and nothing in the renderer rewrites
+letters or control characters: the number marker needs a digit, emphasis and
+code need punctuation, the block tests need their marker at the start of a line
+and a token starts with the delimiter, and the table splitter needs a pipe.
+Scanning left to right, the letters cannot run past the closing delimiter
+because it is not a letter, and cannot start before the opening one because the
+character before it is either source, which is not the delimiter, or a previous
+token's closing delimiter already consumed. Each match is exactly one token
+whatever abuts it. The argument does not depend on which delimiter was picked,
+which is what the tests pin: every candidate, forced in turn, renders the same
+page.
+
+The index is letters rather than decimals because the number marker would wrap a
+decimal index in `<mark>` and split the token in half. Restoration matches the
+exact keys this render stored, in a prototype-less map, and still goes through
+`esc`.
+
+If a page contains all twenty-nine delimiters, `protect` returns the text
+untouched and no escape is honoured. That page renders as it did before round
+13, with visible backslashes and active syntax — a visible defect rather than a
+silent rewrite of the page's own characters. It is pinned as such.
+
+Differential against round 14 over 169 corpus pages plus four synthetic ones
+covering model prose, escapes, a private-use glyph and a fence: zero
+differences. Round 14 was already correct on everything real; the failure it
+had was reachable only by forcing the namespace, which is exactly why the new
+argument is a proof rather than a probability.
+
+## Round 16 — the delimiter must not be whitespace
+
+Round 15's proof said nothing in the renderer rewrites letters or control
+characters. Two of its twenty-nine candidates broke that: JavaScript calls
+U+000B and U+000C whitespace, and the renderer trims table cells and lets the
+heading and list regexes eat the whitespace run after their marker. A token
+that lost a delimiter at a cell edge or straight after a `#` could never be
+closed, so the page showed the internal index letters where the printed
+characters belonged.
+
+It needed no forcing to reach. Astra put U+0001 to U+0008 inside a code fence,
+which walks the candidate list past all eight, and the next escaped heading
+landed on the vertical tab and lost its asterisks. Confirmed here as the only
+difference between round 15 and round 16 across 169 corpus pages and five
+synthetic ones: that page rendered `aliteralb` and now renders `*literal*`.
+
+The list is now the twenty-seven non-whitespace controls, U+0001–U+0008,
+U+000E–U+001F and U+007F. The premise moved into the proof comment as an
+explicit qualifier, and a test asks the real engine — `/\s/.test(d)` and
+`d.trim() === ''` for every candidate — rather than restating it. The test that
+the file's copy of the list matches the shipped one already existed and still
+holds.
+
+The whitespace check also runs at selection time, not only when the list was
+written, so a later edit cannot reintroduce the defect: a whitespace candidate
+is skipped, and a list of nothing but whitespace falls back to no escape
+protection, which is visible, rather than to a token the renderer cuts in half.
+
+Equivalence across all candidates is no longer pinned on paragraph-shaped text
+alone. Every one of the twenty-seven now has to carry a literal through both
+edges of a table cell, a heading, a list item and a blockquote.
+
+Astra's forced probes for U+000B and U+000C remain red, and correctly so: they
+force a delimiter the codec no longer offers, and under the selection-time guard
+that configuration now falls back to unprotected rendering instead of a broken
+token.
