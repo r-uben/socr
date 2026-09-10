@@ -1237,10 +1237,13 @@ def text_layer_trusted(text: str) -> bool:
 
     Note the deliberate abstention inherited from
     ``_encoding_corruption_ratio``: below 20 alpha tokens it returns 0.0
-    ("too little to judge") and this returns True. That is safe for the
-    caller here -- a region with almost no prose is also a witness too small
-    for a fabricated attempt to overlap with, so the corroboration ratio
-    refuses it on its own.
+    ("too little to judge") and this returns True. #652 round 11: that used to
+    be described as safe because a corroboration ratio refused such a region
+    anyway. No such ratio exists any more -- round 10 deleted it -- so the
+    abstention now stands alone: a handful of tokens ship unjudged by this
+    check, under the recovery banner that calls them unverified. What bounds
+    the exposure is the banner and the withheld numeric bands, not a second
+    gate.
     """
     if not text or not text.strip():
         return False

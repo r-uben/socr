@@ -1788,6 +1788,21 @@ SCANNED_PROSE_RECOVERED_FLAG = (
     "text layer; every numeric row is withheld]"
 )
 
+#: Banner for the OTHER shape ``native_prose_floor_text`` recovers: a scan that
+#: reached the table floor whose native layer prints no numeral anywhere, so
+#: there is no numeric band to withhold and nothing the marker can stand in
+#: place of. #652 round 11 (Astra's ruling, 2026-09-10): such a page still has
+#: trusted text, and collapsing it to the bare marker is an avoidable loss.
+#: What ships is the page's own baseline lines, verbatim, and this banner says
+#: exactly that -- the lines are UNVERIFIED and no table here was verified. It
+#: claims nothing about a table having been read, which is the claim the
+#: withholding banner's "every numeric row is withheld" would falsely imply on
+#: a page that withheld nothing.
+SCANNED_NATIVE_TEXT_FLAG = (
+    "[page {page_num}: unverified scan — the lines below are this page's own text "
+    "layer, verbatim and unverified; no table on this page could be verified]"
+)
+
 #: Audit note recorded on the rebuilt output, so the recovery is visible in the
 #: page sidecar and not only in the bytes.
 SCANNED_PROSE_RECOVERED_NOTE = (
@@ -1831,7 +1846,70 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
         return False
     if getattr(out, "scanned_prose_recovered", False) is not True:
         return False
-    return (out.text or "").startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num))
+    text = out.text or ""
+    # #652 round 11: this lane now has TWO banners -- the withholding one and
+    # the all-native one -- and a restore that recognised only the first would
+    # replace a finalized no-numeral recovery with the bare marker on the next
+    # run, which is the exact resume loss #649 round 2 closed for the other
+    # shape. Both are this module's own bytes and neither is forgeable by a
+    # model attempt, because the typed credential above gates them both.
+    return text.startswith(
+        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)
+    ) or text.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num))
+
+
+def _band_line(band) -> str:
+    """One printed baseline band as its literal line of native text."""
+    return " ".join(str(w[4]) for w in band).strip()
+
+
+def _escaped_native_line(line: str) -> str:
+    """A native line that cannot manufacture markdown structure downstream.
+
+    #652 round 11: a text-only table's rows come back here as literal baseline
+    lines, and a page whose printed text happens to contain pipes would then
+    assemble into something a reader -- and every table consumer downstream --
+    would read as a verified markdown table. Nothing on this page was
+    verified. Escaping the pipe is the whole fix: without one, no run of lines
+    parses as a table, so no other markdown character can build a grid.
+    """
+    return line.replace("|", "\\|")
+
+
+def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """The whole page's native text, flagged, when no band can be withheld.
+
+    #652 round 11 (Astra's ruling, 2026-09-10). This is the no-numeral scan:
+    every band is prose by the floor's own partition, so there is no numeric
+    row to hold back and the withholding lane above has nothing to build. The
+    page nevertheless reached the scanned-table floor, which means something
+    flagged a table on it that was never verified -- so the marker and the
+    page image are kept, ONCE, beside the text rather than in place of it.
+
+    What ships is the page's own baseline lines in recovered order, verbatim.
+    No grid is reconstructed and no cell is inferred: a text-only table's rows
+    are lines here, nothing more, and ``_escaped_native_line`` makes sure they
+    cannot become a markdown table on the way out. No model wording is
+    consulted -- round 10 deleted that route for this branch and this does not
+    reopen it.
+
+    ``text_layer_trusted`` is applied unchanged, to the reconstructed native
+    text. An untrusted layer returns ``None`` and the caller's bare marker
+    stands: the page is a scan because its layer is suspect, and shipping
+    corruption as recovered text is the loss this lane exists to stop.
+    """
+    from socr.core.born_digital import text_layer_trusted
+
+    lines = [line for line in (_band_line(band) for _is_prose, band in bands) if line]
+    if not lines:
+        return None
+    if not text_layer_trusted("\n".join(lines)):
+        return None
+
+    blocks = [SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num)]
+    blocks.append(f"{marker_line}\n\n{png_ref}" if png_ref else marker_line)
+    blocks.append("\n".join(_escaped_native_line(line) for line in lines))
+    return "\n\n".join(blocks)
 
 
 def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
@@ -1853,13 +1931,17 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     withheld half is exactly the numeric content the D3 floor exists to
     protect, so this recovers prose without ever relaxing the floor.
 
-    Three ways to abstain, all of which leave the caller's bare marker:
+    A page whose native layer prints NO numeral has no band to withhold. #652
+    round 11 (Astra's ruling, 2026-09-10) rules that shape in rather than out:
+    round 10 removed the model-prose route from this branch, so refusing here
+    collapsed a scan carrying two clean policy paragraphs to the bare marker
+    with its own trusted text sitting unread. It ships through
+    ``_all_native_text`` below -- the page's baseline lines, verbatim, under a
+    banner that claims nothing about a table.
+
+    Two ways to abstain, both of which leave the caller's bare marker:
 
     * no native words -- no page text to recover;
-    * nothing withheld -- there is no table-shaped band here, so this function
-      cannot say what it would be shipping prose "around", and a page that
-      reached the scanned-table floor with no numeric band at all is a shape
-      this has no evidence about;
     * the prose region's own text fails ``text_layer_trusted`` (#652). The
       page is a scan because its layer is corrupt; shipping that corruption as
       recovered text would be the silent loss this ticket is trying to stop,
@@ -1881,8 +1963,10 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
 
     bands = _page_prose_partition(p)
     prose_bands = [band for is_prose, band in bands if is_prose]
-    if not prose_bands or all(is_prose for is_prose, _band in bands):
+    if not prose_bands:
         return None
+    if all(is_prose for is_prose, _band in bands):
+        return _all_native_text(bands, page_num, marker_line=marker_line, png_ref=png_ref)
 
     prose_words = [word for band in prose_bands for word in band]
     if not text_layer_trusted(native_region_text(prose_words)):
@@ -1915,7 +1999,7 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     # same sentence still vanished when it sat directly before or after a real
     # table. The boundaries come from the table's own structure -- the
     # separator row, its header, and the delimited rows beneath it.
-    band_lines = [" ".join(str(w[4]) for w in band).strip() for _is_prose, band in bands]
+    band_lines = [_band_line(band) for _is_prose, band in bands]
     table_syntax = table_syntax_line_indices(band_lines)
 
     for idx, (is_prose, band) in enumerate(bands):

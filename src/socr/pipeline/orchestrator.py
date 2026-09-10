@@ -1654,10 +1654,15 @@ class UnifiedPipeline:
         # ``if pa.is_born_digital``), so a genuinely scanned-with-a-real-text-
         # -layer page (measured: Fed 1989-11-14 p3, 295 native words, 0
         # detected tables) would otherwise reach
-        # ``UNVERIFIABLE_TABLE_SCANNED``'s prose-corroboration guard with NO
-        # witness at all -- not "no evidence of corroboration", but no data
-        # to check in the first place. Widening this filter is what makes
-        # that guard able to fire on the exact fixture it exists to protect.
+        # ``UNVERIFIABLE_TABLE_SCANNED`` with NO native words at all -- not
+        # "no prose to recover", but no data to look at in the first place.
+        # #652 round 10 deleted the vocabulary-overlap guard this comment used
+        # to name; the reader that needs these words now is #649's native
+        # recovery (``manifest.native_prose_floor_text``), which ships the
+        # page's own text layer around its withheld bands. Widening this
+        # filter is what lets that recovery run on the exact fixture it exists
+        # to protect -- without these words it returns None and the page ships
+        # the bare marker.
         try:
             from socr.core.pdf import open_pdf
 

@@ -96,12 +96,15 @@ def _md_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def _native_words_for(text: str) -> list[tuple]:
-    """B1 (#591): synthetic native-word witness for
-    ``manifest._prose_corroboration_ok``, whose guard on
-    ``UNVERIFIABLE_TABLE_SCANNED`` requires the attempt's vocabulary to
-    overlap ``PageState.native_words``.
+    """B1 (#591): synthetic native words for a page on the
+    ``UNVERIFIABLE_TABLE_SCANNED`` branch.
 
-    #652 P2b: geometry is no longer irrelevant. The guard now delimits the
+    These stood in for the vocabulary-overlap guard's witness until #652
+    round 10 deleted that guard. They are still the page's text layer, and the
+    live reader is now ``manifest.native_prose_floor_text`` -- #649's native
+    recovery, which ships these words as the page's body.
+
+    #652 P2b: geometry is not irrelevant to either reader. Both delimit the
     prose region by native baseline BAND (``row_corroboration``), so a witness
     that stacks every word into one placeholder bbox models a page whose
     entire text is a single printed line -- one band, holding the table's

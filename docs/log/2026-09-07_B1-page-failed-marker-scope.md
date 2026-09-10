@@ -381,3 +381,50 @@ failed — and closing it means teaching #649's recovery to publish an all-prose
 scan's own layer, which belongs to that ticket. Model-prose salvage in general
 stays where round 8 left it: separate work needing independent source evidence
 for the region and its transcription, measured by #707.
+
+## Round 11 — the all-prose scan ships its own layer
+
+Astra reviewed round 10 (`0a9c59c`) and ruled the retention regression above
+back in scope: option (a), fix it here rather than ticket it. Ticketing a known
+avoidable loss while shipping it is not the preferred choice, and #707 measures
+fallback fidelity in general, it does not stand in for preserving a page whose
+loss has already been demonstrated.
+
+`native_prose_floor_text` had three abstentions; the middle one — *nothing
+withheld* — is gone. A scan whose native layer prints no numeral has no band to
+hold back, and round 10's deletion of the model-prose route left such a page
+with nothing at all: two clean policy paragraphs collapsed to the bare marker
+with the page's own trusted text sitting unread beside it. It now ships through
+`_all_native_text`, on the same three conditions Astra set: native words exist
+and reconstruct to non-empty text, the whole-page partition withholds nothing,
+and that text passes the UNCHANGED `text_layer_trusted` check. No native text
+or an untrusted layer still floors to the marker.
+
+What ships is the page's own baseline lines, verbatim, in recovered order.
+Nothing is reconstructed: a text-only table's rows are lines here, and
+`_escaped_native_line` escapes the pipe so they cannot assemble into a markdown
+table that nothing on this page verified. No attempt is consulted — round 10's
+deletion is not reopened, and the fabrication control from the same reproducer
+(`ratified quarterly dividends.`) is still refused, now because the branch
+never looks at the attempt rather than because a ratio declined it.
+
+The banner is its own (`SCANNED_NATIVE_TEXT_FLAG`). The withholding banner says
+*every numeric row is withheld*, which would be a false claim on a page that
+withheld nothing; this one says the lines are the page's own text layer,
+verbatim and unverified, and that no table here could be verified. The marker
+and the page image are kept once, beside the text rather than in place of it,
+because the table that failed is still unverified. Status stays `ERROR`,
+`audit_passed` stays `False`, the failure mode and the typed
+`scanned_prose_recovered` credential are unchanged — and `_is_restored_prose_
+recovery` now recognises both banners, or a resumed page would have had this
+body replaced by the bare marker on its next run.
+
+Numeric-withholding behaviour is untouched: same partition, same marker
+placement, same bytes (the real Fed 1989-11-14 p3 equality, the bbox control
+and the page-number control all stay green). The escaping and the second banner
+live only on the new path.
+
+`test_a_pure_prose_scan_ships_no_model_prose_either` is re-pinned as
+`test_a_pure_prose_scan_ships_its_own_layer_not_the_models`: both halves
+together, because either alone is a defect — the page's paragraphs come back
+AND the model's wording still does not.

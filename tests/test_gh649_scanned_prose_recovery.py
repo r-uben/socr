@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from socr.core.manifest import (
+    SCANNED_NATIVE_TEXT_FLAG,
     SelectionProvenance,
     _select_page_output_tagged,
     is_page_failed_marker,
@@ -527,14 +528,79 @@ class TestWhenItMustAbstain:
         assert is_page_failed_marker(corrupt) is True
         assert "irective" not in corrupt
 
-    def test_a_page_with_nothing_withheld_abstains(self) -> None:
-        """Scope guard. With no table-shaped band there is nothing this could
-        say it was shipping prose "around", and a page that reached the
-        scanned-table floor with no numeric band at all is a shape this has no
-        evidence about. The bare marker stands."""
+    def test_a_page_with_nothing_withheld_ships_its_native_text(self) -> None:
+        """#652 round 11 (Astra's ruling, reproducer prose10). A scan whose
+        native layer prints no numeral has no band to withhold, and until this
+        round that abstained -- so two clean policy paragraphs collapsed to the
+        bare marker with the page's own trusted text sitting unread beside it.
+        Round 10 removed the model-prose route from this branch, which is what
+        turned the abstention into a loss.
+
+        What ships is the page's own lines, nothing else: the marker and the
+        image stay, once, because the table that failed here was never
+        verified."""
         ps = _page(table_rows=[])
+        shipped = _ship(ps)
+
+        assert shipped.status is PageStatus.ERROR
+        assert shipped.audit_passed is False
+        assert shipped.scanned_prose_recovered is True
+        assert is_page_failed_marker(shipped.text) is False
+        for line in _PROSE_ABOVE + _PROSE_BELOW:
+            assert line in shipped.text, line
+        # The notice survives, once, and claims nothing about a verified table.
+        assert shipped.text.count(MARKER) == 1
+        assert shipped.text.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=1))
+
+    def test_a_text_only_table_ships_as_lines_not_as_a_grid(self) -> None:
+        """No grid is reconstructed and no cell inferred. A text-only table's
+        rows are literal baseline lines here, and a printed pipe is escaped so
+        the recovered page cannot assemble into a markdown table nothing on it
+        verified."""
+        ps = _page(
+            table_rows=[],
+            prose_above=_PROSE_ABOVE,
+            prose_below=["| Austrian National Bank | Member |"],
+        )
+        shipped = _ship(ps).text
+
+        assert "Austrian National Bank" in shipped
+        assert "| Austrian National Bank | Member |" not in shipped
+        assert "\\| Austrian National Bank \\| Member \\|" in shipped
+
+    def test_an_untrusted_layer_with_nothing_withheld_still_floors(self) -> None:
+        """The trust check is the same one, applied to the same layer. A
+        corrupt no-numeral scan is not published; the bare marker stands.
+        Difference pin: identical page, spaces eaten in one of them."""
+        clean = _ship(_page(table_rows=[])).text
+        corrupt = _ship(_page(table_rows=[], prose_above=_CORRUPT_PROSE_ABOVE, prose_below=[])).text
+
+        assert is_page_failed_marker(clean) is False
+        assert is_page_failed_marker(corrupt) is True
+        assert "irective" not in corrupt
+
+    def test_no_native_words_with_nothing_withheld_still_floors(self) -> None:
+        """No text layer, no recovery -- the other unchanged abstention."""
+        ps = _page(table_rows=[], with_words=False)
         assert native_prose_floor_text(ps, 1, marker_line=MARKER, png_ref="") is None
         assert is_page_failed_marker(_ship(ps).text) is True
+
+    def test_a_text_only_table_cannot_put_the_models_wording_on_the_page(self) -> None:
+        """The complementary control from the same reproducer. Recovering the
+        page's own lines is not a route back for the attempt's: the invented
+        sentence the deleted corroboration guard used to authorise is still
+        refused, because nothing here consults the attempt at all."""
+        ps = _page(
+            table_rows=[],
+            prose_above=["Austrian National Bank Member"],
+            prose_below=["German Federal Bank Swiss National Bank Member"],
+        )
+        ps.best_output.text = (
+            "Austrian National Bank German Federal Bank Swiss National Bank "
+            "ratified quarterly dividends.\n\n| Bank | Status |\n| --- | --- |\n"
+            "| Austrian National Bank | Member |\n"
+        )
+        assert "ratified quarterly dividends" not in _ship(ps).text
 
     def test_a_page_with_no_prose_band_abstains(self) -> None:
         """The mirror case: every band is table-shaped, so there is no prose to
@@ -542,6 +608,27 @@ class TestWhenItMustAbstain:
         ps = _page(prose_above=[], prose_below=[])
         assert native_prose_floor_text(ps, 1, marker_line=MARKER, png_ref="") is None
         assert is_page_failed_marker(_ship(ps).text) is True
+
+
+class TestResumeKeepsWhatShipped:
+    def test_a_no_numeral_recovery_survives_its_own_sidecar(self) -> None:
+        """#652 round 11. The new lane has its OWN banner, and the restore
+        path recognises the recovery by banner plus typed credential. A restore
+        that knew only the withholding banner would replace these lines with
+        the bare marker on the next run -- the resume loss #649 round 2 closed
+        for the other shape, reopened for this one.
+
+        Pinned the way that loss is actually reached: the frozen bytes come
+        back, ``native_words`` does not."""
+        first = _ship(_page(table_rows=[]))
+        saved = PageOutput.from_dict(first.to_dict())
+
+        resumed = _page(table_rows=[])
+        resumed.native_words = []
+        resumed.attempts = [saved]
+        resumed.best_output = saved
+
+        assert _ship(resumed).text == first.text
 
 
 class TestTheImageRefStillShips:

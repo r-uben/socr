@@ -106,13 +106,13 @@ NATIVE_WORDS = _words_for(PROSE_BEFORE, PROSE_AFTER)
 def _words_prose_only() -> list[tuple]:
     """The same two paragraphs with NO numeric row printed anywhere.
 
-    #652 round 8 (Astra's ruling): a scanned page yields a corroboration
-    witness only where the shipping partition withholds nothing -- no printed
-    numeral on any band, so no table whose extent could be in question. That is
-    the one layout on which the guard can still be SATISFIED, and it is what
-    the controls below use to pin that the guard still discriminates rather
-    than always refusing. Every page with a withheld numeric band refuses by
-    construction now, ``NATIVE_WORDS`` included."""
+    This is the no-withholding layout: nothing printed on any band is a
+    numeral, so the shipping partition holds nothing back. Rounds 8-9 used it
+    as the one shape where the vocabulary-overlap guard could still be
+    SATISFIED; round 10 deleted that guard and round 11 gave the shape its own
+    behaviour -- #649's recovery publishes the page's own layer here instead of
+    flooring to the marker. The fixture is unchanged; what it pins is now the
+    recovery, not the guard."""
     tokens = (PROSE_BEFORE + " " + PROSE_AFTER).split()
     return [_word(50.0, 85.0 + (i % 5) * 10.0, tok, i % 5) for i, tok in enumerate(tokens)]
 
@@ -488,30 +488,39 @@ FABRICATED_ATTEMPT_MD = (
 )
 
 
-def test_a_pure_prose_scan_ships_no_model_prose_either():
-    """#652 round 10, and the cost of the ruling pinned where it lands.
+def test_a_pure_prose_scan_ships_its_own_layer_not_the_models():
+    """#652 rounds 10 and 11 on the same layout: a scan whose native layer
+    prints no numeral anywhere.
 
-    This was the suite's positive control: a scan whose native layer prints no
-    numeral at all, where rounds 8-9 still let a genuine attempt's prose ship.
     Round 10 refuses every attempt in this branch, because a numeral-free
     layer with no detected bbox does not establish that the flagged table is
-    absent -- a text-only table has neither (Astra, prose9).
+    absent -- a text-only table has neither (Astra, prose9). Round 10 alone
+    then shipped the bare marker here, which was an avoidable retention loss:
+    the page's own text was clean and unread. Round 11 (Astra's ruling)
+    extends #649's recovery to the no-withholding case, so the layer ships,
+    flagged, beside the unverified-table notice.
 
-    The cost is real and is asserted rather than described: #649's recovery
-    declines a page with NO withheld band, so nothing takes the model prose's
-    place and the bare marker ships. That is a retention regression against
-    round 9 on this one layout, disclosed in the branch log, not a silent one
-    -- the marker says the page failed. Closing it means teaching #649's
-    recovery to ship an all-prose scan's own layer, which is that ticket's
-    behaviour and not this one's to change."""
+    Both halves are pinned together, because each without the other is a
+    defect: the page's own paragraphs come back, and the model's wording still
+    does not."""
     ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS_PROSE_ONLY)
 
     output, provenance = _tagged(ps)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    assert output.text == "[page 1 failed: unverifiable table — see image]"
-    assert PROSE_BEFORE not in output.text
+    # Token-level, like its siblings: this fixture family stacks every prose
+    # word at one x across cycling bands to control band COUNTS, so the
+    # recovered line order is an artifact of the fixture, not of the page.
+    # Sentence-level retention is pinned on real per-line geometry in
+    # ``tests/test_gh649_scanned_prose_recovery.py``.
+    for token in (PROSE_BEFORE + " " + PROSE_AFTER).split():
+        assert token in output.text, token
+    # The table that failed here was never verified, and the notice for it
+    # survives once beside the text rather than in place of it.
+    assert "[page 1 failed: unverifiable table — see image]" in output.text
+    # Nothing the model authored reaches the page: no row, no cell, no grid.
     assert "Decrease" not in output.text
+    assert "|" not in output.text.replace("\\|", "")
 
 
 def test_prose_corroboration_withheld_band_abstains_without_losing_prose():
