@@ -740,54 +740,26 @@ def test_1977_11_15_present_row_value_immediately_follows_its_own_label():
 
 
 @pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
-def test_1990_11_13_gillum_row_is_adopted_from_the_band_next_to_the_run():
-    """GH-592 round 6: the sub-list row ADJACENT to the run is recovered.
-
-    "Gillum, Deputy Assistant Secretary" is the value of the band immediately
-    above the second accepted run. It is longer than every name that run
-    accepted, which is why the per-row narrow-label check compares this row's
-    own two widths rather than the run's. It is adopted because it also clears
-    the run's own row pitch, is the sole candidate in each lane, and its label
-    "Mr." is a label the run already observed.
-    """
-    doc = fitz.open(str(_FED_1990_11_13_MINUTES))
-    out = BornDigitalDetector().extract_structured(doc[0])
-    lines = out.splitlines()
-
-    value_idx = next(i for i, line in enumerate(lines) if "Gillum" in line)
-    assert lines[value_idx - 1].strip() == "Mr.", lines[value_idx - 2 : value_idx + 1]
-
-
-@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH-592 round 6: KNOWN, BOUNDED LOSS, deliberately surfaced rather than "
-        "removed. The 'Alternate Members' sub-list is three consecutive declined "
-        "bands (Kohn, Bernard, Gillum). Adoption is immediate-only -- exactly the "
-        "one band next to each run boundary, never a walk -- because an outward "
-        "walk is what let unrelated lane-aligned paragraphs be interleaved (Astra "
-        "P1 on df45222). Gillum, the adjacent band, IS now recovered (pinned "
-        "separately above); Kohn and Bernard are two and three bands out and keep "
-        "block order. No token is lost, but their bare 'Mr.' is separated from "
-        "the name. Recovering them needs those bands established as a separately "
-        "verified CONTINUATION with their own role evidence -- not a looser or "
-        "recursive adoption rule."
-    ),
-)
 def test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels():
-    """GH-592: Kohn/Bernard should sit beside their own 'Mr.' too.
+    """GH-592: Kohn/Bernard/Gillum must sit beside their own 'Mr.'.
 
-    Asserts the CORRECT output for the whole sub-list, and is marked
-    ``xfail(strict=True)`` so the day a verified continuation rule lands, this
-    fails loudly and gets un-marked rather than quietly staying red.
+    Three consecutive declined bands of the "Alternate Members" sub-list,
+    above the second accepted run. Each is adopted on its own evidence: its
+    step from the boundary row below it (11.70 / 11.98 / 12.12pt) is inside
+    the run's own widest row step (12.34pt), it holds one line in each of the
+    run's lanes, and its label "Mr." is one the run observed. The walk stops
+    at the next band up, 24.46pt away and carrying ordinary prose.
+
+    Two of these values are longer than every name the run accepted, which is
+    why the narrow-label check compares each row's own two widths rather than
+    the run's: a longer title is not evidence against the pairing.
     """
     doc = fitz.open(str(_FED_1990_11_13_MINUTES))
     page = doc[0]
     out = BornDigitalDetector().extract_structured(page)
     lines = out.splitlines()
 
-    for surname in ("Kohn", "Bernard"):
+    for surname in ("Kohn", "Bernard", "Gillum"):
         value_idx = next(i for i, line in enumerate(lines) if surname in line)
         label_idx = value_idx - 1
         assert lines[label_idx].strip() == "Mr.", (
