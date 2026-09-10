@@ -511,12 +511,15 @@ def test_footnote_vocabulary_cannot_stop_the_walk_half_way():
         assert after == before
 
 
-def test_the_ambiguous_two_row_shape_stays_untouched():
-    """The same footnote on the ordinary two-band candidate: an unchanged no-op.
+def test_a_footnote_no_longer_withholds_the_two_row_repair():
+    """The same footnote on the ordinary two-band candidate: a complete flatten.
 
-    Nothing here has been established, so nothing is rewritten. This control
-    is what makes the partial fold above easy to miss: the shallow case was
-    already conservative.
+    This control used to pin ``count == 0``. That abstention was a safe
+    alternative to an incorrect rewrite, never a requirement: the footnote is
+    not part of this table, so its words never had standing to make the
+    table's own leaf band ambiguous. Now that body evidence is scoped to the
+    table in both dimensions, the leaf band is accounted for by the header
+    alone and the repair the page justifies goes through.
     """
     page = _survey_page()
     page.insert_text((72, 400), "Apr Jul 18", fontsize=_FONT_SIZE)
@@ -524,8 +527,10 @@ def test_the_ambiguous_two_row_shape_stays_untouched():
 
     after, count = repair_table_headers_in_text(page.get_text("words"), before)
 
-    assert count == 0
-    assert after == before
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1:] == [
+        [label, *values] for label, values in _DATA_ROWS
+    ]
 
 
 def test_a_row_combining_two_printed_bands_still_folds():
@@ -657,3 +662,91 @@ def test_the_motivating_census_page_still_repairs():
 
     assert outcomes
     assert any(count and before and not after for count, before, after in outcomes)
+
+
+# --------------------------------------------------------------------------
+# Finding 6 — a table beside this one still posed as its body
+# --------------------------------------------------------------------------
+
+
+def test_a_side_by_side_tables_heading_is_not_this_tables_body():
+    """The reviewer's round-6 reproducer: a y-interval is not a table.
+
+    The neighbouring table sits inside the first table's vertical range and
+    500pt to its right, and repeats the same ten leaf headings. Scoping the
+    body witness by y alone still let that heading settle the first table's
+    ambiguous leaf row as body, and the fold duplicated the leaf labels into
+    the header and the first body row at once. Ownership now has to hold in
+    both dimensions, so the neighbour is silent about this table and the leaf
+    band folds where it belongs.
+    """
+    page = _survey_page()
+    page.set_mediabox(fitz.Rect(0, 0, 1100, 500))
+    page.insert_text((600, 230), "Second table", fontsize=_FONT_SIZE)
+    for x, text in _LEAF_BAND:
+        page.insert_text((x + 500, 252), text, fontsize=_FONT_SIZE)
+    page.insert_text((600, 266), "Settlement dates", fontsize=_FONT_SIZE)
+    page.insert_text((704.1, 266), "12/04/89", fontsize=_FONT_SIZE)
+    base = _padded_markdown().splitlines()
+    before = "\n".join([base[0], base[1], base[0], *base[2:]])
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    if count:
+        assert find_table_blocks(after)[0].grid[1:] == [
+            [label, *values] for label, values in _DATA_ROWS
+        ]
+    else:
+        assert after == before
+
+
+def test_a_trailing_source_line_survives_the_fold():
+    """A text-only row below the last numeric row is not swept up by the fold.
+
+    It sits outside the body witness's bottom edge, so nothing certifies it —
+    but the walk has already stopped at the first established body row, and
+    everything under that ships verbatim.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 289), "Source: survey respondents", fontsize=_FONT_SIZE)
+    before = _padded_markdown() + "| Source: survey respondents |" + " |" * 10 + "\n"
+
+    after, _count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert find_table_blocks(after)[0].grid[-1][0] == "Source: survey respondents"
+
+
+@pytest.mark.skipif(
+    not (_CENSUS_ROOT / "in" / f"{_CENSUS_SLUG}.pdf").exists(),
+    reason="local census corpus only — the cached candidates are not in the repo",
+)
+def test_a_footnote_changes_nothing_on_the_census_page():
+    """Scoping is measured on the real page, not only on the fixture.
+
+    Printing an unrelated ``Apr Jul 18`` at the foot of the actual 2018 page
+    leaves both cached candidates' repair counts and defects exactly as they
+    were, which is the property the token scoping was for.
+    """
+    from socr.tables.locate import _horizontal_rules
+    from socr.tables.structure_check import table_output_defect
+
+    with fitz.open(_CENSUS_ROOT / "in" / f"{_CENSUS_SLUG}.pdf") as doc:
+        page = doc[0]
+        original = page.get_text("words")
+        rules = _horizontal_rules(page)
+        page.insert_text((20, page.rect.height - 10), "Apr Jul 18", fontsize=6)
+        with_footnote = page.get_text("words")
+
+    seen = []
+    for path in sorted((_CENSUS_ROOT / "out" / _CENSUS_SLUG / "cache").glob("*/*.json")):
+        data = json.loads(path.read_text())
+        if data.get("page_num") != 1 or not data.get("text"):
+            continue
+        outcomes = []
+        for words in (original, with_footnote):
+            after, count = repair_table_headers_in_text(words, data["text"])
+            outcomes.append((count, table_output_defect(after, words, rules)))
+        assert outcomes[0] == outcomes[1]
+        seen.append(outcomes[0])
+
+    assert (1, "") in seen

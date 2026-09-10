@@ -1016,44 +1016,62 @@ def _band_floor(band_rows: list[list]) -> float:
     return max(w[1] for row in band_rows for w in row)
 
 
-def _below_band_tokens(geom: _TableGeometry, band_floor: float) -> set[str]:
-    """Casefolded word texts the page prints BELOW its header band."""
-    return {
-        w[4].strip().casefold()
-        for row in geom.rows_by_y.values()
-        for w in row
-        if w[1] > band_floor and w[4].strip()
-    }
+def _table_x_extent(geom: _TableGeometry) -> tuple[float, float] | None:
+    """The left and right edge of the rows this table's lanes were derived from.
+
+    Row labels live left of the first lane, so the lanes alone do not bound a
+    table horizontally; the attributed data rows do, and they are already
+    chosen. ``None`` when there are none to measure.
+    """
+    edges = [(w[0], w[2]) for y in geom.data_ys for w in geom.rows_by_y.get(y, [])]
+    if not edges:
+        return None
+    return min(x0 for x0, _x1 in edges), max(x1 for _x0, x1 in edges)
+
+
+def _owned_body_rows(geom: _TableGeometry, band_floor: float) -> list[list]:
+    """The printed rows this table owns below its header band.
+
+    Ownership is two-dimensional, because a y-interval is not a table (#696
+    round 6). A row qualifies only if it sits between the band floor and the
+    last row the lane derivation walked to -- that walk already stops at the
+    first vertical gap too large to belong here -- AND every one of its words
+    falls inside the horizontal extent of those same attributed rows. A
+    neighbouring table sharing this table's y-range is a different table, and
+    its heading row is not evidence about this one.
+
+    No margin is applied in either direction: both bounds are edges of rows
+    the geometry chain already picked.
+    """
+    if not geom.data_ys:
+        return []
+    extent = _table_x_extent(geom)
+    if extent is None:
+        return []
+    left, right = extent
+    bottom = max(geom.data_ys)
+    return [
+        row
+        for y, row in geom.rows_by_y.items()
+        if row
+        and y <= bottom
+        and all(w[1] > band_floor and w[0] >= left and w[2] <= right for w in row)
+    ]
+
+
+def _below_band_tokens(owned_rows: list[list]) -> set[str]:
+    """Casefolded word texts this table prints below its own header band.
+
+    Scoped to the table (#696 round 6). A footnote or a neighbouring table
+    saying the same words is not this table's body, so it can neither certify
+    a row as body nor withhold a repair the rest of the evidence justifies.
+    """
+    return {w[4].strip().casefold() for row in owned_rows for w in row if w[4].strip()}
 
 
 def _row_word_counts(row: list) -> Counter:
     """The multiset of casefolded word texts one printed row puts on the page."""
     return Counter(w[4].strip().casefold() for w in row if w[4].strip())
-
-
-def _body_extent_row_counts(geom: _TableGeometry, band_floor: float) -> list[Counter]:
-    """One multiset per printed row inside THIS table's body extent.
-
-    The extent runs from the header band's floor down to the last row the same
-    geometry chain attributed to this table -- the rows ``_table_geometry``
-    derived its lanes from, whose walk already stops at the first vertical gap
-    too large to be a row of this table. Nothing below that bottom row is part
-    of this body, whatever it says.
-
-    Scoping is the whole point (#696 round 5). "The same words appear on some
-    printed row lower down the page" is not evidence about this table: a
-    second table's leaf HEADING row satisfied it and licensed folding the
-    upper table's leaf band away as if it were data, which duplicated those
-    headings into the header and the body at once.
-    """
-    if not geom.data_ys:
-        return []
-    bottom = max(geom.data_ys)
-    return [
-        _row_word_counts(row)
-        for y, row in geom.rows_by_y.items()
-        if row and y <= bottom and all(w[1] > band_floor for w in row)
-    ]
 
 
 def _candidate_header_depth(
@@ -1065,19 +1083,20 @@ def _candidate_header_depth(
     classified by where the page PRINTS it, and each side of the boundary owes
     positive evidence:
 
-    * a row every token of which the page prints BELOW the header band, and
-      none of which it prints inside the band, is BODY. It and everything
+    * a row every token of which THIS TABLE prints below its header band, and
+      none of which the band itself prints, is BODY. It and everything
       under it ship verbatim, and the walk stops.
     * a row every token of which the page prints INSIDE the band, and not all
-      of which it prints below, is header, and the walk continues.
+      of which this table prints below it, is header, and the walk continues.
     * a row accounted for by BOTH regions has no established role. Vocabulary
       shared with the band cannot prove this occurrence is header material,
       and vocabulary shared with the body cannot prove it is not, so the whole
-      repair abstains -- unless the page prints a row below the band whose
+      repair abstains -- unless this table prints a row below the band whose
       words are exactly this row's, which locates the occurrence itself and
-      settles it as body, PROVIDED that row lies within this table's own
-      body extent.
+      settles it as body.
     * a row accounted for by neither region is unclassifiable: abstain.
+      Absence from the narrowed body vocabulary is not positive proof of
+      header, so silence on both sides still buys nothing.
 
     The single escape hatch runs only in the direction that KEEPS content. An
     exact match against a printed band row would locate an occurrence just as
@@ -1094,8 +1113,9 @@ def _candidate_header_depth(
     """
     band_tokens = _header_band_tokens(band_rows)
     band_floor = _band_floor(band_rows)
-    below_tokens = _below_band_tokens(geom, band_floor)
-    below_rows = _body_extent_row_counts(geom, band_floor)
+    owned_rows = _owned_body_rows(geom, band_floor)
+    below_tokens = _below_band_tokens(owned_rows)
+    below_rows = [_row_word_counts(row) for row in owned_rows]
     depth = 1
     for row in grid[1:]:
         counts = Counter(
