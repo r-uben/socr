@@ -532,9 +532,32 @@ MEASURE_FILL_SHARE_MAX = 0.5
 
 #: A "run" must have at least this many paired rows before two x-disjoint
 #: line groups are treated as an aligned run rather than a coincidental
-#: single pair. Not a measured threshold -- it is the minimum evidence for
-#: calling something a repeating pattern rather than one accident.
-_ALIGNED_RUN_MIN_ROWS = 2
+#: single pair.
+#:
+#: GH-592 round 2 (see docs/log/2026-09-10_592-line-level-bijection.md):
+#: moving the run search to LINE granularity means ``_find_aligned_runs``
+#: can and does try a candidate of exactly 2 rows (the floor this constant
+#: sets) as its own standalone run, not merely as a stepping stone inside a
+#: bigger block. At 2 rows, ``LABEL_COLUMN_WIDTH_SHARE`` and
+#: ``MEASURE_FILL_SHARE_MAX`` are computed over a median of exactly TWO
+#: values -- which is just their average -- so a single outlier row (e.g.
+#: one long name beside four short ones) can swing the average enough to
+#: pass a check the same column fails when measured over its true, larger
+#: extent. Reproduced directly: the width-ratio and fill-share regression
+#: fixtures in tests/test_born_digital_aligned_runs.py (a uniform 0.8 ratio
+#: that must never merge, and a wrapped paragraph beside a label that must
+#: never merge) both falsely merged a 2-row TAIL subset containing the
+#: fixture's one deliberately-long outlier line, at ``_ALIGNED_RUN_MIN_ROWS
+#: = 2``, even though the same guards correctly reject the fixtures' full
+#: (4- and 5-row) extent. A median over 3+ values needs TWO outliers on the
+#: same side to move -- one long line among the rest can no longer swing it
+#: alone. Raised to 3 for this reason; the real 1968-10-29 / 1977-11-15 /
+#: 1990-11-13 Fed fixtures (11-16-row runs) are unaffected, and all
+#: existing positive/negative fixtures pass at this floor. Not one of the
+#: three geometry constants this round's dispatch protected (2.0 / 0.65 /
+#: 0.5) -- this is the minimum-evidence floor the guards need to be
+#: statistically meaningful, not a geometric threshold.
+_ALIGNED_RUN_MIN_ROWS = 3
 
 #: How many consecutive failed extensions to tolerate while growing a
 #: candidate run before giving up on it. The Fed fixture's run only reaches
@@ -758,29 +781,38 @@ def _try_aligned_run(
 
 
 def _find_aligned_runs(
-    block_lines: list[list[dict]],
+    bands: list[list[dict]],
     word_space_width: float,
     word_width: float,
 ) -> list[tuple[int, int, list[str]]]:
-    """Find maximal contiguous block ranges that are aligned two-column runs.
+    """Find maximal contiguous band ranges that are aligned two-column runs.
 
-    ``block_lines[i]`` is the list of line records (``{"text", "y0", "y1",
-    "x0", "x1"}``, already restricted to lines with at least one word) for the
-    i-th text block, in the page's own block order. Returns
-    ``(start, end, merged_row_texts)`` triples, ``end`` inclusive, positions
-    into ``block_lines``; ranges never overlap.
+    ``bands[i]`` is the list of line records (``{"text", "y0", "y1", "x0",
+    "x1"}``, already restricted to lines with at least one word) for the
+    i-th baseline band (see ``_line_baseline_bands``), in baseline (y) order.
+
+    GH-592 round 2: this walks by BASELINE BAND, not by PyMuPDF text block
+    (round 1 / C1) -- a band is one visual row's worth of lines regardless of
+    which block(s) they came from, so the accumulated left/right line counts
+    can reach a bijection within a few bands even when the underlying blocks
+    split a two-column list unevenly. The growth/fail-streak search itself,
+    and the four guards ``_try_aligned_run`` applies, are unchanged from
+    round 1.
+
+    Returns ``(start, end, merged_row_texts)`` triples, ``end`` inclusive,
+    positions into ``bands``; ranges never overlap.
     """
-    n = len(block_lines)
+    n = len(bands)
     runs: list[tuple[int, int, list[str]]] = []
     pos = 0
     while pos < n:
-        items = list(block_lines[pos])
+        items = list(bands[pos])
         best: tuple[int, list[str]] | None = None
         fail_streak = 0
         end = pos
         while end + 1 < n and fail_streak < _ALIGNED_RUN_FAIL_STREAK_LIMIT:
             end += 1
-            items = items + block_lines[end]
+            items = items + bands[end]
             candidate = _try_aligned_run(
                 items, word_space_width, ALIGNED_RUN_GAP_MAX_WORD_SPACES, word_width
             )
@@ -798,6 +830,81 @@ def _find_aligned_runs(
     return runs
 
 
+#: Fraction of the page's own median line HEIGHT used as the tolerance for
+#: "these two lines are the same visual row" in ``_line_baseline_bands``.
+#: Measured on the 1968-10-29 Fed fixture (see
+#: docs/log/2026-09-10_592-line-level-bijection.md): a genuine same-row pair
+#: (a "Mr." line and its name line) has y-center deltas of 0.1-0.9pt against
+#: a median line height of ~13.4pt, while the step to the NEXT row's center
+#: is ~11.2-13pt -- same-row deltas are under 7% of a line height, the
+#: next-row step is over 80%. Naively grouping by y-EXTENT overlap (tried
+#: first) chains transitively across the whole 11-row list into one band,
+#: because this typewriter text's line height (~13.5pt) exceeds its own row
+#: spacing (~11.5pt) -- every line's box already overlaps its neighbour's.
+#: Comparing y-CENTER deltas against half a line height sits with wide
+#: margin below the next-row step and well above the same-row jitter.
+_ROW_BAND_CENTER_TOLERANCE_FRACTION = 0.5
+
+
+def _median_line_height(flat_lines: list[dict]) -> float | None:
+    """Median line-box height (``y1 - y0``) across ``flat_lines``.
+
+    The yardstick ``_line_baseline_bands`` scales its row-center tolerance
+    by -- see ``_ROW_BAND_CENTER_TOLERANCE_FRACTION`` for why an
+    extent-overlap test does not work for this. Returns ``None`` when there
+    are no measurable lines.
+    """
+    heights = [it["y1"] - it["y0"] for it in flat_lines if it["y1"] > it["y0"]]
+    if not heights:
+        return None
+    heights.sort()
+    mid = len(heights) // 2
+    if len(heights) % 2:
+        return heights[mid]
+    return (heights[mid - 1] + heights[mid]) / 2.0
+
+
+def _line_baseline_bands(flat_lines: list[dict]) -> list[list[dict]]:
+    """Group lines into bands by proximity of their vertical CENTER, not block.
+
+    GH-592 round 2 (see docs/log/2026-09-07_D3-fed-table-lane-remeasure.md's
+    "#592" section): the source PDF can split a visual two-column list's
+    honorific and name columns across an UNEQUAL number of PyMuPDF text
+    blocks (e.g. the 1968-10-29 Fed minutes' "Mr." column is 3 blocks
+    totalling 11 lines while its name column is 3 *different* blocks
+    totalling 12 lines) -- a block-granularity walk (round 1, C1/#631) grows
+    the candidate item set one whole block at a time and never lands on a
+    block-range boundary where the accumulated left/right line counts are
+    equal, so the bijection precondition in ``_try_aligned_run`` never holds
+    within the fail-streak budget.
+
+    Grouping by actual vertical position instead of block membership makes a
+    baseline row the unit of growth: each band here corresponds to one
+    visual row, independent of which block(s) contributed its lines. Uses
+    the CENTER of each line's y-extent, clustered against the previous
+    line's center within ``_ROW_BAND_CENTER_TOLERANCE_FRACTION`` of the
+    page's median line height -- not extent overlap (see that constant's
+    derivation for why overlap chains the whole list into one band on this
+    typewriter-spaced text).
+    """
+    if not flat_lines:
+        return []
+    line_height = _median_line_height(flat_lines) or 0.0
+    tolerance = line_height * _ROW_BAND_CENTER_TOLERANCE_FRACTION
+
+    ordered = sorted(flat_lines, key=lambda it: (it["y0"] + it["y1"]) / 2.0)
+    bands: list[list[dict]] = [[ordered[0]]]
+    last_center = (ordered[0]["y0"] + ordered[0]["y1"]) / 2.0
+    for item in ordered[1:]:
+        center = (item["y0"] + item["y1"]) / 2.0
+        if center - last_center <= tolerance:
+            bands[-1].append(item)
+        else:
+            bands.append([item])
+        last_center = center
+    return bands
+
+
 def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     """Reconstruct the no-table-regions prose text, merging aligned runs.
 
@@ -805,6 +912,14 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     evidence to look for one) -- the caller must then fall back to the
     existing ``page.get_text("text")`` path UNCHANGED, so every page without
     this specific defect is byte-for-byte identical to before this ticket.
+
+    GH-592 round 2: the search runs over LINE-granularity baseline bands
+    (``_line_baseline_bands``), not whole PyMuPDF blocks -- see that
+    function's docstring for why block granularity leaves some real
+    attendee-roster pages undetected. ``_try_aligned_run`` /
+    ``_find_aligned_runs`` (the four geometric guards: bijection, gap,
+    left/right width ratio, right-block fill share) are unchanged; only the
+    unit the search walks by changed.
     """
     try:
         words = page.get_text("words") or []
@@ -823,23 +938,39 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     extents = _line_word_extents(words)
     blocks = [b for b in page_dict.get("blocks", []) if b.get("type", 0) == 0]
 
-    block_lines: list[list[dict]] = []
-    block_line_texts: list[list[str]] = []
+    # ``all_lines``: EVERY line of every block, keyed by (bi, li), positioned
+    # by its own bbox -- this is the page's complete content and is what gets
+    # emitted. ``flat_lines``: the subset with measurable WORD extents (a
+    # blank/whitespace-only line has no words) -- this is the narrower set
+    # ``_line_baseline_bands`` / ``_find_aligned_runs`` search for column
+    # pairs over. Keeping these separate means a line the run-search can't
+    # even see (no word extents) still can't be silently dropped from output.
+    all_lines: list[dict] = []
+    flat_lines: list[dict] = []
     for bi, block in enumerate(blocks):
         lines = block.get("lines", []) or []
-        items = []
-        texts = []
         for li, line in enumerate(lines):
             text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
-            texts.append(text)
-            ext = extents.get((bi, li))
-            if ext is None:
-                continue
             bbox = line.get("bbox")
             if not bbox:
                 continue
-            items.append(
+            all_lines.append(
                 {
+                    "bi": bi,
+                    "li": li,
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": bbox[0],
+                    "text": text,
+                }
+            )
+            ext = extents.get((bi, li))
+            if ext is None:
+                continue
+            flat_lines.append(
+                {
+                    "bi": bi,
+                    "li": li,
                     "y0": bbox[1],
                     "y1": bbox[3],
                     "x0": ext[0],
@@ -847,25 +978,70 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     "text": text,
                 }
             )
-        block_lines.append(items)
-        block_line_texts.append(texts)
 
-    runs = _find_aligned_runs(block_lines, word_space_width, word_width)
+    flat_lines.sort(key=lambda it: it["y0"])
+    bands = _line_baseline_bands(flat_lines)
+
+    runs = _find_aligned_runs(bands, word_space_width, word_width)
     if not runs:
         return None
 
-    run_by_start = {start: (end, merged) for start, end, merged in runs}
-    consumed_until = -1
-    out_lines: list[str] = []
-    for bi in range(len(blocks)):
-        if bi <= consumed_until:
+    # GH-592 round 2 REVIEW FIX: emit by PAGE POSITION (visual row, then x),
+    # not by original block. Splicing a merged run in at its first
+    # CONTRIBUTING block's position (the prior approach) is wrong whenever a
+    # run spans several blocks and an unrelated, unconsumed line from one of
+    # the LATER blocks in that span sits between two of the run's own rows in
+    # the source PDF's block order: that unconsumed line gets pushed out to
+    # wherever its own block happens to fall in block-iteration order, which
+    # can be many lines after the whole merged run has already been emitted.
+    # Reproduced on 1977-11-15 p1 -- the declined 3-column "PRESENT:" /
+    # "Mr." / "Burns, Chairman" row's value half lives in a block that also
+    # contributes to the real run starting a few rows later, and its
+    # emission position, tied to block order, put it 11 lines below its own
+    # label.
+    #
+    # A first attempt sorted by raw (y0, x0): this is NOT sufficient -- three
+    # lines belonging to the SAME visual row can have y0 values that differ
+    # by a fraction of a point (measured on 1977-11-15's own PRESENT row:
+    # 267.2 / 267.3 / 267.4), which is enough for a plain numeric sort to put
+    # them in y-order rather than x-order and scramble a label ahead of or
+    # behind its value. Re-clustering the run entries plus every unconsumed
+    # line through ``_line_baseline_bands`` -- the SAME row-membership test
+    # the search itself uses -- groups same-row items regardless of that
+    # jitter, so items genuinely on one visual row sort by x within that row,
+    # and different rows still sort by y between rows.
+    consumed: set[tuple[int, int]] = set()
+    run_pseudo_lines: list[dict] = []
+    run_payload: dict[int, list[str]] = {}
+    for run_id, (start, end, merged) in enumerate(runs):
+        run_items = [it for band in bands[start : end + 1] for it in band]
+        for it in run_items:
+            consumed.add((it["bi"], it["li"]))
+        anchor = min(bands[start], key=lambda it: it["x0"])
+        run_pseudo_lines.append(
+            {
+                "y0": anchor["y0"],
+                "y1": anchor["y1"],
+                "x0": anchor["x0"],
+                "run_id": run_id,
+            }
+        )
+        run_payload[run_id] = merged
+
+    output_items: list[dict] = list(run_pseudo_lines)
+    for it in all_lines:
+        if (it["bi"], it["li"]) in consumed:
             continue
-        if bi in run_by_start:
-            end, merged = run_by_start[bi]
-            out_lines.extend(merged)
-            consumed_until = end
-        else:
-            out_lines.extend(block_line_texts[bi])
+        output_items.append({"y0": it["y0"], "y1": it["y1"], "x0": it["x0"], "text": it["text"]})
+
+    output_rows = _line_baseline_bands(output_items)
+    out_lines: list[str] = []
+    for row in output_rows:
+        for item in sorted(row, key=lambda it: it["x0"]):
+            if "run_id" in item:
+                out_lines.extend(run_payload[item["run_id"]])
+            else:
+                out_lines.append(item["text"])
     return "\n".join(out_lines).strip()
 
 
