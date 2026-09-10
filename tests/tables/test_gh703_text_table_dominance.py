@@ -789,23 +789,75 @@ def test_split_halves_merge_only_within_the_rounding_bin() -> None:
     assert lanes == {}, "two sub-recurring positions 3pt apart found no lane"
 
 
-def test_lane_seeding_is_independent_of_word_order() -> None:
-    """The grouping is deterministic: shuffling the input words changes
-    neither the lane mapping nor the gate.
+def test_subrecurring_group_formation_is_order_independent() -> None:
+    """Astra's 703f shape: the four-row 2/2 split ALONE, so both halves are
+    below the recurrence minimum and the round-6 join step is the only thing
+    that can rejoin them. The earlier version of this test combined fixtures
+    until every position was already recurring, which bypassed that step.
     """
     import random
 
-    from socr.tables.reconstruct import _seeded_lane_of
+    from socr.tables.reconstruct import _MIN_TABLE_ROWS, _seeded_lane_of
 
-    words = _short_jittered_grid(4, jitter=True) + _jittered_tight_columns(jitter=True)
-    nums = [(w[0], round(w[1])) for w in words if w[4].isdigit()]
+    nums = [(12.49 if i % 2 == 0 else 12.51, 20.0 * i) for i in range(4)]
+    nums += [(17.49, 20.0 * i) for i in range(4)]
     xs = sorted({x for x, _ in nums})
-    baseline = _seeded_lane_of(nums, xs)
-    gate = _native_page_has_column_lanes(words)
 
-    for seed in range(5):
-        shuffled_words = list(words)
-        random.Random(seed).shuffle(shuffled_words)
-        shuffled = [(w[0], round(w[1])) for w in shuffled_words if w[4].isdigit()]
-        assert _seeded_lane_of(shuffled, sorted({x for x, _ in shuffled})) == baseline
-        assert _native_page_has_column_lanes(shuffled_words) is gate
+    bands: dict[float, set] = {}
+    for x, y in nums:
+        bands.setdefault(round(x), set()).add(y)
+    assert len(bands[12]) < _MIN_TABLE_ROWS, "the join step is what qualifies this half"
+    assert len(bands[13]) < _MIN_TABLE_ROWS, "and this one"
+
+    baseline = _seeded_lane_of(nums, xs)
+    assert baseline[12.49] == baseline[12.51], "one column, two rounded positions"
+    assert baseline[12.49] != baseline[17.49], "the clean neighbour keeps its own lane"
+
+    for seed in range(10):
+        shuffled = list(nums)
+        random.Random(seed).shuffle(shuffled)
+        assert _seeded_lane_of(shuffled, xs) == baseline
+
+
+def test_space_grouped_number_is_two_token_lanes_scope_limitation() -> None:
+    """DOCUMENTED LIMITATION, pinned rather than fixed (#703, Astra 703f).
+
+    The gate reads TOKEN positions, and a space-grouped number can extract as
+    two tokens: four lines of ``1 234`` at 6pt come back from PyMuPDF as two
+    words per line, which recur in two lanes and open the gate. The adjacency
+    clustering this gate replaced answers the same way on the same fixture, so
+    this is the detector's standing limitation and not the round-3 seeding's.
+    Pinned on BOTH clusterings so that a future narrowing has to move them
+    together or state why it does not.
+    """
+    import pymupdf
+
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for i in range(4):
+        page.insert_text((50, 60 + 20 * i), f"{i + 1} {234 + i}", fontsize=6)
+    words = page.get_text("words")
+    doc.close()
+
+    assert len(words) == 8, "one printed number, two extracted tokens per line"
+    assert has_recurring_numeric_columns(words, 2, seeded_lanes=False) is True
+    assert _native_page_has_column_lanes(words) is True
+
+
+def test_signs_and_brackets_are_not_a_second_token_lane() -> None:
+    """The control for the limitation above: a leading sign or a bracket does
+    not split into its own token, so those forms leave the gate closed.
+    """
+    import pymupdf
+
+    for value in ("-0.5", "(12)"):
+        doc = pymupdf.open()
+        page = doc.new_page()
+        for i in range(4):
+            page.insert_text((50, 60 + 20 * i), value, fontsize=6)
+        words = page.get_text("words")
+        doc.close()
+        assert len(words) == 4, value
+        assert _native_page_has_column_lanes(words) is False, value

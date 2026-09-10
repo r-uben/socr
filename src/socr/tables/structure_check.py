@@ -337,8 +337,29 @@ def _native_page_has_column_lanes(words: list) -> bool:
     x=12 and x=24, inside the 6pt tolerance of both) chains them into a single
     lane, this gate returns False, term (b) abstains, and the truncated
     candidate wins selection over the complete one. Recurrence-seeded lanes
-    cannot be bridged by a position that occurs once, so a NEGATIVE verdict
-    here means the page really has no recurring numeric columns.
+    cannot be bridged by a position that occurs once, so the one-off bridge no
+    longer flips this verdict.
+
+    **What the verdict does and does not mean.** This is a bounded detector
+    over TOKEN POSITIONS, not a semantic table detector. A positive verdict
+    says extracted numeric tokens recur in shared x-lanes; it does not
+    establish that those lanes are the cells of one table, and two token lanes
+    are not proof of two physical columns. Two measured limitations:
+
+    * A space-grouped number can be extracted as two tokens. Four lines of
+      ``1 234`` printed at 6pt come back from PyMuPDF as two words per line
+      (x=50.000 and x=55.004), which register as two recurring token lanes and
+      return True. The adjacency clustering this gate replaced does the same on
+      that fixture (its x1 anchor separates prefix from suffix), so this is the
+      detector's standing limitation, not the seeding's. Signs and brackets are
+      not affected: ``-0.5`` and ``(12)`` each extract as one token.
+    * The question is asked of the WHOLE page, so bands that belong to no
+      table -- numbered source citations, marker at one x and year at another
+      -- can arm term (b) for a candidate whose own table is elsewhere.
+
+    A negative verdict is correspondingly bounded: it says the page shows no
+    recurring numeric token lanes at this arity, which is why term (b) then
+    abstains rather than acquits.
     """
     if not words:
         return False

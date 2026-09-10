@@ -465,6 +465,13 @@ halves raises the lane count on five pages (BoE 2018 p2 2->3, ECB 2003 p2
   merge.** Two positions of one printed column that both carry a numeral on the
   same band are treated as two columns; that is the same evidence the
   co-occurrence override uses, and it is deliberate.
+- **A space-grouped number can register as two token lanes.** Astra measured
+  `1 234` at 6pt extracting as two PyMuPDF words per line (x=50.000 and
+  x=55.004), which opens the gate; the adjacency clustering this gate replaced
+  answers the same way on that fixture, so it is the detector's standing
+  limitation, not the seeding's. Pinned on both clusterings, with `-0.5` and
+  `(12)` as the single-token controls. The gate is a detector over token
+  positions, not proof of physical cells, and `structure_check` now says so.
 - **The gate remains page-wide.** The citation-rows case
   (`test_citation_rows_on_a_text_page_are_a_known_scope_limitation`) is
   unchanged and remains a recorded scope limitation, not a fix.

@@ -671,9 +671,10 @@ def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[fl
        Grouping instead within ``_LANE_X_TOL_PT`` was measured and rejected:
        it distributes scattered positions over six points and reopens two
        inspected non-table pages (BoE 2018 p3, ECB 2000 p3).
-    2. **Qualify.** A position is recurring when tokens sit at THAT position on
-       at least ``_MIN_TABLE_ROWS`` bands -- its own occupancy, never the union
-       over a neighbourhood. Round 3 counted the neighbourhood, so a footnote
+    2. **Qualify.** A position is recurring when tokens sit on at least
+       ``_MIN_TABLE_ROWS`` bands at the position ITSELF, or at the group step
+       1b joined it to -- the occupancy of its own representative, never the
+       union over a neighbourhood. Round 3 counted the neighbourhood, so a footnote
        value printed once between two columns borrowed both columns' support
        (21 + 20 bands -> 22), outranked both, and founded the only centre.
        A position occurring once now cannot found a lane at any ranking.
