@@ -1629,6 +1629,19 @@ def _line_is_in_region_text(line: dict, region_tokens: Counter) -> bool:
 
     A line with no word tokens (pure punctuation, a rule) is droppable: it
     carries nothing to lose.
+
+    #716/#718/#718b: this line is a raw PyMuPDF dict-walk reading, compared
+    UNNORMALISED against ``region_tokens``. Round 2 tried stripping a
+    leading entity run from the line before tokenising to reconcile it with
+    the region's now-canonical replacement; Astra's 718b reproducer showed
+    that this also strips an UNRELATED entity-prefixed note's prefix,
+    making its remaining words newly pass this bag-of-words test and
+    deleting a paragraph the region never represented. The fix is upstream:
+    ``region_tokens`` is now built from each region's RAW (pre-#716,
+    pre-canonicalisation) reading -- see ``raw_table_regions`` in
+    ``extract_structured`` -- so a transformed label's raw line still
+    matches its region's raw tokens exactly as it did before the #716
+    boundary existed, with no normalisation needed here at all.
     """
     text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
     tokens = _WORD_TOKEN_RE.findall(text)
@@ -3495,8 +3508,14 @@ class BornDigitalDetector:
         # downstream (at ingestion) rewrote the text after the identities were
         # already computed, and the splice then refused every region and shipped
         # the whole-page marker instead -- real content loss.
+        #
+        # #718b: keep the PRE-canonicalisation markdown too, aligned by index
+        # with the (now-canonical) ``table_regions`` list below -- the
+        # "already represented" interleaving test needs the RAW reading, not
+        # this one. See ``raw_table_regions``' use further down.
         from socr.tables.label_canonical import canonicalize_table_labels
 
+        raw_table_regions = list(table_regions)
         table_regions = [(rect, canonicalize_table_labels(md)[0]) for rect, md in table_regions]
 
         # TR-2/TR-3 per-region verifier scoping: verify each table region
@@ -3591,9 +3610,21 @@ class BornDigitalDetector:
             # index across every region on the page would let a line be deleted
             # because its words appear in a DIFFERENT table — which does not make
             # this region's replacement contain it.
+            #
+            # #718b: the index is built from the RAW (pre-canonicalisation)
+            # region reading, not the canonical one shipped in
+            # ``output_parts``. A transformed label's raw line carries the
+            # same leading entity run its region did before crossing the
+            # #716 boundary, so it still matches here exactly as it did
+            # before that boundary existed. An unrelated entity-prefixed
+            # note near the region (#145's overrun risk) is not rescued by
+            # borrowing the label's stripped prefix -- its own ``nbsp``
+            # token has no counterpart in a raw region that never had one,
+            # so it still fails the test and survives, undoing round 2's
+            # over-normalisation without reopening the round-2 duplicate.
             covering = [
-                (r, md)
-                for (r, md) in table_regions
+                (r, raw_md)
+                for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)
                 if _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
             ]
 

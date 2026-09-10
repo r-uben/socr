@@ -897,6 +897,184 @@ def test_gh688_native_regions_are_canonical_before_their_identities_exist(
         assert identity, "a region identity must still be computable"
 
 
+def test_gh718_a_ruled_region_with_literal_nbsp_entities_is_canonical_before_verify(
+    tmp_path: Path,
+) -> None:
+    """#718: the test above builds a page with PLAIN text, so removing the
+    extraction-site ``canonicalize_table_labels(md)`` call
+    (``born_digital.py``, just before ``self._verify_regions(page,
+    table_regions)``) alone still leaves the suite green -- the ``&nbsp;``
+    D3 cases elsewhere in this file all go through ``apply_born_digital``'s
+    ingestion-time backstop (round 3's proven-mapping rebuild), which rescues
+    them independently of the extraction site.
+
+    This fixture writes ``&nbsp;&nbsp;Swiss francs`` as LITERAL characters
+    into a real ruled-line table cell -- ``find_tables().extract()`` reads it
+    back verbatim, the same as a model-produced entity run -- so the region
+    text ``_verify_regions`` hashes, and the text this method returns, is only
+    canonical because of the extraction-site call. Proven by the
+    scratch-deletion method: with that one production line deleted, this test
+    fails (the returned text still carries ``&nbsp;``)."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    path = tmp_path / "ruled_entities.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+
+    prose_lines = [
+        "Reserves held at the end of the year, by currency of denomination.",
+        "The table below reports year-end balances in millions of dollars.",
+    ]
+    y = 72
+    for line in prose_lines:
+        page.insert_text((72, y), line, fontsize=11, fontname="helv")
+        y += 16
+
+    table_top = y + 20
+    col_widths = [220, 100]
+    row_height = 20
+    rows = [
+        ["Item", "Amount"],
+        ["&nbsp;&nbsp;Swiss francs", "600.0"],
+        ["&nbsp;&nbsp;Pounds sterling", "1,204.5"],
+        ["Total", "1,804.5"],
+    ]
+    x_start = 72
+    total_width = sum(col_widths)
+
+    shape = page.new_shape()
+    for r in range(len(rows) + 1):
+        y_pos = table_top + r * row_height
+        shape.draw_line(fitz.Point(x_start, y_pos), fitz.Point(x_start + total_width, y_pos))
+    x_pos = x_start
+    for i in range(len(col_widths) + 1):
+        shape.draw_line(
+            fitz.Point(x_pos, table_top), fitz.Point(x_pos, table_top + len(rows) * row_height)
+        )
+        if i < len(col_widths):
+            x_pos += col_widths[i]
+    shape.finish(color=(0, 0, 0), width=0.5)
+    shape.commit()
+
+    for row_idx, row_data in enumerate(rows):
+        for col_idx, cell_text in enumerate(row_data):
+            cell_x = x_start + sum(col_widths[:col_idx]) + 5
+            cell_y = table_top + row_idx * row_height + 14
+            page.insert_text((cell_x, cell_y), cell_text, fontsize=9, fontname="helv")
+
+    doc.save(str(path))
+    doc.close()
+
+    detector = BornDigitalDetector()
+    reopened = fitz.open(str(path))
+    try:
+        text = detector.extract_structured(reopened[0])
+    finally:
+        reopened.close()
+
+    blocks = find_table_blocks(text)
+    assert blocks, "the ruled region must have been found as a table"  # region was detected
+    # #716 follow-up: the raw dict-walk text elsewhere on the page must not
+    # leak the SAME label back in as duplicate prose. The interleaver's
+    # "already represented" test tokenises a region's CANONICAL markdown and
+    # a raw line's LITERAL glyphs; before that comparison was made
+    # entity-aware, ``&nbsp;&nbsp;Swiss francs`` tokenised to a spurious
+    # ``"nbsp"`` word the canonical replacement no longer had, so the raw
+    # line looked uncovered and doubled as prose beneath the table.
+    assert text.count("Swiss francs") == 1, text
+    assert "&nbsp;" not in text, text
+    from socr.tables.reconcile import table_grid_identity
+
+    block_identities = [table_grid_identity(block.grid) for block in blocks]
+    for grid in (block.grid for block in blocks):
+        for row in grid:
+            for cell in row:
+                assert "&nbsp;" not in cell, grid
+    assert any(
+        any(cell.strip() == "Swiss francs" for cell in row)
+        for block in blocks
+        for row in block.grid
+    ), text
+
+    identities = list(getattr(detector, "_last_extraction_region_identities", []) or [])
+    assert identities, "the per-region verifier must have scored at least one table region"
+    assert set(block_identities) & set(identities), (
+        "the identity _verify_regions recorded must key the SHIPPED (canonical) "
+        "region bytes, not a pre-canonicalisation reading"
+    )
+
+    state = _state_with(path, text)
+    shipped = _pipeline()._phase_assemble(state, path.parent / "out718").markdown
+    assert shipped.count("Swiss francs") == 1, (
+        f"the complete emitted page must not duplicate a canonical label as raw prose: {shipped!r}"
+    )
+    assert "&nbsp;" not in shipped, shipped
+
+
+def test_gh718b_an_unrelated_entity_prefixed_note_is_not_suppressed(monkeypatch) -> None:
+    """#718b (Astra): round 2's fix normalised EVERY overlapped line's leading
+    entity run before the bag-of-words "already represented" test, not just
+    a transformed table label's line. An unrelated note that happens to sit
+    under an overextended region rectangle (the #145 overrun risk) and
+    happens to start with ``&nbsp;`` had that prefix stripped too -- and if
+    its remaining words all occur somewhere in the region (in a different
+    row), the whole note vanished, even though its own PHRASE was never in
+    the table.
+
+    The fix is upstream, not in this function: ``_region_token_index`` is
+    now built from each region's RAW (pre-canonicalisation) markdown, so a
+    transformed label's raw line matches its region's raw tokens exactly as
+    it did before #716, and an unrelated entity-prefixed note is judged
+    against a raw region that never had an ``nbsp`` token to begin with --
+    surviving exactly as it did before #716 touched anything.
+    """
+    import fitz
+
+    from socr.core import born_digital as bd
+    from socr.tables import reconstruct
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 110), "Swiss francs 600.0", fontsize=10)
+    page.insert_text((72, 130), "Total 1804.5", fontsize=10)
+    note = "&nbsp;Total Swiss francs"
+    page.insert_text((72, 148), note, fontsize=10)
+    md = "| Item | Amount |\n| --- | --- |\n| Swiss francs | 600.0 |\n| Total | 1804.5 |\n"
+    # An overextended region rectangle reaching into the note below the
+    # table -- the already-documented #145 overrun risk, not a claim that
+    # ``find_tables`` naturally produces bounds this loose.
+    region = fitz.Rect(60, 90, 400, 145)
+    blocks = page.get_text("dict")["blocks"]
+    note_block = next(
+        b
+        for b in blocks
+        if any("nbsp" in s["text"] for line in b.get("lines", []) for s in line["spans"])
+    )
+    coverage = bd._rect_coverage(fitz.Rect(note_block["bbox"]), region)
+    assert coverage >= bd._REGION_COVERAGE_DROP, "fixture must exercise the coverage gate"
+
+    monkeypatch.setattr(reconstruct, "reconstruct_table_regions", lambda *a, **k: [(region, md)])
+    try:
+        text = bd.BornDigitalDetector().extract_structured(page)
+    finally:
+        doc.close()
+
+    assert note in text, (
+        f"an unrelated note must not be deleted just because a region overruns it: {text!r}"
+    )
+
+
+def test_gh718b_novel_and_interior_content_survives() -> None:
+    """A line with a word the region never had, or with a leading-entity /
+    interior-ampersand difference from the region's own reading, is not
+    "already represented" and must not be suppressed."""
+    from socr.core import born_digital as bd
+
+    idx = bd._region_token_index([(None, "| Swiss francs | 600.0 |\n| Total | 1804.5 |")])
+    for text in ("&nbsp;Swiss francs discussion", "Swiss &nbsp;francs", "Swiss francs &amp; Total"):
+        assert not bd._line_is_in_region_text({"spans": [{"text": text}]}, idx), text
+
+
 # ---------------------------------------------------------------------------
 # Round 3, finding 2: decoding is not meaning-preserving.
 # ---------------------------------------------------------------------------
@@ -1054,3 +1232,123 @@ def test_gh688_a_literal_nul_sequence_does_not_crash() -> None:
     is no placeholder any more; the cell is a plain suffix of itself."""
     raw = "| Label | Value |\n| --- | --- |\n| A\x000\x00B | 1 |\n"
     assert canonicalize_table_labels(raw) == (raw, 0)
+
+
+# ---------------------------------------------------------------------------
+# #719: the per-page LIFECYCLE rewrite of ``ps.native_text`` must rebuild
+# ``native_table_region_identities`` alongside the text, not just the text.
+# ---------------------------------------------------------------------------
+
+
+def _run_phase_agentic_with_precanonical_native(
+    tmp_path: Path, *, identities: list[str]
+) -> tuple[UnifiedPipeline, DocumentState]:
+    """Drives ``_phase_agentic`` end to end on a page whose ``native_text``
+    reaches the loop NON-canonical (entity-laden), with region identities
+    that describe those same raw bytes -- the shape #719 worries a later
+    per-page mutation (chart-region PNG rehoming today; anything that
+    touches ``ps.native_text`` after ingestion tomorrow) could produce. Built
+    by setting ``PageState`` fields directly rather than through
+    ``state.apply_born_digital`` -- the same "arrives by another door"
+    pattern ``_born_digital_state(..., via_ingestion=False)`` uses above --
+    because ingestion's own canonicalisation would otherwise already have
+    fixed the text before the lifecycle line ever sees it.
+
+    The provider ladder is mocked to a single rejected (ERROR) rung, the same
+    shape ``_d3_page`` uses, so the page falls through to the D3 regional
+    floor in ``_winning_page_output``."""
+    from unittest.mock import patch
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.document import DocumentHandle
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt
+
+    pdf_path = _pdf(tmp_path, "gh719.pdf")
+    config = PipelineConfig(
+        primary_engine=EngineType.QWEN,
+        agentic=True,
+        enabled_engines=[EngineType.QWEN],
+        quiet=True,
+        save_figures=False,
+        write_manifest=False,
+        table_judge_ladder=False,
+        detect_equations=False,
+        recover_clean_equations=False,
+    )
+    pipeline = UnifiedPipeline(config)
+    pipeline._scan_root = pdf_path.parent
+    out_dir = tmp_path / "out719"
+
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = True
+    ps.has_tables = True
+    raw = _BAD_REGION + "\n" + _HEALTHY_REGION
+    ps.native_text = raw
+    ps.native_table_region_count = 2
+    ps.native_table_region_identities = list(identities)
+    ps.native_table_unverifiable_ordinals = [0]
+    ps.native_table_unverifiable = True
+    ps.native_table_structure_failed = True
+    ps.attempts.append(
+        PageOutput(page_num=1, text="", engine="qwen", status=PageStatus.ERROR, audit_passed=False)
+    )
+    ps.best_output = None
+
+    def _fake_route_page(page_num, ladder, run_provider, judge, **kwargs):
+        out = PageOutput(
+            page_num=page_num, text="", status=PageStatus.ERROR, engine="qwen", audit_passed=False
+        )
+        attempt = ProviderAttempt(
+            engine=EngineType.QWEN,
+            output=out,
+            cost_usd=0.0,
+            accepted=False,
+            reason="rejected",
+            provider_id=PROFILE_QWEN_LOCAL.id,
+            model=PROFILE_QWEN_LOCAL.model,
+            backend=PROFILE_QWEN_LOCAL.backend,
+        )
+        return PageDecision(page_num=page_num, final_output=out, attempts=[attempt])
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch("socr.pipeline.orchestrator.route_page", _fake_route_page),
+        patch.object(pipeline, "_backend_available", return_value=True, create=True),
+    ):
+        pipeline._phase_agentic(state, out_dir)
+
+    return pipeline, state
+
+
+def test_gh719_lifecycle_rewrite_rebuilds_identities_so_the_healthy_sibling_survives(
+    tmp_path: Path,
+) -> None:
+    """The rewrite of ``ps.native_text`` at the per-page lifecycle seam must
+    carry ``native_table_region_identities`` with it -- a text-only rewrite
+    would leave the identities keyed to the PRE-rewrite (entity-laden)
+    regions, so the D3 regional splice's 1:1 identity match against the now-
+    canonical parsed blocks fails for every region, and the floor drops the
+    healthy sibling table it used to retain. Same shape as the round-3 D3
+    content loss ``test_gh688_the_d3_regional_splice_still_retains_a_healthy_sibling``
+    guards at the ingestion boundary; this pins the same invariant at the
+    lifecycle boundary."""
+    provable = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
+    _pipeline, state = _run_phase_agentic_with_precanonical_native(tmp_path, identities=provable)
+    ps = state.pages[1]
+
+    assert "&nbsp;" not in (ps.native_text or ""), ps.native_text
+    assert ps.native_table_region_identities == [
+        markdown_table_identity(canonicalize_table_labels(_BAD_REGION)[0]),
+        markdown_table_identity(canonicalize_table_labels(_HEALTHY_REGION)[0]),
+    ], "the lifecycle rewrite must rebuild the identities alongside the text"
+
+    shipped = _winning_page_output(state, 1).text
+    assert _D3_MARKER in shipped, shipped
+    assert "| Healthy | 2 |" in shipped, (
+        f"the healthy sibling table must survive the lifecycle-rewritten floor: {shipped!r}"
+    )
+    assert "| Bad | 1 |" not in shipped, shipped
+    assert "&nbsp;" not in shipped, shipped
