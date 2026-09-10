@@ -39,7 +39,6 @@ from socr.core.result import (
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
-    REJECTION_VERIFIER_ERROR,
     PageOutput,
     PageStatus,
 )
@@ -74,6 +73,23 @@ class AcceptDecision:
     reason: str = ""
     confidence: float = 0.0
     raw_verdict: object | None = None  # JudgeVerdict when a VLM judged
+    #: #713 round 4 (Astra P2): the TYPED outcome THIS invocation produced when
+    #: the decision is not a judge's answer at all. "" -- the default, and what
+    #: every real verdict carries -- means a judge looked and decided.
+    #:
+    #: Only ``_UnverifiedTableRejection._reject_unverified`` sets it today, to
+    #: ``JUDGE_OUTCOME_VERIFIER_ERROR``: the deterministic table verifier RAISED,
+    #: so the inner judge was never consulted and the negative decision is a
+    #: fail-closed refusal to proceed, not a refusal of the content.
+    #:
+    #: It rides on the DECISION rather than on the output because the outcome is
+    #: a fact about one call. The boundary previously inferred it by comparing
+    #: ``PageOutput.rejection_class`` before and after -- which cannot tell "the
+    #: verifier set this value again" from "the judge left a stale value
+    #: untouched", so a SECOND consecutive verifier crash on the same output was
+    #: recorded as a completed rejection and destroyed the credential (Astra
+    #: round 4). A value carried out of the call has no such blind spot.
+    judge_outcome: str = ""
 
 
 class PageJudge(Protocol):
@@ -319,9 +335,6 @@ def route_page(
         # the caller keeps; what changes is the candidate.
         canonicalize_candidate(output)
 
-        # #713 round 3 (Astra P2-3): read BEFORE the call so the class this call
-        # SETS can be told from one an earlier rung left on the same live object.
-        rejection_before = getattr(output, "rejection_class", None)
         try:
             decision = judge.assess(output, prof)
         except Exception as exc:  # a judge blowing up must not kill the document
@@ -373,30 +386,30 @@ def route_page(
         # reach it. Retiring the credential too is belt-and-braces on the same
         # fact -- authority to ship must never outlive the verdict that would
         # have refused it.
-        # #713 round 3 (Astra P2-3): a decision object is NOT proof a judge
-        # answered. ``_UnverifiedTableRejection._reject_unverified`` returns a
-        # negative ``AcceptDecision`` when the deterministic table VERIFIER
-        # RAISED, before the inner judge is ever consulted -- an infrastructure
-        # failure wearing a verdict's shape. Stamping it COMPLETED made every
-        # downstream reader ("a later completed verdict refused these bytes")
-        # retire a credential nothing had contradicted, and the page shipped the
-        # fail-closed floor on the strength of a crash.
+        # #713 (Astra rounds 2-4): a decision object is NOT proof a judge answered.
+        # ``_UnverifiedTableRejection._reject_unverified`` returns a negative
+        # ``AcceptDecision`` when the deterministic table VERIFIER RAISED, before
+        # the inner judge is ever consulted -- an infrastructure failure wearing
+        # a verdict's shape. Stamping it COMPLETED made every downstream reader
+        # ("a later completed verdict refused these bytes") retire a credential
+        # nothing had contradicted, and the page shipped the fail-closed floor on
+        # the strength of a crash.
         #
-        # Detected from the class this call SET, never from the reason text and
-        # never from the class alone: comparing against the pre-call snapshot
-        # keeps a stale ``REJECTION_VERIFIER_ERROR`` from an earlier rung from
-        # disguising a real refusal on this one.
-        verifier_broke = (
-            not decision.accept
-            and getattr(output, "rejection_class", None) == REJECTION_VERIFIER_ERROR
-            and rejection_before != REJECTION_VERIFIER_ERROR
-        )
-        if verifier_broke:
-            # A missing verdict cannot retire an earlier missing verdict either:
-            # an already-typed timeout stands, so a verifier crashing on a LATER
+        # The outcome is read from the DECISION this call returned, never from
+        # the reason text and never from a before/after comparison of
+        # ``output.rejection_class``: that field persists across rungs, so a
+        # same-value assignment -- a second verifier crash on the same output --
+        # is invisible to a snapshot, and the second crash was recorded as a
+        # completed rejection (Astra round 4). A stale class from an earlier rung
+        # still cannot disguise a real refusal, because a real verdict carries no
+        # ``judge_outcome`` at all.
+        missing_verdict = decision.judge_outcome if not decision.accept else ""
+        if missing_verdict:
+            # A missing verdict cannot retire another missing verdict either: an
+            # already-typed timeout stands, so a verifier crashing on a LATER
             # rung does not destroy the very stand-in this ticket exists for.
             if output.judge_outcome != JUDGE_OUTCOME_TIMEOUT:
-                output.judge_outcome = JUDGE_OUTCOME_VERIFIER_ERROR
+                output.judge_outcome = missing_verdict
         else:
             output.judge_outcome = JUDGE_OUTCOME_COMPLETED
             if not decision.accept:
@@ -546,6 +559,9 @@ class _UnverifiedTableRejection:
             accept=False,
             reason=f"table_verifier_error: {name} raised ({type(exc).__name__})",
             confidence=0.0,
+            # #713 round 4: this call produced no verdict. Carried on the result
+            # so ``route_page`` needs no inference about what the verifier did.
+            judge_outcome=JUDGE_OUTCOME_VERIFIER_ERROR,
         )
 
 

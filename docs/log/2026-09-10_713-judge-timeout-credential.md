@@ -225,3 +225,49 @@ Also: `PageOutput.table_acceptance_credential` cited a nonexistent
   timeouts carry no typed outcome; typing them is a separate change.
 - **Blocking events are still not applicability-resolved** (unchanged from round
   2), and witness bytes are still not re-rendered on resume.
+
+## Round 4 (2026-09-11)
+
+Astra's review of `728dc95` (REQUEST_CHANGES, one P2). Round 3's typed
+verifier-error outcome was right; the way the boundary DETECTED it was not.
+
+**P2, the outcome is a fact about one call.** Round 3 recognised "the verifier
+raised" by comparing `PageOutput.rejection_class` before and after the judge call.
+That field persists across rungs, so a same-value assignment is invisible: the
+SECOND consecutive verifier crash on the same output found the class already
+`REJECTION_VERIFIER_ERROR`, the boundary concluded a judge had answered, stamped
+`JUDGE_OUTCOME_COMPLETED` and deleted the credential. Selection went from
+`JUDGE_TIMEOUT_LADDER_ACCEPTED` to the fail-closed floor with no verdict ever
+completed.
+
+`AcceptDecision` gained `judge_outcome`, defaulting to "" -- what every real
+verdict carries. `_reject_unverified` sets it to `JUDGE_OUTCOME_VERIFIER_ERROR` on
+the decision it returns, and `route_page` reads that value instead of inferring
+anything from persistent state. The before/after snapshot is gone. The
+stale-class control still holds for a better reason than before: a real refusal
+carries no `judge_outcome` at all, so an earlier rung's class cannot disguise it.
+
+Also, per Astra:
+
+- The comment beside the cascade predicate still said the adapter re-raises inner
+  timeouts unchanged. It wraps them since round 3; corrected, with the typed
+  field named as the authority.
+- `test_gh222_probe_host.py` gained the mixed-attempt pin the review asked for:
+  the timed-out attempt moved through every slot of a three-refusal list, for the
+  typed half and the provider half, plus an all-clean control. Position must not
+  decide which attempts arm the halt.
+- Astra's own two closing controls (a foreign `candidate_sha256` cannot authorize
+  a fresh body; a timeout after a verifier crash types as a timeout) are carried
+  into the suite alongside the repeated-crash pin.
+
+### Residuals
+
+Unchanged from round 3, plus:
+
+- **`AcceptDecision.judge_outcome` is only meaningful on a NEGATIVE decision.**
+  The boundary reads it only when `accept` is false; a judge that set it on an
+  acceptance would be ignored rather than rejected. Nothing sets it there today.
+- **Any future path that rebuilds a decision drops the annotation.** Today
+  `_reject_unverified` is the only producer and both table judges return its
+  result directly, so there is no rebuild to lose it; a wrapper that constructs a
+  fresh `AcceptDecision` from an old one would have to carry the field forward.

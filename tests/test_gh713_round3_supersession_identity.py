@@ -1,4 +1,4 @@
-"""#713 round 3: WHICH bytes a refusal is about, and what counts as a refusal.
+"""#713 rounds 3-4: WHICH bytes a refusal is about, and what counts as a refusal.
 
 Astra's round-3 review of ``4d3f3b0`` (REQUEST_CHANGES) found one P1 and two P2,
 all of them about identity rather than policy:
@@ -17,6 +17,12 @@ all of them about identity rather than policy:
    table VERIFIER RAISED. The boundary stamped that COMPLETED, so the
    verifier-error exemption one line later was bypassed and an infrastructure
    crash retired a credential nothing had contradicted.
+
+Round 4 added the state-transition half of (3): the boundary detected "the
+verifier ran" by comparing a PERSISTENT field before and after the call, which
+cannot see a same-value assignment, so a SECOND consecutive verifier crash on the
+same output was recorded as a completed rejection. The typed outcome now rides on
+the decision that call returned.
 
 Every test pins a DIFFERENCE between two runs in the same process that vary
 exactly one thing, per this repo's CI rule.
@@ -347,3 +353,155 @@ def test_the_verifier_error_class_from_an_earlier_rung_cannot_disguise_a_refusal
 
     assert seen["stale-verifier-error"] == JUDGE_OUTCOME_COMPLETED
     assert seen["clean"] == JUDGE_OUTCOME_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Round 4. The outcome is a fact about ONE call, not about a persistent field.
+# ---------------------------------------------------------------------------
+
+
+def test_a_second_verifier_crash_is_still_not_a_completed_verdict(tmp_path: Path) -> None:
+    """Astra round 4, P2: a same-value assignment is invisible to a snapshot.
+
+    Round 3 detected "the verifier ran" by comparing ``output.rejection_class``
+    before and after the call. That field persists across rungs, so the SECOND
+    consecutive crash on the same output found the class already set, the
+    boundary concluded a judge had answered, and it stamped COMPLETED and deleted
+    the credential -- destroying a reading no judge ever refused.
+
+    DIFFERENCE: the same real ``_reject_unverified`` through the same routing,
+    once and then twice, on the same live output. Both iterations must look
+    identical: no crash is a verdict, however many precede it.
+    """
+    from socr.pipeline import agentic
+
+    class _Crashes(agentic._UnverifiedTableRejection):
+        def _emit_event(self, **kwargs) -> None:
+            pass
+
+        def assess(self, output, provider):
+            return self._reject_unverified(output, ValueError("verifier exploded"), 1)
+
+    pdf = _pdf(_fresh_dir(tmp_path, "repeated"))
+    state = _state(pdf)
+    out = state.pages[1].attempts[1]
+    out.table_acceptance_credential = _credential(
+        state, candidate_text=MODEL_TEXT, tables=[MODEL_TABLE]
+    )
+
+    seen = []
+    for _ in range(3):
+        agentic.route_page(1, [_Prof()], lambda prof, page, _o=out: _o, _Crashes())
+        seen.append(
+            (
+                out.judge_outcome,
+                out.table_acceptance_credential is not None,
+                _winning_page_output(state, 1).failure_mode,
+            )
+        )
+
+    assert seen[0] == seen[1] == seen[2]
+    assert seen[0] == (JUDGE_OUTCOME_TIMEOUT, True, FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED)
+
+
+def test_the_missing_verdict_rides_on_the_decision_not_on_the_output() -> None:
+    """The typed outcome is produced BY the call that failed to answer.
+
+    DIFFERENCE: three judges, one output object each -- a crashed verifier, a
+    real refusal, and a real refusal on an output an earlier rung already marked
+    ``REJECTION_VERIFIER_ERROR``. The stale class must not disguise the refusal,
+    which is what a naive "is the class set?" test would have done once the
+    before/after snapshot was removed.
+    """
+    from socr.pipeline import agentic
+
+    class _Crashes(agentic._UnverifiedTableRejection):
+        def _emit_event(self, **kwargs) -> None:
+            pass
+
+        def assess(self, output, provider):
+            return self._reject_unverified(output, ValueError("verifier exploded"), 1)
+
+    class _Refuses:
+        def assess(self, output, provider):
+            return agentic.AcceptDecision(accept=False, reason="judge looked and said no")
+
+    seen = {}
+    for label, judge, stale in (
+        ("verifier-error", _Crashes(), None),
+        ("refusal", _Refuses(), None),
+        ("refusal-after-stale-class", _Refuses(), REJECTION_VERIFIER_ERROR),
+    ):
+        out = PageOutput(page_num=1, text=MODEL_TEXT, status=PageStatus.SUCCESS, engine="qwen")
+        out.rejection_class = stale
+        agentic.route_page(1, [_Prof()], lambda prof, page, _o=out: _o, judge)
+        seen[label] = out.judge_outcome
+
+    assert seen["verifier-error"] == JUDGE_OUTCOME_VERIFIER_ERROR
+    assert seen["refusal"] == JUDGE_OUTCOME_COMPLETED
+    assert seen["refusal-after-stale-class"] == JUDGE_OUTCOME_COMPLETED
+
+
+def test_a_real_timeout_after_a_verifier_crash_is_typed_as_a_timeout() -> None:
+    """The two missing-verdict outcomes are ordered by what actually happened.
+
+    A verifier crash records its own kind; a judge that then times out on the
+    same bytes records the timeout, which is the only outcome that licenses the
+    credentialed stand-in.
+
+    DIFFERENCE: the same two calls in sequence, checked after each.
+    """
+    from socr.pipeline import agentic
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    class _Crashes(agentic._UnverifiedTableRejection):
+        def _emit_event(self, **kwargs) -> None:
+            pass
+
+        def assess(self, output, provider):
+            return self._reject_unverified(output, ValueError("verifier exploded"), 1)
+
+    class _TimesOut:
+        def assess(self, output, provider):
+            raise TimeoutError("timed out")
+
+    out = PageOutput(page_num=1, text=MODEL_TEXT, status=PageStatus.SUCCESS, engine="qwen")
+    agentic.route_page(1, [_Prof()], lambda prof, page, _o=out: _o, _Crashes())
+    after_crash = out.judge_outcome
+    agentic.route_page(
+        1,
+        [_Prof()],
+        lambda prof, page, _o=out: _o,
+        UnifiedPipeline._TimeoutJudge(_TimesOut(), timeout_sec=1.0),
+    )
+    assert after_crash == JUDGE_OUTCOME_VERIFIER_ERROR
+    assert out.judge_outcome == JUDGE_OUTCOME_TIMEOUT
+
+
+def test_a_foreign_candidate_digest_cannot_authorize_a_fresh_body(tmp_path: Path) -> None:
+    """``reading_digests`` widens refusals; it never widens ADMISSION.
+
+    The credential's own digests are trusted only to decide which refusals are
+    about this reading. Fresh admission still recomputes the candidate digest
+    from the bytes in hand, so a credential naming foreign bytes withholds the
+    page rather than vouching for whatever is there.
+
+    DIFFERENCE: the honest credential vs the same credential with a foreign
+    ``candidate_sha256``.
+    """
+    from socr.core.manifest import reading_digests
+
+    modes = {}
+    for label, foreign in (("honest", None), ("foreign", sha256_text("a different candidate"))):
+        pdf = _pdf(_fresh_dir(tmp_path, label), name=f"{label}.pdf")
+        state = _state(pdf)
+        out = state.pages[1].attempts[1]
+        cred = _credential(state, candidate_text=MODEL_TEXT, tables=[MODEL_TABLE])
+        if foreign:
+            cred["candidate_sha256"] = foreign
+            assert foreign in reading_digests(replace(out, table_acceptance_credential=cred))
+        out.table_acceptance_credential = cred
+        modes[label] = _winning_page_output(state, 1).failure_mode
+
+    assert modes["honest"] is FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED
+    assert modes["foreign"] is not FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED

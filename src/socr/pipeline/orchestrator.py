@@ -8026,13 +8026,16 @@ class UnifiedPipeline:
                         #
                         # #713 round 3 (Astra P2): the JUDGE half of this trigger
                         # reads the TYPED outcome, not the reason text. The
-                        # deadline adapter re-raises an inner timeout UNCHANGED,
-                        # so a judge that raised builtin ``TimeoutError("timed
-                        # out")`` records reason "judge raised: timed out" -- the
-                        # contiguous substring "timeout" is absent, the probe was
-                        # never armed, and a wedged backend went unnoticed on
-                        # exactly the pages this ticket is about. Nothing about
-                        # an exception's wording is load-bearing any more.
+                        # deadline adapter used to re-raise an inner timeout
+                        # UNCHANGED, so a judge raising builtin
+                        # ``TimeoutError("timed out")`` recorded reason "judge
+                        # raised: timed out" -- no contiguous "timeout" -- the
+                        # probe was never armed, and a wedged backend went
+                        # unnoticed on exactly the pages this ticket is about.
+                        # The adapter now WRAPS that case too, so both timeout
+                        # branches read alike; the typed field is nonetheless the
+                        # authority here, and no exception's wording is
+                        # load-bearing any more.
                         #
                         # The substring scan stays for the PROVIDER half: a
                         # provider timeout is recorded on the attempt's reason

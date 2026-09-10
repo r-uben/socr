@@ -500,3 +500,48 @@ def test_an_unparseable_host_fails_the_probe_instead_of_raising(monkeypatch) -> 
 
     assert resolve_ollama_host() == "http://[::1:11434]"  # bracketed, still unparseable
     assert probe_ollama_idle() is False
+
+
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_a_timed_out_attempt_arms_the_halt_from_any_position(position) -> None:
+    """#713 round 4 (Astra): WHICH attempts arm the halt, over a mixed list.
+
+    The scope pin above says the loop consults one predicate; the behavioural
+    test says one attempt of each kind arms or does not. Neither pins the filter
+    over a MULTI-attempt page, which is the real shape: a ladder escalates, so a
+    timed-out rung sits among ordinary refusals and its position varies.
+
+    DIFFERENCE: the same three attempts, with the timed-out one moved through
+    every slot, plus an all-clean control. Position must not decide.
+    """
+    from socr.core.config import EngineType
+    from socr.core.result import JUDGE_OUTCOME_COMPLETED, JUDGE_OUTCOME_TIMEOUT, PageOutput
+    from socr.pipeline.agentic import ProviderAttempt
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    def _attempt(outcome: str, reason: str) -> ProviderAttempt:
+        return ProviderAttempt(
+            engine=EngineType.QWEN,
+            output=PageOutput(page_num=1, text="body", judge_outcome=outcome),
+            cost_usd=0.0,
+            accepted=False,
+            reason=reason,
+        )
+
+    clean = [
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: rows disagree"),
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: header lost"),
+        _attempt(JUDGE_OUTCOME_COMPLETED, "judge rejected: value drift"),
+    ]
+    assert UnifiedPipeline._attempts_show_timeout(clean) is False
+
+    # Reason wording deliberately carries NO "timeout": only the typed outcome
+    # separates this attempt from the refusals around it.
+    timed_out = _attempt(JUDGE_OUTCOME_TIMEOUT, "judge raised: timed out")
+    slot = {"first": 0, "middle": 1, "last": 3}[position]
+    mixed = clean[:slot] + [timed_out] + clean[slot:]
+    assert UnifiedPipeline._attempts_show_timeout(mixed) is True
+
+    # The provider half of the trigger, same list shape, no typed outcome at all.
+    provider = clean[:slot] + [_attempt("", "provider timeout after 120s")] + clean[slot:]
+    assert UnifiedPipeline._attempts_show_timeout(provider) is True
