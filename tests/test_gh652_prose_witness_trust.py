@@ -198,8 +198,22 @@ class TestP2bTheWitnessMustBeProse:
         )
         assert _prose_corroboration_ok(self._page(), fabricated) is False
 
-    def test_the_same_attempt_with_genuine_prose_is_accepted(self) -> None:
-        """Control, and the difference pin: identical table half, real prose."""
+    def test_the_same_attempt_with_genuine_prose_is_refused_at_the_page_edge(self) -> None:
+        """RE-PINNED in round 7 (Astra, re-review at 0c67d2d).
+
+        This was the difference pin: identical table half, real prose, accepted.
+        Round 7 rules that a block is evidence only where a recognised numeric
+        row sits across a measured gap on BOTH sides of it, because a row on one
+        side proves a table is nearby and not that the text beside it is prose
+        rather than that table's wrapped label. This fixture's paragraph is the
+        last thing on the page, so it has one side only and the witness now
+        abstains -- the disclosed and intended cost of that ruling.
+
+        The difference the class exists to pin moves to
+        ``test_genuine_prose_between_two_row_blocks_is_still_accepted`` below,
+        which keeps the same two attempts and gives the page evidence on both
+        sides. Refusal costs this page no text: since #649 the native layer's
+        own prose ships flagged either way."""
         genuine = (
             "| Foreign Bank | Amount |\n| --- | --- |\n"
             + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
@@ -207,7 +221,30 @@ class TestP2bTheWitnessMustBeProse:
             + "\n".join(self._PROSE_LINES)
             + "\n"
         )
-        assert _prose_corroboration_ok(self._page(), genuine) is True
+        assert _prose_corroboration_ok(self._page(), genuine) is False
+
+    def test_genuine_prose_between_two_row_blocks_is_still_accepted(self) -> None:
+        """The guard is not vacuous after round 7: on a page that supplies a
+        recognised row on both sides of its paragraph, the genuine attempt
+        clears and the fabricated one does not. Same two attempts as above;
+        only the paragraph's position on the page differs."""
+        page = _scanned_page(
+            _words(self._TABLE_LINES[:3] + [""] + self._PROSE_LINES + [""] + self._TABLE_LINES[3:])
+        )
+        genuine = (
+            "| Foreign Bank | Amount |\n| --- | --- |\n"
+            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
+            + "\n"
+            + "\n".join(self._PROSE_LINES)
+            + "\n"
+        )
+        fabricated = (
+            "| Foreign Bank | Amount |\n| --- | --- |\n"
+            + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
+            + "\nQuarterly dividends were ratified.\n"
+        )
+        assert _prose_corroboration_ok(page, genuine) is True
+        assert _prose_corroboration_ok(page, fabricated) is False
 
     def test_the_table_half_alone_would_have_cleared_the_floor(self) -> None:
         """Proves the refusal above is not vacuous. Scored the way the code
@@ -370,13 +407,37 @@ class TestWrappedLabelsAreNotEvidence:
 
         assert "ratified quarterly dividends" not in output.text
 
-    def test_a_paragraph_across_a_real_gap_still_corroborates(self) -> None:
-        """The control that keeps the fix from being "refuse everything": with
-        the label two bands from its value AND a block break between the table
-        and the paragraph, a genuine attempt still clears. The walk outward
-        from a table row stops at the break; it does not eat the page."""
+    def test_a_paragraph_across_a_real_gap_needs_a_row_on_both_sides(self) -> None:
+        """RE-PINNED in round 7. This control kept the round-3 fix from being
+        "refuse everything": a block break between the table and the paragraph
+        was enough for a genuine attempt to clear.
+
+        Round 7 requires a recognised numeric row across a measured gap on BOTH
+        sides of the block, so the same paragraph, printed last on the page,
+        is refused. Adding a second captioned row block BENEATH it does not
+        rescue it either, and that is the sharper half of the cost: the band
+        this layout puts against the paragraph is the caption, a zero-digit
+        line the walk absorbed, not the row itself. Where a table's outer band
+        is a wrapped label or a units caption, the page cannot supply the
+        evidence round 7 asks for on that side at all.
+
+        What is refused is the WITNESS, not the page: since #649 the native
+        layer's own prose ships flagged either way, and the fabrication built
+        from the table's label is still refused on both layouts."""
         genuine = " ".join(self._CAPTIONED_PROSE) + "."
-        assert _prose_corroboration_ok(self._captioned_page(), genuine) is True
+        assert _prose_corroboration_ok(self._captioned_page(), genuine) is False
+
+        sandwiched = _scanned_page(
+            _words(
+                self._CAPTIONED_TABLE
+                + [""]
+                + self._CAPTIONED_PROSE
+                + [""]
+                + ["German Federal Bank", self._CAPTION, "6,000.0"]
+            )
+        )
+        assert _prose_corroboration_ok(sandwiched, genuine) is False
+        assert _prose_corroboration_ok(sandwiched, self._CAPTIONED_ATTEMPT) is False
 
     @pytest.mark.parametrize("footnote_pitch", [12.0, 6.0])
     def test_text_elsewhere_on_the_page_cannot_redraw_the_table(
@@ -407,15 +468,38 @@ class TestWrappedLabelsAreNotEvidence:
         ps = _scanned_page(table + footnotes)
         assert _prose_corroboration_ok(ps, self._CAPTIONED_ATTEMPT) is False
 
-    def test_genuine_prose_still_corroborates_on_the_split_layout(self) -> None:
-        """Control. The stricter witness must not refuse everything: an attempt
-        whose prose really is the page's still clears, with the labels on their
-        own baselines."""
+    def test_genuine_prose_on_the_split_layout_needs_a_row_on_both_sides(self) -> None:
+        """RE-PINNED in round 7, same reason as the captioned control above:
+        the page's own paragraph is refused where it is the last block on the
+        page, and refused again when a second split-label block is printed
+        beneath it, because the band that block puts against the paragraph is
+        a wrapped label rather than the numeric row round 7 asks for.
+
+        Split labels are still not what decides either verdict, which is what
+        this control exists to say: the inline-label layout of
+        ``TestP2bTheWitnessMustBeProse`` accepts the same shape of paragraph
+        when rows flank it, so the refusal here is about the evidence a layout
+        can supply, not about where a label was printed."""
         genuine = (
             "authorized and directed until otherwise directed by the Committee "
             "to execute transactions in the System Account in accordance."
         )
-        assert _prose_corroboration_ok(self._page(split=True), genuine) is True
+        assert _prose_corroboration_ok(self._page(split=True), genuine) is False
+
+        sandwiched = _scanned_page(
+            _words(
+                [line for label in self._LABELS[:3] for line in (label, "250.0")]
+                + [""]
+                + [
+                    "authorized and directed until otherwise directed by the Committee",
+                    "to execute transactions in the System Account in accordance",
+                ]
+                + [""]
+                + [line for label in self._LABELS[3:] for line in (label, "250.0")]
+            )
+        )
+        assert _prose_corroboration_ok(sandwiched, genuine) is False
+        assert _prose_corroboration_ok(sandwiched, self._ATTEMPT) is False
 
 
 class TestP2aMissingEvidenceIsNotSanity:

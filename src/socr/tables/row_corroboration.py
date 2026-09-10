@@ -430,19 +430,28 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     as table extent. Propagating through every zero-digit band with no stopping
     rule empties the witness on any page whose prose touches a table at all,
     which is nearly every page -- a guard that always refuses is not a guard.
-    Under the anchored walk that same fixture keeps a 190-word witness and its
-    genuine attempt still corroborates, while the table, its wrapped labels and
-    its entire header block are attributed to the table.
+    Under the anchored walk the table, its wrapped labels and its entire header
+    block are attributed to the table rather than read as prose.
 
-    Rounds 5 and 6 (Astra, 2026-09-10) close the ways that walk still turned
-    an UNPROVEN gap into positive prose attribution. Stopping at a step larger
-    than the anchors' pitch says only that the step is unexplained, and
-    separation only proves a BLOCK exists -- neither says the block is prose.
-    A band is admitted as EVIDENCE only where :func:`_separated_prose_runs`
-    finds a run of prose-tagged bands whose separating gap was measured
-    against a recognised table ROW; everything else, including a withheld band
-    sitting outside the table's extent, is unresolved. And an empty anchor
-    list is no longer read as an empty page: see the no-anchor branch below.
+    Rounds 5 to 7 (Astra, 2026-09-10) close the ways that walk still turned an
+    UNPROVEN gap into positive prose attribution. Stopping at a step larger
+    than the anchors' pitch says only that the step is unexplained; separation
+    only proves a BLOCK exists; a recognised row on one side of a block only
+    proves a table is nearby. None of the three says the block is prose rather
+    than the table's own label. A band is admitted as EVIDENCE only where
+    :func:`_separated_prose_runs` finds a run of prose-tagged bands whose
+    separating gap was measured, on BOTH sides, against a recognised table
+    ROW; everything else, including a withheld band sitting outside the
+    table's extent, is unresolved. And an empty anchor list is no longer read
+    as an empty page: see the no-anchor branch below.
+
+    That is deliberately strict, and round 7 measured what it costs on the
+    ticket's own fixture: the witness goes from 185 words to none and the
+    genuine nougat attempt is refused, because the directive runs to the page
+    bottom and a page-edge block has only one side. The page's shipped bytes
+    do not move -- it had already failed its table check, so #649's native
+    recovery is what ships either way, the directive flagged and every printed
+    amount withheld.
 
     Over-exclusion is still the safe direction and its cost is bounded anyway:
     since #649, refusing corroboration no longer loses the page's prose, it
@@ -582,7 +591,18 @@ def _separated_prose_runs(
     abstaining is cheap here: since #649, refusing corroboration costs no page
     text -- the native layer's own prose ships flagged either way.
 
-    A run is admitted only when the page establishes all four of:
+    #652 round 7 (Astra) is that lesson at its limit. Round 6 asked for a
+    recognised row on ONE side. Two bank-name bands printed at the page edge,
+    6pt apart, with an amount 24pt below them satisfied it -- and the same
+    fabricated sentence shipped. A numeric row on one side proves a table is
+    NEARBY; it does not say whether the text beside it is a paragraph above
+    that table or the table's own wrapped label. Nothing in the words or the
+    bboxes separates those two readings, so both sides must supply the
+    evidence. This is not offered as a proof of prose either -- a header block
+    can sit between two numeric sections -- only as the most conservative rule
+    that closes the counterexample, and it costs a page nothing to apply.
+
+    A run is admitted only when the page establishes all of:
 
     1. every band in it is PROSE-TAGGED by the same partition the shipping
        side uses. A withheld, digit-bearing band is never evidence, and it
@@ -593,19 +613,24 @@ def _separated_prose_runs(
        cannot clear (2).
     2. at least two such bands, so the run has an internal step at all. One
        band has no measurable spacing of its own.
-    3. an ADJACENT attributed band is further away than the run's widest
-       internal step -- round 5's gap evidence, now asked only of the table's
-       grown extent. An unattributed withheld band beside the run is not a
-       table boundary (it is the rate line inside the paragraph again), so it
-       neither vouches for the run nor has to be cleared.
-    4. on at least one side, the nearest attributed band -- looking PAST
-       unattributed bands, never past attributed ones -- is an ANCHOR: a band
-       carrying a genuine numeric token, i.e. a recognised table ROW.
+    3. and 4., asked of BOTH sides (round 7): the nearest attributed band --
+       looking PAST unattributed bands, never past attributed ones -- exists,
+       is an ANCHOR (a band carrying a genuine numeric token, i.e. a
+       recognised table ROW), and is further away than the run's widest
+       internal step. The distance is round 5's gap evidence; requiring the
+       band across that gap to be a row is round 6's; requiring it on both
+       sides is round 7's. A run with nothing attributed on one side -- a
+       page-edge paragraph, and the ticket fixture's own directive -- has only
+       one side's evidence and therefore abstains. An unattributed withheld
+       band beside the run is not a boundary (it is the rate line inside the
+       paragraph again), so the search looks past it; if the nearest
+       attributed band lies past such a band the gap is not measured against
+       an adjacency and only the anchor test applies.
 
-    (4) is what the two round-6 counterexamples lack and every genuine
-    fixture has. A gap is evidence about the table's edge only if the thing on
-    the table side of it IS the table: a row it was recognised from, not
-    material the walk itself inferred. In the wrapped-label counterexample the
+    The anchor test is what the round-6 counterexamples lack. A gap is
+    evidence about the table's edge only if the thing on the table side of it
+    IS the table: a row it was recognised from, not material the walk itself
+    inferred. In the wrapped-label counterexample the
     run's only neighbour is "Maturity schedule", a zero-digit caption the walk
     absorbed because it sat 6pt from a value; excluding the label above it
     then rests on inference stacked on inference, and no step in that chain
@@ -639,12 +664,12 @@ def _separated_prose_runs(
                 (run[0], _nearest_attributed(run[0] - 1, -1)),
                 (run[-1], _nearest_attributed(run[-1] + 1, 1)),
             )
-            cleared = all(
-                near is None or abs(near - edge) > 1 or abs(centers[edge] - centers[near]) > widest
+            vouched = all(
+                near in anchor_set
+                and (abs(near - edge) > 1 or abs(centers[edge] - centers[near]) > widest)
                 for edge, near in sides
             )
-            vouched = any(near in anchor_set for _edge, near in sides)
-            if cleared and vouched:
+            if vouched:
                 admitted.update(run)
         run = []
     return admitted

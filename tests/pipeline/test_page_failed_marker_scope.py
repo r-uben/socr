@@ -105,6 +105,33 @@ def _words_for(prose_before: str, prose_after: str) -> list[tuple]:
 NATIVE_WORDS = _words_for(PROSE_BEFORE, PROSE_AFTER)
 
 
+def _words_flanked() -> list[tuple]:
+    """``NATIVE_WORDS`` with a copy of the table's three numeric rows printed
+    above the first paragraph and below the last one.
+
+    #652 round 7: a block of text is evidence about the page's prose only
+    where a recognised numeric ROW sits across a measured gap on BOTH sides of
+    it. ``NATIVE_WORDS`` puts one paragraph at the top of the page and the
+    other at the bottom, so each has one side only and the witness abstains on
+    the whole page -- correct under that rule, but it leaves the corroboration
+    tests below with no page on which the guard can be SATISFIED, and a guard
+    that can only refuse pins nothing. The rows repeat the same three labels,
+    so the page's native vocabulary -- and the overlap ratios measured from it
+    -- are unchanged; only the evidence the layout supplies differs."""
+    words: list[tuple] = []
+    rows = [["Decrease", "17", "14"], ["Unchanged", "78", "73"], ["Increase", "6", "12"]]
+    for y0, line0 in ((25.0, 40), (230.0, 30)):
+        for row_i, row in enumerate(rows):
+            for tok_i, tok in enumerate(row):
+                words.append(_word(50.0 + tok_i * 40.0, y0 + row_i * 15.0, tok, line0 + row_i))
+        if y0 == 25.0:
+            words.extend(NATIVE_WORDS)
+    return words
+
+
+NATIVE_WORDS_FLANKED = _words_flanked()
+
+
 def _no_text_marker_state(
     *,
     native_text: str = NATIVE_TEXT_WITH_PROSE,
@@ -474,8 +501,14 @@ FABRICATED_ATTEMPT_MD = (
 
 
 def test_prose_corroboration_guard_satisfied_keeps_prose():
-    """The attempt's outside-table vocabulary is the page's own -- keep it."""
-    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD)
+    """The attempt's outside-table vocabulary is the page's own -- keep it.
+
+    #652 round 7 moved this control onto ``NATIVE_WORDS_FLANKED``: the page's
+    paragraphs need a recognised numeric row on both sides before they count
+    as evidence, and on ``NATIVE_WORDS`` each of them is at a page edge. The
+    same page with its paragraphs refused is pinned by
+    ``test_prose_corroboration_page_edge_prose_abstains`` below."""
+    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS_FLANKED)
 
     assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is True
 
@@ -485,6 +518,30 @@ def test_prose_corroboration_guard_satisfied_keeps_prose():
     assert PROSE_BEFORE in output.text
     assert PROSE_AFTER in output.text
     assert "Decrease" not in output.text  # table region still withheld
+
+
+def test_prose_corroboration_page_edge_prose_abstains_without_losing_it():
+    """#652 round 7, the cost of the both-sides rule, pinned where it lands.
+
+    On ``NATIVE_WORDS`` the page's two paragraphs are the first and last things
+    printed, so neither has a recognised numeric row on both sides and the
+    witness abstains for the whole page. The genuine attempt is therefore
+    refused -- the same attempt the flanked layout accepts.
+
+    Refusal is not loss: what ships in its place is the page's OWN text layer,
+    flagged, with every numeric row still withheld. Only the model's wording is
+    discarded."""
+    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD)
+
+    assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is False
+
+    output, provenance = _tagged(ps)
+
+    assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    assert "survey" in output.text
+    assert "Respondents" in output.text
+    assert "78" not in output.text
+    assert "| Decrease |" not in output.text
 
 
 def test_prose_corroboration_guard_violated_never_ships_the_invented_prose():
@@ -580,7 +637,9 @@ def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch)
     """
     from socr.core.manifest import _PROSE_TOKEN_RE
 
-    ps = _scanned_table_state(attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
+    ps = _scanned_table_state(
+        attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD, native_words=NATIVE_WORDS_FLANKED
+    )
 
     def _measured_ratio(attempt_text: str) -> float:
         bboxes = ps.detected_table_bboxes
@@ -627,8 +686,9 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     but emitted it with the swap-arrangement table's rows and columns
     reordered into one run per column rather than one row per line -- a
     STRUCTURAL defect the corroboration guard, being vocabulary-only by
-    design, correctly does not catch: ``_prose_corroboration_ok`` measures
-    True here (overlap 1.0, see the decision log's overlap table).
+    design, could never catch. The guard refuses this page anyway, for an
+    unrelated reason recorded at the assertion below: since #652 round 7 the
+    page supplies no witness to score that 1.0 overlap against.
 
     ``splice_all_table_regions`` finds no markdown pipe-table syntax in
     nougat's raw text (it never emitted one) and returns ``None``, so no
@@ -677,7 +737,14 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     ps.attempts = [attempt]
     ps.best_output = attempt
 
-    assert _prose_corroboration_ok(ps, nougat_text) is True  # measured: overlap 1.0
+    # RE-PINNED in round 7 of #652: the vocabulary overlap is still 1.0, but
+    # the witness it is scored against is now empty, so the guard refuses.
+    # A block is evidence only where a recognised numeric row sits across a
+    # measured gap on BOTH sides of it, and this page's directive runs to the
+    # page bottom. The refusal changes nothing this test asserts below: the
+    # page had already failed its table check, so #649's native recovery is
+    # what ships either way, byte for byte.
+    assert _prose_corroboration_ok(ps, nougat_text) is False
     assert splice_all_table_regions(nougat_text, marker_line="[x]", png_ref="") is None
 
     state = DocumentState.__new__(DocumentState)

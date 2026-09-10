@@ -1,4 +1,4 @@
-"""#652 rounds 5-6: where a block's role is unproven, the witness abstains.
+"""#652 rounds 5-7: where a block's role is unproven, the witness abstains.
 
 Two reproduced findings (Astra review at ff5ed74), both in
 ``tables/row_corroboration.corroboration_witness_words`` and both the same
@@ -17,6 +17,13 @@ wrapped over two lines, and a whole date table printed between two recognised
 numeric rows, were both admitted as "separated blocks" -- and the date table's
 own dates landed in neither the witness nor the unresolved list, so nothing
 subtracted them either.
+
+Round 7 (re-review at 0c67d2d) reproduced it once more with the block at the
+page edge: a recognised row on ONE side of a block says a table is nearby, not
+that the block is prose rather than that table's wrapped label. Both sides must
+now supply the evidence, so a page-edge block abstains -- including the ticket
+fixture's own directive, whose two re-pinned tests below record the change and
+the measurement that it costs the page no text.
 
 The reviewer's reproducers are kept verbatim in behaviour; the controls around
 them pin what must NOT change. Abstaining costs no page text: since #649 the
@@ -100,11 +107,22 @@ def test_date_only_table_is_not_unambiguously_prose() -> None:
     assert FABRICATION not in _attempt(ps)
 
 
-def test_far_anchor_pair_keeps_intervening_paragraph_without_label_evidence() -> None:
-    """The control the abstention must not swallow: a real paragraph printed
-    clear of both tables is a run of its own, separated by more than its own
-    widest internal step, so it stays evidence -- while the table label above
-    the first row does not."""
+def test_far_anchor_pair_paragraph_is_refused_but_still_ships() -> None:
+    """RE-PINNED in round 7, honestly, against the ruling that replaced it.
+
+    This shape -- a genuine paragraph printed clear of the tables above and
+    below it -- was round 4's positive control: the paragraph entered the
+    witness while the table label above the first row did not. Round 7 rules
+    that a run is admitted only where the nearest ATTRIBUTED band on BOTH
+    sides is a recognised numeric row, and on this page the nearest attributed
+    band below the paragraph is "Reference total", a zero-digit label the walk
+    absorbed from the row under it. That is inference, not a measured row, so
+    the page no longer proves the block's role and the witness abstains.
+
+    What the re-pin must show is that abstention is not content loss: the
+    paragraph still ships, flagged, from #649's native path, both printed
+    amounts stay withheld, and the fabrication built from the table's labels
+    is still refused."""
     ps = _page()
     native = words(LABEL, 0) + words("250.0", 12)
     for i in range(4):
@@ -112,11 +130,41 @@ def test_far_anchor_pair_keeps_intervening_paragraph_without_label_evidence() ->
     native += words("Reference total", 140) + words("300.0", 152)
     ps.native_words = native
 
-    witness, _unresolved = corroboration_witness_words(native)
-    tokens = {w[4] for w in witness}
+    witness, unresolved = corroboration_witness_words(native)
+    assert witness == []
+    assert len(unresolved) == len(native)
 
-    assert "committee" in tokens
-    assert "Austrian" not in tokens
+    shipped = _attempt(ps)
+    assert FABRICATION not in shipped
+    assert "The committee discussed monetary policy between the tables" in shipped
+    assert MARKER in shipped
+    for amount in ("250.0", "300.0"):
+        assert amount not in shipped, amount
+
+
+def test_two_line_label_directly_above_anchor_does_not_vouch() -> None:
+    """Round 7 (Astra, re-review at 0c67d2d). Round 6 admitted a run when the
+    nearest attributed band on EITHER side was an anchor. Two bank-name bands
+    printed at the page edge, 6pt apart, directly above an amount 24pt below
+    them, satisfied that: one side had no neighbour at all and the other was a
+    real row. The fabricated sentence built from those bank names shipped.
+
+    A numeric row on one side proves a table is nearby, not that the text
+    beside it is prose rather than that table's wrapped label -- the words and
+    bboxes cannot tell those two readings apart. So both sides must supply the
+    evidence, and a page-edge block, having only one side, abstains."""
+    ps = _page()
+    ps.native_words = []
+    for text, y in (
+        ("Austrian National Bank", 0),
+        ("German Federal Bank Swiss National Bank", 6),
+        ("250.0", 30),
+        ("Reference total", 42),
+        ("Annual schedule", 54),
+        ("300.0", 66),
+    ):
+        ps.native_words += words(text, y, height=4)
+
     assert FABRICATION not in _attempt(ps)
 
 
@@ -234,16 +282,22 @@ FED_1989_P3_NOUGAT = (
     not (FED_1989_P3.exists() and FED_1989_P3_NOUGAT.exists()),
     reason="real fixture not present on this machine",
 )
-def test_real_fixture_witness_survives_the_abstention() -> None:
-    """The ticket's own page, on the real PDF and the real cached attempt: the
-    tightening must not gut a page whose prose is genuinely separated.
+def test_real_fixture_abstains_in_full_without_losing_its_prose() -> None:
+    """The ticket's own page, on the real PDF and the real cached attempt.
 
-    The directive's paragraphs stay evidence, the swap-arrangement table's rows
-    do not, and the genuine attempt still corroborates -- which is what keeps
-    the shipped bytes identical to round 4's. (Byte identity of the whole
-    ``PageOutput`` was verified directly against the round-4 witness function
-    at both shas; it is pinned here by the invariants that produce it, so this
-    guard does not depend on a commit staying reachable.)"""
+    RE-PINNED in round 7. Rounds 5-6 kept 185 of this page's 295 words in the
+    witness and the genuine nougat attempt corroborated. Under round 7's
+    both-sides rule the page abstains completely: the directive runs to the
+    page bottom, so its lower side has no attributed neighbour at all, and no
+    other block on the page has a recognised row on both sides either. The
+    witness is empty, every word is unresolved, and corroboration is refused.
+
+    That refusal costs this page NOTHING, which is the point of the re-pin and
+    was measured, not assumed: the page had already failed its table check, so
+    what ships is #649's native recovery either way. The shipped ``PageOutput``
+    is byte-identical to the one round 6 produced -- the three directive
+    paragraphs flagged, every printed amount withheld -- and only the
+    corroboration verdict moved."""
     fitz = pytest.importorskip("fitz")
 
     with fitz.open(str(FED_1989_P3)) as doc:
@@ -251,15 +305,17 @@ def test_real_fixture_witness_survives_the_abstention() -> None:
     nougat_text = json.loads(FED_1989_P3_NOUGAT.read_text())["text"]
 
     witness, unresolved = corroboration_witness_words(native_words)
-    witness_tokens = {w[4] for w in witness}
-    unresolved_tokens = {w[4] for w in unresolved}
-
-    assert "directive:" in witness_tokens
-    assert "unemployment" in witness_tokens
-    for amount in ("1,000.0", "6,000.0", "1,250.0"):
-        assert amount not in witness_tokens, amount
-        assert amount in unresolved_tokens, amount
+    assert witness == []
+    assert len(unresolved) == len(native_words)
 
     ps = _page()
     ps.native_words = native_words
-    assert _prose_corroboration_ok(ps, nougat_text) is True
+    assert _prose_corroboration_ok(ps, nougat_text) is False
+
+    ps.best_output.text = nougat_text
+    shipped = _ship(ps).text
+    assert "domestic policy directive:" in shipped
+    assert "civilian unemployment rate" in shipped
+    assert MARKER in shipped
+    for amount in ("1,000.0", "6,000.0", "1,250.0"):
+        assert amount not in shipped, amount
