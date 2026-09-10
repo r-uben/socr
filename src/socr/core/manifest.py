@@ -1157,13 +1157,43 @@ def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
     both tables' rows, so a candidate missing an entire second table cannot
     reconcile -- the second table's rows are lost content, same as any
     other dropped rows.
+
+    TICKET (#714): this reconciliation ABSTAINS unless the native page shows
+    recurring numeric column lanes (``structure_check._native_page_has_column_lanes``,
+    the eligibility rule #703 settled for A2's term (b), reused here rather
+    than re-derived). Same defect, same page, different call site: on a text
+    table -- a comparison box whose cells are sentences carrying zero or one
+    number each -- ``row_shape_min`` collapses to 1, at which every native
+    prose band that mentions a figure counts as a table row, and a complete
+    candidate reads as a massive row shortfall. Measured on the real BoE 2018
+    Inflation Report box page: 2 candidate rows against 19 "native table
+    rows", so this returned False on a candidate holding 23/23 of the page's
+    numbers.
+
+    **Abstain maps to True, and that is the honest mapping, not a shortcut.**
+    This predicate's contract is a VETO, not a vote: its sole caller does
+    ``if not _row_shape_reconciliation_ok(...): continue``, dropping the
+    candidate from the corroboration pool, and nothing reports the outcome
+    separately (``_apply_row_corroboration_disclosure`` surfaces the
+    ``RowCorroboration``, not this check). "No evidence either way" is
+    therefore "do not veto", which is exactly how the two pre-existing
+    abstentions below already behave (no candidate numeric rows, no
+    table-shaped native rows both ``return True``). A tri-state would add a
+    value no caller can act on differently. The candidate still has to clear
+    A1a's ``corroborate_rows`` gate above and A1c's binding checks
+    downstream; abstaining here removes one veto, it does not admit anything
+    on its own.
     """
+    from socr.tables import structure_check
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,
         numeric_body_rows,
         table_blocks,
         table_shaped_native_row_count,
     )
+
+    if not structure_check._native_page_has_column_lanes(words):
+        return True
 
     candidate_rows = [
         row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
