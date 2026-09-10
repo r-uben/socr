@@ -1029,34 +1029,47 @@ def _table_x_extent(geom: _TableGeometry) -> tuple[float, float] | None:
     return min(x0 for x0, _x1 in edges), max(x1 for _x0, x1 in edges)
 
 
-def _owned_body_rows(geom: _TableGeometry, band_floor: float) -> list[list]:
-    """The printed rows this table owns below its header band.
+def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list], list[list]]:
+    """Split the rows printed under this table's header band by ownership.
 
-    Ownership is two-dimensional, because a y-interval is not a table (#696
-    round 6). A row qualifies only if it sits between the band floor and the
-    last row the lane derivation walked to -- that walk already stops at the
-    first vertical gap too large to belong here -- AND every one of its words
-    falls inside the horizontal extent of those same attributed rows. A
-    neighbouring table sharing this table's y-range is a different table, and
-    its heading row is not evidence about this one.
+    Returns ``(owned, unresolved)``. The rectangle is the vertical run the
+    lane derivation walked -- its walk already stops at the first gap too
+    large to belong here -- crossed with the horizontal extent of those same
+    attributed rows. Three states, not two (#696 round 7):
 
-    No margin is applied in either direction: both bounds are edges of rows
-    the geometry chain already picked.
+    * OWNED, wholly inside the rectangle: this table's body, and the only
+      rows that can settle a candidate row AS body.
+    * UNRESOLVED, inside the vertical run and overlapping the columns but not
+      contained: printed here, ownership unproven. It certifies nothing, and
+      it must still stop a deletion, because failing to prove a row belongs
+      to this table is not proof that it belongs to the header.
+    * FOREIGN, outside the vertical run or horizontally disjoint from the
+      columns: another table's row or a footnote. No standing either way.
+
+    Round 6 collapsed the last two, and exclusion from the body witness
+    silently became permission to delete: a body row whose label began 8pt
+    left of the dense rows was disowned, its words also occurred in the
+    header band, so the walker advanced through it and the row left the
+    document with its printed value. Widening the rectangle would only move
+    that boundary, so the missing state is kept as a state.
     """
     if not geom.data_ys:
-        return []
+        return [], []
     extent = _table_x_extent(geom)
     if extent is None:
-        return []
+        return [], []
     left, right = extent
     bottom = max(geom.data_ys)
-    return [
-        row
-        for y, row in geom.rows_by_y.items()
-        if row
-        and y <= bottom
-        and all(w[1] > band_floor and w[0] >= left and w[2] <= right for w in row)
-    ]
+    owned: list[list] = []
+    unresolved: list[list] = []
+    for y, row in geom.rows_by_y.items():
+        if not row or y > bottom or not all(w[1] > band_floor for w in row):
+            continue
+        if all(left <= w[0] and w[2] <= right for w in row):
+            owned.append(row)
+        elif any(w[0] <= right and w[2] >= left for w in row):
+            unresolved.append(row)
+    return owned, unresolved
 
 
 def _below_band_tokens(owned_rows: list[list]) -> set[str]:
@@ -1097,6 +1110,10 @@ def _candidate_header_depth(
     * a row accounted for by neither region is unclassifiable: abstain.
       Absence from the narrowed body vocabulary is not positive proof of
       header, so silence on both sides still buys nothing.
+    * a row the band accounts for is header only while NO printed row under
+      the band accounts for it -- including one whose ownership could not be
+      established. A candidate-compatible occurrence of unproven ownership
+      blocks the deletion and abstains.
 
     The single escape hatch runs only in the direction that KEEPS content. An
     exact match against a printed band row would locate an occurrence just as
@@ -1113,9 +1130,10 @@ def _candidate_header_depth(
     """
     band_tokens = _header_band_tokens(band_rows)
     band_floor = _band_floor(band_rows)
-    owned_rows = _owned_body_rows(geom, band_floor)
+    owned_rows, unresolved_rows = _below_band_rows(geom, band_floor)
     below_tokens = _below_band_tokens(owned_rows)
-    below_rows = [_row_word_counts(row) for row in owned_rows]
+    owned_counts = [_row_word_counts(row) for row in owned_rows]
+    unresolved_counts = [_row_word_counts(row) for row in unresolved_rows]
     depth = 1
     for row in grid[1:]:
         counts = Counter(
@@ -1123,15 +1141,17 @@ def _candidate_header_depth(
         )
         if not counts:
             return None
+        if counts in owned_counts:
+            break
         in_band = all(tok in band_tokens for tok in counts)
         in_below = all(tok in below_tokens for tok in counts)
-        if in_band and in_below:
-            if counts in below_rows:
-                break
-            return None
         if in_below:
+            if in_band:
+                return None
             break
         if not in_band:
+            return None
+        if any(not counts - printed for printed in unresolved_counts):
             return None
         depth += 1
     # A candidate cannot carry more header bands than the page prints.

@@ -750,3 +750,82 @@ def test_a_footnote_changes_nothing_on_the_census_page():
         seen.append(outcomes[0])
 
     assert (1, "") in seen
+
+
+# --------------------------------------------------------------------------
+# Finding 7 — being disowned was treated as being header
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("left", [58.5, 50.0])
+def test_a_sparse_body_row_outside_the_columns_is_never_deleted(left):
+    """The reviewer's round-7 reproducer: the same row, its label moved 8.5pt.
+
+    At the dense rows' left edge the row is owned and folds through intact.
+    Nudged left of that edge it stops being provably this table's — and round
+    6 read the silence as header material, so the row went, printed ``18``
+    and all, because both of its words also occur in the header band. Failing
+    to prove a row is body is not proving it is header: the occurrence now
+    blocks the deletion, and the whole repair abstains.
+    """
+    page = _survey_page()
+    page.insert_text((left, 211), "Overall", fontsize=_FONT_SIZE)
+    page.insert_text((211.8, 211), "18", fontsize=_FONT_SIZE)
+    row = ["Overall", "18"] + [""] * 9
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(row) + " |")
+    before = "\n".join(lines)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    if count:
+        assert find_table_blocks(after)[0].grid[1] == row
+    else:
+        assert after == before
+
+
+def test_a_wide_subheader_the_band_never_prints_survives():
+    """The control that passed all along, and why it is not reassuring.
+
+    ``of which:`` is printed far wider than the table's columns, so it is
+    disowned too — but the header band does not print those words, so the
+    walker could never have called it header. Its survival was a property of
+    its vocabulary, not of the ownership logic, which is exactly why the
+    round-7 reproducer needed a row whose words the band does print.
+    """
+    page = _survey_page()
+    page.insert_text((50, 211), "of which:", fontsize=20)
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(["of which:"] + [""] * 10) + " |")
+    before = "\n".join(lines)
+
+    after, _count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert "of which:" in after
+
+
+def test_a_foreign_row_still_has_no_say_either_way():
+    """The three states stay three: foreign rows neither certify nor block.
+
+    The lower table's heading is candidate-compatible with this table's leaf
+    band, and it is outside the rectangle — but it is outside by a vertical
+    gap the lane walk already refused to cross, which makes it another
+    table's row rather than an unproven one. It cannot settle the leaf band
+    as body, and it cannot withhold the fold either.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 330), "Second table", fontsize=_FONT_SIZE)
+    for x, text in _LEAF_BAND:
+        page.insert_text((x, 350), text, fontsize=_FONT_SIZE)
+    page.insert_text((58.5, 365), "Second observation", fontsize=_FONT_SIZE)
+    for x, value in zip(_DATA_XS, [str(i) for i in range(1, 11)]):
+        page.insert_text((x, 365), value, fontsize=_FONT_SIZE)
+    base = _padded_markdown().splitlines()
+    before = "\n".join([base[0], base[1], base[0], *base[2:]])
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1:] == [
+        [label, *values] for label, values in _DATA_ROWS
+    ]
