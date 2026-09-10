@@ -219,6 +219,16 @@ JUDGE_OUTCOME_TIMEOUT = "page_judge_timeout"
 #: read as "the judge timed out": only the value above licenses the #713
 #: credentialed stand-in, and an untyped empty string never does.
 JUDGE_OUTCOME_EXCEPTION = "page_judge_exception"
+#: #713 round 2 (Astra P1-2): the page judge COMPLETED and returned a verdict --
+#: accept or reject. Recorded at the judge boundary in
+#: ``pipeline.agentic.route_page`` on the attempt's own ``PageOutput``, which is
+#: the same object a previous rung may have stamped ``JUDGE_OUTCOME_TIMEOUT``.
+#: Writing it here RETIRES that earlier timeout authority: a completed verdict
+#: on this candidate supersedes a missing one, so the credentialed stand-in --
+#: which admits only ``JUDGE_OUTCOME_TIMEOUT`` -- can no longer fire for it.
+#: Without this a page whose judge timed out on one rung and then REFUSED the
+#: same bytes on the next still shipped under the timeout exception.
+JUDGE_OUTCOME_COMPLETED = "page_judge_completed"
 
 
 @dataclass

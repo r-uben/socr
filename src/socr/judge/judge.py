@@ -43,6 +43,28 @@ _PAGE_JUDGE_TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
+class PageJudgeTimeoutError(TimeoutError):
+    """#713 round 2 (Astra P1-3): the page judge missed its wall-clock deadline.
+
+    Raised by the orchestrator's ``_TimeoutJudge`` adapter when the inner judge
+    does not answer in time. Before this the adapter turned its own deadline
+    into ``AcceptDecision(accept=False, reason="judge timeout")``, so the real
+    ``_phase_agentic`` loop never entered ``route_page``'s exception branch and
+    the typed ``judge_outcome`` was never written on a production timeout -- the
+    one path #713 exists for. A rejection is also the wrong shape for it: a
+    deadline is a MISSING verdict, not a negative one.
+
+    Subclasses ``TimeoutError`` so ``is_page_judge_timeout`` classifies it
+    without a special case, and so any caller that already handled a timeout
+    from an inner judge keeps handling this one.
+
+    The message deliberately contains the word "timeout": ``_phase_agentic``'s
+    cascade-halt probe scans attempt reasons for that substring to decide
+    whether a wedged backend should stop the document, and that check reads the
+    interpolated ``judge raised: {exc}`` text.
+    """
+
+
 def is_page_judge_timeout(exc: BaseException) -> bool:
     """Whether ``exc`` means the page judge TIMED OUT rather than misbehaved.
 

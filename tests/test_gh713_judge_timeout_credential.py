@@ -39,6 +39,7 @@ from socr.core.page_credential import (
     sha256_text,
 )
 from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
     FailureMode,
@@ -234,8 +235,10 @@ def test_route_page_records_the_typed_outcome_per_exception(monkeypatch) -> None
 
     assert outcomes["timeout"] == JUDGE_OUTCOME_TIMEOUT
     assert outcomes["defect"] == JUDGE_OUTCOME_EXCEPTION
-    # A completed rejection carries NO typed outcome: the judge answered.
-    assert outcomes["rejection"] == ""
+    # #713 round 2: a completed rejection now carries its OWN typed outcome.
+    # The judge answered, and recording that answer is what retires an earlier
+    # rung's timeout authority over the same candidate.
+    assert outcomes["rejection"] == JUDGE_OUTCOME_COMPLETED
     assert len({outcomes["timeout"], outcomes["defect"], outcomes["rejection"]}) == 3
 
 

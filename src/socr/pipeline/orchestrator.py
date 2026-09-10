@@ -7141,10 +7141,20 @@ class UnifiedPipeline:
     class _TimeoutJudge:
         """Wraps a PageJudge with a ThreadPoolExecutor wall-clock deadline.
 
-        On timeout the wrapper returns a rejection (accept=False,
-        reason="judge timeout"), which causes ``route_page`` to record the
-        attempt and escalate normally.  If the backend is also not idle after
-        the timeout, the caller should set ``backend_degraded`` and halt.
+        On timeout the wrapper RAISES ``judge.PageJudgeTimeoutError``, which
+        ``route_page``'s judge guard catches: it records the attempt UNJUDGED,
+        stamps the typed ``JUDGE_OUTCOME_TIMEOUT`` on the page output and
+        escalates normally -- the same escalation the old rejection produced.
+        If the backend is also not idle after the timeout, the caller should set
+        ``backend_degraded`` and halt (that probe reads the attempt reason, and
+        the raised message keeps the word "timeout" in it).
+
+        #713 round 2 (Astra P1-3): it used to return
+        ``AcceptDecision(accept=False, reason="judge timeout")`` instead. That
+        is a completed REFUSAL as far as ``route_page`` can tell, so the real
+        ``_phase_agentic`` loop -- the only place the adapter is installed --
+        never reached the exception branch and never wrote the typed outcome.
+        The typed field existed and could not be set by the production path.
 
         ``timeout_sec`` is a soft wall-clock bound in seconds.  ``None``
         disables the wrapper (forward to the inner judge directly).
@@ -7162,7 +7172,7 @@ class UnifiedPipeline:
         def assess(self, output, provider):
             import concurrent.futures
 
-            from socr.pipeline.agentic import AcceptDecision
+            from socr.judge.judge import PageJudgeTimeoutError
 
             if self._timeout_sec is None:
                 return self._inner.assess(output, provider)
@@ -7187,15 +7197,26 @@ class UnifiedPipeline:
                 result = future.result(timeout=self._timeout_sec)
                 ex.shutdown(wait=False)
                 return result
-            except concurrent.futures.TimeoutError:
+            except concurrent.futures.TimeoutError as exc:
+                # ``concurrent.futures.TimeoutError`` IS builtin ``TimeoutError``
+                # since 3.11, so this one clause catches both OUR deadline and a
+                # timeout the inner judge raised itself. ``future.done()``
+                # separates them: on our deadline the worker is still running.
+                # Either way the outcome is a timeout, and either way it must
+                # leave as an exception so ``route_page`` types it.
+                inner_raised = future.done()
                 future.cancel()
                 ex.shutdown(wait=False)
+                if inner_raised:
+                    raise
                 logger.warning(
-                    "judge timed out on page %s (%.2fs) — rejecting",
+                    "judge timed out on page %s (%.2fs) — no verdict",
                     output.page_num,
                     self._timeout_sec,
                 )
-                return AcceptDecision(accept=False, reason="judge timeout")
+                raise PageJudgeTimeoutError(
+                    f"page judge timeout after {self._timeout_sec:.2f}s"
+                ) from exc
             finally:
                 # Decremented in the CALLER exactly once, including on timeout:
                 # from here on nothing is waiting on that worker, so anything it
@@ -7960,8 +7981,13 @@ class UnifiedPipeline:
 
                         # Cascade-halt check: did any attempt time out, and is the
                         # backend now unresponsive?  Use PP-0's probe_ollama_idle.
-                        # A judge timeout is encoded as reason="judge timeout" on the
-                        # last attempt; a provider timeout is encoded similarly.
+                        # A judge timeout is encoded as
+                        # reason="judge raised: page judge timeout after N.NNs"
+                        # on the last attempt (#713 round 2: the deadline adapter
+                        # raises ``PageJudgeTimeoutError`` rather than returning a
+                        # rejection, and its message keeps the word "timeout" for
+                        # exactly this scan); a provider timeout is encoded
+                        # similarly.
                         _had_timeout = any(
                             "timeout" in (att.reason or "") for att in decision.attempts
                         )
@@ -8874,7 +8900,8 @@ class UnifiedPipeline:
     # the shipped bytes untrusted in ``tables_trust.json``.
     #
     # Round 3, finding 3. A temporarily swapped instance-global list does not
-    # close that: ``_TimeoutJudge`` returns a rejection while its worker keeps
+    # close that: ``_TimeoutJudge`` abandons its worker (raising past it) while
+    # that worker keeps
     # running, so a LATE event arrived after the swap was restored and reached
     # the document anyway -- or, worse, landed in the scratch list of a LATER
     # re-judge. Ownership therefore has to be per invocation, not per instance:
@@ -12571,7 +12598,7 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_ladder_note}"
             else:
                 final_result.error = _ladder_note
-        _floor_note = self._structure_class_floor_note(state)
+        _floor_note = self._structure_class_floor_note(state, pre_records)
         if _floor_note:
             if final_result.error:
                 final_result.error = f"{final_result.error}; {_floor_note}"
@@ -13047,23 +13074,69 @@ class UnifiedPipeline:
             logger.warning("tables_trust.json write failed (non-fatal): %s", exc)
 
     @staticmethod
-    def _structure_class_floor_note(state: DocumentState) -> str | None:
-        """GH-317: document-level note for structure-class floor pages."""
+    def _structure_class_floor_note(
+        state: DocumentState, records: list | None = None
+    ) -> str | None:
+        """GH-317: document-level note for structure-class floor pages.
+
+        ``records``: #713 round 2 (Astra P2). The finalized page records, when
+        the caller has them. The predicate below asks PageState whether the
+        structure-class branch found no grid winner, and a page-judge-timeout
+        page answers yes to that on both of its endings -- so a page whose
+        credentialed candidate ACTUALLY SHIPPED was reported at document level
+        as "ladder exhausted; fail-closed floor shipped", contradicting the body
+        in the same output directory. Document reporting is therefore derived
+        from what each page SHIPPED, not from a re-derivation over PageState,
+        and the two timeout endings get their own sentences: one page failing
+        closed because nothing ever judged it and one shipping flagged under a
+        verified credential are different facts, and neither is the ordinary
+        "every candidate was refused" floor.
+
+        ``None`` (every pre-#713 caller) keeps the old behaviour exactly.
+        """
         try:
             from socr.core.manifest import structure_class_floor_applies
 
-            pages = sorted(
+            timeout_floor: set[int] = set()
+            credentialed: set[int] = set()
+            for record in records or []:
+                mode = getattr(getattr(record, "output", None), "failure_mode", None)
+                page_num = getattr(getattr(record, "output", None), "page_num", None)
+                if not isinstance(page_num, int):
+                    continue
+                if mode is FailureMode.PAGE_JUDGE_TIMEOUT:
+                    timeout_floor.add(page_num)
+                elif mode is FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED:
+                    credentialed.add(page_num)
+            exhausted = sorted(
                 page_num
                 for page_num, page_state in state.pages.items()
                 if structure_class_floor_applies(page_state)
+                and page_num not in timeout_floor
+                and page_num not in credentialed
             )
-            if not pages:
-                return None
-            return (
-                f"page(s) {', '.join(str(page_num) for page_num in pages)}: "
-                "structure-class ladder exhausted; fail-closed floor shipped "
-                "(marker plus page image, native geometry grid withheld)"
-            )
+            parts: list[str] = []
+            if exhausted:
+                parts.append(
+                    f"page(s) {', '.join(str(n) for n in exhausted)}: "
+                    "structure-class ladder exhausted; fail-closed floor shipped "
+                    "(marker plus page image, native geometry grid withheld)"
+                )
+            if timeout_floor:
+                parts.append(
+                    f"page(s) {', '.join(str(n) for n in sorted(timeout_floor))}: "
+                    "the page judge TIMED OUT and no verified table-acceptance "
+                    "credential vouched for the tables; fail-closed floor shipped "
+                    "(marker plus page image) — re-run the page"
+                )
+            if credentialed:
+                parts.append(
+                    f"page(s) {', '.join(str(n) for n in sorted(credentialed))}: "
+                    "the page judge TIMED OUT; the ladder-accepted reading shipped "
+                    "FLAGGED under a verified table-acceptance credential — the "
+                    "tables were accepted, the page-level check is INCOMPLETE"
+                )
+            return "; ".join(parts) or None
         except Exception as exc:
             logger.warning("structure-class floor note derivation failed (non-fatal): %s", exc)
             return None

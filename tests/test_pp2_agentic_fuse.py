@@ -694,9 +694,25 @@ class TestJudgeBuiltOnce:
 class TestTimeoutJudge:
     """_TimeoutJudge wraps inner judge in a wall-clock deadline."""
 
-    def test_timeout_rejects_slow_judge(self) -> None:
-        """When inner judge hangs longer than timeout, returns accept=False."""
+    def test_timeout_raises_a_typed_timeout_on_a_slow_judge(self) -> None:
+        """When the inner judge hangs past the deadline, the wrapper RAISES.
+
+        #713 round 2 (Astra P1-3): it used to return
+        ``AcceptDecision(accept=False, reason="judge timeout")``. That is a
+        completed REFUSAL as far as ``route_page`` can tell, so the production
+        loop never entered the exception branch that types the outcome, and a
+        real judge timeout was indistinguishable from a real rejection. A
+        missing verdict now leaves as a missing verdict.
+
+        The message keeps the word "timeout": ``_phase_agentic``'s cascade-halt
+        probe scans attempt reasons for that substring to decide whether a
+        wedged backend should stop the document.
+        """
         import time
+
+        import pytest
+
+        from socr.judge.judge import PageJudgeTimeoutError, is_page_judge_timeout
 
         pipeline = _make_pipeline()
 
@@ -709,9 +725,10 @@ class TestTimeoutJudge:
         fake_out = PageOutput(
             page_num=1, text="x", status=PageStatus.SUCCESS, engine="t", audit_passed=True
         )
-        result = judge.assess(fake_out, MagicMock())
-        assert result.accept is False
-        assert "timeout" in result.reason.lower()
+        with pytest.raises(PageJudgeTimeoutError) as excinfo:
+            judge.assess(fake_out, MagicMock())
+        assert "timeout" in str(excinfo.value).lower()
+        assert is_page_judge_timeout(excinfo.value)
 
     def test_fast_judge_verdict_forwarded(self) -> None:
         """When inner judge responds quickly, verdict is passed through unchanged."""

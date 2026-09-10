@@ -33,6 +33,7 @@ from typing import Protocol
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
 from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
     REJECTION_AMBIGUOUS_DEFERRED,
@@ -353,6 +354,23 @@ def route_page(
             )
             continue
 
+        # #713 round 2 (Astra P1-2): the judge COMPLETED. Record that typed
+        # outcome on the attempt's own output BEFORE the attempt is appended,
+        # and on a refusal drop any acceptance credential riding on it.
+        #
+        # ``output`` is a live object a previous rung may already have stamped
+        # ``JUDGE_OUTCOME_TIMEOUT`` (and the table gate may already have minted a
+        # credential against). A completed verdict on these exact bytes is a
+        # LATER, applicable answer to the same question the timed-out judge never
+        # answered, so it supersedes it: the credentialed stand-in in
+        # ``manifest.credentialed_judge_timeout_winner`` admits only
+        # ``JUDGE_OUTCOME_TIMEOUT``, and after this line that page can no longer
+        # reach it. Retiring the credential too is belt-and-braces on the same
+        # fact -- authority to ship must never outlive the verdict that would
+        # have refused it.
+        output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        if not decision.accept:
+            output.table_acceptance_credential = None
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,

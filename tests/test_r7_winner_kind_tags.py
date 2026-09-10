@@ -68,7 +68,11 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     # ships a demoted candidate where the fail-closed floor used to. The floor's
     # own return gained a second tag rather than a second return (the timeout
     # floor and the ordinary floor ship the same bytes under different reasons).
-    assert len(_returns(fn)) == 17
+    # #713 round 2 added an 18th: the RESTORED credentialed ending, which ships
+    # an already-finalized body verbatim. It cannot share the fresh ending's
+    # return -- that one appends the disclosure notes, and appending them to a
+    # restored body would duplicate them on every resume.
+    assert len(_returns(fn)) == 18
 
 
 def test_every_ending_carries_a_tag() -> None:
@@ -86,9 +90,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 19, "two endings share a tag or tag count != 19"
+    assert len(used) == len(set(used)) == 20, "two endings share a tag or tag count != 20"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 19
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 20
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -177,8 +181,8 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 19
-    assert len(list(SelectionProvenance)) == 19
+    # 1. Total count of mapped provenance members must be exactly 20
+    assert len(list(SelectionProvenance)) == 20
 
     # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
@@ -193,6 +197,9 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
             SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
             SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
+            # #713 round 2: the restored ending is the SAME page shipped again
+            # from the ledger, so it joins the same group rather than making one.
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
         },
         PageDisposition(PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS): {
             SelectionProvenance.STRUCTURE_CLASS_FLOOR,
@@ -220,6 +227,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
             SelectionProvenance.STRUCTURE_CLASS_FLOOR,
             SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
+            SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
             SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
         },
         PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE: {

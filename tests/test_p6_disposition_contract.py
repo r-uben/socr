@@ -140,12 +140,13 @@ def test_selection_provenance_keeps_all_sixteen_members() -> None:
     """TICKET-A1c (#641) added a 17th ending (``STRUCTURE_CLASS_GRID_CORROBORATED``)
     after this Stage A/B ticket's own count was pinned; #713 added an 18th and a
     19th (``STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED`` and
-    ``STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR``). The "16" in the test name is
+    ``STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR``); #713 round 2 added a 20th
+    (``STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED``). The "16" in the test name is
     historical, not current -- see ``tests/test_r7_winner_kind_tags.py`` for the
     live, AST-derived count that tracks the cascade itself.
     """
     SelectionProvenance = manifest.SelectionProvenance
-    assert len(list(SelectionProvenance)) == 19, (
+    assert len(list(SelectionProvenance)) == 20, (
         "the selector's endings must not be silently merged in this task -- Stage "
         "A/B is behaviour-preserving; merging is S3/S4 of the design doc, out of "
         "scope. A count change is only legitimate when a real ending was added "
