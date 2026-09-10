@@ -1039,22 +1039,25 @@ def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list
 
     * OWNED, wholly inside the rectangle: this table's body, and the only
       rows that can settle a candidate row AS body.
-    * UNRESOLVED, inside the vertical run and overlapping the columns but not
-      contained: printed here, ownership unproven. It certifies nothing, and
-      it must still stop a deletion, because failing to prove a row belongs
-      to this table is not proof that it belongs to the header.
-    * FOREIGN, past the first vertical gap wider than this table's own
-      largest inter-row step, or horizontally disjoint from the columns:
-      another table's row or a footnote. No standing either way.
+    * UNRESOLVED, overlapping the columns but not contained in the rectangle:
+      printed here, ownership unproven. It certifies nothing, and it must
+      still stop a deletion, because failing to prove a row belongs to this
+      table is not proof that it belongs to the header.
+    * FOREIGN, horizontally disjoint from the columns: a neighbouring table
+      printed beside this one, or a footnote set outside the column run. No
+      standing either way.
 
-    Foreign has to owe BOTH conditions, because "below the last attributed
-    numeric row" is not far away. A trailing ``Total`` row printed one band
-    under the body, in these very columns, is this table's; calling it
-    foreign restored the round-7 deletion for any such row whose words the
-    band happens to print. The gap that separates a table from what follows
-    it is measured from the table's own row pitch, not from a constant, and
-    when there are too few attributed rows to measure one, nothing below the
-    band can be proven foreign at all.
+    Vertical distance does NOT make a row foreign (#696 round 8). Rounds 7
+    and 7b bounded the unresolved state by the table's own largest inter-row
+    step, and the boundary that bound created was itself unsupported: the
+    same trailing row that survives one step below the body was deleted with
+    both its printed values two steps below it. Being further down the page
+    than the last attributed row does not prove an occurrence belongs to
+    another table, so the only discriminator left is horizontal: a row that
+    shares no column span with this table cannot be one of its rows. The
+    accepted price is that a lower table in the SAME columns now leaves the
+    candidate unchanged instead of folding it -- a no-op, paid to keep
+    printed values.
 
     Round 6 collapsed the last two, and exclusion from the body witness
     silently became permission to delete: a body row whose label began 8pt
@@ -1069,16 +1072,11 @@ def _below_band_rows(geom: _TableGeometry, band_floor: float) -> tuple[list[list
     if extent is None:
         return [], []
     left, right = extent
-    ys = sorted(geom.data_ys)
-    bottom = ys[-1]
-    steps = [later - earlier for earlier, later in zip(ys, ys[1:])]
-    reach = bottom + max(steps) if steps else None
+    bottom = max(geom.data_ys)
     owned: list[list] = []
     unresolved: list[list] = []
     for y, row in geom.rows_by_y.items():
         if not row or not all(w[1] > band_floor for w in row):
-            continue
-        if reach is not None and y > reach:
             continue
         if y <= bottom and all(left <= w[0] and w[2] <= right for w in row):
             owned.append(row)

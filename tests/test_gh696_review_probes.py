@@ -568,6 +568,12 @@ def test_a_lower_tables_heading_is_not_this_tables_body():
     reconstructed header and once as a sixth body row over five printed data
     rows. A row below the header floor is only a body witness if it lies
     inside the extent the geometry chain already attributed to this table.
+
+    Re-pinned to abstention in round 8. The lower table shares this table's
+    columns, so its heading is unresolved rather than foreign, and an
+    unresolved occurrence of the candidate row withholds the deletion. That
+    is the ruled trade: this shape loses a fold it used to get, and every
+    trailing row printed in these columns keeps its values.
     """
     page = _survey_page()
     page.insert_text((58.5, 330), "Second table", fontsize=_FONT_SIZE)
@@ -581,12 +587,8 @@ def test_a_lower_tables_heading_is_not_this_tables_body():
 
     after, count = repair_table_headers_in_text(page.get_text("words"), before)
 
-    if count:
-        assert find_table_blocks(after)[0].grid[1:] == [
-            [label, *values] for label, values in _DATA_ROWS
-        ]
-    else:
-        assert after == before
+    assert count == 0
+    assert after == before
 
 
 def test_the_body_escape_is_not_a_cell_verification_credential():
@@ -807,19 +809,20 @@ def test_a_wide_subheader_the_band_never_prints_survives():
 def test_a_foreign_row_still_has_no_say_either_way():
     """The three states stay three: foreign rows neither certify nor block.
 
-    The lower table's heading is candidate-compatible with this table's leaf
-    band, and it is outside the rectangle — but it is outside by a vertical
-    gap the lane walk already refused to cross, which makes it another
-    table's row rather than an unproven one. It cannot settle the leaf band
-    as body, and it cannot withhold the fold either.
+    Round 8 leaves horizontal disjointness as the only thing that makes an
+    occurrence foreign, so this probe puts the second table where no column
+    of the first one reaches — far below it AND 500pt to its right. It
+    repeats the leaf band, and it is silent in both directions: it cannot
+    settle the leaf row as body, and it cannot withhold the fold either.
     """
     page = _survey_page()
-    page.insert_text((58.5, 330), "Second table", fontsize=_FONT_SIZE)
+    page.set_mediabox(fitz.Rect(0, 0, 1100, 500))
+    page.insert_text((600, 330), "Second table", fontsize=_FONT_SIZE)
     for x, text in _LEAF_BAND:
-        page.insert_text((x, 350), text, fontsize=_FONT_SIZE)
-    page.insert_text((58.5, 365), "Second observation", fontsize=_FONT_SIZE)
+        page.insert_text((x + 500, 350), text, fontsize=_FONT_SIZE)
+    page.insert_text((600, 365), "Second observation", fontsize=_FONT_SIZE)
     for x, value in zip(_DATA_XS, [str(i) for i in range(1, 11)]):
-        page.insert_text((x, 365), value, fontsize=_FONT_SIZE)
+        page.insert_text((x + 500, 365), value, fontsize=_FONT_SIZE)
     base = _padded_markdown().splitlines()
     before = "\n".join([base[0], base[1], base[0], *base[2:]])
 
@@ -901,3 +904,59 @@ def test_a_row_above_the_first_numeric_row_stays_this_tables():
 
     assert count == 1
     assert find_table_blocks(after)[0].grid[1][0] == "IMPORTANT PANEL"
+
+
+# --------------------------------------------------------------------------
+# Finding 8 — "two row steps down" was still read as "another table"
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("baseline", [287, 301])
+def test_a_trailing_row_is_not_deleted_at_any_distance(baseline):
+    """The reviewer's round-8 reproducer: distance is not ownership.
+
+    Round 7b let an occurrence be unresolved only as far as this table's own
+    largest inter-row step, and that boundary was as unsupported as the one
+    it replaced. The same printed row — ``Overall`` and two 18s in this
+    table's columns, placed early in the candidate — survived at one step
+    below the body and was deleted with both its values at two steps, where
+    it counted as foreign and the band's vocabulary swallowed it.
+
+    Being further down the page than the last attributed row proves nothing
+    about which table a row belongs to. Vertical reach is gone; a
+    column-overlapping occurrence withholds the deletion wherever it prints.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, baseline), "Overall", fontsize=_FONT_SIZE)
+    for x in _DATA_XS[:2]:
+        page.insert_text((x, baseline), "18", fontsize=_FONT_SIZE)
+    row = ["Overall", "18", "18"] + [""] * 8
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(row) + " |")
+    before = "\n".join(lines)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert row in find_table_blocks(after)[0].grid
+    if count == 0:
+        assert after == before
+
+
+def test_an_unresolved_subset_does_not_block_a_larger_header_row():
+    """Withholding is per-row containment, not shared vocabulary.
+
+    A stray 18 printed left of the columns is unresolved, but it accounts for
+    only one word of the leaf band. The leaf row also carries every Apr/Jul
+    label and a second 18, so no single unresolved row explains it, and the
+    complete table still folds. Containment runs candidate-into-printed-row;
+    reversing it would let one loose token freeze every repair on the page.
+    """
+    page = _survey_page()
+    page.insert_text((55, 211), "18", fontsize=_FONT_SIZE)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), _padded_markdown())
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1:] == [
+        [label, *values] for label, values in _DATA_ROWS
+    ]
