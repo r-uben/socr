@@ -20,6 +20,10 @@ to protect; what comes back is the prose that was only ever collateral.
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+
 from pathlib import Path
 
 import pytest
@@ -28,6 +32,7 @@ from socr.core.manifest import (
     SCANNED_NATIVE_TEXT_FLAG,
     SCANNED_PROSE_RECOVERED_FLAG,
     SelectionProvenance,
+    _escaped_native_line,
     _select_page_output_tagged,
     is_page_failed_marker,
     native_prose_floor_text,
@@ -36,6 +41,11 @@ from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
 
 fitz = pytest.importorskip("fitz")
+
+#: Resolved at import, deliberately. ``tests/conftest.py`` patches
+#: ``shutil.which`` on the module object for every test, so asking inside a
+#: test body answers ``None`` on a machine that has node and silently skips.
+_NODE = shutil.which("node")
 
 MARKER = "[page 1 failed: unverifiable table — see image]"
 
@@ -399,7 +409,10 @@ class TestNativeTableSyntaxNeverShipsAsProse:
         ]
         recovered = _ship(_page(prose_below=below)).text
 
-        assert sentence in recovered
+        # #712: the pipe ships escaped, so it stays a printed character instead
+        # of a cell boundary. The point of the test is that the LINE is not
+        # withheld, which is what the escaped form still shows.
+        assert _escaped_native_line(sentence) in recovered
         # Only the table's own run is marked; nothing in the prose was elided.
         assert recovered.count(MARKER) == 1
 
@@ -416,7 +429,7 @@ class TestNativeTableSyntaxNeverShipsAsProse:
 
         recovered = _ship(_page(table_rows=rows)).text
 
-        assert sentence in recovered
+        assert _escaped_native_line(sentence) in recovered
         assert "| Header | Amount |" not in recovered
         assert "250.0" not in recovered
 
@@ -450,7 +463,7 @@ class TestNativeTableSyntaxNeverShipsAsProse:
         ]
         recovered = _ship(_page(table_rows=rows)).text
 
-        assert "accept | defer in the minutes." in recovered
+        assert _escaped_native_line("accept | defer in the minutes.") in recovered
         assert "had been discussed before." in recovered
 
     def test_a_printed_dash_rule_still_ships(self) -> None:
@@ -811,3 +824,111 @@ class TestTheImageRefStillShips:
         assert "![Scanned page 1](figures/scanned_p1.png)" in recovered
         assert MARKER in recovered
         assert "policy directive" in recovered
+
+
+#: The constructs #712 names, as a scan might print them, plus the sentence
+#: whose disappearance is the actual loss: an unclosed ``<!--`` swallows it.
+_WITHHOLDING_ACTIVES = [
+    "<!--",
+    "The committee retained the original mandate.",
+    "# Literal heading marker",
+    "> quoted directive",
+    "- bulleted item",
+    "*emphasis* and `code` and [link](x) and A & B",
+]
+
+
+class TestTheWithholdingLaneShipsLiteralCharactersToo:
+    """#712. ``_escaped_native_line`` reached only the no-numeral lane.
+
+    The withholding lane -- the one that runs whenever a page HAS a numeric
+    band to hold back, which is the ticket's own Fed 1989-11-14 p3 and every
+    page shaped like it -- appended its prose lines raw. Both lanes promise the
+    page's literal characters, and one of them was emitting active markdown:
+    a native ``<!--`` line hid the sentence beneath it and ``# ...`` became an
+    ``<h1>`` in every CommonMark consumer of the shipped ``.md``, not only in
+    the review viewer.
+    """
+
+    @staticmethod
+    def _shipped() -> str:
+        """A withholding-shaped page: a real numeric table to hold back, and a
+        prose band made of the characters that must stay characters."""
+        shipped = _ship(_page(prose_below=_WITHHOLDING_ACTIVES)).text
+        # The lane under test is the withholding one, not the no-numeral one.
+        assert shipped.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
+        assert MARKER in shipped
+        return shipped
+
+    def test_the_pages_own_characters_never_become_structure(self) -> None:
+        """The no-numeral lane's pin, mirrored onto the lane that was missing
+        it, through the installed renderer rather than a claim about escaping."""
+        markdown_it = pytest.importorskip("markdown_it")
+
+        rendered = markdown_it.MarkdownIt().render(self._shipped())
+
+        assert "<!--" not in rendered
+        assert "The committee retained the original mandate." in rendered
+        for tag in ("<h1>", "<blockquote>", "<li>", "<em>", "<code>", "<a href"):
+            assert tag not in rendered, tag
+        assert "# Literal heading marker" in rendered
+        assert "&gt; quoted directive" in rendered
+        assert "*emphasis* and `code` and [link](x) and A &amp; B" in rendered
+
+    def test_the_review_viewer_shows_the_same_characters(self) -> None:
+        """The second consumer, which has its own regex renderer rather than
+        markdown-it. Run as the JavaScript socr actually ships, under Node."""
+        if _NODE is None:
+            pytest.skip("node not installed")
+
+        from socr.review.html import _TEMPLATE
+
+        renderer = _TEMPLATE[_TEMPLATE.index("function esc(") : _TEMPLATE.index("function head(")]
+        driver = (
+            '\nconst fs = require("fs");'
+            '\nprocess.stdout.write(renderMd(JSON.parse(fs.readFileSync(0, "utf8"))));'
+        )
+        rendered = subprocess.run(
+            [_NODE, "-e", renderer + driver],
+            input=json.dumps(self._shipped()),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        ).stdout
+
+        for tag in ("<h1>", "<blockquote>", "<li>", "<i>", "<code>", "<a "):
+            assert tag not in rendered, tag
+        assert "<!--" not in rendered
+        assert "The committee retained the original mandate." in rendered
+
+    def test_the_escaping_survives_finalization(self, tmp_path: Path) -> None:
+        """Selection is not what a reader opens. The literal body has to reach
+        the assembled record too, unchanged."""
+        ps = _page(prose_below=_WITHHOLDING_ACTIVES)
+        shipped = _ship(ps).text
+
+        assert _finalized_text(ps, tmp_path) == shipped
+
+    def test_the_escaping_survives_resume(self) -> None:
+        """And the next run. The frozen bytes come back through the typed
+        credential with ``native_words`` gone, which is how the resume loss is
+        actually reached."""
+        first = _ship(_page(prose_below=_WITHHOLDING_ACTIVES))
+        saved = PageOutput.from_dict(first.to_dict())
+
+        resumed = _page(prose_below=_WITHHOLDING_ACTIVES)
+        resumed.native_words = []
+        resumed.attempts = [saved]
+        resumed.best_output = saved
+
+        assert _ship(resumed).text == first.text
+        assert "\\# Literal heading marker" in _ship(resumed).text
+
+    def test_the_withheld_table_is_still_withheld(self) -> None:
+        """Escaping changes what the prose looks like, not what ships. The
+        numeric band stays behind the marker."""
+        shipped = self._shipped()
+
+        assert "250.0" not in shipped
+        assert shipped.count(MARKER) == 1
