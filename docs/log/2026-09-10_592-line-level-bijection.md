@@ -351,3 +351,84 @@ The reviewer's five reproducers, installed under a repository name:
   pre-ticket block-order behaviour and is not a new reordering.
 - The reviewer's direction-insensitivity note (the x-sort assumes left-to-right) still stands
   and has no reproducer; it is now confined to entangled groups rather than whole pages.
+
+## Round 4 — lane + band evidence, not block membership (Astra re-review of b8d5063)
+
+### The finding
+
+Round 3 scoped positional emission to every unconsumed line of every PyMuPDF block a run
+draws from. That is still authority granted by segmentation. Astra reproduced it by taking
+the same roster-plus-two-prose-columns page, keeping every line, word, text and bbox
+unchanged, and consistently rewriting the `(block, line)` identities across BOTH the `dict`
+and `words` extractions so the LEFT prose column shares the label block and the RIGHT prose
+column shares the name block. The run search still accepts the roster and still refuses the
+wide-gutter prose; round 3's emission nonetheless returns `LEFT 1 / RIGHT 1 / LEFT 2 / ...`.
+No transitive chain is needed — one accepted run already connects the two blocks.
+
+The criticism is correct as stated: block membership is a property of how the producer
+segmented the page, and says nothing about whether two lines belong to one reading-order
+structure.
+
+### Change
+
+A declined line is now repositioned only on geometric evidence about that line. Both
+conditions must hold:
+
+1. **Lane membership.** Its start (`x0`, word extent) falls inside one of the run's own two
+   column lanes. A lane is `(min, max)` of the START positions of that column's accepted
+   rows — `_run_column_lanes`, built on the new `_split_two_columns` helper that
+   `_try_aligned_run` now also uses, so the partition has one definition.
+2. **Band adjacency.** Its baseline band is reachable by walking outward from the run's band
+   sequence one band at a time, stopping at the first band that contributes no such line.
+
+Neither is a tolerance. The lane is a measurement of the run itself, and the band is
+`_line_baseline_bands`, the row grouping the search already walks. Both fail closed: a line
+that does not qualify is emitted exactly where block order puts it. The union-find from
+round 3 is gone — with block membership no longer conferring anything, two runs sharing a
+block need no merging; a `claimed` map stops two runs from both adopting the same line.
+
+**Lanes are deliberately bounded by start position only, not by the column's right edge.** A
+right-edge bound is content length, the unstable quantity `_try_aligned_run` already avoids:
+1990-11-13's declined `Gillum, Deputy Assistant Secretary` is wider than every line in the
+run below it, and a right-bounded lane would have excluded it and broken that page's pin.
+
+On 1977-11-15 this is what keeps the header row correct. `Mr.` (x0 214.0) starts in the label
+lane and `Burns, Chairman` (x0 243.0) in the value lane, one band above the run, so both
+travel with it; `PRESENT:` (x0 142.0) starts in neither lane and stays where block order puts
+it — immediately before them, which is exactly right. The wide-gutter prose column at x0
+330.0 matches no lane and never moves, however its block is segmented.
+
+### Measurements
+
+Real-fixture output is **byte-identical to b8d5063** across the first four pages of all six
+Fed documents (1968-10-29, 1970-12-15, 1977-11-15, 1982-11-16, 1990-11-13, 1989-11-14). Round
+4, like round 3, is a pure restriction of scope.
+
+Full suite: 4621 passed, 4 xfailed. `uvx ruff@0.16.0 format --check .` clean (621 files).
+Both reviewer files pass in full: `test_astra_592b.py` 5/5, `test_astra_592c.py` 2/2.
+
+### New tests — `tests/test_gh592_lane_scoped_emission.py`
+
+- `test_entangled_prose_columns_stay_column_major` — the reviewer's real-textbox construction,
+  where the roster rows and the paragraph lines genuinely land in the same blocks and the LEFT
+  paragraph even starts at the label column's own x. Passed at b8d5063 too; kept as a control.
+- `test_block_entanglement_does_not_authorize_prose_interleave` — the reviewer's consistent
+  dict/words resegmentation. **Confirmed failing at b8d5063 and passing here.**
+- `test_lane_match_across_an_intervening_row_does_not_travel_with_the_run` — pins the
+  adjacency half, which the reviewer's pair does not exercise: a line starting in the value
+  lane but separated from the run by an ordinary full-width paragraph row must stay after that
+  row. **Confirmed non-vacuous** by re-running it against a source copy with the walk's `break`
+  removed, where it fails.
+
+### Residuals
+
+- A degenerate lane (a column whose accepted rows all start at exactly the same x) admits only
+  that exact x. On the real Fed pages the declined rows match exactly, but a PDF with sub-point
+  start jitter would fail closed and leave a repairable row in block order. That is the safe
+  direction and adds no constant; it is not measured against a corpus.
+- Each group is still emitted atomically at its first member in block order, so two runs whose
+  members bracket each other in block order emit in first-member order. No reproducer.
+- The x-sort within a row still assumes left-to-right; unchanged from round 3 and still
+  without a reproducer.
+- The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0); see the
+  round-3 correction above.

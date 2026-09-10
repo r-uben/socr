@@ -687,6 +687,60 @@ def _cluster_two_bands(values: list[float]) -> tuple[float, float] | None:
     return (seed_a, seed_b) if seed_a < seed_b else (seed_b, seed_a)
 
 
+def _split_two_columns(items: list[dict]) -> tuple[list[dict], list[dict]] | None:
+    """Partition ``items`` into a left and a right column by nearest seed.
+
+    The single definition of "which column is this line in", shared by
+    ``_try_aligned_run`` (which applies the four guards to the partition) and
+    by ``_run_column_lanes`` (which reports the accepted run's lanes back to
+    the emission scope). Clusters on the trimmed LEFT edge (``x0``) only --
+    see ``_try_aligned_run`` for why a column's start position is the stable
+    quantity and its right edge is not. Returns ``None`` when the x-positions
+    do not separate into two clusters at all.
+    """
+    seeds = _cluster_two_bands([it["x0"] for it in items])
+    if seeds is None:
+        return None
+    seed_left, seed_right = seeds
+    left = [it for it in items if abs(it["x0"] - seed_left) <= abs(it["x0"] - seed_right)]
+    right = [it for it in items if abs(it["x0"] - seed_left) > abs(it["x0"] - seed_right)]
+    return left, right
+
+
+def _run_column_lanes(items: list[dict]) -> tuple[tuple[float, float], ...] | None:
+    """The two x-start LANES an accepted run occupies, as ``(min, max)`` pairs.
+
+    A lane is the observed spread of its own column's line START positions --
+    nothing else. It is a measurement of the run, not a tolerance: the run's
+    own rows define both ends, so a column whose rows all start at the same x
+    yields a degenerate lane that admits only that exact x. That fails closed
+    (a line that does not match stays in the caller's block order), which is
+    the safe direction.
+
+    Deliberately NOT the column's right edge: a lane bounded on the right by
+    content length would exclude a genuine roster row that happens to be
+    longer than every row the run accepted -- e.g. 1990-11-13's declined
+    "Gillum, Deputy Assistant Secretary", which is wider than any line in the
+    run below it. Start position is stable across rows; end position is not
+    (the same reason ``_try_aligned_run`` clusters on ``x0``).
+    """
+    split = _split_two_columns(items)
+    if split is None:
+        return None
+    left, right = split
+    if not left or not right:
+        return None
+    return (
+        (min(it["x0"] for it in left), max(it["x0"] for it in left)),
+        (min(it["x0"] for it in right), max(it["x0"] for it in right)),
+    )
+
+
+def _starts_in_a_lane(x0: float, lanes: tuple[tuple[float, float], ...]) -> bool:
+    """True when ``x0`` starts inside one of the run's own column lanes."""
+    return any(low <= x0 <= high for low, high in lanes)
+
+
 def _try_aligned_run(
     items: list[dict],
     word_space_width: float,
@@ -722,13 +776,10 @@ def _try_aligned_run(
     if len(items) < _ALIGNED_RUN_MIN_ROWS * 2:
         return None
 
-    seeds = _cluster_two_bands([it["x0"] for it in items])
-    if seeds is None:
+    split = _split_two_columns(items)
+    if split is None:
         return None
-    seed_left, seed_right = seeds
-
-    left = [it for it in items if abs(it["x0"] - seed_left) <= abs(it["x0"] - seed_right)]
-    right = [it for it in items if abs(it["x0"] - seed_left) > abs(it["x0"] - seed_right)]
+    left, right = split
     if len(left) < _ALIGNED_RUN_MIN_ROWS or len(left) != len(right):
         return None
 
@@ -986,122 +1037,130 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     if not runs:
         return None
 
-    # GH-592 round 3 REVIEW FIX: positional emission is SCOPED to the run and
-    # the lines entangled with it; everything else keeps the caller's original
-    # block order, byte for byte.
+    # GH-592 round 4 REVIEW FIX: a declined line is repositioned only on
+    # GEOMETRIC evidence that it belongs with the repaired rows. Everything
+    # else -- in every block, including the blocks a run draws from -- keeps
+    # the caller's original block order, byte for byte.
     #
-    # Round 2 emitted the WHOLE page by position (visual row, then x). That is
-    # correct for the roster but wrong for everything else: a page carrying a
-    # genuine attendee list AND, elsewhere, an unrelated two-column prose
-    # block gets that prose interleaved line by line (LEFT 1, RIGHT 1, LEFT 2,
-    # ...) even though the four guards in ``_try_aligned_run`` correctly
-    # refused to merge it. Every token survives; the reading order does not.
-    # Finding one run anywhere on a page must not reorder content elsewhere on
-    # it (Astra review of PR #704).
+    # Round 2 emitted the whole page by visual row. Round 3 narrowed that to
+    # every unconsumed line of every block a run contributes to. Both were
+    # too much authority. Block membership is a segmentation accident, not
+    # evidence of reading order: resegment the very same lines, words and
+    # bboxes so that an unrelated left prose column shares the label block and
+    # an unrelated right prose column shares the name block, and round 3's
+    # scope interleaves those two independent paragraphs line by line even
+    # though the four guards in ``_try_aligned_run`` correctly refuse to merge
+    # them (Astra re-review of PR #704). Tokens survive; reading order does
+    # not -- the loss GH-592 exists to prevent.
     #
-    # Block order is only unsafe where a run and an unconsumed line SHARE a
-    # PyMuPDF block: splicing the merged run in at its first contributing
-    # block's position then pushes that block's own unconsumed lines out to
-    # wherever the block falls in block-iteration order, which can be many
-    # lines away from where they belong. That is exactly the 1977-11-15 p1
-    # case -- the declined 3-column "PRESENT:" / "Mr." / "Burns, Chairman"
-    # header row's value half lives in a block that also feeds the real run
-    # starting a row later, and block-order emission put it 11 lines below its
-    # own label. A block that contributes NO line to any run is never split
-    # this way: all of its lines stay contiguous and in order, so it needs no
-    # repositioning at all.
+    # The evidence that IS available per line is geometry, and it is already
+    # computed. A declined line belongs with a run when both hold:
     #
-    # So: each run, plus every unconsumed line of every block that run draws
-    # from, forms one positional GROUP (runs sharing a block join the same
-    # group). Within a group, items are re-clustered through
-    # ``_line_baseline_bands`` -- the SAME row-membership test the search
-    # itself uses -- and sorted by x within a row. A plain (y0, x0) sort is
-    # NOT sufficient: three lines of one visual row can differ in y0 by a
-    # fraction of a point (measured on 1977-11-15's own PRESENT row: 267.2 /
-    # 267.3 / 267.4), enough for a numeric sort to scramble a label past its
-    # value. The group is emitted at the position of the first line of its
-    # first contributing block; every other line is emitted exactly where
-    # block order puts it.
+    #   * its line START falls inside one of that run's own two column LANES
+    #     (``_run_column_lanes`` -- the observed spread of the label column's
+    #     and the value column's start positions, measured from the run's own
+    #     accepted rows); and
+    #   * its baseline band is reachable from the run's band sequence by
+    #     walking outward one band at a time WITHOUT crossing a band that
+    #     contributes no such line. An intervening ordinary paragraph row
+    #     stops the walk.
+    #
+    # Neither test introduces a tolerance: lane membership is the run's own
+    # measurement and band membership is ``_line_baseline_bands``, the same
+    # row-grouping the search itself walks. Both fail closed -- a line that
+    # does not qualify is emitted exactly where block order puts it.
+    #
+    # This is what keeps 1977-11-15 p1 correct. The declined 3-column
+    # "PRESENT:" / "Mr." / "Burns, Chairman" header row sits one band above
+    # the run: "Mr." (x0 214.0) starts in the label lane and "Burns, Chairman"
+    # (x0 243.0) in the value lane, so both travel with the run, while
+    # "PRESENT:" (x0 142.0) starts in neither lane and stays put -- which is
+    # exactly where it belongs, immediately before them. A wide-gutter prose
+    # column at x0 330.0 matches no lane and never moves, however its block
+    # happens to be segmented.
     consumed: set[tuple[int, int]] = set()
-    run_payload: dict[int, list[str]] = {}
-    run_pseudo_lines: list[dict] = []
-    run_blocks: list[set[int]] = []
-    for run_id, (start, end, merged) in enumerate(runs):
-        touched: set[int] = set()
+    for start, end, _merged in runs:
         for band in bands[start : end + 1]:
             for it in band:
                 consumed.add((it["bi"], it["li"]))
-                touched.add(it["bi"])
-        run_blocks.append(touched)
+
+    # ``claimed`` also stops two runs from both adopting the same declined
+    # line: the first run whose walk reaches it takes it, and the other run's
+    # walk then finds nothing left in that band and stops there.
+    claimed: dict[tuple[int, int], int] = {}
+    group_members: dict[int, list[dict]] = {}
+    run_payload: dict[int, list[str]] = {}
+    for run_id, (start, end, merged) in enumerate(runs):
+        run_payload[run_id] = merged
         anchor = min(bands[start], key=lambda it: it["x0"])
-        run_pseudo_lines.append(
+        members: list[dict] = [
             {
                 "y0": anchor["y0"],
                 "y1": anchor["y1"],
                 "x0": anchor["x0"],
                 "run_id": run_id,
             }
-        )
-        run_payload[run_id] = merged
+        ]
+        lanes = _run_column_lanes([it for band in bands[start : end + 1] for it in band])
+        if lanes is not None:
+            for first, step in ((start - 1, -1), (end + 1, 1)):
+                index = first
+                while 0 <= index < len(bands):
+                    picked = [
+                        it
+                        for it in bands[index]
+                        if (it["bi"], it["li"]) not in consumed
+                        and (it["bi"], it["li"]) not in claimed
+                        and _starts_in_a_lane(it["x0"], lanes)
+                    ]
+                    if not picked:
+                        break
+                    for it in picked:
+                        claimed[(it["bi"], it["li"])] = run_id
+                        members.append(
+                            {
+                                "y0": it["y0"],
+                                "y1": it["y1"],
+                                "x0": it["x0"],
+                                "text": it["text"],
+                            }
+                        )
+                    index += step
+        group_members[run_id] = members
 
-    # Runs that draw from a common block cannot be positioned independently --
-    # emitting one of them would have to skip past the other's lines. Merge
-    # them into a single group (union-find over run ids, keyed by block).
-    parent = list(range(len(runs)))
-
-    def _find(a: int) -> int:
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    block_group: dict[int, int] = {}
-    for run_id, touched in enumerate(run_blocks):
-        for bi in sorted(touched):
-            owner = block_group.get(bi)
-            if owner is None:
-                block_group[bi] = run_id
-            else:
-                ra, rb = _find(owner), _find(run_id)
-                if ra != rb:
-                    parent[rb] = ra
-    for bi in list(block_group):
-        block_group[bi] = _find(block_group[bi])
-
-    group_items: dict[int, list[dict]] = {}
-    for run_id, pseudo in enumerate(run_pseudo_lines):
-        group_items.setdefault(_find(run_id), []).append(pseudo)
-    for it in all_lines:
-        if (it["bi"], it["li"]) in consumed:
-            continue
-        gid = block_group.get(it["bi"])
-        if gid is None:
-            continue
-        group_items[gid].append(
-            {"y0": it["y0"], "y1": it["y1"], "x0": it["x0"], "text": it["text"]}
-        )
-
+    # Within a group, order by true visual row and then by x. A plain
+    # (y0, x0) sort is NOT sufficient: three lines of one visual row can
+    # differ in y0 by a fraction of a point (measured on 1977-11-15's own
+    # PRESENT row: 267.2 / 267.3 / 267.4), enough for a numeric sort to
+    # scramble a label past its value. Re-clustering through
+    # ``_line_baseline_bands`` groups a row regardless of that jitter.
     group_text: dict[int, list[str]] = {}
-    for gid, items in group_items.items():
+    for run_id, members in group_members.items():
         rendered: list[str] = []
-        for row in _line_baseline_bands(items):
+        for row in _line_baseline_bands(members):
             for item in sorted(row, key=lambda it: it["x0"]):
                 if "run_id" in item:
                     rendered.extend(run_payload[item["run_id"]])
                 else:
                     rendered.append(item["text"])
-        group_text[gid] = rendered
+        group_text[run_id] = rendered
+
+    line_group: dict[tuple[int, int], int] = dict(claimed)
+    for run_id, (start, end, _merged) in enumerate(runs):
+        for band in bands[start : end + 1]:
+            for it in band:
+                line_group[(it["bi"], it["li"])] = run_id
 
     out_lines: list[str] = []
     emitted: set[int] = set()
     for it in all_lines:
-        gid = block_group.get(it["bi"])
-        if gid is None:
+        run_id = line_group.get((it["bi"], it["li"]))
+        if run_id is None:
             out_lines.append(it["text"])
             continue
-        if gid not in emitted:
-            emitted.add(gid)
-            out_lines.extend(group_text[gid])
+        if run_id not in emitted:
+            emitted.add(run_id)
+            out_lines.extend(group_text[run_id])
     return "\n".join(out_lines).strip()
 
 
