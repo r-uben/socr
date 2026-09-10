@@ -1,6 +1,6 @@
 # STATUS — defect-census fixes
 
-Last updated: 2026-09-10 (overnight)
+Last updated: 2026-09-10 (overnight, second cycle)
 
 ## Stage
 Waves 1-9 merged: A1a #630, C1 #631, D1 #632, A1b #640, A1c #644, A2 #647, B1 #651, E1 #654,
@@ -20,6 +20,15 @@ third-institution census merged as PR #705 (#703 filed). #695 (#652/#649) merged
 model-prose corroboration deleted by ruling (no band-gap geometry proves a block's role), a scan's own
 native layer ships flagged, and the review viewer now honours CommonMark escapes. Filed: #707 (measure native-fallback
 fidelity on the six Fed minutes), #709 (#704's immediate band hoists a staff row above a beside-heading).
+
+Second cycle (05:40–08:00): #703 merged as PR #715 — A2's row-shortfall term (b) now abstains unless the native
+page shows recurring numeric token lanes (own-occupancy seeds, same-band co-occurrence, rejoin within one rounding
+bin); the BoE 2018 text-table page clears `table_truncated` but still ships the marker because its ladder-accepted
+candidate lost the page judge to a timeout (#713); A1b's twin has the same blind spot (#714). #688 merged as PR
+#716 — a label cell's leading indentation (`&nbsp;` runs) is stripped once at candidate ingestion and at region
+extraction before identities, so the shipped `.md` carries plain labels; interior entities are never decoded.
+#709 accepted as PR #720 (beside-heading unit: heading, adopted pair and run emit contiguously at the
+heading's block key). Filed: #713, #714, #717 (conftest neuters `shutil.which`).
 
 ## Base state (clean before tickets)
 - `main@eb14c82`; census + plan on branch `docs/fed-ecb-census` (7015f46, d00fb11, 86db834, 7fea35a, +panel revision).
@@ -59,7 +68,7 @@ fidelity on the six Fed minutes), #709 (#704's immediate band hoists a staff row
 
 ## Next action
 D2 (route cost measurement) and F1b (derived-cell provenance) are the only remaining tickets
-on this board. Open issues still needing work: #688 (decoded `&nbsp;` labels never reach the shipped
-`.md`), #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a draft), #707 (native
-fallback fidelity measurement, the only evidence behind #695's retention claim), #709 (#704 residual),
-#703 (text tables: A2's row-shortfall term floors a complete candidate). #649/#652 closed by PR #695.
+on this board. Open issues still needing work: #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a
+draft), #707 (native fallback fidelity measurement, the only evidence behind #695's retention claim), #713
+(judge timeout discards a ladder-accepted candidate — the last blocker on the BoE text-table page), #714 (A1b
+twin), #717 (test hygiene). #688 and #703 closed by PRs #716 and #715; #709 by PR #720. #649/#652 closed by PR #695.
