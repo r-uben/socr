@@ -318,7 +318,7 @@ def baseline_bands(words: list) -> list[_NativeBand]:
 
 
 #: The fail-closed limit of TICKET-A1b's per-candidate ``ROW_SHAPE_MIN``
-#: (``manifest._row_shape_reconciliation_ok``: the minimum numeric-token count
+#: (``manifest._row_shape_reconciliation``: the minimum numeric-token count
 #: over a CANDIDATE's own numeric body rows). #649's page has no candidate to
 #: derive it from -- the attempt emitted the table as column runs and authored
 #: no markdown grid at all -- so the partition below falls back to the
@@ -387,7 +387,7 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     was tried and rejected: on a two-table page it swallows the entire
     paragraph printed BETWEEN the tables, and no threshold separates "wrapped
     row label" from "paragraph between two tables" (the identical trap
-    ``manifest._row_shape_reconciliation_ok``'s docstring records for its own
+    ``manifest._row_shape_reconciliation``'s docstring records for its own
     distance-anchored rounds). Shipping a bare label is the cheaper error of
     the two: it carries no printed value, so it cannot ship a wrong number,
     and the fail-closed marker sits right beside it saying the table was
@@ -529,12 +529,12 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
     """Count of native baseline bands that look like a table row, by shape alone.
 
-    Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
+    Factored out of ``manifest._row_shape_reconciliation`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
     from it. A band counts iff it has at least ``row_shape_min`` numeric
     tokens (a caller-supplied, per-candidate floor — see
-    ``_row_shape_reconciliation_ok``'s own docstring for why that floor is
+    ``_row_shape_reconciliation``'s own docstring for why that floor is
     derived from the candidate rather than a named constant) and is not the
     printed column-index legend row (``is_column_index_row``, a table
     convention, not data).

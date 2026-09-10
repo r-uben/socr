@@ -375,7 +375,7 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     band could explain (see ``_STRAY_HEADER_BAND_ALLOWANCE``).
 
     Reuses ``row_corroboration.table_shaped_native_row_count`` (the exact
-    function ``manifest._row_shape_reconciliation_ok`` calls) rather than a
+    function ``manifest._row_shape_reconciliation`` calls) rather than a
     second implementation of "table-shaped row", and
     ``row_corroboration.ROW_CORROBORATION_MIN`` (36/39) rather than a second
     named allowance -- both already measured and owned by A1b/A1a. Abstains
