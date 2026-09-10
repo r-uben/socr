@@ -837,6 +837,70 @@ def _adoptable_pair(
     return [label, value]
 
 
+def _beside_heading_lines(
+    extras: list[dict],
+    label: dict,
+    block_lines: dict[int, list[dict]],
+    unit_keys: set[tuple[int, int]],
+    word_space_width: float,
+) -> list[dict] | None:
+    """``extras`` when every one is a standalone heading printed BESIDE the pair.
+
+    GH-709 (Astra design note). ``_adoptable_pair`` moves a declined label/value
+    pair into a run's emitted group and leaves every other line of that band
+    where block order puts it. When the other line is the section heading
+    printed BESIDE the pair -- ``STAFF:`` in the same baseline band as the first
+    staff row -- that separation prints the member above the heading that
+    introduces it. The tokens all survive and the section affiliation does not,
+    which is the loss GH-592 exists to prevent.
+
+    The fix is scoped to the one boundary band: such a heading joins the pair as
+    a single emission unit, rendered left to right, placed where the band sits
+    relative to the run. A heading genuinely ABOVE the pair is in a DIFFERENT
+    band and is not touched -- this never reaches for a neighbouring band.
+
+    Every extra line in the band must qualify, and each on evidence:
+
+    * it lies wholly LEFT of the label, so its reading position within the row
+      is unambiguous and it overlaps neither the label nor the value;
+    * it is baseline-aligned with the label (their vertical extents overlap),
+      so it is printed on that row rather than merely near it;
+    * it is not a line being detached from an independent multi-line column.
+      Block membership cannot answer that -- this module already treats a block
+      as a segmentation accident, and both directions are observed here.
+      1977-11-15's ``PRESENT:`` shares one 13-line block with the whole roster's
+      ``Mr.`` labels, because that block IS the label column; on the synthetic
+      ``STAFF:`` fixture PyMuPDF lumps the heading together with two unrelated
+      columns into one 6-line block. What does answer it is the LEFT EDGE: a
+      paragraph or a column is a stack of lines sharing a starting x, so the
+      test is whether any OTHER line of the heading's block starts within one
+      word space of it and is not already in this emission unit. ``PRESENT:``
+      and ``STAFF:`` each stand alone at their x; a prose column's line, or a
+      numbered marker column's, does not.
+
+      A heading whose block holds it alone is therefore accepted, and so is a
+      genuinely unrelated single-line block printed left of the pair on the same
+      baseline. No evidence on the page separates those two. The tolerance is
+      one measured word space, not a threshold.
+
+    Returns None when any extra fails, and the caller then ABSTAINS from
+    adopting the pair at all. Ambiguity here is not a licence to fall back on
+    the separation that GH-709 is about.
+    """
+    for extra in extras:
+        if extra["x1"] > label["x0"]:
+            return None
+        if extra["y1"] <= label["y0"] or label["y1"] <= extra["y0"]:
+            return None
+        for sibling in block_lines.get(extra["bi"], ()):
+            key = (sibling["bi"], sibling["li"])
+            if key == (extra["bi"], extra["li"]) or key in unit_keys:
+                continue
+            if abs(sibling["x0"] - extra["x0"]) <= word_space_width:
+                return None
+    return extras
+
+
 def _try_aligned_run(
     items: list[dict],
     word_space_width: float,
@@ -1126,6 +1190,14 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                 }
             )
 
+    # The lines each block holds, for GH-709's "is this heading being detached
+    # from a column?" test. Built from ``all_lines`` rather than ``flat_lines``:
+    # a line with no measurable word extent is still a line of its block, and
+    # treating it as absent would make a column look like a lone heading.
+    block_lines: dict[int, list[dict]] = {}
+    for it in all_lines:
+        block_lines.setdefault(it["bi"], []).append(it)
+
     flat_lines.sort(key=lambda it: it["y0"])
     bands = _line_baseline_bands(flat_lines)
 
@@ -1215,6 +1287,7 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
             }
         ]
         run_items = [it for band in bands[start : end + 1] for it in band]
+        run_keys = {(it["bi"], it["li"]) for it in run_items}
         lanes = _run_column_lanes(run_items)
         pitch = _run_row_pitch(bands, start, end)
         vocabulary = _run_label_vocabulary(run_items)
@@ -1255,16 +1328,34 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     # and may not adopt one as a continuation at all: a pair
                     # earns a place in the run only when it is alone in its
                     # band. The one exception is the band immediately at the
-                    # boundary, whose behaviour is GH-704's, unchanged and
-                    # separately reviewed -- 1977-11-15's "PRESENT:" / "Mr." /
-                    # "Burns, Chairman" header is exactly that band, and its
-                    # heading precedes the pair in block order rather than
-                    # following it. Adoption there still happens; the walk
-                    # simply stops afterwards.
-                    pair_only = len(candidates) == len(pair)
-                    if index != first and not pair_only:
+                    # boundary, whose behaviour is GH-704's.
+                    #
+                    # GH-709 (Astra design note) settles what happens in that
+                    # exception. Leaving the extra line behind is what printed
+                    # a staff member above its own "STAFF:" heading. When every
+                    # extra line in the boundary band is a standalone heading
+                    # printed BESIDE the pair, the band is adopted as ONE
+                    # emission unit -- heading, label, value, left to right --
+                    # placed where the band sits relative to the run. When any
+                    # extra line fails that test the adoption ABSTAINS: the
+                    # pair keeps block order rather than being separated from
+                    # content whose relationship to it could not be
+                    # established. Either way a heading-bearing band ENDS the
+                    # walk; it never authorises crossing a section boundary.
+                    pair_keys = {(it["bi"], it["li"]) for it in pair}
+                    extras = [it for it in candidates if (it["bi"], it["li"]) not in pair_keys]
+                    if extras and index != first:
                         break
-                    for it in pair:
+                    unit = pair
+                    if extras:
+                        unit_keys = run_keys | pair_keys | {(it["bi"], it["li"]) for it in extras}
+                        beside = _beside_heading_lines(
+                            extras, pair[0], block_lines, unit_keys, word_space_width
+                        )
+                        if beside is None:
+                            break
+                        unit = beside + pair
+                    for it in unit:
                         claimed[(it["bi"], it["li"])] = run_id
                         members.append(
                             {
@@ -1280,7 +1371,7 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     # the ORIGINAL run: its lanes, its row pitch, its label
                     # vocabulary. Nothing accumulates; a band that cannot
                     # stand on its own stops the walk.
-                    if not pair_only:
+                    if extras:
                         break
                     boundary_center = center
                     index += step

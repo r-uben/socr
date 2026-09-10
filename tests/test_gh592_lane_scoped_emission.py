@@ -387,30 +387,41 @@ def _emitted(page: fitz.Page) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def test_the_walk_stops_after_a_band_that_carried_out_of_lane_content():
-    """GH-706 review fix, on the fixture that used to pin the opposite.
+def test_a_band_whose_marker_belongs_to_a_column_is_not_adopted_at_all():
+    """GH-709 abstention, on the fixture that has pinned three answers now.
 
-    Both leading bands are reachable and both hold a pair whose label the run
-    observed, so before GH-706's heading fix the walk crossed both. Each band
-    here also carries an out-of-lane marker in the left margin -- which is what
-    makes the run search decline them in the first place -- and a band with
-    content in neither lane may no longer continue the run. The boundary band
-    is still adopted, under GH-704's separately reviewed immediate rule; the
-    outer one keeps block order.
+    Each leading band carries an out-of-lane marker in the left margin, which
+    is what makes the run search decline the band in the first place. GH-704
+    adopted the boundary pair and left the marker behind; GH-706 stopped the
+    walk there; GH-709 refuses the adoption outright, because the markers are a
+    two-line COLUMN (``1`` above ``2``, sharing a left edge) and moving ``2``
+    with its pair would detach it from ``1``. That is the ambiguity the design
+    note resolves by abstaining, not by choosing a separation.
 
-    This fixture withholds its marker bands from the run search with out-of-lane
-    content, so it can no longer show a multi-band walk. A fixture that withholds
-    them through fill-share instead still can:
+    So nothing here is adopted and the whole page keeps block order. What the
+    fixture still pins is that the refusal is total rather than partial: no
+    marker, label or value is reordered relative to any other.
+
+    This fixture cannot show a multi-band walk, since the new rule stops on the
+    very marker that withholds its bands from the run search. A fixture that
+    withholds them through fill-share instead still can:
     ``test_a_synthetic_pair_only_continuation_crosses_two_bands`` in
-    ``test_gh706_section_heading_boundary.py``. Note also that this test is not a
-    unique witness for either stop clause -- it passes with either one deleted --
-    so it pins behaviour rather than proving a clause necessary.
+    ``test_gh706_section_heading_boundary.py``.
     """
     lines = _emitted(_roster_with_leading_pairs("Mr.", "Mr."))
-    assert lines[lines.index("Gillum") - 1] == "Mr.", lines
-    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee"), (
-        "the walk must not continue past the band that carried the marker"
-    )
+    assert lines == [
+        "Some ordinary running prose establishes the word space measurement here.",
+        "1",
+        "2",
+        "Mr.",
+        "Mr.",
+        "Bernard",
+        "Gillum",
+        "Mr. Angell",
+        "Mr. Guffey",
+        "Mr. Seger",
+        "Mr. Corrigan, Vice Chairman of the Committee",
+    ], lines
 
 
 def test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused():
