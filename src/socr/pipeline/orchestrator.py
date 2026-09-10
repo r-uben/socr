@@ -53,6 +53,7 @@ from socr.core.providers import (
     resolved_provenance,
 )
 from socr.core.result import (
+    JUDGE_OUTCOME_TIMEOUT,
     DocumentStatus,
     EngineResult,
     FailureMode,
@@ -6184,6 +6185,7 @@ class UnifiedPipeline:
             RungResult,
             is_availability_exception,
         )
+        from socr.core.page_credential import sha256_file, sha256_text
         from socr.tables.binding import BindingEvidence, BindingResult
         from socr.tables.witness import WitnessScope, prepare_table_witnesses
 
@@ -6214,6 +6216,10 @@ class UnifiedPipeline:
         adjudicator = self._build_table_cell_adjudicator()
         markdown_by_table: dict[str, str] = {}
         scope_by_table: dict[str, str] = {}
+        #: #713: table_id -> {witness_sha256, witness_scope, markdown_sha256}.
+        #: Populated inside the witness context (the only place the crop file
+        #: exists) and read by the credential mint at the end of this method.
+        witness_identity: dict[str, dict[str, str]] = {}
         # table_id -> the callables that ACTUALLY ran for it, in call order.
         # The audit trail's executing identity is resolved from these, never
         # from a result's position in the configured ladder (round 5).
@@ -6229,6 +6235,20 @@ class UnifiedPipeline:
                 table_results: list[TableLadderResult] = []
                 for witness in witnesses:
                     scope_by_table[witness.table_id] = witness.scope.value
+                    # #713: the witness IMAGE's own identity, captured HERE
+                    # because ``prepare_table_witnesses`` owns the crop as a
+                    # temp file and unlinks it when this context exits -- by
+                    # the time the credential is minted below there is nothing
+                    # left to hash. A table with no crop records "", which never
+                    # verifies: a credential must name the image the ladder
+                    # actually looked at, not merely assert that one existed.
+                    witness_identity[witness.table_id] = {
+                        "witness_sha256": (
+                            sha256_file(witness.crop_path) if witness.crop_path else ""
+                        ),
+                        "witness_scope": witness.scope.value,
+                        "markdown_sha256": sha256_text(witness.markdown),
+                    }
                     if witness.crop_path is None:
                         # MISSING / corroboration-contradicted AMBIGUOUS /
                         # page-render failed: not S1-shaped -- nobody could
@@ -6743,6 +6763,132 @@ class UnifiedPipeline:
             ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
         elif page_result.outcome is TableLadderOutcome.UNVERIFIED:
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+
+        self._mint_table_acceptance_credential(
+            state,
+            page_num,
+            ps,
+            bo,
+            table_results,
+            witness_identity,
+            executed_rungs_by_table,
+        )
+
+    def _mint_table_acceptance_credential(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+        table_results: list,
+        witness_identity: dict[str, dict[str, str]],
+        executed_rungs_by_table: dict[str, list],
+    ) -> None:
+        """#713: write the acceptance credential, when there is one to write.
+
+        Called at the very end of ``_run_table_judge_gate``, which is the last
+        stage of the per-page agentic loop -- so ``bo.text`` here is the page's
+        settled candidate, and the credential binds those exact bytes.
+
+        Minted ONLY for a candidate whose PAGE judge produced the typed timeout
+        (``JUDGE_OUTCOME_TIMEOUT``). That is a deliberate narrowing of Astra's
+        "written when the table ladder accepts": a credential on every accepted
+        page would change the content-addressed serialization of every table
+        page in every existing corpus and force a spurious full reprocess on the
+        next resume, for a record only the timeout path can ever read.
+
+        Fail-closed on every axis. The credential is withheld -- leaving the
+        page to fail closed under its own reason -- unless ALL hold:
+
+        * every emitted table produced a COMPLETED ``ACCEPTED`` terminal (one
+          UNVERIFIED, REJECTED or WITHHELD table voids the whole page: a
+          per-page stand-in cannot be assembled out of a partial acceptance),
+        * every one of them was judged against a real witness image whose
+          digest we captured, by at least one rung that actually executed,
+        * the page-level ladder reduction is not adverse, and
+        * the page carries no outstanding binding-boundary contradiction --
+          ``TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND`` is the one distrust kind a
+          later acceptance provably does NOT clear (GH-609), so its presence
+          alone withholds the credential rather than being weighed.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.page_credential import (
+            TableAcceptance,
+            TableAcceptanceCredential,
+            sha256_text,
+        )
+        from socr.judge.table_ladder import TableLadderOutcome
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+
+        if bo.judge_outcome != JUDGE_OUTCOME_TIMEOUT or not bo.text:
+            return
+        if not table_results:
+            return
+        if getattr(ps, "table_ladder_disposition", None) is not None:
+            return
+        if any(result.outcome is not TableLadderOutcome.ACCEPTED for result in table_results):
+            return
+        if any(
+            getattr(ev, "page_num", None) == page_num
+            and getattr(ev, "kind", "") == TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+            for ev in state.events
+        ):
+            return
+
+        entries: list[TableAcceptance] = []
+        for idx, result in enumerate(table_results):
+            identity = witness_identity.get(result.table_id)
+            if not identity or not identity.get("witness_sha256"):
+                return
+            rungs = tuple(
+                self._executing_identity(rr, executed_rungs_by_table.get(result.table_id) or [], i)
+                for i, rr in enumerate(result.rung_results)
+            )
+            if not rungs:
+                return
+            entries.append(
+                TableAcceptance(
+                    table_id=result.table_id,
+                    markdown_sha256=identity["markdown_sha256"],
+                    witness_sha256=identity["witness_sha256"],
+                    witness_scope=identity.get("witness_scope", ""),
+                    rungs=rungs,
+                )
+            )
+
+        credential = TableAcceptanceCredential(
+            page_num=page_num,
+            document_checksum=state.handle.file_hash or "",
+            candidate_sha256=sha256_text(bo.text),
+            attempt_engine=bo.engine or "",
+            attempt_provider_id=bo.provider_id or "",
+            attempt_provider_model=bo.provider_model or "",
+            attempt_provider_backend=bo.provider_backend or "",
+            judge_model=state.agentic_judge_model or JUDGE_IDENTITY_HEURISTIC,
+            judge_outcome=bo.judge_outcome,
+            run_fingerprint=self._run_fingerprint(),
+            tables=tuple(entries),
+        )
+        bo.table_acceptance_credential = credential.to_dict()
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="page_judge_timeout_credential",
+                engine=bo.engine or "",
+                detail=(
+                    "the page judge timed out on this candidate and the table judge ladder "
+                    f"accepted all {len(entries)} emitted table(s) against their own witness "
+                    "image(s); an acceptance credential bound to these exact candidate bytes "
+                    "was recorded -- the page-level check remains INCOMPLETE and the prose "
+                    "around the tables was never verified"
+                ),
+                data={
+                    "tables": [e.table_id for e in entries],
+                    "candidate_sha256": credential.candidate_sha256,
+                    "judge_outcome": bo.judge_outcome,
+                },
+            )
+        )
 
     def _adjudicate_clamped_table(
         self,
@@ -9018,6 +9164,14 @@ class UnifiedPipeline:
             bo.rejection_class = candidate.rejection_class
             bo.audit_passed = True
             bo.judge_reason = decision.reason or ""
+            # #713: a completed acceptance retires any earlier TYPED page-judge
+            # outcome. Leaving a stale ``page_judge_timeout`` on an accepted
+            # candidate would let the credentialed stand-in describe a page
+            # whose judge did, in the end, return a verdict -- and would leave a
+            # credential minted later in this same loop claiming an incomplete
+            # page check that had completed.
+            bo.judge_outcome = ""
+            bo.table_acceptance_credential = None
             if decision.confidence:
                 bo.confidence = decision.confidence
             # Exhaustion stamps set BEFORE the crop lane ran. A first-time
@@ -10170,8 +10324,13 @@ class UnifiedPipeline:
             # REGIONAL floor (marker surrounded by preserved prose). The floored
             # page would then be restored verbatim and never re-OCR'd. The floor
             # is a page-level fail-closed disposition; it is never skippable.
-            floor_shipped = (
-                winning.get("failure_mode") == FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value
+            # #713: the timeout floor ships the SAME fail-closed bytes under a
+            # different reason, so it forfeits the content-terminal exception on
+            # exactly the same grounds. Keying this on one enum value alone would
+            # have re-opened the hole the moment the floor gained a second mode.
+            floor_shipped = winning.get("failure_mode") in (
+                FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value,
+                FailureMode.PAGE_JUDGE_TIMEOUT.value,
             )
             # P1 (owner ruling Q2): WITHHELD is a CONTENT terminal for exactly
             # the same reason REJECTED is -- the readers looked and said no, and
@@ -10208,7 +10367,26 @@ class UnifiedPipeline:
             )
             is_ladder_rejected = is_content_terminal
 
-            if not is_ladder_rejected:
+            # #713, the SECOND deliberate exception (Astra, 2026-09-10): a page
+            # that shipped WARNING / ``JUDGE_TIMEOUT_LADDER_ACCEPTED`` under a
+            # verified acceptance credential. Without it the credentialed page is
+            # re-OCR'd on every resume forever -- it is WARNING with
+            # ``audit_passed=False`` by construction, which is exactly what the
+            # two gates below refuse -- so the work never converges and a page
+            # whose tables were positively accepted is repeatedly re-judged
+            # against a judge that may time out again.
+            #
+            # Deliberately NARROWER than the REJECTED exception above: that one
+            # is granted on a disposition alone, this one re-verifies the whole
+            # credential against the persisted record, and additionally requires
+            # the FRAGMENT ON DISK to hash to the finalized digest the credential
+            # recorded. Authority is never synthesized from an old log event: the
+            # credential is the only admissible evidence, and any mutation of the
+            # body, a different input, a different attempt identity or a changed
+            # run fingerprint drops through to a full revalidation.
+            is_credentialed_judge_timeout = self._resume_credential_holds(state, winning)
+
+            if not (is_ladder_rejected or is_credentialed_judge_timeout):
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
                 # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
                 # whose best_output is the ERROR attempt, or a flagged native fallback)
@@ -10251,6 +10429,30 @@ class UnifiedPipeline:
             if is_page_failed_marker(body) and not is_ladder_withheld:
                 return None
 
+            # #713: body identity for the credentialed exception. The credential
+            # binds the CANDIDATE bytes the ladder judged; the fragment on disk is
+            # those bytes plus the disclosure notes finalization appended, so the
+            # candidate digest cannot check it and the finalized digest recorded
+            # at finalization is what does. A rewritten fragment (a later
+            # ``_rewrite_all_fragments`` pass, a hand edit, a truncated write)
+            # therefore revalidates rather than being restored on the strength of
+            # a credential describing bytes that are no longer there.
+            if is_credentialed_judge_timeout:
+                from socr.core.page_credential import TableAcceptanceCredential, sha256_text
+
+                cred = TableAcceptanceCredential.from_dict(
+                    winning.get("table_acceptance_credential") or {}
+                )
+                if cred is None or not cred.finalized_sha256:
+                    return None
+                if cred.finalized_sha256 != sha256_text(body):
+                    logger.debug(
+                        "#713: p%d fragment does not match the credential's finalized "
+                        "body digest; revalidating",
+                        page_num,
+                    )
+                    return None
+
             # #688: derived evidence keyed to PRE-canonicalisation bytes is
             # INVALIDATED, never dual-keyed. This ledger entry's audit verdict,
             # ``markdown_sha256`` and ``markdown_table_identity`` were all
@@ -10284,6 +10486,63 @@ class UnifiedPipeline:
         except Exception as exc:  # never let the ledger read break a run
             logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)
             return None
+
+    def _resume_credential_holds(self, state: DocumentState, winning: dict) -> bool:
+        """#713: whether a persisted record is a still-valid credentialed timeout page.
+
+        Re-verifies the credential against the record's OWN persisted fields --
+        the serialized candidate text, page number, attempt identity and typed
+        judge outcome -- plus the current run fingerprint. The caller has already
+        matched ``input_checksum`` against the live input; this re-checks the
+        credential's own recorded document checksum against the LIVE handle's
+        digest, so a page whose source changed cannot be restored on a credential
+        minted for different bytes.
+
+        Witness identity is bound TRANSITIVELY rather than by re-rendering: the
+        crops are temp files that no longer exist, and the run fingerprint the
+        credential records already binds render DPI, rung identities, prompts and
+        every ladder flag, so a config change that would produce a different
+        witness produces a different fingerprint and fails this check first. The
+        per-table witness digests are still persisted in the credential, so an
+        exact re-check remains possible for a caller that can re-render.
+
+        Returns False on ANY doubt, which reprocesses the page -- the same
+        direction of failure every other condition in the ledger gate takes.
+        """
+        from socr.core.page_credential import verify_credential
+
+        if winning.get("failure_mode") != FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED.value:
+            return False
+        if winning.get("status") != PageStatus.WARNING.value:
+            return False
+        if winning.get("audit_passed") is not False:
+            return False
+        credential = winning.get("table_acceptance_credential")
+        if not isinstance(credential, dict):
+            return False
+        page_num = winning.get("page_num")
+        if not isinstance(page_num, int):
+            return False
+        verdict = verify_credential(
+            credential,
+            # The persisted ``text`` is the FINALIZED body -- the judged candidate
+            # plus the disclosure notes -- so it is checked against the credential's
+            # finalized digest, which finalization stamped for exactly this.
+            candidate_text=str(winning.get("text", "")),
+            finalized=True,
+            page_num=page_num,
+            # The LIVE document's hash, never the credential's own copy of it --
+            # verifying a record against itself proves nothing. This is the same
+            # digest ``DocumentHandle`` computes over the input bytes.
+            document_checksum=getattr(state.handle, "file_hash", "") or "",
+            engine=str(winning.get("engine", "")),
+            provider_id=str(winning.get("provider_id", "")),
+            provider_model=str(winning.get("provider_model", "")),
+            provider_backend=str(winning.get("provider_backend", "")),
+            judge_outcome=str(winning.get("judge_outcome", "")),
+            run_fingerprint=self._run_fingerprint(),
+        )
+        return verdict.valid
 
     def _record_ledger_audit_reject(
         self, state: DocumentState, page_num: int, winning: dict
@@ -11142,6 +11401,23 @@ class UnifiedPipeline:
         structure_class_model_pages = sorted(disposition_buckets["structure_class_model_pages"])
         structure_class_floor_pages = sorted(disposition_buckets["structure_class_floor_pages"])
         corrupt_math_hybrid_pages = sorted(disposition_buckets["corrupt_math_hybrid_pages"])
+        # #713: the two page-judge-timeout sets, read off the SHIPPED record's own
+        # failure mode rather than re-derived from PageState. Both are subsets of
+        # buckets that already exist (the credentialed pages are structure-class
+        # model pages; the timeout floors are structure-class floor pages), so
+        # nothing they had before is removed -- these only add the timeout-specific
+        # event and CLI line on top, which is what makes the reason legible at
+        # document level instead of only on the page.
+        judge_timeout_credentialed_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.failure_mode is FailureMode.JUDGE_TIMEOUT_LADDER_ACCEPTED
+        )
+        page_judge_timeout_floor_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.failure_mode is FailureMode.PAGE_JUDGE_TIMEOUT
+        )
         # TICKET-A1c (#641): pages whose shipped winner is A1b's row-
         # corroboration fallback (``FailureMode.HEADER_BINDING_UNVERIFIED``,
         # stamped unconditionally in ``manifest._select_page_output_tagged``
@@ -11824,6 +12100,48 @@ class UnifiedPipeline:
             # and withholds every native byte. Floor pages also remain in
             # ``failed_pages`` (a whole-page floor produced no usable output);
             # this event is the floor-specific surface on top of that.
+            # #713: the two page-judge-timeout surfaces. Emitted IN ADDITION to
+            # the structure-class events above and below (a credentialed page is
+            # still a structure-class model page; a timeout floor is still a
+            # structure-class floor), because #713 is about adding the missing
+            # reason, never about removing surfacing a consumer already reads.
+            for n in judge_timeout_credentialed_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="judge_timeout_ladder_accepted",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages.get(n) and state.pages[n].best_output
+                            else ""
+                        ),
+                        detail=(
+                            "the PAGE judge timed out and returned no verdict; every table "
+                            "this candidate emits was accepted by the table judge ladder "
+                            "against its own witness image, under a credential bound to "
+                            "these exact bytes, so the reading ships DEMOTED rather than "
+                            "being replaced by the fail-closed marker -- the page-level "
+                            "check is INCOMPLETE and the prose was never verified"
+                        ),
+                        data={"judge_timeout_ladder_accepted": True},
+                    )
+                )
+            for n in page_judge_timeout_floor_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="page_judge_timeout_floor",
+                        engine="native",
+                        detail=(
+                            "the PAGE judge timed out on this page's only grid candidate and "
+                            "no acceptance credential cleared it; the fail-closed marker plus "
+                            "page image ships. Nothing REFUSED this reading -- nothing judged "
+                            "it -- so re-running the page is the action, not re-reading it "
+                            "with another model"
+                        ),
+                        data={"page_judge_timeout_floor": True},
+                    )
+                )
             for n in structure_class_floor_pages:
                 state.events.append(
                     AuditEvent(
@@ -11923,6 +12241,25 @@ class UnifiedPipeline:
                         f"  [yellow]{len(header_binding_unverified_pages)} page(s) shipped a "
                         f"corroborated table with header binding unverified: "
                         f"{header_binding_unverified_pages}[/yellow]"
+                    )
+                # #713: printed BEFORE the generic floor line so the operator sees
+                # the specific cause first. A timed-out page-judge is an
+                # infrastructure fact with a different next action -- re-run the
+                # page -- than "every candidate was refused", which is a content
+                # fact and calls for a different model.
+                if judge_timeout_credentialed_pages:
+                    console.print(
+                        f"  [yellow]{len(judge_timeout_credentialed_pages)} page(s) shipped "
+                        f"DEMOTED on a PAGE-JUDGE TIMEOUT: every table was ladder-accepted "
+                        f"under a credential bound to these bytes, the page-level check never "
+                        f"completed, the prose is unverified: "
+                        f"{judge_timeout_credentialed_pages}[/yellow]"
+                    )
+                if page_judge_timeout_floor_pages:
+                    console.print(
+                        f"  [red]{len(page_judge_timeout_floor_pages)} page(s) failed closed on "
+                        f"a PAGE-JUDGE TIMEOUT (nothing refused the reading -- nothing judged "
+                        f"it; no acceptance credential): {page_judge_timeout_floor_pages}[/red]"
                     )
                 if structure_class_floor_pages:
                     console.print(

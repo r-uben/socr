@@ -13,13 +13,45 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+import httpx
+
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "judge_page.md"
 
 VALID_ACTIONS = {"accept", "retry_same", "escalate_engine"}
+
+
+#: #713: exception TYPES that mean the PAGE judge never returned a verdict
+#: because the call did not complete in time. ``httpx.TimeoutException`` covers
+#: connect/read/write/pool timeouts from the Ollama and HTTP judge backends;
+#: builtin ``TimeoutError`` covers ``socket.timeout`` and
+#: ``concurrent.futures.TimeoutError`` (both aliases of it since 3.11), and
+#: ``subprocess.TimeoutExpired`` covers a CLI-backed judge.
+#:
+#: Everything else -- a transport error that is not a timeout, an HTTP status
+#: error, a decode failure, a defect in our own code -- is deliberately NOT a
+#: timeout. The distinction is load-bearing: only a timeout can license #713's
+#: credentialed stand-in, so widening this tuple widens what may ship.
+_PAGE_JUDGE_TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    subprocess.TimeoutExpired,
+    httpx.TimeoutException,
+)
+
+
+def is_page_judge_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` means the page judge TIMED OUT rather than misbehaved.
+
+    Classified by exception TYPE, never by the text of the message. The judge
+    guard builds its ``judge_reason`` by interpolating ``str(exc)``, and that
+    string can carry any words a remote service or a model chose to emit -- a
+    gate keyed on the substring "timed out" is a gate any upstream can open.
+    """
+    return isinstance(exc, _PAGE_JUDGE_TIMEOUT_EXCEPTIONS)
 
 
 def load_judge_prompt() -> str:

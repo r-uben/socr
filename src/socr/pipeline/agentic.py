@@ -33,11 +33,14 @@ from typing import Protocol
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
 from socr.core.result import (
+    JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_TIMEOUT,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     PageOutput,
     PageStatus,
 )
+from socr.judge.judge import is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -323,6 +326,19 @@ def route_page(
             # never pulled) propagates out of the per-page loop in
             # ``_phase_agentic`` and takes the whole document with it (#133).
             logger.warning("judge failed on page %s at %s: %s", page_num, prof.engine.value, exc)
+            # #713: record the TYPED outcome on the attempt itself. The reason
+            # string below still carries the raw exception text for the audit
+            # trail, but no gate may key on it: it interpolates an arbitrary
+            # ``str(exc)``, so "timed out" in it proves nothing about who said
+            # it. Only this field separates an infrastructure timeout -- the
+            # one outcome #713's credentialed stand-in may act on -- from a
+            # judge defect, a refusal, or a malformed response, and it is set
+            # from the exception's TYPE. A completed rejection never reaches
+            # this branch at all (it returns a decision), and a provider blowing
+            # up is caught by the guard above, which never touches this field.
+            output.judge_outcome = (
+                JUDGE_OUTCOME_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_OUTCOME_EXCEPTION
+            )
             attempts.append(
                 ProviderAttempt(
                     engine=prof.engine,
