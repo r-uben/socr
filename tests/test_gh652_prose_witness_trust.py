@@ -313,14 +313,37 @@ class TestWrappedLabelsAreNotEvidence:
         + "\n\n| Label | Amount |\n| --- | --- |\n| Austrian National Bank | 250.0 |\n"
     )
 
-    def _captioned_page(self) -> PageState:
+    _CAPTIONED_PROSE = [
+        "authorized and directed until otherwise directed by the Committee",
+        "to execute transactions in the System Account in accordance",
+    ]
+
+    def _captioned_page(self, *, rows: int = 2) -> PageState:
         """Label, caption, value -- the label is at distance 2 from the band
-        that is actually withheld, with a block break before the paragraph."""
-        prose = [
-            "authorized and directed until otherwise directed by the Committee",
-            "to execute transactions in the System Account in accordance",
+        that is actually withheld, with a block break before the paragraph.
+
+        Two rows by default: with only one numeric row the page has no
+        measurable row pitch and the witness abstains outright (see
+        ``test_a_single_row_table_abstains_rather_than_guess``), which would
+        make the fabrication pins below pass for a reason that has nothing to
+        do with distance.
+        """
+        table = [
+            line
+            for row in range(rows)
+            for line in (self._LABELS[row], self._CAPTION, f"{250 + row * 50}.0")
         ]
-        return _scanned_page(_words(self._CAPTIONED_TABLE + [""] + prose))
+        return _scanned_page(_words(table + [""] + self._CAPTIONED_PROSE))
+
+    def test_a_single_row_table_abstains_rather_than_guess(self) -> None:
+        """#652 round 4 (Astra). One numeric row gives no row pitch, so no step
+        on the page can be shown to be a block break rather than the table's
+        own advance. The witness abstains rather than admit the label on its
+        distance alone -- and abstaining costs no page text, because #649 ships
+        the native prose either way."""
+        page = self._captioned_page(rows=1)
+        assert _prose_corroboration_ok(page, self._CAPTIONED_ATTEMPT) is False
+        assert _prose_corroboration_ok(page, " ".join(self._CAPTIONED_PROSE)) is False
 
     def test_a_label_two_bands_from_its_value_is_not_evidence_either(self) -> None:
         """#652 round 3 (Astra). The first fix walked one hop, so a single
@@ -352,11 +375,37 @@ class TestWrappedLabelsAreNotEvidence:
         the label two bands from its value AND a block break between the table
         and the paragraph, a genuine attempt still clears. The walk outward
         from a table row stops at the break; it does not eat the page."""
-        genuine = (
-            "authorized and directed until otherwise directed by the Committee "
-            "to execute transactions in the System Account in accordance."
-        )
+        genuine = " ".join(self._CAPTIONED_PROSE) + "."
         assert _prose_corroboration_ok(self._captioned_page(), genuine) is True
+
+    @pytest.mark.parametrize("footnote_pitch", [12.0, 6.0])
+    def test_text_elsewhere_on_the_page_cannot_redraw_the_table(
+        self, footnote_pitch: float
+    ) -> None:
+        """#652 round 4 (Astra), the finding itself. The stopping criterion was
+        the page-wide MEDIAN step, so tightening an unrelated footnote block to
+        6pt pulled the median down, the table's own unchanged 12pt step was
+        reclassified as a block break, its label entered the witness and the
+        fabrication shipped. A table's extent is a fact about the table; text
+        elsewhere on the page must not be able to redraw it.
+
+        Same table at both pitches, only the footnote block differs."""
+        table: list[tuple] = []
+        for row in range(2):
+            base = row * 36.0
+            table += _words([self._LABELS[row]], y0=base)
+            table += _words([self._CAPTION], y0=base + 12.0)
+            table += _words([f"{250 + row * 50}.0"], y0=base + 24.0)
+
+        footnotes: list[tuple] = []
+        for idx in range(10):
+            footnotes += _words(
+                ["Additional explanatory remarks concerning the original document"],
+                y0=120.0 + idx * footnote_pitch,
+            )
+
+        ps = _scanned_page(table + footnotes)
+        assert _prose_corroboration_ok(ps, self._CAPTIONED_ATTEMPT) is False
 
     def test_genuine_prose_still_corroborates_on_the_split_layout(self) -> None:
         """Control. The stricter witness must not refuse everything: an attempt

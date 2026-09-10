@@ -2032,7 +2032,7 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
             blocks.append("\n".join(paragraph))
             paragraph.clear()
 
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import table_syntax_line_indices
 
     # A native line that parses as markdown TABLE SYNTAX can never ship as
     # prose here, whatever its digits say: the rows beneath it are withheld by
@@ -2041,22 +2041,16 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     # ``_apply_table_emission_guard`` catches downstream. It joins the withheld
     # run instead.
     #
-    # #649 round 3 (Astra): "is this line table syntax" is a question about
+    # #649 rounds 3-4 (Astra): "is this line table syntax" is a question about
     # CONTEXT, not about the line. Round 2 asked ``_is_table_line``, whose
-    # regex accepts any line containing a pipe, so the numeral-free sentence
-    # "The symbol | separates the alternatives in this paragraph." was withheld
-    # -- avoidable prose loss, which is not what "over-exclusion in the safe
-    # direction" was meant to license. The structural question is asked of the
-    # page instead, by the same parser that defines a table block everywhere
-    # else in this file: a run of at least two consecutive pipe-bearing lines.
-    # A lone pipe in a sentence is not a table and ships; a header beside its
-    # separator is, and does not.
+    # regex accepts any line containing a pipe, so a numeral-free sentence
+    # carrying one was withheld. Round 3 asked ``find_table_blocks``, which
+    # knows a run of pipe lines but not where that run's table BEGINS, so the
+    # same sentence still vanished when it sat directly before or after a real
+    # table. The boundaries come from the table's own structure -- the
+    # separator row, its header, and the delimited rows beneath it.
     band_lines = [" ".join(str(w[4]) for w in band).strip() for _is_prose, band in bands]
-    table_syntax = {
-        idx
-        for block in find_table_blocks("\n".join(band_lines))
-        for idx in range(block.start, block.end + 1)
-    }
+    table_syntax = table_syntax_line_indices(band_lines)
 
     for idx, (is_prose, band) in enumerate(bands):
         line = band_lines[idx]

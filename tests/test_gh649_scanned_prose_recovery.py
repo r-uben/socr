@@ -26,6 +26,7 @@ import pytest
 
 from socr.core.manifest import (
     SelectionProvenance,
+    _prose_corroboration_ok,
     _select_page_output_tagged,
     is_page_failed_marker,
     native_prose_floor_text,
@@ -401,10 +402,110 @@ class TestNativeTableSyntaxNeverShipsAsProse:
         # Only the table's own run is marked; nothing in the prose was elided.
         assert recovered.count(MARKER) == 1
 
+    @pytest.mark.parametrize("side", ["before", "after"])
+    def test_a_pipe_sentence_beside_a_real_table_survives(self, side: str) -> None:
+        """#649 round 4 (Astra). Round 3 asked ``find_table_blocks``, which
+        groups consecutive pipe-bearing lines but knows nothing about where the
+        table inside that run BEGINS, so the same sentence still vanished when
+        it sat directly before or after a genuine header/separator/body block.
+        The boundaries come from the table's own structure now."""
+        sentence = "The symbol | separates alternatives in this paragraph."
+        table = ["| Header | Amount |", "| --- | --- |", "| Bank | 250.0 |"]
+        rows = [sentence, *table] if side == "before" else [*table, sentence]
+
+        recovered = _ship(_page(table_rows=rows)).text
+
+        assert sentence in recovered
+        assert "| Header | Amount |" not in recovered
+        assert "250.0" not in recovered
+
+    def test_a_table_between_two_ordinary_lines_keeps_both(self) -> None:
+        """Control: the neighbours survive and the table does not, with one
+        marker where it went."""
+        recovered = _ship(
+            _page(
+                table_rows=[
+                    "Introductory words",
+                    "| Header | Amount |",
+                    "| --- | --- |",
+                    "| Bank | 250.0 |",
+                    "Concluding words",
+                ]
+            )
+        ).text
+
+        assert "Introductory words" in recovered
+        assert "Concluding words" in recovered
+        assert "| Header" not in recovered
+        assert recovered.count(MARKER) == 1
+
+    def test_pipe_lines_with_no_separator_are_not_a_table(self) -> None:
+        """The separator is the one element that cannot be mistaken for prose,
+        so a run without one stays prose whatever its pipes suggest."""
+        rows = [
+            "Outstanding amounts 250.0",
+            "Options were listed as accept | defer in the minutes.",
+            "The chair noted accept | defer had been discussed before.",
+        ]
+        recovered = _ship(_page(table_rows=rows)).text
+
+        assert "accept | defer in the minutes." in recovered
+        assert "had been discussed before." in recovered
+
     def test_a_printed_dash_rule_still_ships(self) -> None:
         """Control from the same probe: a printed rule carries no pipe and no
         digit, and is ordinary page furniture."""
         assert "--------" in _ship(_page(table_rows=["amount 10.0", "--------"])).text
+
+
+class TestTwoColumnPagesFailSafe:
+    """Bands are clustered by y across the full page width, so on a two-column
+    page a left-column prose line and a right-column table row share a band.
+
+    Raised as an open question in review rather than a finding, and measured
+    here rather than argued: the failure is entirely in the safe direction. The
+    shared band carries the right column's digits, so it is withheld and
+    marked; no printed value reaches the page, and the witness treats the same
+    band as table-attributed so it cannot vouch for a fabrication either. What
+    it costs is the left column's prose, withheld behind the marker instead of
+    shipped. Column-aware banding would recover that text; nothing here leaks
+    without it, which is why this is a limitation and not a hole.
+    """
+
+    _LEFT = [
+        "The committee reviewed the swap arrangements at length",
+        "and authorized their renewal for a further twelve months",
+        "with no dissenting votes recorded in the minutes today",
+    ]
+    _RIGHT = [
+        "Austrian National Bank 250.0",
+        "Bank of England 3000.0",
+        "Bank of France 2000.0",
+    ]
+
+    def _page(self) -> PageState:
+        words: list[tuple] = []
+        for idx, (left, right) in enumerate(zip(self._LEFT, self._RIGHT)):
+            top = idx * 12.0
+            for word_idx, tok in enumerate(left.split()):
+                x = word_idx * 14.0
+                words.append((x, top, x + 12.0, top + 8.0, tok, 0, 0, 0))
+            for word_idx, tok in enumerate(right.split()):
+                x = 400.0 + word_idx * 14.0
+                words.append((x, top, x + 12.0, top + 8.0, tok, 0, 0, 0))
+        ps = _page(with_words=False)
+        ps.native_words = words
+        return ps
+
+    def test_no_printed_value_reaches_the_page(self) -> None:
+        recovered = _ship(self._page()).text
+        for value in ("250.0", "3000.0", "2000.0"):
+            assert value not in recovered, value
+        assert MARKER in recovered
+
+    def test_a_shared_band_cannot_vouch_for_a_fabrication(self) -> None:
+        fabricated = "The committee reviewed the swap arrangements ratified quarterly dividends."
+        assert _prose_corroboration_ok(self._page(), fabricated) is False
 
 
 class TestWhenItMustAbstain:

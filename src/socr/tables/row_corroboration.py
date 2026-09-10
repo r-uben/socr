@@ -448,24 +448,58 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
         return [], []
 
     centers = [statistics.mean((w[1] + w[3]) / 2.0 for w in band) for _is_prose, band in bands]
-    steps = [centers[i] - centers[i - 1] for i in range(1, len(centers))]
-    # The page's own line advance, the way ``baseline_bands`` takes its
-    # clustering tolerance from the page's own median word height rather than
-    # from a page-independent constant. A step no larger than this continues
-    # the block it is in; a larger one is a block break.
-    continues_block = statistics.median(steps) if steps else 0.0
-
-    anchors = {
+    anchors = sorted(
         idx
         for idx, (_is_prose, band) in enumerate(bands)
         if any(_is_genuine_numeric(word[4])[0] for word in band)
-    }
+    )
+
+    if not anchors:
+        # No numeric row anywhere: there is no table on this page to confuse a
+        # band with, so every prose band is unambiguously prose. Nothing to
+        # attribute, nothing to abstain from.
+        return [word for is_prose, band in bands if is_prose for word in band], []
+
+    # A LONE anchor is the opposite case. With one numeric row there is no row
+    # pitch to measure, so no step on the page can be shown to be a block break
+    # rather than the table's own advance -- and the label above it would be
+    # admitted as prose evidence on nothing but its distance. Abstain: no
+    # witness, corroboration refused. It costs no page text, because #649 ships
+    # the native prose either way.
+    if len(anchors) < 2:
+        return [], [word for _is_prose, band in bands for word in band]
+
+    def _row_pitch(anchor: int) -> float:
+        """The table's own line advance AT *anchor*, from its nearest rows.
+
+        Measured strictly between neighbouring anchors -- the distance to the
+        nearest anchor on each side, divided by the bands spanned -- so only
+        rows of the table being walked contribute. The page-wide median this
+        replaces was reachable from anywhere: Astra tightened an unrelated
+        footnote block to 6pt and the table's own unchanged 12pt step was
+        reclassified as a block break, letting its label back into the witness
+        and shipping the fabrication. Text elsewhere on the page must not be
+        able to redraw a table's extent, and mixed-pitch pages (a footnote
+        block under a table) are ordinary.
+        """
+        position = anchors.index(anchor)
+        pitches = []
+        if position > 0:
+            other = anchors[position - 1]
+            pitches.append(abs(centers[anchor] - centers[other]) / (anchor - other))
+        if position < len(anchors) - 1:
+            other = anchors[position + 1]
+            pitches.append(abs(centers[other] - centers[anchor]) / (other - anchor))
+        # The tighter of the two: a step this anchor's own rows never take is
+        # not this anchor's block.
+        return min(pitches)
 
     attributed = set(anchors)
     for anchor in anchors:
+        continues_block = _row_pitch(anchor)
         for step in (-1, 1):
             idx = anchor + step
-            while 0 <= idx < len(bands) and idx not in anchors:
+            while 0 <= idx < len(bands) and idx not in attributed:
                 gap = abs(centers[idx] - centers[idx - step])
                 if gap > continues_block:
                     break
