@@ -518,104 +518,230 @@ consulted. It bites only where something the lane filter discards blocked that a
   assumes left-to-right. Both unchanged and still without reproducers.
 - The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).
 
-## Round 6 — bounded, role-checked adoption (Astra design note)
+## Round 6 — role-checked adoption, one band at a time
 
 Astra was asked what evidence it would accept and answered with a design, not another
-reproducer (`astra-design-592.md`). It supersedes round 5's rule, and its central point is
-one round 5 got wrong: **`MEASURE_FILL_SHARE_MAX` is a distribution statistic over a whole
-right block, not a per-row guard.** A single line's fill share is always 1.0, so re-running
-the run's own guards over `run_items + picked` rejects candidates on arithmetic rather than
-evidence — which is exactly what cost 1990-11-13 three rows in round 5.
+reproducer (`astra-design-592.md`). Its central correction is one round 5 got wrong:
+**`MEASURE_FILL_SHARE_MAX` is a distribution statistic over a whole right block, not a
+per-row guard.** A single line's fill share is always 1.0, so re-running the run's own guards
+over `run_items + picked` rejects candidates on arithmetic rather than evidence — which is
+exactly what cost 1990-11-13 three rows in round 5. Astra also states that a value line
+LONGER than the accepted names is not evidence against a pairing; Gillum's title is precisely
+that case.
+
+Astra additionally proposed adopting only the one immediately adjacent band. That part is
+**not** what shipped: the orchestrator directed a walk that continues band by band, with each
+step standing on its own evidence. The difference matters only for a sub-list of several
+consecutive declined rows, which is what 1990-11-13 has.
 
 ### The rule
 
-Adoption is now **bounded** and **role-checked**. For each run, on each side, exactly one
-band is considered — `bands[start - 1]` and `bands[end + 1]`, once, never a walk:
+For each run, walk outward from each boundary one band at a time. A band is adopted only if
+all of the following hold, and the walk stops at the first band where any fails:
 
-1. that band is no further from the boundary row than the run's own widest inter-row step
-   (`_run_row_pitch`, unchanged from round 5);
+1. its vertical step from the CURRENT boundary row is no greater than the run's own widest
+   inter-row step (`_run_row_pitch`);
 2. it holds **exactly one** candidate in each of the run's two lanes — a unique pair. Two
    candidates in a lane is ambiguity, not evidence. Every other line in the band
    (1977-11-15's `PRESENT:`) stays where block order puts it;
 3. the pair is baseline-aligned and separated by the same horizontal gap `_try_aligned_run`
    requires, and the label is narrower than its value by the same `LABEL_COLUMN_WIDTH_SHARE`
-   ratio — applied to **this row's own two widths**, so a value longer than any name the run
-   accepted (Gillum's title) is not evidence against the pairing;
-4. the candidate label's **whole text** is one the accepted run already observed in its own
-   label column (`_run_label_vocabulary`, derived from the run — honorifics are never
-   hardcoded).
+   ratio — applied to **this row's own two widths**, so a long title is not evidence against
+   the pairing. Fill-share is not applied;
+4. the candidate label's **whole normalised text** is one the accepted run already observed in
+   its own label column (`_run_label_vocabulary`, derived from the run — honorifics are never
+   hardcoded). The value side is unconstrained in length.
 
-New helpers: `_normalized_label`, `_run_label_vocabulary`, `_adoptable_pair`. No new
-constant. Every check fails closed.
+Adopting a band moves the boundary but widens nothing else: lanes, pitch and vocabulary are
+always the ORIGINAL run's measurements. Scope never accumulates. New helpers:
+`_normalized_label`, `_run_label_vocabulary`, `_adoptable_pair`. No new constant. Every check
+fails closed.
 
 Condition 4 is the part geometry cannot supply. Lanes, pitch and gap can all be matched
-exactly by an independent two-column sentence pair; the label's role cannot.
+exactly by an independent two-column sentence pair; the label's role cannot. It is also what
+now refuses Astra's 592d paragraph reproducer, which rounds 4 and 5 could only refuse
+geometrically.
 
-### Measurement
+### 1990-11-13 p1, measured
 
-Fed sweep, 6 minutes documents × first 4 pages, against round 5 (`086e86b`): **1 of 24 pages
-differs, and the difference is the fix.**
+The `Alternate Members` sub-list is three consecutive declined bands. Run pitch is 12.336pt
+and the run's label vocabulary is `{"Mr."}`.
 
-```
-== 1990-11-13:0
-    Mr.
-+   Gillum, Deputy Assistant Secretary
-    Mr. Mattingly, General Counsel
-...
-    Bernard, Assistant Secretary
--   Gillum, Deputy Assistant Secretary
-```
+| band | step from the boundary below it | inside pitch | adoptable pair |
+| --- | --- | --- | --- |
+| `Mr.` + `Gillum, Deputy Assistant Secretary` | 12.116 | yes | yes |
+| `Mr.` + `Bernard, Assistant Secretary` | 11.980 | yes | yes |
+| `Mr.` + `Kohn, Secretary and Economist` | 11.697 | yes | yes |
+| `and Boston, respectively` | 24.457 | **no** | no |
 
-A second 24-page sweep over the same six meetings' first-matching document (beige books,
-agendas) showed 0 differing pages.
+All three are recovered and the walk stops at the prose band above them. **The strict xfail is
+dropped and the original three-surname pin restored as a passing test.** Two of the three
+values are longer than every name the run accepted, which is why the narrow-label check uses
+each row's own two widths.
 
-### 1990-11-13 re-pinned to what is actually correct
+### Fed sweep
 
-Astra predicted this and it holds: the `Alternate Members` sub-list is **three consecutive
-declined bands**, and immediate-only adoption reaches exactly one of them.
+Six minutes documents × first 4 pages:
 
-- **Gillum is recovered.** Pinned as a passing test,
-  `test_1990_11_13_gillum_row_is_adopted_from_the_band_next_to_the_run`.
-- **Kohn and Bernard are not.** They are two and three bands out; the outer band is measured
-  at more than the run's own row pitch from the boundary row, so no bound short of a
-  recursive walk reaches them. The strict xfail is narrowed to those two, and its reason now
-  names the real cause (immediate-only adoption), not the fill-share misfire round 5 blamed.
-
-Recovering them needs those bands established as a separately verified **continuation** with
-their own role evidence. That is a follow-up, not a looser rule here.
+- **vs `df45222` (round 4): 0 of 24 pages differ.** Round 6 reproduces round 4's output
+  exactly, having reached it on evidence rather than on lane membership plus reachability.
+- vs `086e86b` (round 5): 1 of 24 pages differs, and the difference is the three rows above
+  returning to their labels.
 
 ### Witnesses
 
-Each new condition was checked by deleting it from a copy of the source and re-running:
+Each condition was checked by deleting it from a copy of the source and re-running:
 
 - deleting the **label-vocabulary** check fails
-  `test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused`;
+  `test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused` and
+  `test_the_walk_continues_only_while_each_band_brings_its_own_evidence`;
 - deleting the **pitch** bound fails
-  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused` (unchanged from
-  round 5).
+  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused`, whose far pair sits
+  250pt below the roster at its exact lane starts and carries an out-of-lane marker that stops
+  `_find_aligned_runs` from absorbing it.
 
-**Immediate-only** is witnessed differently, because deleting it means reinstating a walk. The
-fixture in `test_only_the_band_adjacent_to_the_run_is_adopted` uses a double-spaced roster, so
-its measured pitch (~29.5pt) puts *both* leading bands inside the bound (~14.2pt and ~29.0pt).
-The test asserts, before looking at any output, that both bands satisfy `_adoptable_pair` and
-both clear the pitch. Only the nearer one is adopted. Nothing but the adjacency rule refuses
-the other.
-
-The round-5 test that pinned the fill-share refusal on the real page is replaced by
-`test_1990_measures_which_alternate_member_bands_adoption_can_reach`, which measures the
-sub-list's actual geometry: the adjacent band satisfies every condition, the next band out is
-beyond the pitch. The residual is a property of that page's geometry, not a threshold.
+`test_1990_measures_every_alternate_member_band_the_walk_crosses` pins the table above from
+the real page, and is the non-accumulation witness: three consecutive bands, each measured
+against the ORIGINAL run. (Round 2 of the review removed the synthetic counterpart -- see
+below for why one cannot be built.)
 
 ### Residuals
 
-- **1990-11-13's Kohn and Bernard rows are still lost to block order.** Tracked as a narrowed
-  strict xfail. Needs a verified-continuation rule; `MEASURE_FILL_SHARE_MAX` is no longer
-  implicated, since it is no longer consulted per row.
 - Adoption cannot distinguish an independent two-column sentence pair that both occupies the
   run's lanes and opens with a word the run used as a label. Astra states this explicitly and
   accepts it; no reproducer exists.
 - A degenerate lane admits only one exact x, so start jitter fails closed. Unmeasured against a
   corpus. Unchanged.
-- Groups still emit atomically at their first member in block order; the within-row sort still
-  assumes left-to-right. Both unchanged and still without reproducers.
+- Groups still emit atomically at their first member in block order, so a line the walk
+  declines can end up far from its own neighbours (visible in the synthetic stop fixture, where
+  the refused `Bernard` trails the run). Unchanged, and still without a real-page reproducer.
+- The within-row sort still assumes left-to-right. Unchanged.
 - The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).
+
+## GH-706 round 2 — a pair may not continue a run out of a band that carries a heading
+
+Astra reviewed the rebased continuation (`28b78a1`) and **accepted the frozen-measurement
+walk** as a legitimate separately-reviewed proposal: each new pair is checked against the
+ORIGINAL lanes, pitch and whole-label vocabulary, so permissive evidence cannot accumulate,
+and `_run_row_pitch` is compared directly against the run's own observed maximum with no added
+slack. One P1.
+
+### The defect
+
+Freezing the measurements prevents accumulation but says nothing about **section membership**.
+A continuation band can satisfy every condition and still carry, out of both lanes, the
+printed content that gives its pair a section — `STAFF:` beside the first staff row. The pair
+is adopted into the run's emitted group while the heading stays behind in block order, so the
+member is printed ABOVE the heading that introduces it. Every token survives; the section
+affiliation does not. That is the class of loss GH-592 exists to prevent.
+
+Astra's reproducer is differential against the merged base `223a171`: there `STAFF:` precedes
+`Gillum`, at `28b78a1` `Gillum` precedes `STAFF:`. The base's immediate-band rule already
+misplaces the FIRST staff row (`Burns`); the review does not claim the baseline layout was
+correct, only that #706 extended the misplacement to a member the base had placed correctly.
+
+### The fix
+
+Conservative, and stated as two clauses on the same fact — whether the band held anything in
+neither lane:
+
+- a band may only **continue** the run when the pair is alone in it;
+- after adopting any band, the walk **stops** if that band held anything else.
+
+The band immediately at the run boundary is the single exception to the first clause, because
+that is GH-704's rule and it is unchanged and separately reviewed here. 1977-11-15's
+`PRESENT:` / `Mr.` / `Burns, Chairman` band is exactly such a band, and there the heading
+precedes its pair in block order, so adopting the pair does not move it across the heading.
+Adoption still happens; only the walk past it stops.
+
+Headings are never reordered. Nothing else in the emission plan changed.
+
+### Measurement
+
+1990-11-13 p1's three `Alternate Members` bands are **pair-only** — two lines each, nothing
+outside the lanes:
+
+```
+start-1  ['Mr.  ', 'Gillum, Deputy Assistant Secretary ']
+start-2  ['Mr.  ', 'Bernard, Assistant Secretary ']
+start-3  ['Kohn, Secretary and Economist ', 'Mr.  ']
+```
+
+All three still recover. 1977-11-15 p1 still emits `PRESENT:` / `Mr.` / `Burns, Chairman` in
+that order.
+
+Fed sweep, 6 minutes documents × first 4 pages:
+
+- **vs `28b78a1`: 0 of 24 pages differ.** The heading fix costs nothing on this corpus.
+- vs `8a63646` (merged base): 1 page differs, 1990-11-13 p1, which is #706's intended recovery
+  of Kohn and Bernard.
+
+### Witnesses
+
+Each clause was checked by deleting it from a copy of the source and re-running. **Run these
+with `-o pythonpath=<copy>/src`, not the `PYTHONPATH` environment variable**: `pyproject.toml`
+sets `pythonpath = ["src"]` under `[tool.pytest.ini_options]`, and pytest inserts that
+rootdir-relative path ahead of `PYTHONPATH`, so an env-var override silently tests the
+worktree's own source and every deletion appears harmless. An earlier version of this section
+was written from such a run and its first bullet was wrong.
+
+- deleting the **stop-after** clause (`if not pair_only: break`) fails Astra's reproducer
+  `test_continuation_does_not_hoist_staff_before_its_heading` and
+  `test_a_continuation_band_carrying_out_of_lane_content_is_not_adopted`;
+- deleting the **refuse-later** clause (`if index != first and not pair_only: break`) fails only
+  `test_a_later_band_carrying_a_heading_is_refused_not_merely_last`, which was added for it. The
+  two clauses are not redundant: without the second, a band beyond the boundary that carries a
+  heading is adopted and only then stops the walk — the #706 defect displaced by one band;
+- deleting the **vocabulary** check fails
+  `test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused`;
+- deleting the **pitch** bound fails
+  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused`.
+
+`test_the_walk_stops_after_a_band_that_carried_out_of_lane_content` survives all four deletions.
+It pins the fixture's behaviour, and it is not a unique witness for any clause; that is now
+stated rather than implied.
+
+Astra's probe is copied to `tests/test_gh706_section_heading_boundary.py`, alongside a witness
+that the refused band is otherwise fully adoptable and a synthetic pin that a BOUNDARY band
+carrying a heading is still adopted.
+
+### What the continuation is for, and its corpus-free witness
+
+State it plainly: the continuation **deliberately recovers pairs that the run-level fill-share
+statistic declined**. Fill-share measures the distribution of right-column widths across a whole
+candidate window, so a window mixing long role-bearing names with short ones is refused
+wholesale — pair-only rows included. Each recovered pair must then independently satisfy the
+ORIGINAL run's lane starts, row pitch, gap and whole-label vocabulary, and carry no other
+content in its band. That is a different claim from "the run search would have taken it anyway".
+
+`test_the_walk_continues_only_while_each_band_brings_its_own_evidence` used a fixture whose
+leading bands are withheld from the run search by an out-of-lane marker. The new rule stops on
+exactly that marker, so that fixture can no longer show a multi-band walk; it is rewritten to
+pin the stop behaviour under its accurate name.
+
+An **earlier version of this log claimed no synthetic fixture could show one. That was wrong**,
+and Astra built the counterexample. Withhold the bands through fill-share instead of through
+out-of-lane content and every band stays pair-only:
+`test_a_synthetic_pair_only_continuation_crosses_two_bands` puts four long role-bearing names
+before four short ones, shows `_try_aligned_run` refusing the roster under normal fill-share
+checking and accepting it with only that statistic disabled, and then crosses two leading
+bands. The multi-band continuation is therefore witnessed **corpus-free as well as on the real
+1990-11-13 page**.
+
+Astra's real-section measurement is pinned too
+(`test_real_section_boundaries_are_separated_by_more_than_the_run_pitch`): on both 1977-11-15
+and 1990-11-13, every band following an accepted run sits further away than that run's own
+pitch (24.70 vs 12.5; 24.05 vs 12.20; 23.94 vs 12.34). No heading-free sub-pitch break between
+two distinct lists was found in the measured sections.
+
+### Residuals (GH-706 round 2)
+
+- `Burns`, the first staff row in Astra's fixture, is still hoisted above `STAFF:` by GH-704's
+  immediate-band rule on the merged base. This branch does not change that and deliberately
+  does not fix it: it is a **#704 residual**, and the boundary-band exception is what keeps
+  1977-11-15 correct. A rule that distinguishes "heading above its pair" from "heading beside
+  its pair" would settle both, and does not exist yet.
+- Bands are built from lines with measurable word extents, so a whitespace-only line is
+  invisible to the out-of-lane test. It carries no tokens, so nothing can be lost through it,
+  but the pair-only claim is about visible content.
+- Everything listed under round 6 above still stands.

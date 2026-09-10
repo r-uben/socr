@@ -1219,35 +1219,71 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
         pitch = _run_row_pitch(bands, start, end)
         vocabulary = _run_label_vocabulary(run_items)
         if lanes is not None and pitch is not None and vocabulary:
-            for index, edge in ((start - 1, start), (end + 1, end)):
-                if not 0 <= index < len(bands):
-                    continue
-                if abs(_band_center(bands[index]) - _band_center(bands[edge])) > pitch:
-                    continue
-                candidates = [
-                    it
-                    for it in bands[index]
-                    if (it["bi"], it["li"]) not in consumed and (it["bi"], it["li"]) not in claimed
-                ]
-                pair = _adoptable_pair(
-                    candidates,
-                    lanes,
-                    vocabulary,
-                    word_space_width,
-                    ALIGNED_RUN_GAP_MAX_WORD_SPACES,
-                )
-                if pair is None:
-                    continue
-                for it in pair:
-                    claimed[(it["bi"], it["li"])] = run_id
-                    members.append(
-                        {
-                            "y0": it["y0"],
-                            "y1": it["y1"],
-                            "x0": it["x0"],
-                            "text": it["text"],
-                        }
+            for first, step, edge in ((start - 1, -1, start), (end + 1, 1, end)):
+                index = first
+                boundary_center = _band_center(bands[edge])
+                while 0 <= index < len(bands):
+                    center = _band_center(bands[index])
+                    if abs(center - boundary_center) > pitch:
+                        break
+                    candidates = [
+                        it
+                        for it in bands[index]
+                        if (it["bi"], it["li"]) not in consumed
+                        and (it["bi"], it["li"]) not in claimed
+                    ]
+                    pair = _adoptable_pair(
+                        candidates,
+                        lanes,
+                        vocabulary,
+                        word_space_width,
+                        ALIGNED_RUN_GAP_MAX_WORD_SPACES,
                     )
+                    if pair is None:
+                        break
+                    # GH-706 Astra P1: a band that also carries content in
+                    # NEITHER lane is carrying something the pair is
+                    # subordinate to -- a printed section heading ("STAFF:"),
+                    # a marker, a note. Adopting a pair out of such a band
+                    # moves it into the run's emitted group while the heading
+                    # stays behind in block order, so the member ends up ABOVE
+                    # the heading that introduces it. Every token survives and
+                    # the section affiliation is destroyed, which is the class
+                    # of loss GH-592 exists to prevent.
+                    #
+                    # The walk therefore does not CONTINUE past such a band,
+                    # and may not adopt one as a continuation at all: a pair
+                    # earns a place in the run only when it is alone in its
+                    # band. The one exception is the band immediately at the
+                    # boundary, whose behaviour is GH-704's, unchanged and
+                    # separately reviewed -- 1977-11-15's "PRESENT:" / "Mr." /
+                    # "Burns, Chairman" header is exactly that band, and its
+                    # heading precedes the pair in block order rather than
+                    # following it. Adoption there still happens; the walk
+                    # simply stops afterwards.
+                    pair_only = len(candidates) == len(pair)
+                    if index != first and not pair_only:
+                        break
+                    for it in pair:
+                        claimed[(it["bi"], it["li"])] = run_id
+                        members.append(
+                            {
+                                "y0": it["y0"],
+                                "y1": it["y1"],
+                                "x0": it["x0"],
+                                "text": it["text"],
+                            }
+                        )
+                    # The adopted band becomes the new boundary, so the next
+                    # step is measured from IT -- but the evidence each band
+                    # must produce is unchanged and is still measured against
+                    # the ORIGINAL run: its lanes, its row pitch, its label
+                    # vocabulary. Nothing accumulates; a band that cannot
+                    # stand on its own stops the walk.
+                    if not pair_only:
+                        break
+                    boundary_center = center
+                    index += step
         group_members[run_id] = members
 
     # Within a group, order by true visual row and then by x. A plain
