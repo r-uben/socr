@@ -23,6 +23,7 @@ never an absolute outcome.
 
 from __future__ import annotations
 
+import html
 import json
 import shutil
 from pathlib import Path
@@ -43,6 +44,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import bind, parse_grid
 from socr.tables.label_canonical import (
     _LINE_BOUNDARIES,
+    _canonicalize_row,
     canonicalize_candidate,
     canonicalize_label_cell,
     canonicalize_table_labels,
@@ -507,13 +509,18 @@ def test_gh688_no_decoded_boundary_can_split_a_row(char: str) -> None:
     assert resolve_cell_refs(canonical, ["R1C1"]) == resolve_cell_refs(raw, ["R1C1"])
 
 
-def test_gh688_a_literal_boundary_character_leaves_the_cell_alone() -> None:
-    """A LITERAL line boundary in the decoded remainder has no serialised form
-    that keeps the row where it is, so the cell is returned unchanged. (An
-    ENTITY that spells one is kept encoded instead -- see the round-3 rule.)"""
+def test_gh688_a_literal_boundary_character_stays_where_it_is() -> None:
+    """A LITERAL line boundary already splits the row for every
+    ``str.splitlines`` parser. Round 4 deletes only a leading indentation run,
+    so the boundary survives byte for byte -- both when it follows other label
+    text and when it is the first thing after the run, where deleting it would
+    MERGE the two halves."""
     for char in ("\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
-        cell = f"&nbsp;A{char}B"
-        assert canonicalize_label_cell(cell) == cell
+        assert canonicalize_label_cell(f"&nbsp;A{char}B") == f"A{char}B"
+        assert canonicalize_label_cell(f"&nbsp;{char}B") == f"{char}B"
+        line = f"| &nbsp;{char}B | 1 |"
+        rewritten, _ = _canonicalize_row(line)
+        assert len(rewritten.splitlines()) == len(line.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +544,9 @@ def test_gh688_the_serialised_label_is_a_fixed_point(cell: str) -> None:
     """Round 1 decoded to a *value* and re-encoded only structure, so a
     literal entity text such as ``&amp;nbsp;X`` lost one level of escaping on
     every pass: ``route_page`` judged one string and the lifecycle hook then
-    mutated it again. The transform now escapes the decoded ampersand, and
-    accepts a serialisation only when ``decode_label_cell`` maps it straight
-    back -- which makes a second pass a byte-for-byte no-op."""
+    mutated it again. Round 4 stops decoding interior content at all: the scan
+    halts at the first character that is not indentation, so a second pass
+    finds no leading run and is a byte-for-byte no-op by construction."""
     once = canonicalize_label_cell(cell)
     assert canonicalize_label_cell(once) == once
     assert decode_label_cell(once) == decode_label_cell(cell)
@@ -950,3 +957,100 @@ def test_gh688_a_literal_ampersand_is_never_newly_encoded() -> None:
     raw = "| Label | Value |\n| --- | --- |\n| R&D | 1 |\n"
     assert canonicalize_table_labels(raw) == (raw, 0)
     assert canonicalize_label_cell("&nbsp;R&D") == "R&D"
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the transform deletes leading indentation and nothing else.
+# ---------------------------------------------------------------------------
+
+
+#: Astra's three round-3/round-4 probes, the ticket's own reproducer, and the
+#: labels the earlier rounds broke. Each is a full label cell.
+_RENDER_PROBES = {
+    "long-zero-padded-reference": "&#0000000042;x&#0000000042;",
+    "nbsp-beside-literal-emphasis": "*&nbsp;x*",
+    "literal-nul-sequence": "A\x000\x00B",
+    "indentation-target": "&nbsp;&nbsp;Swiss francs",
+    "encoded-tag": "&lt;b&gt;X&lt;/b&gt;",
+    "literal-ampersand": "R&D",
+    "escaped-entity-text": "&amp;nbsp;x",
+    "encoded-emphasis": "&ast;important&ast;",
+}
+
+
+def _rendered_cell(cell: str) -> str:
+    """The label cell as CommonMark actually renders it, tags and all."""
+    markdown_it = pytest.importorskip("markdown_it")
+    renderer = markdown_it.MarkdownIt("commonmark").enable("table")
+    rendered = renderer.render(f"| Label | Value |\n| --- | --- |\n| {cell} | 1 |\n")
+    start = rendered.index("<td>", rendered.index("<tbody>")) + len("<td>")
+    return rendered[start : rendered.index("</td>", start)]
+
+
+@pytest.mark.parametrize("cell", _RENDER_PROBES.values(), ids=_RENDER_PROBES)
+def test_gh688_the_render_only_loses_the_leading_indentation(cell: str) -> None:
+    """The rule the three rejected rounds each broke, stated as a measurement
+    on the real renderer rather than on a scalar decoder.
+
+    Round 1 decoded U+2028 into a row split; round 2 decoded ``&lt;b&gt;`` into
+    a live tag and ``&ast;`` into italics; round 3 kept those encoded but still
+    decoded a leading ``&nbsp;`` beside a LITERAL ``*``, which flips CommonMark
+    delimiter flanking -- the emphasis disappears and the asterisks become
+    visible -- and no keep-encoded rule can protect punctuation that was never
+    encoded. So the rendered cell must be identical to the raw one except for
+    the indentation that was deleted from its front."""
+    canonical = canonicalize_label_cell(cell)
+    before = _rendered_cell(cell)
+    assert _rendered_cell(canonical) == before.lstrip()
+    assert decode_label_cell(canonical) == decode_label_cell(cell)
+    assert canonicalize_label_cell(canonical) == canonical
+
+
+@pytest.mark.parametrize("cell", _RENDER_PROBES.values(), ids=_RENDER_PROBES)
+def test_gh688_nothing_interior_is_copied_other_than_verbatim(cell: str) -> None:
+    """The structural claim behind the render measurement: the output is a
+    SUFFIX of the input. Nothing is decoded, held, re-encoded or escaped, so
+    no rendering question can arise past the first non-indentation character
+    and the transform cannot introduce a pipe or a line boundary."""
+    canonical = canonicalize_label_cell(cell)
+    assert cell.endswith(canonical)
+    deleted = cell[: len(cell) - len(canonical)]
+    assert deleted == "" or html.unescape(deleted).strip() == ""
+
+
+def test_gh688_a_long_zero_padded_reference_is_read_like_the_decoder_reads_it() -> None:
+    """Round 3 located references with its own pattern, capped at seven decimal
+    digits, while ``html.unescape`` accepts any length. ``&#0000000042;`` was
+    therefore not recognised as a reference, its asterisk was not protected,
+    and ``&#0000000042;x&#0000000042;`` shipped as live emphasis. The scan now
+    uses the decoder's own pattern and asks the decoder what each match
+    means."""
+    markdown_it = pytest.importorskip("markdown_it")
+    raw = "| Label | Value |\n| --- | --- |\n| &#0000000042;x&#0000000042; | 1 |\n"
+    canonical, changed = canonicalize_table_labels(raw)
+    assert (canonical, changed) == (raw, 0)
+
+    renderer = markdown_it.MarkdownIt("commonmark").enable("table")
+    assert "<em>x</em>" not in renderer.render(raw)
+    assert "<em>x</em>" not in renderer.render(canonical)
+
+
+def test_gh688_a_reference_that_decodes_to_whitespace_is_still_stripped() -> None:
+    """The run is defined by what the DECODER says a reference means, so every
+    whitespace-valued spelling counts -- named, numeric, hex, legacy (no
+    semicolon), and the one multi-codepoint whitespace entity in the HTML5
+    inventory -- and a reference that decodes to anything else stops it."""
+    for lead in ("&nbsp;", "&#160", "&#xa0;", "&Tab;", "&ThickSpace;", "&NewLine;", " "):
+        assert canonicalize_label_cell(f"{lead}Swiss francs") == "Swiss francs"
+    for lead in ("&notit;", "&#0000000042;", "&#11;", "&amp;nbsp;"):
+        cell = f"{lead}Swiss francs"
+        assert canonicalize_label_cell(cell) == cell
+
+
+def test_gh688_a_literal_nul_sequence_does_not_crash() -> None:
+    """Round 3 held kept entities behind an in-band ``\\x00<index>\\x00``
+    placeholder, so a label that literally contained that sequence indexed an
+    empty list and raised ``IndexError`` through the public entry point. There
+    is no placeholder any more; the cell is a plain suffix of itself."""
+    raw = "| Label | Value |\n| --- | --- |\n| A\x000\x00B | 1 |\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)

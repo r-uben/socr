@@ -18,42 +18,44 @@ escalation lane all submit their resulting candidate through this same
 boundary; a later text replacement is a new candidate and crosses it again.
 Raw engine/crop bytes stay immutable provenance.
 
-What the transform may do, and nothing else:
+**The transform DELETES leading indentation and does nothing else.** Round 4
+(2026-09-10) removed the decoder that used to run over the whole cell. Three
+successive reviews found three rendering regressions in it, each from a
+different direction -- a decoded ``&lt;b&gt;`` became a live tag, a decoded
+``&ast;`` became emphasis, and decoding a leading ``&nbsp;`` next to a literal
+``*`` flipped CommonMark delimiter flanking so the emphasis vanished and the
+asterisks became visible. The ticket's target was never interior content; it
+was the indentation run at the front of the cell. So:
 
 * **Label cells only.** Column 0 of a BODY row of a genuine markdown table.
   Header cells are column titles and ``parse_grid`` does not normalise them,
   so neither does this. Delimiters, row order, row count, column count and
   every value cell are byte-identical.
-* **Decode, then strip leading whitespace** (including U+00A0), exactly
-  ``decode_label_cell`` -- the same function ``binding`` uses -- so the
-  shipped bytes and the binder's view of the label cannot diverge again.
-* **Re-encode structural characters** that decoding introduced. A cell
-  segment cannot contain a literal ``|`` or a line boundary by construction
-  (it is delimited by pipes and lives on one line), so any that appears
-  after ``html.unescape`` came from an entity, and writing it out raw would
-  manufacture a cell or a row -- a coordinate move, which this transform is
-  forbidden to make. **Every** boundary the real parsers honour counts, not
-  just LF and CR: ``binding.parse_grid`` and
-  ``reconcile._markdown_content_lines`` split with ``str.splitlines``, which
-  also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029. They are
-  enumerated in ``_LINE_BOUNDARIES`` and each one is pinned by a test.
-* **An entity that spells active syntax is left alone.** Decoding is not
-  meaning-preserving: ``&lt;b&gt;X&lt;/b&gt;`` decodes to a live CommonMark
-  tag and ``&ast;important&ast;`` to italics, so a label's own punctuation
-  would vanish from the rendered corpus. Any entity whose value is a single
-  Markdown/HTML syntax character is restored with its ORIGINAL spelling; only
-  the rest decodes. Nothing is ever newly encoded, so a literal ``&`` in
-  ``R&D`` stays literal and a clean label is never churned. A LITERAL line
-  boundary in the decoded remainder leaves the whole cell unchanged --
-  serialising it would move a row.
-* **Idempotent, per cell, mechanically.** The serialisation chosen for a
-  cell is accepted only if ``decode_label_cell`` maps it back to the decoded
-  label the raw cell reads as; a second application then recomputes the same
-  choice and is a byte-for-byte no-op. That is also the invariant #688 needs: the
-  binder's view of the shipped label equals the binder's view of the raw
-  one. Nested escapes are the reason a plain "decode to a fixed point"
-  would be wrong -- ``&amp;nbsp;X`` means the literal text ``&nbsp;X``, and
-  decoding it twice would silently reinterpret it as indentation.
+* **Only a leading run is removed.** The run is the longest prefix of the
+  cell's content made of literal whitespace characters and character
+  references whose decoded value ``.isspace()``. References are located with
+  ``html.unescape``'s OWN pattern and read by ``html.unescape`` itself, so a
+  legacy/partial reference (``&#160``) and a longest-prefix named match
+  (``&notit;`` -> ``¬it;``) are classified exactly as the decoder classifies
+  them. The prefix is deleted, never rewritten, and the run stops at a
+  LITERAL line boundary: that character already splits the row, so
+  deleting it would merge two halves.
+* **Nothing interior is decoded, held or re-encoded.** No character is ever
+  introduced. The rest of the cell is copied byte for byte, so a literal
+  ``&`` in ``R&D`` stays literal, ``&amp;nbsp;X`` keeps meaning the literal
+  text ``&nbsp;X``, ``&lt;b&gt;`` stays inert, ``&#0000000042;`` stays a
+  reference, and ``*&nbsp;x*`` keeps rendering as emphasis. A line boundary
+  or a pipe cannot appear that was not already there, so the transform cannot
+  move a cell or split a row (``_LINE_BOUNDARIES`` enumerates every boundary
+  ``str.splitlines`` honours; each one is pinned by a test).
+* **Idempotent by construction.** The scan stops at the first character that
+  is neither whitespace nor a whitespace-valued reference, so a second pass
+  finds no leading run and is a byte-for-byte no-op. No acceptance check is
+  needed.
+* **The binder still agrees.** ``decode_label_cell`` unescapes and then strips
+  leading whitespace; the deleted prefix decodes to whitespace and would have
+  been stripped anyway, so the binder's view of the shipped label equals its
+  view of the raw one. That equality is #688's actual invariant.
 
 #624b's font-evidence wrapped-label merge stays ``bind()``-internal and is not
 touched here: it changes a ROW COUNT, and this boundary never does.
@@ -69,12 +71,12 @@ from socr.tables.reconcile import table_body_row_indices
 #: Leading presentation whitespace on a decoded label. ``\s`` already covers
 #: U+00A0 for ``str`` patterns; it is spelled out so the intent survives a
 #: future reader (the model encodes sub-row indentation as ``&nbsp;`` runs).
-_LEADING_WS_RE = re.compile("^[\\s ]+")
+_LEADING_WS_RE = re.compile("^[\\s\u00a0]+")
 
 #: Every character ``str.splitlines`` recognises as a line boundary. The
 #: parsers this transform must not disturb (``binding.parse_grid``,
-#: ``reconcile._markdown_content_lines``) split with it, so emitting any of
-#: these raw into a label cell splits the row in two.
+#: ``reconcile._markdown_content_lines``) split with it. Nothing here is ever
+#: emitted -- the transform only deletes -- and a test pins each one.
 _LINE_BOUNDARIES = (
     "\n",  # LF
     "\r",  # CR
@@ -88,10 +90,14 @@ _LINE_BOUNDARIES = (
     "\u2029",  # PARAGRAPH SEPARATOR
 )
 
-#: Characters that ARE markdown structure: the cell boundary plus every line
-#: boundary above. Decoding must never emit one raw into the page body -- see
-#: the module docstring.
-_STRUCTURAL = ("|",) + _LINE_BOUNDARIES
+#: ``html.unescape``'s own character-reference pattern. Using the decoder's
+#: pattern is the point: a stricter one silently disagrees with it (round 3
+#: capped decimal references at seven digits, so ``&#0000000042;`` was not
+#: recognised as a reference at all). The literal fallback is the same
+#: expression, copied, in case a future CPython renames the private name.
+_CHARREF = getattr(html, "_charref", None) or re.compile(
+    r"&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)"
+)
 
 #: Markdown cell padding: the ASCII run around a cell's content. Deliberately
 #: NOT ``str.strip``, which also eats the U+00A0 indentation this transform
@@ -109,79 +115,34 @@ def decode_label_cell(text: str) -> str:
     return _LEADING_WS_RE.sub("", html.unescape(text))
 
 
-#: Characters that are ACTIVE Markdown or HTML syntax inside a table cell.
-#: #688 round 3: decoding is not meaning-preserving. ``&lt;b&gt;X&lt;/b&gt;``
-#: decodes to ``<b>X</b>``, which CommonMark then reads as a live tag, and
-#: ``&ast;important&ast;`` decodes to ``*important*``, which the review
-#: renderer emits as italics -- the label's own punctuation disappears from
-#: the visible text. An entity that spells one of these is doing real work and
-#: is kept exactly as written.
-_ACTIVE_SYNTAX = frozenset("<>&*_`[]\\~|")
-
-#: Block-level markers. Inert inside a GFM cell, but an entity spelling one is
-#: still deliberate, and preserving it costs nothing: this set only ever
-#: PREVENTS a rewrite, it never introduces an entity that was not there.
-_LEADING_SYNTAX = frozenset("#>-+=")
-
-#: The characters an entity is allowed to keep spelling.
-_KEEP_ENCODED = _ACTIVE_SYNTAX | _LEADING_SYNTAX | frozenset(_STRUCTURAL)
-
-#: A character reference, named or numeric, with or without its semicolon
-#: (html5 accepts both). Used only to LOCATE candidates; what each one means
-#: is decided by ``html.unescape``, never by this pattern.
-_ENTITY_REF_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});?")
-
-#: Placeholder delimiter for a kept entity. NUL cannot occur in extracted page
-#: text and is not whitespace, so it neither collides with content nor lets a
-#: kept entity be mistaken for strippable indentation.
-_KEEP_MARK = "\x00"
-
-
-def _canonical_cell(text: str) -> str:
-    """The page-markdown form of a label cell. Idempotent; may be *text*.
-
-    One level of decoding, with the entities that spell active syntax held
-    back. Concretely:
-
-    * an entity whose value is a single character in ``_KEEP_ENCODED`` is
-      restored VERBATIM -- same spelling, same bytes -- so ``&lt;``,
-      ``&ast;``, ``&amp;`` and ``&#124;`` all survive untouched and the
-      shipped label stays literal;
-    * everything else decodes, which is the ticket's actual target: the
-      ``&nbsp;`` runs the model emits as sub-row indentation;
-    * a LITERAL line-boundary character in the decoded remainder makes the
-      cell unrepresentable, and the cell is returned unchanged rather than
-      rewritten around a row split this transform is forbidden to make.
-
-    Nothing is ever newly encoded, so a literal ``&`` in ``R&D`` stays literal
-    and a clean label is never churned. The result is verified by decoding it
-    back: if it does not read as the raw cell reads, the raw cell is returned.
-    """
-    kept: list[str] = []
-
-    def _hold(match: re.Match[str]) -> str:
-        raw = match.group(0)
-        value = html.unescape(raw)
-        if len(value) == 1 and value in _KEEP_ENCODED:
-            kept.append(raw)
-            return f"{_KEEP_MARK}{len(kept) - 1}{_KEEP_MARK}"
-        return raw
-
-    held = _ENTITY_REF_RE.sub(_hold, text)
-    decoded_rest = _LEADING_WS_RE.sub("", html.unescape(held))
-    if any(char in decoded_rest for char in _LINE_BOUNDARIES):
-        return text
-    result = re.sub(
-        rf"{_KEEP_MARK}(\d+){_KEEP_MARK}", lambda m: kept[int(m.group(1))], decoded_rest
-    )
-    if decode_label_cell(result) != decode_label_cell(text):
-        return text
-    return result
-
-
 def canonicalize_label_cell(text: str) -> str:
-    """The shipped form of a label cell. See :func:`_canonical_cell`."""
-    return _canonical_cell(text)
+    """Drop *text*'s leading indentation run. Idempotent; may be *text*.
+
+    The run is literal whitespace and character references whose decoded value
+    is whitespace, in any mix. Everything from the first other character on is
+    returned byte for byte -- see the module docstring for why nothing
+    interior is decoded.
+    """
+    pos = 0
+    end = len(text)
+    while pos < end:
+        char = text[pos]
+        if char.isspace():
+            # A LITERAL line boundary already splits this row for every
+            # ``str.splitlines`` parser. Deleting it would MERGE the two
+            # halves -- a coordinate move -- so the run stops here. An
+            # ENCODED one is only text on this line and may go.
+            if char in _LINE_BOUNDARIES:
+                break
+            pos += 1
+            continue
+        if char == "&":
+            match = _CHARREF.match(text, pos)
+            if match is not None and html.unescape(match.group(0)).isspace():
+                pos = match.end()
+                continue
+        break
+    return text[pos:]
 
 
 def _canonicalize_row(line: str) -> tuple[str, bool]:
