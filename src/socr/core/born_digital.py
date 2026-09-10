@@ -837,6 +837,125 @@ def _adoptable_pair(
     return [label, value]
 
 
+def _relocation_keeps_reading_order(
+    anchor_position: int,
+    run_first_position: int,
+    unit_keys: set[tuple[int, int]],
+    unit_y0: float,
+    unit_y1: float,
+    all_lines: list[dict],
+    consumed_run: dict[tuple[int, int], int],
+    run_span: dict[int, tuple[float, float]],
+) -> bool:
+    """True when the move preserves the measured order of the content it crosses.
+
+    Block order itself DOES change -- that is the point of the move. What must
+    survive is the relative order the page establishes between the unit and
+    every line the move steps over.
+
+    GH-709 round 6. Adopting a pair beside a boundary heading emits the
+    heading, the pair and the run's own rows as one unit at the heading's key
+    in block order. That move carries the run's rows across every line lying
+    between the run's first line and the heading. Each such line changes sides:
+    it prints before the whole unit, or after it.
+
+    The move is sound exactly when each crossed line ends up on the side the
+    PAGE already puts it -- wholly above the unit if it now prints first,
+    wholly below if it now prints last. Astra's wide-heading page is the
+    positive case: the two heading lines the run steps over are printed above
+    the heading's last line, so the run landing beneath them is vertical order
+    restored, not destroyed. A crossed line that belongs to another run is
+    judged by that run's whole vertical extent, because the other run's group
+    travels with it.
+
+    The comparison is between measured y extents, with no tolerance: a line
+    that overlaps the unit vertically has no unambiguous side and refuses.
+    """
+    low, high = sorted((anchor_position, run_first_position))
+    unit_prints_after = anchor_position < run_first_position
+    for it in all_lines[low : high + 1]:
+        key = (it["bi"], it["li"])
+        if key in unit_keys:
+            continue
+        other = consumed_run.get(key)
+        top, bottom = run_span[other] if other is not None else (it["y0"], it["y1"])
+        if unit_prints_after:
+            if top < unit_y1:
+                return False
+        elif bottom > unit_y0:
+            return False
+    return True
+
+
+def _beside_heading_lines(
+    extras: list[dict],
+    label: dict,
+    bands: list[list[dict]],
+    index: int,
+) -> list[dict] | None:
+    """``extras`` when every one is a heading printed BESIDE the pair.
+
+    GH-709 (Astra design note). ``_adoptable_pair`` moves a declined label/value
+    pair into a run's emitted group and leaves every other line of that band
+    where block order puts it. When the other line is the section heading
+    printed BESIDE the pair -- ``STAFF:`` in the same baseline band as the first
+    staff row -- that separation prints the member above the heading that
+    introduces it. The tokens all survive and the section affiliation does not,
+    which is the loss GH-592 exists to prevent.
+
+    WHAT MOVES is the round-5 ruling (Astra review of 2a868bc), and it inverts
+    rounds 1-4. Those pulled the extra to the pair, forming one unit placed at
+    the boundary band's position relative to the run. That is what made a
+    heading's independence load-bearing: to move its last line safely you had
+    to prove the lines above it were not part of it, and no test does. Three
+    attempts failed on real PyMuPDF geometry -- shared block membership, a
+    shared left edge, and a left-aligned stack crossing the label lane -- and
+    each was defeated by an ordinary heading a page may legitimately contain.
+
+    So the extra never moves. It stays exactly where the caller's block order
+    puts it, and so does everything above it; the PAIR travels to the extra and
+    is emitted immediately after it. A heading of any line count therefore
+    stays intact and still precedes its member, and no claim about the lines
+    above the extra is needed, because none of them is touched. This also
+    removes the abstention Astra measured a real cost for: refusing every
+    intersecting line above kept the synthetic heading whole but displaced
+    ``Burns, Chairman`` eleven lines down the 1977-11-15 roster, away from his
+    own label.
+
+    Each extra must still qualify, and each on evidence:
+
+    * it lies wholly LEFT of the label, so its reading position within the row
+      is unambiguous and it overlaps neither the label nor the value;
+    * it is baseline-aligned with the label (their vertical extents overlap),
+      so it is printed on that row rather than merely near it;
+    * nothing in the band immediately BELOW may be its own continuation. That
+      side still matters under the round-5 rule: the pair is inserted directly
+      after the extra, so a heading that carries on downward would have the
+      label and value pushed between its own two lines.
+
+    A continuation cannot avoid being printed over the same horizontal ground
+    as the line it continues: however it is aligned inside its column -- flush,
+    indented, centred, hanging -- its x-extent INTERSECTS. So the test is
+    horizontal intersection with the band below, across every block, with no
+    tolerance of its own.
+
+    There is deliberately no test on the band ABOVE. Rounds 1-4 needed one and
+    could not build one that survived review; round 5 does not need one, since
+    the extra is not being moved away from whatever is above it.
+    """
+    for extra in extras:
+        if extra["x1"] > label["x0"]:
+            return None
+        if extra["y1"] <= label["y0"] or label["y1"] <= extra["y0"]:
+            return None
+        below = index + 1
+        if below < len(bands):
+            for other in bands[below]:
+                if other["x1"] > extra["x0"] and extra["x1"] > other["x0"]:
+                    return None
+    return extras
+
+
 def _try_aligned_run(
     items: list[dict],
     word_space_width: float,
@@ -1192,15 +1311,46 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     # qualifies, and the rest keep block order. That is a tracked residual, not
     # a reason to reopen the walk.
     consumed: set[tuple[int, int]] = set()
-    for start, end, _merged in runs:
+    # GH-709 round 6. Relocating a pair moves its run's whole emitted group to
+    # the boundary heading's position in block order, so the walk has to be
+    # able to say what that move would step over. ``consumed_run`` names the
+    # run a line belongs to, ``run_span`` its vertical extent (a crossed line
+    # that belongs to another run drags that whole run with it), and
+    # ``block_position`` gives every line its index in the caller's order.
+    consumed_run: dict[tuple[int, int], int] = {}
+    run_span: dict[int, tuple[float, float]] = {}
+    for run_id, (start, end, _merged) in enumerate(runs):
         for band in bands[start : end + 1]:
             for it in band:
                 consumed.add((it["bi"], it["li"]))
+                consumed_run[(it["bi"], it["li"])] = run_id
+        run_lines = [it for band in bands[start : end + 1] for it in band]
+        run_span[run_id] = (
+            min(it["y0"] for it in run_lines),
+            max(it["y1"] for it in run_lines),
+        )
+    block_position = {(it["bi"], it["li"]): n for n, it in enumerate(all_lines)}
 
     # ``claimed`` also stops two runs from both adopting the same declined
     # line: the first run whose walk reaches it takes it, and the other run's
     # walk then finds nothing left in that band and stops there.
     claimed: dict[tuple[int, int], int] = {}
+    # GH-709 round 6. The boundary heading, the pair adopted beside it and the
+    # run's own rows are ONE unit and are emitted contiguously, in vertical
+    # order, at the heading's own place in block order. ``run_anchor`` records
+    # that placement per run -- the heading line's key, the pair's text, and
+    # which side of the run the boundary band sits on -- and ``relocated``
+    # holds the pair lines, which must not also print where block order puts
+    # them.
+    #
+    # Round 5 emitted the pair at the heading and left the run's group at its
+    # own block position. Astra measured the cost on a page whose roster
+    # objects precede the heading objects: the run printed first and the
+    # adopted first member travelled alone to the heading, landing after every
+    # later member -- roster rows reversed, which is the loss GH-592 exists to
+    # prevent. Nothing may be emitted at two independent anchors.
+    run_anchor: dict[int, tuple[tuple[int, int], list[str], int]] = {}
+    relocated: set[tuple[int, int]] = set()
     group_members: dict[int, list[dict]] = {}
     run_payload: dict[int, list[str]] = {}
     for run_id, (start, end, merged) in enumerate(runs):
@@ -1255,32 +1405,145 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     # and may not adopt one as a continuation at all: a pair
                     # earns a place in the run only when it is alone in its
                     # band. The one exception is the band immediately at the
-                    # boundary, whose behaviour is GH-704's, unchanged and
-                    # separately reviewed -- 1977-11-15's "PRESENT:" / "Mr." /
-                    # "Burns, Chairman" header is exactly that band, and its
-                    # heading precedes the pair in block order rather than
-                    # following it. Adoption there still happens; the walk
-                    # simply stops afterwards.
-                    pair_only = len(candidates) == len(pair)
-                    if index != first and not pair_only:
+                    # boundary, whose behaviour is GH-704's.
+                    #
+                    # GH-709 (Astra design note) settles what happens in that
+                    # exception. Leaving the extra line behind is what printed
+                    # a staff member above its own "STAFF:" heading. When every
+                    # extra line in the boundary band is a standalone heading
+                    # printed BESIDE the pair, the band is adopted as ONE
+                    # emission unit -- heading, label, value, left to right --
+                    # placed where the band sits relative to the run. When any
+                    # extra line fails that test the adoption ABSTAINS: the
+                    # pair keeps block order rather than being separated from
+                    # content whose relationship to it could not be
+                    # established. Either way a heading-bearing band ENDS the
+                    # walk; it never authorises crossing a section boundary.
+                    pair_keys = {(it["bi"], it["li"]) for it in pair}
+                    extras = [it for it in candidates if (it["bi"], it["li"]) not in pair_keys]
+                    if extras and index != first:
                         break
+                    beside = None
+                    if extras:
+                        # GH-709 round 5, measured correction. Relocating the
+                        # pair to the extra reorders it against the lines
+                        # between them, and that is damage as soon as the
+                        # boundary band is one of a SERIES of such bands
+                        # rather than the only one. The marker fixture is
+                        # exactly that: two declined rows carrying markers "1"
+                        # and "2" in one left-margin column, of which the walk
+                        # only ever adopts the boundary one. Relocating its
+                        # pair printed Gillum's row ahead of Bernard's -- two
+                        # roster rows reversed, the loss GH-592 exists to
+                        # prevent.
+                        #
+                        # So the band on the FAR side of the boundary, away
+                        # from the run, must not be another band of the same
+                        # shape. It is one when BOTH hold: a candidate in the
+                        # run's own LABEL lane, so it is a row of this kind
+                        # that is staying put; and a line outside both lanes
+                        # that horizontally intersects one of our extras, so
+                        # its marker is in the same column as ours. Both are
+                        # read off the run's own lanes and the lines' own
+                        # extents, with no tolerance.
+                        #
+                        # Each half is needed. The #706 staff fixture has a
+                        # plain Gillum row on the far side -- a label in the
+                        # lane, no marker -- and must still adopt. 1977-11-15
+                        # has "1977, at 9:30 a.m." there, out of the label
+                        # lane at x0 108.0 against 214.0, and must still
+                        # adopt. This refuses only where both appear at once.
+                        #
+                        # Refusing is the safe direction, so this needs no
+                        # proof that the far band IS a series member, only
+                        # that it looks like one.
+                        outward = index + step
+                        if 0 <= outward < len(bands):
+                            neighbours = bands[outward]
+                            in_label_lane = any(
+                                lanes[0][0] <= it["x0"] <= lanes[0][1] for it in neighbours
+                            )
+                            same_column_marker = any(
+                                not (lanes[0][0] <= it["x0"] <= lanes[0][1])
+                                and not (lanes[1][0] <= it["x0"] <= lanes[1][1])
+                                and it["x1"] > extra["x0"]
+                                and extra["x1"] > it["x0"]
+                                for it in neighbours
+                                for extra in extras
+                            )
+                            if in_label_lane and same_column_marker:
+                                break
+                        beside = _beside_heading_lines(extras, pair[0], bands, index)
+                        if beside is None:
+                            break
+                        # One run, one anchor. Both boundaries of the same run
+                        # can carry a heading; honouring the second would ask
+                        # the run's rows to be emitted in two places at once.
+                        if run_id in run_anchor:
+                            break
+                        # GH-709 round 6: the unit is emitted at the LAST
+                        # extra's own place in block order, which moves the
+                        # run's rows there too. Whatever that move steps over
+                        # must end up on the side of the unit its position on
+                        # the PAGE puts it -- above the unit if it now prints
+                        # before, below if it now prints after. A crossed line
+                        # belonging to another run drags that whole run with
+                        # it, so its run's extent is what is measured. When the
+                        # move cannot satisfy that, the adoption abstains
+                        # entirely rather than emit the pair or the rows at a
+                        # second anchor.
+                        heading_anchor = max(beside, key=lambda it: (it["bi"], it["li"]))
+                        unit_lines = [
+                            *(it for band in bands[start : end + 1] for it in band),
+                            *candidates,
+                        ]
+                        run_first = min(
+                            block_position[(it["bi"], it["li"])]
+                            for band in bands[start : end + 1]
+                            for it in band
+                        )
+                        if not _relocation_keeps_reading_order(
+                            block_position[(heading_anchor["bi"], heading_anchor["li"])],
+                            run_first,
+                            {(it["bi"], it["li"]) for it in unit_lines},
+                            min(it["y0"] for it in unit_lines),
+                            max(it["y1"] for it in unit_lines),
+                            all_lines,
+                            consumed_run,
+                            run_span,
+                        ):
+                            break
                     for it in pair:
                         claimed[(it["bi"], it["li"])] = run_id
-                        members.append(
-                            {
-                                "y0": it["y0"],
-                                "y1": it["y1"],
-                                "x0": it["x0"],
-                                "text": it["text"],
-                            }
+                    if beside is None:
+                        for it in pair:
+                            members.append(
+                                {
+                                    "y0": it["y0"],
+                                    "y1": it["y1"],
+                                    "x0": it["x0"],
+                                    "text": it["text"],
+                                }
+                            )
+                    else:
+                        # The extra never moves relative to its own block, so a
+                        # multi-line heading stays whole: the lines above the
+                        # extra are its block's, above it, and are never
+                        # touched. The pair and the run's rows come to IT.
+                        run_anchor[run_id] = (
+                            (heading_anchor["bi"], heading_anchor["li"]),
+                            [it["text"] for it in sorted(pair, key=lambda it: it["x0"])],
+                            step,
                         )
+                        for it in pair:
+                            relocated.add((it["bi"], it["li"]))
                     # The adopted band becomes the new boundary, so the next
                     # step is measured from IT -- but the evidence each band
                     # must produce is unchanged and is still measured against
                     # the ORIGINAL run: its lanes, its row pitch, its label
                     # vocabulary. Nothing accumulates; a band that cannot
                     # stand on its own stops the walk.
-                    if not pair_only:
+                    if extras:
                         break
                     boundary_center = center
                     index += step
@@ -1303,22 +1566,48 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     rendered.append(item["text"])
         group_text[run_id] = rendered
 
-    line_group: dict[tuple[int, int], int] = dict(claimed)
+    line_group: dict[tuple[int, int], int] = {
+        key: run_id for key, run_id in claimed.items() if key not in relocated
+    }
     for run_id, (start, end, _merged) in enumerate(runs):
         for band in bands[start : end + 1]:
             for it in band:
                 line_group[(it["bi"], it["li"])] = run_id
 
+    # An anchored run is emitted ONCE, at its boundary heading's key, as one
+    # contiguous unit in vertical order: heading, pair, rows when the boundary
+    # band is above the run; rows, heading, pair when it is below. Within the
+    # band the heading is always left of the label, so heading-then-pair is the
+    # band's own reading order either way.
+    anchored_at: dict[tuple[int, int], tuple[int, list[str], int]] = {
+        key: (run_id, pair_text, side) for run_id, (key, pair_text, side) in run_anchor.items()
+    }
+
     out_lines: list[str] = []
     emitted: set[int] = set()
     for it in all_lines:
-        run_id = line_group.get((it["bi"], it["li"]))
+        key = (it["bi"], it["li"])
+        if key in relocated:
+            continue
+        unit = anchored_at.get(key)
+        if unit is not None:
+            unit_run, pair_text, side = unit
+            emitted.add(unit_run)
+            if side > 0:
+                out_lines.extend(group_text[unit_run])
+            out_lines.append(it["text"])
+            out_lines.extend(pair_text)
+            if side < 0:
+                out_lines.extend(group_text[unit_run])
+            continue
+        run_id = line_group.get(key)
         if run_id is None:
             out_lines.append(it["text"])
             continue
-        if run_id not in emitted:
-            emitted.add(run_id)
-            out_lines.extend(group_text[run_id])
+        if run_id in run_anchor or run_id in emitted:
+            continue
+        emitted.add(run_id)
+        out_lines.extend(group_text[run_id])
     return "\n".join(out_lines).strip()
 
 
