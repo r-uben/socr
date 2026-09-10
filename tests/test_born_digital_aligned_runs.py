@@ -740,40 +740,54 @@ def test_1977_11_15_present_row_value_immediately_follows_its_own_label():
 
 
 @pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
+def test_1990_11_13_gillum_row_is_adopted_from_the_band_next_to_the_run():
+    """GH-592 round 6: the sub-list row ADJACENT to the run is recovered.
+
+    "Gillum, Deputy Assistant Secretary" is the value of the band immediately
+    above the second accepted run. It is longer than every name that run
+    accepted, which is why the per-row narrow-label check compares this row's
+    own two widths rather than the run's. It is adopted because it also clears
+    the run's own row pitch, is the sole candidate in each lane, and its label
+    "Mr." is a label the run already observed.
+    """
+    doc = fitz.open(str(_FED_1990_11_13_MINUTES))
+    out = BornDigitalDetector().extract_structured(doc[0])
+    lines = out.splitlines()
+
+    value_idx = next(i for i, line in enumerate(lines) if "Gillum" in line)
+    assert lines[value_idx - 1].strip() == "Mr.", lines[value_idx - 2 : value_idx + 1]
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "GH-592 round 5: KNOWN LOSS, deliberately surfaced rather than removed. "
-        "Rounds 2-4 kept these three rows beside their labels, but only by "
-        "adopting them on lane membership plus band adjacency -- which also "
-        "adopted unrelated lane-aligned paragraphs and destroyed their reading "
-        "order (Astra P1 on df45222). Round 5 admits a declined band only if the "
-        "run's OWN guards accept it as another row of that run, and they do not: "
-        "adding 'Gillum, Deputy Assistant Secretary' takes the value column's "
-        "fill share from 0.50 to 0.60 against MEASURE_FILL_SHARE_MAX = 0.5, i.e. "
-        "the wrapped-body-prose discriminator misfires on this sub-list -- the "
-        "same misfire already recorded as an accepted residual in the round-2 "
-        "log, and the same reason the greedy search itself declines the 7-row "
-        "window. The rows revert to block order: no token is lost, but each bare "
-        "'Mr.' is separated from its name by the merged run. Fixing this needs "
-        "the fill-share guard revisited, not a looser adoption rule."
+        "GH-592 round 6: KNOWN, BOUNDED LOSS, deliberately surfaced rather than "
+        "removed. The 'Alternate Members' sub-list is three consecutive declined "
+        "bands (Kohn, Bernard, Gillum). Adoption is immediate-only -- exactly the "
+        "one band next to each run boundary, never a walk -- because an outward "
+        "walk is what let unrelated lane-aligned paragraphs be interleaved (Astra "
+        "P1 on df45222). Gillum, the adjacent band, IS now recovered (pinned "
+        "separately above); Kohn and Bernard are two and three bands out and keep "
+        "block order. No token is lost, but their bare 'Mr.' is separated from "
+        "the name. Recovering them needs those bands established as a separately "
+        "verified CONTINUATION with their own role evidence -- not a looser or "
+        "recursive adoption rule."
     ),
 )
 def test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels():
-    """GH-592: Kohn/Bernard/Gillum should sit beside their own 'Mr.'.
+    """GH-592: Kohn/Bernard should sit beside their own 'Mr.' too.
 
-    Three declined rows in the "Alternate Members" sub-list (the
-    ``MEASURE_FILL_SHARE_MAX`` residual documented in the decision log). This
-    asserts the CORRECT output, and is marked ``xfail(strict=True)`` so that
-    the day the fill-share guard stops misfiring here, this test fails loudly
-    and gets un-marked rather than quietly staying red.
+    Asserts the CORRECT output for the whole sub-list, and is marked
+    ``xfail(strict=True)`` so the day a verified continuation rule lands, this
+    fails loudly and gets un-marked rather than quietly staying red.
     """
     doc = fitz.open(str(_FED_1990_11_13_MINUTES))
     page = doc[0]
     out = BornDigitalDetector().extract_structured(page)
     lines = out.splitlines()
 
-    for surname in ("Kohn", "Bernard", "Gillum"):
+    for surname in ("Kohn", "Bernard"):
         value_idx = next(i for i, line in enumerate(lines) if surname in line)
         label_idx = value_idx - 1
         assert lines[label_idx].strip() == "Mr.", (

@@ -762,6 +762,81 @@ def _run_row_pitch(bands: list[list[dict]], start: int, end: int) -> float | Non
     return max(b - a for a, b in zip(centers, centers[1:]))
 
 
+def _normalized_label(text: str) -> str:
+    """A label's text with runs of whitespace collapsed, for role comparison."""
+    return " ".join(text.split())
+
+
+def _run_label_vocabulary(items: list[dict]) -> frozenset[str] | None:
+    """The set of whole LABEL texts the accepted run actually observed.
+
+    Derived from the run's own left column -- never a hardcoded list of
+    honorifics. It is the evidence that a declined line plays the same ROLE
+    as the run's labels, which geometry alone cannot establish: an
+    independent two-column sentence pair can occupy the run's lanes with the
+    run's spacing and still be unrelated prose (GH-592 Astra design note).
+    """
+    split = _split_two_columns(items)
+    if split is None:
+        return None
+    left, _right = split
+    if not left:
+        return None
+    return frozenset(_normalized_label(it["text"]) for it in left)
+
+
+def _adoptable_pair(
+    band: list[dict],
+    lanes: tuple[tuple[float, float], ...],
+    vocabulary: frozenset[str],
+    word_space_width: float,
+    gap_max_word_spaces: float,
+) -> list[dict] | None:
+    """The one label/value pair in ``band`` that belongs to a run, or None.
+
+    Applied to the band IMMEDIATELY adjacent to a run boundary, and only
+    there. Requires, in order:
+
+    * exactly one candidate line starting in each of the run's two lanes --
+      "unique pair"; two candidates in a lane is ambiguity, not evidence.
+      Every other line in the band (1977-11-15's ``PRESENT:``) is left where
+      block order puts it;
+    * the pair is baseline-aligned (their vertical extents overlap) and
+      separated by the same horizontal gap ``_try_aligned_run`` requires;
+    * the label is narrower than its value by the same ``LABEL_COLUMN_WIDTH_SHARE``
+      ratio the run's rows satisfy. Applied to this row's own two widths, so a
+      value LONGER than any name the run accepted (1990-11-13's "Gillum,
+      Deputy Assistant Secretary") is not evidence against the pairing;
+    * the label's WHOLE text is one the run already observed.
+
+    ``MEASURE_FILL_SHARE_MAX`` is deliberately not applied: it is a
+    distribution statistic over a whole right block (what share of its lines
+    run to the block's own maximum width), and a single line's fill share is
+    always 1.0. Using it per row rejects every candidate on arithmetic rather
+    than evidence.
+    """
+    lane_left, lane_right = lanes
+    in_left = [it for it in band if lane_left[0] <= it["x0"] <= lane_left[1]]
+    in_right = [it for it in band if lane_right[0] <= it["x0"] <= lane_right[1]]
+    if len(in_left) != 1 or len(in_right) != 1:
+        return None
+    label, value = in_left[0], in_right[0]
+    if label is value:
+        return None
+    if label["y1"] <= value["y0"] or value["y1"] <= label["y0"]:
+        return None
+    gap = value["x0"] - label["x1"]
+    if gap <= 0 or gap > gap_max_word_spaces * word_space_width:
+        return None
+    label_width = label["x1"] - label["x0"]
+    value_width = value["x1"] - value["x0"]
+    if value_width <= 0 or label_width > LABEL_COLUMN_WIDTH_SHARE * value_width:
+        return None
+    if _normalized_label(label["text"]) not in vocabulary:
+        return None
+    return [label, value]
+
+
 def _try_aligned_run(
     items: list[dict],
     word_space_width: float,
@@ -1074,31 +1149,48 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     # them (Astra re-review of PR #704). Tokens survive; reading order does
     # not -- the loss GH-592 exists to prevent.
     #
-    # The evidence that IS available per line is geometry, and it is already
-    # computed. A declined line belongs with a run when both hold:
+    # GH-592 round 6 (Astra design note): geometry alone is NOT sufficient
+    # evidence to reposition a declined line, and neither is an outward walk.
+    # Lane membership plus band reachability sustains itself down a page of
+    # ordinary prose whose margins happen to match the roster's; re-checking
+    # the run's own guards on the growing set repairs that case but rejects a
+    # genuine roster row on a whole-block statistic (fill share) that has no
+    # meaning for one row. Adoption is therefore BOUNDED and ROLE-CHECKED:
     #
-    #   * its line START falls inside one of that run's own two column LANES
-    #     (``_run_column_lanes`` -- the observed spread of the label column's
-    #     and the value column's start positions, measured from the run's own
-    #     accepted rows); and
-    #   * its baseline band is reachable from the run's band sequence by
-    #     walking outward one band at a time WITHOUT crossing a band that
-    #     contributes no such line. An intervening ordinary paragraph row
-    #     stops the walk.
+    #   * only the band IMMEDIATELY adjacent to a run boundary is considered,
+    #     on each side, once. There is no recursive growth, so nothing can
+    #     travel down a page one band at a time;
+    #   * that band must be no further from the boundary row than the run's
+    #     own widest inter-row step (``_run_row_pitch``) -- its own
+    #     measurement, not a tolerance;
+    #   * it must hold exactly ONE candidate in each of the run's two lanes,
+    #     baseline-aligned to each other and satisfying the same horizontal-gap
+    #     and narrow-label checks the run's own rows satisfy. The pair moves
+    #     together; every other line in that band stays where block order puts
+    #     it (``_adoptable_pair``);
+    #   * the candidate LABEL's whole text must be one the accepted run has
+    #     already observed in its own label column (``_run_label_vocabulary``,
+    #     derived from the run -- honorifics are never hardcoded). This is the
+    #     role evidence geometry cannot supply: two independent sentences in
+    #     adjacent narrow columns can match the lanes, the pitch and the gap,
+    #     and still be unrelated prose.
     #
-    # Neither test introduces a tolerance: lane membership is the run's own
-    # measurement and band membership is ``_line_baseline_bands``, the same
-    # row-grouping the search itself walks. Both fail closed -- a line that
-    # does not qualify is emitted exactly where block order puts it.
+    # Every check fails closed: a line that does not qualify is emitted exactly
+    # where the caller's block order puts it.
     #
     # This is what keeps 1977-11-15 p1 correct. The declined 3-column
-    # "PRESENT:" / "Mr." / "Burns, Chairman" header row sits one band above
-    # the run: "Mr." (x0 214.0) starts in the label lane and "Burns, Chairman"
-    # (x0 243.0) in the value lane, so both travel with the run, while
-    # "PRESENT:" (x0 142.0) starts in neither lane and stays put -- which is
-    # exactly where it belongs, immediately before them. A wide-gutter prose
-    # column at x0 330.0 matches no lane and never moves, however its block
-    # happens to be segmented.
+    # "PRESENT:" / "Mr." / "Burns, Chairman" header row is the band immediately
+    # above the run: "Mr." (x0 214.0) is the sole candidate in the label lane
+    # and its text is a label the run observed, "Burns, Chairman" (x0 243.0) is
+    # the sole candidate in the value lane, so the pair travels with the run,
+    # while "PRESENT:" (x0 142.0) starts in neither lane and stays put --
+    # exactly where it belongs, immediately before them.
+    #
+    # It also bounds the loss. A sub-list of SEVERAL consecutive declined rows
+    # (1990-11-13 p1's "Alternate Members" Kohn/Bernard/Gillum) is not
+    # recovered by immediate-only adoption: only the row adjacent to the run
+    # qualifies, and the rest keep block order. That is a tracked residual, not
+    # a reason to reopen the walk.
     consumed: set[tuple[int, int]] = set()
     for start, end, _merged in runs:
         for band in bands[start : end + 1]:
@@ -1125,47 +1217,37 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
         run_items = [it for band in bands[start : end + 1] for it in band]
         lanes = _run_column_lanes(run_items)
         pitch = _run_row_pitch(bands, start, end)
-        adopted: list[dict] = []
-        if lanes is not None and pitch is not None:
-            for first, step, edge in ((start - 1, -1, start), (end + 1, 1, end)):
-                index = first
-                edge_center = _band_center(bands[edge])
-                while 0 <= index < len(bands):
-                    picked = [
-                        it
-                        for it in bands[index]
-                        if (it["bi"], it["li"]) not in consumed
-                        and (it["bi"], it["li"]) not in claimed
-                        and _starts_in_a_lane(it["x0"], lanes)
-                    ]
-                    if not picked:
-                        break
-                    center = _band_center(bands[index])
-                    if abs(center - edge_center) > pitch:
-                        break
-                    if (
-                        _try_aligned_run(
-                            run_items + adopted + picked,
-                            word_space_width,
-                            ALIGNED_RUN_GAP_MAX_WORD_SPACES,
-                            word_width,
-                        )
-                        is None
-                    ):
-                        break
-                    for it in picked:
-                        claimed[(it["bi"], it["li"])] = run_id
-                        members.append(
-                            {
-                                "y0": it["y0"],
-                                "y1": it["y1"],
-                                "x0": it["x0"],
-                                "text": it["text"],
-                            }
-                        )
-                    adopted.extend(picked)
-                    edge_center = center
-                    index += step
+        vocabulary = _run_label_vocabulary(run_items)
+        if lanes is not None and pitch is not None and vocabulary:
+            for index, edge in ((start - 1, start), (end + 1, end)):
+                if not 0 <= index < len(bands):
+                    continue
+                if abs(_band_center(bands[index]) - _band_center(bands[edge])) > pitch:
+                    continue
+                candidates = [
+                    it
+                    for it in bands[index]
+                    if (it["bi"], it["li"]) not in consumed and (it["bi"], it["li"]) not in claimed
+                ]
+                pair = _adoptable_pair(
+                    candidates,
+                    lanes,
+                    vocabulary,
+                    word_space_width,
+                    ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+                )
+                if pair is None:
+                    continue
+                for it in pair:
+                    claimed[(it["bi"], it["li"])] = run_id
+                    members.append(
+                        {
+                            "y0": it["y0"],
+                            "y1": it["y1"],
+                            "x0": it["x0"],
+                            "text": it["text"],
+                        }
+                    )
         group_members[run_id] = members
 
     # Within a group, order by true visual row and then by x. A plain

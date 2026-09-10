@@ -517,3 +517,105 @@ consulted. It bites only where something the lane filter discards blocked that a
 - Groups still emit atomically at their first member in block order; the within-row sort still
   assumes left-to-right. Both unchanged and still without reproducers.
 - The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).
+
+## Round 6 — bounded, role-checked adoption (Astra design note)
+
+Astra was asked what evidence it would accept and answered with a design, not another
+reproducer (`astra-design-592.md`). It supersedes round 5's rule, and its central point is
+one round 5 got wrong: **`MEASURE_FILL_SHARE_MAX` is a distribution statistic over a whole
+right block, not a per-row guard.** A single line's fill share is always 1.0, so re-running
+the run's own guards over `run_items + picked` rejects candidates on arithmetic rather than
+evidence — which is exactly what cost 1990-11-13 three rows in round 5.
+
+### The rule
+
+Adoption is now **bounded** and **role-checked**. For each run, on each side, exactly one
+band is considered — `bands[start - 1]` and `bands[end + 1]`, once, never a walk:
+
+1. that band is no further from the boundary row than the run's own widest inter-row step
+   (`_run_row_pitch`, unchanged from round 5);
+2. it holds **exactly one** candidate in each of the run's two lanes — a unique pair. Two
+   candidates in a lane is ambiguity, not evidence. Every other line in the band
+   (1977-11-15's `PRESENT:`) stays where block order puts it;
+3. the pair is baseline-aligned and separated by the same horizontal gap `_try_aligned_run`
+   requires, and the label is narrower than its value by the same `LABEL_COLUMN_WIDTH_SHARE`
+   ratio — applied to **this row's own two widths**, so a value longer than any name the run
+   accepted (Gillum's title) is not evidence against the pairing;
+4. the candidate label's **whole text** is one the accepted run already observed in its own
+   label column (`_run_label_vocabulary`, derived from the run — honorifics are never
+   hardcoded).
+
+New helpers: `_normalized_label`, `_run_label_vocabulary`, `_adoptable_pair`. No new
+constant. Every check fails closed.
+
+Condition 4 is the part geometry cannot supply. Lanes, pitch and gap can all be matched
+exactly by an independent two-column sentence pair; the label's role cannot.
+
+### Measurement
+
+Fed sweep, 6 minutes documents × first 4 pages, against round 5 (`086e86b`): **1 of 24 pages
+differs, and the difference is the fix.**
+
+```
+== 1990-11-13:0
+    Mr.
++   Gillum, Deputy Assistant Secretary
+    Mr. Mattingly, General Counsel
+...
+    Bernard, Assistant Secretary
+-   Gillum, Deputy Assistant Secretary
+```
+
+A second 24-page sweep over the same six meetings' first-matching document (beige books,
+agendas) showed 0 differing pages.
+
+### 1990-11-13 re-pinned to what is actually correct
+
+Astra predicted this and it holds: the `Alternate Members` sub-list is **three consecutive
+declined bands**, and immediate-only adoption reaches exactly one of them.
+
+- **Gillum is recovered.** Pinned as a passing test,
+  `test_1990_11_13_gillum_row_is_adopted_from_the_band_next_to_the_run`.
+- **Kohn and Bernard are not.** They are two and three bands out; the outer band is measured
+  at more than the run's own row pitch from the boundary row, so no bound short of a
+  recursive walk reaches them. The strict xfail is narrowed to those two, and its reason now
+  names the real cause (immediate-only adoption), not the fill-share misfire round 5 blamed.
+
+Recovering them needs those bands established as a separately verified **continuation** with
+their own role evidence. That is a follow-up, not a looser rule here.
+
+### Witnesses
+
+Each new condition was checked by deleting it from a copy of the source and re-running:
+
+- deleting the **label-vocabulary** check fails
+  `test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused`;
+- deleting the **pitch** bound fails
+  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused` (unchanged from
+  round 5).
+
+**Immediate-only** is witnessed differently, because deleting it means reinstating a walk. The
+fixture in `test_only_the_band_adjacent_to_the_run_is_adopted` uses a double-spaced roster, so
+its measured pitch (~29.5pt) puts *both* leading bands inside the bound (~14.2pt and ~29.0pt).
+The test asserts, before looking at any output, that both bands satisfy `_adoptable_pair` and
+both clear the pitch. Only the nearer one is adopted. Nothing but the adjacency rule refuses
+the other.
+
+The round-5 test that pinned the fill-share refusal on the real page is replaced by
+`test_1990_measures_which_alternate_member_bands_adoption_can_reach`, which measures the
+sub-list's actual geometry: the adjacent band satisfies every condition, the next band out is
+beyond the pitch. The residual is a property of that page's geometry, not a threshold.
+
+### Residuals
+
+- **1990-11-13's Kohn and Bernard rows are still lost to block order.** Tracked as a narrowed
+  strict xfail. Needs a verified-continuation rule; `MEASURE_FILL_SHARE_MAX` is no longer
+  implicated, since it is no longer consulted per row.
+- Adoption cannot distinguish an independent two-column sentence pair that both occupies the
+  run's lanes and opens with a word the run used as a label. Astra states this explicitly and
+  accepts it; no reproducer exists.
+- A degenerate lane admits only one exact x, so start jitter fails closed. Unmeasured against a
+  corpus. Unchanged.
+- Groups still emit atomically at their first member in block order; the within-row sort still
+  assumes left-to-right. Both unchanged and still without reproducers.
+- The round-2 table's 1982-11-16 entry remains wrong (1 bare label line, not 0).

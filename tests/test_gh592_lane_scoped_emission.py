@@ -263,21 +263,20 @@ def test_lane_aligned_paragraphs_are_not_interleaved(monkeypatch):
 
 
 @pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="fed-01 corpus not present")
-def test_1990_gillum_band_clears_the_pitch_bound_but_the_runs_guards_refuse_it():
-    """The measured case that isolates the second condition from the first.
+def test_1990_measures_which_alternate_member_bands_adoption_can_reach():
+    """The measured real-page basis for the round-6 rule and its residual.
 
-    On 1990-11-13 p1 the band holding ``Mr.`` / ``Gillum, Deputy Assistant
-    Secretary`` sits one row-pitch above the second run and starts in both of
-    its lanes, so it passes the pitch bound. It is refused because appending it
-    takes the value column's fill share from 0.50 to 0.60 against
-    ``MEASURE_FILL_SHARE_MAX`` -- the run's own wrapped-body-prose
-    discriminator. Pitch alone would have adopted it.
+    On 1990-11-13 p1 the ``Alternate Members`` sub-list is three consecutive
+    declined bands above the second run. This pins, from the page itself:
 
-    This is the trade-off recorded on
-    ``test_1990_11_13_alternate_secretary_rows_stay_adjacent_to_their_labels``:
-    the guard misfires on this genuine sub-list, so refusing the band costs
-    that page three correctly-paired rows. Pinned here so the cost is measured
-    and visible, not inferred.
+    * the band immediately above the run (Gillum) satisfies every adoption
+      condition -- inside the pitch, one candidate per lane, and its label is
+      one the run observed; and
+    * the next band out (Bernard) is beyond the run's own row pitch from the
+      boundary row, so no bound short of a recursive walk reaches it.
+
+    The residual is therefore a property of the sub-list's geometry, not a
+    threshold that could be nudged.
     """
     page = fitz.open(str(_FED_1990_11_13_MINUTES))[0]
     words = page.get_text("words")
@@ -312,22 +311,170 @@ def test_1990_gillum_band_clears_the_pitch_bound_but_the_runs_guards_refuse_it()
     run_items = [it for band in bands[start : end + 1] for it in band]
     lanes = bd._run_column_lanes(run_items)
     pitch = bd._run_row_pitch(bands, start, end)
+    vocabulary = bd._run_label_vocabulary(run_items)
 
-    candidate = bands[start - 1]
-    picked = [it for it in candidate if bd._starts_in_a_lane(it["x0"], lanes)]
-    step = abs(bd._band_center(candidate) - bd._band_center(bands[start]))
-
-    assert any("Gillum" in it["text"] for it in picked), [it["text"] for it in candidate]
-    assert step <= pitch, "the band is one row-pitch away; the pitch bound does NOT refuse it"
+    adjacent = bands[start - 1]
+    assert any("Gillum" in it["text"] for it in adjacent), [it["text"] for it in adjacent]
+    assert abs(bd._band_center(adjacent) - bd._band_center(bands[start])) <= pitch
     assert (
-        bd._try_aligned_run(
-            run_items + picked,
+        bd._adoptable_pair(
+            adjacent,
+            lanes,
+            vocabulary,
             word_space_width,
             bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
-            word_width,
+        )
+        is not None
+    ), "the adjacent band must satisfy every adoption condition"
+
+    outer = bands[start - 2]
+    assert any("Bernard" in it["text"] for it in outer), [it["text"] for it in outer]
+    assert abs(bd._band_center(outer) - bd._band_center(bands[start])) > pitch, (
+        "the next band out must be beyond the run's own row pitch"
+    )
+
+
+def _roster_with_two_leading_pairs(label: str) -> fitz.Page:
+    """A 4-row roster with TWO declined label/value bands directly above it.
+
+    The roster is double-spaced, so its measured row pitch (~29.5pt) is wide
+    enough that BOTH leading bands fall inside it -- the outer one at ~29.0pt.
+    Each leading row also carries an out-of-lane marker in the left margin,
+    which is what stops ``_find_aligned_runs`` from simply absorbing the two
+    rows into the run (the marker column breaks the left/right bijection).
+
+    Every adoption condition except the two under test is therefore satisfied
+    by BOTH leading bands, which is what makes the tests below non-vacuous.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    right = (
+        90 + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(60, 211, 80, 251), "1\n2", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 211, 130, 251), f"{label}\n{label}", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(90, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    return page
+
+
+def _bands_and_run(page: fitz.Page):
+    """The page's baseline bands and its single accepted run's parameters."""
+    words = page.get_text("words")
+    word_space_width = bd._median_word_space_width(words)
+    word_width = bd._median_word_width(words) or 0.0
+    extents = bd._line_word_extents(words)
+    flat = []
+    blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type", 0) == 0]
+    for bi, block in enumerate(blocks):
+        for li, line in enumerate(block.get("lines", []) or []):
+            bbox = line.get("bbox")
+            extent = extents.get((bi, li))
+            if not bbox or extent is None:
+                continue
+            flat.append(
+                {
+                    "bi": bi,
+                    "li": li,
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": extent[0],
+                    "x1": extent[1],
+                    "text": "".join(s.get("text", "") for s in line.get("spans", []) or []),
+                }
+            )
+    flat.sort(key=lambda it: it["y0"])
+    bands = bd._line_baseline_bands(flat)
+    runs = bd._find_aligned_runs(bands, word_space_width, word_width)
+    return bands, runs, word_space_width
+
+
+def test_only_the_band_adjacent_to_the_run_is_adopted():
+    """The witness for immediate-only adoption, isolated from the pitch bound.
+
+    Both leading bands are inside the run's own row pitch and both would pass
+    ``_adoptable_pair`` on their own -- asserted here, so the test cannot pass
+    for the wrong reason. Only the nearer one is adopted; the outer one keeps
+    block order. Nothing but the immediate-only rule refuses it, and without
+    that rule an outward walk would take it and then keep going.
+    """
+    page = _roster_with_two_leading_pairs("Mr.")
+    bands, runs, word_space_width = _bands_and_run(page)
+    start, end, _merged = runs[0]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    pitch = bd._run_row_pitch(bands, start, end)
+    vocabulary = bd._run_label_vocabulary(run_items)
+
+    for offset in (1, 2):
+        band = bands[start - offset]
+        distance = abs(bd._band_center(band) - bd._band_center(bands[start]))
+        assert distance <= pitch, (offset, distance, pitch)
+        assert (
+            bd._adoptable_pair(
+                band,
+                lanes,
+                vocabulary,
+                word_space_width,
+                bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+            )
+            is not None
+        ), f"band {offset} out must satisfy every condition except adjacency"
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    gillum = lines.index("Gillum")
+    assert lines[gillum - 1] == "Mr.", lines
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee"), (
+        "the outer band must keep block order; the walk must not continue"
+    )
+
+
+def test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused():
+    """The witness for the label-role condition, isolated from the geometry.
+
+    Byte-identical fixture to the test above apart from the leading rows'
+    label TEXT, which the run never observed. That difference alone must
+    refuse the adjacent band, leaving both leading rows in block order. This
+    is the evidence geometry cannot supply: an independent two-column sentence
+    pair can match the lanes, the pitch and the gap exactly.
+    """
+    page = _roster_with_two_leading_pairs("Dr.")
+    bands, runs, word_space_width = _bands_and_run(page)
+    start, end, _merged = runs[0]
+    run_items = [it for band in bands[start : end + 1] for it in band]
+    lanes = bd._run_column_lanes(run_items)
+    vocabulary = bd._run_label_vocabulary(run_items)
+    band = bands[start - 1]
+    assert all(bd._starts_in_a_lane(it["x0"], lanes) for it in band if it["text"] != "2"), band
+    assert (
+        bd._adoptable_pair(
+            band,
+            lanes,
+            vocabulary,
+            word_space_width,
+            bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
         )
         is None
-    ), "the run's own guards must be what refuses this band"
+    )
+
+    out = bd._assemble_prose_with_aligned_runs(page)
+    assert out is not None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[lines.index("Gillum") - 1] == "Bernard", (
+        "a label the run never observed is not evidence of the same role"
+    )
 
 
 def test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused():
