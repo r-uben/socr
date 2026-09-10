@@ -358,15 +358,15 @@ def test_a_wrapped_headings_first_line_is_not_torn_off_its_continuation(style):
     assert lines.index(lower) < lines.index("Burns")
 
 
-def test_a_centered_headings_first_line_is_refused_whatever_the_run_pitch():
-    """Astra's focused probe, on the helper itself.
+def test_a_centered_headings_first_line_is_refused_on_the_helper_itself():
+    """Astra's focused probe, on the helper rather than on emission.
 
     The two centred lines are ``ALTERNATE`` (x0 19.55) and ``MEMBERS``
-    (x0 23.72) and PyMuPDF puts them in two separate blocks, so neither a
+    (x0 23.72), and PyMuPDF puts them in two separate blocks, so neither a
     shared left edge nor shared block membership sees them as one heading.
-    Their x-extents intersect, and both lie wholly left of the label lane, so
-    the refusal holds even with the run pitch set to zero -- it does not depend
-    on how far apart the two bands are.
+    Their x-extents intersect and ``MEMBERS`` is printed BELOW, which is the
+    direction a heading is read in, so the refusal needs no other evidence and
+    no measurement of how far apart the two bands are.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -390,18 +390,21 @@ def test_a_centered_headings_first_line_is_refused_whatever_the_run_pitch():
     assert [it["text"] for band in bands for it in band] == ["ALTERNATE", "MEMBERS"]
     upper = bands[0][0]
     label = dict(bi=9, li=0, x0=90, x1=105, y0=upper["y0"], y1=upper["y1"], text="Mr.")
+    word_space = bd._median_word_space_width(page.get_text("words"))
 
-    assert bd._beside_heading_lines([upper], label, bands, 0, 0.0) is None
+    assert bd._beside_heading_lines([upper], label, bands, 0, word_space) is None
 
 
-def _wide_continuation_page() -> fitz.Page:
-    """A heading whose SECOND line runs past the label lane.
+def _heading_with_continuation_page(wide: bool, leading: float) -> fitz.Page:
+    """Astra's round-3 reproducer geometry.
 
-    ``STAFF AND OTHER`` sits wholly left of the label lane; its continuation
-    ``ATTENDEES AT THE MEETING`` wraps across that lane, at the roster's own
-    leading. The continuation is therefore not itself "left of the pair", and
-    only its proximity -- one band away, within the run's row pitch -- marks it
-    as the same material.
+    ``STAFF AND OTHER`` is printed beside the boundary pair and continued
+    directly below by ``ATTENDEES...``, in the immediately adjacent band. Two
+    dimensions vary and nothing else: whether the continuation crosses the
+    label lane at x=240, and whether it is set at the roster's own pitch or at
+    1.5 times it. Round 2 dismissed the wide continuation at 1.5 pitch --
+    neither wholly left of the label nor within the pitch -- and split the
+    heading around its first member.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -424,30 +427,220 @@ def _wide_continuation_page() -> fitz.Page:
     pitch = ys[-1] - ys[-2]
     first = ys[-1] + pitch
     page.insert_text((40, first + 10.75), "STAFF AND OTHER", fontsize=10)
-    page.insert_text(
-        (40, first + 10.75 + pitch), "ATTENDEES AT THE MEETING OF THE COMMITTEE", fontsize=10
-    )
-    page.insert_textbox(fitz.Rect(x, first, 280, first + 80), "Mr.\nMr.", fontsize=10)
+    continuation = "ATTENDEES AT THE MEETING OF THE COMMITTEE" if wide else "ATTENDEES"
+    page.insert_text((40, first + 10.75 + leading * pitch), continuation, fontsize=10)
+    page.insert_textbox(fitz.Rect(x, first, 280, first + 100), "Mr.\n\n\nMr.", fontsize=10)
     page.insert_textbox(
-        fitz.Rect(right, first, 560, first + 80),
-        "Burns\nGillum, Deputy Assistant Secretary",
+        fitz.Rect(right, first, 560, first + 100),
+        "Burns\n\n\nGillum, Deputy Assistant Secretary",
         fontsize=10,
     )
     return page
 
 
-def test_a_continuation_that_crosses_the_label_lane_still_refuses_the_adoption():
-    """The other half of the intersection test, and its only witness.
+@pytest.mark.parametrize("leading", [1.0, 1.5])
+@pytest.mark.parametrize("wide", [False, True])
+def test_a_continuation_printed_below_the_heading_always_refuses_the_adoption(wide, leading):
+    """Astra's four paired cases: below is below, whatever the shape.
 
-    A neighbour is dismissed only when it is BOTH outside the ground left of
-    the pair AND further away than the run's row pitch. Here the continuation
-    crosses the label lane, so the first condition alone would dismiss it and
-    the heading's first line would be torn off; its proximity is what refuses
-    the adoption.
+    A heading is read downward, so a line intersecting it from the band below
+    is always a possible continuation and there is no evidence that dismisses
+    one. Neither of the two facts round 2 dismissed on -- that the line crosses
+    the label lane, that it is set at 1.5 times the roster's pitch -- says
+    anything about whose line it is.
     """
-    lines = _emitted(_wide_continuation_page())
+    page = _heading_with_continuation_page(wide, leading)
+    bands, _runs, _ws = _bands_and_run(page)
+    heading = next(
+        i for i, b in enumerate(bands) if any(it["text"] == "STAFF AND OTHER" for it in b)
+    )
+    below = next(
+        i for i, b in enumerate(bands) if any(it["text"].startswith("ATTENDEES") for it in b)
+    )
+    assert below == heading + 1, "the fixture must put the continuation in the adjacent band"
+    continuation = "ATTENDEES AT THE MEETING OF THE COMMITTEE" if wide else "ATTENDEES"
 
-    assert (
-        lines[lines.index("STAFF AND OTHER") + 1] == "ATTENDEES AT THE MEETING OF THE COMMITTEE"
-    ), lines
-    assert lines.index("ATTENDEES AT THE MEETING OF THE COMMITTEE") < lines.index("Burns")
+    lines = _emitted(page)
+
+    assert lines[lines.index("STAFF AND OTHER") + 1] == continuation, lines
+    assert lines.index(continuation) < lines.index("Burns")
+
+
+def test_a_short_paragraph_line_above_the_heading_no_longer_refuses_the_adoption():
+    """The recall round 3 recovers, and the shape 1977-11-15 would have had.
+
+    Round 2 dismissed the line above the heading only if it ran PAST the label
+    lane, so a paragraph whose last line happens to be short vetoed the whole
+    adoption. Astra measured all six Fed minutes: the preceding line ends at
+    x1 235-481 against lane starts to its left, so no real page exercises it
+    either way, and the veto was a recall loss with nothing behind it.
+
+    What is evidence is that the line belongs to a left-aligned stack the
+    heading is not part of: here two prose lines at x0 72 above a heading at
+    x0 30. The heading is adopted with its pair.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    page.insert_text((72, 199), "It.", fontsize=10)
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(30, 211, 88, 251), "PRESENT:", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 211, 130, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    short = next(w for w in page.get_text("words") if w[4] == "It.")
+    heading = next(w for w in page.get_text("words") if w[4] == "PRESENT:")
+    assert short[2] < 90, "the paragraph's last line must end before the label lane"
+    assert short[0] < heading[2] and heading[0] < short[2], (
+        "and it must still intersect the heading horizontally"
+    )
+
+    lines = _emitted(page)
+
+    assert lines[lines.index("Bernard") - 1] == "Mr."
+    assert lines.index("PRESENT:") < lines.index("Mr.")
+
+
+def _heading_above_the_pair_page(lines: list[str], centred: bool) -> fitz.Page:
+    """A multi-line heading whose LAST line is printed beside the boundary pair.
+
+    The 1977-11-15 shape -- heading and pair in one band, run below -- with the
+    heading's earlier lines stacked directly above it. ``centred`` sets them in
+    a box so that each line starts somewhere else, as a display heading does.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    if centred:
+        page.insert_textbox(fitz.Rect(20, 175, 88, 255), "\n".join(lines), fontsize=10, align=1)
+    else:
+        page.insert_text((30, 186), lines[0], fontsize=10)
+        page.insert_text((30, 199), lines[1], fontsize=10)
+        page.insert_textbox(fitz.Rect(30, 211, 88, 251), lines[2], fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 211, 130, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    return page
+
+
+def test_a_display_headings_last_line_is_not_torn_off_the_lines_above_it():
+    """The heading reads DOWNWARD into the boundary band, and must not be split.
+
+    Three centred lines, so no two of them start at the same x: ``ALTERNATE``
+    (24.55), ``MEMBERS`` (28.72), ``BOARD`` (36.22) against a 2.78pt word
+    space. The line above the boundary band intersects it, and it
+    continues no left-aligned stack of its own, so there is no evidence it is a
+    paragraph rather than this heading. The adoption abstains.
+
+    Nothing else refuses it: the last line starts 7.5pt from the one above, so
+    the shared-edge clause does not fire.
+    """
+    page = _heading_above_the_pair_page(["ALTERNATE", "MEMBERS", "BOARD"], centred=True)
+    bands, _runs, word_space = _bands_and_run(page)
+    starts = [band[0]["x0"] for band in bands[1:4]]
+    assert all(abs(a - b) > word_space for a, b in zip(starts, starts[1:])), starts
+    assert abs(starts[2] - starts[1]) > word_space, "the shared-edge clause must not fire here"
+
+    lines = _emitted(page)
+
+    assert lines[lines.index("MEMBERS") + 1] == "BOARD", lines
+    assert lines.index("BOARD") < lines.index("Bernard")
+
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    )
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
+
+
+def test_a_left_aligned_headings_last_line_is_not_torn_off_the_lines_above_it():
+    """The same, when the heading IS a left-aligned stack.
+
+    Here the line above the boundary band does continue a stack -- three lines
+    flush at x0 30 -- so the paragraph evidence is satisfied. What refuses the
+    adoption is that the extra line shares that same edge: it is a line OF that
+    stack, not a heading standing beside the pair.
+    """
+    page = _heading_above_the_pair_page(["STAFF AND", "OTHER FOLK", "PRESENT:"], centred=False)
+    bands, _runs, word_space = _bands_and_run(page)
+    starts = [band[0]["x0"] for band in bands[1:4]]
+    assert all(abs(start - 30.0) <= word_space for start in starts), starts
+
+    lines = _emitted(page)
+
+    assert lines[lines.index("OTHER FOLK") + 1] == "PRESENT:", lines
+    assert lines.index("PRESENT:") < lines.index("Bernard")
+
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    )
+    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
+
+
+def test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adoption():
+    """One line above and nothing above THAT is not evidence of a paragraph.
+
+    The page opens straight into the roster, so the line intersecting the
+    heading from above is the page's first band. It could be a paragraph's only
+    line or the heading's own first line, and nothing on the page separates
+    those, so the adoption abstains. This is the conservative half of the rule,
+    and it is why the #706 fixture that models 1977-11-15 now prints a
+    two-line opening paragraph: the real page has one.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(30, 211, 88, 251), "PRESENT:", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 211, 130, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    bands, _runs, _ws = _bands_and_run(page)
+    prose, heading = bands[0][0], bands[1][0]
+    assert heading["text"].startswith("PRESENT:")
+    assert prose["x0"] < heading["x1"] and heading["x0"] < prose["x1"], (
+        "the fixture must have the opening line intersect the heading"
+    )
+
+    lines = _emitted(page)
+
+    assert lines.index("PRESENT:") < lines.index("Bernard")
+    assert lines[lines.index("Bernard") - 1] != "Mr.", (
+        "the pair must keep block order when the line above cannot be placed"
+    )

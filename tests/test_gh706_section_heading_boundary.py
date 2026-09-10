@@ -152,10 +152,21 @@ def test_a_boundary_band_carrying_a_heading_is_still_adopted():
     """
     doc = fitz.open()
     page = doc.new_page()
+    # The opening paragraph runs to the band immediately above the heading, as
+    # it does on 1977-11-15 (four lines left-aligned at x0 107-108, ending in
+    # "1977, at 9:30 a.m."). It is TWO lines here for the same reason: GH-709
+    # dismisses a line intersecting the heading from above only when it
+    # continues a left-aligned stack the heading is not part of, and a one-line
+    # preamble is not a stack. Modelling the real page's paragraph as a single
+    # floating line made this fixture ask for an adoption the real page's
+    # geometry never asks for.
     page.insert_text(
         (72, 72),
         "Some ordinary running prose establishes the word space measurement here.",
         fontsize=10,
+    )
+    page.insert_text(
+        (72, 199), "It carries on to the line just above the roster's heading.", fontsize=10
     )
     x = 90
     right = (

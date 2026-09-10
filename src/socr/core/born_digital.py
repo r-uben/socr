@@ -837,12 +837,41 @@ def _adoptable_pair(
     return [label, value]
 
 
+def _continues_a_left_aligned_stack(
+    line: dict,
+    bands: list[list[dict]],
+    index: int,
+    word_space_width: float,
+) -> bool:
+    """Whether ``line`` (in ``bands[index]``) has another line of its own column
+    printed directly above it.
+
+    A running paragraph or a left-aligned column is a STACK: line n starts at
+    the same left edge as line n-1. One line on its own carries no such
+    evidence, and neither does a centred heading, whose lines each start
+    somewhere else.
+
+    The stack is read from the baseline bands rather than from PyMuPDF's
+    blocks, because on the page this exists for the blocks are not there.
+    1977-11-15's opening paragraph -- the four lines ending in
+    ``1977, at 9:30 a.m.`` -- is FOUR separate one-line blocks, so a
+    "does its block hold two aligned lines?" test finds nothing and would
+    refuse the very recovery it was meant to protect. The bands do hold it:
+    x0 107.00, 107.00, 108.00 in consecutive bands against that page's own
+    8.28pt word space.
+    """
+    above = index - 1
+    if above < 0:
+        return False
+    return any(abs(other["x0"] - line["x0"]) <= word_space_width for other in bands[above])
+
+
 def _beside_heading_lines(
     extras: list[dict],
     label: dict,
     bands: list[list[dict]],
     index: int,
-    pitch: float,
+    word_space_width: float,
 ) -> list[dict] | None:
     """``extras`` when every one is a standalone heading printed BESIDE the pair.
 
@@ -865,70 +894,66 @@ def _beside_heading_lines(
       is unambiguous and it overlaps neither the label nor the value;
     * it is baseline-aligned with the label (their vertical extents overlap),
       so it is printed on that row rather than merely near it;
-    * nothing printed immediately above or below it may be its own
+    * nothing printed in the immediately adjacent bands may be its own
       continuation. A heading or paragraph that carries on across a line break
       must not have its first line torn off and moved.
 
-    That last test is NOT block membership and NOT a shared left edge, and both
-    of those were tried and are wrong.
+    A continuation cannot avoid being printed over the same horizontal ground
+    as the line it continues: however it is aligned inside its column -- flush,
+    indented, centred, hanging -- its x-extent INTERSECTS. So the test is
+    horizontal intersection with the adjacent bands, across every block, with no
+    tolerance of its own. Two earlier attempts at this test were wrong and are
+    recorded so they are not tried again: shared block membership (PyMuPDF
+    splits a two-line heading into two blocks and lumps a heading in with an
+    unrelated column), and a shared left edge (a centred heading's second line
+    starts 4.17pt right of its first against a 2.78pt word space, and no wider
+    multiplier removes that -- it only moves it).
 
-    Block membership is a segmentation accident, in both directions:
-    1977-11-15's ``PRESENT:`` shares one 13-line block with the whole roster's
-    ``Mr.`` labels because that block IS the label column, while PyMuPDF splits
-    a two-line ``STAFF:`` / ``advisers`` heading into two separate blocks
-    (Astra review of 545de02).
+    The two sides are not symmetric, and this is the round-3 correction (Astra
+    review of d5fcd15):
 
-    A shared left edge is not proof either, and widening its tolerance only
-    moves the boundary rather than removing it: a CENTRED two-line heading
-    (``ALTERNATE`` over ``MEMBERS``) starts its second line 4.17pt right of its
-    first against a 2.78pt word space, and an indented continuation does the
-    same by construction. What a continuation cannot avoid is being printed
-    over the same horizontal ground: it INTERSECTS the first line's x-extent
-    however it is aligned within the column. So the test is horizontal
-    intersection with the immediately adjacent bands, above and below, across
-    every block -- and it carries no threshold of its own.
+    * BELOW, an intersecting line is ALWAYS a possible continuation, because
+      that is the direction a heading is read in. There is no dismissal clause
+      at all. Round 2 dismissed one that crossed the label lane at 1.5x the
+      roster's pitch, and split a heading around its first member.
+    * ABOVE, an intersecting line is dismissed only on independent evidence
+      that it is a paragraph's line rather than the extra's own heading: it
+      must continue a left-aligned stack of its own
+      (``_continues_a_left_aligned_stack``) that the extra does NOT belong to.
 
-    A neighbour that intersects is disqualifying when it could belong to the
-    same column, which is either of:
+    That is what keeps 1977-11-15 correct, and it is the only real page in the
+    Fed set that exercises the dismissal -- Astra measured all six, and the
+    other five never expose ``PRESENT:`` as a line of its own beside the pair.
+    ``1977, at 9:30 a.m.`` (x0 108.00) does intersect ``PRESENT:``
+    (x0 142.00-198.64) horizontally, but it is the last line of a paragraph
+    left-aligned at x0 107-108 across four consecutive bands, and ``PRESENT:``
+    starts 34pt right of that edge. It is a paragraph carrying on above the
+    roster, not a heading over it.
 
-    * it too lies wholly left of the label, i.e. it occupies the same ground
-      left of the pair that a wrapped heading would occupy; or
-    * its band is no further from this one than the run's own row pitch, so it
-      is printed at this material's own leading rather than at some unrelated
-      distance.
-
-    Both must fail before a neighbour is dismissed. That is what keeps
-    1977-11-15 correct: the line above ``PRESENT:`` is the last line of the
-    meeting's opening paragraph, ``1977, at 9:30 a.m.``, which does intersect
-    it -- but it runs past the label lane (x1 235.12 against the lane's 214.0)
-    and its band is 23.8pt away against a 12.4pt run pitch. It is neither a
-    heading beside the roster nor printed at the roster's leading. Below,
-    ``Mr.`` / ``Volcker`` are in the run's own lanes, to the RIGHT of
-    ``PRESENT:``, and intersect nothing.
-
-    No line is exempt from the test, the run's own rows included. A run row
-    cannot in practice disqualify a heading anyway -- the extras are wholly
-    left of the label and a run's rows are in its lanes, at or right of it --
-    and exempting a class of lines would be an unmeasured licence to adopt.
-
-    Returns None when any extra fails, and the caller then ABSTAINS from
-    adopting the pair at all. Ambiguity here is not a licence to fall back on
-    the separation that GH-709 is about.
+    Everything else abstains. A centred heading above (its lines share no left
+    edge), a left-aligned heading whose next line IS the extra (the extra
+    shares the edge), a lone line above with no stack behind it: none of these
+    can be told from a heading, so the pair is not adopted at all. Ambiguity
+    here is not a licence to fall back on the separation GH-709 is about.
     """
     for extra in extras:
         if extra["x1"] > label["x0"]:
             return None
         if extra["y1"] <= label["y0"] or label["y1"] <= extra["y0"]:
             return None
-        for offset in (-1, 1):
-            neighbour = index + offset
-            if not 0 <= neighbour < len(bands):
-                continue
-            near = abs(_band_center(bands[neighbour]) - _band_center(bands[index])) <= pitch
-            for other in bands[neighbour]:
+        below = index + 1
+        if below < len(bands):
+            for other in bands[below]:
+                if other["x1"] > extra["x0"] and extra["x1"] > other["x0"]:
+                    return None
+        above = index - 1
+        if above >= 0:
+            for other in bands[above]:
                 if other["x1"] <= extra["x0"] or extra["x1"] <= other["x0"]:
                     continue
-                if near or other["x1"] <= label["x0"]:
+                if not _continues_a_left_aligned_stack(other, bands, above, word_space_width):
+                    return None
+                if abs(extra["x0"] - other["x0"]) <= word_space_width:
                     return None
     return extras
 
@@ -1371,7 +1396,9 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                         break
                     unit = pair
                     if extras:
-                        beside = _beside_heading_lines(extras, pair[0], bands, index, pitch)
+                        beside = _beside_heading_lines(
+                            extras, pair[0], bands, index, word_space_width
+                        )
                         if beside is None:
                             break
                         unit = beside + pair

@@ -182,3 +182,88 @@ Fed 6 documents × 4 pages against `cf28858`: **0 of 24** pages differ.
   are examined. Bands are built from lines with measurable word extents, so a whitespace-only
   line between them does not itself create a band, but a large leading does.
 - The marker-column recovery #704 made is still refused (above).
+
+---
+
+## Round 3 — the two sides are not symmetric, and one measurement in the ruling was wrong
+
+Astra's review of `d5fcd15` reproduced a P1 with real geometry: `STAFF AND OTHER` beside the
+boundary pair, continued by `ATTENDEES AT THE MEETING OF THE COMMITTEE` in the **immediately
+adjacent band below**, crossing the label lane at 1.5x the roster's 14.77pt pitch. Round 2's
+conjunction dismissed it — neither wholly left of the label nor within the pitch — and split the
+heading around its first member. Neither of those two facts says anything about whose line it is.
+
+### The rule now
+
+* **Below the extra**, an intersecting line is ALWAYS a possible continuation, because that is
+  the direction a heading is read in. There is no dismissal clause on that side at all.
+* **Above the extra**, an intersecting line is dismissed only on independent evidence that it is
+  a paragraph's line rather than the extra's own heading: it must continue a **left-aligned
+  stack** of its own that the extra does **not** belong to.
+
+The pitch clause and the lane-crossing clause are both gone. Nothing here is a threshold except
+the page's own measured word space, which is the same measurement the run guards use.
+
+### The ruling said "its own PyMuPDF block"; that block does not exist
+
+The dispatched direction was to read the stack from the intersector's own block: `>= 2` lines
+sharing a left edge. Measured on 1977-11-15 page 1, the opening paragraph is **four separate
+one-line blocks** — blocks 4, 5, 6 and 7, at x0 178.00, 107.00, 107.00 and 108.00 — so a
+block-based test finds a single line, produces no evidence, and abstains on the one real page
+the dismissal exists to keep.
+
+The evidence is there in the **bands**: 107.00, 107.00, 108.00 in consecutive bands, against
+that page's own 8.28pt word space, with `PRESENT:` starting at 142.00, 34pt right of that edge.
+So `_continues_a_left_aligned_stack` reads the band immediately above the intersector, not its
+block. This is the third time block membership has been the wrong instrument on this ticket, and
+it is now recorded in the helper's own docstring alongside the shared-left-edge attempt.
+
+### One fixture changed, and why
+
+`test_a_boundary_band_carrying_a_heading_is_still_adopted` (GH-706 suite) modelled 1977-11-15's
+opening paragraph as a **single** floating prose line directly above the heading. Under the new
+rule that is not a stack, so the fixture asked for an adoption the real page's geometry never
+asks for. It now prints two prose lines, as the real page does. The one-line shape is kept as an
+abstention pin in the GH-709 suite
+(`test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adoption`).
+
+### What this recovers
+
+Round 2 vetoed the adoption whenever the line above ended before the label lane, however clearly
+it belonged to a paragraph. Astra measured all six Fed minutes: the line preceding `PRESENT:`
+ends at x1 235.12 (1977) to 481.04 (1970), and only 1977 exposes `PRESENT:` as a line of its own
+beside the pair at all, so no real page exercised that veto either way. It is now driven by
+paragraph evidence instead, pinned by
+`test_a_short_paragraph_line_above_the_heading_no_longer_refuses_the_adoption`.
+
+### Witnesses at this commit
+
+| clause deleted | test that fails |
+| --- | --- |
+| wholly left of the label | `test_a_marker_printed_right_of_the_value_makes_the_adoption_abstain` |
+| the whole BELOW branch | all three wrapped-heading variants, the helper probe, all four of Astra's paired cases |
+| the whole ABOVE branch | `test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adoption`, `test_a_band_whose_marker_belongs_to_a_column_is_not_adopted_at_all` |
+| left-aligned stack required | `test_a_display_headings_last_line_is_not_torn_off_the_lines_above_it`, the lone-line test |
+| a stack needs a line above it (band 0 returns False) | the lone-line test |
+| the extra must not share the stack's edge | `test_a_left_aligned_headings_last_line_is_not_torn_off_the_lines_above_it` |
+| abstain on failure | all ten abstention tests |
+
+Astra's four paired cases are in the suite as
+`test_a_continuation_printed_below_the_heading_always_refuses_the_adoption`.
+
+Fed 6 documents x 4 pages against `cf28858`: **0 of 24** pages differ.
+
+### Residuals after round 3
+
+- The baseline-alignment condition still has no witness (round 1).
+- **"Two or more bands away" means beyond an intervening OCCUPIED band, not a distance.** Bands
+  are built from lines with measurable word extents, so leading and whitespace do not manufacture
+  empty bands: a continuation set far below its heading is still in the immediately adjacent band
+  and IS seen. What is not seen is a continuation with another occupied band between it and the
+  heading — a heading interleaved with something else.
+- A lone line above the heading, with nothing above it, refuses the adoption whatever it is. It
+  cannot be told from a heading's own first line. That is a recall loss on a shape no measured
+  Fed page has.
+- A genuinely unrelated isolated single line printed beside the pair, with nothing intersecting
+  it in either adjacent band, is still adopted as a heading.
+- The marker-column recovery #704 made is still refused (round 1).
