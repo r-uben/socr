@@ -986,37 +986,53 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     if not runs:
         return None
 
-    # GH-592 round 2 REVIEW FIX: emit by PAGE POSITION (visual row, then x),
-    # not by original block. Splicing a merged run in at its first
-    # CONTRIBUTING block's position (the prior approach) is wrong whenever a
-    # run spans several blocks and an unrelated, unconsumed line from one of
-    # the LATER blocks in that span sits between two of the run's own rows in
-    # the source PDF's block order: that unconsumed line gets pushed out to
-    # wherever its own block happens to fall in block-iteration order, which
-    # can be many lines after the whole merged run has already been emitted.
-    # Reproduced on 1977-11-15 p1 -- the declined 3-column "PRESENT:" /
-    # "Mr." / "Burns, Chairman" row's value half lives in a block that also
-    # contributes to the real run starting a few rows later, and its
-    # emission position, tied to block order, put it 11 lines below its own
-    # label.
+    # GH-592 round 3 REVIEW FIX: positional emission is SCOPED to the run and
+    # the lines entangled with it; everything else keeps the caller's original
+    # block order, byte for byte.
     #
-    # A first attempt sorted by raw (y0, x0): this is NOT sufficient -- three
-    # lines belonging to the SAME visual row can have y0 values that differ
-    # by a fraction of a point (measured on 1977-11-15's own PRESENT row:
-    # 267.2 / 267.3 / 267.4), which is enough for a plain numeric sort to put
-    # them in y-order rather than x-order and scramble a label ahead of or
-    # behind its value. Re-clustering the run entries plus every unconsumed
-    # line through ``_line_baseline_bands`` -- the SAME row-membership test
-    # the search itself uses -- groups same-row items regardless of that
-    # jitter, so items genuinely on one visual row sort by x within that row,
-    # and different rows still sort by y between rows.
+    # Round 2 emitted the WHOLE page by position (visual row, then x). That is
+    # correct for the roster but wrong for everything else: a page carrying a
+    # genuine attendee list AND, elsewhere, an unrelated two-column prose
+    # block gets that prose interleaved line by line (LEFT 1, RIGHT 1, LEFT 2,
+    # ...) even though the four guards in ``_try_aligned_run`` correctly
+    # refused to merge it. Every token survives; the reading order does not.
+    # Finding one run anywhere on a page must not reorder content elsewhere on
+    # it (Astra review of PR #704).
+    #
+    # Block order is only unsafe where a run and an unconsumed line SHARE a
+    # PyMuPDF block: splicing the merged run in at its first contributing
+    # block's position then pushes that block's own unconsumed lines out to
+    # wherever the block falls in block-iteration order, which can be many
+    # lines away from where they belong. That is exactly the 1977-11-15 p1
+    # case -- the declined 3-column "PRESENT:" / "Mr." / "Burns, Chairman"
+    # header row's value half lives in a block that also feeds the real run
+    # starting a row later, and block-order emission put it 11 lines below its
+    # own label. A block that contributes NO line to any run is never split
+    # this way: all of its lines stay contiguous and in order, so it needs no
+    # repositioning at all.
+    #
+    # So: each run, plus every unconsumed line of every block that run draws
+    # from, forms one positional GROUP (runs sharing a block join the same
+    # group). Within a group, items are re-clustered through
+    # ``_line_baseline_bands`` -- the SAME row-membership test the search
+    # itself uses -- and sorted by x within a row. A plain (y0, x0) sort is
+    # NOT sufficient: three lines of one visual row can differ in y0 by a
+    # fraction of a point (measured on 1977-11-15's own PRESENT row: 267.2 /
+    # 267.3 / 267.4), enough for a numeric sort to scramble a label past its
+    # value. The group is emitted at the position of the first line of its
+    # first contributing block; every other line is emitted exactly where
+    # block order puts it.
     consumed: set[tuple[int, int]] = set()
-    run_pseudo_lines: list[dict] = []
     run_payload: dict[int, list[str]] = {}
+    run_pseudo_lines: list[dict] = []
+    run_blocks: list[set[int]] = []
     for run_id, (start, end, merged) in enumerate(runs):
-        run_items = [it for band in bands[start : end + 1] for it in band]
-        for it in run_items:
-            consumed.add((it["bi"], it["li"]))
+        touched: set[int] = set()
+        for band in bands[start : end + 1]:
+            for it in band:
+                consumed.add((it["bi"], it["li"]))
+                touched.add(it["bi"])
+        run_blocks.append(touched)
         anchor = min(bands[start], key=lambda it: it["x0"])
         run_pseudo_lines.append(
             {
@@ -1028,20 +1044,64 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
         )
         run_payload[run_id] = merged
 
-    output_items: list[dict] = list(run_pseudo_lines)
+    # Runs that draw from a common block cannot be positioned independently --
+    # emitting one of them would have to skip past the other's lines. Merge
+    # them into a single group (union-find over run ids, keyed by block).
+    parent = list(range(len(runs)))
+
+    def _find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    block_group: dict[int, int] = {}
+    for run_id, touched in enumerate(run_blocks):
+        for bi in sorted(touched):
+            owner = block_group.get(bi)
+            if owner is None:
+                block_group[bi] = run_id
+            else:
+                ra, rb = _find(owner), _find(run_id)
+                if ra != rb:
+                    parent[rb] = ra
+    for bi in list(block_group):
+        block_group[bi] = _find(block_group[bi])
+
+    group_items: dict[int, list[dict]] = {}
+    for run_id, pseudo in enumerate(run_pseudo_lines):
+        group_items.setdefault(_find(run_id), []).append(pseudo)
     for it in all_lines:
         if (it["bi"], it["li"]) in consumed:
             continue
-        output_items.append({"y0": it["y0"], "y1": it["y1"], "x0": it["x0"], "text": it["text"]})
+        gid = block_group.get(it["bi"])
+        if gid is None:
+            continue
+        group_items[gid].append(
+            {"y0": it["y0"], "y1": it["y1"], "x0": it["x0"], "text": it["text"]}
+        )
 
-    output_rows = _line_baseline_bands(output_items)
+    group_text: dict[int, list[str]] = {}
+    for gid, items in group_items.items():
+        rendered: list[str] = []
+        for row in _line_baseline_bands(items):
+            for item in sorted(row, key=lambda it: it["x0"]):
+                if "run_id" in item:
+                    rendered.extend(run_payload[item["run_id"]])
+                else:
+                    rendered.append(item["text"])
+        group_text[gid] = rendered
+
     out_lines: list[str] = []
-    for row in output_rows:
-        for item in sorted(row, key=lambda it: it["x0"]):
-            if "run_id" in item:
-                out_lines.extend(run_payload[item["run_id"]])
-            else:
-                out_lines.append(item["text"])
+    emitted: set[int] = set()
+    for it in all_lines:
+        gid = block_group.get(it["bi"])
+        if gid is None:
+            out_lines.append(it["text"])
+            continue
+        if gid not in emitted:
+            emitted.add(gid)
+            out_lines.extend(group_text[gid])
     return "\n".join(out_lines).strip()
 
 

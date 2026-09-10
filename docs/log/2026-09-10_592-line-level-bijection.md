@@ -258,3 +258,96 @@ to emit by true page position (`all_lines` + run pseudo-lines re-clustered throu
 real-PDF ordering pins, four adversarial negative controls x2 each). No change to
 `_try_aligned_run`'s four guards or the region around `text_layer_trusted` (~line 1216, owned
 by a separate in-flight PR).
+
+## Round 3 — scoping the positional emission (Astra review of PR #704, P1)
+
+### The finding
+
+Round 2's emission fix was page-wide. Any page on which a run was found had **every**
+unconsumed line re-clustered and x-sorted, so a page carrying a genuine attendee roster AND,
+elsewhere, an unrelated two-column prose block had that prose interleaved line by line:
+
+```
+LEFT 1 / LEFT 2 / LEFT 3 / RIGHT 1 / RIGHT 2 / RIGHT 3      (before)
+LEFT 1 / RIGHT 1 / LEFT 2 / RIGHT 2 / LEFT 3 / RIGHT 3      (round 2)
+```
+
+The four guards in `_try_aligned_run` correctly refused to merge that block; it was reordered
+only because a run existed somewhere else on the page. Every token survives, the reading order
+does not — the same class of loss GH-592 exists to prevent. Reproduced by the reviewer both
+through `_assemble_prose_with_aligned_runs` directly and through `BornDigitalDetector.
+extract_structured`; the standalone two-column negative controls could not catch it because
+they return before the emission loop (no run anywhere on those pages).
+
+### Why block order is only unsafe in one place
+
+Block order breaks exactly where a run and an unconsumed line **share a PyMuPDF block**.
+Splicing the merged run in at its first contributing block's position pushes that block's own
+unconsumed lines out to wherever the block falls in block-iteration order. That is the
+1977-11-15 p1 case: `Burns, Chairman` (band 8, a declined 3-column header row) lives in block
+9, which also feeds band 9 of the run, so block-order emission put it 11 lines below its own
+`Mr.`. A block that contributes **no** line to any run is never split this way — all of its
+lines stay contiguous and in their original order, so it needs no repositioning at all.
+
+This is the scoping criterion, and it needs no new tolerance: it is block membership, which is
+already computed. Note that a pure "vertical extent of the accepted runs" criterion would
+**not** have worked — on 1977-11-15 the run spans bands 9-19 (y 279.6-401.1) while the
+displaced `Burns, Chairman` sits in band 8 at y 267.3, outside that extent. Nor does "shares a
+baseline band with a run's row": every flat line inside a run's band range is consumed by that
+run, so no declined line ever shares a band with one.
+
+### Change
+
+`_assemble_prose_with_aligned_runs`'s emission section now builds one positional **group** per
+run: the run's pseudo-line plus every unconsumed line of every block that run draws from. Runs
+sharing a block join the same group (union-find over run ids, keyed by block) because they
+cannot be positioned independently. Within a group, items are re-clustered through
+`_line_baseline_bands` and x-sorted within a row, exactly as in round 2. Each group is emitted
+at the position of the first line of its first contributing block. Every other line is emitted
+where block order puts it — byte for byte as before this ticket.
+
+On 1990-11-13 there are two runs (bands 6-16 and 25-28) and two groups; the declined
+Kohn / Bernard / Gillum rows fall in blocks 16 and 17, both of which feed the second run, so
+they join that group and stay beside their own labels.
+
+### Measurements
+
+Real-fixture output is **byte-identical between round 2 and round 3** across the first four
+pages of all six Fed documents (1968-10-29, 1970-12-15, 1977-11-15, 1982-11-16, 1990-11-13,
+1989-11-14). Round 3 is a pure restriction: it changes nothing on the pages round 2 fixed, and
+removes the collateral reordering on mixed-layout pages.
+
+Bare label-line counts on page 1, unchanged from round 2: 1968-10-29 → 0, 1970-12-15 → 0,
+1977-11-15 → 1, 1982-11-16 → 1, 1990-11-13 → 3, 1989-11-14 → 0.
+
+**Correction to the round-2 table above:** it records 1982-11-16 as 0 bare lines. Measured
+directly at both `ba9e10d` and at this commit, page 1 of that document has **1** bare label
+line. The round-2 entry is wrong; this is not a round-3 regression.
+
+### New tests — `tests/test_gh592_scoped_positional_emission.py`
+
+The reviewer's five reproducers, installed under a repository name:
+
+- `test_run_does_not_interleave_unrelated_two_column_prose` and
+  `test_real_extractor_preserves_unrelated_column_order` — the two that failed at `ba9e10d`,
+  asserted against a **pinned** expected reading order rather than against a comparison run
+  loaded from `origin/main`, so they are hermetic in a shallow CI checkout.
+- `test_unconsumed_lines_keep_the_assembler_off_ordering` — the general invariant behind the
+  finding: with no block shared between a run and an unconsumed line, every non-roster line
+  appears in the same relative order as with the assembler forced off.
+- `test_no_run_page_is_left_untouched` and `test_orphan_is_emitted_once_in_position` — the
+  reviewer's passing controls, kept.
+- `test_two_row_decline_is_an_actual_behavior_change` — the `_ALIGNED_RUN_MIN_ROWS` 2→3
+  trade-off, pinned as a **difference** between the `origin/main` implementation and this one
+  (not as an absolute outcome), and skipped when `origin/main` is not fetched.
+
+### Residuals
+
+- The 1977-11-15 3-column `PRESENT:` row and the 1990-11-13 `MEASURE_FILL_SHARE_MAX` decline
+  are unchanged residuals from round 2; round 3 does not attempt them.
+- Two runs separated by unrelated blocks that also feed neither run are emitted at their own
+  block positions, so an unrelated block sitting vertically *between* two halves of one run's
+  block span is emitted after that run rather than between its rows. This matches the
+  pre-ticket block-order behaviour and is not a new reordering.
+- The reviewer's direction-insensitivity note (the x-sort assumes left-to-right) still stands
+  and has no reproducer; it is now confined to entangled groups rather than whole pages.
