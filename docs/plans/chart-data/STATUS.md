@@ -50,19 +50,88 @@ labelled unresolved-placement block — see residuals).
    form now emits one `chart_table_skeleton_unbound` event per run. Intended (the decision
    is visible), but it is new audit-log volume.
 
-## Stage 1 — geometric reader — **TODO**
+## Stage 1 — geometric reader — **DONE (vector charts only)**
 
-Not started. Discrete vertical bars/histograms only; legend-derived series mapping,
-two-tick calibration, per-cell provenance, `UNRESOLVED` rather than a guess. Golden counts
-require independent human annotation — the issue's worked June example sums to 19, not 16,
-and must not become the oracle.
+Branch `feat/635-stage1-bar-reader`. New module `src/socr/figures/chart_reader.py`;
+`suppress_chart_table_skeletons` gained a `derivations` argument so the block that ships
+where the empty grid stood is the derived table instead of Stage 0's note; the reading
+itself is driven by `UnifiedPipeline._derive_chart_counts`, called from the same
+candidate-ingestion seam Stage 0 already crosses. Tests in
+`tests/test_gh635_chart_reader.py`. Counts for the corpus page are in
+[GOLDENS.md](./GOLDENS.md).
+
+Done-when, and how each is met:
+
+| Done-when | Met by |
+| --- | --- |
+| Panel, legend and axes from NATIVE geometry, not OCR of the crop | `read_chart_page` reads `page.get_drawings()` and `page.get_text("words")` only. The crop is never decoded. |
+| Legend maps swatch geometry to a series name, never a colour | `read_legend`: a swatch is a mark that does not rest on the axis, is narrower than a bin AND covers no bin's printed label centre, and has a word-row beside it. Style is `solid_fill` (a filled rect) or `dashed_stroke` (any non-zero dash array). No colour channel is read anywhere in the module; the fixture's legend dash pattern differs from its staircase's, so pattern equality is deliberately not used either. |
+| Legend inheritance needs explicit figure-level binding | Panels are grouped by (printed bin-label sequence, fitted tick-value set) — the page's own evidence that they are panels of one chart. A legend found in one member binds the group, and the source region is recorded per panel (`legend_from_region`). A group whose members carry two different legends binds nothing. The axis titles are resolved the same way. |
+| Series presence is present / absent / unresolved, never forced to zero | A series with no marks in the panel is `unresolved`, with cells `()`. The 2021 panel publishes no June row at all. `absent` is reserved for evidence this fixture does not carry (see residual 2). |
+| Calibration from ≥2 labelled ticks, validated against the rest and the baseline | `calibrate_y`: least squares over every stroked tick paired with the numeric word beside it (outside the plot's x span, within half the smallest tick gap). `residual` is the worst disagreement over all ticks AND the axis line, which the fit must place at zero. On the corpus page: 9 ticks, residual 0.0064 pt against a half-count of 1.780 pt. |
+| One participant = half the 2-unit tick spacing, derived | `YCalibration.half_count_points` is `points_per_unit / 2`, fitted. No spacing constant exists in the module. |
+| Bars from the PDF vector drawings, not raster pixels | Filled rects resting on the axis (the solid series) and dashed runs/risers (the staircase). **A raster fallback is explicitly out of scope for this round** — a page with no drawing operators is refused with that reason in the event. |
+| Each bar assigned to a bin by its horizontal footprint | `_owned_bins`: the bins whose printed label centre lies inside the mark. Not an interval-containment test — a text bbox carries side bearings, so the printed label's centre sits ~0.7 pt off the drawn bin centre on this fixture, and an interval derived from it cuts a bar's own edge. A mark owning NO bin makes every bin it touches `UNRESOLVED`. |
+| Solid silhouette separated from the dashed staircase by fill vs stroke+dash | Two different readers, selected by the legend-bound style. The staircase is additionally reconstructed as a level function and CHECKED: every riser must join the level on its left to the level on its right, probed half a bin out. One riser that does not sends the whole series `UNRESOLVED`. |
+| Count interval from measured uncertainty; one integer or UNRESOLVED | `_resolve`: the height widened by (calibration residual + half the mark's own stroke width) on each side, divided by the fitted points per participant. An integer only when exactly one non-negative integer lies inside, and only when the uncertainty is below half a count. |
+| A zero needs an observable empty bin | A zero is emitted only when the series is PRESENT, the bin lies wholly inside the drawn plot, and nothing of that series is over it — for bars, a histogram resting on the axis, where a zero bar is invisible by construction; for the staircase, an outline whose risers are all consistent with the level there being the axis. `Cell.empty_bin_observed` records it. |
+| Never allocate residual participants to make a sum work | No code path reads a total. The acceptance hook is the only thing that ever sees one, it is the CALLER's, and its verdict can only accept, reject or abstain — it can never change a cell. Pinned by running one reading through three verdicts and asserting the counts are identical. |
+| Per-cell provenance persisted | `PanelReading.to_dict` on the `chart_counts_derived` event: source checksum, page, crop filename + sha256 + DPI + clip, panel label, series key and style, every bin's label and coordinates, each cell's bar bbox, detected top and baseline, the calibration's tick pairs/residual/zero, the uncertainty interval, reader version, status, and the verification verdict with its detail. |
+| Acceptance: internal check plus the caller hook; totals never in code | `_internally_checked` (every emitted count a non-negative integer; every bin of a present series accounted for) runs always. `verify_panel` then applies `PipelineConfig.chart_constraint_hook`, `(survey_key, horizon, {series: {bin: count}}) -> accept/reject/no_opinion`. `survey_key` is the source document's stem, `horizon` the panel's own printed heading. Without a hook the derivation is published labelled UNVERIFIED. A hook that raises leaves it unverified, never takes the reading with it. |
+| A failed constraint rejects the derivation, never the image | A REJECTED panel publishes a note naming the refusal and NO table; the crop reference is unchanged. Pinned end to end through the pipeline. |
+| Real table replaces Stage 0's note; crop stays | `panel_block` writes `\| Series \| <bins…> \|` with one row per present series, cells an integer or the literal `UNRESOLVED`. It ships through `suppress_chart_table_skeletons(derivations=…)`, so the binding that decided WHERE it goes is Stage 0's, unchanged. |
+| Surfaced at page, document and CLI | Page: an audit note on the winning output, plus `PageState.chart_derivations`. Document: `chart_counts_derived` / `chart_counts_not_derived` events, both in `resume_restore_kinds`. CLI: "N chart derivation(s): V verified / U unverified / R rejected; C cell(s) read, X UNRESOLVED". |
+| Byte identity and resume hold | The reading is a pure function of the page and is cached per page per run, so every candidate crossing produces the same bytes; `_rewrite_all_fragments` remains the sole authoritative writer. Resume replays both event kinds and recomputes `chart_derivations` from them. Pinned. |
+
+What the dotplot page ships now: five panel headings, five tables of counts (two series
+on four panels, one on 2021), the page's own prose, and the five crops.
+
+## Residuals carried out of Stage 1
+
+1. **Vector only.** A scanned or rasterised chart has no drawing operators; the reader
+   refuses it by name (`chart_counts_not_derived`, "the page draws no vector operators")
+   and Stage 0's note ships unchanged. A raster lane (column profiling against the same
+   calibration) is deliberately not built here.
+2. **`absent` is never emitted.** A panel that draws no marks for a legend-declared
+   series yields `unresolved`, because "the series is absent from this panel" and "every
+   bin of it is zero" are not distinguishable from that panel's geometry — an all-zero
+   staircase would be drawn coincident with the axis and add no ink. The trichotomy is
+   in the model and in the sidecar; only two of its three values are reachable from a
+   chart shaped like this one.
+3. **The derivation publishes only where an empty grid stood.** The block replaces the
+   withheld skeleton, so a chart page whose model output never emitted a grid gets the
+   event and the CLI count but no table in the body. Giving the reader its own insertion
+   point is a change to #189's placement contract and was left out.
+4. **The axis titles are read positionally.** The count unit is the topmost multi-token
+   row above the highest tick that is not drawn wholly inside the plot; the bin unit is
+   the first narrower row below the bin labels. That is the corpus figure's layout. A
+   chart that titles its y axis inside the frame would lose the unit (and only the
+   unit — no count depends on it).
+5. **Crop digest is computed by re-rendering.** `crop_digest` mirrors
+   `_render_chart_region_crops`'s matrix, rotation and clip and hashes the pixmap, so
+   the provenance names the file that ships without waiting for assembly to write it.
+   Pinned: a test renders the crop through `_render_chart_region_crops` and asserts the
+   file on disk hashes to the digest the derivation recorded. If the two paths ever
+   diverge, that test is what says so.
+6. **The acceptance hook is not in the run fingerprint.** It is a callable, so it has
+   no stable serialisation across processes, and putting its identity in the fingerprint
+   would invalidate every terminal page on a restart that behaves identically. The cost
+   is real and is stated rather than hidden: changing the hook from accepting to
+   rejecting (or supplying one where there was none) does NOT invalidate already-terminal
+   pages, so a resumed run keeps the verdict the earlier run published. It is the same family as
+   the known resume gap where a source-code change does not invalidate a terminal page;
+   forcing a re-read means clearing the affected pages' sidecars.
+7. **Stage 2 is untouched.** No model is consulted; geometry is the only authority, as
+   the design requires before proposals can be reconciled against it.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 
 Not started. Depends on Stage 1's geometry being the authority.
 
-## Owner decision — **PENDING**
+## Owner decision — **ANSWERED (yes)**
 
 From DESIGN.md: *may expected totals be keyed by survey and horizon, with absent series
-represented explicitly?* Astra recommends yes; a universal equal-total/16 rule would reject
-valid panels. Unanswered. Stage 1's acceptance hook cannot be specified until it is.
+represented explicitly?* **Yes**, recorded with the Stage 1 brief. Implemented as
+`PipelineConfig.chart_constraint_hook`, which receives the survey key and the horizon
+separately and whose payload carries only the series the panel actually draws. No
+expected total exists anywhere in this codebase.

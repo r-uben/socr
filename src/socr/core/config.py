@@ -2,6 +2,7 @@
 
 import dataclasses
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -470,6 +471,18 @@ class PipelineConfig:
     gemini_model: str = "gemini-3-flash-preview"
     gemini_task: str = "convert"  # "convert", "extract", "table", "describe_figure"
     mistral_model: str = "mistral-ocr-latest"
+
+    # --- #635 Stage 1: chart-count acceptance hook ---
+    # A callable ``(survey_key, horizon, {series name: {bin label: count}})``
+    # -> ``"accept"`` / ``"reject"`` / ``"no_opinion"``. It is the ONLY place an
+    # expected total can enter: this codebase holds none, for any survey, series
+    # or horizon, because a universal "sixteen participants" rule would reject
+    # valid panels (a longer-run horizon and an absent series are both normal)
+    # and would silently bless a wrong reading whose errors happen to cancel.
+    # ``survey_key`` is the source document's stem and ``horizon`` the panel's
+    # own printed heading, so a caller keys its totals on what the page says.
+    # Without a hook every derivation is published labelled UNVERIFIED.
+    chart_constraint_hook: Callable[[str, str, dict], str] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.output_dir, str):

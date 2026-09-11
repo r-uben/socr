@@ -180,6 +180,12 @@ _ASSIGNMENT_SITES = {
     ("pipeline/orchestrator.py", "_render_chart_page_png"),
     ("pipeline/orchestrator.py", "_render_chart_region_crops"),
     ("review/html.py", "_render_page_image"),
+    # #635 Stage 1: `crop_digest` hashes the crop the pipeline is going to
+    # write, so it MUST mirror `_render_chart_region_crops` exactly -- same
+    # matrix, same rotation, same clip -- or the provenance would name a file
+    # nobody ships. It is a deliberate second copy of that site's form, and
+    # tests/test_gh635_chart_reader.py asserts the two produce the same bytes.
+    ("figures/chart_reader.py", "crop_digest"),
 }
 
 

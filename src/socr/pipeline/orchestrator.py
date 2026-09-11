@@ -2497,6 +2497,7 @@ class UnifiedPipeline:
             TABLE_WRAPPED_LABEL_MERGED_KIND,
         )
         from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
+        from socr.figures.chart_reader import CHART_DERIVATION, CHART_DERIVATION_REFUSED
         from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
         return frozenset(
@@ -2554,6 +2555,13 @@ class UnifiedPipeline:
             # reason every other lane's refusal does: it is the record that an
             # empty form on a chart page was looked at and deliberately kept.
             | {SKELETON_SUPPRESSED, SKELETON_UNBOUND}
+            # #635 Stage 1: a derivation and a refusal to derive are both
+            # standing properties of the PAGE's chart, not of the run that
+            # read it. The published table's whole provenance -- calibration,
+            # crop digest, per-cell interval -- lives in the event and nowhere
+            # else, so dropping it on resume would leave a resumed run
+            # shipping a table of counts it can no longer account for.
+            | {CHART_DERIVATION, CHART_DERIVATION_REFUSED}
             # #601 / #624b: the candidate-row normalisation counters live
             # only on these events (the ``BindingResult`` that produced them
             # is not itself persisted). Dropping them on resume would make
@@ -3312,6 +3320,126 @@ class UnifiedPipeline:
             logger.debug("could not compute figures_dir via contract: %s", exc)
             return output_dir, output_dir / "figures"
 
+    def _derive_chart_counts(
+        self, state: DocumentState, page_num: int, page, bboxes: list, crop_names: dict[int, str]
+    ) -> dict[int, str]:
+        """#635 Stage 1: read each chart region's counts, and return its block.
+
+        The returned mapping is ``{region index: markdown}`` -- the table the
+        region's own vector geometry supports, or the note saying the
+        derivation was refused. ``suppress_chart_table_skeletons`` ships it
+        where the empty grid stood; a region with no entry keeps Stage 0's
+        "counts not extracted" note exactly as before, which is the outcome for
+        every chart this reader cannot read (a raster chart, an unlabelled
+        axis, a figure with no legend).
+
+        Everything the published numbers rest on -- the crop's digest and DPI,
+        the calibration's tick pairs and residual, each cell's own uncertainty
+        interval and the reason for every UNRESOLVED -- is recorded on the
+        audit event, per panel, so the table can be audited without re-reading
+        the PDF. The CLI and the page note report the same counts.
+
+        Cached per page for the run: the candidate seam is crossed once per
+        ladder rung, and the reading is a pure function of the page, so
+        re-deriving it would burn a pixmap per rung and could not change an
+        answer. Never raises; a failure leaves Stage 0 untouched.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.figures.chart_reader import (
+            CHART_DERIVATION,
+            CHART_DERIVATION_REFUSED,
+            REJECTED,
+            crop_digest,
+            panel_block,
+            read_chart_page,
+            verify_panel,
+        )
+
+        cache = getattr(self, "_chart_reading_cache", None)
+        if cache is None:
+            cache = {}
+            self._chart_reading_cache = cache
+        key = (str(state.handle.path), page_num)
+        if key in cache:
+            return cache[key]
+
+        blocks: dict[int, str] = {}
+        try:
+            from socr.figures.extractor import RENDER_DPI
+
+            digests = {
+                idx: crop_digest(page, bboxes[idx - 1], RENDER_DPI)
+                for idx in range(1, len(bboxes) + 1)
+            }
+            reading = read_chart_page(
+                page,
+                bboxes,
+                page_num=page_num,
+                source_checksum=getattr(state.handle, "checksum", "") or "",
+                crop_names=crop_names,
+                crop_digests=digests,
+            )
+        except Exception as exc:
+            logger.warning("#635 Stage 1: chart read failed on p%d: %s", page_num, exc)
+            cache[key] = blocks
+            return blocks
+
+        # The survey key is the SOURCE document's stem and the horizon is the
+        # panel's own printed heading. Neither is interpreted here: they are
+        # handed to the caller's hook so the caller can key its own expected
+        # totals on what the page actually says. No total is held in this
+        # codebase.
+        survey_key = state.handle.path.stem
+        hook = getattr(self.config, "chart_constraint_hook", None)
+        seen = {
+            ((ev.data or {}).get("region_index"), ev.kind)
+            for ev in state.events
+            if ev.page_num == page_num and ev.kind in (CHART_DERIVATION, CHART_DERIVATION_REFUSED)
+        }
+        for idx in sorted(reading.panels):
+            panel = verify_panel(reading.panels[idx], survey_key, hook)
+            blocks[idx] = panel_block(panel)
+            if (idx, CHART_DERIVATION) in seen:
+                continue
+            seen.add((idx, CHART_DERIVATION))
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=CHART_DERIVATION,
+                    engine="chart_reader",
+                    detail=(
+                        f"chart region {idx} ({panel.label or 'unlabelled'}): "
+                        f"{panel.resolved_cells} cell(s) read as integers, "
+                        f"{panel.unresolved_cells} UNRESOLVED, {panel.verification}"
+                        + (
+                            "; the derivation is withheld from the body"
+                            if panel.verification == REJECTED
+                            else ""
+                        )
+                    ),
+                    data=panel.to_dict(),
+                )
+            )
+        for idx in sorted(reading.refusals):
+            if (idx, CHART_DERIVATION_REFUSED) in seen:
+                continue
+            seen.add((idx, CHART_DERIVATION_REFUSED))
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=CHART_DERIVATION_REFUSED,
+                    engine="chart_reader",
+                    detail=f"chart region {idx}: {reading.refusals[idx]}",
+                    data={
+                        "region_index": idx,
+                        "reason": reading.refusals[idx],
+                        "crop": crop_names.get(idx, ""),
+                    },
+                )
+            )
+        cache[key] = blocks
+        return blocks
+
     def _suppress_chart_table_skeletons(self, state: DocumentState, page_num: int, bo) -> int:
         """#635 Stage 0: withhold this candidate's EMPTY chart-derived grids.
 
@@ -3357,6 +3485,7 @@ class UnifiedPipeline:
             region_interior_rows,
             suppress_chart_table_skeletons,
         )
+        from socr.figures.chart_reader import CHART_DERIVATION
 
         text = getattr(bo, "text", "") or ""
         # Cheap structural pre-check first: no empty grid means no PDF open, so
@@ -3375,6 +3504,7 @@ class UnifiedPipeline:
         interiors: dict[int, list[str]] = {}
         axis_rows: dict[int, list[list[tuple[float, str]]]] = {}
         crop_names: dict[int, str] = {}
+        derivations: dict[int, str] = {}
         try:
             with open_pdf(str(state.handle.path)) as _doc:
                 _page = _doc[page_num - 1]
@@ -3386,6 +3516,9 @@ class UnifiedPipeline:
                         idx: chart_region_filename(page_num, idx)
                         for idx in range(1, len(bboxes) + 1)
                     }
+                    derivations = self._derive_chart_counts(
+                        state, page_num, _page, bboxes, crop_names
+                    )
         except Exception as exc:
             logger.warning("#635: chart geometry unreadable on p%d: %s", page_num, exc)
             state.events.append(
@@ -3408,6 +3541,7 @@ class UnifiedPipeline:
             interiors=interiors,
             crop_names=crop_names,
             axis_rows=axis_rows,
+            derivations=derivations,
         )
 
         # The candidate boundary is crossed more than once per page -- every
@@ -3483,6 +3617,23 @@ class UnifiedPipeline:
                 if ev.page_num == page_num and ev.kind == SKELETON_SUPPRESSED
             }
         )
+        ps.chart_derivations = len(
+            {
+                (ev.data or {}).get("region_index")
+                for ev in state.events
+                if ev.page_num == page_num and ev.kind == CHART_DERIVATION
+            }
+        )
+        derived_here = sorted(r for r in derivations if r in {s.region_index for s in suppressions})
+        if derived_here:
+            derived_note = (
+                f"#635 Stage 1: chart region(s) {', '.join(str(r) for r in derived_here)} on "
+                f"p{page_num} published counts READ from the page's own vector geometry in "
+                "place of the withheld empty grid. Every published cell is an integer the "
+                "measurement supports uniquely, or the literal UNRESOLVED."
+            )
+            if derived_note not in bo.audit_notes:
+                bo.audit_notes.append(derived_note)
         note = (
             f"#635: {len(suppressions)} empty chart-table skeleton(s) withheld on p{page_num} "
             f"(table(s) {', '.join(str(s.table_index) for s in suppressions)}; "
@@ -11363,6 +11514,19 @@ class UnifiedPipeline:
                     if e.page_num == page_num and e.kind == SKELETON_SUPPRESSED
                 }
             )
+            # #635 Stage 1: same contract -- the derivation belongs to the
+            # page's chart, so a resumed page reports the same number of
+            # derived panels as the run that read them, and the CLI line does
+            # not vanish on the second run.
+            from socr.figures.chart_reader import CHART_DERIVATION as _CHART_DERIVATION
+
+            ps.chart_derivations = len(
+                {
+                    (e.data or {}).get("region_index")
+                    for e in state.events
+                    if e.page_num == page_num and e.kind == _CHART_DERIVATION
+                }
+            )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
@@ -11742,6 +11906,46 @@ class UnifiedPipeline:
                 console.print(
                     f"  [yellow]{_skeletons} chart-table skeleton(s) suppressed; "
                     "crops kept[/yellow]"
+                )
+
+            # #635 Stage 1, CLI surface. Same source as the Stage 0 line above
+            # -- the document's own events -- so a resumed run reports what
+            # this run's body actually contains. The unresolved cells are named
+            # beside the resolved ones on purpose: a derivation that could not
+            # read half its cells must not look like a derivation that read
+            # them all.
+            from socr.figures.chart_reader import (
+                CHART_DERIVATION,
+                REJECTED,
+                UNVERIFIED,
+                VERIFIED,
+            )
+
+            _derivations = [
+                (e.data or {}) for e in state.events if getattr(e, "kind", "") == CHART_DERIVATION
+            ]
+            if _derivations:
+
+                def _cells(data: dict, resolved: bool) -> int:
+                    return sum(
+                        1
+                        for series in data.get("series", [])
+                        for cell in series.get("cells", [])
+                        if (cell.get("status") == "integer") is resolved
+                    )
+
+                _by = {v: 0 for v in (VERIFIED, UNVERIFIED, REJECTED)}
+                for d in _derivations:
+                    _by[d.get("verification", UNVERIFIED)] = (
+                        _by.get(d.get("verification", UNVERIFIED), 0) + 1
+                    )
+                _ok = sum(_cells(d, True) for d in _derivations)
+                _no = sum(_cells(d, False) for d in _derivations)
+                console.print(
+                    f"  [cyan]{len(_derivations)} chart derivation(s): "
+                    f"{_by[VERIFIED]} verified / {_by[UNVERIFIED]} unverified / "
+                    f"{_by[REJECTED]} rejected; {_ok} cell(s) read, "
+                    f"{_no} UNRESOLVED[/cyan]"
                 )
 
         final_text, has_text = self._canonical_body(state, page_texts=page_texts)

@@ -144,9 +144,16 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
      | form | sites |
      |---|---|
      | mutate-only `mat.prerotate(rotation)` | `tables/extract.py` (`_render_crop`), `tables/source_evidence.py` (`_render_crop_pixmap`, `build_scanned_evidence`), `tables/witness.py` (`_render_crop_safe`), `pipeline/orchestrator.py` (`_render_adjudication_crop`) |
-     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py` (`process_pages`), `core/document.py` (`render_page`, `render_all_pages`), `review/html.py` (`_render_page_image`), `pipeline/orchestrator.py` (`_render_chart_page_png`, `_render_chart_region_crops`) |
+     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py` (`process_pages`), `core/document.py` (`render_page`, `render_all_pages`), `review/html.py` (`_render_page_image`), `pipeline/orchestrator.py` (`_render_chart_page_png`, `_render_chart_region_crops`), `figures/chart_reader.py` (`crop_digest`) |
 
      GH-440: the mutate-only cell first named the D3 floor render. That caller
+     `figures/chart_reader.py` (`crop_digest`, #635 Stage 1) is a deliberate
+     mirror of `_render_chart_region_crops`: it hashes the pixmap that lane is
+     about to write, so a chart derivation's provenance can name the crop that
+     ships. The two must stay identical in matrix, rotation and clip, and
+     `tests/test_gh635_chart_reader.py` pins that by comparing the digest
+     against the file on disk.
+
      does not call `prerotate` at all -- `_render_d3_floor_png` delegates to
      `_render_chart_page_png`, so if D3 is named anywhere it belongs on the
      assignment row, via that helper. Enumerated by walking every `prerotate`

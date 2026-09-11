@@ -494,7 +494,11 @@ def test_dotplot_page_ships_five_crops_and_no_empty_grid(tmp_path: Path) -> None
     _p, on_state, on = _run(DOTPLOT_PDF, tmp_path / "on", winner, suppress=True)
 
     assert len(_table_lines(_body(off))) == 15, "control arm: five 3-line grids"
-    assert _table_lines(_body(on)) == [], f"an empty grid still ships: {_body(on)!r}"
+    # #635 Stage 1 landed: the five withheld grids are replaced by five grids of
+    # counts READ off the page's vector geometry, so what must be gone is the
+    # EMPTY grid, which is what this assertion has always been about. Pinning
+    # "no table at all" would now pin Stage 1's absence.
+    assert find_empty_skeletons(_body(on)) == [], f"an empty grid still ships: {_body(on)!r}"
 
     assert len(_crops(tmp_path / "on")) == 5
     for index in range(1, 6):
