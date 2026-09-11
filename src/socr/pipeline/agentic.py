@@ -176,6 +176,7 @@ def route_page(
     max_attempts: int = 0,
     remaining_budget: float | None = None,
     provider_timeout: dict[EngineType, float] | None = None,
+    on_candidate: Callable[[int, PageOutput], None] | None = None,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
 
@@ -195,6 +196,11 @@ def route_page(
             rung: a paid provider that does not fit is skipped (free rungs
             always fit), instead of discovering the overrun after spending.
             ``None`` = unbounded.
+        on_candidate: called at the candidate boundary below -- once per rung,
+            on the canonicalised candidate, BEFORE the judge assesses it. A
+            transform that must apply to what is judged, selected, bound and
+            persisted belongs here and nowhere later; anything after this point
+            is changing text a verdict has already been passed on.
         provider_timeout: optional per-provider wall-clock timeout in seconds.
             When a provider's ``EngineType`` is present in this dict, the
             ``run_provider`` call is wrapped with a
@@ -334,6 +340,8 @@ def route_page(
         # provider's raw bytes remain immutable provenance in the transcript
         # the caller keeps; what changes is the candidate.
         canonicalize_candidate(output)
+        if on_candidate is not None:
+            on_candidate(page_num, output)
 
         try:
             decision = judge.assess(output, prof)

@@ -787,6 +787,22 @@ def _aligned_content_lines(lines: list[str]) -> list[str] | None:
     return masked + [""] * (len(lines) - len(masked))
 
 
+def literal_context_mask(lines: list[str]) -> list[str] | None:
+    """#688's literal-context mask under a name other packages may import.
+
+    Blanks fenced code, HTML comments and indented code IN PLACE of the
+    caller's own ``split("\n")`` list, so every index still refers to the same
+    line. ``None`` means the text has no usable mapping (an unclosed comment
+    truncates it) and the caller must abstain rather than guess.
+
+    Any caller deciding whether a run of pipe-bearing lines is a real table --
+    rather than a code SAMPLE that happens to contain one -- needs this mask
+    before ``table_syntax_line_indices``, which is a raw grammar with no notion
+    of literal context. #635 is the second such caller.
+    """
+    return _aligned_content_lines(lines)
+
+
 def table_body_row_indices(lines: list[str]) -> set[int]:
     """Indices of *lines* that are BODY rows of a genuine markdown table.
 

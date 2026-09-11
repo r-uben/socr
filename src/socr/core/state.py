@@ -239,6 +239,13 @@ class PageState:
     #: placement-unresolved flag above would report "the crop is preserved but
     #: unplaced" for a page from which no crop was ever retained.
     chart_region_inventory_failed: bool = False
+    #: #635 Stage 0: how many EMPTY markdown grids on this page were proven to
+    #: be derivations of one of its charts and withheld from the published body.
+    #: A count, not a flag, because the page note and the CLI line both report
+    #: how many. Deliberately NOT part of ``needs_repair`` or any status guard:
+    #: withholding a grid that carried no value removes no reading, so the page
+    #: is not less complete than it was -- it is less misleading.
+    chart_table_skeletons_suppressed: int = 0
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume

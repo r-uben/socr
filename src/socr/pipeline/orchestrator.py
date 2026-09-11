@@ -2496,6 +2496,7 @@ class UnifiedPipeline:
             TABLE_SPACER_ROWS_DROPPED_KIND,
             TABLE_WRAPPED_LABEL_MERGED_KIND,
         )
+        from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
         from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
         return frozenset(
@@ -2543,6 +2544,16 @@ class UnifiedPipeline:
             # history and must not disappear on resume, same as every other
             # distrust kind), so it is replayed the same as the rest.
             | {LABEL_UNVERIFIED_KIND}
+            # #635: the ONLY archive of a withheld grid is its suppression
+            # event -- ``original_text`` and ``sha256`` live nowhere else, and
+            # the restored body cannot regenerate them because the grid is
+            # already gone from it. Dropping these on resume would leave a
+            # resumed run unable to say what was withheld or why, and would
+            # silently zero the document's CLI count, which is computed from
+            # these events. The refusal kind travels with it for the same
+            # reason every other lane's refusal does: it is the record that an
+            # empty form on a chart page was looked at and deliberately kept.
+            | {SKELETON_SUPPRESSED, SKELETON_UNBOUND}
             # #601 / #624b: the candidate-row normalisation counters live
             # only on these events (the ``BindingResult`` that produced them
             # is not itself persisted). Dropping them on resume would make
@@ -3300,6 +3311,187 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.debug("could not compute figures_dir via contract: %s", exc)
             return output_dir, output_dir / "figures"
+
+    def _suppress_chart_table_skeletons(self, state: DocumentState, page_num: int, bo) -> int:
+        """#635 Stage 0: withhold this candidate's EMPTY chart-derived grids.
+
+        A model reading a chart page commonly emits, per panel, a markdown grid
+        whose header row is the chart's own axis bins and whose body row is
+        empty in every cell. Nothing was read, and a reader is shown a table
+        shaped exactly like an extraction that succeeded. The crop of the same
+        chart is preserved by #189 either way, so no evidence is at stake --
+        what is at stake is the empty grid being taken for the chart's content.
+
+        Two independent SOURCE proofs are required per grid (see
+        ``figures.chart_data``): a label drawn inside exactly one chart region
+        that matches exactly one line of the candidate, and every data column
+        key of the grid drawn IN FULL along that region's axis. Short of both,
+        the text is left byte-identical and the refusal is recorded: an empty
+        form that is not a chart derivation is the page's content.
+
+        Called at CANDIDATE INGESTION -- ``route_page``'s ``on_candidate``
+        boundary, before the page judge assesses the candidate -- and again on
+        the two later candidate replacements (the escalation candidate, the
+        crop-repaired text), so a verdict is never passed on bytes this pass
+        later changes and no later reading can reintroduce a withheld grid.
+        Those THREE producers are what crosses that seam, and the claim is not
+        wider than that: the trusted-native lane, the page-level chart and
+        equation lanes, GH-649 recovery, the manifest fallbacks and GH-713's
+        restored outputs reach only the ``_phase_agentic`` backstop crossing,
+        which runs after their own judgment rather than before it. The native
+        and manifest fallbacks among them can carry tables.
+
+        Idempotent, and its records are deduplicated by the grid AND what it
+        was bound to, ``(kind, table_index, sha256, region_index)``.
+
+        Returns the number of grids withheld. Nothing here touches
+        ``audit_passed`` (the winner-SELECTION flag, #252) or the page status:
+        a withheld empty grid removes no reading, so the surfacing is the page
+        note, the document audit events and the CLI count, not a demotion.
+        """
+        from socr.figures.chart_data import (
+            SKELETON_SUPPRESSED,
+            SKELETON_UNBOUND,
+            find_empty_skeletons,
+            region_axis_rows,
+            region_interior_rows,
+            suppress_chart_table_skeletons,
+        )
+
+        text = getattr(bo, "text", "") or ""
+        # Cheap structural pre-check first: no empty grid means no PDF open, so
+        # this costs nothing on every page that does not have one.
+        if not find_empty_skeletons(text):
+            return 0
+        ps = state.pages.get(page_num)
+        if ps is None:
+            return 0
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.figures.chart_regions import chart_region_filename
+        from socr.tables.reconstruct import chart_region_bboxes
+
+        interiors: dict[int, list[str]] = {}
+        axis_rows: dict[int, list[list[tuple[float, str]]]] = {}
+        crop_names: dict[int, str] = {}
+        try:
+            with open_pdf(str(state.handle.path)) as _doc:
+                _page = _doc[page_num - 1]
+                bboxes = chart_region_bboxes(_page)
+                if bboxes:
+                    interiors = region_interior_rows(_page, bboxes)
+                    axis_rows = region_axis_rows(_page, bboxes)
+                    crop_names = {
+                        idx: chart_region_filename(page_num, idx)
+                        for idx in range(1, len(bboxes) + 1)
+                    }
+        except Exception as exc:
+            logger.warning("#635: chart geometry unreadable on p%d: %s", page_num, exc)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=SKELETON_UNBOUND,
+                    engine="chart_data",
+                    detail=(
+                        "the page's chart geometry could not be read, so an empty grid on it "
+                        "was neither proven to be a chart derivation nor withheld"
+                    ),
+                    data={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+            )
+            return 0
+
+        new_text, suppressions, refusals = suppress_chart_table_skeletons(
+            text,
+            page_num=page_num,
+            interiors=interiors,
+            crop_names=crop_names,
+            axis_rows=axis_rows,
+        )
+
+        # The candidate boundary is crossed more than once per page -- every
+        # ladder rung, the escalation candidate, the crop-repaired text and the
+        # backstop -- so a record already made for the same finding is not made
+        # again. Identity is the grid AND what it was bound to: (kind, table,
+        # sha256, region). The region belongs in it because two candidates can
+        # put a byte-identical empty grid under DIFFERENT panels; those are two
+        # different derivations, and keeping only the first would leave the
+        # published note citing region 2 with provenance that says region 1.
+        # Refusals carry no binding, so their region is None and they dedup by
+        # grid alone, as before.
+        def _identity(kind: str, data: dict) -> tuple:
+            return (
+                kind,
+                data.get("table_index"),
+                data.get("sha256"),
+                data.get("region_index"),
+            )
+
+        seen = {
+            _identity(ev.kind, ev.data or {})
+            for ev in state.events
+            if ev.page_num == page_num and ev.kind in (SKELETON_SUPPRESSED, SKELETON_UNBOUND)
+        }
+
+        def _record(kind: str, detail: str, data: dict) -> bool:
+            key = _identity(kind, data)
+            if key in seen:
+                return False
+            seen.add(key)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine="chart_data",
+                    detail=detail,
+                    data=data,
+                )
+            )
+            return True
+
+        # A refusal on a page with no chart region at all is not a decision
+        # worth a record -- an empty form on an ordinary page is simply the
+        # page. Record the refusals made where a chart WAS present.
+        if interiors:
+            for refusal in refusals:
+                _record(SKELETON_UNBOUND, refusal.reason, refusal.to_dict())
+
+        if not suppressions:
+            return 0
+
+        bo.text = new_text
+        for s in suppressions:
+            _record(
+                SKELETON_SUPPRESSED,
+                (
+                    f"table {s.table_index} was an empty derivation of chart region "
+                    f"{s.region_index}; withheld, crop {s.crop_filename} kept"
+                ),
+                s.to_dict(),
+            )
+        # The page's count is how many DISTINCT GRIDS were withheld on it, not
+        # how many suppression records it holds. Those differ on purpose now
+        # that a re-bound grid keeps its own record: candidate history is the
+        # event list, and the count is the grid identity behind it, so a second
+        # candidate that re-derived the same grid under another panel does not
+        # make the page look as though it lost two tables.
+        ps.chart_table_skeletons_suppressed = len(
+            {
+                ((ev.data or {}).get("table_index"), (ev.data or {}).get("sha256"))
+                for ev in state.events
+                if ev.page_num == page_num and ev.kind == SKELETON_SUPPRESSED
+            }
+        )
+        note = (
+            f"#635: {len(suppressions)} empty chart-table skeleton(s) withheld on p{page_num} "
+            f"(table(s) {', '.join(str(s.table_index) for s in suppressions)}; "
+            f"crop(s) {', '.join(s.crop_filename for s in suppressions)} kept). "
+            "The chart counts were NOT extracted."
+        )
+        if note not in bo.audit_notes:
+            bo.audit_notes.append(note)
+        return len(suppressions)
 
     def _preserve_chart_regions(
         self, state: DocumentState, page_texts: list[str], output_dir: Path
@@ -4947,8 +5139,11 @@ class UnifiedPipeline:
 
                 # #688: the escalation candidate crosses the same boundary
                 # before ``decide_escalation`` measures it, so the comparison
-                # and the promoted bytes are the canonical ones.
+                # and the promoted bytes are the canonical ones. #635 crosses
+                # with it: a rung that re-emits the empty chart grid must not
+                # be able to reintroduce it by winning the comparison.
                 canonicalize_candidate(out)
+                self._suppress_chart_table_skeletons(state, page_num, out)
 
                 try:
                     decision = decide_escalation(page, incumbent_text, out.text)
@@ -7618,6 +7813,20 @@ class UnifiedPipeline:
             )
             return outs[0]
 
+        def _ingest_candidate(page_num: int, candidate: PageOutput) -> None:
+            """#635 Stage 0 at the candidate boundary, before the page judge.
+
+            ``route_page`` calls this on every rung's canonicalised candidate,
+            and the escalation and crop-repair replacements below call it on
+            theirs, so an empty grid derived from one of the page's own charts
+            is withheld from the text that is judged, scored, bound, selected
+            and persisted -- never from text a verdict was already passed on,
+            and never only on the first candidate a page happens to produce.
+            Idempotent: a second crossing of the same bytes finds no skeleton
+            and records nothing twice.
+            """
+            self._suppress_chart_table_skeletons(state, page_num, candidate)
+
         def _timed_route_provider(profile: ProviderProfile, page_num: int) -> PageOutput:
             # Extract is a child of route only for the OCR ladder. Escalation
             # reuses ``run_provider`` untimed so that spend stays under tables.
@@ -7823,6 +8032,7 @@ class UnifiedPipeline:
                             judge,
                             remaining_budget=remaining,
                             provider_timeout=provider_timeout,
+                            on_candidate=_ingest_candidate,
                         )
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
@@ -8113,6 +8323,20 @@ class UnifiedPipeline:
                 # per-page flush. Idempotent, so for a routed page this is a
                 # no-op that leaves the object byte-identical.
                 canonicalize_candidate(bo)
+
+                # #635 Stage 0 backstop, on the same contract as #688's above.
+                # The withholding itself happens at CANDIDATE INGESTION -- the
+                # ``on_candidate`` boundary inside ``route_page``, before the
+                # page judge assesses the candidate, and again on the escalation
+                # and crop-repair replacements. This crossing exists for a page
+                # that reached here by another door (the native lane, a ledger
+                # restore) and is a byte-identical no-op for a routed one.
+                # Deliberately NOT in ``reconcile_chart_region_refs``, whose
+                # contract is to place crops against model-authored text without
+                # rewriting it; #189 then reconciles over these bytes, so the
+                # fragments, the stitched document and the sidecar agree.
+                with clock.span("tables"):
+                    self._suppress_chart_table_skeletons(state, page_num, bo)
 
                 # #123 TICKET-C2 scoring is NOT gated on the P5 signal: it must reach
                 # every page it reached before this branch, because it is the only
@@ -9512,6 +9736,9 @@ class UnifiedPipeline:
             # it against the accepted bytes and re-judges it.
             bo.text = result.text
             canonicalize_candidate(bo)
+            # #635: the patched text is a new candidate too, and a crop reread
+            # can re-emit the empty grid the ingestion boundary withheld.
+            self._suppress_chart_table_skeletons(state, page_num, bo)
             patched_delta = 1
             if crop_repair_fallback:
                 bo.audit_notes.append(
@@ -11060,11 +11287,42 @@ class UnifiedPipeline:
             # are the only record that a reading was looked at and refused.
             # Dropping them on resume would leave a page that silently ships
             # native prose with no trace of the refusal.
+            from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
+
+            _skeleton_kinds = (SKELETON_SUPPRESSED, SKELETON_UNBOUND)
+            # #635: the skeleton records are keyed by the finding they are
+            # about -- the grid AND its binding, (kind, table, sha256, region)
+            # -- so replaying a sidecar onto a state that already holds them (a
+            # re-restore, or a restore of a page this run also processed)
+            # restores every record without doubling any of them. The page's
+            # withheld count is then taken over distinct GRIDS, so two records
+            # of one grid under two panels still count as the one table it is.
+            _seen_skeletons = {
+                (
+                    e.kind,
+                    (e.data or {}).get("table_index"),
+                    (e.data or {}).get("sha256"),
+                    (e.data or {}).get("region_index"),
+                )
+                for e in state.events
+                if e.page_num == page_num and e.kind in _skeleton_kinds
+            }
             restore_kinds = self.resume_restore_kinds()
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
                 ev_kind = str(ev.get("kind", ""))
+                if ev_kind in _skeleton_kinds:
+                    _ev_data = dict(ev.get("data") or {})
+                    _key = (
+                        ev_kind,
+                        _ev_data.get("table_index"),
+                        _ev_data.get("sha256"),
+                        _ev_data.get("region_index"),
+                    )
+                    if _key in _seen_skeletons:
+                        continue
+                    _seen_skeletons.add(_key)
                 ev_detail = str(ev.get("detail", "") or "")
                 ev_data = dict(ev.get("data") or {})
                 if ev_kind == TABLE_LADDER_UNVERIFIED_KIND and "latched" not in ev_data:
@@ -11094,6 +11352,17 @@ class UnifiedPipeline:
                         data=ev_data,
                     )
                 )
+            # #635: the page's withheld count is a property of the grids, not
+            # of the run -- it is read straight off the restored events so a
+            # resumed page reports the same number as the run that withheld
+            # them, and the CLI line does not vanish on the second run.
+            ps.chart_table_skeletons_suppressed = len(
+                {
+                    ((e.data or {}).get("table_index"), (e.data or {}).get("sha256"))
+                    for e in state.events
+                    if e.page_num == page_num and e.kind == SKELETON_SUPPRESSED
+                }
+            )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
@@ -11459,6 +11728,22 @@ class UnifiedPipeline:
         # flush, the status aggregation, the initial save and the metadata --
         # so every terminal writer serializes the same reconciled text.
         page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
+
+        # #635 Stage 0, CLI surface. Counted from the document's own events so a
+        # resumed run reports what THIS run's body actually contains rather than
+        # what a page object happens to still carry.
+        if not self.config.quiet:
+            from socr.figures.chart_data import SKELETON_SUPPRESSED
+
+            _skeletons = sum(
+                1 for e in state.events if getattr(e, "kind", "") == SKELETON_SUPPRESSED
+            )
+            if _skeletons:
+                console.print(
+                    f"  [yellow]{_skeletons} chart-table skeleton(s) suppressed; "
+                    "crops kept[/yellow]"
+                )
+
         final_text, has_text = self._canonical_body(state, page_texts=page_texts)
 
         self._backfill_missing_table_ladder_terminals(state, page_texts)
