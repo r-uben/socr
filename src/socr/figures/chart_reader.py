@@ -933,14 +933,40 @@ def read_dashed_series(
     strays = [m for m in runs if not _owned_bins(m, bins)]
     cover = {i: [m for m in runs if i in _owned_bins(m, bins)] for i in range(len(bins))}
 
-    def descends_at(x: float, seg: Mark) -> bool:
-        """The outline is drawn coming down to the axis at *x*."""
+    def descent_at(x: float, seg: Mark) -> str:
+        """``""`` when the outline is drawn coming down to the axis at *x*.
+
+        Otherwise the reason it is not established, in the page's own terms.
+        Every bound here is measured off the drawing -- the riser's own half
+        stroke width, the run's, and the calibration residual -- and it is held
+        to the SAME half-count rule ``_resolve`` holds every height to. Without
+        that, a stroke thicker than the per-participant pitch would let a
+        descent stopping most of a participant above the axis count as reaching
+        it: the one number such a panel published would be the one number its
+        own geometry could not support.
+        """
         slack = max(seg.tolerance, cal.residual)
-        return any(
-            abs(v.cx - x) <= max(v.tolerance, slack)
-            and abs(max(v.y0, v.y1) - frame.baseline) <= max(v.tolerance, slack)
-            for v in risers
-        )
+        coarse = False
+        stopped = False
+        for v in risers:
+            bound = max(v.tolerance, slack)
+            if abs(v.cx - x) > bound:
+                continue
+            if abs(max(v.y0, v.y1) - frame.baseline) > bound:
+                stopped = True
+                continue
+            if bound >= cal.half_count_points:
+                coarse = True
+                continue
+            return ""
+        if coarse:
+            return (
+                "a riser is drawn there, but its own edge uncertainty is not below half "
+                "a count, so it does not establish that the outline reached the axis"
+            )
+        if stopped:
+            return "the riser drawn there stops short of the axis"
+        return "no riser of the outline is drawn descending to the axis there"
 
     cells: list[Cell] = []
     for i, b in enumerate(bins):
@@ -978,27 +1004,44 @@ def read_dashed_series(
         if not covering:
             observed = frame.x0 <= b.lo and b.hi <= frame.x1
             # An uncovered bin is the axis only where the page SHOWS the
-            # outline coming down to it. Where a neighbouring bin carries a
-            # level above the axis, the descent from that level is the
-            # evidence, and it has to be drawn: without the riser, an outline
-            # that stopped being drawn and an outline that fell to zero are the
-            # same picture, and this reader will not call that picture zero.
-            # Where no neighbouring bin carries a level at all there is no
-            # descent to require, and the detail says which of the two it is.
+            # outline coming down to it, and the question is about the whole
+            # undrawn stretch, not about two array indices: the evidence for a
+            # bin in the MIDDLE of a gap is the descent at the far end of that
+            # gap, which is one bin away or five. So walk out in each direction
+            # to the nearest bin the outline says anything about, and ask that
+            # one. A bin whose own level this reader could not resolve is
+            # evidence MISSING, never evidence not required -- it is exactly
+            # the case where the drawing is least trustworthy. The detail
+            # describes what was drawn, because these details are the audit
+            # trail behind every published zero.
             missing: list[str] = []
-            checked = 0
-            for j in (i - 1, i + 1):
+            supported: list[str] = []
+            for step in (-1, 1):
+                j = i + step
+                while 0 <= j < len(bins) and not cover[j] and not _doubted_by(strays, bins[j]):
+                    j += step
                 if not 0 <= j < len(bins):
                     continue
                 near = cover[j]
-                if len(near) != 1:
+                if len(near) != 1 or _doubted_by(strays, bins[j]):
+                    missing.append(
+                        f"the level over {bins[j].label} is not itself established, so "
+                        "it cannot witness a descent to the axis"
+                    )
                     continue
                 seg = near[0]
                 if abs(seg.cy - frame.baseline) <= max(seg.tolerance, cal.residual):
+                    supported.append(f"the outline runs on the axis over {bins[j].label}")
                     continue
-                checked += 1
-                if not descends_at(seg.x1 if j < i else seg.x0, seg):
-                    missing.append(bins[j].label)
+                why = descent_at(seg.x1 if j < i else seg.x0, seg)
+                if why:
+                    missing.append(
+                        f"where the outline leaves the level over {bins[j].label}, {why}"
+                    )
+                else:
+                    supported.append(
+                        f"the outline is drawn descending to the axis beside {bins[j].label}"
+                    )
             if observed and missing:
                 cells.append(
                     Cell(
@@ -1007,10 +1050,10 @@ def read_dashed_series(
                         count=None,
                         interval=(0.0, 0.0),
                         detail=(
-                            "the outline draws no level over this bin, and it is not "
-                            "drawn descending to the axis where it meets the level over "
-                            f"{' and '.join(missing)}, so the outline stopping here and "
-                            "the outline falling to zero here are the same picture"
+                            "the outline draws no level over this bin, and "
+                            + "; ".join(missing)
+                            + ", so the outline stopping short of this bin and the "
+                            "outline falling to zero over it are the same picture"
                         ),
                         baseline_y=frame.baseline,
                     )
@@ -1025,14 +1068,14 @@ def read_dashed_series(
                     detail=(
                         (
                             "the outline draws no level over this bin while the axis is "
-                            "stroked across it, and it is drawn descending to the axis "
-                            "where it meets each neighbouring level, so the level here "
-                            "is the axis"
-                            if checked
-                            else "the outline draws no level over this bin while the "
-                            "axis is stroked across it, and no neighbouring bin carries "
-                            "a level above the axis for it to descend from, so the "
-                            "level here is the axis"
+                            "stroked across it, and "
+                            + (
+                                "; ".join(supported)
+                                if supported
+                                else "the outline draws no level anywhere on either side "
+                                "of it for it to descend from"
+                            )
+                            + ", so the level here is the axis"
                         )
                         if observed
                         else "the bin is not wholly inside the drawn plot, so it was not observed"

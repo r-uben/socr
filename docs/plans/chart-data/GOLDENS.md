@@ -1,4 +1,3 @@
-warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
 # #635 — chart-count goldens for `dotplot-p20.pdf`
 
 **Status: independently annotated (two channels, second reviewer) on this one document;
@@ -52,9 +51,12 @@ grouping, which keys on bin label strings and tick values rather than geometry.
 **What this does and does not establish.** It establishes the reading of THIS page,
 through channels that share no code with the implementation. It is not a defect rate:
 one Fed SEP page, unusually well behaved (three orders of margin between the residual
-and the refusal boundary). The two refusal paths hardened in round 2 — a bar spanning
-two bins, and a staircase that stops without descending — are precisely the cases this
-fixture cannot exercise, and they are pinned by synthetic drawings instead.
+and the refusal boundary). The refusal paths hardened in rounds 2 and 3 — a bar spanning
+two bins, a staircase that stops without descending anywhere across an undrawn stretch, a
+neighbouring level the reader could not resolve, and a stroke too thick to locate the axis
+within half a participant — are precisely the cases this fixture cannot exercise, and they
+are pinned by synthetic drawings instead. The reading of this page is unchanged at all 65
+cells across both rounds of hardening.
 
 
 ## Panel 1 — “2018”  (chart region 1, crop `chart_region_p20_1.png`)

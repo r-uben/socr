@@ -58,6 +58,9 @@ def build_chart(
     ticks: tuple[int, ...] = (2, 4, 6, 8, 10),
     heading: str = "PANEL A",
     omit_dashed_risers: bool = False,
+    dash_width: float | None = None,
+    descent_gap: float = 0.0,
+    extra_runs: list[tuple[float, float, int]] = (),
 ) -> tuple[fitz.Document, list]:
     """Draw a two-series histogram and return ``(doc, [full-page bbox])``.
 
@@ -134,25 +137,44 @@ def build_chart(
             width=0.3 * scale,
         )
 
+    dash = {
+        "width": dash_width if dash_width is not None else 1.5 * scale,
+        "dashes": "[2 2] 0",
+        "color": (0, 0.4, 0.7),
+    }
     if dashed is not None:
         edges = [bin_x0 + bin_w * i for i in range(n + 1)]
         levels = [base - c * unit for c in dashed]
         prev = base
-        dash = {"width": 1.5 * scale, "dashes": "[2 2] 0", "color": (0, 0.4, 0.7)}
+
+        def riser_end(y: float) -> float:
+            # ``descent_gap`` stops a descent short of the axis, which is how a
+            # test says "the outline nearly reached the axis" without moving a
+            # single level.
+            return base - descent_gap if y == base else y
+
         for i, level in enumerate(levels):
             if level != prev and not omit_dashed_risers:
+                ends = (riser_end(level), riser_end(prev))
                 page.draw_line(
-                    fitz.Point(edges[i], min(level, prev)),
-                    fitz.Point(edges[i], max(level, prev)),
+                    fitz.Point(edges[i], min(*ends)),
+                    fitz.Point(edges[i], max(*ends)),
                     **dash,
                 )
             if level != base:
                 page.draw_line(fitz.Point(edges[i], level), fitz.Point(edges[i + 1], level), **dash)
             prev = level
         if prev != base and not omit_dashed_risers:
+            ends = (riser_end(prev), riser_end(base))
             page.draw_line(
-                fitz.Point(edges[n], min(prev, base)), fitz.Point(edges[n], max(prev, base)), **dash
+                fitz.Point(edges[n], min(*ends)), fitz.Point(edges[n], max(*ends)), **dash
             )
+    for rx0, rx1, count in extra_runs:
+        page.draw_line(
+            fitz.Point(rx0 * scale, base - count * unit),
+            fitz.Point(rx1 * scale, base - count * unit),
+            **dash,
+        )
 
     doc.save(str(path))
     reopened = fitz.open(str(path))
@@ -710,7 +732,8 @@ def test_a_staircase_that_never_descends_is_not_a_drawn_zero(tmp_path: Path) -> 
     zero = [c for s in drawn.series if s.name == DASHED for c in s.cells][1]
     assert "descending to the axis" in zero.detail, zero.detail
     refused = [c for s in gapped.series if s.name == DASHED for c in s.cells][1]
-    assert "not drawn descending to the axis" in refused.detail, refused.detail
+    assert "no riser of the outline is drawn descending to the axis" in refused.detail
+    assert "B1" in refused.detail and "B3" in refused.detail, refused.detail
     assert "every riser" not in refused.detail, "a check that did not run is still claimed"
 
 
@@ -878,3 +901,142 @@ def test_the_cli_does_not_count_derivations_that_never_reached_the_document(
     assert published and "1 chart derivation(s) in the document" in published[0], with_unbound
     withheld = [ln for ln in with_unbound if "NOT published" in ln]
     assert withheld and "1 further chart derivation(s)" in withheld[0], with_unbound
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the descent rule across the whole undrawn stretch
+# ---------------------------------------------------------------------------
+
+
+def test_a_gap_two_bins_wide_needs_the_descent_just_as_much(tmp_path: Path) -> None:
+    """The evidence for a bin mid-gap is the descent at the END of the gap.
+
+    Levels over the first and last bin and nothing between them. The DIFFERENCE
+    is whether the page draws the risers: with them every bin of the stretch is
+    the axis, without them none of it is. Asking only the immediate neighbours
+    would leave the middle of any gap wider than one bin publishing a zero out
+    of a stretch the outline is never drawn crossing.
+    """
+    levels = [4, 0, 0, 0, 4]
+    drawn = read_one(tmp_path / "drawn", None, levels)
+    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    got_drawn = counts(drawn, DASHED)
+    got_gapped = counts(gapped, DASHED)
+
+    assert got_drawn[1:4] == ["0", "0", "0"], got_drawn
+    assert got_gapped[1:4] == ["UNRESOLVED"] * 3, got_gapped
+    assert got_drawn[0] == got_gapped[0] == "4", (got_drawn, got_gapped)
+
+    middle = [c for s in gapped.series if s.name == DASHED for c in s.cells][2]
+    assert "B1" in middle.detail and "B5" in middle.detail, middle.detail
+    assert "no neighbouring bin carries a level" not in middle.detail
+
+
+def test_a_neighbour_the_reader_could_not_resolve_is_missing_evidence(tmp_path: Path) -> None:
+    """An unresolved neighbour is evidence MISSING, not evidence not required.
+
+    Both arms refuse, which is right, and the DIFFERENCE is the detail -- the
+    audit trail behind the refusal. One run over the neighbouring bin and the
+    reader says the descent was never drawn. Two runs over it and the reader
+    says that bin's own level is not established, instead of asserting, as it
+    once did, that no neighbouring bin carries a level at all.
+    """
+    one = read_one(tmp_path / "one", None, [0, 4, 0, 0, 0], omit_dashed_risers=True)
+    two = read_one(
+        tmp_path / "two",
+        None,
+        [0, 4, 0, 0, 0],
+        omit_dashed_risers=True,
+        # A second level over bin 2's own span (110 + 50i, 50 wide), drawn
+        # short of its right edge so the level either side of the riser stays
+        # unambiguous and it is the BIN that is ambiguous, not the outline.
+        extra_runs=[(_CENTRES[1] - 23.0, _CENTRES[1] + 20.0, 6)],
+    )
+    got_one = counts(one, DASHED)
+    got_two = counts(two, DASHED)
+
+    assert got_one[1] == "4", got_one
+    assert got_two[1] == "UNRESOLVED", "the ambiguous bin must refuse"
+    assert got_one[2] == got_two[2] == "UNRESOLVED", (got_one, got_two)
+
+    said_one = [c for s in one.series if s.name == DASHED for c in s.cells][2].detail
+    said_two = [c for s in two.series if s.name == DASHED for c in s.cells][2].detail
+    assert "no riser of the outline is drawn descending" in said_one, said_one
+    assert "is not itself established" in said_two, said_two
+    assert "no neighbouring bin carries a level" not in said_two
+    assert said_one != said_two, "two different drawings, one provenance string"
+
+
+def test_a_complete_staircase_is_not_over_refused(tmp_path: Path) -> None:
+    """Control: the rule under-refuses nothing that the page actually draws."""
+    panel = read_one(tmp_path / "ok", None, [0, 4, 6, 2, 0])
+    got = counts(panel, DASHED)
+    assert got[1:4] == ["4", "6", "2"], got
+    assert got[4] == "0", got
+    zero = [c for s in panel.series if s.name == DASHED for c in s.cells][4]
+    assert "descending to the axis beside B4" in zero.detail, zero.detail
+
+
+def test_a_stroke_too_thick_to_locate_the_axis_cannot_certify_a_zero(tmp_path: Path) -> None:
+    """The descent is held to the same half-count bound as every height.
+
+    The DIFFERENCE is the dashed stroke width and nothing else: same levels,
+    same descents drawn all the way to the axis, same calibration. A thin
+    stroke locates the axis well inside half a participant and the empty bin is
+    zero. A stroke thicker than the per-participant pitch cannot, so it may not
+    certify the one number such a panel would otherwise publish.
+    """
+    thin = read_one(tmp_path / "thin", None, [0, 4, 0, 0, 0], dash_width=1.5)
+    fat = read_one(tmp_path / "fat", None, [0, 4, 0, 0, 0], dash_width=14.0)
+    got_thin = counts(thin, DASHED)
+    got_fat = counts(fat, DASHED)
+
+    assert got_thin[2] == "0", got_thin
+    assert got_fat[2] == "UNRESOLVED", got_fat
+    why = [c for s in fat.series if s.name == DASHED for c in s.cells][2].detail
+    assert "not below half a count" in why, why
+
+
+def test_the_half_count_bound_is_the_calibration_not_the_stroke_width(tmp_path: Path) -> None:
+    """Same 14pt stroke, twice the page scale: half a count doubles and the
+    same drawing becomes readable. The bound is a ratio the page supplies, not
+    a width this module holds."""
+    tight = read_one(tmp_path / "tight", None, [0, 4, 0, 0, 0], dash_width=14.0)
+    roomy = read_one(tmp_path / "roomy", None, [0, 4, 0, 0, 0], dash_width=14.0, scale=2.0)
+    assert counts(tight, DASHED)[2] == "UNRESOLVED", counts(tight, DASHED)
+    assert counts(roomy, DASHED)[2] == "0", counts(roomy, DASHED)
+
+
+def test_a_descent_that_stops_short_of_the_axis_is_not_a_zero(tmp_path: Path) -> None:
+    """The DIFFERENCE is how far short the descent stops, in units of the
+    mark's own edge uncertainty. Inside half a stroke width is anti-aliasing
+    and path rounding; a full stroke width is an unfinished path."""
+    near = read_one(tmp_path / "near", None, [0, 4, 0, 0, 0], descent_gap=0.7)
+    far = read_one(tmp_path / "far", None, [0, 4, 0, 0, 0], descent_gap=3.0)
+    assert counts(near, DASHED)[2] == "0", counts(near, DASHED)
+    assert counts(far, DASHED)[2] == "UNRESOLVED", counts(far, DASHED)
+
+
+def test_two_hooks_from_one_factory_are_indistinguishable(tmp_path: Path) -> None:
+    """The stated limit of the fingerprint, pinned so it cannot drift silently.
+
+    Hook identity is ``module.qualname``, so two hooks a caller builds from one
+    factory both read ``make.<locals>.hook`` and the fingerprint cannot tell
+    them apart. Documented in the config docstring; pinned here so that if the
+    identity scheme ever changes, this test is what says the docstring is now
+    wrong.
+    """
+    stage0 = _pipeline_helpers()
+
+    def make(verdict: str):
+        def hook(survey_key: str, horizon: str, series: dict) -> str:
+            return verdict
+
+        return hook
+
+    def fingerprint(hook):
+        pipeline = stage0._make_pipeline()
+        pipeline.config.chart_constraint_hook = hook
+        return pipeline._run_fingerprint()
+
+    assert fingerprint(make("accept")) == fingerprint(make("reject"))

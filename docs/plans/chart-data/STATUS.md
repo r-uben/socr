@@ -74,7 +74,7 @@ Done-when, and how each is met:
 | Each bar assigned to a bin by its horizontal footprint | `_owned_bins`: the bins whose printed label centre lies inside the mark. Not an interval-containment test — a text bbox carries side bearings, so the printed label's centre sits ~0.7 pt off the drawn bin centre on this fixture, and an interval derived from it cuts a bar's own edge. A mark owning NO bin makes every bin it touches `UNRESOLVED`, and so does a BAR owning more than one: a histogram bar spans one bin by construction, so covering two printed label centres is the same evidence failure as covering none (round 2 finding — before it, such a bar was published at full height in both bins). The staircase reader keeps the multi-bin case, where a level legitimately runs across several bins. |
 | Solid silhouette separated from the dashed staircase by fill vs stroke+dash | Two different readers, selected by the legend-bound style. The staircase is additionally reconstructed as a level function and CHECKED: every riser must join the level on its left to the level on its right, probed half a bin out. One riser that does not sends the whole series `UNRESOLVED`. |
 | Count interval from measured uncertainty; one integer or UNRESOLVED | `_resolve`: the height widened by (calibration residual + half the mark's own stroke width) on each side, divided by the fitted points per participant. An integer only when exactly one non-negative integer lies inside, and only when the uncertainty is below half a count. |
-| A zero needs an observable empty bin | A zero is emitted only when the series is PRESENT, the bin lies wholly inside the drawn plot, and nothing of that series is over it — for bars, a histogram resting on the axis, where a zero bar is invisible by construction; for the staircase, an outline the page draws DESCENDING to the axis where it meets the bin from a neighbouring level. Where that neighbouring level simply stops instead, the bin is `UNRESOLVED`: an outline that ended and an outline that fell to zero are the same picture (round 2 finding — before it, a gap read as zero and the cell claimed a riser check that had iterated an empty list). `Cell.empty_bin_observed` records it. |
+| A zero needs an observable empty bin | A zero is emitted only when the series is PRESENT, the bin lies wholly inside the drawn plot, and nothing of that series is over it — for bars, a histogram resting on the axis, where a zero bar is invisible by construction; for the staircase, an outline the page draws DESCENDING to the axis. The question is asked of the whole undrawn stretch, not of two array indices: the reader walks out in each direction to the nearest bin the outline says anything about and asks THAT one for the descent, so a gap five bins wide is held to the same evidence as a gap one bin wide. A neighbour whose own level the reader could not resolve is evidence MISSING, never evidence not required. The descent is held to the same half-count bound as every height: a stroke too thick to locate the axis within half a participant cannot certify a zero. `Cell.empty_bin_observed` records it, and the cell detail names the bin whose descent was or was not drawn. (Round 2 finding: a gap read as zero while the cell claimed a riser check that had iterated an empty list. Round 3: that check reached only i±1 and was waived entirely by an unresolved neighbour, and its slack had no half-count bound.) |
 | Never allocate residual participants to make a sum work | No code path reads a total. The acceptance hook is the only thing that ever sees one, it is the CALLER's, and its verdict can only accept, reject or abstain — it can never change a cell. Pinned by running one reading through three verdicts and asserting the counts are identical. |
 | Per-cell provenance persisted | `PanelReading.to_dict` on the `chart_counts_derived` event: source checksum, page, crop filename + sha256 + DPI + clip, panel label, series key and style, every bin's label and coordinates, each cell's bar bbox, detected top and baseline, the calibration's tick pairs/residual/zero, the uncertainty interval, reader version, status, and the verification verdict with its detail. |
 | Acceptance: internal check plus the caller hook; totals never in code | `_internally_checked` (every emitted count a non-negative integer; every bin of a present series accounted for) runs always. `verify_panel` then applies `PipelineConfig.chart_constraint_hook`, `(survey_key, horizon, {series: {bin: count}}) -> accept/reject/no_opinion`. `survey_key` is the source document's stem, `horizon` the panel's own printed heading. Without a hook the derivation is published labelled UNVERIFIED. A hook that raises leaves it unverified, never takes the reading with it. |
@@ -123,7 +123,10 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    turned on to REJECT a table was skipped on resume and the rejected table stayed in the
    document. What remains: editing a hook's logic without renaming it is not detected,
    because a fingerprint cannot see a function body. Said out loud in the config
-   docstring; the instruction to callers is to rename the hook when its rules change.
+   docstring; the instruction to callers is to rename the hook when its rules change. The
+   sharpest form of that limit, also stated there and pinned by a test: two hooks built by
+   one factory share the qualname `make.<locals>.hook`, so a factory-shaped caller gets no
+   discrimination at all.
 7. **Stage 2 is untouched.** No model is consulted; geometry is the only authority, as
    the design requires before proposals can be reconciled against it.
 8. **One document is not a defect rate.** Every claim about accuracy here is measured on
@@ -134,7 +137,13 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    The two refusal paths added in round 2 are exercised by synthetic drawings only,
    because this fixture draws neither a bar spanning two bins nor a staircase that stops
    without descending.
-9. **The corpus golden does not run in CI.** `test_dotplot_fixture_five_panels` is
+9. **A stray bar refuses a bin it barely touches.** `_doubted_by` is a raw interval
+   overlap with no tolerance, so a bar of unknown binning that reaches 0.14 pt into the
+   next bin's interval refuses that whole bin. Round 2 made strays much more common (a bar
+   spanning two label centres is now one), so this path carries more traffic than it did.
+   It costs recall only, never correctness — a bin whose contents are contested publishes
+   nothing rather than a guess — so it is recorded rather than charged.
+10. **The corpus golden does not run in CI.** `test_dotplot_fixture_five_panels` is
    skipped when `~/Data/socr/fixtures/dotplot/dotplot-p20.pdf` is absent, which it is on
    CI. The strongest evidence in the ticket is therefore unenforced on every CI run; a
    green tick does not mean the golden was checked.

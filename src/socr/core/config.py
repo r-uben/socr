@@ -489,7 +489,11 @@ class PipelineConfig:
     # already terminal. Editing the hook's LOGIC without renaming it is NOT
     # detected -- the fingerprint cannot see a function body -- and a resumed run
     # will keep whatever verdict the previous logic produced. Rename the hook
-    # when its rules change.
+    # when its rules change. The same limit bites harder on a shape callers
+    # reach for naturally: two hooks built by one factory both carry the
+    # qualname ``make.<locals>.hook``, so a caller that constructs its hooks
+    # that way gets no discrimination at all -- give each rule set its own
+    # named function, or its own factory.
     chart_constraint_hook: Callable[[str, str, dict], str] | None = None
 
     def __post_init__(self) -> None:
