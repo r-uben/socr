@@ -246,6 +246,13 @@ class PageState:
     #: withholding a grid that carried no value removes no reading, so the page
     #: is not less complete than it was -- it is less misleading.
     chart_table_skeletons_suppressed: int = 0
+    #: #635 Stage 1: how many of this page's chart regions had their counts
+    #: READ off the source vector geometry and published as a real table. A
+    #: count, like the line above, because the page note and the CLI both
+    #: report how many. Deliberately NOT part of ``needs_repair`` or any status
+    #: guard: a derivation adds a reading the page did not have, so a page with
+    #: none is exactly as complete as it was before this lane existed.
+    chart_derivations: int = 0
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume

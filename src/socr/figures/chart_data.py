@@ -675,6 +675,7 @@ def suppress_chart_table_skeletons(
     interiors: dict[int, list[str]],
     crop_names: dict[int, str],
     axis_rows: dict[int, list[list[tuple[float, str]]]] | None = None,
+    derivations: dict[int, str] | None = None,
 ) -> tuple[str, list[SkeletonSuppression], list[SkeletonRefusal]]:
     """Withhold each empty grid PROVEN to derive from one of the page's charts.
 
@@ -688,6 +689,13 @@ def suppress_chart_table_skeletons(
     Refusals leave the text alone. Deleting an empty form the page happens to
     contain, because the page also has a chart, would be content loss dressed up
     as a fix.
+
+    #635 Stage 1: *derivations* maps a region index to the block that region's
+    own geometry supports -- a real table of counts, or a note saying the
+    derivation was refused. Where one is supplied it ships in place of the
+    empty grid instead of Stage 0's "counts not extracted" note; the binding
+    that puts it there is unchanged, and so is every outcome for a region with
+    no derivation. Omitting the argument reproduces Stage 0 byte for byte.
     """
     if not text:
         return text, [], []
@@ -804,7 +812,9 @@ def suppress_chart_table_skeletons(
         skeleton = by_index[chosen[region]]
         crop = crop_names.get(region, "")
         label = anchors[region][1]
-        note = suppression_note(page_num, region, crop, label, skeleton)
+        note = (derivations or {}).get(region) or suppression_note(
+            page_num, region, crop, label, skeleton
+        )
         lines[skeleton.start : skeleton.end + 1] = [note]
         suppressions.append(
             SkeletonSuppression(

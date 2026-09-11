@@ -152,6 +152,13 @@ _UNEXERCISED = {
     # covered directly by tests/test_gh222_probe_host.py.
     "ollama_host",
     "describe_figures",  # read by the figure-description lane, not reached here
+    # #635 Stage 1: read by `_derive_chart_counts` -> `verify_panel`, which runs
+    # only for a page that HAS a detected chart region and an empty chart-derived
+    # grid. This fixture's page has neither, so the field is genuinely unexercised
+    # here rather than dead; it is falsified directly in
+    # tests/test_gh635_chart_reader.py (an accepting, a rejecting and a raising
+    # hook, each through the real pipeline or the real `verify_panel`).
+    "chart_constraint_hook",
     # Per-engine model/task settings. Read by the engine when it actually runs;
     # `_run_engine_on_pages` is stubbed here, so no engine subprocess is ever
     # constructed. Their appearance under `_engine_determinants` is fingerprint
