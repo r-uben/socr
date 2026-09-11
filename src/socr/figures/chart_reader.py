@@ -862,9 +862,12 @@ def read_dashed_series(
     page does not draw.
 
     That check is about the risers that exist. A bin no run covers needs the
-    opposite: the riser that brings the outline DOWN to the axis beside it must
-    have been drawn. Where the neighbouring level is there and its descent is
-    not, the bin is ``UNRESOLVED`` -- see the empty-bin branch below.
+    opposite: the page must SHOW the outline at the axis beside it, either by
+    the riser that brings it down or by a neighbouring run already drawn on the
+    axis. Where the neighbouring level is there and neither witness is, the bin
+    is ``UNRESOLVED`` -- see the empty-bin branch below. Both witnesses are
+    held to the same half-count bound ``_resolve`` holds every height to, so a
+    stroke too thick to locate the axis certifies nothing by either route.
     """
     inside = [
         m
@@ -1030,8 +1033,24 @@ def read_dashed_series(
                     )
                     continue
                 seg = near[0]
-                if abs(seg.cy - frame.baseline) <= max(seg.tolerance, cal.residual):
-                    supported.append(f"the outline runs on the axis over {bins[j].label}")
+                # The walk's other admissible witness: the outline already
+                # drawn ON the axis over the neighbour, which needs no descent
+                # because it never left. It is held to the same half-count rule
+                # as the descent beside it -- a stroke too thick to locate the
+                # axis within half a participant cannot certify a zero by this
+                # route either, or the reader would publish, out of one panel,
+                # a number witnessed by a level it refused in that same panel.
+                on_axis = max(seg.tolerance, cal.residual)
+                if abs(seg.cy - frame.baseline) <= on_axis:
+                    if on_axis >= cal.half_count_points:
+                        missing.append(
+                            f"the level over {bins[j].label} is drawn within its own edge "
+                            "uncertainty of the axis, but that uncertainty is not below "
+                            "half a count, so it does not establish that the outline is "
+                            "on the axis"
+                        )
+                    else:
+                        supported.append(f"the outline runs on the axis over {bins[j].label}")
                     continue
                 why = descent_at(seg.x1 if j < i else seg.x0, seg)
                 if why:

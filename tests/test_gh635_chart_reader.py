@@ -1040,3 +1040,98 @@ def test_two_hooks_from_one_factory_are_indistinguishable(tmp_path: Path) -> Non
         return pipeline._run_fingerprint()
 
     assert fingerprint(make("accept")) == fingerprint(make("reject"))
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the on-axis witness, and the walk at the page edge
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_near_the_axis_cannot_witness_a_zero_when_the_stroke_cannot_tell(
+    tmp_path: Path,
+) -> None:
+    """The second witness is bounded like the first.
+
+    One drawing: a level six tenths of a participant above the axis over the
+    middle bins, no risers anywhere. The DIFFERENCE is the dashed stroke width.
+    A stroke thicker than the per-participant pitch cannot tell that level from
+    the axis, and the bins on either side must not take it as proof that the
+    outline is down -- the same panel refuses the level itself for the same
+    uncertainty, so accepting it here would publish a number the reader's own
+    message says it cannot support.
+    """
+    span = (_CENTRES[1] - 24.0, _CENTRES[3] + 24.0, 0.6)
+    thin = read_one(tmp_path / "thin", None, None, dash_width=1.5, extra_runs=[span])
+    fat = read_one(tmp_path / "fat", None, None, dash_width=14.0, extra_runs=[span])
+    got_thin = counts(thin, DASHED)
+    got_fat = counts(fat, DASHED)
+
+    # The witness itself is refused in both arms, for uncertainty in the fat
+    # one and for a height that is not the axis in the thin one.
+    assert got_thin[2] == "UNRESOLVED" and got_fat[2] == "UNRESOLVED", (got_thin, got_fat)
+    # So neither arm may publish a zero on the strength of it.
+    assert got_fat[0] == "UNRESOLVED" and got_fat[4] == "UNRESOLVED", got_fat
+    assert got_thin[0] == "UNRESOLVED" and got_thin[4] == "UNRESOLVED", got_thin
+
+    why = [c for s in fat.series if s.name == DASHED for c in s.cells][0].detail
+    assert "not below half a count" in why, why
+    assert "runs on the axis over" not in why, why
+
+
+def test_the_on_axis_witness_still_works_when_the_stroke_can_locate_the_axis(
+    tmp_path: Path,
+) -> None:
+    """Control for the bound above: the same witness, drawn ON the axis.
+
+    The DIFFERENCE is the stroke width alone. A thin stroke places the run on
+    the axis well inside half a participant, and the bins beside it are zero on
+    that witness by name. A stroke thicker than the pitch cannot, and they
+    refuse. The bound removes the unsupportable readings and keeps the rest.
+    """
+    span = (_CENTRES[1] - 24.0, _CENTRES[3] + 24.0, 0)
+    thin = read_one(tmp_path / "thin", None, None, dash_width=1.5, extra_runs=[span])
+    fat = read_one(tmp_path / "fat", None, None, dash_width=14.0, extra_runs=[span])
+    got_thin = counts(thin, DASHED)
+    got_fat = counts(fat, DASHED)
+
+    assert got_thin[0] == "0" and got_thin[4] == "0", got_thin
+    assert got_fat[0] == "UNRESOLVED" and got_fat[4] == "UNRESOLVED", got_fat
+    said = [c for s in thin.series if s.name == DASHED for c in s.cells][0].detail
+    assert "runs on the axis over" in said, said
+
+
+def test_a_gap_against_the_page_edge_is_decided_by_the_side_that_speaks(
+    tmp_path: Path,
+) -> None:
+    """Walking off the end of the bins asks nothing and proves nothing.
+
+    The first two bins are empty and the outline is drawn over the last three.
+    The left walk runs out of bins and contributes neither evidence nor a
+    requirement; the bins are decided by the one direction that has something
+    to say. The DIFFERENCE is the risers: drawn, both bins are the axis on the
+    strength of a descent two bins away, with nothing at all inside their own
+    intervals; omitted, both refuse.
+    """
+    levels = [0, 0, 4, 4, 4]
+    drawn = read_one(tmp_path / "drawn", None, levels)
+    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    got_drawn = counts(drawn, DASHED)
+    got_gapped = counts(gapped, DASHED)
+
+    assert got_drawn[:2] == ["0", "0"], got_drawn
+    assert got_gapped[:2] == ["UNRESOLVED", "UNRESOLVED"], got_gapped
+    assert got_drawn[2:] == got_gapped[2:] == ["4", "4", "4"], (got_drawn, got_gapped)
+    said = [c for s in drawn.series if s.name == DASHED for c in s.cells][0].detail
+    assert "descending to the axis beside B3" in said, said
+
+
+def test_half_a_count_is_recomputed_from_the_calibration_at_every_scale(
+    tmp_path: Path,
+) -> None:
+    """Nothing in the bound is a point value: the same drawing at twice the
+    page scale reports twice the points per participant and twice half a
+    count, so the veto tracks the ratio the page supplies."""
+    one = read_one(tmp_path / "one", None, [0, 4, 0, 0, 0])
+    two = read_one(tmp_path / "two", None, [0, 4, 0, 0, 0], scale=2.0)
+    assert abs(two.calibration.points_per_unit / one.calibration.points_per_unit - 2.0) < 0.01
+    assert abs(two.calibration.half_count_points / one.calibration.half_count_points - 2.0) < 0.01
