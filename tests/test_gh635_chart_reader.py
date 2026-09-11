@@ -57,6 +57,7 @@ def build_chart(
     extra_bars: list[tuple[float, float, int]] = (),
     ticks: tuple[int, ...] = (2, 4, 6, 8, 10),
     heading: str = "PANEL A",
+    omit_dashed_risers: bool = False,
 ) -> tuple[fitz.Document, list]:
     """Draw a two-series histogram and return ``(doc, [full-page bbox])``.
 
@@ -139,7 +140,7 @@ def build_chart(
         prev = base
         dash = {"width": 1.5 * scale, "dashes": "[2 2] 0", "color": (0, 0.4, 0.7)}
         for i, level in enumerate(levels):
-            if level != prev:
+            if level != prev and not omit_dashed_risers:
                 page.draw_line(
                     fitz.Point(edges[i], min(level, prev)),
                     fitz.Point(edges[i], max(level, prev)),
@@ -148,7 +149,7 @@ def build_chart(
             if level != base:
                 page.draw_line(fitz.Point(edges[i], level), fitz.Point(edges[i + 1], level), **dash)
             prev = level
-        if prev != base:
+        if prev != base and not omit_dashed_risers:
             page.draw_line(
                 fitz.Point(edges[n], min(prev, base)), fitz.Point(edges[n], max(prev, base)), **dash
             )
@@ -629,3 +630,251 @@ def test_the_recorded_crop_digest_names_the_file_the_pipeline_writes(tmp_path: P
     assert assets and assets[0].rendered, assets
     on_disk = (tmp_path / "figures" / assets[0].filename).read_bytes()
     assert _hashlib.sha256(on_disk).hexdigest() == recorded
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the four findings of the adversarial review at f3dbf60
+# ---------------------------------------------------------------------------
+
+# Bin geometry of ``build_chart`` at scale 1: bins start at x=110 and are 50pt
+# wide, so their printed label centres are 135, 185, 235, 285, 335.
+_CENTRES = [110.0 + 50.0 * (i + 0.5) for i in range(5)]
+
+
+def test_a_bar_covering_two_bin_centres_is_refused_not_published_in_both(tmp_path: Path) -> None:
+    """A histogram bar spans one bin. Owning two is an evidence failure.
+
+    The DIFFERENCE is the bar's width and nothing else -- same builder, same
+    height, same process. Narrow enough to cover one printed label centre, the
+    count is published once. Wide enough to cover two, the reader must refuse
+    both bins rather than state the same height twice and invent the second
+    seven participants.
+    """
+    narrow = read_one(
+        tmp_path / "narrow",
+        None,
+        None,
+        extra_bars=[(_CENTRES[1] - 20.0, _CENTRES[1] + 20.0, 7)],
+    )
+    wide = read_one(
+        tmp_path / "wide",
+        None,
+        None,
+        extra_bars=[(_CENTRES[1] - 20.0, _CENTRES[2] + 20.0, 7)],
+    )
+    got_narrow = counts(narrow, SOLID)
+    got_wide = counts(wide, SOLID)
+
+    assert got_narrow[1] == "7", got_narrow
+    assert got_narrow[2] == "0", got_narrow
+    assert got_wide[1] == "UNRESOLVED", got_wide
+    assert got_wide[2] == "UNRESOLVED", got_wide
+
+    def total(panel) -> int:
+        return sum(
+            c.count or 0 for series in panel.series for c in series.cells if series.name == SOLID
+        )
+
+    assert total(narrow) == 7
+    assert total(wide) == 0, "a bar of ambiguous bin contributed a count"
+    said = [
+        c.detail
+        for series in wide.series
+        if series.name == SOLID
+        for c in series.cells
+        if c.status != INTEGER
+    ]
+    assert said and all("does not cover exactly one bin" in d for d in said), said
+
+
+def test_a_staircase_that_never_descends_is_not_a_drawn_zero(tmp_path: Path) -> None:
+    """A gap in the outline and an outline drawn down to the axis differ.
+
+    Same levels, same bins, same process: the DIFFERENCE is whether the page
+    draws the risers. With them, the uncovered bin between two levels is the
+    axis and the reader says so. Without them, the outline may simply have
+    stopped being drawn, and "it ended" and "it fell to zero" are the same
+    picture -- so the bin is UNRESOLVED, not a fabricated zero.
+    """
+    levels = [4, 0, 4, 0, 0]
+    drawn = read_one(tmp_path / "drawn", None, levels)
+    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    got_drawn = counts(drawn, DASHED)
+    got_gapped = counts(gapped, DASHED)
+
+    assert got_drawn[0] == "4" and got_drawn[2] == "4", got_drawn
+    assert got_drawn[1] == "0", got_drawn
+    assert got_gapped[1] == "UNRESOLVED", got_gapped
+    assert got_gapped[0] == "4" and got_gapped[2] == "4", got_gapped
+
+    zero = [c for s in drawn.series if s.name == DASHED for c in s.cells][1]
+    assert "descending to the axis" in zero.detail, zero.detail
+    refused = [c for s in gapped.series if s.name == DASHED for c in s.cells][1]
+    assert "not drawn descending to the axis" in refused.detail, refused.detail
+    assert "every riser" not in refused.detail, "a check that did not run is still claimed"
+
+
+def test_a_riser_that_joins_the_wrong_levels_still_refuses_the_series(tmp_path: Path) -> None:
+    """Control for the test above: the existing riser check is still live."""
+    doc, bboxes = build_chart(tmp_path / "broken.pdf", None, [4, 0, 4, 0, 0])
+    page = doc[0]
+    page.draw_line(
+        fitz.Point(160.0, 340.0),
+        fitz.Point(160.0, 310.0),
+        width=1.5,
+        dashes="[2 2] 0",
+        color=(0, 0.4, 0.7),
+    )
+    out = tmp_path / "broken2.pdf"
+    doc.save(str(out))
+    reopened = fitz.open(str(out))
+    reading = read_chart_page(reopened[0], [reopened[0].rect], page_num=1)
+    got = counts(reading.panels[1], DASHED)
+    assert set(got) == {"UNRESOLVED"}, got
+
+
+def test_a_pure_fill_contributes_no_stroke_widening(tmp_path: Path) -> None:
+    """The uncertainty bound rests on what PyMuPDF reports, not on a guess.
+
+    A stroked rectangle's ``rect`` is its centreline, so measuring the bar top
+    to it is exact and half the stroke width is a real bound. An unstroked fill
+    reports width 0, so it widens nothing.
+    """
+    from socr.figures.chart_reader import page_marks
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    page.draw_rect(fitz.Rect(20, 50, 60, 150), color=(0, 0, 0), fill=(0.5, 0.5, 0.5), width=2.0)
+    page.draw_rect(fitz.Rect(80, 50, 120, 150), color=None, fill=(0.5, 0.5, 0.5))
+    doc.save(str(tmp_path / "f.pdf"))
+    marks = page_marks(fitz.open(str(tmp_path / "f.pdf"))[0])
+    stroked = next(m for m in marks if m.width > 0)
+    plain = next(m for m in marks if m.width == 0)
+    assert (stroked.y0, stroked.y1) == (50.0, 150.0), "rect is the centreline, not the painted edge"
+    assert stroked.tolerance == 1.0, "half the stroke width is the bound"
+    assert plain.tolerance == 0.0, "a pure fill contributes no edge uncertainty"
+
+
+def test_stage0_is_byte_identical_when_derivations_is_omitted() -> None:
+    """Pin the DIFFERENCE: the same call with the argument absent, None and {}."""
+    from socr.figures.chart_data import suppress_chart_table_skeletons
+
+    text = (
+        "Preamble\n\n"
+        "| Percent range | B1 | B2 |\n"
+        "| :--- | :---: | :---: |\n"
+        "| **Participants** |  |  |\n"
+    )
+    kw = {
+        "page_num": 1,
+        "interiors": {1: ["PANEL A"]},
+        "crop_names": {1: "chart_region_p1_1.png"},
+    }
+    absent = suppress_chart_table_skeletons(text, **kw)
+    none = suppress_chart_table_skeletons(text, **kw, derivations=None)
+    empty = suppress_chart_table_skeletons(text, **kw, derivations={})
+    assert absent[0] == none[0] == empty[0]
+
+
+def test_turning_the_acceptance_hook_on_invalidates_the_resume_ledger() -> None:
+    """The hook is the only safety valve, and resume must not skip past it.
+
+    Without the hook in the run fingerprint, a run that publishes a table
+    UNVERIFIED and a later run whose hook REJECTS it share a fingerprint, so
+    the per-page ledger gate skips the page and the rejected table stays in the
+    document. Pinned as differences, not as a value: absent vs present, and one
+    hook vs another, against the same pipeline otherwise untouched.
+    """
+    stage0 = _pipeline_helpers()
+
+    def reject(survey_key: str, horizon: str, series: dict) -> str:
+        return "reject"
+
+    def accept(survey_key: str, horizon: str, series: dict) -> str:
+        return "accept"
+
+    bare = stage0._make_pipeline()
+    off = bare._run_fingerprint()
+
+    rejecting = stage0._make_pipeline()
+    rejecting.config.chart_constraint_hook = reject
+    on = rejecting._run_fingerprint()
+
+    accepting = stage0._make_pipeline()
+    accepting.config.chart_constraint_hook = accept
+    other = accepting._run_fingerprint()
+
+    again = stage0._make_pipeline()
+    again.config.chart_constraint_hook = reject
+    stable = again._run_fingerprint()
+
+    assert off != on, "turning a rejecting hook on did not invalidate terminal pages"
+    assert on != other, "swapping one hook for another did not invalidate terminal pages"
+    assert on == stable, "the same hook produced two fingerprints"
+
+
+def test_the_cli_does_not_count_derivations_that_never_reached_the_document(
+    tmp_path: Path,
+) -> None:
+    """A derivation ships only where an empty grid was bound to its region.
+
+    The DIFFERENCE is one extra CHART_DERIVATION event for a region no
+    suppression bound, with the document otherwise identical. The published
+    line must not move; the unpublished reading must be reported separately
+    rather than counted as though it were in the .md.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from socr.core.audit_log import AuditEvent
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.figures.chart_reader import CHART_DERIVATION
+    from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    stage0 = _pipeline_helpers()
+
+    def run(inject: bool) -> list[str]:
+        here = tmp_path / ("b" if inject else "a")
+        here.mkdir(parents=True, exist_ok=True)
+        pdf = _readable_chart_pdf(here)
+        out_dir = tmp_path / ("out_b" if inject else "out_a")
+        pipeline = stage0._make_pipeline()
+        pipeline.config.quiet = False
+        state = stage0._make_state(pdf, "Preamble sentence unique alpha")
+        pipeline._last_assessment = state._last_assessment
+        printed = MagicMock()
+        with (
+            patch.object(orch, "console", printed),
+            patch(
+                "socr.pipeline.orchestrator.route_page",
+                return_value=stage0._accepted_decision(CANDIDATE),
+            ),
+            patch.object(
+                UnifiedPipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+        ):
+            pipeline._phase_agentic(state, out_dir)
+            if inject:
+                shipped = next(e for e in state.events if e.kind == CHART_DERIVATION)
+                state.events.append(
+                    AuditEvent(
+                        page_num=shipped.page_num,
+                        kind=CHART_DERIVATION,
+                        engine="chart_reader",
+                        detail="a second region, read but bound to no empty grid",
+                        data={**(shipped.data or {}), "region_index": 99},
+                    )
+                )
+            pipeline._phase_assemble(state, out_dir)
+        return stage0._cli_lines(printed)
+
+    plain = [ln for ln in run(False) if "chart derivation(s)" in ln]
+    with_unbound = [ln for ln in run(True) if "chart derivation(s)" in ln]
+
+    assert plain and "1 chart derivation(s) in the document" in plain[0], plain
+    assert not any("NOT published" in ln for ln in plain), plain
+    published = [ln for ln in with_unbound if "in the document" in ln]
+    assert published and "1 chart derivation(s) in the document" in published[0], with_unbound
+    withheld = [ln for ln in with_unbound if "NOT published" in ln]
+    assert withheld and "1 further chart derivation(s)" in withheld[0], with_unbound

@@ -44,8 +44,10 @@ A zero is a reading, not a default. A bin is zero only when the series is
 PRESENT in the panel, the bin lies inside the drawn plot, and the panel's
 geometry positively shows nothing there -- for a bar series, a histogram whose
 bars rest on the axis so a zero bar is invisible by construction; for a
-staircase, an outline that descends to the axis before the bin and rises from
-it after. A series with no marks at all is ``unresolved`` presence, never a
+staircase, an outline the page draws descending to the axis where it meets the
+bin from a neighbouring level. Where a neighbouring level simply stops instead,
+the bin is ``UNRESOLVED``: an outline that ended and an outline that fell to
+zero are the same picture. A series with no marks at all is ``unresolved`` presence, never a
 column of zeros: the 2021 panel of the corpus fixture draws no June outline,
 and "the series is absent" and "every June bin is zero" are not distinguishable
 from that panel alone.
@@ -725,7 +727,7 @@ def _owned_bins(mark: Mark, bins: list[Bin]) -> list[int]:
 
 
 def _doubted_by(strays: list[Mark], b: Bin) -> bool:
-    """A mark that owns no bin overlaps this bin's interval."""
+    """A mark this reader could not place overlaps this bin's interval."""
     return any(m.x1 > b.lo and m.x0 < b.hi for m in strays)
 
 
@@ -761,10 +763,16 @@ def read_solid_series(
     strays: list[Mark] = []
     for bar in bars:
         mine = _owned_bins(bar, bins)
-        if not mine:
+        # A histogram bar spans exactly one bin by construction, so owning
+        # none and owning several are the same evidence failure: the drawing
+        # does not establish which bin this bar counts. Publishing it in every
+        # bin it covers would state its height once per bin and invent the
+        # difference. (The dashed reader does NOT share this rule -- a
+        # staircase level legitimately runs across several bins.)
+        if len(mine) != 1:
             strays.append(bar)
-        for i in mine:
-            owned.setdefault(i, []).append(bar)
+            continue
+        owned.setdefault(mine[0], []).append(bar)
     cells: list[Cell] = []
     for i, b in enumerate(bins):
         here = owned.get(i, [])
@@ -776,8 +784,9 @@ def read_solid_series(
                     count=None,
                     interval=(0.0, 0.0),
                     detail=(
-                        "a bar overlaps this bin but covers no bin's printed label "
-                        "centre, so which bin it belongs to is not established"
+                        "a bar overlaps this bin but does not cover exactly one bin's "
+                        "printed label centre -- it covers none, or it spans several -- "
+                        "so which bin it belongs to is not established"
                     ),
                     baseline_y=frame.baseline,
                 )
@@ -851,6 +860,11 @@ def read_dashed_series(
     right. One riser that does not means the outline was not reconstructed, and
     the whole series goes ``UNRESOLVED`` rather than publishing a staircase the
     page does not draw.
+
+    That check is about the risers that exist. A bin no run covers needs the
+    opposite: the riser that brings the outline DOWN to the axis beside it must
+    have been drawn. Where the neighbouring level is there and its descent is
+    not, the bin is ``UNRESOLVED`` -- see the empty-bin branch below.
     """
     inside = [
         m
@@ -917,9 +931,20 @@ def read_dashed_series(
         )
 
     strays = [m for m in runs if not _owned_bins(m, bins)]
+    cover = {i: [m for m in runs if i in _owned_bins(m, bins)] for i in range(len(bins))}
+
+    def descends_at(x: float, seg: Mark) -> bool:
+        """The outline is drawn coming down to the axis at *x*."""
+        slack = max(seg.tolerance, cal.residual)
+        return any(
+            abs(v.cx - x) <= max(v.tolerance, slack)
+            and abs(max(v.y0, v.y1) - frame.baseline) <= max(v.tolerance, slack)
+            for v in risers
+        )
+
     cells: list[Cell] = []
     for i, b in enumerate(bins):
-        covering = [m for m in runs if i in _owned_bins(m, bins)]
+        covering = cover[i]
         if _doubted_by(strays, b):
             cells.append(
                 Cell(
@@ -952,6 +977,45 @@ def read_dashed_series(
             continue
         if not covering:
             observed = frame.x0 <= b.lo and b.hi <= frame.x1
+            # An uncovered bin is the axis only where the page SHOWS the
+            # outline coming down to it. Where a neighbouring bin carries a
+            # level above the axis, the descent from that level is the
+            # evidence, and it has to be drawn: without the riser, an outline
+            # that stopped being drawn and an outline that fell to zero are the
+            # same picture, and this reader will not call that picture zero.
+            # Where no neighbouring bin carries a level at all there is no
+            # descent to require, and the detail says which of the two it is.
+            missing: list[str] = []
+            checked = 0
+            for j in (i - 1, i + 1):
+                if not 0 <= j < len(bins):
+                    continue
+                near = cover[j]
+                if len(near) != 1:
+                    continue
+                seg = near[0]
+                if abs(seg.cy - frame.baseline) <= max(seg.tolerance, cal.residual):
+                    continue
+                checked += 1
+                if not descends_at(seg.x1 if j < i else seg.x0, seg):
+                    missing.append(bins[j].label)
+            if observed and missing:
+                cells.append(
+                    Cell(
+                        bin_label=b.label,
+                        status=UNRESOLVED,
+                        count=None,
+                        interval=(0.0, 0.0),
+                        detail=(
+                            "the outline draws no level over this bin, and it is not "
+                            "drawn descending to the axis where it meets the level over "
+                            f"{' and '.join(missing)}, so the outline stopping here and "
+                            "the outline falling to zero here are the same picture"
+                        ),
+                        baseline_y=frame.baseline,
+                    )
+                )
+                continue
             cells.append(
                 Cell(
                     bin_label=b.label,
@@ -959,9 +1023,17 @@ def read_dashed_series(
                     count=0 if observed else None,
                     interval=(0.0, 0.0),
                     detail=(
-                        "the outline draws no level over this bin while the axis is "
-                        "stroked across it, and every riser of the outline is "
-                        "consistent with that reading, so the level here is the axis"
+                        (
+                            "the outline draws no level over this bin while the axis is "
+                            "stroked across it, and it is drawn descending to the axis "
+                            "where it meets each neighbouring level, so the level here "
+                            "is the axis"
+                            if checked
+                            else "the outline draws no level over this bin while the "
+                            "axis is stroked across it, and no neighbouring bin carries "
+                            "a level above the axis for it to descend from, so the "
+                            "level here is the axis"
+                        )
                         if observed
                         else "the bin is not wholly inside the drawn plot, so it was not observed"
                     ),

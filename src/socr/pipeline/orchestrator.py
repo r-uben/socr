@@ -1246,6 +1246,21 @@ class UnifiedPipeline:
             # Both change the saved .md content, so both must invalidate the cache.
             "save_figures": cfg.save_figures,
             "describe_figures": cfg.describe_figures,
+            # #635 Stage 1: the caller's acceptance hook, by IDENTITY. It is the
+            # only safety valve the chart reader offers, and it runs on the
+            # candidate path, which a resumed terminal page never crosses -- so
+            # without this entry, turning a REJECTING hook on after a run leaves
+            # the rejected table in the document (the GH-214 family, and the
+            # standing "fingerprint omits the source version" note). Identity,
+            # not the body: module.qualname is deterministic across checkouts
+            # and closes the dangerous direction (absent -> present, or one hook
+            # swapped for another). A caller who edits the hook's LOGIC without
+            # renaming it is not detected; the config docstring says so.
+            "chart_constraint_hook": (
+                f"{_h.__module__}.{_h.__qualname__}"
+                if (_h := getattr(cfg, "chart_constraint_hook", None)) is not None
+                else ""
+            ),
             # --- corrupt-font math recovery (separate from GH-36) ---
             # ``recover_corrupt_math`` re-renders equations through a VLM and
             # replaces page text, so the flag AND the model identity change the
@@ -11921,9 +11936,27 @@ class UnifiedPipeline:
                 VERIFIED,
             )
 
-            _derivations = [
-                (e.data or {}) for e in state.events if getattr(e, "kind", "") == CHART_DERIVATION
+            # A derivation SHIPS only where an empty grid was bound to that
+            # region -- ``suppress_chart_table_skeletons`` substitutes the block
+            # for a suppressed skeleton and nowhere else. A chart page whose
+            # model emitted no grid is read all the same, and reporting those
+            # cells beside the published ones would tell the operator the
+            # document holds numbers it does not. Same (page, region) identity
+            # the page note uses, and both event kinds survive resume.
+            _shipped_keys = {
+                (e.page_num, (e.data or {}).get("region_index"))
+                for e in state.events
+                if getattr(e, "kind", "") == SKELETON_SUPPRESSED
+            }
+            _all_derivations = [
+                e for e in state.events if getattr(e, "kind", "") == CHART_DERIVATION
             ]
+            _derivations = [
+                (e.data or {})
+                for e in _all_derivations
+                if (e.page_num, (e.data or {}).get("region_index")) in _shipped_keys
+            ]
+            _withheld = len(_all_derivations) - len(_derivations)
             if _derivations:
 
                 def _cells(data: dict, resolved: bool) -> int:
@@ -11942,10 +11975,16 @@ class UnifiedPipeline:
                 _ok = sum(_cells(d, True) for d in _derivations)
                 _no = sum(_cells(d, False) for d in _derivations)
                 console.print(
-                    f"  [cyan]{len(_derivations)} chart derivation(s): "
+                    f"  [cyan]{len(_derivations)} chart derivation(s) in the document: "
                     f"{_by[VERIFIED]} verified / {_by[UNVERIFIED]} unverified / "
                     f"{_by[REJECTED]} rejected; {_ok} cell(s) read, "
                     f"{_no} UNRESOLVED[/cyan]"
+                )
+            if _withheld:
+                console.print(
+                    f"  [cyan]{_withheld} further chart derivation(s) read but NOT "
+                    "published: no empty chart grid was bound to that region for "
+                    "them to replace[/cyan]"
                 )
 
         final_text, has_text = self._canonical_body(state, page_texts=page_texts)

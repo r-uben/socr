@@ -71,10 +71,10 @@ Done-when, and how each is met:
 | Calibration from ≥2 labelled ticks, validated against the rest and the baseline | `calibrate_y`: least squares over every stroked tick paired with the numeric word beside it (outside the plot's x span, within half the smallest tick gap). `residual` is the worst disagreement over all ticks AND the axis line, which the fit must place at zero. On the corpus page: 9 ticks, residual 0.0064 pt against a half-count of 1.780 pt. |
 | One participant = half the 2-unit tick spacing, derived | `YCalibration.half_count_points` is `points_per_unit / 2`, fitted. No spacing constant exists in the module. |
 | Bars from the PDF vector drawings, not raster pixels | Filled rects resting on the axis (the solid series) and dashed runs/risers (the staircase). **A raster fallback is explicitly out of scope for this round** — a page with no drawing operators is refused with that reason in the event. |
-| Each bar assigned to a bin by its horizontal footprint | `_owned_bins`: the bins whose printed label centre lies inside the mark. Not an interval-containment test — a text bbox carries side bearings, so the printed label's centre sits ~0.7 pt off the drawn bin centre on this fixture, and an interval derived from it cuts a bar's own edge. A mark owning NO bin makes every bin it touches `UNRESOLVED`. |
+| Each bar assigned to a bin by its horizontal footprint | `_owned_bins`: the bins whose printed label centre lies inside the mark. Not an interval-containment test — a text bbox carries side bearings, so the printed label's centre sits ~0.7 pt off the drawn bin centre on this fixture, and an interval derived from it cuts a bar's own edge. A mark owning NO bin makes every bin it touches `UNRESOLVED`, and so does a BAR owning more than one: a histogram bar spans one bin by construction, so covering two printed label centres is the same evidence failure as covering none (round 2 finding — before it, such a bar was published at full height in both bins). The staircase reader keeps the multi-bin case, where a level legitimately runs across several bins. |
 | Solid silhouette separated from the dashed staircase by fill vs stroke+dash | Two different readers, selected by the legend-bound style. The staircase is additionally reconstructed as a level function and CHECKED: every riser must join the level on its left to the level on its right, probed half a bin out. One riser that does not sends the whole series `UNRESOLVED`. |
 | Count interval from measured uncertainty; one integer or UNRESOLVED | `_resolve`: the height widened by (calibration residual + half the mark's own stroke width) on each side, divided by the fitted points per participant. An integer only when exactly one non-negative integer lies inside, and only when the uncertainty is below half a count. |
-| A zero needs an observable empty bin | A zero is emitted only when the series is PRESENT, the bin lies wholly inside the drawn plot, and nothing of that series is over it — for bars, a histogram resting on the axis, where a zero bar is invisible by construction; for the staircase, an outline whose risers are all consistent with the level there being the axis. `Cell.empty_bin_observed` records it. |
+| A zero needs an observable empty bin | A zero is emitted only when the series is PRESENT, the bin lies wholly inside the drawn plot, and nothing of that series is over it — for bars, a histogram resting on the axis, where a zero bar is invisible by construction; for the staircase, an outline the page draws DESCENDING to the axis where it meets the bin from a neighbouring level. Where that neighbouring level simply stops instead, the bin is `UNRESOLVED`: an outline that ended and an outline that fell to zero are the same picture (round 2 finding — before it, a gap read as zero and the cell claimed a riser check that had iterated an empty list). `Cell.empty_bin_observed` records it. |
 | Never allocate residual participants to make a sum work | No code path reads a total. The acceptance hook is the only thing that ever sees one, it is the CALLER's, and its verdict can only accept, reject or abstain — it can never change a cell. Pinned by running one reading through three verdicts and asserting the counts are identical. |
 | Per-cell provenance persisted | `PanelReading.to_dict` on the `chart_counts_derived` event: source checksum, page, crop filename + sha256 + DPI + clip, panel label, series key and style, every bin's label and coordinates, each cell's bar bbox, detected top and baseline, the calibration's tick pairs/residual/zero, the uncertainty interval, reader version, status, and the verification verdict with its detail. |
 | Acceptance: internal check plus the caller hook; totals never in code | `_internally_checked` (every emitted count a non-negative integer; every bin of a present series accounted for) runs always. `verify_panel` then applies `PipelineConfig.chart_constraint_hook`, `(survey_key, horizon, {series: {bin: count}}) -> accept/reject/no_opinion`. `survey_key` is the source document's stem, `horizon` the panel's own printed heading. Without a hook the derivation is published labelled UNVERIFIED. A hook that raises leaves it unverified, never takes the reading with it. |
@@ -100,8 +100,11 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    chart shaped like this one.
 3. **The derivation publishes only where an empty grid stood.** The block replaces the
    withheld skeleton, so a chart page whose model output never emitted a grid gets the
-   event and the CLI count but no table in the body. Giving the reader its own insertion
-   point is a change to #189's placement contract and was left out.
+   event but no table in the body. Giving the reader its own insertion point is a change
+   to #189's placement contract and was left out. Round 2 made the surfacing honest about
+   it: the page note and the CLI both report only what the document actually holds, and
+   the CLI names the unpublished readings on a separate line rather than counting them
+   as shipped.
 4. **The axis titles are read positionally.** The count unit is the topmost multi-token
    row above the highest tick that is not drawn wholly inside the plot; the bin unit is
    the first narrower row below the bin labels. That is the corpus figure's layout. A
@@ -113,16 +116,28 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    Pinned: a test renders the crop through `_render_chart_region_crops` and asserts the
    file on disk hashes to the digest the derivation recorded. If the two paths ever
    diverge, that test is what says so.
-6. **The acceptance hook is not in the run fingerprint.** It is a callable, so it has
-   no stable serialisation across processes, and putting its identity in the fingerprint
-   would invalidate every terminal page on a restart that behaves identically. The cost
-   is real and is stated rather than hidden: changing the hook from accepting to
-   rejecting (or supplying one where there was none) does NOT invalidate already-terminal
-   pages, so a resumed run keeps the verdict the earlier run published. It is the same family as
-   the known resume gap where a source-code change does not invalidate a terminal page;
-   forcing a re-read means clearing the affected pages' sidecars.
+6. **The acceptance hook is fingerprinted by identity, not by behaviour.** Round 2 put
+   `module.qualname` (empty when absent) into the run fingerprint, so adding a hook,
+   removing one, or swapping one for another reprocesses pages that were already
+   terminal — which closes the dangerous direction the reviewer measured, where a hook
+   turned on to REJECT a table was skipped on resume and the rejected table stayed in the
+   document. What remains: editing a hook's logic without renaming it is not detected,
+   because a fingerprint cannot see a function body. Said out loud in the config
+   docstring; the instruction to callers is to rename the hook when its rules change.
 7. **Stage 2 is untouched.** No model is consulted; geometry is the only authority, as
    the design requires before proposals can be reconciled against it.
+8. **One document is not a defect rate.** Every claim about accuracy here is measured on
+   a single Fed SEP page, now read independently by a second reviewer through two
+   channels that share no code with the implementation (raw operators with bin
+   boundaries taken from the staircase risers, and a 600-DPI raster ink read): zero
+   disagreements over all 65 cells. The claim is "correct on this page", not "correct".
+   The two refusal paths added in round 2 are exercised by synthetic drawings only,
+   because this fixture draws neither a bar spanning two bins nor a staircase that stops
+   without descending.
+9. **The corpus golden does not run in CI.** `test_dotplot_fixture_five_panels` is
+   skipped when `~/Data/socr/fixtures/dotplot/dotplot-p20.pdf` is absent, which it is on
+   CI. The strongest evidence in the ticket is therefore unenforced on every CI run; a
+   green tick does not mean the golden was checked.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 

@@ -482,6 +482,14 @@ class PipelineConfig:
     # ``survey_key`` is the source document's stem and ``horizon`` the panel's
     # own printed heading, so a caller keys its totals on what the page says.
     # Without a hook every derivation is published labelled UNVERIFIED.
+    #
+    # RESUME LIMIT, stated rather than implied: the run fingerprint records this
+    # hook by IDENTITY (``module.qualname``, empty when absent), so adding a
+    # hook, removing it, or swapping one for another reprocesses pages that were
+    # already terminal. Editing the hook's LOGIC without renaming it is NOT
+    # detected -- the fingerprint cannot see a function body -- and a resumed run
+    # will keep whatever verdict the previous logic produced. Rename the hook
+    # when its rules change.
     chart_constraint_hook: Callable[[str, str, dict], str] | None = None
 
     def __post_init__(self) -> None:

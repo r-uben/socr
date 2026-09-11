@@ -1,7 +1,8 @@
 warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
 # #635 — chart-count goldens for `dotplot-p20.pdf`
 
-**Status: machine-read, awaiting human annotation.**
+**Status: independently annotated (two channels, second reviewer) on this one document;
+not yet a defect rate.**
 
 Read by `socr.figures.chart_reader` (version `635-stage1/1`) from the page's own PDF
 vector operators — not from a raster, not from a model. The issue's worked example is NOT
@@ -22,7 +23,8 @@ in the reader, and the reader's interval is printed so you can see how much room
 `~/Data/socr/fixtures/dotplot/goldens-crops-2026-09-11/panel_{1..5}.png` (outside the
 repo; they are regenerable from the fixture).
 
-**Checks already made, and their standing.** Two, neither of them a human annotation:
+**Checks already made, and their standing.** Four, two of them by a second reviewer who
+did not write the reader and did not run its code:
 
 1. The page's raw drawing operators were decoded BY HAND, before this reader was
    written, and the counts that decode produced are the counts below — panel by panel,
@@ -30,10 +32,29 @@ repo; they are regenerable from the fixture).
 2. The rendered crops above were then read visually against the printed ticks, for
    panels 1 (2018), 3 (2020) and 5 (Longer run) — the two most crowded staircases and
    the one whose totals are not 16 — and agreed on every cell.
+3. **Second reviewer, channel A — raw operators.** `page.get_drawings()` read directly,
+   with the reviewer's own arithmetic, and with the bin boundaries taken from the June
+   staircase's riser x-positions rather than from label centres — so the bin↔label
+   mapping was fixed by a different piece of evidence than the reader uses.
+4. **Second reviewer, channel B — raster ink.** The page rendered at 600 DPI greyscale,
+   each tick row located by its own ink, each bar top located by the first row that is
+   ≥60% ink inside the bin column, converted with points-per-participant measured off
+   the tick ladder. This channel touches no drawing operator.
 
-Both checks were made by the same agent that wrote the reader, so neither is
-independent of it in the sense this file needs. The status stays **awaiting human
-annotation**.
+Channels A and B agree with each other and with the reader on **all 65 cells**: zero
+disagreements. Calibration measured independently as 3.5606 pt per participant, residual
+0.0064 pt against a half-count of 1.7803 pt. Two things the reviewer checked because
+they would have hidden an off-by-one, and both hold: every printed label centre lands in
+its own bin with ~14 pt of margin (the side-bearing offset is 0.70 pt), and the 2021
+panel's different x pitch (31.165 against 30.68) does not break the figure-level legend
+grouping, which keys on bin label strings and tick values rather than geometry.
+
+**What this does and does not establish.** It establishes the reading of THIS page,
+through channels that share no code with the implementation. It is not a defect rate:
+one Fed SEP page, unusually well behaved (three orders of margin between the residual
+and the refusal boundary). The two refusal paths hardened in round 2 — a bar spanning
+two bins, and a staircase that stops without descending — are precisely the cases this
+fixture cannot exercise, and they are pinned by synthetic drawings instead.
 
 
 ## Panel 1 — “2018”  (chart region 1, crop `chart_region_p20_1.png`)
