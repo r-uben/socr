@@ -3301,6 +3301,125 @@ class UnifiedPipeline:
             logger.debug("could not compute figures_dir via contract: %s", exc)
             return output_dir, output_dir / "figures"
 
+    def _suppress_chart_table_skeletons(self, state: DocumentState, page_num: int, ps, bo) -> int:
+        """#635 Stage 0: withhold this candidate's EMPTY chart-derived grids.
+
+        A model reading a chart page commonly emits, per panel, a markdown grid
+        whose header row is the chart's own axis bins and whose body row is
+        empty in every cell. Nothing was read, and a reader is shown a table
+        shaped exactly like an extraction that succeeded. The crop of the same
+        chart is preserved by #189 either way, so no evidence is at stake --
+        what is at stake is the empty grid being taken for the chart's content.
+
+        Two independent SOURCE proofs are required per grid (see
+        ``figures.chart_data``): a label drawn inside exactly one chart region
+        that matches exactly one line of the candidate, and every data column
+        key of the grid attested by that region's own axis text. Short of both,
+        the text is left byte-identical and the refusal is recorded: an empty
+        form that is not a chart derivation is the page's content.
+
+        Returns the number of grids withheld. Nothing here touches
+        ``audit_passed`` (the winner-SELECTION flag, #252) or the page status:
+        a withheld empty grid removes no reading, so the surfacing is the page
+        note, the document audit events and the CLI count, not a demotion.
+        """
+        from socr.figures.chart_data import (
+            SKELETON_SUPPRESSED,
+            SKELETON_UNBOUND,
+            find_empty_skeletons,
+            region_interior_rows,
+            suppress_chart_table_skeletons,
+        )
+
+        text = getattr(bo, "text", "") or ""
+        # Cheap structural pre-check first: no empty grid means no PDF open, so
+        # this costs nothing on every page that does not have one.
+        if not find_empty_skeletons(text):
+            return 0
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.figures.chart_regions import chart_region_filename
+        from socr.tables.reconstruct import chart_region_bboxes
+
+        interiors: dict[int, list[str]] = {}
+        crop_names: dict[int, str] = {}
+        try:
+            with open_pdf(str(state.handle.path)) as _doc:
+                _page = _doc[page_num - 1]
+                bboxes = chart_region_bboxes(_page)
+                if bboxes:
+                    interiors = region_interior_rows(_page, bboxes)
+                    crop_names = {
+                        idx: chart_region_filename(page_num, idx)
+                        for idx in range(1, len(bboxes) + 1)
+                    }
+        except Exception as exc:
+            logger.warning("#635: chart geometry unreadable on p%d: %s", page_num, exc)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=SKELETON_UNBOUND,
+                    engine="chart_data",
+                    detail=(
+                        "the page's chart geometry could not be read, so an empty grid on it "
+                        "was neither proven to be a chart derivation nor withheld"
+                    ),
+                    data={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+            )
+            return 0
+
+        new_text, suppressions, refusals = suppress_chart_table_skeletons(
+            text,
+            page_num=page_num,
+            interiors=interiors,
+            crop_names=crop_names,
+        )
+
+        # A refusal on a page with no chart region at all is not a decision
+        # worth a record -- an empty form on an ordinary page is simply the
+        # page. Record the refusals made where a chart WAS present.
+        if interiors:
+            for refusal in refusals:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=SKELETON_UNBOUND,
+                        engine="chart_data",
+                        detail=refusal.reason,
+                        data=refusal.to_dict(),
+                    )
+                )
+
+        if not suppressions:
+            return 0
+
+        bo.text = new_text
+        for s in suppressions:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=SKELETON_SUPPRESSED,
+                    engine="chart_data",
+                    detail=(
+                        f"table {s.table_index} was an empty derivation of chart region "
+                        f"{s.region_index}; withheld, crop {s.crop_filename} kept"
+                    ),
+                    data=s.to_dict(),
+                )
+            )
+        ps.chart_table_skeletons_suppressed = len(suppressions)
+        note = (
+            f"#635: {len(suppressions)} empty chart-table skeleton(s) withheld on p{page_num} "
+            f"(table(s) {', '.join(str(s.table_index) for s in suppressions)}; "
+            f"crop(s) {', '.join(s.crop_filename for s in suppressions)} kept). "
+            "The chart counts were NOT extracted."
+        )
+        if note not in bo.audit_notes:
+            bo.audit_notes.append(note)
+        return len(suppressions)
+
     def _preserve_chart_regions(
         self, state: DocumentState, page_texts: list[str], output_dir: Path
     ) -> list[str]:
@@ -8114,6 +8233,17 @@ class UnifiedPipeline:
                 # no-op that leaves the object byte-identical.
                 canonicalize_candidate(bo)
 
+                # #635 Stage 0. The candidate seam is also where an EMPTY grid
+                # derived from one of this page's charts is withheld: once, on
+                # the candidate, before judging, table scoring, witness/identity
+                # creation and the flush all measure a grid that says nothing.
+                # Deliberately NOT in ``reconcile_chart_region_refs``, whose
+                # contract is to place crops against model-authored text without
+                # rewriting it; #189 then reconciles over these bytes, so the
+                # fragments, the stitched document and the sidecar agree.
+                with clock.span("tables"):
+                    self._suppress_chart_table_skeletons(state, page_num, ps, bo)
+
                 # #123 TICKET-C2 scoring is NOT gated on the P5 signal: it must reach
                 # every page it reached before this branch, because it is the only
                 # surface `table_not_scorable` and `table_unexplained_lanes` ever get.
@@ -11459,6 +11589,22 @@ class UnifiedPipeline:
         # flush, the status aggregation, the initial save and the metadata --
         # so every terminal writer serializes the same reconciled text.
         page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
+
+        # #635 Stage 0, CLI surface. Counted from the document's own events so a
+        # resumed run reports what THIS run's body actually contains rather than
+        # what a page object happens to still carry.
+        if not self.config.quiet:
+            from socr.figures.chart_data import SKELETON_SUPPRESSED
+
+            _skeletons = sum(
+                1 for e in state.events if getattr(e, "kind", "") == SKELETON_SUPPRESSED
+            )
+            if _skeletons:
+                console.print(
+                    f"  [yellow]{_skeletons} chart-table skeleton(s) suppressed; "
+                    "crops kept[/yellow]"
+                )
+
         final_text, has_text = self._canonical_body(state, page_texts=page_texts)
 
         self._backfill_missing_table_ladder_terminals(state, page_texts)
