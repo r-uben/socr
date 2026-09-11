@@ -27,10 +27,15 @@ come from the PDF's own geometry, never from words in the model's text:
    page's regions survive. A surviving label that matches exactly one line of
    the candidate (as a heading/list item in its own right, not by containment)
    ties that region to one position in the candidate.
-2. **Axis attestation.** Every DATA column header of the grid must share a token
-   with the region's interior text. The column keys of a grid derived from a
-   chart are that chart's axis labels; a grid whose keys the chart never drew is
-   not that chart's derivation.
+2. **Axis attestation.** Every DATA column key of the grid must be attested IN
+   FULL along one axis line of that region: the keys' first atoms must be
+   consecutive tokens of a single drawn word-row, in the header's own order,
+   and each further atom of a range key (``1.88-2.12`` has two) must be drawn
+   in the row below, in the column the first atom occupies -- which is how a
+   two-line tick label is printed. A partially-overlapping key is NOT
+   attestation: ``1.88-9.99`` shares ``1.88`` with an axis that never drew
+   ``9.99``, and accepting it would delete an unrelated empty form standing
+   under a matching heading.
 
 Anything short of both, for every skeleton on the page, is a refusal: the text
 is left byte-identical and the refusal is recorded. A quarantined or unbound
@@ -62,6 +67,9 @@ SKELETON_SUPPRESSED = "chart_table_skeleton_suppressed"
 SKELETON_UNBOUND = "chart_table_skeleton_unbound"
 
 _SEP_CELL_RE = re.compile(r"^:?-+:?$")
+#: A key is split into ATOMS on the range dash (already folded to ASCII "-").
+_ATOM_SPLIT_RE = re.compile(r"[-\u2013\u2014\u2212]")
+_WHOLE_TOKEN_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.]*$")
 _TOKEN_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.]*")
 #: Leading markdown a line may carry while still BEING that label: an ATX
 #: heading marker, a bullet, or an ordered-list marker.
@@ -200,13 +208,32 @@ def _is_separator(cells: list[str]) -> bool:
     return bool(cells) and all(_SEP_CELL_RE.match(c) for c in cells)
 
 
+def _content_mask(lines: list[str]) -> list[str] | None:
+    """#688's literal-context mask, index-aligned to *lines*.
+
+    A grid inside a code fence, an HTML comment or an indented code block is a
+    code SAMPLE, not a reading of the page. ``table_syntax_line_indices`` is a
+    raw separator-anchored grammar with no notion of literal context, so
+    reading it directly would recognise a fenced example's table, withhold it,
+    and write the replacement note INSIDE the fence. The mask blanks those
+    lines without moving any other, so every index in this module still refers
+    to the caller's own ``split("\n")`` line.
+
+    ``None`` (an unclosed comment leaves no usable mapping) means abstain: no
+    skeleton is found, so nothing is withheld.
+    """
+    from socr.tables.reconcile import literal_context_mask
+
+    return literal_context_mask(lines)
+
+
 def _table_runs(lines: list[str]) -> list[tuple[int, int]]:
-    """Inclusive ``(start, end)`` for each genuine markdown table on the page.
+    """Inclusive ``(start, end)`` for each genuine markdown table in *lines*.
 
     Delegated to ``table_syntax_line_indices``, the strict separator-anchored
     grammar #649 settled, so a pipe-carrying sentence beside a table is prose
     here exactly as it is everywhere else. Contiguous runs of its indices are
-    the tables.
+    the tables. *lines* must already be literal-context masked.
     """
     from socr.tables.reconcile import table_syntax_line_indices
 
@@ -239,9 +266,13 @@ def find_empty_skeletons(text: str) -> list[Skeleton]:
     if not text or "|" not in text:
         return []
     lines = text.split("\n")
+    masked = _content_mask(lines)
+    if masked is None:
+        logger.debug("#635: no literal-context mapping for this text; no grid is withheld")
+        return []
     out: list[Skeleton] = []
-    for ordinal, (start, end) in enumerate(_table_runs(lines), start=1):
-        rows = [_split_row(lines[i]) for i in range(start, end + 1)]
+    for ordinal, (start, end) in enumerate(_table_runs(masked), start=1):
+        rows = [_split_row(masked[i]) for i in range(start, end + 1)]
         separators = [i for i, cells in enumerate(rows) if _is_separator(cells)]
         # One header band, one separator, one body. A run with two separators is
         # two stacked grids or a malformed one; either way this pass does not
@@ -362,21 +393,197 @@ def _resolve_anchor(
     return max(i for i, _d in hits), hits[0][1]
 
 
-def _axis_attested(skeleton: Skeleton, interior: list[str]) -> bool:
-    """Every DATA column key of the grid shares a token with the chart's interior.
+def region_axis_rows(page, bboxes) -> dict[int, list[list[tuple[float, str]]]]:
+    """``{region_index: [[(x centre, word), ...] top-to-bottom]}`` for each region.
+
+    The rows an axis label can be drawn on: the region itself, plus the strip
+    directly beneath it that no other region occupies. The strip is not
+    generosity -- a chart's x tick labels are printed under the plot, and on the
+    corpus page this ticket is about the expanded chart bbox clips the SECOND
+    line of every two-line tick label ("1.88-" above, "2.12" below), so the
+    upper endpoint of all thirteen printed bins falls just outside the box.
+    Without the strip no range key could ever be attested in full and the pass
+    could only ever be wrong in the permissive direction.
+
+    Only words drawn fully within the region's own horizontal span qualify, so
+    the strip cannot pull in a marginal note or a neighbouring column.
+
+    Never raises; returns ``{}`` when word geometry is absent.
+    """
+    try:
+        words = page.get_text("words") or []
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("chart_data: get_text('words') failed: %s", exc)
+        return {}
+    try:
+        page_bottom = float(page.rect.y1)
+    except Exception:  # pragma: no cover - defensive
+        page_bottom = max((float(b.y1) for b in bboxes), default=0.0)
+
+    out: dict[int, list[list[tuple[float, str]]]] = {}
+    for idx, box in enumerate(bboxes, start=1):
+        below = [float(o.y0) for o in bboxes if float(o.y0) > float(box.y1)]
+        limit = min(below) if below else page_bottom
+        rows: dict[int, list[tuple[float, str]]] = {}
+        for w in words:
+            text = str(w[4])
+            if not text.strip():
+                continue
+            x0, y0, x1 = float(w[0]), float(w[1]), float(w[2])
+            if x0 < float(box.x0) or x1 > float(box.x1):
+                continue
+            if not (float(box.y0) <= y0 < limit):
+                continue
+            rows.setdefault(round(y0), []).append(((x0 + x1) / 2.0, text))
+        out[idx] = [sorted(rows[key]) for key in sorted(rows)]
+    return out
+
+
+def _rows_from_texts(texts: list[str]) -> list[list[tuple[float, str]]]:
+    """Axis rows for a caller that has row TEXT but no page geometry.
+
+    The token's character offset in its row stands in for its x centre. Word
+    rows are space-joined in source order, so offsets order and separate the
+    tokens exactly as their coordinates do; what they cannot do is align two
+    rows drawn in different font sizes. Callers holding a page pass
+    ``region_axis_rows`` instead.
+    """
+    rows: list[list[tuple[float, str]]] = []
+    for raw in texts:
+        row: list[tuple[float, str]] = []
+        pos = 0
+        for token in raw.split():
+            at = raw.index(token, pos)
+            pos = at + len(token)
+            row.append((at + len(token) / 2.0, token))
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _norm_token(token: str) -> str:
+    return _fold(token).rstrip(".")
+
+
+def _key_atoms(cell: str) -> list[str] | None:
+    """The column key's atoms, or ``None`` when it is not a well-formed key.
+
+    ``1.88-2.12`` is two atoms, ``B1`` is one. A key is well formed only when
+    every part between its range dashes is a single whole token: a cell such as
+    ``2.13-unrelated`` is well formed and will simply fail to be attested,
+    while ``n/a`` or an empty part is not a bin key at all and stops the proof
+    here. Nothing lexical is read -- no atom is compared against a word list.
+    """
+    folded = _fold(_EMPH_RE.sub("", cell))
+    if not folded:
+        return None
+    parts = [part.strip() for part in _ATOM_SPLIT_RE.split(folded)]
+    if not parts or any(not part for part in parts):
+        return None
+    if any(not _WHOLE_TOKEN_RE.match(part) for part in parts):
+        return None
+    return [part.rstrip(".") for part in parts]
+
+
+def _label_tokens(row: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """The row's LABEL tokens: its words and numbers, without punctuation marks.
+
+    A printed range tick label puts its own dash on the axis line as a separate
+    word ("1.88" "-" "2.13" "-" ...), and that dash is part of the label being
+    matched, not a tick between two others. Nothing else is dropped: an ordinary
+    word standing between two tick labels stays, and breaks the run, because
+    then the numbers are not consecutive ticks.
+    """
+    out: list[tuple[float, str]] = []
+    for x, token in row:
+        folded = _norm_token(token)
+        if folded and _WHOLE_TOKEN_RE.match(folded):
+            out.append((x, folded))
+    return out
+
+
+def _column_tokens(row: list[tuple[float, str]], columns: list[float]) -> list[str] | None:
+    """The row's token in each of *columns*, or ``None`` if there is no such reading.
+
+    Each column takes the row token nearest its centre -- the pairing a stacked
+    two-line tick label has by construction, and no tolerance to choose. The
+    reading is refused when two columns claim the same token or when the chosen
+    tokens do not run left to right, because either means the row is not a
+    second line of these columns' labels.
+    """
+    labels = _label_tokens(row)
+    if not labels:
+        return None
+    picked: list[int] = []
+    for centre in columns:
+        picked.append(min(range(len(labels)), key=lambda i: abs(labels[i][0] - centre)))
+    if len(set(picked)) != len(picked) or picked != sorted(picked):
+        return None
+    return [labels[i][1] for i in picked]
+
+
+def _axis_attested(skeleton: Skeleton, rows: list[list[tuple[float, str]]]) -> bool:
+    """Every DATA column key of the grid is drawn IN FULL along this region's axis.
 
     The column keys of a grid derived from a chart are that chart's own axis
-    labels. A key the chart never drew means the grid is a derivation of
-    something else, whatever else lines up.
+    bin labels, and a bin label is proven only when all of it is: both endpoints
+    of ``1.88-2.12`` AND their grouping into one bin AND that bin's place in the
+    printed order. Sharing a token is not proof -- ``1.88-9.99`` shares ``1.88``
+    with an axis that never drew ``9.99``, and treating that as attestation
+    deletes an unrelated empty form that happens to sit under a matching
+    heading, which is the one outcome this pass must never produce.
+
+    The proof, entirely from where the page drew its words:
+
+    * the keys' FIRST atoms are consecutive tokens of one drawn row, in the
+      header's own left-to-right order -- that row is the region's axis line
+      and those tokens are its tick labels;
+    * every further atom of a multi-part key is drawn in a LOWER row, in the
+      column its first atom occupies. That is how a two-line tick label is
+      printed, and it is what ties ``2.12`` to ``1.88`` rather than to any
+      other number on the page.
+
+    Keys of differing arity ("1.88-2.12" beside "B3") describe no single axis
+    and are refused outright.
     """
-    available = set()
-    for row in interior:
-        available |= _tokens(row)
-    if not available:
+    keys = [_key_atoms(cell) for cell in skeleton.data_headers]
+    if not keys or any(key is None for key in keys):
         return False
-    for cell in skeleton.data_headers:
-        cell_tokens = _tokens(cell)
-        if not cell_tokens or not (cell_tokens & available):
+    depth = len(keys[0])
+    if any(len(key) != depth for key in keys):
+        return False
+    heads = [key[0] for key in keys]
+    width = len(heads)
+    for primary, row in enumerate(rows):
+        labels = _label_tokens(row)
+        tokens = [token for _x, token in labels]
+        for offset in range(0, len(tokens) - width + 1):
+            if tokens[offset : offset + width] != heads:
+                continue
+            columns = [x for x, _t in labels[offset : offset + width]]
+            if _stacked_atoms_attested(rows, primary, columns, keys, depth):
+                return True
+    return False
+
+
+def _stacked_atoms_attested(
+    rows: list[list[tuple[float, str]]],
+    primary: int,
+    columns: list[float],
+    keys: list[list[str]],
+    depth: int,
+) -> bool:
+    """Atoms 1..depth-1 of every key are drawn below *primary*, in its columns."""
+    cursor = primary
+    for position in range(1, depth):
+        expected = [key[position] for key in keys]
+        found = False
+        for candidate in range(cursor + 1, len(rows)):
+            if _column_tokens(rows[candidate], columns) == expected:
+                cursor = candidate
+                found = True
+                break
+        if not found:
             return False
     return True
 
@@ -430,6 +637,7 @@ def suppress_chart_table_skeletons(
     page_num: int,
     interiors: dict[int, list[str]],
     crop_names: dict[int, str],
+    axis_rows: dict[int, list[list[tuple[float, str]]]] | None = None,
 ) -> tuple[str, list[SkeletonSuppression], list[SkeletonRefusal]]:
     """Withhold each empty grid PROVEN to derive from one of the page's charts.
 
@@ -462,12 +670,18 @@ def suppress_chart_table_skeletons(
     from socr.tables.reconcile import table_syntax_line_indices
 
     lines = text.split("\n")
-    table_lines = table_syntax_line_indices(lines)
+    masked = _content_mask(lines)
+    if masked is None:  # pragma: no cover - find_empty_skeletons already abstained
+        return text, [], []
+    # Labels are matched against the MASKED lines, never the raw ones: a
+    # heading inside a code fence is part of a sample, and letting it anchor a
+    # region would put the replacement note inside the fence.
+    table_lines = table_syntax_line_indices(masked)
     labels = unique_region_labels(interiors)
     # region -> (anchor line, the label that matched)
     anchors: dict[int, tuple[int, str]] = {}
     for region in sorted(interiors):
-        resolved = _resolve_anchor(lines, table_lines, labels.get(region, []))
+        resolved = _resolve_anchor(masked, table_lines, labels.get(region, []))
         if resolved is not None:
             anchors[region] = resolved
 
@@ -494,12 +708,18 @@ def suppress_chart_table_skeletons(
                 )
             )
             continue
-        if not _axis_attested(target, interiors.get(region, [])):
+        rows = (
+            axis_rows.get(region, [])
+            if axis_rows is not None
+            else _rows_from_texts(interiors.get(region, []))
+        )
+        if not _axis_attested(target, rows):
             refusals.append(
                 SkeletonRefusal(
                     page_num,
                     target.table_index,
-                    f"the grid's column keys are not attested by chart region {region}'s axis",
+                    f"chart region {region}'s axis does not draw the grid's column keys in "
+                    "full, in order",
                     target.sha256,
                 )
             )

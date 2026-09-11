@@ -404,7 +404,7 @@ def test_a_grid_whose_keys_the_chart_never_drew_is_quarantined(tmp_path: Path) -
     assert _body(on) == _body(off)
     assert _events(on_state, SKELETON_SUPPRESSED) == []
     reasons = [e.detail for e in _events(on_state, SKELETON_UNBOUND)]
-    assert any("not attested" in r for r in reasons), reasons
+    assert any("does not draw the grid's column keys in full" in r for r in reasons), reasons
 
 
 def test_an_ambiguous_panel_label_quarantines_rather_than_guesses(tmp_path: Path) -> None:
@@ -509,3 +509,178 @@ def test_dotplot_page_ships_five_crops_and_no_empty_grid(tmp_path: Path) -> None
     # The page's own prose survives.
     assert "Federal Open Market Committee" in _body(on)
     assert "notes to table 1" in _body(on)
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (Astra): the four findings, each pinned where it failed
+# ---------------------------------------------------------------------------
+
+
+def test_partial_key_overlap_is_not_axis_attestation() -> None:
+    """P1. ``1.88-9.99`` shares a token with the axis; the axis never drew 9.99.
+
+    An unrelated empty form standing under a heading the chart also draws must
+    survive, which is the case the design exists to protect.
+    """
+    text = (
+        "### ALPHA\n\n| Plan | 1.88-9.99 | 2.13-unrelated |\n| --- | --- | --- |\n| Entry | | |\n"
+    )
+    result, events, refusals = suppress_chart_table_skeletons(
+        text,
+        page_num=1,
+        interiors={1: ["ALPHA", "1.88 2.13"]},
+        crop_names={1: "chart_region_p1_1.png"},
+    )
+    assert result == text
+    assert events == []
+    assert any("in full" in r.reason for r in refusals), [r.reason for r in refusals]
+
+
+def test_complete_two_line_tick_label_does_attest() -> None:
+    """The same keys, drawn in full: lower bounds on one row, upper bounds below."""
+    text = "### ALPHA\n\n| Plan | 1.88-2.12 | 2.13-2.37 |\n| --- | --- | --- |\n| Entry | | |\n"
+    result, events, _r = suppress_chart_table_skeletons(
+        text,
+        page_num=1,
+        interiors={1: ["ALPHA", "1.88 2.13", "2.12 2.37"]},
+        crop_names={1: "chart_region_p1_1.png"},
+    )
+    assert [e.region_index for e in events] == [1]
+    assert "counts not extracted" in result
+
+
+def test_upper_bounds_drawn_above_the_axis_line_do_not_attest() -> None:
+    """Order matters: a two-line tick label's second line is drawn BELOW the first."""
+    _result, events, _r = suppress_chart_table_skeletons(
+        "### ALPHA\n\n| Plan | 1.88-2.12 |\n| --- | --- |\n| Entry | |\n",
+        page_num=1,
+        interiors={1: ["2.12", "ALPHA", "1.88"]},
+        crop_names={1: "a.png"},
+    )
+    assert events == []
+
+
+def test_a_fenced_example_is_never_rewritten() -> None:
+    """P2. A grid inside a code fence is a sample, and the note must not land in it."""
+    text = "### ALPHA\n\n```\n| Bin | 1.88 | 2.13 |\n| --- | --- | --- |\n| Entry | | |\n```\n"
+    result, events, refusals = suppress_chart_table_skeletons(
+        text,
+        page_num=1,
+        interiors={1: ["ALPHA", "1.88 2.13"]},
+        crop_names={1: "chart_region_p1_1.png"},
+    )
+    assert result == text
+    assert (events, refusals) == ([], [])
+    assert find_empty_skeletons(text) == []
+
+
+def test_a_heading_inside_a_fence_cannot_anchor_a_region() -> None:
+    """The same masking on the LABEL side: a fenced heading is not the page's heading."""
+    text = "```\n### ALPHA\n```\n\n| Bin | 1.88 | 2.13 |\n| --- | --- | --- |\n| Entry | | |\n"
+    result, events, _r = suppress_chart_table_skeletons(
+        text,
+        page_num=1,
+        interiors={1: ["ALPHA", "1.88 2.13"]},
+        crop_names={1: "a.png"},
+    )
+    assert (result, events) == (text, [])
+
+
+def test_suppression_provenance_survives_a_resume(tmp_path: Path) -> None:
+    """P2. The withheld grid's bytes live ONLY in the event; the body cannot rebuild them."""
+    from socr.core.result import PageOutput
+
+    pdf = _make_two_panel_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline, state, _result = _run(pdf, out_dir, _winner())
+    first = _events(state, SKELETON_SUPPRESSED)
+    assert len(first) == 2
+    assert state.pages[1].chart_table_skeletons_suppressed == 2
+
+    meta = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+    restored_state = _make_state(pdf, "Preamble sentence unique alpha")
+    page_out = PageOutput.from_dict(meta["winning_output"])
+    pipeline._restore_terminal_page_state(restored_state, 1, page_out, out_dir)
+
+    replayed = _events(restored_state, SKELETON_SUPPRESSED)
+    assert len(replayed) == 2
+    assert [e.data["original_text"] for e in replayed] == [e.data["original_text"] for e in first]
+    assert [e.data["sha256"] for e in replayed] == [e.data["sha256"] for e in first]
+    assert restored_state.pages[1].chart_table_skeletons_suppressed == 2
+
+    # Replaying the same sidecar again restores the provenance without doubling
+    # the count the CLI line reports.
+    pipeline._restore_terminal_page_state(restored_state, 1, page_out, out_dir)
+    assert len(_events(restored_state, SKELETON_SUPPRESSED)) == 2
+    assert restored_state.pages[1].chart_table_skeletons_suppressed == 2
+
+
+def test_the_page_judge_assesses_the_suppressed_candidate(tmp_path: Path) -> None:
+    """P2. The withholding happens at candidate ingestion, BEFORE the page judge.
+
+    ``route_page`` runs for real here -- only the provider and the judge are
+    stand-ins -- so the ordering under test is the pipeline's own, not a mock's.
+    """
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import AcceptDecision
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = _make_two_panel_pdf(tmp_path)
+    winner = _winner()
+    judged: list[str] = []
+
+    class _RecordingJudge:
+        def assess(self, output, provider) -> AcceptDecision:
+            judged.append(output.text or "")
+            return AcceptDecision(accept=True, reason="stand-in")
+
+    def _fake_engine(self, state, pages, *args, **kwargs):
+        return [
+            PageOutput(
+                page_num=pages[0],
+                text=winner,
+                status=PageStatus.SUCCESS,
+                engine="qwen_local",
+            )
+        ]
+
+    pipeline = _make_pipeline()
+    state = _make_state(pdf, "Preamble sentence unique alpha")
+    pipeline._last_assessment = state._last_assessment
+    stack = [
+        patch.object(
+            UnifiedPipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+        ),
+        patch.object(UnifiedPipeline, "_run_engine_on_pages", _fake_engine),
+        patch.object(UnifiedPipeline, "_build_page_judge", return_value=_RecordingJudge()),
+    ]
+    for ctx in stack:
+        ctx.start()
+    try:
+        pipeline._phase_agentic(state, tmp_path / "out")
+    finally:
+        for ctx in reversed(stack):
+            ctx.stop()
+
+    assert judged, "the judge was never reached; this test would prove nothing"
+    assert _table_lines(judged[0]) == [], f"the judge assessed an empty grid: {judged[0]!r}"
+    assert "counts not extracted" in judged[0]
+    assert len(_events(state, SKELETON_SUPPRESSED)) == 2
+
+
+def test_a_later_candidate_cannot_reintroduce_the_grid(tmp_path: Path) -> None:
+    """P2. Crop reread and escalation replace ``bo.text``; they cross the same seam."""
+    pdf = _make_two_panel_pdf(tmp_path)
+    pipeline, state, _result = _run(pdf, tmp_path / "out", _winner())
+    assert len(_events(state, SKELETON_SUPPRESSED)) == 2
+
+    bo = state.pages[1].best_output
+    bo.text = _winner()  # a later reading puts both empty grids back
+    withheld = pipeline._suppress_chart_table_skeletons(state, 1, bo)
+
+    assert withheld == 2
+    assert _table_lines(bo.text) == []
+    # Same grids, same bytes: one finding, not two.
+    assert len(_events(state, SKELETON_SUPPRESSED)) == 2
+    assert state.pages[1].chart_table_skeletons_suppressed == 2
