@@ -684,3 +684,227 @@ def test_a_later_candidate_cannot_reintroduce_the_grid(tmp_path: Path) -> None:
     # Same grids, same bytes: one finding, not two.
     assert len(_events(state, SKELETON_SUPPRESSED)) == 2
     assert state.pages[1].chart_table_skeletons_suppressed == 2
+
+
+# ---------------------------------------------------------------------------
+# Round 3: region ownership, token barriers, and what dedup may collapse
+# ---------------------------------------------------------------------------
+
+
+def _candidate(text: str):
+    from socr.core.result import PageOutput
+
+    return PageOutput(page_num=1, text=text)
+
+
+def _overlapping_page():
+    """Two panel boxes that SHARE a band: panel 2 starts inside panel 1's span.
+
+    ``chart_region_bboxes`` expands each cluster on its own and promises no
+    non-overlap, so this is a shape its consumer has to survive, not one the
+    detector is being accused of producing.
+    """
+    from socr.figures.chart_data import region_axis_rows, region_interior_rows
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=250)
+    for x, y, text in (
+        (20, 20, "ALPHA"),
+        (50, 60, "1.88"),
+        (150, 60, "2.13"),
+        (20, 120, "BRAVO"),
+        (50, 160, "2.12"),
+        (150, 160, "2.37"),
+    ):
+        page.insert_text((x, y), text, fontsize=8)
+    boxes = [fitz.Rect(0, 0, 280, 100), fitz.Rect(0, 90, 280, 220)]
+    return page, boxes, region_axis_rows(page, boxes), region_interior_rows(page, boxes)
+
+
+def test_an_overlapping_panel_cannot_lend_its_tick_endpoints() -> None:
+    """P1. Panel 1's strip must stop at panel 2's TOP, even when that is above
+    panel 1's own bottom -- otherwise panel 1 reads panel 2's axis as its own
+    and a grid spanning both panels' numbers is proven and deleted."""
+    _page, _boxes, axis_rows, interiors = _overlapping_page()
+
+    drawn = {token for row in axis_rows[1] for _x, token in row}
+    assert "1.88" in drawn and "2.13" in drawn
+    assert not drawn & {"2.12", "2.37", "BRAVO"}, f"panel 2's words reached panel 1: {drawn}"
+
+    raw = "### ALPHA\n| Bin | 1.88-2.12 | 2.13-2.37 |\n| --- | --- | --- |\n| Count | | |\n"
+    result, events, refusals = suppress_chart_table_skeletons(
+        raw,
+        page_num=1,
+        interiors=interiors,
+        crop_names={1: "a.png", 2: "b.png"},
+        axis_rows=axis_rows,
+    )
+    assert result == raw
+    assert not events
+    assert refusals, "a refusal is the point; silence would hide the abstention"
+
+
+def test_a_word_in_the_contested_band_is_evidence_for_neither_panel() -> None:
+    """P1. Ownership in an overlap is abstained, not awarded to the first box."""
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=250)
+    page.insert_text((40, 110), "SHARED", fontsize=8)
+    boxes = [fitz.Rect(0, 0, 280, 120), fitz.Rect(0, 90, 280, 220)]
+
+    from socr.figures.chart_data import region_axis_rows, region_interior_rows
+
+    interiors = region_interior_rows(page, boxes)
+    axis_rows = region_axis_rows(page, boxes)
+    assert "SHARED" not in " ".join(interiors[1] + interiors[2])
+    assert not [t for rows in axis_rows.values() for row in rows for _x, t in row]
+
+
+def test_separated_panels_still_read_the_strip_below_them() -> None:
+    """The abstention above must not cost the ordinary stacked case its strip:
+    the corpus page's second tick-label line is drawn OUTSIDE the chart bbox."""
+    from socr.figures.chart_data import region_axis_rows
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=250)
+    page.insert_text((50, 60), "1.88", fontsize=8)
+    page.insert_text((50, 110), "2.12", fontsize=8)  # below box 1, above box 2
+    boxes = [fitz.Rect(0, 0, 280, 80), fitz.Rect(0, 130, 280, 220)]
+
+    drawn = [token for row in region_axis_rows(page, boxes)[1] for _x, token in row]
+    assert drawn == ["1.88", "2.12"]
+
+
+def test_a_meaningful_token_between_two_keys_breaks_the_run() -> None:
+    """P2. Only punctuation MARKS may be skipped when proving consecutiveness.
+
+    Dropping ``not/a/tick`` because it holds a slash would manufacture the very
+    adjacency the proof is supposed to read off the page.
+    """
+    raw = "### ALPHA\n| Bin | B1 | B2 |\n| --- | --- | --- |\n| Count | | |\n"
+    kwargs = dict(page_num=1, interiors={1: ["ALPHA"]}, crop_names={1: "a.png"})
+
+    barred, events, _refusals = suppress_chart_table_skeletons(
+        raw, axis_rows={1: [[(100, "B1"), (150, "not/a/tick"), (200, "B2")]]}, **kwargs
+    )
+    adjacent, adjacent_events, _ = suppress_chart_table_skeletons(
+        raw, axis_rows={1: [[(100, "B1"), (200, "B2")]]}, **kwargs
+    )
+
+    assert barred == raw and not events
+    assert adjacent != raw and len(adjacent_events) == 1
+
+
+def test_the_labels_own_dash_is_still_not_a_barrier() -> None:
+    """The control for the rule above: a printed range tick label draws its own
+    dash as a separate word, and that dash is part of the label being matched."""
+    raw = "### ALPHA\n| Bin | 1.88-2.12 | 2.13-2.37 |\n| --- | --- | --- |\n| Count | | |\n"
+    axis = [
+        [(100, "1.88"), (140, "-"), (200, "2.13"), (240, "-")],
+        [(100, "2.12"), (200, "2.37")],
+    ]
+    result, events, _refusals = suppress_chart_table_skeletons(
+        raw,
+        page_num=1,
+        interiors={1: ["ALPHA"]},
+        crop_names={1: "a.png"},
+        axis_rows={1: axis},
+    )
+    assert result != raw and len(events) == 1
+
+
+def test_a_regrid_under_another_panel_keeps_its_own_provenance(tmp_path: Path) -> None:
+    """P2. Two candidates, one byte-identical grid, two DIFFERENT panels.
+
+    The grid bytes plus its ordinal do not establish that both derivations are
+    about the same chart, so both records are kept -- while the page's withheld
+    count stays at the one table that was actually withheld.
+    """
+    pdf = _make_two_panel_pdf(tmp_path)
+    pipeline = _make_pipeline()
+    state = _make_state(pdf, "Preamble sentence unique alpha")
+
+    first = _candidate(f"### ALPHA\n{EMPTY_GRID}\n\n### BRAVO\n")
+    second = _candidate(f"### ALPHA\n\n### BRAVO\n{EMPTY_GRID}\n")
+    assert pipeline._suppress_chart_table_skeletons(state, 1, first) == 1
+    assert pipeline._suppress_chart_table_skeletons(state, 1, second) == 1
+
+    events = _events(state, SKELETON_SUPPRESSED)
+    assert [e.data["region_index"] for e in events] == [1, 2]
+    assert len({e.data["sha256"] for e in events}) == 1
+    assert "region 2" in second.text and "region 1" not in second.text
+    # One grid, however many panels it was bound to across candidates.
+    assert state.pages[1].chart_table_skeletons_suppressed == 1
+
+
+def test_both_bindings_survive_a_restore_without_doubling_the_count(tmp_path: Path) -> None:
+    """The split above has to hold across the resume seam too."""
+    pdf = _make_two_panel_pdf(tmp_path)
+    pipeline = _make_pipeline()
+    state = _make_state(pdf, "Preamble sentence unique alpha")
+    for text in (
+        f"### ALPHA\n{EMPTY_GRID}\n\n### BRAVO\n",
+        f"### ALPHA\n\n### BRAVO\n{EMPTY_GRID}\n",
+    ):
+        pipeline._suppress_chart_table_skeletons(state, 1, _candidate(text))
+    original = [e.data for e in _events(state, SKELETON_SUPPRESSED)]
+
+    meta = {
+        "audit_events": [
+            {"kind": e.kind, "engine": e.engine, "detail": e.detail, "data": e.data}
+            for e in state.events
+        ]
+    }
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    out_dir = tmp_path / "resumed"
+    doc_dir = doc_dir_for(out_dir, relative_key(pdf, pdf.parent))
+    (doc_dir / "pages").mkdir(parents=True)
+    (doc_dir / "pages" / "00001.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    fresh = _make_state(pdf, "Preamble sentence unique alpha")
+    restored_body = _candidate("### ALPHA\n\n### BRAVO\n")
+    for _ in range(2):
+        pipeline._restore_terminal_page_state(fresh, 1, restored_body, out_dir)
+
+    assert [e.data for e in _events(fresh, SKELETON_SUPPRESSED)] == original
+    assert fresh.pages[1].chart_table_skeletons_suppressed == 1
+
+
+def test_keys_reversed_or_split_across_rows_abstain() -> None:
+    """Consecutive means consecutive IN THE HEADER'S ORDER, on ONE drawn row."""
+    raw = "### ALPHA\n| Bin | B1 | B2 |\n| --- | --- | --- |\n| Count | | |\n"
+    for rows in ([[(100, "B2"), (200, "B1")]], [[(100, "B1")], [(100, "B2")]]):
+        result, events, _refusals = suppress_chart_table_skeletons(
+            raw,
+            page_num=1,
+            interiors={1: ["ALPHA"]},
+            crop_names={1: "a.png"},
+            axis_rows={1: rows},
+        )
+        assert result == raw and not events
+
+
+@pytest.mark.skipif(not DOTPLOT_PDF.exists(), reason="corpus fixture not present")
+def test_on_the_corpus_page_each_strip_stops_at_the_next_panel() -> None:
+    """The real five-panel page: the new bound must not change what it reads.
+
+    Its panels are separated, so every strip ends at the next panel's top and
+    the fifth runs to the page bottom — the ordinary case the overlap
+    abstention has to leave alone.
+    """
+    from socr.figures.chart_data import region_axis_rows
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    with fitz.open(DOTPLOT_PDF) as doc:
+        page = doc[0]
+        boxes = chart_region_bboxes(page)
+        assert len(boxes) == 5
+        rows = region_axis_rows(page, boxes)
+        for idx, box in enumerate(boxes[:-1], start=1):
+            limit = boxes[idx].y0
+            expected = sorted(
+                w[4]
+                for w in page.get_text("words")
+                if box.x0 <= w[0] and w[2] <= box.x1 and box.y0 <= w[1] < limit
+            )
+            assert sorted(t for row in rows[idx] for _x, t in row) == expected

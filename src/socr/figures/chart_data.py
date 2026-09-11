@@ -306,6 +306,25 @@ def find_empty_skeletons(text: str) -> list[Skeleton]:
 # ---------------------------------------------------------------------------
 
 
+def _inside(box, x0: float, y0: float) -> bool:
+    """The containment rule every region reader here shares: a word belongs to a
+    box when the corner the page drew it from lies in that box."""
+    return float(box.x0) <= x0 <= float(box.x1) and float(box.y0) <= y0 <= float(box.y1)
+
+
+def _contested(bboxes, idx: int, x0: float, y0: float) -> bool:
+    """The word at ``(x0, y0)`` also lies inside a region OTHER than *idx*.
+
+    ``chart_region_bboxes`` expands each cluster on its own and promises no
+    non-overlap, so two panels' boxes can share a band of the page. A word in
+    that band is evidence for neither panel: it names no one region, and letting
+    the upper panel claim it is exactly how one chart's grid comes to be
+    attested against the next chart's tick labels. Ownership is abstained here,
+    never decided -- the cost is a refusal, and the alternative is a deletion.
+    """
+    return any(other != idx and _inside(box, x0, y0) for other, box in enumerate(bboxes, start=1))
+
+
 def region_interior_rows(page, bboxes) -> dict[int, list[str]]:
     """``{region_index: [word-row text, ...]}`` for text INSIDE each region.
 
@@ -326,7 +345,10 @@ def region_interior_rows(page, bboxes) -> dict[int, list[str]]:
     for idx, box in enumerate(bboxes, start=1):
         rows: dict[int, list[tuple[float, str]]] = {}
         for w in words:
-            if box.x0 <= w[0] <= box.x1 and box.y0 <= w[1] <= box.y1:
+            x0, y0 = float(w[0]), float(w[1])
+            if _contested(bboxes, idx, x0, y0):
+                continue
+            if _inside(box, x0, y0):
                 rows.setdefault(round(w[1]), []).append((w[0], w[4]))
         texts = []
         for key in sorted(rows):
@@ -406,7 +428,8 @@ def region_axis_rows(page, bboxes) -> dict[int, list[list[tuple[float, str]]]]:
     could only ever be wrong in the permissive direction.
 
     Only words drawn fully within the region's own horizontal span qualify, so
-    the strip cannot pull in a marginal note or a neighbouring column.
+    the strip cannot pull in a marginal note or a neighbouring column, and a
+    word that also falls inside another region's box is evidence for neither.
 
     Never raises; returns ``{}`` when word geometry is absent.
     """
@@ -422,7 +445,14 @@ def region_axis_rows(page, bboxes) -> dict[int, list[list[tuple[float, str]]]]:
 
     out: dict[int, list[list[tuple[float, str]]]] = {}
     for idx, box in enumerate(bboxes, start=1):
-        below = [float(o.y0) for o in bboxes if float(o.y0) > float(box.y1)]
+        # The strip stops at the top of the next region DOWN THE PAGE, and a
+        # region that starts inside this one's own vertical span is such a
+        # region: taking only tops below ``box.y1`` let an overlapping
+        # neighbour leave the strip unbounded, and this region then read the
+        # neighbour's tick labels as its own axis. The bound cuts into the box
+        # itself in that case, which is the intended abstention -- the shared
+        # band belongs to neither panel.
+        below = [float(o.y0) for o in bboxes if float(o.y0) > float(box.y0)]
         limit = min(below) if below else page_bottom
         rows: dict[int, list[tuple[float, str]]] = {}
         for w in words:
@@ -433,6 +463,10 @@ def region_axis_rows(page, bboxes) -> dict[int, list[list[tuple[float, str]]]]:
             if x0 < float(box.x0) or x1 > float(box.x1):
                 continue
             if not (float(box.y0) <= y0 < limit):
+                continue
+            # Belt and braces for the box that overlaps from ABOVE or encloses
+            # this one, which no vertical bound can exclude.
+            if _contested(bboxes, idx, x0, y0):
                 continue
             rows.setdefault(round(y0), []).append(((x0 + x1) / 2.0, text))
         out[idx] = [sorted(rows[key]) for key in sorted(rows)]
@@ -486,18 +520,21 @@ def _key_atoms(cell: str) -> list[str] | None:
 
 
 def _label_tokens(row: list[tuple[float, str]]) -> list[tuple[float, str]]:
-    """The row's LABEL tokens: its words and numbers, without punctuation marks.
+    """The row's tokens, with its punctuation MARKS removed and nothing else.
 
     A printed range tick label puts its own dash on the axis line as a separate
     word ("1.88" "-" "2.13" "-" ...), and that dash is part of the label being
-    matched, not a tick between two others. Nothing else is dropped: an ordinary
-    word standing between two tick labels stays, and breaks the run, because
-    then the numbers are not consecutive ticks.
+    matched, not a tick between two others. A token carrying any letter or
+    digit is never dropped, whatever else it contains: ``not/a/tick`` standing
+    between ``B1`` and ``B2`` stays, so those two are not consecutive and the
+    grid is refused. Dropping it would manufacture the adjacency the proof is
+    supposed to find on the page. Such a token can never be mistaken for a key
+    atom either -- an atom must be a single whole token, which this is not.
     """
     out: list[tuple[float, str]] = []
     for x, token in row:
         folded = _norm_token(token)
-        if folded and _WHOLE_TOKEN_RE.match(folded):
+        if any(ch.isalnum() for ch in folded):
             out.append((x, folded))
     return out
 

@@ -3334,8 +3334,15 @@ class UnifiedPipeline:
         the two later candidate replacements (the escalation candidate, the
         crop-repaired text), so a verdict is never passed on bytes this pass
         later changes and no later reading can reintroduce a withheld grid.
-        Idempotent, and its records are deduplicated by the grid's own
-        ``(kind, table_index, sha256)``.
+        Those THREE producers are what crosses that seam, and the claim is not
+        wider than that: the trusted-native lane, the page-level chart and
+        equation lanes, GH-649 recovery, the manifest fallbacks and GH-713's
+        restored outputs reach only the ``_phase_agentic`` backstop crossing,
+        which runs after their own judgment rather than before it. The native
+        and manifest fallbacks among them can carry tables.
+
+        Idempotent, and its records are deduplicated by the grid AND what it
+        was bound to, ``(kind, table_index, sha256, region_index)``.
 
         Returns the number of grids withheld. Nothing here touches
         ``audit_passed`` (the winner-SELECTION flag, #252) or the page status:
@@ -3405,22 +3412,30 @@ class UnifiedPipeline:
 
         # The candidate boundary is crossed more than once per page -- every
         # ladder rung, the escalation candidate, the crop-repaired text and the
-        # backstop -- so a record already made for the same grid is not made
-        # again. Identity is the grid's own (kind, table, sha256), never the
-        # event's position: a rung that re-emits a byte-identical grid is the
-        # same finding, and a rung that emits a different one is not.
-        seen = {
-            (
-                ev.kind,
-                (ev.data or {}).get("table_index"),
-                (ev.data or {}).get("sha256"),
+        # backstop -- so a record already made for the same finding is not made
+        # again. Identity is the grid AND what it was bound to: (kind, table,
+        # sha256, region). The region belongs in it because two candidates can
+        # put a byte-identical empty grid under DIFFERENT panels; those are two
+        # different derivations, and keeping only the first would leave the
+        # published note citing region 2 with provenance that says region 1.
+        # Refusals carry no binding, so their region is None and they dedup by
+        # grid alone, as before.
+        def _identity(kind: str, data: dict) -> tuple:
+            return (
+                kind,
+                data.get("table_index"),
+                data.get("sha256"),
+                data.get("region_index"),
             )
+
+        seen = {
+            _identity(ev.kind, ev.data or {})
             for ev in state.events
             if ev.page_num == page_num and ev.kind in (SKELETON_SUPPRESSED, SKELETON_UNBOUND)
         }
 
         def _record(kind: str, detail: str, data: dict) -> bool:
-            key = (kind, data.get("table_index"), data.get("sha256"))
+            key = _identity(kind, data)
             if key in seen:
                 return False
             seen.add(key)
@@ -3455,11 +3470,18 @@ class UnifiedPipeline:
                 ),
                 s.to_dict(),
             )
-        # The page's count is the number of DISTINCT grids withheld on it, which
-        # is what the events hold -- not the number this crossing happened to
-        # find, which would reset to the last candidate's tally.
-        ps.chart_table_skeletons_suppressed = sum(
-            1 for ev in state.events if ev.page_num == page_num and ev.kind == SKELETON_SUPPRESSED
+        # The page's count is how many DISTINCT GRIDS were withheld on it, not
+        # how many suppression records it holds. Those differ on purpose now
+        # that a re-bound grid keeps its own record: candidate history is the
+        # event list, and the count is the grid identity behind it, so a second
+        # candidate that re-derived the same grid under another panel does not
+        # make the page look as though it lost two tables.
+        ps.chart_table_skeletons_suppressed = len(
+            {
+                ((ev.data or {}).get("table_index"), (ev.data or {}).get("sha256"))
+                for ev in state.events
+                if ev.page_num == page_num and ev.kind == SKELETON_SUPPRESSED
+            }
         )
         note = (
             f"#635: {len(suppressions)} empty chart-table skeleton(s) withheld on p{page_num} "
@@ -11268,13 +11290,20 @@ class UnifiedPipeline:
             from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
 
             _skeleton_kinds = (SKELETON_SUPPRESSED, SKELETON_UNBOUND)
-            # #635: the skeleton records are keyed by the GRID they are about
-            # (kind, table, sha256), so replaying a sidecar onto a state that
-            # already holds them -- a re-restore, or a restore of a page this
-            # run also processed -- restores the provenance without doubling
-            # the document's withheld count.
+            # #635: the skeleton records are keyed by the finding they are
+            # about -- the grid AND its binding, (kind, table, sha256, region)
+            # -- so replaying a sidecar onto a state that already holds them (a
+            # re-restore, or a restore of a page this run also processed)
+            # restores every record without doubling any of them. The page's
+            # withheld count is then taken over distinct GRIDS, so two records
+            # of one grid under two panels still count as the one table it is.
             _seen_skeletons = {
-                (e.kind, (e.data or {}).get("table_index"), (e.data or {}).get("sha256"))
+                (
+                    e.kind,
+                    (e.data or {}).get("table_index"),
+                    (e.data or {}).get("sha256"),
+                    (e.data or {}).get("region_index"),
+                )
                 for e in state.events
                 if e.page_num == page_num and e.kind in _skeleton_kinds
             }
@@ -11285,7 +11314,12 @@ class UnifiedPipeline:
                 ev_kind = str(ev.get("kind", ""))
                 if ev_kind in _skeleton_kinds:
                     _ev_data = dict(ev.get("data") or {})
-                    _key = (ev_kind, _ev_data.get("table_index"), _ev_data.get("sha256"))
+                    _key = (
+                        ev_kind,
+                        _ev_data.get("table_index"),
+                        _ev_data.get("sha256"),
+                        _ev_data.get("region_index"),
+                    )
                     if _key in _seen_skeletons:
                         continue
                     _seen_skeletons.add(_key)
@@ -11322,8 +11356,12 @@ class UnifiedPipeline:
             # of the run -- it is read straight off the restored events so a
             # resumed page reports the same number as the run that withheld
             # them, and the CLI line does not vanish on the second run.
-            ps.chart_table_skeletons_suppressed = sum(
-                1 for e in state.events if e.page_num == page_num and e.kind == SKELETON_SUPPRESSED
+            ps.chart_table_skeletons_suppressed = len(
+                {
+                    ((e.data or {}).get("table_index"), (e.data or {}).get("sha256"))
+                    for e in state.events
+                    if e.page_num == page_num and e.kind == SKELETON_SUPPRESSED
+                }
             )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
