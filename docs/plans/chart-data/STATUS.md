@@ -203,6 +203,29 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    one region) is fixed; the reconciliation half is not, and #734 stays open. Found by the
    #735 reviewer by source inspection, not by a pipeline run.
 
+15. **A bin label drawn as vector art hands the bins to a prose caption.** Where the
+   labels are OUTLINED rather than set as text, the page carries no tokens on the label
+   row, so the bars attest the nearest prose row instead and the panel publishes its counts
+   under that row's words. The counts themselves are right — the caption's words happen to
+   sit over the bin centres in the reviewer's construction — but the headers are prose.
+   Reproduced unchanged at `3cbf8a9` (main), `4f56a5e`, `816e18b` and `1ede541`, so it is
+   not a regression of this branch: nothing in the reader can tell a caption from a label
+   when the labels are not text, and OCR of the outlines is the only thing that could.
+   Reviewer probe `/private/tmp/rev735/test_rev735g.py::test_k`. The same weakness in a
+   second hat: a four-word caption whose words fall over the bin centres is accepted by
+   `_aligned` as a second LINE of labels and joined into them (`B1-Effective`, ...), also
+   pre-existing on main and harmless on both corpora, whose second lines are the range
+   endpoints.
+
+16. **A dashed panel that carries a prose caption below its labels is refused.** Round 4
+   requires the label row, where no bar attests any row, to be both the first multi-token
+   row under the axis and the only one of them inside the axis' span. A caption below the
+   labels satisfies neither test on its own but makes the count of in-span rows two, and
+   the panel refuses. It is a recall loss, not a wrong number, and the branch it sits on is
+   reached 0 times in 835 calls over the 198 corpus pages. The reviewer's own control
+   (`test_rev735g.py::test_j`, the no-stray-token half) is that page and is expected to
+   refuse.
+
 ## Stage 2 — model-assisted proposals — **TODO**
 
 Not started. Depends on Stage 1's geometry being the authority.

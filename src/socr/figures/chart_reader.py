@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/5"
+READER_VERSION = "635-stage1/6"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -600,9 +600,30 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
 
     Where NO bar attests any row -- a panel drawn with strays alone, or a
     dashed series with no bar resting on the axis at all -- the bars have said
-    nothing and the span test decides by itself. It must then decide uniquely:
-    one in-span row is the labels, and more than one is a choice nothing can
-    settle, so the panel is refused rather than read against the upper of them.
+    nothing and only the page's own layout is left, so BOTH of the two things
+    layout can say are required: the row must be the FIRST multi-token row
+    printed under the axis, and it must be the only one of them drawn inside
+    the axis' span. Neither half is sufficient alone, and each is the other's
+    counterexample (#735 review).
+
+    * Uniqueness alone reads its own exclusion as evidence. One unit word
+      printed on the label row's own baseline past the end of the axis
+      disqualifies that row, a prose caption below it is then the only in-span
+      row, and it takes the bins -- with the counts wrong as well as the
+      labels, since a caption's word centres redefine the bin intervals.
+    * Nearest alone assumes the labels are the first thing under the axis, and
+      on the corpus shape this reader exists for they are not: the chart's own
+      x-unit annotation is set BETWEEN the axis and its labels, so the nearest
+      row is the caption and the labels are absorbed into it as a second atom
+      line. Measured on the fixture of that page, the nearest-row rule publishes
+      bins ``Percent-B2 ...`` -- the round-1 defect verbatim.
+
+    Required together, the disqualified label row is nearest and not in span on
+    the first page, and the caption is nearest but not alone in span on the
+    second, so both refuse. What this costs is a dashed panel that carries a
+    prose caption below its labels: two rows in span, no bar to settle them,
+    and the panel is refused rather than guessed at. That is a recall loss and
+    not a wrong number, and it is reached 0 times in 835 calls over the corpus.
 
     All of it is geometric and frame-attached, and none of it reads what the
     tokens say: the bins of a bar chart need not be numeric, and a reader that
@@ -636,10 +657,11 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
         winner = plural[corroboration.index(attested)]
         if in_span(winner):
             best = winner
-    else:
+    elif plural:
+        nearest = min(plural, key=lambda row: row.y0)
         in_span_rows = [row for row in plural if in_span(row)]
-        if len(in_span_rows) == 1:
-            best = in_span_rows[0]
+        if in_span_rows == [nearest]:
+            best = nearest
     if best is None:
         logger.debug(
             "chart_reader: of the %d rows drawn below the axis at y=%.2f, the %d bars "
@@ -648,7 +670,10 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
             len(plural),
             frame.baseline,
             len(bars),
-            "a row not drawn inside the axis' own span" if attested else "none of them",
+            "a row not drawn inside the axis' own span"
+            if attested
+            else "none of them, and the nearest row below the axis is not the only one "
+            "drawn inside the axis' own span",
         )
         return []
     primaries = _alnum_tokens(best)
@@ -1594,9 +1619,9 @@ def read_chart_page(
         if len(bins) < 2:
             reading.refusals[idx] = (
                 "the row of text the bars standing on this region's axis attest is not "
-                "drawn inside the axis' own span, or no bar attests any row and more than "
-                "one row below the axis could be its labels, so the region's x bins are "
-                "not corroborated by its own drawing"
+                "drawn inside the axis' own span, or no bar attests any row and the "
+                "first row below the axis is not the only one drawn inside that span, "
+                "so the region's x bins are not corroborated by its own drawing"
             )
             continue
         frames[idx] = frame

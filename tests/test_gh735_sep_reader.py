@@ -858,3 +858,149 @@ def test_one_plot_drawn_with_a_top_rule_is_still_one_frame(tmp_path: Path) -> No
     found = find_frames(page_marks(page))
     assert len(found) == 1
     assert found[0].baseline == base
+
+
+# ---------------------------------------------------------------------------
+# Round 4 -- with no bar attesting, first AND alone in span (both halves)
+# ---------------------------------------------------------------------------
+
+
+def draw_dashed(
+    path: Path,
+    *,
+    caption: str | None = None,
+    stray_unit_token: bool = False,
+    solid_bars: bool = False,
+) -> tuple[fitz.Document, list]:
+    """A staircase drawn as dashed STROKES, so no bar rests on the axis.
+
+    ``_resting_bars`` is empty here, which is the page shape that reaches the
+    fallback: the bars attest no row at all and the layout decides. The caption
+    is set BELOW the labels -- the opposite of ``draw_captioned`` -- because the
+    two orders are each other's counterexample. Pass ``solid_bars`` to draw the
+    same counts as filled bars instead, which restores the attestation.
+    """
+    labels = list(BINS)
+    bin_w, centres = _bin_geometry(len(labels))
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.draw_line(fitz.Point(X0, BASE), fitz.Point(X1, BASE), width=0.4)
+    for value in TICK_VALUES:
+        y = BASE - value * UNIT
+        page.draw_line(fitz.Point(X0, y), fitz.Point(X0 + 10.0, y), width=0.4)
+        page.draw_line(fitz.Point(X1 - 10.0, y), fitz.Point(X1, y), width=0.4)
+        page.insert_text(fitz.Point(X1 + 5.0, y + 2.0), str(value), fontsize=5)
+    for centre, label in zip(centres, labels, strict=True):
+        page.insert_text(fitz.Point(centre - len(label) * 1.4, BASE + 10.0), label, fontsize=5)
+    if stray_unit_token:
+        page.insert_text(fitz.Point(X1 + 4.0, BASE + 10.0), "Percent", fontsize=5)
+    if caption is not None:
+        page.insert_text(fitz.Point(X0 + 40.0, BASE + 26.0), caption, fontsize=5)
+    style: dict = {} if solid_bars else {"dashes": "[2 2] 0"}
+    for i, label in enumerate(labels):
+        count = BARS[label]
+        y = BASE - count * UNIT
+        if solid_bars:
+            page.draw_rect(
+                fitz.Rect(centres[i] - bin_w * 0.4, y, centres[i] + bin_w * 0.4, BASE),
+                color=(0, 0, 0),
+                fill=(0.4, 0.6, 0.8),
+                width=0.3,
+            )
+        else:
+            page.draw_line(
+                fitz.Point(centres[i] - bin_w * 0.4, y),
+                fitz.Point(centres[i] + bin_w * 0.4, y),
+                width=1.0,
+                **style,
+            )
+    if solid_bars:
+        swatch_cx = (centres[0] + centres[1]) / 2.0
+        page.draw_rect(
+            fitz.Rect(swatch_cx - 4.0, BASE - 102.0, swatch_cx + 4.0, BASE - 98.0),
+            color=(0, 0, 0),
+            fill=(0.4, 0.6, 0.8),
+            width=0.3,
+        )
+        page.insert_text(fitz.Point(swatch_cx + 8.0, BASE - 98.5), SOLID, fontsize=5)
+    else:
+        page.draw_line(
+            fitz.Point(X0 + 20.0, BASE - 130.0),
+            fitz.Point(X0 + 36.0, BASE - 130.0),
+            width=1.0,
+            **style,
+        )
+        page.insert_text(fitz.Point(X0 + 40.0, BASE - 128.5), DASHED, fontsize=5)
+    doc.save(str(path))
+    reopened = fitz.open(str(path))
+    return reopened, [reopened[0].rect]
+
+
+def read_dashed(tmp_path: Path, name: str, **kw):
+    doc, bboxes = draw_dashed(tmp_path / f"{name}.pdf", **kw)
+    reading = read_chart_page(doc[0], bboxes, page_num=1)
+    return reading.panels.get(1), reading.refusals.get(1)
+
+
+def test_with_no_bar_attesting_a_caption_below_the_labels_cannot_take_the_bins(
+    tmp_path: Path,
+) -> None:
+    """Uniqueness alone reads its own exclusion as evidence (#735 review).
+
+    Nothing rests on this axis, so the bars attest no row and the layout
+    decides. One unit word set on the label row's own baseline past the end of
+    the axis disqualifies that row by the span test, and the prose caption
+    below it is then the only in-span row left. Admitting it published four
+    caption words as the bins AND moved the counts, because the caption's word
+    centres redefine the bin intervals. The stray token is the only difference
+    between the two drawings.
+    """
+    plain, plain_refusal = read_dashed(tmp_path, "plain", caption="Effective funds rate here")
+    assert plain is None
+    assert plain_refusal and "not corroborated" in plain_refusal
+
+    stray, stray_refusal = read_dashed(
+        tmp_path, "stray", caption="Effective funds rate here", stray_unit_token=True
+    )
+    assert stray is None, [b.label for b in stray.bins]
+    assert stray_refusal and "not corroborated" in stray_refusal
+
+
+def test_with_no_bar_attesting_the_labels_must_be_first_under_the_axis(
+    tmp_path: Path,
+) -> None:
+    """Nearest alone assumes the labels come first, and on this corpus they do not.
+
+    The chart's own x-unit annotation is set between the axis and its labels
+    (``draw_captioned``), so the first row under the axis is the caption. A
+    rule that took it would publish ``Percent-B2 ...`` -- the round-1 defect
+    verbatim. The caption is the only difference: without it the lone in-span
+    row is the labels and the panel reads.
+    """
+    bare, bare_refusal = read_dashed(tmp_path, "bare")
+    assert bare is not None, bare_refusal
+    assert [b.label for b in bare.bins] == list(BINS)
+
+    capped, capped_refusal = read_dashed(tmp_path, "capped", caption="Percent range")
+    assert capped is None, [b.label for b in capped.bins]
+    assert capped_refusal and "not corroborated" in capped_refusal
+
+
+def test_a_bar_attesting_the_labels_outranks_a_second_row_in_span(tmp_path: Path) -> None:
+    """The fallback is only reached where the bars say nothing.
+
+    Same page, same caption, drawn once as dashed levels and once as filled
+    bars. Filled, each bar covers exactly one label centre and none covers
+    exactly one caption word, so the labels win on the drawing's own evidence
+    and the extra in-span row is inert.
+    """
+    dashed, _ = read_dashed(tmp_path, "dashed", caption="Effective funds rate here")
+    assert dashed is None
+
+    solid, solid_refusal = read_dashed(
+        tmp_path, "solid", caption="Effective funds rate here", solid_bars=True
+    )
+    assert solid is not None, solid_refusal
+    assert [b.label for b in solid.bins] == list(BINS)
+    counts = {c.bin_label: c.count for s in solid.series for c in s.cells}
+    assert counts == {b: BARS[b] for b in BINS}, counts
