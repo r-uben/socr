@@ -68,8 +68,13 @@ SKELETON_UNBOUND = "chart_table_skeleton_unbound"
 
 _SEP_CELL_RE = re.compile(r"^:?-+:?$")
 #: A key is split into ATOMS on the range dash (already folded to ASCII "-").
-_ATOM_SPLIT_RE = re.compile(r"[-\u2013\u2014\u2212]")
-_WHOLE_TOKEN_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.]*$")
+#: Only a dash following the END of a token is a range dash: a dash that opens
+#: the key, or one that follows another dash, is the SIGN of the bound it is
+#: attached to. Without that, a ZIRP-era negative range such as "-0.37--0.13"
+#: split into empty atoms and produced a void key, so the derived column could
+#: never be matched to the withheld one (#735 review).
+_ATOM_SPLIT_RE = re.compile(r"(?<=[0-9A-Za-z.])[-\u2013\u2014\u2212]")
+_WHOLE_TOKEN_RE = re.compile(r"^-?[0-9A-Za-z][0-9A-Za-z.]*$")
 _TOKEN_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.]*")
 #: Leading markdown a line may carry while still BEING that label: an ATX
 #: heading marker, a bullet, or an ordered-list marker.

@@ -432,6 +432,7 @@ def draw_captioned(
     caption: str | None,
     bars: dict[str, int],
     extra_bars: tuple[tuple[float, float, int], ...] = (),
+    stray_unit_token: bool = False,
 ) -> tuple[fitz.Document, list]:
     """A panel with an optional text row set BETWEEN the axis and its labels.
 
@@ -454,6 +455,10 @@ def draw_captioned(
         page.insert_text(fitz.Point(mid - 20.0, BASE + 8.0), caption, fontsize=5)
     for centre, label in zip(centres, labels, strict=True):
         page.insert_text(fitz.Point(centre - len(label) * 1.4, BASE + 22.0), label, fontsize=5)
+    if stray_unit_token:
+        # The unit annotation set on the LABEL row's own baseline, past the end
+        # of the axis: one token outside the span disqualifies the whole row.
+        page.insert_text(fitz.Point(X1 + 4.0, BASE + 22.0), "Percent", fontsize=5)
     swatch_cx = (centres[0] + centres[1]) / 2.0
     sx0, sx1 = swatch_cx - 4.0, swatch_cx + 4.0
     sy = BASE - 100.0
@@ -532,15 +537,17 @@ def test_a_five_word_caption_publishes_nothing_of_its_own(tmp_path: Path) -> Non
     assert [b.label for b in panel.bins] == list(BINS)
 
 
-def test_with_one_candidate_row_the_bars_are_not_asked(tmp_path: Path) -> None:
-    """Corroboration decides WHICH row, never whether a bar is good.
+def test_when_no_bar_attests_a_row_the_span_test_must_decide_alone(
+    tmp_path: Path,
+) -> None:
+    """A panel drawn with strays alone falls back to the span test, which must be unique.
 
     The bar here straddles a bin boundary, so it covers no label centre and
-    corroborates nothing. With a single candidate row there is nothing for it
-    to pick between, so the panel still reads and the bar refuses only the bins
-    it casts doubt over. Add the caption and a choice appears that no bar can
-    settle, so the panel is refused rather than read against either row. The
-    caption is the only difference between the two drawings.
+    attests nothing. With one in-span row that row is the labels and the panel
+    reads, the stray refusing only the bins it casts doubt over. Add the
+    caption and the span test has two answers that no bar can settle, so the
+    panel is refused rather than read against the upper of them. The caption is
+    the only difference between the two drawings.
     """
     _bin_w, centres = _bin_geometry(len(BINS))
     straddle = ((centres[0] + centres[1]) / 2.0 - 5.0, (centres[0] + centres[1]) / 2.0 + 5.0, 5)
@@ -552,6 +559,30 @@ def test_with_one_candidate_row_the_bars_are_not_asked(tmp_path: Path) -> None:
     assert [b.label for b in alone.bins] == list(BINS)
     assert contested is None
     assert contested_refusal and "not corroborated" in contested_refusal
+
+
+def test_one_token_past_the_axis_end_cannot_hand_the_bins_to_a_caption(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's route to the round-1 defect, through the lone-candidate rule.
+
+    A unit annotation set on the label row's OWN baseline but past the end of
+    the axis disqualifies that row by the span test, leaving the caption below
+    it as the only candidate. The only difference between the two drawings is
+    that one token. Neither may publish a count under a word of prose.
+    """
+    intact, _ = read_captioned(tmp_path, "intact", "Effective federal funds rate", BARS)
+    assert intact is not None
+    assert [b.label for b in intact.bins] == list(BINS)
+
+    lone, lone_refusal = read_captioned(
+        tmp_path, "lone", "Effective federal funds rate", BARS, stray_unit_token=True
+    )
+    published = (
+        [] if lone is None else [c for s in lone.series for c in s.cells if c.count is not None]
+    )
+    assert not published, [b.label for b in lone.bins]
+    assert lone is None and lone_refusal and "not corroborated" in lone_refusal
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +664,9 @@ def test_a_two_line_range_label_joins_with_exactly_one_dash() -> None:
         (["0.00-", "0.37"], "0.00-0.37"),
     ):
         assert _key_atoms(_join_atoms(drawn)) is not None, drawn
-        assert _key_atoms("-".join(drawn)) is None, "the un-stripped form is the defect"
+        assert _key_atoms("-".join(drawn)) != _key_atoms(_join_atoms(drawn)), (
+            "the un-stripped form is the defect: it parses, to a different key"
+        )
         assert joined == _join_atoms(drawn)
 
 
@@ -684,7 +717,7 @@ def test_a_ladder_disagreement_the_stroke_admits_is_charged_as_residual(
 # ---------------------------------------------------------------------------
 
 
-def _two_charts(path: Path, *, lower_bar: int, separate_grounds: bool):
+def _two_charts(path: Path, *, lower_bar: int, separate_grounds: bool, lower_dx: float = 0.0):
     """Two complete charts, sharing one visible background or on two.
 
     Nothing here is invisible: the background is light grey and is real ink.
@@ -701,7 +734,7 @@ def _two_charts(path: Path, *, lower_bar: int, separate_grounds: bool):
         page.draw_rect(fitz.Rect(60, 240, 560, 740), color=None, fill=(0.95, 0.95, 0.95))
     for x, base, title, count in (
         (100, 400, "FIRST PANEL", 5),
-        (120, 700, "SECOND PANEL", lower_bar),
+        (120 + lower_dx, 700, "SECOND PANEL", lower_bar),
     ):
         page.draw_line((x, base), (x + 300, base), width=0.4)
         for n in (2, 4, 6, 8, 10):
@@ -775,6 +808,33 @@ def test_the_lower_frames_bar_never_reaches_the_upper_frames_title(tmp_path: Pat
     seven = _titled_counts(read_chart_page(seven_page, seven_boxes, page_num=1))
     nine = _titled_counts(read_chart_page(nine_page, nine_boxes, page_num=1))
     assert seven.get("FIRST PANEL") == nine.get("FIRST PANEL")
+
+
+def test_the_two_frame_refusal_needs_the_tick_COLUMNS_to_differ(tmp_path: Path) -> None:
+    """The documented limit of the frame count: it is keyed on ladder identity.
+
+    Two stacked plots drawn in the SAME column put their tick marks at one x
+    span, so both ladders land in one span group, every candidate axis reads
+    that one merged ladder, and the region holds one frame by this count. The
+    refusal therefore does not fire; what catches the drawing instead is the
+    residual gate, since a ladder of doubled length cannot fit one scale. Both
+    outcomes are refusals, which is why this is recorded as a limit rather
+    than charged -- but the two are reached by different routes, and STATUS
+    item 12 says so. Found by the #735 reviewer (`test_rev735f.py`).
+    """
+    offset_page, offset_boxes = _two_charts(
+        tmp_path / "offset.pdf", lower_bar=7, separate_grounds=False
+    )
+    offset = read_chart_page(offset_page, offset_boxes, page_num=1)
+    same_page, same_boxes = _two_charts(
+        tmp_path / "same.pdf", lower_bar=7, separate_grounds=False, lower_dx=-20.0
+    )
+    same = read_chart_page(same_page, same_boxes, page_num=1)
+
+    assert offset.panels == {} and same.panels == {}
+    assert "2 plot frames" in offset.refusals[1]
+    assert "2 plot frames" not in same.refusals[1]
+    assert "closes only to" in same.refusals[1]
 
 
 def test_one_plot_drawn_with_a_top_rule_is_still_one_frame(tmp_path: Path) -> None:

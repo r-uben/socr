@@ -165,19 +165,27 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    CI. The strongest evidence in the ticket is therefore unenforced on every CI run; a
    green tick does not mean the golden was checked.
 
-12. **A region holding two panels reads one of them when only one plot has a ladder.**
+12. **A region holding two panels reads one of them unless their tick columns differ.**
    Two plots in one region used to read as one: the lower axis was selected, the upper
    title was taken, and the lower chart's bars were published under it at a calibration
-   residual of 0.0. The reader now counts the plot frames in a region by the tick ladder
-   each reads, and refuses a region that holds more than one — a refusal, not a split,
-   because the region index is the identity the crops and the Stage 0 notes are keyed on,
-   so the reader cannot manufacture new ones. What survives is the case where the upper
-   plot carries NO tick ladder of its own: there is then one frame to find, the
-   calibration closes cleanly off it, the lower panel reads correctly, and the upper panel
-   is neither read nor refused — one crop covering both, one table showing one, no
-   internal issue. Closing it belongs to the region detector, which is what draws the
-   boundary in the first place. Found by the #735 reviewers
-   (`test_rev735b.py::test_d_...`, `test_astra_735.py::test_good_residual_...`).
+   residual of 0.0. The reader now counts the plot frames in a region and refuses a region
+   that holds more than one — a refusal, not a split, because the region index is the
+   identity the crops and the Stage 0 notes are keyed on, so the reader cannot manufacture
+   new ones. Two things bound that count, and both were measured by the #735 reviewers.
+   First, the count is by LADDER IDENTITY: `_span_groups` keys a ladder on its exact x
+   span, so two plots stacked in the same column draw one span group holding both ladders'
+   heights, every candidate axis reads that one merged ladder, and the region holds one
+   frame by this count. What catches that drawing is the residual gate instead — a ladder
+   of doubled length cannot fit one scale — so the outcome is still a refusal, by a
+   different route. The refusal added here fires only where the plots' tick columns differ
+   in x. Second, where the upper plot carries NO tick ladder of its own there is one frame
+   to find, the calibration closes cleanly off the lower one, the lower panel reads
+   correctly, and the upper panel is neither read nor refused — one crop covering both, one
+   table showing one, no internal issue. That last case is the surviving silent loss, and
+   closing it belongs to the region detector, which is what draws the boundary in the first
+   place. Found by the #735 reviewers (`test_rev735b.py::test_d_...`, `test_rev735c.py`,
+   `test_rev735f.py`, `test_astra_735.py::test_good_residual_...`); the ladder-identity
+   limit is pinned as a control in `tests/test_gh735_sep_reader.py`.
 13. **`_ladders_agree` has no bound relative to the tick pitch.** The two copies of a tick
    ladder are compared within half their own stroke width, which is the right resolution
    for a rounding difference but is not scaled to what a count is worth: a 4 pt

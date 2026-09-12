@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/4"
+READER_VERSION = "635-stage1/5"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -329,17 +329,6 @@ def find_frames(marks: list[Mark]) -> list[Frame]:
     return found
 
 
-def find_frame(marks: list[Mark]) -> Frame | None:
-    """The lowest plot frame drawn in *marks*, or ``None``.
-
-    Where more than one plot is drawn, this says nothing about the others; a
-    caller handed a region that may hold several must ask ``find_frames`` and
-    decide, because the lowest axis' scale does not govern the ink above it.
-    """
-    found = find_frames(marks)
-    return found[0] if found else None
-
-
 @dataclass(frozen=True)
 class YCalibration:
     """Points per unit, fitted to the labelled ticks and checked against the rest.
@@ -598,17 +587,28 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
       corroboration is ZERO the drawing does not pick a row at all, and the
       panel is refused rather than read against a row nothing attests.
 
-    Where only ONE row satisfies the first two conditions the bars are not
-    asked, because there is nothing for them to choose between: a panel whose
-    single label row is drawn against unplaceable bars still reads, and those
-    bars still make their own bins UNRESOLVED through ``_doubted_by``. The
-    corroboration decides WHICH row, never whether a bar is good.
+    The bars are scored over EVERY multi-token row below the axis, including
+    the rows the span test excludes, and only the winner is then held to that
+    test. Scoring inside the span first was the round-2 defect: one unit word
+    printed on the label row's own baseline past the end of the axis
+    disqualifies that whole row, and the caption below it is then the best --
+    indeed the only -- thing left to attest, so a count was published under a
+    word the page set as prose (#735 review). Scored against all of them, the
+    real label row still wins on the bars and is then refused for being drawn
+    outside the span, which is the honest answer: the page's own best-attested
+    labels are not this frame's.
+
+    Where NO bar attests any row -- a panel drawn with strays alone, or a
+    dashed series with no bar resting on the axis at all -- the bars have said
+    nothing and the span test decides by itself. It must then decide uniquely:
+    one in-span row is the labels, and more than one is a choice nothing can
+    settle, so the panel is refused rather than read against the upper of them.
 
     All of it is geometric and frame-attached, and none of it reads what the
     tokens say: the bins of a bar chart need not be numeric, and a reader that
     demanded numbers here would refuse every categorical panel. Note that
     neither corpus draws x tick MARKS -- nothing at all is stroked below the
-    axis, and the ladders ``find_frame`` matches are the y ticks at each end --
+    axis, and the ladders ``find_frames`` matches are the y ticks at each end --
     so the bars are the only thing left that can attest one row over another.
     A frame with no admissible row leaves the panel with no bins, and
     ``read_chart_page`` refuses it.
@@ -616,34 +616,39 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     below = [r for r in rows if r.y0 > frame.baseline]
     if not below:
         return []
+
+    def in_span(row: WordRow) -> bool:
+        return all(frame.x0 <= cx <= frame.x1 for cx, _text in _alnum_tokens(row))
+
+    plural = [row for row in below if len(_alnum_tokens(row)) >= 2]
     bars = _resting_bars(frame, residual, marks)
-    candidates = [
-        row
-        for row in below
-        if len(_alnum_tokens(row)) >= 2
-        and all(frame.x0 <= cx <= frame.x1 for cx, _text in _alnum_tokens(row))
+    corroboration = [
+        sum(
+            1
+            for bar in bars
+            if sum(1 for cx, _t in _alnum_tokens(row) if bar.x0 <= cx <= bar.x1) == 1
+        )
+        for row in plural
     ]
     best: WordRow | None = None
-    if len(candidates) == 1:
-        best = candidates[0]
-    elif candidates:
-        corroboration = [
-            sum(
-                1
-                for bar in bars
-                if sum(1 for cx, _t in _alnum_tokens(row) if bar.x0 <= cx <= bar.x1) == 1
-            )
-            for row in candidates
-        ]
-        if max(corroboration):
-            best = candidates[corroboration.index(max(corroboration))]
+    attested = max(corroboration, default=0)
+    if attested:
+        winner = plural[corroboration.index(attested)]
+        if in_span(winner):
+            best = winner
+    else:
+        in_span_rows = [row for row in plural if in_span(row)]
+        if len(in_span_rows) == 1:
+            best = in_span_rows[0]
     if best is None:
         logger.debug(
-            "chart_reader: of the %d rows drawn below the axis at y=%.2f inside its own "
-            "span, none is corroborated by a bar covering exactly one of its labels, so "
-            "the drawing does not say which row labels this frame's bins",
-            len(candidates),
+            "chart_reader: of the %d rows drawn below the axis at y=%.2f, the %d bars "
+            "standing on it attest %s, so the drawing does not say which row labels "
+            "this frame's bins",
+            len(plural),
             frame.baseline,
+            len(bars),
+            "a row not drawn inside the axis' own span" if attested else "none of them",
         )
         return []
     primaries = _alnum_tokens(best)
@@ -1588,9 +1593,10 @@ def read_chart_page(
         bins = read_bins(frame, rows, own, cal.residual)
         if len(bins) < 2:
             reading.refusals[idx] = (
-                "no row of text below this region's axis is drawn inside the axis' own "
-                "span with every bar standing on it covering exactly one of the row's "
-                "labels, so the region's x bins are not corroborated by its own drawing"
+                "the row of text the bars standing on this region's axis attest is not "
+                "drawn inside the axis' own span, or no bar attests any row and more than "
+                "one row below the axis could be its labels, so the region's x bins are "
+                "not corroborated by its own drawing"
             )
             continue
         frames[idx] = frame
