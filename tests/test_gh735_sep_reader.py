@@ -537,17 +537,17 @@ def test_a_five_word_caption_publishes_nothing_of_its_own(tmp_path: Path) -> Non
     assert [b.label for b in panel.bins] == list(BINS)
 
 
-def test_when_no_bar_attests_a_row_the_span_test_must_decide_alone(
+def test_with_nothing_attesting_a_row_the_caption_makes_no_difference(
     tmp_path: Path,
 ) -> None:
-    """A panel drawn with strays alone falls back to the span test, which must be unique.
+    """The layout question is no longer asked, so its answer cannot matter.
 
     The bar here straddles a bin boundary, so it covers no label centre and
-    attests nothing. With one in-span row that row is the labels and the panel
-    reads, the stray refusing only the bins it casts doubt over. Add the
-    caption and the span test has two answers that no bar can settle, so the
-    panel is refused rather than read against the upper of them. The caption is
-    the only difference between the two drawings.
+    attests nothing. Round 3 read this page against the only row inside the
+    axis' span and round 4 against the first such row; both were defeated by a
+    prose row printed where the rule looked (#735 review). The caption is the
+    only difference between the two drawings, and with no corroborated row
+    there are no bins either way.
     """
     _bin_w, centres = _bin_geometry(len(BINS))
     straddle = ((centres[0] + centres[1]) / 2.0 - 5.0, (centres[0] + centres[1]) / 2.0 + 5.0, 5)
@@ -555,10 +555,10 @@ def test_when_no_bar_attests_a_row_the_span_test_must_decide_alone(
     contested, contested_refusal = read_captioned(
         tmp_path, "contested", "Percent range", {}, extra_bars=(straddle,)
     )
-    assert alone is not None, alone_refusal
-    assert [b.label for b in alone.bins] == list(BINS)
+    assert alone is None
     assert contested is None
-    assert contested_refusal and "not corroborated" in contested_refusal
+    assert alone_refusal == contested_refusal, (alone_refusal, contested_refusal)
+    assert alone_refusal and "not corroborated" in alone_refusal
 
 
 def test_one_token_past_the_axis_end_cannot_hand_the_bins_to_a_caption(
@@ -861,7 +861,7 @@ def test_one_plot_drawn_with_a_top_rule_is_still_one_frame(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Round 4 -- with no bar attesting, first AND alone in span (both halves)
+# Round 5 -- with no bar on the axis there are no bins, and no fallback
 # ---------------------------------------------------------------------------
 
 
@@ -869,16 +869,20 @@ def draw_dashed(
     path: Path,
     *,
     caption: str | None = None,
+    caption_first: bool = False,
+    labels_out_of_span: bool = False,
     stray_unit_token: bool = False,
     solid_bars: bool = False,
 ) -> tuple[fitz.Document, list]:
     """A staircase drawn as dashed STROKES, so no bar rests on the axis.
 
-    ``_resting_bars`` is empty here, which is the page shape that reaches the
-    fallback: the bars attest no row at all and the layout decides. The caption
-    is set BELOW the labels -- the opposite of ``draw_captioned`` -- because the
-    two orders are each other's counterexample. Pass ``solid_bars`` to draw the
-    same counts as filled bars instead, which restores the attestation.
+    ``_resting_bars`` is empty here, which is the page shape the deleted
+    fallback used to decide by layout. The knobs are the four ingredients the
+    #735 review used against it, in every combination it found: a prose caption
+    above or below the label row, the label row pushed a few points outside the
+    axis' span, and one unit word printed on the label row's own baseline past
+    the end of the axis. Pass ``solid_bars`` to draw the same counts as filled
+    bars instead, which is the only thing that puts a bar on the axis.
     """
     labels = list(BINS)
     bin_w, centres = _bin_geometry(len(labels))
@@ -890,12 +894,18 @@ def draw_dashed(
         page.draw_line(fitz.Point(X0, y), fitz.Point(X0 + 10.0, y), width=0.4)
         page.draw_line(fitz.Point(X1 - 10.0, y), fitz.Point(X1, y), width=0.4)
         page.insert_text(fitz.Point(X1 + 5.0, y + 2.0), str(value), fontsize=5)
-    for centre, label in zip(centres, labels, strict=True):
-        page.insert_text(fitz.Point(centre - len(label) * 1.4, BASE + 10.0), label, fontsize=5)
-    if stray_unit_token:
-        page.insert_text(fitz.Point(X1 + 4.0, BASE + 10.0), "Percent", fontsize=5)
+    label_y = BASE + 26.0 if caption_first else BASE + 10.0
+    shift = -(centres[0] - X0) - 8.0 if labels_out_of_span else 0.0
     if caption is not None:
-        page.insert_text(fitz.Point(X0 + 40.0, BASE + 26.0), caption, fontsize=5)
+        page.insert_text(
+            fitz.Point(X0 + 40.0, BASE + 10.0 if caption_first else BASE + 26.0),
+            caption,
+            fontsize=5,
+        )
+    for centre, label in zip(centres, labels, strict=True):
+        page.insert_text(fitz.Point(centre + shift - len(label) * 1.4, label_y), label, fontsize=5)
+    if stray_unit_token:
+        page.insert_text(fitz.Point(X1 + 4.0, label_y), "Percent", fontsize=5)
     style: dict = {} if solid_bars else {"dashes": "[2 2] 0"}
     for i, label in enumerate(labels):
         count = BARS[label]
@@ -942,60 +952,27 @@ def read_dashed(tmp_path: Path, name: str, **kw):
     return reading.panels.get(1), reading.refusals.get(1)
 
 
-def test_with_no_bar_attesting_a_caption_below_the_labels_cannot_take_the_bins(
+def _no_cell_published(panel) -> bool:
+    if panel is None:
+        return True
+    return not [c for s in panel.series for c in s.cells if c.status == INTEGER]
+
+
+def test_the_bars_are_the_only_thing_that_can_say_which_row_carries_the_bins(
     tmp_path: Path,
 ) -> None:
-    """Uniqueness alone reads its own exclusion as evidence (#735 review).
+    """The whole rule, as one difference: dashed strokes against filled bars.
 
-    Nothing rests on this axis, so the bars attest no row and the layout
-    decides. One unit word set on the label row's own baseline past the end of
-    the axis disqualifies that row by the span test, and the prose caption
-    below it is then the only in-span row left. Admitting it published four
-    caption words as the bins AND moved the counts, because the caption's word
-    centres redefine the bin intervals. The stray token is the only difference
-    between the two drawings.
+    Same counts, same labels, same caption, same page. Drawn as filled bars,
+    each covers exactly one printed label centre, the labels are corroborated
+    and the panel reads what it was drawn from. Drawn as dashed levels, nothing
+    stands on the axis, no row is corroborated by anything, and the panel is
+    refused. There is no layout fallback: four of them were tried and each
+    published a prose row as the bins (#735 review rounds 1-4).
     """
-    plain, plain_refusal = read_dashed(tmp_path, "plain", caption="Effective funds rate here")
-    assert plain is None
-    assert plain_refusal and "not corroborated" in plain_refusal
-
-    stray, stray_refusal = read_dashed(
-        tmp_path, "stray", caption="Effective funds rate here", stray_unit_token=True
-    )
-    assert stray is None, [b.label for b in stray.bins]
-    assert stray_refusal and "not corroborated" in stray_refusal
-
-
-def test_with_no_bar_attesting_the_labels_must_be_first_under_the_axis(
-    tmp_path: Path,
-) -> None:
-    """Nearest alone assumes the labels come first, and on this corpus they do not.
-
-    The chart's own x-unit annotation is set between the axis and its labels
-    (``draw_captioned``), so the first row under the axis is the caption. A
-    rule that took it would publish ``Percent-B2 ...`` -- the round-1 defect
-    verbatim. The caption is the only difference: without it the lone in-span
-    row is the labels and the panel reads.
-    """
-    bare, bare_refusal = read_dashed(tmp_path, "bare")
-    assert bare is not None, bare_refusal
-    assert [b.label for b in bare.bins] == list(BINS)
-
-    capped, capped_refusal = read_dashed(tmp_path, "capped", caption="Percent range")
-    assert capped is None, [b.label for b in capped.bins]
-    assert capped_refusal and "not corroborated" in capped_refusal
-
-
-def test_a_bar_attesting_the_labels_outranks_a_second_row_in_span(tmp_path: Path) -> None:
-    """The fallback is only reached where the bars say nothing.
-
-    Same page, same caption, drawn once as dashed levels and once as filled
-    bars. Filled, each bar covers exactly one label centre and none covers
-    exactly one caption word, so the labels win on the drawing's own evidence
-    and the extra in-span row is inert.
-    """
-    dashed, _ = read_dashed(tmp_path, "dashed", caption="Effective funds rate here")
+    dashed, dashed_refusal = read_dashed(tmp_path, "dashed", caption="Effective funds rate here")
     assert dashed is None
+    assert dashed_refusal and "not corroborated" in dashed_refusal
 
     solid, solid_refusal = read_dashed(
         tmp_path, "solid", caption="Effective funds rate here", solid_bars=True
@@ -1004,3 +981,61 @@ def test_a_bar_attesting_the_labels_outranks_a_second_row_in_span(tmp_path: Path
     assert [b.label for b in solid.bins] == list(BINS)
     counts = {c.bin_label: c.count for s in solid.series for c in s.cells}
     assert counts == {b: BARS[b] for b in BINS}, counts
+
+
+def test_no_arrangement_of_prose_under_a_dashed_axis_can_publish_a_count(
+    tmp_path: Path,
+) -> None:
+    """Every page the four layout rules were defeated by, pinned together.
+
+    Each of these satisfied one of the rules the review tried, and each
+    published a fabricated label with a fabricated count at a perfect residual:
+    the caption alone (uniqueness), the caption first (nearest), and the two
+    together with one unit word past the axis end, which satisfied both halves
+    of the conjunction at once. None of them may publish anything.
+    """
+    shapes = {
+        "bare": {},
+        "caption_below": {"caption": "Effective funds rate here"},
+        "caption_first": {"caption": "Effective funds rate here", "caption_first": True},
+        "stray_token": {"caption": "Effective funds rate here", "stray_unit_token": True},
+        "first_and_alone": {
+            "caption": "Effective funds rate here",
+            "caption_first": True,
+            "labels_out_of_span": True,
+        },
+        "corpus_shape": {
+            "caption": "Percent range",
+            "caption_first": True,
+            "stray_unit_token": True,
+        },
+    }
+    for name, kw in shapes.items():
+        panel, refusal = read_dashed(tmp_path, name, **kw)
+        assert panel is None, (name, [b.label for b in panel.bins])
+        assert refusal and "not corroborated" in refusal, (name, refusal)
+        assert _no_cell_published(panel), name
+
+
+def test_a_bar_that_covers_no_label_centre_attests_nothing(tmp_path: Path) -> None:
+    """A straddling bar is on the axis but corroborates no row.
+
+    The bars are asked whether each covers exactly ONE token of a row, which is
+    what a histogram bar does to its own label and what a caption is never
+    subject to. A bar straddling a bin boundary covers two label centres or
+    none, so it answers nothing, and the panel has no more evidence than a
+    dashed one. The bar's width is the only difference between the drawings.
+    """
+    _bin_w, centres = _bin_geometry(len(BINS))
+    mid = (centres[0] + centres[1]) / 2.0
+    straddling, refusal = read_captioned(
+        tmp_path, "straddling", None, {}, extra_bars=((mid - 5.0, mid + 5.0, 5),)
+    )
+    assert straddling is None
+    assert refusal and "not corroborated" in refusal
+
+    owning, owning_refusal = read_captioned(
+        tmp_path, "owning", None, {}, extra_bars=((centres[0] - 5.0, centres[0] + 5.0, 5),)
+    )
+    assert owning is not None, owning_refusal
+    assert [b.label for b in owning.bins] == list(BINS)

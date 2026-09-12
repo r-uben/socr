@@ -208,23 +208,29 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    row, so the bars attest the nearest prose row instead and the panel publishes its counts
    under that row's words. The counts themselves are right — the caption's words happen to
    sit over the bin centres in the reviewer's construction — but the headers are prose.
-   Reproduced unchanged at `3cbf8a9` (main), `4f56a5e`, `816e18b` and `1ede541`, so it is
-   not a regression of this branch: nothing in the reader can tell a caption from a label
-   when the labels are not text, and OCR of the outlines is the only thing that could.
-   Reviewer probe `/private/tmp/rev735/test_rev735g.py::test_k`. The same weakness in a
-   second hat: a four-word caption whose words fall over the bin centres is accepted by
-   `_aligned` as a second LINE of labels and joined into them (`B1-Effective`, ...), also
-   pre-existing on main and harmless on both corpora, whose second lines are the range
-   endpoints.
+   Reproduced unchanged at `3cbf8a9` (main) and at every commit of this branch, so it is
+   not a regression: nothing in the reader can tell a caption from a label when the labels
+   are not text, and OCR of the outlines is the only thing that could. Reviewer probe
+   `/private/tmp/rev735/test_rev735g.py::test_k`. The same weakness in a second hat: a
+   four-word caption whose words fall over the bin centres is accepted by `_aligned` as a
+   second LINE of labels and joined into them (`B1-Effective`, ...), also pre-existing on
+   main and harmless on both corpora, whose second lines are the range endpoints. This is
+   the one route by which a prose row can still become a bin label, and it needs the labels
+   to be absent from the text layer.
 
-16. **A dashed panel that carries a prose caption below its labels is refused.** Round 4
-   requires the label row, where no bar attests any row, to be both the first multi-token
-   row under the axis and the only one of them inside the axis' span. A caption below the
-   labels satisfies neither test on its own but makes the count of in-span rows two, and
-   the panel refuses. It is a recall loss, not a wrong number, and the branch it sits on is
-   reached 0 times in 835 calls over the 198 corpus pages. The reviewer's own control
-   (`test_rev735g.py::test_j`, the no-stray-token half) is that page and is expected to
-   refuse.
+16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
+   layout fallback: where no bar covers exactly one token of any row below the axis, the
+   region has no bins and is refused. Four successive fallbacks were tried and each
+   published a prose row as the bins with fabricated counts at a perfect residual — the
+   densest row (the page's footnote), the only row in span, the first row, and both of the
+   last two required together (#735 review rounds 1–4, and `read_bins`' docstring). What it
+   costs is a dashed series with no bar anywhere on its axis, which now reads nothing. That
+   branch is reached 0 times in 835 calls over the 198 corpus pages, and both corpus dumps
+   are byte-identical across the change; the loss is therefore synthetic so far, and it is
+   a refusal rather than a wrong number. The 14 synthetic drawings in
+   `tests/test_gh635_chart_reader.py` whose point was the outline now draw one bar
+   (`WITNESS`) so their own subject still reads, and the refusal itself is pinned as a
+   difference against them.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 
