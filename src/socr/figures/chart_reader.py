@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/2"
+READER_VERSION = "635-stage1/4"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -100,6 +100,22 @@ _NUM_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)$")
 #: A key's atoms are split on the range dash, exactly as Stage 0 splits a
 #: column key, so a derived bin label and a withheld one are the same string.
 _ATOM_JOIN = "-"
+#: The dash codepoints a page may set a printed range with. A label drawn over
+#: two lines carries the connector at the end of its upper line -- ``2.13-``
+#: over ``2.37``, and the Fed sets it as U+2212 -- so joining the atoms as
+#: drawn produces ``2.13--2.37``, which Stage 0's ``_key_atoms`` rejects as a
+#: key with an empty part. On the corpora measured for #735 that is 2 072 of
+#: 7 077 labels across 46 of 198 pages: a derived grid that can never be
+#: matched to a withheld one. The connector is stripped from an atom that has
+#: another atom after it, and nowhere else -- a trailing dash on the LAST atom
+#: is the page's own text and is left alone.
+_RANGE_DASHES = "-\u2212\u2013\u2014"
+
+
+def _join_atoms(atoms: list[str]) -> str:
+    """The bin label: the atoms as drawn, joined by exactly one range dash."""
+    joined = [a.rstrip(_RANGE_DASHES) for a in atoms[:-1]] + [atoms[-1]]
+    return _ATOM_JOIN.join(joined)
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +272,8 @@ def _ladders_agree(a: list[float], b: list[float], tolerance: float) -> bool:
     return all(abs(x - y) <= max(tolerance, 1e-9) for x, y in zip(a, b, strict=False))
 
 
-def find_frame(marks: list[Mark]) -> Frame | None:
-    """The panel's axis line and its tick values, or ``None``.
+def find_frames(marks: list[Mark]) -> list[Frame]:
+    """Every distinct plot frame drawn in *marks*, lowest axis first.
 
     An axis is not "a long line"; it is *the line the ticks attach to*. So the
     two are found together: a candidate axis is a stroked horizontal, and its
@@ -268,16 +284,19 @@ def find_frame(marks: list[Mark]) -> Frame | None:
     by being the candidate's own span; the page's header rule attaches to
     nothing and is never a candidate at all.
 
-    Among the candidates that have ladders, the axis is the LOWEST -- the plot's
-    bottom rule, the one a bar rests on. Ladders that disagree about which
-    heights are ticked (a left and a right ladder must agree) abstain, because a
-    scale fitted to one of two contradictory ladders is a guess.
+    One plot is drawn with several such candidates -- its bottom rule and its
+    top rule both enclose the same ticks -- so the candidates are grouped by
+    the LADDER they read, and each group yields one frame: the lowest candidate
+    of that group, the rule a bar rests on. Two groups mean two plots, drawn in
+    whatever the caller handed in as one region. Ladders that disagree about
+    which heights are ticked (a left and a right ladder must agree) abstain,
+    because a scale fitted to one of two contradictory ladders is a guess.
     """
     horizontals = _stroked_horizontals(marks)
     if not horizontals:
-        return None
+        return []
     groups = _span_groups(horizontals)
-    best: tuple[Mark, tuple[float, ...]] | None = None
+    by_ladder: dict[tuple[float, ...], Mark] = {}
     for axis in horizontals:
         span = (round(axis.x0, 3), round(axis.x1, 3))
         ladders = [
@@ -299,12 +318,26 @@ def find_frame(marks: list[Mark]) -> Frame | None:
         ticks = tuple(first)
         if any(abs(axis.cy - t) <= max(axis.tolerance, 1e-6) for t in ticks):
             continue
-        if best is None or axis.cy > best[0].cy:
-            best = (axis, ticks)
-    if best is None:
-        return None
-    axis, ticks = best
-    return Frame(baseline=axis.cy, x0=axis.x0, x1=axis.x1, tick_ys=ticks)
+        held = by_ladder.get(ticks)
+        if held is None or axis.cy > held.cy:
+            by_ladder[ticks] = axis
+    found = [
+        Frame(baseline=axis.cy, x0=axis.x0, x1=axis.x1, tick_ys=ticks)
+        for ticks, axis in by_ladder.items()
+    ]
+    found.sort(key=lambda f: -f.baseline)
+    return found
+
+
+def find_frame(marks: list[Mark]) -> Frame | None:
+    """The lowest plot frame drawn in *marks*, or ``None``.
+
+    Where more than one plot is drawn, this says nothing about the others; a
+    caller handed a region that may hold several must ask ``find_frames`` and
+    decide, because the lowest axis' scale does not govern the ink above it.
+    """
+    found = find_frames(marks)
+    return found[0] if found else None
 
 
 @dataclass(frozen=True)
@@ -518,7 +551,7 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     return [tokens[i][1] for i in picked]
 
 
-def read_bins(frame: Frame, rows: list[WordRow]) -> list[Bin]:
+def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: float) -> list[Bin]:
     """The printed bin labels below the axis, with their intervals.
 
     The interval is the midpoints between consecutive label centres, with the
@@ -530,50 +563,86 @@ def read_bins(frame: Frame, rows: list[WordRow]) -> list[Bin]:
     the label CENTRE lying inside the mark -- see ``_owned_bins``. The interval
     is used only to say which bins an UNASSIGNABLE mark casts doubt over.
 
-    **Which row is the label row is a safety question, not a heuristic one.**
-    This used to be "the row below the axis with the most alphanumeric tokens",
-    which is a popularity contest a page's FOOTNOTE wins: on the Fed SEP pages
-    the reader published ``Definitions | of | variables | and | ...`` as its
-    bins, with hard zeros under them, beneath the banner that says the counts
-    were read from the source (#735). A prose sentence is not an axis.
+    **Which row is the label row is a safety question, not a heuristic one,
+    and text position alone cannot answer it.** Two rules have now failed here,
+    in opposite directions. "The row below the axis with the most alphanumeric
+    tokens" is a popularity contest the page's FOOTNOTE wins: the Fed SEP pages
+    published ``Definitions | of | variables | and | ...`` as their bins, with
+    hard zeros under them, beneath the banner that says the counts were read
+    from the source (#735). "The FIRST row below the axis" is a proximity
+    contest the chart's own x-unit annotation wins: a two-word ``Percent
+    range`` set between the axis and its labels became the bins, the printed
+    labels were absorbed into it as a second atom line, and three of four bars
+    vanished behind a column the page never labelled. Density and adjacency are
+    both properties of where a generator happens to put its text.
 
-    So the row is required to be what an axis label row IS, by the frame's own
-    geometry and by its own content:
+    The property actually being asserted is that the row the MARKS are assigned
+    to is a row the marks corroborate, so that is what is asked. A candidate
+    row must satisfy three conditions, and the first row below the axis that
+    satisfies all three is the label row:
 
-    * it is the FIRST row drawn below the axis that carries more than one
-      token. An axis sets its labels against itself; whatever is printed
-      further down the page belongs to something else, and a footnote four
-      centimetres below the plot is never what an axis is labelled with,
-      however many words it has;
+    * it carries more than one token, since a single label cannot make bins;
     * every one of its tokens is drawn within the axis' own horizontal span.
       That is what makes the row THIS frame's labels rather than a neighbour's
       or the page's, and it is the same discriminator ``calibrate_y`` uses in
-      reverse -- a y tick label is the numeric word set OUTSIDE the span.
+      reverse -- a y tick label is the numeric word set OUTSIDE the span;
+    * where more than one row satisfies those two, **the bars choose between
+      them.** A row's corroboration is the number of bars standing on this axis
+      that cover exactly one of its token centres -- ``_owned_bins``, the
+      module's own assignment rule, used as an admission test. A histogram bar
+      spans its bin, so it covers that bin's label centre and no other; a
+      caption is covered two words at a time or not at all. The best
+      corroborated row wins, ties going to the upper one, because a label
+      printed over two lines puts both lines in the running and it is the upper
+      line whose centres the lower is aligned against. When the best
+      corroboration is ZERO the drawing does not pick a row at all, and the
+      panel is refused rather than read against a row nothing attests.
 
-    Both conditions are geometric and frame-attached, and neither reads what
-    the tokens say: the bins of a bar chart need not be numeric, and a reader
-    that demanded numbers here would refuse every categorical panel. Note that
+    Where only ONE row satisfies the first two conditions the bars are not
+    asked, because there is nothing for them to choose between: a panel whose
+    single label row is drawn against unplaceable bars still reads, and those
+    bars still make their own bins UNRESOLVED through ``_doubted_by``. The
+    corroboration decides WHICH row, never whether a bar is good.
+
+    All of it is geometric and frame-attached, and none of it reads what the
+    tokens say: the bins of a bar chart need not be numeric, and a reader that
+    demanded numbers here would refuse every categorical panel. Note that
     neither corpus draws x tick MARKS -- nothing at all is stroked below the
     axis, and the ladders ``find_frame`` matches are the y ticks at each end --
-    so the axis' span and the row it carries are the whole of the attachment
-    there is to measure. A frame whose first row below the axis fails either
-    condition leaves the panel with no bins, and ``read_chart_page`` refuses it.
+    so the bars are the only thing left that can attest one row over another.
+    A frame with no admissible row leaves the panel with no bins, and
+    ``read_chart_page`` refuses it.
     """
     below = [r for r in rows if r.y0 > frame.baseline]
     if not below:
         return []
+    bars = _resting_bars(frame, residual, marks)
+    candidates = [
+        row
+        for row in below
+        if len(_alnum_tokens(row)) >= 2
+        and all(frame.x0 <= cx <= frame.x1 for cx, _text in _alnum_tokens(row))
+    ]
     best: WordRow | None = None
-    for row in below:
-        tokens = _alnum_tokens(row)
-        if len(tokens) < 2:
-            continue
-        if all(frame.x0 <= cx <= frame.x1 for cx, _text in tokens):
-            best = row
-        break
+    if len(candidates) == 1:
+        best = candidates[0]
+    elif candidates:
+        corroboration = [
+            sum(
+                1
+                for bar in bars
+                if sum(1 for cx, _t in _alnum_tokens(row) if bar.x0 <= cx <= bar.x1) == 1
+            )
+            for row in candidates
+        ]
+        if max(corroboration):
+            best = candidates[corroboration.index(max(corroboration))]
     if best is None:
         logger.debug(
-            "chart_reader: the first row below the axis at y=%.2f is not drawn within "
-            "the axis' own span, so the axis carries no label row",
+            "chart_reader: of the %d rows drawn below the axis at y=%.2f inside its own "
+            "span, none is corroborated by a bar covering exactly one of its labels, so "
+            "the drawing does not say which row labels this frame's bins",
+            len(candidates),
             frame.baseline,
         )
         return []
@@ -602,7 +671,7 @@ def read_bins(frame: Frame, rows: list[WordRow]) -> list[Bin]:
             edges.append(right)
     out: list[Bin] = []
     for i, c in enumerate(centres):
-        out.append(Bin(label=_ATOM_JOIN.join(atoms[i]), centre=c, lo=edges[i], hi=edges[i + 1]))
+        out.append(Bin(label=_join_atoms(atoms[i]), centre=c, lo=edges[i], hi=edges[i + 1]))
     return out
 
 
@@ -837,6 +906,25 @@ def _owned_bins(mark: Mark, bins: list[Bin]) -> list[int]:
     return [i for i, b in enumerate(bins) if mark.x0 <= b.centre <= mark.x1]
 
 
+def _resting_bars(frame: Frame, residual: float, marks: list[Mark]) -> list[Mark]:
+    """The filled marks standing on this frame's axis, inside its span.
+
+    These are the panel's bars: what ``read_solid_series`` measures, and what
+    ``read_bins`` requires its candidate label row to be corroborated by. One
+    definition, used in both places, so the row a bar is assigned to cannot be
+    a row that bar was never checked against.
+    """
+    return [
+        m
+        for m in marks
+        if m.filled
+        and abs(m.y1 - frame.baseline) <= max(m.tolerance, residual)
+        and m.y0 < frame.baseline
+        and frame.x0 <= m.x0
+        and m.x1 <= frame.x1
+    ]
+
+
 def _doubted_by(strays: list[Mark], b: Bin) -> bool:
     """A mark this reader could not place overlaps this bin's interval."""
     return any(m.x1 > b.lo and m.x0 < b.hi for m in strays)
@@ -850,15 +938,7 @@ def read_solid_series(
     marks: list[Mark],
 ) -> SeriesReading:
     """A bar series: filled rectangles standing on the axis."""
-    bars = [
-        m
-        for m in marks
-        if m.filled
-        and abs(m.y1 - frame.baseline) <= max(m.tolerance, cal.residual)
-        and m.y0 < frame.baseline
-        and frame.x0 <= m.x0
-        and m.x1 <= frame.x1
-    ]
+    bars = _resting_bars(frame, cal.residual, marks)
     if not bars:
         return SeriesReading(
             name=name,
@@ -1451,13 +1531,32 @@ def read_chart_page(
     for idx, box in enumerate(bboxes, start=1):
         own = [m for m in marks if _in_box(m, box)]
         marks_by_region[idx] = own
-        frame = find_frame(own)
-        if frame is None:
+        found = find_frames(own)
+        if not found:
             reading.refusals[idx] = (
                 "no vector plot frame (a stroked axis with a tick ladder) is drawn in "
                 "this region; a raster chart is out of scope for this reader"
             )
             continue
+        # Two plot frames in one region is one region too few. Everything read
+        # below is attributed to ONE frame -- the title above it, the legend
+        # beside it, the labels under it, the marks inside it -- and none of
+        # those attributions is checked against which frame the ink belongs to.
+        # A region bridging two charts therefore publishes the lower chart's
+        # bars under the upper chart's title, at a residual of 0.0, because the
+        # residual only tests that one ladder fits one scale (#735). The
+        # reader cannot split the region: the region index is the identity the
+        # crops and the Stage 0 notes are keyed on. So it refuses, and the
+        # detector is left to separate them.
+        if len(found) > 1:
+            reading.refusals[idx] = (
+                f"this region encloses {len(found)} plot frames, with axes at y="
+                + ", ".join(f"{f.baseline:.2f}" for f in found)
+                + "; which frame any title, legend, label or mark in the region "
+                "belongs to is not established by the drawing, so nothing in it is read"
+            )
+            continue
+        frame = found[0]
         rows = rows_by_region[idx]
         cal = calibrate_y(frame, rows)
         if cal is None:
@@ -1486,9 +1585,13 @@ def read_chart_page(
                 "is supported by it"
             )
             continue
-        bins = read_bins(frame, rows)
+        bins = read_bins(frame, rows, own, cal.residual)
         if len(bins) < 2:
-            reading.refusals[idx] = "the region prints fewer than two x bin labels below its axis"
+            reading.refusals[idx] = (
+                "no row of text below this region's axis is drawn inside the axis' own "
+                "span with every bar standing on it covering exactly one of the row's "
+                "labels, so the region's x bins are not corroborated by its own drawing"
+            )
             continue
         frames[idx] = frame
         cals[idx] = cal

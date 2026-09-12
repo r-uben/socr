@@ -129,16 +129,24 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    discrimination at all.
 7. **Stage 2 is untouched.** No model is consulted; geometry is the only authority, as
    the design requires before proposals can be reconciled against it.
-8. **One document is not a defect rate.** Every claim about accuracy here is measured on
-   a single Fed SEP page, now read independently by a second reviewer through two
-   channels that share no code with the implementation (raw operators with bin
-   boundaries taken from the staircase risers, and a 600-DPI raster ink read): zero
-   disagreements over all 65 cells. The claim is "correct on this page", not "correct".
-   The five refusal paths added in rounds 2, 3 and 4 are exercised by synthetic drawings
-   only, because this fixture draws no bar spanning two bins, no staircase that stops
-   without descending, no gap whose far end is unresolvable, and no stroke thick enough
-   to defeat the half-count bound on either witness of a zero (its 1.0-1.5 pt strokes sit
-   ~2.4x clear of its 1.78 pt half count).
+8. **198 pages of measurement, and still no per-cell defect rate.** Accuracy is measured
+   two ways, and they answer different questions. On the single Fed SEP fixture page
+   (`dotplot-p20.pdf`) a second reviewer annotated all 65 cells independently through two
+   channels sharing no code with the implementation — raw operators with bin boundaries
+   taken from the staircase risers, and a 600-DPI raster ink read — with zero
+   disagreements. That page still carries the only per-cell oracle there is. On the
+   #735 branch the reader was then run over 198 pages: the 23 Fed SEP projection pages
+   and the 175 FOMC minutes pages (35 meetings × Figures 3.A–3.E). Those have **no
+   per-cell oracle**. What they have is an independent consistency check: across the 175
+   minutes pages, 610 fully-resolved current-meeting series produce exactly one
+   participant count per meeting, with the longer-run panels one below it and **zero
+   stragglers over 35 meetings**, with no total supplied to the reader. That is strong
+   corroboration and it is not a defect rate. The seven refusal paths now in the reader
+   (rounds 2, 3 and 4 of #635, plus #735's compound-path guard, panel residual gate and
+   uncorroborated-label-row refusal) are exercised by synthetic drawings only, because
+   neither corpus draws a bar spanning two bins, a staircase that stops without
+   descending, a gap whose far end is unresolvable, a stroke thick enough to defeat the
+   half-count bound, or a page ground other than white.
 9. **A stray bar refuses a bin it barely touches.** `_doubted_by` is a raw interval
    overlap with no tolerance, so a bar of unknown binning that reaches 0.14 pt into the
    next bin's interval refuses that whole bin. Round 2 made strays much more common (a bar
@@ -156,6 +164,36 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    skipped when `~/Data/socr/fixtures/dotplot/dotplot-p20.pdf` is absent, which it is on
    CI. The strongest evidence in the ticket is therefore unenforced on every CI run; a
    green tick does not mean the golden was checked.
+
+12. **A region holding two panels reads one of them when only one plot has a ladder.**
+   Two plots in one region used to read as one: the lower axis was selected, the upper
+   title was taken, and the lower chart's bars were published under it at a calibration
+   residual of 0.0. The reader now counts the plot frames in a region by the tick ladder
+   each reads, and refuses a region that holds more than one — a refusal, not a split,
+   because the region index is the identity the crops and the Stage 0 notes are keyed on,
+   so the reader cannot manufacture new ones. What survives is the case where the upper
+   plot carries NO tick ladder of its own: there is then one frame to find, the
+   calibration closes cleanly off it, the lower panel reads correctly, and the upper panel
+   is neither read nor refused — one crop covering both, one table showing one, no
+   internal issue. Closing it belongs to the region detector, which is what draws the
+   boundary in the first place. Found by the #735 reviewers
+   (`test_rev735b.py::test_d_...`, `test_astra_735.py::test_good_residual_...`).
+13. **`_ladders_agree` has no bound relative to the tick pitch.** The two copies of a tick
+   ladder are compared within half their own stroke width, which is the right resolution
+   for a rounding difference but is not scaled to what a count is worth: a 4 pt
+   disagreement against a 20 pt pitch is refused at a 0.4 pt stroke and accepted at a 9 pt
+   one. It cannot produce a wrong number — a displaced ladder moves `zero_y`, which lands
+   in `cal.residual`, which both the panel gate and `_resolve` charge — so it costs recall
+   or refusal, never correctness. Recorded rather than charged.
+
+14. **#734 is not closed by the #735 branch: a FILLED model grid never reaches the
+   reader.** `_derive_chart_tables` in `src/socr/pipeline/orchestrator.py` opens with a
+   structural pre-check, `if not find_empty_skeletons(text): return 0`, so chart derivation
+   runs only where the model left an EMPTY grid. A model that fills its chart table with
+   invented numbers bypasses the geometry path entirely, and nothing reconciles its values
+   against what the page draws. The reader-side half of #734 (five panels collapsing into
+   one region) is fixed; the reconciliation half is not, and #734 stays open. Found by the
+   #735 reviewer by source inspection, not by a pipeline run.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 
