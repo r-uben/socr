@@ -1142,8 +1142,46 @@ _CHART_MIN_CLUSTER_AREA_PT2: float = 120.0 * 120.0  # 14 400 pt²
 _CHART_CLUSTER_GAP_PT: float = 30.0
 
 
+def _paints_nothing(d) -> bool:
+    """True when the drawing lays down no ink the page can show.
+
+    A drawing paints only through the channels it declares: a fill if its
+    operator fills, a stroke if its operator strokes. A channel shows nothing
+    when it is absent, when its opacity is zero, or when its colour is the page
+    ground the drawing sits on -- white on white. The test is on the drawing's
+    OWN declared colour and opacity, so there is no threshold and no page
+    measurement behind it.
+
+    This matters because clustering asks which drawings are near each other.
+    An invisible container rectangle drawn around a panel is not near the next
+    panel's ink in any sense a reader can see, yet it touches it: the Fed SEP
+    projection pages wrap each dot-plot panel in a white-on-white rectangle
+    whose slabs sit half a point apart, and counting those as ink merged all
+    five panels into one region (#735).
+    """
+    kind = str(d.get("type") or "")
+    fill, stroke = d.get("fill"), d.get("color")
+    fill_alpha = d.get("fill_opacity")
+    stroke_alpha = d.get("stroke_opacity")
+    fill_alpha = 1.0 if fill_alpha is None else float(fill_alpha)
+    stroke_alpha = 1.0 if stroke_alpha is None else float(stroke_alpha)
+
+    def shows(channel, painted: bool, alpha: float) -> bool:
+        if not painted or channel is None or alpha <= 0:
+            return False
+        try:
+            return not all(float(c) >= 1.0 for c in channel)
+        except TypeError:  # pragma: no cover - defensive: unknown colour shape
+            return True
+
+    return not (shows(fill, "f" in kind, fill_alpha) or shows(stroke, "s" in kind, stroke_alpha))
+
+
 def _drawing_bboxes(page) -> list[tuple[float, float, float, float]]:
-    """Return (x0, y0, x1, y1) for every non-degenerate drawing on *page*.
+    """Return (x0, y0, x1, y1) for every non-degenerate VISIBLE drawing on *page*.
+
+    A drawing that paints nothing (see ``_paints_nothing``) is not ink and is
+    excluded: it can neither anchor a cluster nor bridge two.
 
     Returns [] on error or when there are no drawings.
     """
@@ -1155,6 +1193,8 @@ def _drawing_bboxes(page) -> list[tuple[float, float, float, float]]:
     for d in drawings:
         rect = d.get("rect")
         if rect is None:
+            continue
+        if _paints_nothing(d):
             continue
         x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
         if x1 > x0 or y1 > y0:  # skip zero-area point/line markers
