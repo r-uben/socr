@@ -241,6 +241,7 @@ def test_coverage_record_fields_and_types():
         contradiction_count=0,
         native_unbound_count=0,
         model_unbound_count=0,
+        model_unbound_nonempty=False,
     )
     assert record.row_labels_checked == 5
     assert record.candidate_valueless_unbound == 0
