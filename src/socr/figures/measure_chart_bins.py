@@ -24,6 +24,13 @@ rules the round-6 notes rejected were measured against the ROUND 5 scoring
 (coverage of exactly one token centre) while the shipped reader also requires
 containment -- the same corpus gives different counts under the two, and saying
 which is meant is half of what these numbers are for.
+
+Round 7 replaced the round-6 rival rule with a numeric-label gate, so the report
+also counts how many rows below each axis carry only numbers, how many panels
+have no such row at all (the gate's refusals), and whether the attested row is
+one of them. On both Fed corpora and the reference those are 0 refusals and
+every attested row numeric, which is the "costs nothing measured" claim in
+``docs/log/2026-09-12_735-sep-reader.md``.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from socr.figures.chart_reader import (
     _alnum_tokens,
     _attesting_bars,
     _bin_edges,
+    _numeric_row,
     _resting_bars,
     read_chart_page,
 )
@@ -59,7 +67,7 @@ class Measurement:
     def __init__(self) -> None:
         self.counts: Counter[str] = Counter()
         self.clearances: list[float] = []
-        self.silent_rivals: list[dict] = []
+        self.non_numeric_winners: list[str] = []
 
     def observe(self, frame, rows, marks, residual) -> None:
         below = [r for r in rows if r.y0 > frame.baseline]
@@ -70,6 +78,8 @@ class Measurement:
         contained = [len(_attesting_bars(r, bars)) for r in plural]
         c = self.counts
         c["calls"] += 1
+        c["rows_all_numeric"] += sum(1 for r in plural if _numeric_row(r))
+        c["calls_with_no_numeric_row"] += not any(_numeric_row(r) for r in plural)
         c["corroborated_2_or_more_covering"] += sum(1 for s in covering if s) >= 2
         c["corroborated_2_or_more_contained"] += sum(1 for s in contained if s) >= 2
         best = max(covering, default=0)
@@ -99,38 +109,14 @@ class Measurement:
             if len(covered) == 1:
                 i = covered[0]
                 self.clearances.append(min(bar.x0 - edges[i], edges[i + 1] - bar.x1))
-        widest = max((b.x1 - b.x0 for b in bars), default=0.0)
-        at_least, strictly = False, False
-        for i, t in enumerate(tokens):
-            if i == w or i not in in_span or len(t) < len(win):
-                continue
-            if any(b.x0 <= cx <= b.x1 for b in bars for cx, _t in t):
-                continue
-            at_least = True
-            if len(t) == len(win):
-                continue
-            strictly = True
-            centres = [cx for cx, _t in t]
-            self.silent_rivals.append(
-                {
-                    "text": " ".join(text for _cx, text in t)[:80],
-                    "tokens": len(t),
-                    "winner_tokens": len(win),
-                    "tightest_column": min(
-                        b - a for a, b in zip(centres, centres[1:], strict=False)
-                    ),
-                    "widest_bar": widest,
-                }
-            )
-        c["silent_rival_at_least_as_many_tokens"] += at_least
-        c["silent_rival_strictly_more_tokens"] += strictly
+        c["winner_is_numeric"] += _numeric_row(plural[w])
+        if not _numeric_row(plural[w]):
+            self.non_numeric_winners.append(" ".join(text for _cx, text in win)[:80])
 
     def report(self) -> dict:
         out = dict(self.counts)
         out["minimum_clearance_points"] = min(self.clearances, default=None)
-        out["silent_rivals_ruled_out_by_width"] = [
-            r for r in self.silent_rivals if r["widest_bar"] > r["tightest_column"]
-        ]
+        out["non_numeric_winners"] = self.non_numeric_winners
         return out
 
 

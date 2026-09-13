@@ -31,7 +31,7 @@ X0, X1 = 100.0, 400.0
 BASE = 400.0
 UNIT = 10.0  # points per participant
 TICK_VALUES = (2, 4, 6, 8, 10)
-BINS = ("B1", "B2", "B3", "B4")
+BINS = ("1.0", "2.0", "3.0", "4.0")
 SOLID = "September projections"
 DASHED = "June projections"
 
@@ -235,10 +235,10 @@ def test_ladders_that_disagree_within_their_own_stroke_still_find_the_axis(
     axis is refused.
     """
     inside, refusal_inside = read_panel(
-        tmp_path, "inside", bars={"B1": 3}, right_ladder_offset=0.15, tick_width=0.4
+        tmp_path, "inside", bars={"1.0": 3}, right_ladder_offset=0.15, tick_width=0.4
     )
     outside, refusal_outside = read_panel(
-        tmp_path, "outside", bars={"B1": 3}, right_ladder_offset=3.0, tick_width=0.4
+        tmp_path, "outside", bars={"1.0": 3}, right_ladder_offset=3.0, tick_width=0.4
     )
     assert inside is not None, refusal_inside
     assert outside is None
@@ -251,10 +251,10 @@ def test_the_agreement_window_is_the_stroke_width_not_a_constant(tmp_path: Path)
     """One offset, two stroke widths: the thicker stroke admits it."""
     offset = 0.6
     thin, _ = read_panel(
-        tmp_path, "thin", bars={"B1": 3}, right_ladder_offset=offset, tick_width=0.4
+        tmp_path, "thin", bars={"1.0": 3}, right_ladder_offset=offset, tick_width=0.4
     )
     thick, _ = read_panel(
-        tmp_path, "thick", bars={"B1": 3}, right_ladder_offset=offset, tick_width=2.0
+        tmp_path, "thick", bars={"1.0": 3}, right_ladder_offset=offset, tick_width=2.0
     )
     assert thin is None
     assert thick is not None
@@ -274,8 +274,8 @@ def test_a_footnote_longer_than_the_label_row_changes_nothing(tmp_path: Path) ->
     it is not the first row below the axis. The reading is identical with and
     without it -- bins, counts and all.
     """
-    plain, _ = read_panel(tmp_path, "plain", bars={"B1": 3, "B3": 5})
-    noted, _ = read_panel(tmp_path, "noted", bars={"B1": 3, "B3": 5}, footnote=FOOTNOTE)
+    plain, _ = read_panel(tmp_path, "plain", bars={"1.0": 3, "3.0": 5})
+    noted, _ = read_panel(tmp_path, "noted", bars={"1.0": 3, "3.0": 5}, footnote=FOOTNOTE)
     assert plain is not None and noted is not None
     assert [b.label for b in plain.bins] == list(BINS)
     assert [b.label for b in noted.bins] == list(BINS)
@@ -290,9 +290,9 @@ def test_without_a_label_row_the_footnote_is_not_promoted_to_bins(tmp_path: Path
     reader must publish NOTHING rather than a table of footnote words with
     hard zeros beneath them.
     """
-    labelled, _ = read_panel(tmp_path, "labelled", bars={"B1": 3}, footnote=FOOTNOTE)
+    labelled, _ = read_panel(tmp_path, "labelled", bars={"1.0": 3}, footnote=FOOTNOTE)
     unlabelled, refusal = read_panel(
-        tmp_path, "unlabelled", bars={"B1": 3}, footnote=FOOTNOTE, draw_bin_labels=False
+        tmp_path, "unlabelled", bars={"1.0": 3}, footnote=FOOTNOTE, draw_bin_labels=False
     )
     assert labelled is not None
     assert [b.label for b in labelled.bins] == list(BINS)
@@ -317,9 +317,9 @@ def test_a_scale_that_does_not_close_publishes_no_cell_not_even_a_zero(
     which used to read a confident 0 off a scale the reader had just failed to
     fit. That zero path is the one the SEP pages published through.
     """
-    good, _ = read_panel(tmp_path, "good", bars={"B1": 3})
+    good, _ = read_panel(tmp_path, "good", bars={"1.0": 3})
     bad, refusal = read_panel(
-        tmp_path, "bad", bars={"B1": 3}, tick_labels=("2", "4", "6", "8", "30")
+        tmp_path, "bad", bars={"1.0": 3}, tick_labels=("2", "4", "6", "8", "30")
     )
     assert good is not None
     assert series_counts(good, SOLID) == [3, 0, 0, 0]
@@ -340,8 +340,8 @@ def test_a_swatch_above_a_bin_label_is_still_a_legend(tmp_path: Path) -> None:
     alone as the mark of a data bar discarded the legend and with it both
     series names. A data mark also spans its whole bin, and a swatch does not.
     """
-    clear, _ = read_panel(tmp_path, "clear", bars={"B1": 3, "B3": 5})
-    over, _ = read_panel(tmp_path, "over", bars={"B1": 3, "B3": 5}, legend_over_bin_centre=True)
+    clear, _ = read_panel(tmp_path, "clear", bars={"1.0": 3, "3.0": 5})
+    over, _ = read_panel(tmp_path, "over", bars={"1.0": 3, "3.0": 5}, legend_over_bin_centre=True)
     assert clear is not None and over is not None
     assert [s.name for s in clear.series] == [SOLID]
     assert [s.name for s in over.series] == [SOLID]
@@ -350,7 +350,7 @@ def test_a_swatch_above_a_bin_label_is_still_a_legend(tmp_path: Path) -> None:
 
 def test_the_series_name_stops_at_the_plots_edge(tmp_path: Path) -> None:
     """The y tick labels share the legend's rows and must not join its name."""
-    panel, _ = read_panel(tmp_path, "named", bars={"B1": 3})
+    panel, _ = read_panel(tmp_path, "named", bars={"1.0": 3})
     assert panel is not None
     assert [s.name for s in panel.series] == [SOLID]
 
@@ -372,9 +372,9 @@ def test_a_compound_staircase_is_unresolved_not_a_column_of_zeros(
     the SEP pages published a hard-zero column for the prior meeting.
     """
     levels = (4, 4, 2, 2)
-    separate, _ = read_panel(tmp_path, "sep", bars={"B1": 3}, dashed_levels=levels)
+    separate, _ = read_panel(tmp_path, "sep", bars={"1.0": 3}, dashed_levels=levels)
     compound, _ = read_panel(
-        tmp_path, "cmp", bars={"B1": 3}, dashed_levels=levels, dashed_compound=True
+        tmp_path, "cmp", bars={"1.0": 3}, dashed_levels=levels, dashed_compound=True
     )
     assert separate is not None and compound is not None
     assert series_counts(separate, DASHED) == list(levels)
@@ -499,7 +499,7 @@ def read_captioned(tmp_path: Path, name: str, caption: str | None, bars, **kw):
     return reading.panels.get(1), reading.refusals.get(1)
 
 
-BARS = {"B1": 3, "B2": 5, "B3": 4, "B4": 2}
+BARS = {"1.0": 3, "2.0": 5, "3.0": 4, "4.0": 2}
 
 
 def test_a_unit_row_between_the_axis_and_the_labels_is_not_the_bins(tmp_path: Path) -> None:
@@ -702,10 +702,10 @@ def test_a_ladder_disagreement_the_stroke_admits_is_charged_as_residual(
     calibration does not support.
     """
     thin, thin_refusal = read_panel(
-        tmp_path, "lad_thin", bars={"B1": 3}, right_ladder_offset=4.0, tick_width=0.4
+        tmp_path, "lad_thin", bars={"1.0": 3}, right_ladder_offset=4.0, tick_width=0.4
     )
     thick, _ = read_panel(
-        tmp_path, "lad_thick", bars={"B1": 3}, right_ladder_offset=4.0, tick_width=9.0
+        tmp_path, "lad_thick", bars={"1.0": 3}, right_ladder_offset=4.0, tick_width=9.0
     )
     assert thin is None and thin_refusal
     assert thick is not None
@@ -743,7 +743,7 @@ def _two_charts(path: Path, *, lower_bar: int, separate_grounds: bool, lower_dx:
             page.draw_line((x + 290, y), (x + 300, y), width=0.4)
             page.insert_text((x + 305, y + 2), str(n), fontsize=5)
         for i in range(4):
-            page.insert_text((x + 42 + i * 70, base + 10), f"B{i + 1}", fontsize=5)
+            page.insert_text((x + 42 + i * 70, base + 10), f"{i + 1}.0", fontsize=5)
         page.insert_text((x + 20, base - 120), title, fontsize=8)
         page.draw_rect(
             fitz.Rect(x + 20, base - count * 10, x + 75, base),
@@ -1123,14 +1123,14 @@ def test_a_tie_on_one_bar_is_not_broken_by_the_row_being_higher(tmp_path: Path) 
     is 56pt wide and the interval the caption's own two words derive is 16pt, so
     it is not a bar of that row at all, and the labels win on the drawing.
     """
-    plain, plain_refusal = read_captioned(tmp_path, "plain", None, {"B2": 5})
-    capt, capt_refusal = read_captioned(tmp_path, "capt", "Percent range", {"B2": 5})
+    plain, plain_refusal = read_captioned(tmp_path, "plain", None, {"2.0": 5})
+    capt, capt_refusal = read_captioned(tmp_path, "capt", "Percent range", {"2.0": 5})
     assert plain is not None, plain_refusal
     assert capt is not None, capt_refusal
     assert [b.label for b in plain.bins] == list(BINS)
     assert [b.label for b in capt.bins] == [b.label for b in plain.bins]
     assert _published(capt) == _published(plain)
-    assert ("B2", 5) in _published(capt), _published(capt)
+    assert ("2.0", 5) in _published(capt), _published(capt)
 
 
 def test_prose_over_a_stray_cannot_turn_it_into_a_bin(tmp_path: Path) -> None:
@@ -1152,3 +1152,182 @@ def test_prose_over_a_stray_cannot_turn_it_into_a_bin(tmp_path: Path) -> None:
     assert capt is None, [b.label for b in capt.bins]
     assert bare_refusal and "not corroborated" in bare_refusal
     assert capt_refusal == bare_refusal
+
+
+# ---------------------------------------------------------------------------
+# Round 7: the bins are a row of numbers, and nothing else is asked
+# ---------------------------------------------------------------------------
+
+_R7_CENTRES = [160.0, 180.0, 200.0, 220.0]
+_R7_COUNTS = (3, 5, 4, 2)
+
+
+def _numeric_panel(
+    path: Path,
+    *,
+    labels: tuple[str, ...] = BINS,
+    label_y: float = BASE + 10.0,
+    extra_row: tuple[str, ...] | None = None,
+    extra_centres: list[float] | None = None,
+    extra_y: float = BASE + 26.0,
+    bars_on_extra: bool = False,
+) -> tuple[fitz.Document, list]:
+    """One panel, its bin labels, and optionally one more row of text.
+
+    The knobs are only what the round-7 rule turns on: what the label row says,
+    what the extra row says, where it is drawn, and which of the two the bars
+    stand on.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.draw_line(fitz.Point(X0, BASE), fitz.Point(X1, BASE), width=0.4)
+    for value in TICK_VALUES:
+        y = BASE - value * UNIT
+        page.draw_line(fitz.Point(X0, y), fitz.Point(X0 + 10.0, y), width=0.4)
+        page.draw_line(fitz.Point(X1 - 10.0, y), fitz.Point(X1, y), width=0.4)
+        page.insert_text(fitz.Point(X1 + 5.0, y + 2.0), str(value), fontsize=5)
+    for centre, label in zip(_R7_CENTRES, labels, strict=True):
+        page.insert_text(fitz.Point(centre - len(label) * 1.4, label_y), label, fontsize=5)
+    centres = extra_centres or [130.0, 190.0, 250.0, 310.0]
+    if extra_row is not None:
+        for centre, word in zip(centres, extra_row, strict=True):
+            page.insert_text(fitz.Point(centre - len(word) * 1.2, extra_y), word, fontsize=5)
+    page.draw_rect(
+        fitz.Rect(296.0, BASE - 102.0, 304.0, BASE - 98.0),
+        color=(0, 0, 0),
+        fill=(0.4, 0.6, 0.8),
+        width=0.3,
+    )
+    page.insert_text(fitz.Point(308.0, BASE - 98.5), SOLID, fontsize=5)
+    for centre, count in zip(centres if bars_on_extra else _R7_CENTRES, _R7_COUNTS, strict=True):
+        page.draw_rect(
+            fitz.Rect(centre - 4.0, BASE - count * UNIT, centre + 4.0, BASE),
+            color=(0, 0, 0),
+            fill=(0.4, 0.6, 0.8),
+            width=0.3,
+        )
+    doc.save(str(path))
+    reopened = fitz.open(str(path))
+    return reopened, [reopened[0].rect]
+
+
+def _read_numeric(path: Path, **kw):
+    doc, bboxes = _numeric_panel(path, **kw)
+    reading = read_chart_page(doc[0], bboxes, page_num=1)
+    panel = reading.panels.get(1)
+    if panel is None:
+        return None, reading.refusals.get(1)
+    return (
+        [b.label for b in panel.bins],
+        [(c.bin_label, c.count) for s in panel.series for c in s.cells if c.status == INTEGER],
+    )
+
+
+def test_a_footnote_below_a_read_chart_no_longer_refuses_it(tmp_path: Path) -> None:
+    """The round-6 rival rule refused a correct chart because of a footnote.
+
+    The bars attest the printed numeric labels and nothing is in doubt. Round 6
+    then asked whether any silent row below the axis was an equally good home
+    for the marks, and a five-word footnote — drawn over nothing, covered by
+    nothing, saying nothing about the bins — answered yes and refused the whole
+    panel. That rule is deleted, and the footnote must now change nothing.
+    """
+    plain_bins, plain_cells = _read_numeric(tmp_path / "plain.pdf")
+    footed_bins, footed_cells = _read_numeric(
+        tmp_path / "footed.pdf",
+        extra_row=("Note", "excludes", "one", "absent", "participant"),
+        extra_centres=[120.0, 170.0, 230.0, 290.0, 350.0],
+        extra_y=BASE + 30.0,
+    )
+    assert plain_bins == list(BINS), plain_cells
+    assert footed_bins == plain_bins
+    assert footed_cells == plain_cells
+    assert plain_cells == list(zip(BINS, _R7_COUNTS, strict=True))
+
+
+def test_a_row_of_words_cannot_be_the_bins_wherever_the_bars_stand(tmp_path: Path) -> None:
+    """The whole of round 7, as one difference: what the attested row SAYS.
+
+    Standing on the printed numbers the bars attest them and the panel reads.
+    Moved onto the caption's words — the only change — the row they attest
+    carries words, so it cannot be a row of bins and the panel is refused
+    instead of publishing counts under `Effective | federal | funds | rate`.
+    """
+    caption = ("Effective", "federal", "funds", "rate")
+    on_labels = _read_numeric(tmp_path / "labels.pdf", extra_row=caption)
+    on_caption = _read_numeric(tmp_path / "caption.pdf", extra_row=caption, bars_on_extra=True)
+    assert on_labels[0] == list(BINS), on_labels
+    assert on_caption[0] is None, on_caption
+    assert "not corroborated" in on_caption[1]
+
+
+def test_a_chart_whose_bins_are_words_is_out_of_scope_and_refuses(tmp_path: Path) -> None:
+    """The measured cost of the gate, pinned as a difference.
+
+    The same drawing twice, the bars on the label row in both. Numeric labels
+    read; the same bins labelled by category refuse, because the owner's ruling
+    is best-effort extraction of NUMERIC charts and a categorical histogram is
+    outside it. No corpus page is affected: all 7 142 published bin labels of
+    both corpora and the reference parse as numbers.
+    """
+    numeric = _read_numeric(tmp_path / "numeric.pdf")
+    words = _read_numeric(tmp_path / "words.pdf", labels=("Asia", "Europe", "Africa", "Oceania"))
+    assert numeric[0] == list(BINS), numeric
+    assert words[0] is None, words
+    assert "not corroborated" in words[1]
+
+
+def test_a_numeric_annotation_row_still_takes_the_bins(tmp_path: Path) -> None:
+    """OPEN FABRICATION ROUTE — this pins what the reader DOES, not what it should.
+
+    The numeric gate asks whether a row is label-SHAPED. It cannot ask whether
+    the row IS the labels, and a numeric annotation printed above the bin labels
+    satisfies everything the reader can check: every token parses, every bar lies
+    wholly inside its annotation-derived bin, and no bar covers a real label
+    centre. The annotation therefore scores 4 to 0 and the counts are published
+    under `0 | 5 | 10 | 15` while the page's own `1.0 2.0 3.0 4.0` is ignored.
+
+    No layout test separates the two rows: the fabricating row is the topmost
+    in-span numeric row, which is exactly the arrangement all 840 corpus calls
+    show for genuine labels. Round 7 is the last change to the selection logic
+    (STATUS item 18), so this is pinned rather than closed — if a later change
+    alters it, this test says so instead of letting it drift.
+    """
+    bins, cells = _read_numeric(
+        tmp_path / "annotation.pdf",
+        extra_row=("0", "5", "10", "15"),
+        extra_y=BASE + 10.0,
+        label_y=BASE + 26.0,
+        bars_on_extra=True,
+    )
+    assert bins == ["0", "5", "10", "15"], bins
+    assert cells == [("0", 3), ("5", 5), ("10", 4), ("15", 2)], cells
+
+
+def test_a_two_line_range_label_with_a_trailing_dash_is_still_the_bins(tmp_path: Path) -> None:
+    """The form both corpora actually draw, pinned against the numeric gate.
+
+    A Fed dot-plot prints its bins over two lines, ``0.13-`` above ``0.37``, so
+    the row the gate judges carries tokens ending in a range dash. Handed to the
+    key grammar unstripped, such a token splits into ``0.13`` and an empty part
+    and is malformed -- and the first version of the numeric gate therefore
+    rejected the real label row of every SEP page, fell through to the second
+    line, and published ``0.37`` where the page says ``0.13-0.37``. Only the
+    corpus dumps caught that. This pins it without them: the trailing-dash row
+    must be the bins, and its label must be the two lines joined.
+    """
+    ranged_bins, ranged_cells = _read_numeric(
+        tmp_path / "ranged.pdf",
+        labels=("0.13-", "0.38-", "0.63-", "0.88-"),
+        extra_row=("0.37", "0.62", "0.87", "1.12"),
+        extra_centres=_R7_CENTRES,
+        extra_y=BASE + 20.0,
+    )
+    assert ranged_bins == ["0.13-0.37", "0.38-0.62", "0.63-0.87", "0.88-1.12"], ranged_cells
+    assert [count for _label, count in ranged_cells] == list(_R7_COUNTS), ranged_cells
+
+    # The same drawing with single-line labels reads the same counts, so what
+    # the pin above tests is the LABEL, not the geometry.
+    plain_bins, plain_cells = _read_numeric(tmp_path / "plain.pdf")
+    assert plain_bins == list(BINS)
+    assert [count for _label, count in plain_cells] == [count for _label, count in ranged_cells]

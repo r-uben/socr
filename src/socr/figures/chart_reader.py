@@ -62,10 +62,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from socr.figures.chart_data import _key_atoms
+
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/8"
+READER_VERSION = "635-stage1/9"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -606,50 +608,63 @@ def _attesting_bars(row: WordRow, bars: list[Mark]) -> list[Mark]:
     return attesting
 
 
-def _unruled_out_rival(row: WordRow, bars: list[Mark], columns: int) -> bool:
-    """Is *row* as good a home for these marks as the row the bars attest?
+def _numeric_row(row: WordRow) -> bool:
+    """Is every token of *row* a number, or a range of numbers, as printed?
 
-    The winning row is the one the bars attest. That says where the marks
-    stand; it does not say that the row IS the labels. A row the drawing is
-    SILENT about -- no bar covers any of its token centres -- carrying at least
-    *columns* tokens, is as good a candidate for the bins as the winner, and
-    the drawing has not chosen between them.
+    This is the whole of what round 7 asks of a candidate bin row, and it is a
+    question about the row's own text rather than about the marks. A histogram
+    of a numeric variable prints numeric bins; a caption, a unit annotation, an
+    axis title and a footnote all carry at least one word. Nothing else in this
+    module reads what a token says, and this does not read what it MEANS: it
+    asks only whether the token is a number.
 
-    *columns* is where the one asymmetry of this module's layout lives, and it
-    is the one thing the corpora measure about it: in all 840 ``read_bins``
-    calls of both corpora and the reference, the row the bars attest is the
-    TOPMOST plural row drawn below the axis inside its span -- no corpus panel
-    prints anything between its axis and its bin labels. A silent row drawn
-    ABOVE the winner is therefore where the labels were expected, and it is a
-    rival on a tie (``columns`` is the winner's own token count). A silent row
-    BELOW has to beat it (``columns`` is one more), because every corpus page
-    draws prose there -- a unit annotation, an axis title, a footnote -- and a
-    chart may legitimately be captioned underneath.
+    The grammar is ``chart_data._key_atoms``, the same one Stage 0 uses to
+    decide whether a published column key is well formed, so the two halves of
+    the feature cannot drift apart. It splits a printed range on its dashes and
+    requires each part to be a whole token, and it keeps a negative bound
+    (``-0.5``) intact rather than splitting it. Each atom must then parse as a
+    number, which is the step ``_key_atoms`` does not take: it accepts ``B1``
+    and ``Effective`` as well-formed keys, and neither is a number.
 
-    Two further conditions keep this from swallowing that prose. A row with
-    fewer columns than asked cannot supply the winner's bins, so a short unit
-    annotation is not a rival. And a row whose own tightest column is narrower
-    than the widest bar cannot be the row those bars stand on at all: such a
-    bar would cover two of its labels at once, which is the same thing
-    ``_attesting_bars`` refuses. That is what separates a bin row from running
-    prose, and it is read off the drawing -- the bar's width against the row's
-    own spacing -- not off a cutoff.
+    The one thing asked of the token before that grammar sees it is that a
+    TRAILING range dash is stripped. Both corpora draw their bins over two
+    lines, ``0.13-`` above ``0.37``, so the row this function judges carries
+    tokens that are ranges with their upper bound on the next line. Handing
+    ``0.13-`` to the grammar unstripped splits it into ``0.13`` and an empty
+    part, which is malformed -- and the gate then rejected the real label row of
+    every one of the 103 SEP calls, chose the second line instead, and published
+    ``0.37`` where the page says ``0.13-0.37``. The corpus dumps caught it.
 
-    Measured over the same 840 calls: 8 minutes panels carry a silent footnote
-    with strictly more tokens than their bin row -- which is what the below-leg
-    asks -- and in every one of them the widest bar (31.5-45.4pt) is wider than
-    the footnote's tightest column (9.0-12.0pt) by a factor of 2.6 to 5.0, so
-    no corpus panel is refused by this. (11 calls have a silent row with at least as many
-    tokens; the 3 that tie are not rivals below, and this figure was first
-    written as 11 by quoting that wider count against the narrower rule.)
+    Measured over both corpora and the reference: 1 217 SEP, 5 860 minutes and
+    65 reference published bin labels, and every one of them passes. The gate
+    refuses nothing that the 198 dot-plot pages publish.
+
+    What it costs is charts whose bins are NOT numeric -- a categorical
+    histogram labelled by country or by sector. Those are now out of scope and
+    refuse, which is the owner's ruling recorded in STATUS: best-effort
+    extraction of NUMERIC charts, rather than a reader that also guesses at
+    categorical ones.
     """
-    centres = [cx for cx, _t in _alnum_tokens(row)]
-    if len(centres) < columns:
+    atoms: list[str] = []
+    for _cx, token in _alnum_tokens(row):
+        # A printed range whose upper bound is on the SECOND line ends in a range
+        # dash: the SEP pages draw "0.13-" above "0.37". That trailing dash is
+        # part of the label, and ``_join_atoms`` strips it for exactly this
+        # reason, so it is stripped here too -- otherwise the grammar splits the
+        # token into "0.13" and an empty part and calls the page's own bin row
+        # malformed.
+        parsed = _key_atoms(token.rstrip(_RANGE_DASHES))
+        if parsed is None:
+            return False
+        atoms.extend(parsed)
+    if not atoms:
         return False
-    if any(bar.x0 <= c <= bar.x1 for bar in bars for c in centres):
-        return False
-    pitch = min(b - a for a, b in zip(centres, centres[1:], strict=False))
-    return all(bar.x1 - bar.x0 <= pitch for bar in bars)
+    for atom in atoms:
+        try:
+            float(atom)
+        except ValueError:
+            return False
+    return True
 
 
 def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: float) -> list[Bin]:
@@ -795,37 +810,29 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
         return all(frame.x0 <= cx <= frame.x1 for cx, _text in _alnum_tokens(row))
 
     plural = [row for row in below if len(_alnum_tokens(row)) >= 2]
+    numeric = [row for row in plural if _numeric_row(row)]
     bars = _resting_bars(frame, residual, marks)
-    corroboration = [len(_attesting_bars(row, bars)) for row in plural]
+    corroboration = [len(_attesting_bars(row, bars)) for row in numeric]
     best: WordRow | None = None
-    rivals: list[WordRow] = []
     attested = max(corroboration, default=0)
     if attested:
-        chosen = corroboration.index(attested)
-        winner = plural[chosen]
-        columns = len(_alnum_tokens(winner))
-        rivals = [
-            row
-            for i, row in enumerate(plural)
-            if i != chosen
-            and in_span(row)
-            and _unruled_out_rival(row, bars, columns if i < chosen else columns + 1)
-        ]
-        if in_span(winner) and not rivals:
+        winner = numeric[corroboration.index(attested)]
+        if in_span(winner):
             best = winner
     if best is None:
-        if not attested:
+        if not numeric:
+            why = "no row below it carries only numbers"
+        elif not attested:
             why = "none of them"
-        elif rivals:
-            why = "a row that another row below the axis is an equally good home for"
         else:
             why = "a row not drawn inside the axis' own span"
         logger.debug(
-            "chart_reader: of the %d rows drawn below the axis at y=%.2f, the %d bars "
-            "standing on it attest %s, so the drawing does not say which row labels "
-            "this frame's bins",
+            "chart_reader: of the %d rows drawn below the axis at y=%.2f, %d carry only "
+            "numbers, and the %d bars standing on it attest %s, so the drawing does not "
+            "say which row labels this frame's bins",
             len(plural),
             frame.baseline,
+            len(numeric),
             len(bars),
             why,
         )

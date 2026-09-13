@@ -3,7 +3,7 @@
 **Status: independently annotated (two channels, second reviewer) on this one document;
 not yet a defect rate.**
 
-Read by `socr.figures.chart_reader` (version `635-stage1/8`) from the page's own PDF
+Read by `socr.figures.chart_reader` (version `635-stage1/9`) from the page's own PDF
 vector operators — not from a raster, not from a model. The issue's worked example is NOT
 the oracle: its June column sums to 19, and a visual check of the 2018 panel found it
 misreads the dashed heights. These numbers replace it.

@@ -236,54 +236,65 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    (`WITNESS`) so their own subject still reads, and the refusal itself is pinned as a
    difference against them.
 
-17. **A bar standing on a prose row made that row the bins (round 6, fixed).** Attesting
-   and being the labels are not the same thing, and the round-5 selection tested only the
-   first: `attested = max(corroboration)` with no test that the winning row is a label row.
-   Two reviewers reached the same surviving class from three directions, all three with the
-   bin labels present as ordinary text inside the axis' span, all three drawn with the
-   branch's own fixtures and no mock:
-   **(a)** a sparse chart whose single bar covers one printed label centre AND one word of
-   the caption above it — both rows score 1, and the tie went to the upper row, publishing
-   `Percent-B2 | range-B3`;
-   **(b)** a stray rectangle on the axis that no printed bin can claim, which round 5
-   correctly refuses — until a caption is added whose first word lies over the stray, at
-   which point the caption scores 1, the complete printed label row scores 0, and the mark
-   no bin could claim becomes evidence for the prose that covers it;
-   **(c)** four narrow bins mid-axis and a four-word caption spaced more widely below, with
-   the position of the bars as the only knob: stood on the label centres the panel reads
-   3, 5, 4, 2 against `B1..B4`; stood on the caption's words it published the same counts
-   under `Effective | federal | funds | rate` at a residual of 0.0.
-   Fixed by two further admission tests, neither a threshold and both measured over all 840
-   `read_bins` calls of the two corpora and the reference before shipping. A bar attests a
-   row only if it also lies INSIDE the bin that row's own centres derive for it — true of
-   every attesting bar on every corpus call, with ≥1.08pt of clearance, and false of a
-   56pt bar reaching into a 16pt caption interval, which closes (a). And the winner is
-   discarded when another row below the axis is an equally good home for the same marks:
-   a row the bars are SILENT about (no bar covers any of its token centres), carrying at
-   least as many columns, whose own tightest column the bars would fit inside. That closes
-   (b) and (c), because in both the printed label row is sitting there with nothing said
-   about it. The rival test is asymmetric, and the corpora are why: the attested row is the
-   topmost plural in-span row below the axis on all 840 calls, so a silent row ABOVE the
-   winner is a rival on a tie while one BELOW must carry strictly more columns — which is
-   what keeps the `Percent range` annotation, the `Number of participants` axis title and
-   the pages' footnotes from refusing every panel. Eight minutes panels do carry a silent
-   footnote with strictly more tokens than their bin row; in every one the widest bar
-   (31.5–45.4pt) exceeds the footnote's tightest column (9.0–12.0pt) by a factor of 2.625
-   to 5.042, so the drawing rules it out. (11 calls have a silent row with at least as many tokens; the 3
-   that tie are not rivals below.) Every count here is reproducible from the tree with
-   `uv run socr-measure-chart-bins <corpus dirs>`. Both corpus dumps are byte-identical
-   across the change.
-   **What it does not close.** Construction (c)'s fabricating arm is refused and its
-   correct arm still reads: with the bars on the printed label centres the panel publishes
-   `B1..B4` with 3, 5, 4, 2, which `tests/test_gh735_sep_reader.py` pins as the difference.
-   What the rule costs instead is the mirror shape, and it follows from the asymmetry
-   rather than from construction (c): a panel that prints a plural in-span row ABOVE its
-   bin labels, carrying at least as many words as the chart has bins, which no bar covers,
-   is refused even when the bars stand correctly on the labels. No corpus panel prints
-   anything plural and in-span above its bin labels (0 of 840 calls), so the loss is real
-   but unmeasured. A caption drawn below the
-   labels with exactly as many words as the chart has bins is still absorbed as a second
-   label line (item 15). And nothing here helps when the labels are not text at all.
+17. **A bar standing on a prose row made that row the bins (round 6), and the geometric
+   defence of it was abandoned in round 7.** Round 6 added two admission tests: a bar
+   attests a row only if it lies INSIDE the bin that row's own centres derive
+   (`_attesting_bars`), and the winner was discarded when a silent row below the axis was
+   an equally good home for the same marks (`_unruled_out_rival`). Two reviewers then broke
+   the second one in both directions — a fabrication through it, and a FALSE REFUSAL of a
+   chart the reader otherwise reads correctly, caused by nothing more than a footnote
+   printed under the chart. Round 7 **deletes `_unruled_out_rival` outright**; it is not
+   patched or narrowed. `_attesting_bars` is kept, which neither reviewer could defeat.
+
+   In its place, one rule: **every token of the chosen row must be a number, or a range of
+   numbers, as printed** (`_numeric_row`). It uses Stage 0's own key grammar
+   (`chart_data._key_atoms`) so the two halves of the feature cannot drift, and then
+   requires each atom to parse as a number — the step that grammar does not take, since it
+   accepts `B1` and `Effective` as well-formed keys. A row with any word token cannot be
+   the bins, and where no row below the axis is all-numeric the panel is refused.
+
+   **Measured cost: nothing on the corpus** — on all 840 `read_bins` calls the attested row
+   is all-numeric, no call has zero numeric rows below its axis, and both corpus dumps stay
+   byte-identical. The first version of the gate did NOT have that property and was caught
+   by those dumps rather than by any test: it judged each token with the raw key grammar,
+   which treats the corpora's own two-line form `0.13-` (upper bound on the next line) as
+   malformed, so it rejected the real label row on every SEP call and published `0.37`
+   where the page says `0.13-0.37`. A trailing range dash is now stripped before parsing,
+   as `_join_atoms` already does, and the case is pinned by its own test. What it does cost is charts whose bins are NOT
+   numeric: a histogram labelled by country or sector is now out of scope and refuses. The
+   repository's own synthetic fixtures were relabelled from `B1..B5` to `1.0..5.0` for the
+   same reason, and any reviewer probe still drawn with `B`-labels now refuses by design
+   rather than by defect.
+
+18. **OPEN, disclosed: a NUMERIC annotation row still takes the bins.** The numeric gate
+   rejects all three of the round-6 constructions, because each selected a row containing
+   words. It does not close the class. Concretely, and reproduced against this build:
+   print real bin labels `1.0 2.0 3.0 4.0` centred at x = 160, 180, 200, 220, and a numeric
+   annotation `0 5 10 15` above them at x = 130, 190, 250, 310; stand four 8pt bars of
+   3, 5, 4, 2 on the annotation's positions. Every annotation token parses as a number,
+   every bar lies wholly inside its annotation-derived 60pt bin, and no bar covers a real
+   label centre — so the annotation scores 4 to 0 and the panel publishes **3, 5, 4, 2
+   under `0 | 5 | 10 | 15`**. The reader establishes only that a row is label-SHAPED and
+   attested by the marks; it never establishes that the row IS the labels, and no layout
+   test separates these two rows — the fabricating row is itself the topmost in-span
+   numeric row, which is the arrangement the corpus shows for genuine labels. This is
+   pinned by `test_a_numeric_annotation_row_still_takes_the_bins` so it cannot drift
+   silently. It is unmeasured: no corpus page is known to draw it.
+
+**Owner ruling, 2026-09-13 — best-effort numeric-chart extraction.** The owner has accepted
+best-effort extraction of numeric charts as the product scope, against the alternative of
+refusing every mapping the reader cannot prove. What that means, stated plainly so no
+reader of these tables is misled:
+
+* the reader establishes that a row is **label-shaped** (all numeric) and **attested** by
+  the marks standing on the axis. It does **not** establish that the row IS the bin labels,
+  and item 18 is a live construction in which it is not;
+* published chart tables are **UNVERIFIED** unless a caller's `chart_constraint_hook`
+  accepts them. The banner on every derived block says so, and nothing in Stage 1 promotes
+  a reading to verified;
+* the counts themselves are geometry, not guesses — an integer is emitted only where the
+  measured interval admits exactly one — but the COLUMN those counts are published under
+  rests on the attestation above.
 
 **Scope of every number above.** All 835 measured `read_bins` calls come from the 198
 dot-plot pages of the two Fed corpora, plus 5 more on the reference fixture. The other

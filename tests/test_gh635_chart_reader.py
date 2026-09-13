@@ -69,7 +69,7 @@ def build_chart(
     from a tick it can see. ``extra_bars`` adds raw ``(x0, x1, count)`` bars for
     the overlap cases.
     """
-    labels = bins or ["B1", "B2", "B3", "B4", "B5"]
+    labels = bins or ["1.0", "2.0", "3.0", "4.0", "5.0"]
     n = len(labels)
     x0, x1 = 100.0 * scale, 400.0 * scale
     base = 400.0 * scale
@@ -222,7 +222,7 @@ def test_two_series_read_back_the_counts_they_were_drawn_from(tmp_path: Path) ->
     assert counts(panel, SOLID) == ["0", "4", "2", "0", "1"]
     assert counts(panel, DASHED) == ["1", "3", "3", "2", "0"]
     assert panel.label == "PANEL A"
-    assert [b.label for b in panel.bins] == ["B1", "B2", "B3", "B4", "B5"]
+    assert [b.label for b in panel.bins] == ["1.0", "2.0", "3.0", "4.0", "5.0"]
 
 
 def test_odd_counts_between_printed_ticks_resolve(tmp_path: Path) -> None:
@@ -261,7 +261,7 @@ def test_two_bars_in_one_bin_are_unresolved_not_summed(tmp_path: Path) -> None:
         extra_bars=[(165.0, 195.0, 3)],
     )
     assert counts(panel, SOLID)[1] == UNRESOLVED_MARKER
-    cell = [c for c in panel.series[0].cells if c.bin_label == "B2"][0]
+    cell = [c for c in panel.series[0].cells if c.bin_label == "2.0"][0]
     assert cell.status == UNRESOLVED and cell.count is None
 
 
@@ -339,7 +339,7 @@ def test_an_accepting_hook_marks_the_derivation_verified(tmp_path: Path) -> None
     panel = verify_panel(read_one(tmp_path, [1, 2, 3, 0, 0], None), "survey-2018", hook)
     assert panel.verification == VERIFIED
     assert seen == [
-        ("survey-2018", "PANEL A", {SOLID: {"B1": 1, "B2": 2, "B3": 3, "B4": 0, "B5": 0}})
+        ("survey-2018", "PANEL A", {SOLID: {"1.0": 1, "2.0": 2, "3.0": 3, "4.0": 0, "5.0": 0}})
     ]
     assert "| 1 | 2 | 3 | 0 | 0 |" in panel_block(panel)
 
@@ -505,7 +505,7 @@ def _readable_chart_pdf(tmp_path: Path) -> Path:
 CANDIDATE = (
     "Preamble sentence unique alpha\n\n"
     "### PANEL A\n\n"
-    "| Percent range | B1 | B2 | B3 | B4 | B5 |\n"
+    "| Percent range | 1.0 | 2.0 | 3.0 | 4.0 | 5.0 |\n"
     "| :--- | :---: | :---: | :---: | :---: | :---: |\n"
     "| **Participants** |  |  |  |  |  |\n"
 )
@@ -755,7 +755,7 @@ def test_a_staircase_that_never_descends_is_not_a_drawn_zero(tmp_path: Path) -> 
     assert "descending to the axis" in zero.detail, zero.detail
     refused = [c for s in gapped.series if s.name == DASHED for c in s.cells][1]
     assert "no riser of the outline is drawn descending to the axis" in refused.detail
-    assert "B1" in refused.detail and "B3" in refused.detail, refused.detail
+    assert "1.0" in refused.detail and "3.0" in refused.detail, refused.detail
     assert "every riser" not in refused.detail, "a check that did not run is still claimed"
 
 
@@ -806,7 +806,7 @@ def test_stage0_is_byte_identical_when_derivations_is_omitted() -> None:
 
     text = (
         "Preamble\n\n"
-        "| Percent range | B1 | B2 |\n"
+        "| Percent range | 1.0 | 2.0 |\n"
         "| :--- | :---: | :---: |\n"
         "| **Participants** |  |  |\n"
     )
@@ -950,7 +950,7 @@ def test_a_gap_two_bins_wide_needs_the_descent_just_as_much(tmp_path: Path) -> N
     assert got_drawn[0] == got_gapped[0] == "4", (got_drawn, got_gapped)
 
     middle = [c for s in gapped.series if s.name == DASHED for c in s.cells][2]
-    assert "B1" in middle.detail and "B5" in middle.detail, middle.detail
+    assert "1.0" in middle.detail and "5.0" in middle.detail, middle.detail
     assert "no neighbouring bin carries a level" not in middle.detail
 
 
@@ -996,7 +996,7 @@ def test_a_complete_staircase_is_not_over_refused(tmp_path: Path) -> None:
     assert got[1:4] == ["4", "6", "2"], got
     assert got[4] == "0", got
     zero = [c for s in panel.series if s.name == DASHED for c in s.cells][4]
-    assert "descending to the axis beside B4" in zero.detail, zero.detail
+    assert "descending to the axis beside 4.0" in zero.detail, zero.detail
 
 
 def test_a_stroke_too_thick_to_locate_the_axis_cannot_certify_a_zero(tmp_path: Path) -> None:
@@ -1144,7 +1144,7 @@ def test_a_gap_against_the_page_edge_is_decided_by_the_side_that_speaks(
     assert got_gapped[:2] == ["UNRESOLVED", "UNRESOLVED"], got_gapped
     assert got_drawn[2:] == got_gapped[2:] == ["4", "4", "4"], (got_drawn, got_gapped)
     said = [c for s in drawn.series if s.name == DASHED for c in s.cells][0].detail
-    assert "descending to the axis beside B3" in said, said
+    assert "descending to the axis beside 3.0" in said, said
 
 
 def test_half_a_count_is_recomputed_from_the_calibration_at_every_scale(
@@ -1184,7 +1184,7 @@ def _categorical(path: Path, *, two_word_entry: bool):
     second-line entry is ``America`` or ``North America``. Every bar, every bin
     label and every other category word is identical.
     """
-    labels = ["A", "B", "C", "D", "E"]
+    labels = ["1.0", "2.0", "3.0", "4.0", "5.0"]
     doc, _bboxes = build_chart(path, [2, 3, 4, 5, 6], None, bins=labels)
     page = doc[0]
     first = "North America" if two_word_entry else "America"
@@ -1206,7 +1206,7 @@ def test_a_two_word_entry_does_not_delete_the_whole_second_label_line(tmp_path: 
 
     Requiring a second line to carry exactly one token per column threw the
     entire line away as soon as one entry ran to two words: the panel published
-    bare ``A``..``E``, dropping five identifiers the page had printed, and
+    bare ``1.0``..``5.0``, dropping five identifiers the page had printed, and
     refused nothing (#735 round 6 review). The line is read as a partition of
     its own tokens instead, so the two-word entry stays with its own column and
     the rest are untouched.
@@ -1220,18 +1220,18 @@ def test_a_two_word_entry_does_not_delete_the_whole_second_label_line(tmp_path: 
     assert one is not None, single.refusals
     assert many is not None, multi.refusals
     assert [b.label for b in one.bins] == [
-        "A-America",
-        "B-Europe",
-        "C-Asia",
-        "D-Africa",
-        "E-Oceania",
+        "1.0-America",
+        "2.0-Europe",
+        "3.0-Asia",
+        "4.0-Africa",
+        "5.0-Oceania",
     ]
     assert [b.label for b in many.bins] == [
-        "A-North America",
-        "B-Europe",
-        "C-Asia",
-        "D-Africa",
-        "E-Oceania",
+        "1.0-North America",
+        "2.0-Europe",
+        "3.0-Asia",
+        "4.0-Africa",
+        "5.0-Oceania",
     ]
     # The counts are the same drawing in both, and the only label that moves is
     # the one whose entry gained a word.
