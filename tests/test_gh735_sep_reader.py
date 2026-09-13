@@ -1534,13 +1534,6 @@ def test_numeric_chart_labels_parse_and_none_of_these_drawings_refuses(
     Neither needs a corpus to detect, so the property is asserted here directly
     and hermetically over the shapes the reviews produced.
 
-    **Scope, because the property is narrower than it sounds.** What holds is
-    that the labels of a NUMERIC bin row parse. It is NOT true of every label
-    this reader publishes: ``1.0-North America``, which
-    ``tests/test_gh635_chart_reader.py`` requires as correct output, is rejected
-    by ``_key_atoms`` because a multi-word run is not a whole token. That is the
-    standing exception, and it is required output rather than a defect.
-
     The ``spread_centres`` drawing earns its place twice over. Bounding a second
     line by its column's interval ALONE looks sufficient on tightly-packed
     labels, but ``_bin_edges`` mirrors the outer two edges from the neighbouring
