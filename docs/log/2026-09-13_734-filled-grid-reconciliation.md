@@ -166,11 +166,12 @@ of the coverage fix below:
     807e060    uncovered 604   with a number 308   without 296   beside_published 0   verified 4
     prototype  uncovered 720   with a number 308   without 412   beside_published 0   verified 0
 
-**The increment is 116 and all of it is readings geometry could not resolve.** The
-with-a-number column is flat at 308; the without column rises 296 → 412. So the fix
-reveals no hidden readings that carry a count — it correctly reclassifies unresolved cells
-that had been buying coverage. That is recall loss and deserves its own line rather than
-being folded into a headline.
+**The increment is 116, and all of it is cells where the model published a number and
+geometry ABSTAINED from reading the mark.** The with-a-number column is flat at 308; the
+without column rises 296 → 412. The fix reveals no hidden readings that carry a count — it
+reclassifies cells that had been buying coverage without ever being compared. The word
+matters: the reader did not disagree with those numbers and did not fail silently on them.
+It declined, with a stated reason, and "unchecked" is the accurate description.
 
 **`verified` falls from 4 to 0.** The honest statement is not "nothing is verified" as a
 flat fact about the corpus, but that the fix removes verification from four grids that
@@ -178,22 +179,31 @@ should never have earned it, leaving none verified here. That is the floor Stage
 improve on rather than inherit — but see the reader limit below before reading the zero
 as a statement about reconciliation.
 
-**The zero is gated upstream of reconciliation, and must never be reported bare.**
-Measured independently on all 23 SEP pages at `807e060` — 94 panels, 188 series rows —
-**95 series resolve every cell, 93 resolve none, and none resolves partly.** On every
-panel the CURRENT meeting's series resolves all of its cells and the PRIOR meeting's
-resolves none: `sep-20201216` reads `December projections` 12/12 beside `September
-projections` 0/12, and the same shape holds on every page. Zero partials is what makes
-this a limit rather than a reader struggling.
+**The zero is gated upstream of reconciliation, is the CORRECT answer here, and must
+never be reported bare.** Measured independently on all 23 SEP pages at `807e060` — 94
+panels, 188 series rows — **95 series resolve every cell, 90 hold cells and resolve none,
+3 hold no cells at all, and none resolves partly.** On every panel the CURRENT meeting is
+drawn as filled bars and resolves 12/12, while the PRIOR meeting is a dashed staircase and
+resolves 0/12. Zero partials is what makes this a limit rather than a reader struggling.
+
+**All 90 abstain explicitly**: every one is `dashed_stroke`, and every one carries the
+same stated reason — the outline is drawn as a path the reader cannot decompose, naming
+the segment that is neither a horizontal run nor a riser. That is the compound-staircase
+limit already recorded in `STATUS.md`, filed as **#739**. None is silent. So the 412
+without a number are a documented refusal, not a hole: fail-closed behaviour working as
+this repo requires.
 
 A grid naming both series therefore cannot reach complete coverage whatever the
-reconciler does, because half its identities have no reading to be compared against. That
-also accounts for the 308/412 split above: the identities carrying a number are
-approximately the current-meeting half. So "0 of 37 grids verified" is a fact about the
-reader first and about reconciliation second, and reporting the ratio without its cause
-would lead a later reader to conclude the reconciler is broken. The series-resolution
-limit is a separate and larger defect — it costs half of every chart reading on this
-corpus, its cause is not diagnosed, and it is filed on its own rather than inside #734.
+reconciler does, because half its identities were honestly refused. **Zero verified grids
+is the expected and correct output on this corpus, and the gate must not be loosened to
+make the number move.** It will stay zero until #739's dashed-staircase decomposition is
+fixed, and a gate that is never satisfiable on the only corpus anyone has is precisely the
+kind of thing a later maintainer relaxes believing it broken. The cause is #739 and the
+remedy is #739 — not a weaker definition of coverage.
+
+That also accounts for the 308/412 split above: the identities carrying a number are
+approximately the current-meeting half. "0 of 37 grids verified" is a fact about the
+reader first and about reconciliation second.
 
 **Two counts that must never be added together.** Under the fix, a cell geometry could not
 resolve is BOTH `unknown_to_geometry` and uncovered: the model wrote a number nobody could
@@ -312,6 +322,12 @@ load-bearing are three different properties.**
    Two agents share this checkout, so any measurement taken from `$PWD/src` is a
    measurement of whatever someone was mid-way through writing. Remedy: measure both
    sides from `git archive` trees, and assert `socr.__file__` inside each.
+
+5. **Throwaway probes are still code the rules apply to.** Both the measuring here and
+   the measuring alongside it invoked the interpreter on a script path, which the global
+   instructions forbid; a heredoc or `-c` is the workable form for a one-off probe. The
+   measurements stand — the pattern is what should not be repeated, and it is recorded
+   because this work brushed against the rule twice in one evening.
 
 Final battery: **24 mutants, no survivors**, each killed by the guard named for it. Four
 were added in the second round: reverting the coverage rule so that naming an identity
