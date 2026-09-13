@@ -24,7 +24,14 @@ from pathlib import Path
 import fitz
 import pytest
 
-from socr.figures.chart_reader import INTEGER, PRESENT, read_chart_page
+from socr.figures.chart_reader import (
+    INTEGER,
+    PRESENT,
+    _alnum_tokens,
+    _numeric_row,
+    read_chart_page,
+    region_word_rows,
+)
 from socr.tables.reconstruct import chart_region_bboxes
 
 X0, X1 = 100.0, 400.0
@@ -1432,15 +1439,27 @@ def test_words_outside_the_axis_are_not_joined_into_the_bin_labels(tmp_path: Pat
     assert all(_key_atoms(label) is not None for label in fringed_bins), fringed_bins
 
 
-def test_a_five_word_prose_row_below_the_labels_joins_none_of_itself(tmp_path: Path) -> None:
-    """Prose under the chart is not a second line of its labels.
+def test_a_prose_row_that_cannot_fill_every_column_joins_nothing(tmp_path: Path) -> None:
+    """A row that cannot supply one token per column is not a second line.
 
-    Five words set below four numeric columns published
-    ``1.0-Note excludes | 2.0-one | 3.0-absent | 4.0-participant``, whose first
-    key Stage 0's grammar rejects outright (#735 round 7 review). A token joins
-    a column only if it is drawn inside the axis and inside that column's own
-    interval, so the words that fall outside are dropped and the row cannot
-    account for every column.
+    This pins the partition's COUNT requirement, and nothing else. It is worth
+    being exact about that, because an earlier version of this docstring claimed
+    it demonstrated the ownership bounds and it does not: set at this spacing and
+    font size the five drawn words overlap, so the text layer yields three tokens
+    (``Notexcludes``, ``one``, ``absentparticipant``) rather than five. Three is
+    fewer than the four columns, so ``_aligned`` returns at its length check
+    before either the axis-span or the interval bound is consulted, and the test
+    passes with both of them removed (#735 round 8 review). The token count is
+    asserted below so that reason is visible rather than incidental.
+
+    The ownership bounds are pinned elsewhere, by drawings built for them:
+    ``test_words_outside_the_axis_are_not_joined_into_the_bin_labels`` and the
+    ``spread_centres`` drawing in
+    ``test_numeric_chart_labels_parse_and_none_of_these_drawings_refuses``.
+
+    Note also what must NOT be prohibited here: prose drawn inside the axis and
+    inside its columns IS joined, as ``1.0-Effective`` (STATUS item 15). That is
+    the accepted mislabelling class, not a defect, and no rule here excludes it.
     """
     plain_bins, plain_cells = _read_numeric(tmp_path / "plain.pdf")
     prose_bins, prose_cells = _read_numeric(
@@ -1451,6 +1470,22 @@ def test_a_five_word_prose_row_below_the_labels_joins_none_of_itself(tmp_path: P
     assert plain_bins == list(BINS)
     assert prose_bins == plain_bins, prose_bins
     assert prose_cells == plain_cells
+
+    # The reason it joins nothing: the drawn words overlap, so the row carries
+    # fewer tokens than the chart has columns and never reaches a bound.
+    doc, boxes = _numeric_panel(
+        tmp_path / "tokens.pdf",
+        extra_row=("Note", "excludes", "one", "absent", "participant"),
+        extra_centres=[150.0, 163.0, 180.0, 200.0, 220.0],
+    )
+    page = doc[0]
+    below = [
+        row
+        for row in region_word_rows(page, boxes, 1, page.rect.y1)
+        if row.y0 > BASE and not _numeric_row(row)
+    ]
+    assert below, "the prose row was not drawn"
+    assert len(_alnum_tokens(below[0])) < len(BINS), [text for _cx, text in _alnum_tokens(below[0])]
 
 
 def test_numeric_chart_labels_parse_and_none_of_these_drawings_refuses(
