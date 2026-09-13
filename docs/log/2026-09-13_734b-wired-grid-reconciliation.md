@@ -200,6 +200,75 @@ precise as its uniqueness. And **run the suite that OWNS the function you are mu
 first run mutated Stage 0's discard and ran only the Stage B file, so the #635 suite that guards
 that line was never executed. The line was guarded; the run could not see it.
 
+**A fifth clause, and it came from an instance rather than from foresight: the assertion must
+ABORT, not merely fire.** An assertion that fires and lets the script carry on has the same
+failure surface as one that printed. Measured on the review side: a mutation anchored on
+`list(` where the materialisation is a list COMPREHENSION, so the uncapped count assertion
+correctly reported zero occurrences — and the script then ran pytest anyway, printing
+`34 passed` against a completely unmutated tree. Read without looking at the assertion's own
+output, that is indistinguishable from "the regression is unguarded".
+
+**This branch's battery survives that by luck of structure rather than by design, and the
+distinction is the transferable part.** A bare `assert` at module level terminates the script,
+so M3, M18 and M19 forced a retarget instead of quietly passing. Nothing in the harness was
+written to make failure stop the run — it stops because of how Python happens to treat a failed
+assert there. A harness that collected its assertions into a report, or looped over mutants
+catching exceptions, would have the review side's behaviour and none of the protection, while
+looking equally rigorous on the page.
+
+`CLAUDE.md` gained the clause as a result (PR #743): assert uncapped `src.count(anchor) == 1`
+before editing, AND abort on failure. The rule's first three clauses were written from
+reasoning; this one was found only when a harness produced a confident green on an unmutated
+tree. A rule derived from a live failure is not the same kind of claim as one derived from
+anticipation, and this log records which is which.
+
+**The same shape, one gate over.** `ruff format --check` does not reflow markdown PROSE, so the
+format gate is structurally incapable of flagging an over-length line in a `.md` file. A
+114-character line on this branch passed it green, and so did three 104-110 character lines in
+the commit that added the rule above — which is why every log edit here is checked with a
+separate `awk 'length>100'` pass. A gate that cannot fail on a class of input is not evidence
+about that class. That is the fourth trap's own sentence, applied to a different check.
+
+**And the same shape once more, outside the code entirely: a clean working tree is not evidence
+that nobody is working.** Two agents share this checkout. After Stage B merged, it was switched
+to another agent's branch to land an unrelated change, and the state that greeted the next
+writer was: branch at main, zero commits ahead, no upstream, and one uncommitted file. Every one
+of those signals reads as "finished and idle". The tree was in fact mid-write.
+
+The consequence would not have been a conflict, which is loud, but a misplacement, which is not.
+**Uncommitted changes follow a branch switch**, so cutting a new branch off main there would
+have carried the other agent's edit onto it, and whichever of us committed next would have put
+their change in the wrong commit or ours on the wrong branch — with both commits looking
+entirely ordinary afterwards. It was caught only by reading the branch and the dirty list BEFORE
+writing rather than after.
+
+That completes the family this branch kept meeting: an absent process (finished, died, or never
+started), a pattern that matches nothing (absent, or searched for wrongly), a capped assertion
+(satisfied, or unable to fail), and now a clean tree (free, or mid-write). In each, the state
+that means "safe to proceed" and the state that means "something is wrong" are indistinguishable
+from outside, and in each the remedy is the same: check a SECOND, independent signal before
+acting on the first — the output file, the occurrence count, the enclosing function, the branch.
+
+**The paragraph above was interrupted by its own subject.** While it was being written, the
+other agent read the tree as idle and tried to switch it to main. Git refused, because the file
+being edited differed between the two branches and the switch would have overwritten it. That
+refusal is the only reason this is an anecdote rather than an incident.
+
+**And the refusal is not a protection anyone should rely on.** Git blocks a checkout only when a
+modified file would be CLOBBERED by the switch — that is, when the file's content differs across
+the two branches. An uncommitted change to a file that is identical on both is carried across
+silently, which is the ordinary case for a new file or an untouched one, and is exactly the
+"uncommitted changes follow a switch" behaviour described above. Here the log file differed
+because this branch had already changed it; had the edit been to a file the two branches share
+unchanged, the switch would have succeeded and the edit would have arrived on main under
+whichever commit came next.
+
+So what saved it was a side effect of which file happened to be open, not a guard. Both agents
+believed the tree was theirs, each on reasonable evidence, and the only deliberate defence in
+play was reading the branch and the dirty list before writing. Recorded because a near-miss
+whose cause is luck is worth more in a log than one whose cause is care: the care is repeatable
+and the luck is not.
+
 **The cost was two opposite wrong conclusions in a row, on the same line.** `chosen = {}` occurs
 THREE times at the same indentation across two functions of `chart_data.py` — Stage 0's
 suppression discard, Stage B's backwards-order discard, and Stage B's 1:1 pairing discard. The
