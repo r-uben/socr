@@ -333,8 +333,41 @@ where nothing was ambiguous to a human.
 
 So "an unbound grid" is not merely noise to be tolerated: on a chart page it is evidence that
 the anchor-to-first-grid rule has been displaced, and it is the ONLY signal of that displacement
-when every region still finds something to bind. The pairing requirement stays, and the recall
-loss on mixed pages is accepted knowingly rather than for want of a cheaper rule.
+when every region still finds something to bind.
+
+**A second counterexample settles it, and its control is the part that matters.** The
+caption-below layout with ONE ordinary filled table at the foot of the page, measured the same
+way (pairing rule disabled in a mutant tree, ``socr.__file__`` asserted inside it):
+
+    2 panels + trailing table   bound {1: 2, 2: 3}        all regions bound  => ACCEPTS
+    3 panels + trailing table   bound {1: 2, 2: 3, 3: 4}  all regions bound  => ACCEPTS
+    control: no trailing table  bound {1: 2}              region 2 unbound   => refuses
+
+Every panel binds to the NEXT panel's grid and the last panel binds to the unrelated data table.
+The page satisfies "every region binds exactly one grid, no two regions share a grid" perfectly,
+and the only trace is a refusal against grid 1 — which the narrower rule is built to ignore as
+an extra grid nobody claimed.
+
+**The control is what makes it conclusive.** Strip the trailing table and the last region fails
+to bind, which the narrower rule DOES catch. So the extra grid is not incidental: it is what
+converts a detectable shift into an undetectable one, by giving the final region something to
+absorb. Any extra filled grid after the last panel does it. The region-side proposal would have
+exempted precisely the condition that creates the vulnerability.
+
+**Three things a future reader needs, because they will otherwise propose what was proposed
+here.** First, the 1:1 rule DOES narrow what gets checked: a mixed chart-and-table page is
+refused wholesale rather than partly checked. Second, that narrowing is the deliberate trade for
+never deleting a correct number, and it is justified by the counterexamples above rather than by
+the corpus — "costs nothing on the corpus" has been withdrawn as support, because all 8 shipped
+pages are chart-only and the failing shape cannot occur in that evidence. Third, a weaker
+region-side rule was proposed, built, tested and defeated; it is not an unexplored option.
+
+**An untested idea, recorded as an idea and not as a plan.** Keep the region-side rule and
+additionally require each region's grid to be the FIRST grid following that region's anchor with
+no other grid between. That would refuse the caption-below route on the grid whose binding is
+actually wrong, and leave a trailing table alone. **Nobody has built or measured it**, and it is
+recorded here only as the next thing to try if the narrowing proves expensive in practice. It
+must not be read as a decision, and it carries no evidence whatever at this commit.
 
 **The trap behind all three findings, including the `failure_mode` one.** A guard that only
 fails once a DIFFERENT failure has already occurred has not been shown to guard its own
@@ -359,7 +392,11 @@ dies on its own subject rather than on collateral from another break.
 4. **Whether a panel whose grid is unverifiable may ship the reader's OWN numbers** is still
    filed rather than settled. The 308 uncovered readings that carry a count make it concrete:
    geometry proved those counts and nobody publishes them.
-5. **A page whose chart geometry cannot be read is left alone**, silently from this lane's
+5. **The 1:1 pairing rule narrows what is checked on a mixed chart-and-table page**, which is
+   refused wholesale rather than partly checked (see above). Not closed, and deliberately so.
+   The untested candidate for relaxing it — region-side pairing PLUS "no other grid between the
+   anchor and its grid" — is described above and has been neither built nor measured.
+6. **A page whose chart geometry cannot be read is left alone**, silently from this lane's
    point of view — `_chart_page_geometry` logs and returns `None`. Stage 0 records a
    `SKELETON_UNBOUND` event in the same situation; Stage B does not, because it has no grid
    it can name as the thing that went unchecked until after the geometry is read.
