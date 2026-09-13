@@ -2513,6 +2513,11 @@ class UnifiedPipeline:
         )
         from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
         from socr.figures.chart_reader import CHART_DERIVATION, CHART_DERIVATION_REFUSED
+        from socr.figures.chart_reconcile import (
+            GRID_CONTRADICTED,
+            GRID_RECONCILE_REFUSED,
+            GRID_RECONCILED,
+        )
         from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
         return frozenset(
@@ -2570,6 +2575,20 @@ class UnifiedPipeline:
             # reason every other lane's refusal does: it is the record that an
             # empty form on a chart page was looked at and deliberately kept.
             | {SKELETON_SUPPRESSED, SKELETON_UNBOUND}
+            # #734 Stage B: the same contract as the #635 line above, and the
+            # argument there applies here word for word -- these counters are
+            # computed from these events, so dropping them would silently zero
+            # the document's CLI count. It is worse than the #635 case, though,
+            # and that is why it is called out rather than folded in: a resumed
+            # page is terminal and never re-processed, so the reconciler does
+            # not run, while the restored BODY still carries ``WITHHELD`` where
+            # numbers were removed. Without this replay the document ships with
+            # content removed and no surface anywhere saying why -- the CLI
+            # prints nothing, the contradicted counter reads zero and the
+            # sidecar carries no reconciliation event. The refusal kind travels
+            # with the other two for the reason every lane's refusal does: it
+            # is the record that a grid on a chart page went unchecked.
+            | {GRID_RECONCILED, GRID_CONTRADICTED, GRID_RECONCILE_REFUSED}
             # #635 Stage 1: a derivation and a refusal to derive are both
             # standing properties of the PAGE's chart, not of the run that
             # read it. The published table's whole provenance -- calibration,
@@ -3497,67 +3516,46 @@ class UnifiedPipeline:
         from socr.figures.chart_data import bind_filled_grids, find_filled_grids
         from socr.figures.chart_reconcile import (
             CONTRADICTED,
-            CONTRADICTED_MARKER,
             GRID_CONTRADICTED,
             GRID_RECONCILE_REFUSED,
             GRID_RECONCILED,
             reconcile_grid,
+            grid_digest,
             reconciliation_note,
             withhold_contradicted,
         )
+
+        from socr.core.audit_log import AuditEvent
 
         text = getattr(bo, "text", "") or ""
         # Cheap structural pre-check first, exactly as Stage 0 does: no filled
         # grid means no PDF open. Unlike Stage 0's, this one passes on most
         # pages that carry a table at all, which is why the geometry probe
         # below is cached per page rather than per crossing.
-        if not find_filled_grids(text):
+        grids = find_filled_grids(text)
+        if not grids:
             return 0
         ps = state.pages.get(page_num)
         if ps is None:
             return 0
 
-        geometry = self._chart_page_geometry(state, page_num)
-        if geometry is None:
-            return 0
-        bboxes, interiors, crop_names = geometry
-        if not interiors:
-            return 0
-
-        bindings, refusals = bind_filled_grids(text, page_num=page_num, interiors=interiors)
-        # socr's OWN derivation is a filled grid too. Stage 0 substitutes a real
-        # table of counts for a bound empty grid, and reconciling that against
-        # the geometry it was read from would corroborate nothing while
-        # reporting a check that happened. Identified by the block socr itself
-        # stamps above it, never by its contents.
-        lines = text.split("\n")
-        bindings = {
-            region: grid
-            for region, grid in bindings.items()
-            if not self._grid_authored_by_socr(lines, grid, page_num, len(bboxes))
-            # A grid already carrying the marker is socr's OWN withheld output,
-            # and re-reconciling it does not merely duplicate a record -- it
-            # files a FALSE one. The withheld cell no longer holds a count, so
-            # the second pass reaches ``not_a_count`` and reports the grid with
-            # ``contradicted: 0``. A consumer reading the latest event for that
-            # grid would conclude nothing was ever disputed, which is the exact
-            # silent loss this lane exists to prevent. Measured on
-            # ``sep-20201216-p09``: grid 5 contradicts once, and a second
-            # crossing of the rewritten bytes filed a clean reconciliation over
-            # the top of it. The digest cannot carry this -- withholding
-            # changes the bytes by design, so the grid's sha256 is a different
-            # sha256 and no dedup key built from it can match.
-            and CONTRADICTED_MARKER not in grid.text
-        }
-        if not bindings and not refusals:
-            return 0
-
-        panels = self._chart_panels_for_page(state, page_num, bboxes, crop_names)
-
-        from socr.core.audit_log import AuditEvent
-
         def _identity(kind: str, data: dict) -> tuple:
-            return (kind, data.get("table_index"), data.get("sha256"), data.get("region_index"))
+            # The CELL belongs in the key because GRID_CONTRADICTED is recorded
+            # per cell, not per grid. Without it two contradicted cells of one
+            # grid collide and every one after the first is discarded -- the
+            # body withholds three values, the note says three, and the event
+            # list and the page counter both say one. Measured on the corpus:
+            # 10 withheld numbers in 5 grids filed 5 events, so the CLI would
+            # report 5 CONTRADICTED on a run that removed 10 numbers.
+            cell = data.get("cell") or {}
+            return (
+                kind,
+                data.get("table_index"),
+                data.get("sha256"),
+                data.get("region_index"),
+                cell.get("bin_label"),
+                cell.get("series_name"),
+            )
 
         seen = {
             _identity(ev.kind, ev.data or {})
@@ -3576,6 +3574,74 @@ class UnifiedPipeline:
                     page_num=page_num, kind=kind, engine="chart_reconcile", detail=detail, data=data
                 )
             )
+
+        geometry = self._chart_page_geometry(state, page_num)
+        if geometry is None:
+            # The page could not be read at all. Recorded rather than returned
+            # silently: this was the last route in the lane that left a filled
+            # grid unchecked with NO record anywhere, and Stage 0 records its
+            # equivalent (``SKELETON_UNBOUND``) for the same reason. A page
+            # whose grids went unchecked must say so however the checking
+            # failed -- the operator's question is the same one either way.
+            for grid in grids:
+                _record(
+                    GRID_RECONCILE_REFUSED,
+                    "the page's chart geometry could not be read, so this grid's values "
+                    "were not compared against anything",
+                    {
+                        "page_num": page_num,
+                        "table_index": grid.table_index,
+                        "sha256": grid.sha256,
+                        "region_index": None,
+                    },
+                )
+            return 0
+        bboxes, interiors, crop_names = geometry
+        if not interiors:
+            return 0
+
+        bindings, refusals = bind_filled_grids(text, page_num=page_num, interiors=interiors)
+        # socr's OWN derivation is a filled grid too. Stage 0 substitutes a real
+        # table of counts for a bound empty grid, and reconciling that against
+        # the geometry it was read from would corroborate nothing while
+        # reporting a check that happened. Identified by the block socr itself
+        # stamps above it, never by its contents.
+        lines = text.split("\n")
+        # Digests of the grids THIS page has already withheld into, from the
+        # document's own events, so the skip survives a new candidate object.
+        withheld_digests = {
+            (ev.data or {}).get("withheld_sha256")
+            for ev in state.events
+            if ev.page_num == page_num and ev.kind == GRID_RECONCILED
+        } - {None, ""}
+        bindings = {
+            region: grid
+            for region, grid in bindings.items()
+            if not self._grid_authored_by_socr(lines, grid, page_num, len(bboxes))
+            # A grid whose bytes are ones THIS PAGE already withheld into is
+            # socr's own output, and re-reconciling it does not merely duplicate
+            # a record -- it files a FALSE one. The withheld cell no longer
+            # holds a count, so the second pass reaches ``not_a_count`` and
+            # reports the grid with ``contradicted: 0``. A consumer reading the
+            # latest event for that grid would conclude nothing was ever
+            # disputed. Measured on ``sep-20201216-p09``: grid 5 contradicts
+            # once, and a second crossing filed a clean reconciliation over it.
+            #
+            # Recognised by the DIGEST of what socr itself wrote, recorded on
+            # the reconciliation event, never by looking for the marker in the
+            # text. A substring test is a silent opt-out: a model is entitled to
+            # write WITHHELD -- central-bank releases redact values, and a model
+            # re-transcribing an earlier socr output carries the marker straight
+            # back in -- and such a grid produced no verdict, no refusal and no
+            # counter at all, the only unrecorded route in this lane. It is the
+            # same rule ``_grid_authored_by_socr`` follows for Stage 1's block:
+            # socr's own output is known by what socr stamped, not by contents.
+            and grid.sha256 not in withheld_digests
+        }
+        if not bindings and not refusals:
+            return 0
+
+        panels = self._chart_panels_for_page(state, page_num, bboxes, crop_names)
 
         for refusal in refusals:
             _record(GRID_RECONCILE_REFUSED, refusal.reason, refusal.to_dict())
@@ -3599,9 +3665,14 @@ class UnifiedPipeline:
                 continue
             result = reconcile_grid(grid, panel)
             results.append(result)
+            replacement = withhold_contradicted(grid, result)
             data = result.to_dict()
             data["sha256"] = grid.sha256
             data["crop"] = crop_names.get(region, "")
+            # The bytes socr is about to publish for this grid. Recorded so a
+            # later crossing recognises its own output without inspecting it.
+            if replacement is not None:
+                data["withheld_sha256"] = grid_digest(replacement)
             if result.refusal:
                 _record(GRID_RECONCILE_REFUSED, result.refusal, data)
                 continue
@@ -3630,7 +3701,6 @@ class UnifiedPipeline:
                     ),
                     cell_data,
                 )
-            replacement = withhold_contradicted(grid, result)
             if replacement is not None:
                 lines[grid.start : grid.end + 1] = replacement.split("\n")
 
@@ -9031,10 +9101,12 @@ class UnifiedPipeline:
                 # content loss and the page says so at status level.
                 #
                 # Demoted HERE rather than inside the reconciler for the same
-                # reason GH-318 is: the candidate boundary is crossed mid-ladder,
-                # where a non-SUCCESS status makes the escalation gate discard
-                # the candidate outright -- demoting there would throw the page
-                # away instead of flagging it. ``audit_passed`` is untouched:
+                # reason GH-318 is: the reconciler runs at the CANDIDATE
+                # boundary, on bytes that may never become the page's winner, so
+                # a status set there is an ATTEMPT's status and not the page's.
+                # This site runs once per page after selection, which is the
+                # only place a page-level demotion means what it says.
+                # ``audit_passed`` is untouched:
                 # it is the winner-SELECTION flag, and flipping it would make
                 # assemble discard this page's text (the #252 defect), turning a
                 # withheld cell into a lost page.
@@ -11891,6 +11963,36 @@ class UnifiedPipeline:
                     if e.page_num == page_num and e.kind == _CHART_DERIVATION
                 }
             )
+            # #734 Stage B: same contract again, and rebuilding the KIND SET
+            # alone would not have been enough -- a resumed page whose events
+            # came back but whose counters stayed zero still reports a clean
+            # page over a body with numbers removed. Both are derived from the
+            # restored events on the same identities the live pass uses, so a
+            # resumed page reports exactly what the run that withheld them did.
+            from socr.figures.chart_reconcile import (
+                GRID_CONTRADICTED as _GRID_CONTRADICTED,
+                GRID_RECONCILED as _GRID_RECONCILED,
+            )
+
+            ps.chart_grids_reconciled = len(
+                {
+                    ((e.data or {}).get("table_index"), (e.data or {}).get("region_index"))
+                    for e in state.events
+                    if e.page_num == page_num and e.kind == _GRID_RECONCILED
+                }
+            )
+            ps.chart_grid_cells_contradicted = len(
+                {
+                    (
+                        (e.data or {}).get("table_index"),
+                        (e.data or {}).get("region_index"),
+                        ((e.data or {}).get("cell") or {}).get("bin_label"),
+                        ((e.data or {}).get("cell") or {}).get("series_name"),
+                    )
+                    for e in state.events
+                    if e.page_num == page_num and e.kind == _GRID_CONTRADICTED
+                }
+            )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
@@ -12284,20 +12386,47 @@ class UnifiedPipeline:
                 GRID_RECONCILED,
             )
 
-            _reconciled = [e for e in state.events if getattr(e, "kind", "") == GRID_RECONCILED]
-            _withheld_cells = [
-                e for e in state.events if getattr(e, "kind", "") == GRID_CONTRADICTED
-            ]
+            # Counted by grid IDENTITY, not by event, and this is the whole of
+            # the fix. A page re-emitted with DIFFERENT wrong numbers is
+            # correctly re-judged and files a second reconciliation for the same
+            # grid, so counting raw events reported "2 filled chart grid(s)
+            # checked" for one grid; and before the per-cell dedup key, counting
+            # raw contradiction events reported 5 withheld on a corpus run that
+            # removed 10 numbers. The PageState counters already dedup on these
+            # exact identities -- this line was the only surface that did not,
+            # which is why it was the one that disagreed with the body.
+            #
+            # Kept on the EVENTS rather than repointed at the counters because
+            # the counters carry only two of these five figures, and sourcing
+            # one line from two places is how surfaces drift apart; the events
+            # are replayed on resume (``resume_restore_kinds``) so both sources
+            # survive, and a guard pins the two against each other.
+            _latest: dict[tuple, dict] = {}
+            for _e in state.events:
+                if getattr(_e, "kind", "") != GRID_RECONCILED:
+                    continue
+                _d = _e.data or {}
+                _latest[(_e.page_num, _d.get("table_index"), _d.get("region_index"))] = _d
+            _reconciled = list(_latest.values())
+            _withheld_cells = {
+                (
+                    _e.page_num,
+                    (_e.data or {}).get("table_index"),
+                    (_e.data or {}).get("region_index"),
+                    ((_e.data or {}).get("cell") or {}).get("bin_label"),
+                    ((_e.data or {}).get("cell") or {}).get("series_name"),
+                )
+                for _e in state.events
+                if getattr(_e, "kind", "") == GRID_CONTRADICTED
+            }
             _unreconciled = [
                 e for e in state.events if getattr(e, "kind", "") == GRID_RECONCILE_REFUSED
             ]
             if _reconciled:
-                _agreed = sum((e.data or {}).get("agreed", 0) for e in _reconciled)
-                _unknown = sum((e.data or {}).get("unknown_to_geometry", 0) for e in _reconciled)
-                _uncov = sum((e.data or {}).get("uncovered_count", 0) for e in _reconciled)
-                _beside = sum(
-                    (e.data or {}).get("uncovered_beside_published", 0) for e in _reconciled
-                )
+                _agreed = sum(d.get("agreed", 0) for d in _reconciled)
+                _unknown = sum(d.get("unknown_to_geometry", 0) for d in _reconciled)
+                _uncov = sum(d.get("uncovered_count", 0) for d in _reconciled)
+                _beside = sum(d.get("uncovered_beside_published", 0) for d in _reconciled)
                 console.print(
                     f"  [cyan]{len(_reconciled)} filled chart grid(s) checked against the "
                     f"pages' own geometry: {_agreed} cell(s) agreed, "

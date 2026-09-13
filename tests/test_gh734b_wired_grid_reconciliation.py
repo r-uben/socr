@@ -154,6 +154,62 @@ def test_a_candidate_whose_panels_run_backwards_refuses_the_whole_page() -> None
     assert any("backwards against the source order" in r.reason for r in refused)
 
 
+def test_a_region_that_resolves_no_anchor_refuses_the_page(tmp_path: Path) -> None:
+    """P5 route A: the destructive one, and the guard it needed.
+
+    A region resolving no label of its own is simply ABSENT from ``anchors``, so
+    the intervening-label guard has nothing to fire on and the grid shifts
+    silently onto the wrong panel — bound, no refusal, and reconciled against
+    geometry it does not describe. Identity cannot catch it: panels of one
+    figure draw the same bins, so the grid matches the wrong panel's bins just
+    as well. Stage B is the lane that DELETES, so a wrong binding replaces
+    correct numbers with the marker and files a successful reconciliation.
+
+    The DIFFERENCE is whether region 2 draws a label only it draws; everything
+    else is held fixed. Before the pairing rule the test arm returned
+    ``{1: grid 1}`` with no refusal at all.
+    """
+    text = f"Preamble unique alpha\n\nALPHA\n\nBRAVO\n\n{ALPHA_GRID}\n\nTrailing unique delta\n"
+    control, control_refusals = bind_filled_grids(text, page_num=1, interiors=INTERIORS)
+    blind, blind_refusals = bind_filled_grids(
+        text, page_num=1, interiors={1: ["ALPHA", "shared"], 2: ["shared"]}
+    )
+
+    # Control: region 2 owns the grid, and region 1 is refused for the right reason.
+    assert {r: g.table_index for r, g in control.items()} == {2: 1}
+    assert any("separates region 1" in r.reason for r in control_refusals)
+
+    # Test: nothing binds, and the page says why rather than shifting.
+    assert blind == {}
+    assert any("do not pair 1:1" in r.reason for r in blind_refusals)
+
+
+def test_a_caption_below_its_figure_refuses_rather_than_shifting(tmp_path: Path) -> None:
+    """P5 route B: no unresolved label needed, and the order check cannot see it.
+
+    Same two grids, same two labels, same panel order — only the label/grid
+    order within each panel flipped, which is what a caption drawn BELOW its
+    figure produces. Every pairing shifts by one and the bindings stay
+    ASCENDING, so the backwards-order rule is silent. Before the pairing rule
+    this bound ``{1: grid 2}`` — a mis-binding — while the only refusal named
+    the OTHER grid.
+    """
+    above = (
+        f"Preamble unique alpha\n\nALPHA\n\n{ALPHA_GRID}\n\n"
+        f"Middle unique bravo\n\nBRAVO\n\n{BRAVO_GRID}\n\nTrailing unique delta\n"
+    )
+    below = (
+        f"Preamble unique alpha\n\n{ALPHA_GRID}\n\nALPHA\n\n"
+        f"Middle unique bravo\n\n{BRAVO_GRID}\n\nBRAVO\n\nTrailing unique delta\n"
+    )
+    up, _up_ref = bind_filled_grids(above, page_num=1, interiors=INTERIORS)
+    down, down_ref = bind_filled_grids(below, page_num=1, interiors=INTERIORS)
+
+    assert {r: g.table_index for r, g in up.items()} == {1: 1, 2: 2}
+    assert down == {}, "an off-by-one shift must refuse, never bind"
+    assert any("do not pair 1:1" in r.reason for r in down_ref)
+
+
 def test_a_grid_no_region_binds_is_refused_and_not_silently_kept() -> None:
     """The finding this lane exists for: a filled grid on a chart page whose
     numbers were compared against nothing. Silence would report it as checked."""
@@ -616,6 +672,227 @@ def test_the_page_is_demoted_by_status_and_keeps_its_text(tmp_path: Path) -> Non
     # The whole point of demoting by status: the page's content is still here.
     assert CONTRADICTED_MARKER in winner.text
     assert "Trailing unique delta" in winner.text
+
+
+def test_the_contradicted_page_names_its_failure_mode(tmp_path: Path) -> None:
+    """The demotion sets a MODE as well as a status, and the mode is its own line.
+
+    Separated from the status guard above deliberately, and the separation is
+    the point. That test does discriminate on status -- removing the status
+    demotion turns the contradicting arm back to SUCCESS and it goes red -- but
+    it was ALSO going red under a mutant that broke ``withhold_contradicted``,
+    because withholding fails upstream of the demotion and nothing downstream
+    can run. A guard that only fails once a DIFFERENT failure has already
+    occurred has not been shown to guard its own subject; measured at e1a0340,
+    deleting the ``failure_mode`` assignment alone left all 23 tests green while
+    the page reported ``FailureMode.NONE``.
+
+    ``failure_mode`` is one of the five surfaces this ticket exists to populate
+    -- it is what the sidecar and the manifest read -- so an unguarded line here
+    would let the metadata surface be hollowed out with no signal at all.
+
+    Pinned as a DIFFERENCE between the two arms rather than as an absolute: the
+    agreeing arm's own mode depends on machinery CI does not run, and the
+    demotion only fills a mode in when none was set. If both arms report the
+    same mode, the assignment did nothing.
+    """
+    from socr.core.result import FailureMode
+
+    agree_state, _a = _run(tmp_path, "fm_ok", page_text(counts_grid()), tmp_path / "e")
+    wrong_state, _w = _run(tmp_path, "fm_bad", page_text(counts_grid(**{"1.0": 9})), tmp_path / "f")
+    agree = agree_state.pages[1].best_output
+    wrong = wrong_state.pages[1].best_output
+    assert agree is not None and wrong is not None
+
+    # The contradiction happened in exactly one arm, so the modes must differ.
+    assert wrong.failure_mode is not agree.failure_mode
+    # And where the agreeing arm carried no mode, the contradicting arm names
+    # THIS one -- never a reused HALLUCINATION, which would publish a verdict
+    # about which side is wrong that this lane has not reached.
+    if agree.failure_mode is FailureMode.NONE:
+        assert wrong.failure_mode is FailureMode.CHART_GRID_CONTRADICTED
+
+
+def test_every_contradicted_cell_of_a_grid_gets_its_own_record(tmp_path: Path) -> None:
+    """One record per withheld NUMBER, not one per grid.
+
+    ``GRID_CONTRADICTED`` is recorded per cell, so a dedup key that names only
+    the grid collides on the second cell and discards it and every one after.
+    The failure is silent and the surfaces then disagree with each other: the
+    body withholds three values and the note says three, while the event list
+    and the page counter say one. On the corpus that is 10 withheld numbers in
+    5 grids reported as 5, and the CLI prints the length of that event list.
+
+    Pinned as a DIFFERENCE across cell COUNT rather than as an absolute: one
+    contradicted cell and three, with everything else held fixed, and the four
+    surfaces required to agree with the reconciler in both arms. A guard using
+    a single bad cell cannot see this at all -- which is why the nine pipeline
+    guards that preceded it did not.
+    """
+    for expected, overrides in ((1, {"1.0": 9}), (3, {"1.0": 9, "2.0": 9, "3.0": 9})):
+        _p, state, bo = _reconcile(
+            tmp_path, f"multi{expected}", page_text(counts_grid(**overrides))
+        )
+
+        reconciled = _kinds(state, GRID_RECONCILED)[0]
+        assert reconciled.data["contradicted"] == expected
+        assert len(_kinds(state, GRID_CONTRADICTED)) == expected
+        assert state.pages[1].chart_grid_cells_contradicted == expected
+        assert bo.text.count(CONTRADICTED_MARKER) == expected
+
+
+def test_a_model_that_writes_the_marker_is_still_checked(tmp_path: Path) -> None:
+    """socr's own withheld output is known by DIGEST, never by its contents.
+
+    A substring test for the marker is a silent opt-out, and it was the only
+    unrecorded route in this lane: a grid carrying ``WITHHELD`` anywhere
+    produced no verdict, no refusal, no counter and an unchanged body. A model
+    is entitled to write it -- central-bank releases redact values, and a model
+    re-transcribing an earlier socr output carries the marker straight back in.
+
+    It is also the rule ``_grid_authored_by_socr`` already follows for Stage 1's
+    block, and for the same stated reason: a model is entitled to write a table
+    that looks like socr's, so socr's own output is recognised by what socr
+    stamped and never by what the text happens to contain.
+
+    The DIFFERENCE: two arms identical but for one UNRELATED cell carrying the
+    marker, both contradicting geometry at the same bin. They must reconcile
+    alike.
+    """
+    plain = page_text(counts_grid(**{"1.0": 9}))
+    marked = page_text(counts_grid(**{"1.0": 9}).replace("| 4.0 | 0 |", "| 4.0 | WITHHELD |"))
+    assert CONTRADICTED_MARKER in marked and CONTRADICTED_MARKER not in plain
+
+    _p, plain_state, plain_bo = _reconcile(tmp_path, "mk_plain", plain)
+    _p2, marked_state, marked_bo = _reconcile(tmp_path, "mk_marked", marked)
+
+    for state, bo in ((plain_state, plain_bo), (marked_state, marked_bo)):
+        assert len(_kinds(state, GRID_RECONCILED)) == 1
+        assert len(_kinds(state, GRID_CONTRADICTED)) == 1
+        assert state.pages[1].chart_grid_cells_contradicted == 1
+    # The contradiction found is the same contradiction in both arms.
+    assert [e.data["cell"]["bin_label"] for e in _kinds(marked_state, GRID_CONTRADICTED)] == [
+        e.data["cell"]["bin_label"] for e in _kinds(plain_state, GRID_CONTRADICTED)
+    ]
+    assert marked_bo.text != marked
+
+
+def _assemble_cli(pipeline, state, out: Path) -> list[str]:
+    """Re-run assembly with the console captured, and return what it printed."""
+    from socr.pipeline import orchestrator as orch
+
+    printed = MagicMock()
+    with patch.object(orch, "console", printed):
+        pipeline.config.quiet = False
+        pipeline._phase_assemble(state, out)
+    return [str(c.args[0]) for c in printed.print.call_args_list if c.args]
+
+
+def test_a_resumed_page_still_reports_what_it_withheld(tmp_path: Path) -> None:
+    """The worst shape this lane can produce, and the one a resume creates.
+
+    A resumed page is terminal and never re-processed, so the reconciler does
+    not run -- while the restored BODY still carries ``WITHHELD`` where numbers
+    were removed. If the events are not replayed and the counters not rebuilt,
+    the document ships with content removed and NO surface saying why: the CLI
+    prints nothing, the contradicted counter reads zero, the sidecar carries no
+    reconciliation.
+
+    Deliberately a RESUMED RUN rather than a membership test over
+    ``resume_restore_kinds``. A membership test passes the moment the kinds are
+    added and stays green if the counters never come back -- which is the second
+    half of the defect and the half it cannot reach. This repo has already been
+    bitten there: that set's own docstring records a guard which rebuilt the
+    union from the same sources and so could not see its own subject.
+    """
+    from socr.core.result import PageOutput
+
+    out = tmp_path / "resume"
+    state, _cli = _run(tmp_path, "res", page_text(counts_grid(**{"1.0": 9, "2.0": 9})), out)
+    assert state.pages[1].chart_grid_cells_contradicted == 2
+
+    meta = json.loads(next(out.rglob("pages/00001.json")).read_text())
+    winner = PageOutput.from_dict(meta["winning_output"])
+    assert CONTRADICTED_MARKER in (winner.text or ""), "the restored BODY is missing numbers"
+
+    pipeline = _pipeline()
+    restored = _state(tmp_path / "res.pdf")
+    pipeline._restore_terminal_page_state(restored, 1, winner, out)
+
+    # The record comes back...
+    assert len(_kinds(restored, GRID_RECONCILED)) == 1
+    assert len(_kinds(restored, GRID_CONTRADICTED)) == 2
+    # ...and so do BOTH counters, which the kind set alone would not restore.
+    assert restored.pages[1].chart_grids_reconciled == 1
+    assert restored.pages[1].chart_grid_cells_contradicted == 2
+
+    # Replaying the same sidecar again must not double what the CLI reports.
+    pipeline._restore_terminal_page_state(restored, 1, winner, out)
+    assert restored.pages[1].chart_grid_cells_contradicted == 2
+
+
+def test_the_cli_counts_grids_and_cells_by_identity_not_by_event(tmp_path: Path) -> None:
+    """The CLI must agree with the body, and with the counters, after a re-emit.
+
+    Three crossings of one page: contradict, re-emit the SAME bytes (which must
+    add nothing), then re-emit the same cell with a DIFFERENT wrong number --
+    fresh bytes, correctly re-judged and re-withheld. Counting raw events then
+    reported "2 filled chart grid(s) checked" for ONE grid, because it was the
+    only surface reading neither the deduped counters nor the reconciler.
+
+    The DIFFERENCE is the third crossing; the invariant is that the CLI figures
+    equal the summed PageState counters in both arms.
+    """
+    out = tmp_path / "cli"
+    state, _first = _run(tmp_path, "cli3", page_text(counts_grid(**{"1.0": 9})), out)
+    pipeline = _pipeline()
+
+    # Rung 2: the same bytes again. Rung 3: a different wrong number.
+    bo = state.pages[1].best_output
+    pipeline._reconcile_chart_table_grids(state, 1, _candidate(bo.text or ""))
+    pipeline._reconcile_chart_table_grids(
+        state, 1, _candidate(page_text(counts_grid(**{"1.0": 7})))
+    )
+
+    said = next(
+        line for line in _assemble_cli(pipeline, state, out) if "chart grid(s) checked" in line
+    )
+    assert "1 filled chart grid(s) checked" in said, said
+    assert f"{state.pages[1].chart_grid_cells_contradicted} CONTRADICTED and withheld" in said
+
+
+def test_an_unreadable_page_records_that_its_grids_went_unchecked(tmp_path: Path) -> None:
+    """The last silent route in the lane, closed on Stage 0's precedent.
+
+    Three routes leave a chart page unchecked: unreadable geometry, a
+    model-written marker, and a resumed run. The other two are recorded; this
+    one returned zero and said nothing at all. Stage 0 records its equivalent
+    (``SKELETON_UNBOUND``) when the page's geometry raises, and the operator's
+    question is the same however the checking failed.
+
+    The DIFFERENCE: the same page and the same grid, with only the geometry
+    probe failing.
+    """
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    text = page_text(counts_grid(**{"1.0": 9}))
+    _p, ok_state, ok_bo = _reconcile(tmp_path, "geo_ok", text)
+
+    pdf = tmp_path / "geo_bad.pdf"
+    draw_panel(pdf, bars={"1.0": 3, "2.0": 5})
+    pipeline, bad_state, bad_bo = _pipeline(), _state(pdf), _candidate(text)
+    with patch.object(UnifiedPipeline, "_chart_page_geometry", return_value=None):
+        pipeline._reconcile_chart_table_grids(bad_state, 1, bad_bo)
+
+    assert len(_kinds(ok_state, GRID_RECONCILED)) == 1
+    assert CONTRADICTED_MARKER in ok_bo.text
+
+    # Nothing could be checked -- and the page says so rather than staying mute.
+    assert _kinds(bad_state, GRID_RECONCILED) == []
+    refusals = _kinds(bad_state, GRID_RECONCILE_REFUSED)
+    assert len(refusals) == 1
+    assert "geometry could not be read" in refusals[0].detail
+    assert bad_bo.text == text
 
 
 # ---------------------------------------------------------------------------

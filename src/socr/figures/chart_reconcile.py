@@ -728,6 +728,18 @@ def withhold_contradicted(grid: FilledGrid, result: GridReconciliation) -> str |
     return "\n".join(lines) if touched else None
 
 
+def grid_digest(text: str) -> str:
+    """SHA-256 of a grid's markdown, on the same rule ``FilledGrid.sha256`` uses.
+
+    What socr writes for a grid it withheld into, so a later crossing can
+    recognise its OWN output by identity rather than by searching the text for a
+    marker a model is equally entitled to write.
+    """
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _series_coverage(result: GridReconciliation) -> list[tuple[str, int, int]]:
     """``(series, uncovered identities, of those carrying a number)``, per series.
 
