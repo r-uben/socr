@@ -813,3 +813,66 @@ def test_a_series_geometry_read_but_holds_no_cell_for_is_not_dropped_content() -
     assert nothing_lost.unpublished_series == ()
     assert dropped.unpublished_series == (DASHED,)
     assert (nothing_lost.verified, dropped.verified) == (True, False)
+
+
+# ---------------------------------------------------------------------------
+# The divergence, as the corpus actually draws it
+# ---------------------------------------------------------------------------
+
+#: The SEP pages whose final YEAR panel carries a series the reader holds no
+#: cell for at all — no dashed outline of it is drawn anywhere in the panel, so
+#: the series being absent and every bin being zero cannot be told apart. That
+#: is a different refusal from the compound-staircase one (#739), and it is the
+#: production instance of the shape where deriving the series summary from the
+#: identity set and computing it from the panel give different answers.
+SEP_CORPUS = Path.home() / "Data/socr/sep-dotplots/in"
+CELL_LESS_PANELS = [
+    ("sep-20210922-p09", 4, "2024", "June projections", "September projections"),
+    ("sep-20230920-p09", 4, "2026", "June projections", "September projections"),
+    ("sep-20240918-p09", 4, "2027", "June projections", "September projections"),
+]
+
+
+@pytest.mark.skipif(not SEP_CORPUS.exists(), reason="SEP dot-plot corpus is not present")
+@pytest.mark.parametrize(("stem", "region", "label", "absent", "sibling"), CELL_LESS_PANELS)
+def test_a_cell_less_series_the_corpus_really_draws_raises_no_false_alarm(
+    stem: str, region: int, label: str, absent: str, sibling: str
+) -> None:
+    """The same property as the synthetic guard above, on a real page.
+
+    The synthetic case is what runs in CI, which has no corpus. This one exists
+    because a guard whose distinguishing input occurs in production is worth
+    more than one whose input had to be invented: it answers the objection that
+    the divergence between the two summary implementations is academic.
+
+    Deriving from the identity set is the CORRECT behaviour, and that is what
+    is pinned — not that either output is preferable in the abstract. Naming a
+    series geometry could not read as "unpublished" would be a false alarm: the
+    model dropped nothing, because there was no reading to drop.
+    """
+    from socr.figures.chart_reader import read_chart_page
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    page = fitz.open(str(SEP_CORPUS / f"{stem}.pdf"))[0]
+    panel = read_chart_page(page, chart_region_bboxes(page), page_num=1).panels[region]
+    held = {s.name: s for s in panel.series}
+
+    # The measured shape: one series holding no cell at all, beside a sibling
+    # the reader resolved completely.
+    assert panel.label == label
+    assert held[absent].cells == ()
+    resolved = [c for c in held[sibling].cells if c.status == INTEGER]
+    assert resolved and len(resolved) == len(held[sibling].cells)
+
+    grid = make_grid(["Percent range", sibling], [[c.bin_label, str(c.count)] for c in resolved])
+    result = reconcile_grid(grid, panel)
+
+    # The cell-less series contributed no identity, so it is neither uncovered
+    # nor unpublished, and it does not withhold verification.
+    assert result.agreed == len(resolved)
+    assert result.uncovered == ()
+    assert result.unpublished_series == ()
+    assert result.verified is True
+    # The divergence precondition: a summary computed from the PANEL would name
+    # it, since the grid names no column for it anywhere.
+    assert absent in {s.name for s in panel.series} - {sibling}

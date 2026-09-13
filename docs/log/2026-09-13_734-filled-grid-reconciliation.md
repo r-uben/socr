@@ -149,6 +149,18 @@ series. Both implementations agree on every other shape, which is exactly why th
 consistency test could not witness it — both of its cases hold under either. Now pinned by
 a guard whose two cases differ only in whether the absent series has a reading.
 
+**That shape is not hypothetical: the corpus draws it three times.** On `sep-20210922`,
+`sep-20230920` and `sep-20240918` the FINAL YEAR panel — labelled 2024, 2026 and 2027
+respectively, not the longer-run panel — carries `June projections` with no cell at all,
+beside a `September projections` the reader resolved completely (12/12, 17/17, 14/14).
+Their refusal differs from #739's: no dashed outline of the series is drawn anywhere in
+the panel, so the series being absent and every bin being zero cannot be told apart. A
+second guard reconciles those three real panels and pins that the cell-less series is
+neither uncovered nor unpublished and does not withhold verification — because nothing was
+dropped, there being no reading to drop. It skips where the corpus is absent, so CI keeps
+the synthetic case; the corpus case answers the objection that the divergence is academic.
+Both kill the reviewer's variant.
+
 ## Measurement
 
 All corpus figures are the team lead's, over the SEP dot-plot corpus at `807e060`. They
@@ -160,11 +172,11 @@ from one model and one run.
     reader identities 836; refused grids hide a further 80
 
 Reader-side coverage was then measured under two instruments, both from `git archive`
-trees with `socr.__file__` asserted inside them — the commit as it stood, and a prototype
-of the coverage fix below:
+trees with `socr.__file__` asserted inside them — the commit as it stood, and the coverage
+fix below, which is the shipped behaviour from `0fb2348` on:
 
     807e060    uncovered 604   with a number 308   without 296   beside_published 0   verified 4
-    prototype  uncovered 720   with a number 308   without 412   beside_published 0   verified 0
+    0fb2348    uncovered 720   with a number 308   without 412   beside_published 0   verified 0
 
 **The increment is 116, and all of it is cells where the model published a number and
 geometry ABSTAINED from reading the mark.** The with-a-number column is flat at 308; the
@@ -213,7 +225,8 @@ belong in the disclosure separately; summing them double-counts one cell.
 Three figures reported earlier on this branch were wrong and are recorded as such rather
 than quietly replaced. "604, of which geometry had a number: 604" was a script testing
 index values instead of resolved counts — the field says 308. "Zero of 37 grids earn
-verified" was true of the prototype only, not of `807e060`, where four did. And an earlier
+verified" was true of the coverage fix only — shipped from `0fb2348` — and not of
+`807e060`, where four grids did. And an earlier
 604-vs-720 comparison was invalid because one side was measured against the live working
 tree rather than an archive.
 
@@ -323,7 +336,32 @@ load-bearing are three different properties.**
    measurement of whatever someone was mid-way through writing. Remedy: measure both
    sides from `git archive` trees, and assert `socr.__file__` inside each.
 
-5. **Throwaway probes are still code the rules apply to.** Both the measuring here and
+5. **A search that matches nothing reads exactly like an absence.** Checking whether the
+   gate warning had reached the log, a `grep -E` pattern was written with `\|` as the
+   alternation — a literal in ERE — so it matched nothing, and the conclusion "the warning
+   never landed" was one message away from being reported. The warning was sitting at line
+   198 the whole time. This is trap 2 wearing a different hat: there, a substitution that
+   applied nowhere; here, a pattern that matched nowhere. Both are silent, and both invite
+   a confident negative. Remedy is the same shape — before concluding something is absent,
+   assert the pattern finds what you know is there.
+
+6. **An absent process is ambiguous, and reading it as death is a guess.** Late on this
+   branch a suite job was diagnosed as having died silently, on the evidence of zero
+   running pytest processes beside a dirty tree, and the finished work was described as
+   stranded for two hours. The job had in fact COMPLETED — 5307 passed — and its result
+   was sitting in its own output file. `pgrep` returning nothing distinguishes nothing on
+   its own: it is equally consistent with finished, died, and never started, and only the
+   output file tells them apart. The inverse holds too — an empty output file beside a
+   live process means running, and an empty one beside no process means gone.
+
+   Recorded because the correction nearly went the other way: this entry was first written
+   up as "a background job can die without waking you", on the strength of the diagnosis
+   rather than the file, and would have put a failure into the permanent record that never
+   happened. Check both signals before writing either down. The real cost here was
+   different and smaller: finished work sat uncommitted across several rounds because each
+   round found something else worth measuring first.
+
+7. **Throwaway probes are still code the rules apply to.** Both the measuring here and
    the measuring alongside it invoked the interpreter on a script path, which the global
    instructions forbid; a heredoc or `-c` is the workable form for a one-off probe. The
    measurements stand — the pattern is what should not be repeated, and it is recorded

@@ -277,9 +277,10 @@ class GridReconciliation:
         were reached at all, no cell was contradicted, and every reading on
         both sides was actually COMPARED -- not merely named. A grid whose
         cells are all unknown corroborated nothing and is not verified, which
-        is what stops "unknown" from ever being reported as checked. Without the third, a model earns a clean bill
-        by renaming precisely the series that would have contradicted it --
-        the rename removes the cells rather than the disagreement.
+        is what stops "unknown" from ever being reported as checked. Without
+        the third, a model earns a clean bill by renaming precisely the series
+        that would have contradicted it -- the rename removes the cells rather
+        than the disagreement.
 
         Withholding only ever removes agreement. It cannot manufacture a
         contradiction, and it changes no cell verdict: ``CellVerdict.published``
@@ -620,12 +621,14 @@ def _unknown_cause(
     if series_matched:
         return (
             CAUSE_BIN_UNMATCHED,
-            f"geometry read series “{series_name}”, but no bin it read is named “{bin_label}”; "
+            f"geometry read series “{series_name}”, but no bin it read is "
+            f"named “{bin_label}”; "
             "this cell was never compared",
         )
     return (
         CAUSE_NEITHER_MATCHED,
-        f"neither bin “{bin_label}” nor series “{series_name}” names anything geometry read; "
+        f"neither bin “{bin_label}” nor series “{series_name}” names "
+        "anything geometry read; "
         "this cell was never compared",
     )
 
