@@ -249,6 +249,26 @@ that means "safe to proceed" and the state that means "something is wrong" are i
 from outside, and in each the remedy is the same: check a SECOND, independent signal before
 acting on the first — the output file, the occurrence count, the enclosing function, the branch.
 
+**The paragraph above was interrupted by its own subject.** While it was being written, the
+other agent read the tree as idle and tried to switch it to main. Git refused, because the file
+being edited differed between the two branches and the switch would have overwritten it. That
+refusal is the only reason this is an anecdote rather than an incident.
+
+**And the refusal is not a protection anyone should rely on.** Git blocks a checkout only when a
+modified file would be CLOBBERED by the switch — that is, when the file's content differs across
+the two branches. An uncommitted change to a file that is identical on both is carried across
+silently, which is the ordinary case for a new file or an untouched one, and is exactly the
+"uncommitted changes follow a switch" behaviour described above. Here the log file differed
+because this branch had already changed it; had the edit been to a file the two branches share
+unchanged, the switch would have succeeded and the edit would have arrived on main under
+whichever commit came next.
+
+So what saved it was a side effect of which file happened to be open, not a guard. Both agents
+believed the tree was theirs, each on reasonable evidence, and the only deliberate defence in
+play was reading the branch and the dirty list before writing. Recorded because a near-miss
+whose cause is luck is worth more in a log than one whose cause is care: the care is repeatable
+and the luck is not.
+
 **The cost was two opposite wrong conclusions in a row, on the same line.** `chosen = {}` occurs
 THREE times at the same indentation across two functions of `chart_data.py` — Stage 0's
 suppression discard, Stage B's backwards-order discard, and Stage B's 1:1 pairing discard. The
