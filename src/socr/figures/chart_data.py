@@ -117,6 +117,37 @@ class Skeleton:
 
 
 @dataclass(frozen=True)
+class FilledGrid:
+    """One markdown grid on the page carrying at least one non-empty DATA cell.
+
+    The counterpart of :class:`Skeleton`, found by the same parse: the two
+    differ only in whether any data position says anything. A model that reads
+    a chart region and writes numbers into the grid produces one of these, and
+    nothing about the grid itself says whether those numbers were read off the
+    page or invented -- that is what reconciliation against the region's own
+    geometry is for (``figures.chart_reconcile``).
+
+    ``rows`` is ``(row label, data cells)`` per body row, in source order, so a
+    caller addresses a cell by the pair of labels the grid itself gives it --
+    column 0 is the row label and the header is the column key, the same
+    convention ``find_empty_skeletons`` holds the page to.
+    """
+
+    table_index: int
+    start: int
+    end: int
+    header: list[str]
+    label_header: str
+    data_headers: list[str]
+    rows: tuple[tuple[str, tuple[str, ...]], ...]
+    text: str
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
 class SkeletonSuppression:
     """A grid proven to be a chart region's empty derivation, and withheld."""
 
@@ -252,6 +283,61 @@ def _table_runs(lines: list[str]) -> list[tuple[int, int]]:
     return runs
 
 
+@dataclass(frozen=True)
+class _Parsed:
+    """One genuine markdown grid, parsed but not yet classified."""
+
+    table_index: int
+    start: int
+    end: int
+    header: list[str]
+    body: list[list[str]]
+    text: str
+
+    @property
+    def data_cells(self) -> list[str]:
+        """Every DATA position of the grid: column 0 of a body row is the label."""
+        return [cell for row in self.body for cell in row[1:]]
+
+
+def _parse_grids(text: str) -> list[_Parsed]:
+    """Every grid in *text* that is one header band, one separator and a body.
+
+    The single parse both finders read. A run with two separators is two
+    stacked grids or a malformed one; either way this module does not know
+    which header keys which body, so it does not classify it at all.
+    """
+    if not text or "|" not in text:
+        return []
+    lines = text.split("\n")
+    masked = _content_mask(lines)
+    if masked is None:
+        logger.debug("#635: no literal-context mapping for this text; no grid is classified")
+        return []
+    out: list[_Parsed] = []
+    for ordinal, (start, end) in enumerate(_table_runs(masked), start=1):
+        rows = [_split_row(masked[i]) for i in range(start, end + 1)]
+        separators = [i for i, cells in enumerate(rows) if _is_separator(cells)]
+        if len(separators) != 1:
+            continue
+        sep = separators[0]
+        header = rows[sep - 1] if sep >= 1 else []
+        body = rows[sep + 1 :]
+        if not header or len(header) < 2 or not body:
+            continue
+        out.append(
+            _Parsed(
+                table_index=ordinal,
+                start=start,
+                end=end,
+                header=header,
+                body=body,
+                text="\n".join(lines[start : end + 1]),
+            )
+        )
+    return out
+
+
 def find_empty_skeletons(text: str) -> list[Skeleton]:
     """Every grid in *text* whose DATA cells are, structurally, all empty.
 
@@ -268,39 +354,54 @@ def find_empty_skeletons(text: str) -> list[Skeleton]:
     is something the reading says about the cell, and only a cell that says
     nothing at all is empty.
     """
-    if not text or "|" not in text:
-        return []
-    lines = text.split("\n")
-    masked = _content_mask(lines)
-    if masked is None:
-        logger.debug("#635: no literal-context mapping for this text; no grid is withheld")
-        return []
     out: list[Skeleton] = []
-    for ordinal, (start, end) in enumerate(_table_runs(masked), start=1):
-        rows = [_split_row(masked[i]) for i in range(start, end + 1)]
-        separators = [i for i, cells in enumerate(rows) if _is_separator(cells)]
-        # One header band, one separator, one body. A run with two separators is
-        # two stacked grids or a malformed one; either way this pass does not
-        # know which header keys which body, so it does not act.
-        if len(separators) != 1:
-            continue
-        sep = separators[0]
-        header = rows[sep - 1] if sep >= 1 else []
-        body = rows[sep + 1 :]
-        if not header or len(header) < 2 or not body:
-            continue
-        data_cells = [cell for row in body for cell in row[1:]]
-        if not data_cells or any(cell for cell in data_cells):
+    for grid in _parse_grids(text):
+        cells = grid.data_cells
+        if not cells or any(cell for cell in cells):
             continue
         out.append(
             Skeleton(
-                table_index=ordinal,
-                start=start,
-                end=end,
-                header=header,
-                label_header=header[0],
-                data_headers=header[1:],
-                text="\n".join(lines[start : end + 1]),
+                table_index=grid.table_index,
+                start=grid.start,
+                end=grid.end,
+                header=grid.header,
+                label_header=grid.header[0],
+                data_headers=grid.header[1:],
+                text=grid.text,
+            )
+        )
+    return out
+
+
+def find_filled_grids(text: str) -> list[FilledGrid]:
+    """Every grid in *text* carrying at least one non-empty DATA cell.
+
+    Exactly the complement of ``find_empty_skeletons`` over the same parse and
+    the same single rule, so no grid is both and a grid with no data position
+    at all is neither. #635 Stage 0 acts on the empty ones because nothing was
+    read; #734 needs these, because a model that filled the grid for a chart
+    region published numbers that no geometry has yet been asked about.
+
+    Nothing here says the values are wrong, or invented, or a chart's at all.
+    It says only that the page carries a grid with values in it; binding it to
+    a region and checking those values are separate steps that keep their own
+    burden of proof.
+    """
+    out: list[FilledGrid] = []
+    for grid in _parse_grids(text):
+        cells = grid.data_cells
+        if not cells or not any(cell for cell in cells):
+            continue
+        out.append(
+            FilledGrid(
+                table_index=grid.table_index,
+                start=grid.start,
+                end=grid.end,
+                header=grid.header,
+                label_header=grid.header[0],
+                data_headers=grid.header[1:],
+                rows=tuple((row[0] if row else "", tuple(row[1:])) for row in grid.body),
+                text=grid.text,
             )
         )
     return out
