@@ -210,6 +210,40 @@ def test_a_caption_below_its_figure_refuses_rather_than_shifting(tmp_path: Path)
     assert any("do not pair 1:1" in r.reason for r in down_ref)
 
 
+def test_a_page_that_fails_the_pairing_withholds_nothing(tmp_path: Path) -> None:
+    """P5, end to end: the consequence, not just the binding.
+
+    The two binding guards stop at ``bind_filled_grids`` and assert it returns
+    nothing. This one carries it to the only thing that matters -- a page whose
+    regions and grids do not pair 1:1 must reach the body unchanged, with no
+    cell withheld. A binder that refuses while the caller still withholds would
+    satisfy both of those guards and delete numbers anyway.
+
+    The DIFFERENCE is one unrelated filled table appended to a contradicting
+    page: without it the grid binds, reconciles and withholds; with it the page
+    carries two filled grids against one chart region, fails the pairing, and
+    must ship byte-identical.
+    """
+    contradicting = counts_grid(**{"1.0": 9})
+    alone = page_text(contradicting)
+    with_table = alone.rstrip("\n") + "\n\n" + grid_text(["Year", "Value"], [["2019", "42"]]) + "\n"
+
+    _p, bound_state, bound_bo = _reconcile(tmp_path, "pair_ok", alone)
+    _p2, unpaired_state, unpaired_bo = _reconcile(tmp_path, "pair_no", with_table)
+
+    # Control: it binds, contradicts and withholds.
+    assert CONTRADICTED_MARKER in bound_bo.text
+    assert bound_state.pages[1].chart_grid_cells_contradicted == 1
+
+    # Unpaired: nothing is checked, and NOTHING is removed from the body.
+    assert unpaired_bo.text == with_table
+    assert CONTRADICTED_MARKER not in unpaired_bo.text
+    assert unpaired_state.pages[1].chart_grid_cells_contradicted == 0
+    assert _kinds(unpaired_state, GRID_RECONCILED) == []
+    # ...and the page says so rather than going quiet about it.
+    assert _kinds(unpaired_state, GRID_RECONCILE_REFUSED)
+
+
 def test_a_grid_no_region_binds_is_refused_and_not_silently_kept() -> None:
     """The finding this lane exists for: a filled grid on a chart page whose
     numbers were compared against nothing. Silence would report it as checked."""
@@ -859,6 +893,82 @@ def test_the_cli_counts_grids_and_cells_by_identity_not_by_event(tmp_path: Path)
     )
     assert "1 filled chart grid(s) checked" in said, said
     assert f"{state.pages[1].chart_grid_cells_contradicted} CONTRADICTED and withheld" in said
+
+
+def test_a_cell_a_later_rung_gets_right_is_retired_from_the_count(tmp_path: Path) -> None:
+    """A contradiction belongs to one READING of a grid, not to the page.
+
+    The page is crossed at several rungs. When a later rung gets the same cell
+    right, the body no longer withholds anything -- so a count that unions every
+    contradiction event ever filed keeps a retired one and reports a number the
+    body does not contain. Measured before the fix: the latest reading said
+    ``agreed 4, contradicted 0`` while the withheld count still said 1, so the
+    CLI accounted for FIVE cells on a four-cell grid.
+
+    This is the across-rung half of the same count P1 fixed within a rung, and
+    the error changed sign: P1 was an undercount, this is an overcount. Pinned
+    as a DIFFERENCE over whether the second rung corrects the cell.
+    """
+    corrected = _reconcile(tmp_path, "retire_a", page_text(counts_grid(**{"1.0": 9})))[1]
+    still_wrong = _reconcile(tmp_path, "retire_b", page_text(counts_grid(**{"1.0": 9})))[1]
+    pipeline = _pipeline()
+
+    # Arm A: the second rung gets it right. Arm B: still wrong, different bytes.
+    pipeline._reconcile_chart_table_grids(corrected, 1, _candidate(page_text(counts_grid())))
+    pipeline._reconcile_chart_table_grids(
+        still_wrong, 1, _candidate(page_text(counts_grid(**{"1.0": 8})))
+    )
+
+    assert corrected.pages[1].chart_grid_cells_contradicted == 0
+    assert still_wrong.pages[1].chart_grid_cells_contradicted == 1
+
+    # The surfaces agree with the body in both arms: the corrected page carries
+    # no marker, the still-wrong page carries one.
+    from socr.figures.chart_reconcile import (
+        latest_grid_reconciliations,
+        withheld_cell_identities,
+    )
+
+    for state, expected in ((corrected, 0), (still_wrong, 1)):
+        events = [(e.page_num, e.kind, e.data or {}) for e in state.events]
+        latest = list(latest_grid_reconciliations(events).values())
+        assert len(latest) == 1, "one grid, however many rungs crossed it"
+        assert len(withheld_cell_identities(events)) == expected
+        # agreed + withheld must never exceed the grid's own cell count.
+        assert latest[0]["agreed"] + expected <= len(DRAWN)
+
+
+def test_one_unbound_grid_re_emitted_is_one_unchecked_grid(tmp_path: Path) -> None:
+    """The refusal figure counts GRIDS, not events.
+
+    An unbound grid re-emitted with different bytes files a refusal per
+    candidate, correctly -- each is a real record of a real crossing. But the
+    CLI line says how many grids went unchecked, and a raw event count turned
+    one such grid into three. It was the only one of the three figures on that
+    line still counted by event after P4 deduplicated the other two.
+    """
+    from socr.figures.chart_reconcile import unreconciled_grid_identities
+
+    pipeline, state, _bo = _reconcile(
+        tmp_path,
+        "unb",
+        f"Preamble unique alpha\n\n{counts_grid()}\n\nTrailing unique delta\n",
+    )
+    for value in (1, 2):
+        pipeline._reconcile_chart_table_grids(
+            state,
+            1,
+            _candidate(
+                f"Preamble unique alpha\n\n{counts_grid(**{'4.0': value})}"
+                "\n\nTrailing unique delta\n"
+            ),
+        )
+
+    events = [(e.page_num, e.kind, e.data or {}) for e in state.events]
+    # Every crossing is still recorded -- nothing is lost from the audit trail.
+    assert len(_kinds(state, GRID_RECONCILE_REFUSED)) == 3
+    # ...but the page carries ONE unchecked grid, and that is what is reported.
+    assert len(unreconciled_grid_identities(events)) == 1
 
 
 def test_an_unreadable_page_records_that_its_grids_went_unchecked(tmp_path: Path) -> None:

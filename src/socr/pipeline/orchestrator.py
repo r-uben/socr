@@ -3522,6 +3522,7 @@ class UnifiedPipeline:
             reconcile_grid,
             grid_digest,
             reconciliation_note,
+            withheld_cell_identities,
             withhold_contradicted,
         )
 
@@ -3723,17 +3724,15 @@ class UnifiedPipeline:
                 if ev.page_num == page_num and ev.kind == GRID_RECONCILED
             }
         )
+        # Same recency rule as the CLI, and it must be: a cell a later rung got
+        # right is not withheld from the body, so counting it here would demote
+        # the page for a number it still carries.
         ps.chart_grid_cells_contradicted = len(
-            {
-                (
-                    (ev.data or {}).get("table_index"),
-                    (ev.data or {}).get("region_index"),
-                    ((ev.data or {}).get("cell") or {}).get("bin_label"),
-                    ((ev.data or {}).get("cell") or {}).get("series_name"),
-                )
+            withheld_cell_identities(
+                (ev.page_num, ev.kind, ev.data or {})
                 for ev in state.events
-                if ev.page_num == page_num and ev.kind == GRID_CONTRADICTED
-            }
+                if ev.page_num == page_num
+            )
         )
         return len(results)
 
@@ -11981,17 +11980,16 @@ class UnifiedPipeline:
                     if e.page_num == page_num and e.kind == _GRID_RECONCILED
                 }
             )
+            from socr.figures.chart_reconcile import (
+                withheld_cell_identities as _withheld_cell_identities,
+            )
+
             ps.chart_grid_cells_contradicted = len(
-                {
-                    (
-                        (e.data or {}).get("table_index"),
-                        (e.data or {}).get("region_index"),
-                        ((e.data or {}).get("cell") or {}).get("bin_label"),
-                        ((e.data or {}).get("cell") or {}).get("series_name"),
-                    )
+                _withheld_cell_identities(
+                    (e.page_num, e.kind, e.data or {})
                     for e in state.events
-                    if e.page_num == page_num and e.kind == _GRID_CONTRADICTED
-                }
+                    if e.page_num == page_num
+                )
             )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
@@ -12381,9 +12379,9 @@ class UnifiedPipeline:
             # uncovered readings: a cell geometry could not resolve is both
             # unchecked and unaddressed, and summing the two double-counts it.
             from socr.figures.chart_reconcile import (
-                GRID_CONTRADICTED,
-                GRID_RECONCILE_REFUSED,
-                GRID_RECONCILED,
+                latest_grid_reconciliations,
+                unreconciled_grid_identities,
+                withheld_cell_identities,
             )
 
             # Counted by grid IDENTITY, not by event, and this is the whole of
@@ -12401,27 +12399,18 @@ class UnifiedPipeline:
             # one line from two places is how surfaces drift apart; the events
             # are replayed on resume (``resume_restore_kinds``) so both sources
             # survive, and a guard pins the two against each other.
-            _latest: dict[tuple, dict] = {}
-            for _e in state.events:
-                if getattr(_e, "kind", "") != GRID_RECONCILED:
-                    continue
-                _d = _e.data or {}
-                _latest[(_e.page_num, _d.get("table_index"), _d.get("region_index"))] = _d
-            _reconciled = list(_latest.values())
-            _withheld_cells = {
-                (
-                    _e.page_num,
-                    (_e.data or {}).get("table_index"),
-                    (_e.data or {}).get("region_index"),
-                    ((_e.data or {}).get("cell") or {}).get("bin_label"),
-                    ((_e.data or {}).get("cell") or {}).get("series_name"),
-                )
-                for _e in state.events
-                if getattr(_e, "kind", "") == GRID_CONTRADICTED
-            }
-            _unreconciled = [
-                e for e in state.events if getattr(e, "kind", "") == GRID_RECONCILE_REFUSED
-            ]
+            # ONE recency rule for all three figures. Counting grids by their
+            # latest reading while counting withheld cells as the union of every
+            # contradiction ever filed mixed two rules in one line: a cell a
+            # later rung got right was never retired, so the line reported four
+            # agreed AND one withheld on a four-cell grid -- five cells, one of
+            # which the body does not contain. The refusal figure was a third
+            # rule again, a raw event list, so one unbound grid re-emitted twice
+            # printed three unchecked grids.
+            _events = [(e.page_num, getattr(e, "kind", ""), e.data or {}) for e in state.events]
+            _reconciled = list(latest_grid_reconciliations(_events).values())
+            _withheld_cells = withheld_cell_identities(_events)
+            _unreconciled = unreconciled_grid_identities(_events)
             if _reconciled:
                 _agreed = sum(d.get("agreed", 0) for d in _reconciled)
                 _unknown = sum(d.get("unknown_to_geometry", 0) for d in _reconciled)

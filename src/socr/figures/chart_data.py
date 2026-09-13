@@ -913,7 +913,7 @@ def suppress_chart_table_skeletons(
                     by_index[chosen[region]].sha256,
                 )
             )
-        chosen = {}
+        chosen = {}  # Stage 0 discard: empty-grid bindings (#635)
 
     bound_tables = set(chosen.values())
     for skeleton in skeletons:
@@ -1105,7 +1105,7 @@ def bind_filled_grids(
                     chosen[region].sha256,
                 )
             )
-        chosen = {}
+        chosen = {}  # Stage B discard: BACKWARDS source order
 
     # The pairing requirement (see the docstring). Checked AFTER the order rule
     # so a page failing both is refused once, by the first reason that applies.
@@ -1135,7 +1135,7 @@ def bind_filled_grids(
                     page_num, chosen[region].table_index, reason, chosen[region].sha256
                 )
             )
-        chosen = {}
+        chosen = {}  # Stage B discard: a failed 1:1 PAIRING (#734 P5)
 
     bound = {g.table_index for g in chosen.values()}
     for grid in grids:

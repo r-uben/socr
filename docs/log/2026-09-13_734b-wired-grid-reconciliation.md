@@ -110,7 +110,7 @@ re-judged. Pinned by a guard and by mutant M3. The same exclusion covers socr's 
 derivation block, which is a filled grid on every later crossing and would otherwise have
 reconciled geometry against itself and reported the tautology as a check.
 
-## Mutant battery — 21 mutants, no survivors
+## Mutant battery — 24 mutants, no survivors
 
 `src` AND `tests` copied to `/tmp/mut734`, run from that rootdir, with the three traps from
 `docs/log/2026-09-13_734-filled-grid-reconciliation.md` each checked separately:
@@ -147,6 +147,9 @@ reconciled geometry against itself and reported the tautology as a check.
 | M19 count CLI figures by event | the count-by-identity guard |
 | M20 drop the unreadable-geometry record | the unreadable-page guard |
 | M21 drop the 1:1 pairing rule | the two P5 binding guards |
+| M22 union every contradiction ever filed | the retired-contradiction guard |
+| M23 count unchecked grids by event | the one-unbound-grid guard |
+| M24 read the event stream without materialising it | the demotion and withholding guards |
 
 **A fourteenth mutant, and the trap that hid it.** At `e1a0340` the battery was 13 and the
 reviewer found an unguarded line: deleting `bo.failure_mode = FailureMode.CHART_GRID_CONTRADICTED`
@@ -191,6 +194,12 @@ can fail:
     occurrences = src.count(anchor)
     assert occurrences == 1, f"anchor occurs {occurrences}x"
 
+**Two further remedies, and the second is half of why the wrong line looked unguarded.** Target
+by LINE CONTENT or by the enclosing `def` rather than by a literal, since a literal is only as
+precise as its uniqueness. And **run the suite that OWNS the function you are mutating**: the
+first run mutated Stage 0's discard and ran only the Stage B file, so the #635 suite that guards
+that line was never executed. The line was guarded; the run could not see it.
+
 **The cost was two opposite wrong conclusions in a row, on the same line.** `chosen = {}` occurs
 THREE times at the same indentation across two functions of `chart_data.py` — Stage 0's
 suppression discard, Stage B's backwards-order discard, and Stage B's 1:1 pairing discard. The
@@ -224,10 +233,14 @@ and is deliberately NOT done in this sha, which is documentation-only.
 
 This branch's battery uses the uncapped form (`src.count(lit)` asserted against an expected
 count, with the two-occurrence anchors declared as such and the last occurrence targeted), and
-that assertion fired for real twice here — once when a mutation's anchor had been deleted by a
-later fix, and once on a log literal that matched nothing.
+that assertion fired for real FOUR times here: three when a mutation's anchor had been deleted
+by a later fix on this same branch (M3 by the P2 rewrite, then M18 and M19 by the P6/P7 rewrite),
+and once on a log literal that matched nothing. Each would otherwise have been a confidently
+green mutant measuring an unmutated file — and the three anchor deletions are a standing hazard
+of a long branch, since every fix can silently retire a mutant written against the code it
+replaced.
 
-## What the reviewer's rounds found — one failure at four ranges
+## What the reviewer's rounds found — one failure at six ranges
 
 Both were live on the corpus, and neither was visible to any guard that existed.
 
@@ -425,6 +438,43 @@ no other grid between. That would refuse the caption-below route on the grid who
 actually wrong, and leave a trailing table alone. **Nobody has built or measured it**, and it is
 recorded here only as the next thing to try if the narrowing proves expensive in practice. It
 must not be read as a decision, and it carries no evidence whatever at this commit.
+
+**P6 — the withheld-cell count never retired a contradiction a later rung fixed.** P1 fixed the
+WITHIN-rung half of this count and left the ACROSS-rung half, and the residue changed sign: P1
+was an undercount, this is an overcount. A contradiction belongs to one READING of a grid, not
+to the page, so unioning every contradiction event ever filed keeps counting a cell the body no
+longer withholds. Measured: after a second rung gets the cell right, the latest reading says
+`agreed 4, contradicted 0` while the count still said 1 — and one CLI line took `agreed` from
+the latest event and `withheld` from the union, accounting for FIVE cells on a four-cell grid.
+Closed by taking the withheld cells from the latest reading of each grid, matched on the grid's
+digest — the same recency rule the grid count already used.
+
+**P7 — the refusal figure was still counted by event.** One unbound grid re-emitted with
+different bytes files a refusal per candidate, correctly; but the CLI line says how many GRIDS
+went unchecked, and a raw event list turned one into three. It was the last of that line's three
+figures still counted by event after P4 deduplicated the other two. Closed by identity.
+
+Neither loses content; both over-report. They are blocking because surface-versus-body agreement
+is this ticket's own standard, and a line that says five cells on a four-cell grid is not a
+disclosure a reader can use.
+
+**A near-miss worth recording, because it was mine and the guards caught it.** The first P6/P7
+fix read the event stream TWICE — once to find each grid's latest reading, once to select the
+contradictions belonging to it — while the orchestrator's two counter sites naturally pass a
+GENERATOR (they filter `state.events` by page inline). A generator read twice is empty on the
+second pass, so every withheld count silently became zero: on the corpus, 10 markers in the
+bodies and **0 pages demoted**. That is precisely the "the body lost a number and a surface says
+it did not" shape this lane exists to stop, reintroduced by the fix for it. Eight existing guards
+failed immediately — the demotion guard, the failure-mode guard, the resume guard and the
+withholding guards among them.
+
+**That is worth more as evidence than any mutant in the battery, and the reason is that it was
+an ACCIDENT rather than a designed probe.** Every mutant here was written by someone who already
+knew which guard should catch it; a mutant dying proves the guard covers a failure its author
+had in mind. This one was nobody's hypothesis. A real defect, introduced in good faith while
+fixing a different one, walked into the guard set and was stopped at once — which is the only
+form of evidence that speaks to the failures nobody thought to write a mutant for. The stream is
+now materialised once, and M24 pins it.
 
 **The trap behind all three findings, including the `failure_mode` one.** A guard that only
 fails once a DIFFERENT failure has already occurred has not been shown to guard its own

@@ -740,6 +740,83 @@ def grid_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _grid_key(page_num: int, data: dict) -> tuple:
+    """The identity of one grid on one page: (page, table, region)."""
+    return (page_num, data.get("table_index"), data.get("region_index"))
+
+
+def latest_grid_reconciliations(events) -> dict[tuple, dict]:
+    """``{(page, table, region): data}`` keeping the LATEST reading of each grid.
+
+    *events* is an iterable of ``(page_num, kind, data)``. A page crossed at
+    several rungs files one reconciliation per DISTINCT candidate, so the last
+    one is what the body now holds; earlier ones are history.
+    """
+    out: dict[tuple, dict] = {}
+    for page_num, kind, data in events:
+        if kind == GRID_RECONCILED:
+            out[_grid_key(page_num, data)] = data
+    return out
+
+
+def _materialise(events) -> list[tuple]:
+    """The event stream as a list, because it is read TWICE below.
+
+    Callers naturally pass a generator -- the orchestrator filters state.events
+    by page inline -- and a generator read twice is empty on the second pass.
+    That silently produced ZERO withheld cells everywhere: measured on the SEP
+    corpus, 10 markers in the bodies and 0 pages demoted, which is the very
+    "body lost a number and a surface says it did not" shape this lane exists
+    to stop, reintroduced by the fix for it.
+    """
+    return list(events)
+
+
+def withheld_cell_identities(events) -> set[tuple]:
+    """Cells the CURRENT reading of each grid withholds -- not every one ever.
+
+    The recency rule the grid count already uses, applied to the cells, because
+    a contradiction is a property of one READING of a grid rather than of the
+    page. A later rung that gets the same cell right files a fresh
+    reconciliation carrying a new ``sha256``; unioning every contradiction event
+    ever filed would keep counting the retired one, so a page whose body holds
+    four agreed cells and nothing withheld would report four agreed PLUS one
+    withheld -- five cells on a four-cell grid, and a number the body does not
+    contain.
+
+    A contradiction is kept only when its grid digest is still the digest of
+    that grid's latest reading. That also keeps the withheld cells of a grid
+    socr rewrote: the rewritten bytes are skipped rather than re-reconciled, so
+    the contradicting reading remains the latest one.
+    """
+    events = _materialise(events)
+    latest = latest_grid_reconciliations(events)
+    out: set[tuple] = set()
+    for page_num, kind, data in events:
+        if kind != GRID_CONTRADICTED:
+            continue
+        key = _grid_key(page_num, data)
+        current = latest.get(key)
+        if current is None or current.get("sha256") != data.get("sha256"):
+            continue
+        cell = data.get("cell") or {}
+        out.add(key + (cell.get("bin_label"), cell.get("series_name")))
+    return out
+
+
+def unreconciled_grid_identities(events) -> set[tuple]:
+    """Grids that reached no verdict, by IDENTITY rather than by event.
+
+    One grid re-emitted with different bytes files a refusal per candidate, so a
+    raw event count reported three unchecked grids where the page carries one.
+    """
+    return {
+        _grid_key(page_num, data)
+        for page_num, kind, data in events
+        if kind == GRID_RECONCILE_REFUSED
+    }
+
+
 def _series_coverage(result: GridReconciliation) -> list[tuple[str, int, int]]:
     """``(series, uncovered identities, of those carrying a number)``, per series.
 
