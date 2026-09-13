@@ -82,6 +82,12 @@ pages, audits quality, and falls back. One control loop: the
   Failures must surface at *every* level (page status, document status, metadata, CLI) — not just one.
 - Branch per change (`feat/NN-…` / `fix/NN-…`); stage by name (never `git add -A`); one commit per
   ticket; **wait for CI green before merging**.
+- **A guard that has never been seen to fail has not been shown to guard anything.** Delete the fix
+  in a mutant copy; require the guard to fail. **Loaded:** copy `src` AND `tests` outside the repo;
+  assert `socr.__file__` points inside. **Applied:** assert uncapped `src.count(anchor) == 1` before
+  editing, and abort on failure; asserting a capped replacement count is tautological. **Load-bearing:**
+  demonstrate changed behaviour on an input. **Right suite:** run the suite owning the mutated function.
+  Instances: `docs/log/2026-09-12_735-sep-reader.md`, `docs/log/2026-09-13_734b-wired-grid-reconciliation.md`.
 
 ## Plan / history
 
