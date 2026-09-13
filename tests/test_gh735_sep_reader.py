@@ -1380,7 +1380,17 @@ def test_the_measurement_tool_actually_measures_a_page(tmp_path: Path) -> None:
     import subprocess
     import sys
 
-    _numeric_panel(tmp_path / "one.pdf")
+    # A TWO-LINE range chart, so the run actually reaches ``_aligned``. Drawn
+    # with single-line labels the tool reports calls=1 and absorbed=0, never
+    # calls the wrapper, and the guard cannot see the very defect it exists for
+    # (#735 round 9 review, found independently by both reviewers).
+    _numeric_panel(
+        tmp_path / "one.pdf",
+        labels=("0.13-", "0.38-", "0.63-", "0.88-"),
+        extra_row=("0.37", "0.62", "0.87", "1.12"),
+        extra_centres=list(_R7_CENTRES),
+        extra_y=BASE + 20.0,
+    )
     report_path = tmp_path / "report.json"
     done = subprocess.run(
         [
@@ -1401,6 +1411,10 @@ def test_the_measurement_tool_actually_measures_a_page(tmp_path: Path) -> None:
     report = json.loads(report_path.read_text())
     assert report["total"]["calls"] >= 1, report
     assert report["total"]["winner_is_numeric"] == report["total"]["calls"], report
+    # The load-bearing one: a second line was actually absorbed, so the wrapper
+    # around ``_aligned`` was actually called. Without this the guard passes
+    # against the two-argument wrapper that broke every corpus page.
+    assert report["second_lines_absorbed"] >= 1, report
 
 
 def test_words_outside_the_axis_are_not_joined_into_the_bin_labels(tmp_path: Path) -> None:
@@ -1491,15 +1505,19 @@ def test_a_prose_row_that_cannot_fill_every_column_joins_nothing(tmp_path: Path)
 def test_numeric_chart_labels_parse_and_none_of_these_drawings_refuses(
     tmp_path: Path,
 ) -> None:
-    """Two properties of these six NUMERIC drawings, named for what they are.
+    """Two properties of these seven drawings, named for what they are.
 
     The name matters because the obvious one -- "every published bin label
     parses as a Stage 0 key" -- is false on this branch, and its counterexample
     is a test kept deliberately passing: ``1.0-North America`` in
     ``tests/test_gh635_chart_reader.py`` is published and rejected by
     ``_key_atoms``, since a multi-word run is not a whole token. It is required
-    output, not a defect. The property that holds is about NUMERIC charts, which
-    is what all six drawings here are.
+    output, not a defect. What is demonstrated is narrower still: that the
+    published labels of THESE fixtures parse. "The labels of a numeric bin row
+    parse" would also be too broad, and the gate's own disclosure supplies the
+    counterexample -- a row of dangling prefixes like ``0.13--`` is all-numeric,
+    passes admission, and publishes a label ``_key_atoms`` rejects when no second
+    line completes it.
 
     This carries a second assertion that is not an invariant at all: that every
     drawing still publishes. That is a refusal-regression guard, and it is the

@@ -228,8 +228,17 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    columns, while a FOUR-word one at the bin centres still joins. The prose case is closed
    only for word counts that happen to break the partition, which is arrangement
    dependence of the kind rounds 1-6 repeatedly died on — a reason to disclose this rather
-   than to add a third selection rule. Harmless on both
-   corpora, whose second lines are the range endpoints.
+   than to add a third selection rule. Harmless on both corpora, whose second lines are the
+   range endpoints.
+
+   **Accepted and disclosed: a dropped fragment is silent.** The bounds DISCARD a secondary
+   token drawn outside the axis or outside its column rather than refusing the row. If the
+   fragments that remain still fill every column, the page publishes a SHORTENED label with
+   no warning, no internal issue and no refusal — e.g. a second line whose first word is set
+   past the axis end publishes the remaining words as that column's label. This is the
+   deliberate trade for not deleting whole label lines (round 6 did that, and lost five
+   printed identifiers at once), and it is recorded here because nothing in the output says
+   it happened.
 
 16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
    layout fallback: where no bar covers exactly one token of any row below the axis, the
@@ -261,8 +270,10 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    requires each atom to parse as a number — the step that grammar does not take, since it
    accepts `B1` and `Effective` as well-formed keys. The test is a FLOAT PARSE, not a word
    test, and the difference matters in both directions: it admits a numeric prefix, since
-   `0.13-` passes on the strength of `0.13` once the trailing range dash is stripped, and
-   it judges the PRIMARY row only, so a label joined from a second line is not guaranteed
+   `0.13-` passes on the strength of `0.13` once the trailing range dash is stripped. The
+   strip removes a whole RUN of dashes, so `0.13--` passes too, and publishes a label Stage
+   0's own grammar then rejects when no second line completes it. And the gate judges the
+   PRIMARY row only, so a label joined from a second line is not guaranteed
    to parse as a Stage 0 key even though the row it came from did. What is true is that a
    row carrying a token no float parse accepts cannot be the bins, and where no row below the axis is all-numeric the panel is refused.
 
