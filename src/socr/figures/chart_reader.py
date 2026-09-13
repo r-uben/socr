@@ -661,8 +661,13 @@ def _numeric_row(row: WordRow) -> bool:
         return False
     for atom in atoms:
         try:
-            float(atom)
+            value = float(atom)
         except ValueError:
+            return False
+        # ``float`` also accepts ``nan``, ``inf``, ``Infinity`` and their signed
+        # forms, which are words that happen to parse. A bin is a position on a
+        # printed axis, so a label that is not a finite number is not a bin.
+        if not math.isfinite(value):
             return False
     return True
 

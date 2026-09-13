@@ -203,24 +203,27 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    one region) is fixed; the reconciliation half is not, and #734 stays open. Found by the
    #735 reviewer by source inspection, not by a pipeline run.
 
-15. **A bin label drawn as vector art hands the bins to a prose caption.** Where the
-   labels are OUTLINED rather than set as text, the page carries no tokens on the label
-   row, so the bars attest the nearest prose row instead and the panel publishes its counts
-   under that row's words. The counts themselves are right — the caption's words happen to
-   sit over the bin centres in the reviewer's construction — but the headers are prose.
-   Reproduced unchanged at `3cbf8a9` (main) and at every commit of this branch, so it is
-   not a regression: nothing in the reader can tell a caption from a label when the labels
-   are not text, and OCR of the outlines is the only thing that could. Reviewer probe
-   `/private/tmp/rev735/test_rev735g.py::test_k`. The same weakness in a second hat: a
-   four-word caption whose words fall over the bin centres is accepted by `_aligned` as a
-   second LINE of labels and joined into them (`B1-Effective`, ...), also pre-existing on
-   main and harmless on both corpora, whose second lines are the range endpoints. (Round 6
-   narrowed the second half: `_aligned` now requires a second line to carry exactly one
-   token per column, which stops a four-label row being absorbed into a two-word caption,
-   but a caption with exactly as many words as the chart has bins is still a well-formed
-   second line and is still joined in.) This is the one route found **that needs the labels
-   to be absent from the text layer** — not the only route. Item 17 is a second, found from
-   three directions with the labels present as ordinary text.
+15. **Labels drawn as vector art: the panel now REFUSES, and a caption at the bin centres
+   still mislabels.** Where the bin labels are OUTLINED rather than set as text, the page
+   carries no tokens on the label row at all. Through round 6 the bars then attested the
+   nearest prose row and the panel published its counts under that row's words. **At this
+   build it refuses**: the caption that used to take the bins is prose, and round 7's
+   numeric gate rejects it (`/private/tmp/rev735/test_rev735g.py::test_k`, which published
+   on every earlier commit of this branch and on `3cbf8a9`). The underlying weakness is NOT
+   closed — a NUMERIC row on such a page would still take the bins, which is item 18 — but
+   the fabrication this item described is not reachable here.
+
+   **Still live, and a different thing from fabrication.** A four-word caption drawn at the
+   bin centres BELOW a row of numeric labels is absorbed as a second LINE of those labels
+   and joined into them: the bins become `1.0-Effective`, `2.0-federal`, `3.0-funds`,
+   `4.0-rate` (`/private/tmp/rev735/test_rev735n.py::test_v`). The counts are right, the
+   attested row is the real label row, and the page's own labels survive inside the joined
+   string — so this is **mislabelling, not fabrication**, and it is pre-existing on main.
+   In the partition rule's terms (`_aligned`, replaced in `c15cdcd`): a row below is a
+   second line when its tokens partition one-per-column with none left over and the runs in
+   order, and a caption with exactly as many words as the chart has bins satisfies that
+   just as a printed lower bound does. Nothing geometric separates them. Harmless on both
+   corpora, whose second lines are the range endpoints.
 
 16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
    layout fallback: where no bar covers exactly one token of any row below the axis, the
@@ -266,20 +269,28 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    same reason, and any reviewer probe still drawn with `B`-labels now refuses by design
    rather than by defect.
 
-18. **OPEN, disclosed: a NUMERIC annotation row still takes the bins.** The numeric gate
-   rejects all three of the round-6 constructions, because each selected a row containing
-   words. It does not close the class. Concretely, and reproduced against this build:
-   print real bin labels `1.0 2.0 3.0 4.0` centred at x = 160, 180, 200, 220, and a numeric
-   annotation `0 5 10 15` above them at x = 130, 190, 250, 310; stand four 8pt bars of
-   3, 5, 4, 2 on the annotation's positions. Every annotation token parses as a number,
-   every bar lies wholly inside its annotation-derived 60pt bin, and no bar covers a real
-   label centre — so the annotation scores 4 to 0 and the panel publishes **3, 5, 4, 2
-   under `0 | 5 | 10 | 15`**. The reader establishes only that a row is label-SHAPED and
-   attested by the marks; it never establishes that the row IS the labels, and no layout
-   test separates these two rows — the fabricating row is itself the topmost in-span
-   numeric row, which is the arrangement the corpus shows for genuine labels. This is
-   pinned by `test_a_numeric_annotation_row_still_takes_the_bins` so it cannot drift
-   silently. It is unmeasured: no corpus page is known to draw it.
+18. **OPEN, disclosed: ANY numeric row the bars attest becomes the bins.** The numeric
+   gate rejects all three round-6 constructions, because each selected a row containing
+   words. It does not close the class, and the class is wider than the first statement of
+   this item allowed. What the reader requires of a row is only that it is all-numeric,
+   that its tokens are inside the axis' span, and that the bars stand inside the bins its
+   own centres derive. **Vertical order is not consulted at all** — with the rival rule
+   deleted in round 7, nothing in the reader compares a candidate row's position against
+   any other row's.
+
+   So the route has at least two instances of one shape, both reproduced against this
+   build. Print real bin labels `1.0 2.0 3.0 4.0` at x = 160, 180, 200, 220 and a numeric
+   annotation `0 5 10 15` at x = 130, 190, 250, 310, then stand four 8pt bars of 3, 5, 4, 2
+   on the annotation's positions. With the annotation **above** the labels the panel
+   publishes 3, 5, 4, 2 under `0 | 5 | 10 | 15`; with the same annotation **below** them it
+   publishes identically (`/private/tmp/rev735/test_rev735m.py::test_s`). Every annotation
+   token parses, every bar lies wholly inside its annotation-derived 60pt bin, and no bar
+   covers a real label centre.
+
+   This is the owner-accepted class, not a new one: the reader establishes that a row is
+   label-SHAPED and attested by the marks, and never that it IS the labels. It is pinned
+   by `test_a_numeric_annotation_row_still_takes_the_bins` so it cannot drift silently, and
+   it is unmeasured — no corpus page is known to draw it.
 
 **Owner ruling, 2026-09-13 — best-effort numeric-chart extraction.** The owner has accepted
 best-effort extraction of numeric charts as the product scope, against the alternative of

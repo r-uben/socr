@@ -181,3 +181,10 @@ def main() -> int:
         args.json.write_text(text)
     print(text)
     return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - module-execution entry point
+    # Without this, ``python -m socr.figures.measure_chart_bins <dirs>`` exits 0
+    # having printed nothing, which is indistinguishable from a corpus with no
+    # chart pages. A silent success is how the first numeric gate got through.
+    raise SystemExit(main())

@@ -1331,3 +1331,45 @@ def test_a_two_line_range_label_with_a_trailing_dash_is_still_the_bins(tmp_path:
     plain_bins, plain_cells = _read_numeric(tmp_path / "plain.pdf")
     assert plain_bins == list(BINS)
     assert [count for _label, count in plain_cells] == [count for _label, count in ranged_cells]
+
+
+def test_a_row_of_infinities_is_not_a_row_of_bins() -> None:
+    """``float`` parses more words than a bin label can be.
+
+    ``nan``, ``inf``, ``Infinity`` and their signed forms all parse, so a row of
+    them passed the numeric gate on the strength of the parser alone. A bin is a
+    position on a printed axis, so a label that is not a FINITE number is not a
+    bin. Pinned as a difference against the finite row of the same shape.
+    """
+    from socr.figures.chart_reader import WordRow, _numeric_row
+
+    def row(*words: str) -> WordRow:
+        tokens = tuple((100.0 + 20.0 * i, 8.0, w) for i, w in enumerate(words))
+        return WordRow(y0=410.0, y1=416.0, x0=95.0, x1=200.0, text=" ".join(words), tokens=tokens)
+
+    assert _numeric_row(row("1.0", "2.0", "3.0"))
+    assert _numeric_row(row("-0.5", "0.5"))
+    for words in (("nan", "nan"), ("inf", "inf"), ("Infinity", "1.0"), ("-inf", "2.0")):
+        assert not _numeric_row(row(*words)), words
+
+
+def test_the_measurement_tool_is_runnable_as_a_module() -> None:
+    """``python -m socr.figures.measure_chart_bins`` must not exit 0 in silence.
+
+    Without a ``__main__`` guard the module imports, defines ``main``, never
+    calls it, and exits 0 having printed nothing — which reads exactly like a
+    corpus with no chart pages. The log cites this tool as the reason its 840-call
+    table can be re-derived from the tree, so it has to actually run. A silent
+    success is how the first numeric gate got through (#735 round 7 review).
+    """
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-m", "socr.figures.measure_chart_bins", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "corpus" in done.stdout, done.stdout
