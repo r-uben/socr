@@ -200,6 +200,35 @@ precise as its uniqueness. And **run the suite that OWNS the function you are mu
 first run mutated Stage 0's discard and ran only the Stage B file, so the #635 suite that guards
 that line was never executed. The line was guarded; the run could not see it.
 
+**A fifth clause, and it came from an instance rather than from foresight: the assertion must
+ABORT, not merely fire.** An assertion that fires and lets the script carry on has the same
+failure surface as one that printed. Measured on the review side: a mutation anchored on
+`list(` where the materialisation is a list COMPREHENSION, so the uncapped count assertion
+correctly reported zero occurrences — and the script then ran pytest anyway, printing
+`34 passed` against a completely unmutated tree. Read without looking at the assertion's own
+output, that is indistinguishable from "the regression is unguarded".
+
+**This branch's battery survives that by luck of structure rather than by design, and the
+distinction is the transferable part.** A bare `assert` at module level terminates the script,
+so M3, M18 and M19 forced a retarget instead of quietly passing. Nothing in the harness was
+written to make failure stop the run — it stops because of how Python happens to treat a failed
+assert there. A harness that collected its assertions into a report, or looped over mutants
+catching exceptions, would have the review side's behaviour and none of the protection, while
+looking equally rigorous on the page.
+
+`CLAUDE.md` gained the clause as a result (PR #743): assert uncapped `src.count(anchor) == 1`
+before editing, AND abort on failure. The rule's first three clauses were written from
+reasoning; this one was found only when a harness produced a confident green on an unmutated
+tree. A rule derived from a live failure is not the same kind of claim as one derived from
+anticipation, and this log records which is which.
+
+**The same shape, one gate over.** `ruff format --check` does not reflow markdown PROSE, so the
+format gate is structurally incapable of flagging an over-length line in a `.md` file. A
+114-character line on this branch passed it green, and so did three 104-110 character lines in
+the commit that added the rule above — which is why every log edit here is checked with a
+separate `awk 'length>100'` pass. A gate that cannot fail on a class of input is not evidence
+about that class. That is the fourth trap's own sentence, applied to a different check.
+
 **The cost was two opposite wrong conclusions in a row, on the same line.** `chosen = {}` occurs
 THREE times at the same indentation across two functions of `chart_data.py` — Stage 0's
 suppression discard, Stage B's backwards-order discard, and Stage B's 1:1 pairing discard. The
