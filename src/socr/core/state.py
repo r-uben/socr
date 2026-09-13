@@ -253,6 +253,19 @@ class PageState:
     #: guard: a derivation adds a reading the page did not have, so a page with
     #: none is exactly as complete as it was before this lane existed.
     chart_derivations: int = 0
+    #: #734 Stage B: how many FILLED markdown grids on this page were bound to
+    #: one of its chart regions and compared, cell by cell, against the counts
+    #: read from the page's own vector geometry. A count, like the two above,
+    #: because the page note and the CLI both report how many.
+    chart_grids_reconciled: int = 0
+    #: #734 Stage B: how many cells of those grids CONTRADICTED geometry and had
+    #: their value withheld from the published body. Unlike the two counters
+    #: above this one IS a content loss -- a number the page carried no longer
+    #: ships -- so it demotes the page's STATUS (never ``audit_passed``, which
+    #: is the winner-SELECTION flag: flipping it discards the page's text, the
+    #: #252 defect). Zero on every page where the two readings agreed or where
+    #: geometry had no opinion.
+    chart_grid_cells_contradicted: int = 0
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume

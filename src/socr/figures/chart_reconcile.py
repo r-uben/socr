@@ -59,7 +59,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from socr.figures.chart_data import _EMPH_RE, FilledGrid, _fold, _key_atoms
+from socr.figures.chart_data import (
+    _EMPH_RE,
+    FilledGrid,
+    _fold,
+    _is_separator,
+    _key_atoms,
+    _split_row,
+)
 from socr.figures.chart_reader import INTEGER, Cell, PanelReading
 from socr.tables.label_canonical import decode_label_cell
 
@@ -648,3 +655,175 @@ def _refuse(base: GridReconciliation, reason: str) -> GridReconciliation:
         orientation=base.orientation,
         refusal=reason,
     )
+
+
+# ---------------------------------------------------------------------------
+# #734 Stage B: what a reconciled page records and ships
+# ---------------------------------------------------------------------------
+
+#: A filled grid was bound to a region and compared, cell by cell.
+GRID_RECONCILED = "chart_grid_reconciled"
+#: At least one cell of a compared grid disagreed with geometry. The cell's
+#: value is withheld from the body; BOTH numbers are kept on the event.
+GRID_CONTRADICTED = "chart_grid_contradicted"
+#: A filled grid on a chart page reached no verdict -- nothing bound it, or the
+#: reconciler refused it. Its numbers ship unchecked, and that is the finding.
+GRID_RECONCILE_REFUSED = "chart_grid_not_reconciled"
+
+#: What stands in the body where a contradicted number was. The sibling of
+#: ``chart_reader.UNRESOLVED_MARKER`` and it means a different thing: that one
+#: says geometry could not read the cell, this one says two readings of the
+#: cell disagreed and neither is published. A reader who sees it must go to the
+#: source -- which is why it is a word and not a blank.
+CONTRADICTED_MARKER = "WITHHELD"
+
+
+def withhold_contradicted(grid: FilledGrid, result: GridReconciliation) -> str | None:
+    """*grid*'s markdown with every CONTRADICTED cell replaced by the marker.
+
+    ``None`` when the grid has no contradicted cell, so a caller can leave the
+    page byte-identical in the overwhelmingly common case.
+
+    **Only contradicted cells are touched, and this is the whole policy.** A
+    cell geometry could not resolve, or never met, keeps the model's number:
+    refusing it would delete a reading on the strength of a refusal to read,
+    and on the SEP corpus that would silently drop 424 numbers on the strength
+    of a documented reader limit (#739). What a contradiction removes is one
+    number that two independent readings disagree about -- and it removes BOTH,
+    the model's and geometry's, because nothing here adjudicates between them.
+
+    The row is rebuilt from its own cells, so only the contradicted row's
+    spacing changes; every other line of the grid is left as the model wrote
+    it. Position is recovered from the labels the verdict carries, which came
+    verbatim off this grid, so the cell rewritten is the cell judged.
+    """
+    targets = {(c.bin_label, c.series_name) for c in result.cells if c.status == CONTRADICTED}
+    if not targets or not result.orientation:
+        return None
+
+    lines = grid.text.split("\n")
+    sep = next(
+        (i for i, line in enumerate(lines) if _is_separator(_split_row(line))),
+        None,
+    )
+    if sep is None:  # pragma: no cover - the grid parsed with a separator to exist
+        return None
+
+    headers = list(grid.data_headers)
+    touched = False
+    for row_index, (row_label, _cells) in enumerate(grid.rows):
+        line_index = sep + 1 + row_index
+        if line_index >= len(lines):  # pragma: no cover - rows come from these lines
+            break
+        cells = _split_row(lines[line_index])
+        for column, header in enumerate(headers):
+            identity = (
+                (header, row_label) if result.orientation == BINS_IN_HEADER else (row_label, header)
+            )
+            if identity not in targets or column + 1 >= len(cells):
+                continue
+            cells[column + 1] = CONTRADICTED_MARKER
+            touched = True
+        lines[line_index] = "| " + " | ".join(cells) + " |"
+    return "\n".join(lines) if touched else None
+
+
+def _series_coverage(result: GridReconciliation) -> list[tuple[str, int, int]]:
+    """``(series, uncovered identities, of those carrying a number)``, per series.
+
+    Per SERIES and not only per page, because "geometry never saw the December
+    column" is what a reader citing this page needs, while "an opinion on a
+    fifth of this page" hides which half was checked. Order is the reader's own.
+    """
+    out: list[tuple[str, int, int]] = []
+    index: dict[str, int] = {}
+    for entry in result.uncovered:
+        if entry.series_name not in index:
+            index[entry.series_name] = len(out)
+            out.append((entry.series_name, 0, 0))
+        position = index[entry.series_name]
+        name, total, with_count = out[position]
+        out[position] = (name, total + 1, with_count + (entry.reader_count is not None))
+    return out
+
+
+def reconciliation_note(page_num: int, results: list[GridReconciliation]) -> str:
+    """The disclosure a reconciled page carries in its own body.
+
+    Four things it must never do, each learned rather than assumed:
+
+    * **never report an unknown or a refused cell as checked.** The unchecked
+      count is stated outright, beside the checked one;
+    * **never add "unknown" to "uncovered".** A cell geometry could not resolve
+      is BOTH -- the model wrote a number nobody could check, AND a reading
+      existed that nothing compared -- so summing them double-counts one cell.
+      They answer different questions and are reported on separate lines;
+    * **never rank the coverage findings by volume.** A grid that published
+      nothing can leave a whole chart uncovered while shipping no number: that
+      is recall loss. The dangerous shape is the small one -- geometry never
+      consulted BESIDE cells that did agree and publish, a table that reads as
+      checked and is half a chart. That is reported first whatever its size;
+    * **say geometry ABSTAINED, never that it failed or disagreed.** On the SEP
+      corpus all 90 zero-resolving series refuse explicitly, every one of them
+      ``dashed_stroke`` naming the segment it cannot decompose (#739). A
+      refusal with a stated reason is not a disagreement and not a silence.
+    """
+    compared = [r for r in results if not r.refusal]
+    refused = [r for r in results if r.refusal]
+    agreed = sum(r.agreed for r in compared)
+    contradicted = sum(r.contradicted for r in compared)
+    unknown = sum(r.unknown for r in compared)
+
+    lines = [
+        f"> **Chart grids on page {page_num} — checked against the page's own geometry** — "
+        f"{len(compared)} filled grid(s) were compared cell by cell with the counts read "
+        f"from this page's vector drawings. {agreed} cell(s) agreed. "
+        f"{contradicted} cell(s) CONTRADICTED geometry and are withheld "
+        f"(shown as `{CONTRADICTED_MARKER}`; neither reading is published). "
+        f"{unknown} cell(s) carry a number geometry did not check, so they ship UNVERIFIED — "
+        "neither corroborated nor impeached."
+    ]
+    if refused:
+        lines.append(
+            f"> A further {len(refused)} grid(s) reached no verdict at all "
+            f"({'; '.join(sorted({r.refusal for r in refused}))}), so none of their "
+            "numbers was compared against anything."
+        )
+
+    for result in compared:
+        for cell in result.cells:
+            if cell.status != CONTRADICTED:
+                continue
+            lines.append(
+                f"> Region {result.region_index}, series “{cell.series_name}”, bin "
+                f"“{cell.bin_label}”: the grid says {cell.model_count}, geometry reads "
+                f"{cell.reader_count}. Both are withheld; nothing here adjudicates between them."
+            )
+
+    beside = [r for r in compared if r.uncovered_beside_published]
+    for result in beside:
+        for name, total, with_count in _series_coverage(result):
+            if not with_count:
+                continue
+            lines.append(
+                f"> Region {result.region_index}, series “{name}”: geometry read "
+                f"{with_count} count(s) across {total} bin(s) that NO cell of this grid "
+                "addressed — beside cells of the same grid that did agree and publish. "
+                "This table reads as checked and is only partly checked."
+            )
+    recall = [r for r in compared if r.uncovered and not r.uncovered_beside_published]
+    for result in recall:
+        for name, total, with_count in _series_coverage(result):
+            lines.append(
+                f"> Region {result.region_index}, series “{name}”: {total} bin(s) geometry "
+                f"read were not addressed by this grid, {with_count} of them carrying a "
+                "count. This grid published no agreed cell, so nothing here is a check "
+                "that passed — the readings are simply absent from the table."
+            )
+    if any(c.cause == CAUSE_READER_UNRESOLVED for r in compared for c in r.cells):
+        lines.append(
+            "> Where geometry has no count, it ABSTAINED with a stated reason rather than "
+            "failing silently or disagreeing; the reason is on this page's audit events, "
+            "per cell. An abstention is not evidence against the model's number."
+        )
+    return "\n".join(lines)
