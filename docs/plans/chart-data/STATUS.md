@@ -213,25 +213,24 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    closed — a NUMERIC row on such a page would still take the bins, which is item 18 — but
    the fabrication this item described is not reachable here.
 
-   **Still live, and a different thing from fabrication.** A four-word caption drawn at the
-   bin centres BELOW a row of numeric labels is absorbed as a second LINE of those labels
-   and joined into them: the bins become `1.0-Effective`, `2.0-federal`, `3.0-funds`,
-   `4.0-rate` (`/private/tmp/rev735/test_rev735n.py::test_v`). The counts are right, the
-   attested row is the real label row, and the page's own labels survive inside the joined
-   string — so this is **mislabelling, not fabrication**, and it is pre-existing on main.
-   In the partition rule's terms (`_aligned`, replaced in `c15cdcd`, bounded in `b9cf4f3`
-   and `67257c9`): a row below is a second line when its tokens fall inside the axis and
-   inside their own columns, give every column at least one token, use every token that is
-   inside those bounds, and run in order. A column's tokens are a RUN and may be several --
-   that is how `1.0-North America` survives -- and a token outside the bounds is DISCARDED
-   rather than left over, which is item 19. A caption with exactly as many words as the chart has bins satisfies that just as
-   a printed lower bound does, and nothing geometric separates them. Note what that makes
-   the bound worth here: a FIVE-word prose row is dropped only because it cannot fill four
-   columns, while a FOUR-word one at the bin centres still joins. The prose case is closed
-   only for word counts that happen to break the partition, which is arrangement
-   dependence of the kind rounds 1-6 repeatedly died on — a reason to disclose this rather
-   than to add a third selection rule. Harmless on both corpora, whose second lines are the
-   range endpoints.
+   **Still live, and a different thing from fabrication.** A four-word caption drawn at the bin
+   centres BELOW a row of numeric labels is absorbed as a second LINE of those labels and
+   joined into them: the bins become `1.0-Effective`, `2.0-federal`, `3.0-funds`, `4.0-rate`
+   (`/private/tmp/rev735/test_rev735n.py::test_v`). The counts are right, the attested row is
+   the real label row, and the page's own labels survive inside the joined string — so this is
+   **mislabelling, not fabrication**, and it is pre-existing on main. In the partition rule's
+   terms (`_aligned`, replaced in `c15cdcd`, bounded in `b9cf4f3` and `67257c9`): a row below
+   is a second line when its tokens fall inside the axis and inside their own columns, give
+   every column at least one token, use every token that is inside those bounds, and run in
+   order. A column's tokens are a RUN and may be several -- that is how `1.0-North America`
+   survives -- and a token outside the bounds is DISCARDED rather than left over, which is item
+   19. A caption with exactly as many words as the chart has bins satisfies that just as a
+   printed lower bound does, and nothing geometric separates them. Note what that makes the
+   bound worth here: a FIVE-word prose row is dropped only because it cannot fill four columns,
+   while a FOUR-word one at the bin centres still joins. The prose case is closed only for word
+   counts that happen to break the partition, which is arrangement dependence of the kind
+   rounds 1-6 repeatedly died on — a reason to disclose this rather than to add a third
+   selection rule. Harmless on both corpora, whose second lines are the range endpoints.
 
    The fragments those bounds discard are dropped silently; that is item 19.
 
@@ -270,20 +269,21 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    0's own grammar then rejects when no second line completes it. And the gate judges the
    PRIMARY row only, so a label joined from a second line is not guaranteed
    to parse as a Stage 0 key even though the row it came from did. What is true is that a
-   row carrying a token no float parse accepts cannot be the bins, and where no row below the axis is all-numeric the panel is refused.
+   row carrying a token no float parse accepts cannot be the bins, and where no row below the
+   axis is all-numeric the panel is refused.
 
-   **Measured cost: nothing on the corpus** — on all 840 `read_bins` calls the attested row
-   is all-numeric, no call has zero numeric rows below its axis, and both corpus dumps stay
-   byte-identical. The first version of the gate did NOT have that property and was caught
-   by those dumps rather than by any test: it judged each token with the raw key grammar,
-   which treats the corpora's own two-line form `0.13-` (upper bound on the next line) as
-   malformed, so it rejected the real label row on every SEP call and published `0.37`
-   where the page says `0.13-0.37`. A trailing range dash is now stripped before parsing,
-   as `_join_atoms` already does, and the case is pinned by its own test. What it does cost is charts whose bins are NOT
+   **Measured cost: nothing on the corpus** — on all 840 `read_bins` calls the attested row is
+   all-numeric, no call has zero numeric rows below its axis, and both corpus dumps stay
+   byte-identical. The first version of the gate did NOT have that property and was caught by
+   those dumps rather than by any test: it judged each token with the raw key grammar, which
+   treats the corpora's own two-line form `0.13-` (upper bound on the next line) as malformed,
+   so it rejected the real label row on every SEP call and published `0.37` where the page says
+   `0.13-0.37`. A trailing range dash is now stripped before parsing, as `_join_atoms` already
+   does, and the case is pinned by its own test. What it does cost is charts whose bins are NOT
    numeric: a histogram labelled by country or sector is now out of scope and refuses. The
-   repository's own synthetic fixtures were relabelled from `B1..B5` to `1.0..5.0` for the
-   same reason, and any reviewer probe still drawn with `B`-labels now refuses by design
-   rather than by defect.
+   repository's own synthetic fixtures were relabelled from `B1..B5` to `1.0..5.0` for the same
+   reason, and any reviewer probe still drawn with `B`-labels now refuses by design rather than
+   by defect.
 
 18. **OPEN, disclosed: ANY numeric row the bars attest becomes the bins.** The numeric
    gate stops all three round-6 constructions from publishing under prose, but "all three
