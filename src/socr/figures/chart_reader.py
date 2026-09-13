@@ -736,30 +736,40 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     the bin centres, which published ``Effective | federal | funds | rate`` with
     3, 5, 4, 2 under it at a residual of 0.0.
 
-    So a bar attests a row only if it also lies INSIDE the bin it covers
-    (``_attesting_bars``), and the winner is discarded if any other row below
-    the axis is an equally good home for the same marks (``_unruled_out_rival``)
-    -- a row the bars are silent about, carrying at least as many columns, whose
-    own spacing those bars would fit. The first closes the tie, by disqualifying
-    a bar that sweeps in from outside the two-word caption's own interval; the
-    second closes the stray and the stood-on caption, because in both the real
-    label row is sitting there with nothing said about it.
+    Round 6 answered that with two tests. The first, ``_attesting_bars``,
+    stands: a bar attests a row only if it also lies INSIDE the bin that row's
+    own centres derive for it, which is what a histogram bar does to its own
+    label and what a bar sweeping in from outside a two-word caption's interval
+    does not. Measured over all 840 ``read_bins`` calls of both corpora and the
+    reference, every attesting bar is inside its bin with at least 1.08pt of
+    clearance, and no winner moves. It is not a threshold: it compares a bar
+    against an interval the row itself derives.
 
-    The rival test is not symmetric, and the corpora are what make it so: the
-    attested row is the topmost such row on every one of those 840 calls, so a
-    silent row ABOVE the winner is a rival on a tie, while one BELOW -- where
-    every corpus page prints its unit annotation, its axis title and its
-    footnote -- must carry strictly more columns. That is also the limit of the
-    rule: the caption of the third construction, stood on by the bars, is
-    refused because the printed labels are above it, and a caption drawn BELOW a
-    chart's labels with as many words as the chart has bins is still read as
-    prose only because nothing attests it.
+    The second was a rule that discarded the winner when another row below the
+    axis was an equally good home for the same marks. **Round 7 deleted it.**
+    Two reviewers broke it in both directions -- a fabrication through it, and
+    the FALSE REFUSAL of a chart this reader otherwise reads correctly, caused
+    by nothing more than a footnote printed underneath. Narrowing it further
+    would have been a fifth round of the same exercise, so the owner ruled
+    instead on scope, and what replaces it asks about the row's own text:
 
-    Neither test is a threshold: one compares a bar against the interval the
-    row's own centres derive, the other a bar's width against the row's own
-    tightest column. Both were measured over all 840 ``read_bins`` calls of the
-    two corpora and the reference before being shipped, and neither moves a
-    single one of them.
+    **the bins are a row of NUMBERS** (``_numeric_row``). Every token of a
+    candidate row must be a number or a printed range of numbers; a caption, a
+    unit annotation, an axis title and a footnote all carry at least one word.
+    Where no row below the axis is all-numeric, the panel is refused. That
+    rejects all three of the constructions above, since each selected a row
+    containing words, and it costs the corpus nothing: on all 840 calls the
+    attested row is all-numeric and no call has zero numeric rows beneath it.
+
+    It does NOT close the class, and the limit is worth stating precisely here
+    rather than only in the plan notes. This module establishes that a row is
+    label-SHAPED and attested by the marks. It never establishes that the row
+    IS the labels. A NUMERIC annotation printed above the real bin labels, with
+    the bars standing on it, satisfies every test above and publishes counts
+    under the annotation's values -- pinned, as the behaviour it is, by
+    ``test_a_numeric_annotation_row_still_takes_the_bins``. What a chart table
+    carries is therefore UNVERIFIED unless a caller's constraint hook accepts
+    it, and nothing in this module promotes a reading past that.
 
     Where NO bar attests any row -- a panel drawn with strays alone, or a
     dashed series with no bar resting on the axis at all -- the panel is
@@ -1768,9 +1778,8 @@ def read_chart_page(
         if len(bins) < 2:
             reading.refusals[idx] = (
                 "the row of text the bars standing on this region's axis attest is not "
-                "drawn inside the axis' own span, or another row drawn below that axis "
-                "is an equally good home for those marks and nothing drawn separates "
-                "them, or no bar stands on that axis at all and nothing drawn on the "
+                "drawn inside the axis' own span, or no row below that axis carries only "
+                "numbers, or no bar stands on that axis at all and nothing drawn on the "
                 "page says which row below it carries the labels, so the region's x "
                 "bins are not corroborated by its own drawing"
             )

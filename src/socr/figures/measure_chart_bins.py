@@ -17,9 +17,8 @@ in. Typical use::
 Each argument is a directory of PDFs or a single PDF. The report gives, per
 corpus and in total, the counts the round-6 rule was chosen against: how many
 rows the bars corroborate, how often the best score ties, whether the attested
-row is the topmost row inside the axis' span, whether any winner moves when a
-bar is required to lie inside the bin it covers, and how many panels carry a
-silent rival row. Two scorings are reported side by side, because the candidate
+row is the topmost row inside the axis' span, and whether any winner moves when a
+bar is required to lie inside the bin it covers. Two scorings are reported side by side, because the candidate
 rules the round-6 notes rejected were measured against the ROUND 5 scoring
 (coverage of exactly one token centre) while the shipped reader also requires
 containment -- the same corpus gives different counts under the two, and saying
