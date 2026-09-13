@@ -1005,6 +1005,74 @@ def test_an_unreadable_page_records_that_its_grids_went_unchecked(tmp_path: Path
     assert bad_bo.text == text
 
 
+def test_the_restored_counter_matches_the_body_and_depends_on_event_order(
+    tmp_path: Path,
+) -> None:
+    """P8: all three figures take the LAST reading per key, so they depend on
+    the event stream arriving in filing order — and nothing states that.
+
+    The dependency holds today for three independent reasons, none of which is
+    a contract: the sidecar writer serialises in filing order, the restore loop
+    appends in sidecar order, and these three kinds are exempt from the skeleton
+    dedupe. Three accidents lining up is not a guarantee, and the next person to
+    touch the sidecar writer has no way to discover the dependency except by
+    breaking it — probably not immediately, since the failure is a counter
+    quietly disagreeing with the body rather than a crash.
+
+    This guard does not remove the dependency; **#742 does**, by carrying a
+    monotonic key and selecting the maximum rather than the last seen. What this
+    does is convert a silent dependency into a failing test, today, for a few
+    lines.
+
+    Deliberately in counter-versus-body form rather than asserting the sidecar's
+    order directly: it keeps working if the writer is rewritten, which is exactly
+    the change that would otherwise break the property silently. And it splices
+    only ``audit_events`` into a REAL sidecar from ``_run`` — constructing the
+    restored state by hand would test the rule instead of the path it travels.
+
+    **The second assertion retires this guard.** It pins that the order still
+    matters; when #742 lands and the figures stop depending on it, that line
+    fails and tells whoever is reading that this whole test can go.
+    """
+    from socr.figures.chart_reconcile import CONTRADICTED_MARKER
+
+    out = tmp_path / "p8out"
+    _run(tmp_path, "p8", page_text(counts_grid(**{"1.0": 9, "2.0": 9})), out)
+    sidecar = next(out.rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+
+    # Two rungs live: two cells wrong, then a candidate that gets 2.0 right, so
+    # the body ends up withholding exactly one and the count must retire the
+    # other. A single-contradiction page could not tell order from arithmetic.
+    pipeline, state, bo = _reconcile(tmp_path, "p8", page_text(counts_grid(**{"1.0": 9, "2.0": 7})))
+    bo.text = page_text(counts_grid(**{"1.0": 9}))
+    pipeline._reconcile_chart_table_grids(state, 1, bo)
+    body = bo.text.count(CONTRADICTED_MARKER)
+    assert body == 1, "the fixture must leave exactly one cell withheld"
+    assert state.pages[1].chart_grid_cells_contradicted == body
+
+    page_events = [
+        {"kind": e.kind, "engine": e.engine, "detail": e.detail, "data": e.data or {}}
+        for e in state.events
+        if getattr(e, "page_num", None) == 1
+    ]
+
+    def restored_counter(event_list: list) -> int:
+        meta["audit_events"] = event_list
+        sidecar.write_text(json.dumps(meta))
+        fresh = _state(tmp_path / "p8.pdf")
+        _pipeline()._restore_terminal_page_state(fresh, 1, bo, out)
+        return fresh.pages[1].chart_grid_cells_contradicted
+
+    # The property: a resumed page reports what its body actually holds.
+    assert restored_counter(page_events) == body
+
+    # ...and it holds ONLY because the stream arrives in filing order. Reversed,
+    # the recency rule selects the earlier reading and the counter claims a cell
+    # the body does not withhold. Retire this line — and this test — with #742.
+    assert restored_counter(list(reversed(page_events))) != body
+
+
 # ---------------------------------------------------------------------------
 # The corpus this ticket was measured on
 # ---------------------------------------------------------------------------
