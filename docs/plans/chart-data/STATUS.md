@@ -221,8 +221,10 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    string — so this is **mislabelling, not fabrication**, and it is pre-existing on main.
    In the partition rule's terms (`_aligned`, replaced in `c15cdcd`, bounded in `b9cf4f3`
    and `67257c9`): a row below is a second line when its tokens fall inside the axis and
-   inside their own columns, partition one-per-column with none left over, and run in
-   order. A caption with exactly as many words as the chart has bins satisfies that just as
+   inside their own columns, give every column at least one token, use every token that is
+   inside those bounds, and run in order. A column's tokens are a RUN and may be several --
+   that is how `1.0-North America` survives -- and a token outside the bounds is DISCARDED
+   rather than left over, which is item 19. A caption with exactly as many words as the chart has bins satisfies that just as
    a printed lower bound does, and nothing geometric separates them. Note what that makes
    the bound worth here: a FIVE-word prose row is dropped only because it cannot fill four
    columns, while a FOUR-word one at the bin centres still joins. The prose case is closed
@@ -231,14 +233,7 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    than to add a third selection rule. Harmless on both corpora, whose second lines are the
    range endpoints.
 
-   **Accepted and disclosed: a dropped fragment is silent.** The bounds DISCARD a secondary
-   token drawn outside the axis or outside its column rather than refusing the row. If the
-   fragments that remain still fill every column, the page publishes a SHORTENED label with
-   no warning, no internal issue and no refusal — e.g. a second line whose first word is set
-   past the axis end publishes the remaining words as that column's label. This is the
-   deliberate trade for not deleting whole label lines (round 6 did that, and lost five
-   printed identifiers at once), and it is recorded here because nothing in the output says
-   it happened.
+   The fragments those bounds discard are dropped silently; that is item 19.
 
 16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
    layout fallback: where no bar covers exactly one token of any row below the axis, the
@@ -314,6 +309,24 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    label-SHAPED and attested by the marks, and never that it IS the labels. It is pinned
    by `test_a_numeric_annotation_row_still_takes_the_bins` so it cannot drift silently, and
    it is unmeasured — no corpus page is known to draw it.
+
+19. **OPEN, disclosed: a discarded label fragment is silent, and that is in tension with
+   this repo's no-silent-loss rule.** The bounds on a second line (`_aligned`) DISCARD a
+   token drawn outside the axis, or inside the axis but outside every bin interval, rather
+   than refusing the row. If the fragments that remain still fill every column, the row is
+   admitted **as though the discarded token had never been drawn**: the page publishes a
+   SHORTENED label with no refusal, no internal issue, no entry in `refusals`, and nothing
+   in the cell detail. Reproduced by both reviewers — the word `revised` set at x = 300 on
+   the second line vanishes, and the published labels come back byte-identical to the
+   control drawing.
+
+   Naming it here because of the tension, not merely to record a limit. This codebase's
+   stated rule is that a wrong or dropped number must surface at every level, and this is
+   the one place the chart reader discards printed page text without surfacing anything.
+   The alternative was worse and was measured: round 6 refused the whole second line when it
+   could not account for every token, which silently dropped five printed identifiers at
+   once (`1.0`..`5.0` lost their categories). Discarding the stray and keeping the real
+   endpoints is the better of the two, and it is still a loss that nothing announces.
 
 **Owner ruling, 2026-09-13 — best-effort numeric-chart extraction.** The owner has accepted
 best-effort extraction of numeric charts as the product scope, against the alternative of
