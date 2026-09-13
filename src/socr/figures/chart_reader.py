@@ -655,10 +655,12 @@ def _numeric_row(row: WordRow) -> bool:
     number, which is the step ``_key_atoms`` does not take: it accepts ``B1``
     and ``Effective`` as well-formed keys, and neither is a number.
 
-    Two things this gate does NOT promise. It admits a numeric PREFIX: with the
-    trailing range dash stripped, ``0.13-`` passes on the strength of ``0.13``,
-    so a row of dangling lower bounds with no second line to complete them is
-    accepted and publishes those labels as drawn. And it judges the PRIMARY row
+    Two things this gate does NOT promise. It admits a numeric PREFIX: the strip
+    below removes a whole RUN of trailing range dashes, so ``0.13-`` passes on
+    the strength of ``0.13`` and so does ``0.13--``. A row of such dangling
+    lower bounds, with no second line to complete them, is accepted and
+    publishes those labels as drawn -- and ``0.13--`` is then a label Stage 0's
+    own grammar rejects. And it judges the PRIMARY row
     only -- a second line joined onto it (``_aligned``) is not re-checked, so a
     published label is not guaranteed to parse as a Stage 0 key even though the
     row it came from did.

@@ -1166,6 +1166,7 @@ def _numeric_panel(
     path: Path,
     *,
     labels: tuple[str, ...] = BINS,
+    centres: list[float] | None = None,
     label_y: float = BASE + 10.0,
     extra_row: tuple[str, ...] | None = None,
     extra_centres: list[float] | None = None,
@@ -1186,11 +1187,12 @@ def _numeric_panel(
         page.draw_line(fitz.Point(X0, y), fitz.Point(X0 + 10.0, y), width=0.4)
         page.draw_line(fitz.Point(X1 - 10.0, y), fitz.Point(X1, y), width=0.4)
         page.insert_text(fitz.Point(X1 + 5.0, y + 2.0), str(value), fontsize=5)
-    for centre, label in zip(_R7_CENTRES, labels, strict=True):
+    columns = centres or _R7_CENTRES
+    for centre, label in zip(columns, labels, strict=True):
         page.insert_text(fitz.Point(centre - len(label) * 1.4, label_y), label, fontsize=5)
-    centres = extra_centres or [130.0, 190.0, 250.0, 310.0]
+    extra = extra_centres or [130.0, 190.0, 250.0, 310.0]
     if extra_row is not None:
-        for centre, word in zip(centres, extra_row, strict=True):
+        for centre, word in zip(extra, extra_row, strict=True):
             page.insert_text(fitz.Point(centre - len(word) * 1.2, extra_y), word, fontsize=5)
     page.draw_rect(
         fitz.Rect(296.0, BASE - 102.0, 304.0, BASE - 98.0),
@@ -1199,7 +1201,7 @@ def _numeric_panel(
         width=0.3,
     )
     page.insert_text(fitz.Point(308.0, BASE - 98.5), SOLID, fontsize=5)
-    for centre, count in zip(centres if bars_on_extra else _R7_CENTRES, _R7_COUNTS, strict=True):
+    for centre, count in zip(extra if bars_on_extra else columns, _R7_COUNTS, strict=True):
         page.draw_rect(
             fitz.Rect(centre - 4.0, BASE - count * UNIT, centre + 4.0, BASE),
             color=(0, 0, 0),
@@ -1440,10 +1442,23 @@ def test_every_published_bin_label_parses_as_a_stage_0_key(tmp_path: Path) -> No
     dump: the numeric gate's first version relabelled every SEP page from
     ``0.13-0.37`` to ``0.37``, and the partition rule joined out-of-axis prose
     into genuine ranges as ``0.13-Additional 0.37``, whose key is malformed.
-    Neither needs a corpus to detect -- every label this reader publishes is
-    supposed to parse through the grammar Stage 0 uses for a column key, and
-    that is asserted here directly, hermetically, over the shapes the reviews
-    produced.
+    Neither needs a corpus to detect, so the property is asserted here directly
+    and hermetically over the shapes the reviews produced.
+
+    **Scope, because the property is narrower than it sounds.** What holds is
+    that the labels of a NUMERIC bin row parse. It is NOT true of every label
+    this reader publishes: ``1.0-North America``, which
+    ``tests/test_gh635_chart_reader.py`` requires as correct output, is rejected
+    by ``_key_atoms`` because a multi-word run is not a whole token. That is the
+    standing exception, and it is required output rather than a defect.
+
+    The ``spread_centres`` drawing earns its place twice over. Bounding a second
+    line by its column's interval ALONE looks sufficient on tightly-packed
+    labels, but ``_bin_edges`` mirrors the outer two edges from the neighbouring
+    half-gap, so on labels spread across the axis those edges reach past its
+    ends: centres 130/210/290/370 on a 100..400 axis give edges 90..410, and a
+    word drawn at x=95 is outside the axis and inside a bin. Every other drawing
+    here has tight centres and passes either way.
 
     Note what this does NOT assert: that the label is the RIGHT one. A prose
     caption drawn at the bin centres is joined in as ``1.0-Effective``, which
@@ -1477,6 +1492,14 @@ def test_every_published_bin_label_parses_as_a_stage_0_key(tmp_path: Path) -> No
             extra_y=BASE + 10.0,
             label_y=BASE + 26.0,
             bars_on_extra=True,
+        ),
+        # Columns spread across the axis, so the outer bin intervals reach past
+        # its ends, with one page word drawn outside each end.
+        "spread_centres": dict(
+            centres=[130.0, 210.0, 290.0, 370.0],
+            extra_row=("Additional", "0.37", "0.62", "0.87", "1.12", "footnote"),
+            extra_centres=[95.0, 130.0, 210.0, 290.0, 370.0, 405.0],
+            **ranged,
         ),
     }
     published = 0

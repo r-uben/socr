@@ -219,10 +219,16 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    `4.0-rate` (`/private/tmp/rev735/test_rev735n.py::test_v`). The counts are right, the
    attested row is the real label row, and the page's own labels survive inside the joined
    string — so this is **mislabelling, not fabrication**, and it is pre-existing on main.
-   In the partition rule's terms (`_aligned`, replaced in `c15cdcd`): a row below is a
-   second line when its tokens partition one-per-column with none left over and the runs in
-   order, and a caption with exactly as many words as the chart has bins satisfies that
-   just as a printed lower bound does. Nothing geometric separates them. Harmless on both
+   In the partition rule's terms (`_aligned`, replaced in `c15cdcd`, bounded in `b9cf4f3`
+   and `67257c9`): a row below is a second line when its tokens fall inside the axis and
+   inside their own columns, partition one-per-column with none left over, and run in
+   order. A caption with exactly as many words as the chart has bins satisfies that just as
+   a printed lower bound does, and nothing geometric separates them. Note what that makes
+   the bound worth here: a FIVE-word prose row is dropped only because it cannot fill four
+   columns, while a FOUR-word one at the bin centres still joins. The prose case is closed
+   only for word counts that happen to break the partition, which is arrangement
+   dependence of the kind rounds 1-6 repeatedly died on — a reason to disclose this rather
+   than to add a third selection rule. Harmless on both
    corpora, whose second lines are the range endpoints.
 
 16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
