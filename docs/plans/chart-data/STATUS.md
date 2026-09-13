@@ -129,16 +129,24 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    discrimination at all.
 7. **Stage 2 is untouched.** No model is consulted; geometry is the only authority, as
    the design requires before proposals can be reconciled against it.
-8. **One document is not a defect rate.** Every claim about accuracy here is measured on
-   a single Fed SEP page, now read independently by a second reviewer through two
-   channels that share no code with the implementation (raw operators with bin
-   boundaries taken from the staircase risers, and a 600-DPI raster ink read): zero
-   disagreements over all 65 cells. The claim is "correct on this page", not "correct".
-   The five refusal paths added in rounds 2, 3 and 4 are exercised by synthetic drawings
-   only, because this fixture draws no bar spanning two bins, no staircase that stops
-   without descending, no gap whose far end is unresolvable, and no stroke thick enough
-   to defeat the half-count bound on either witness of a zero (its 1.0-1.5 pt strokes sit
-   ~2.4x clear of its 1.78 pt half count).
+8. **198 pages of measurement, and still no per-cell defect rate.** Accuracy is measured
+   two ways, and they answer different questions. On the single Fed SEP fixture page
+   (`dotplot-p20.pdf`) a second reviewer annotated all 65 cells independently through two
+   channels sharing no code with the implementation — raw operators with bin boundaries
+   taken from the staircase risers, and a 600-DPI raster ink read — with zero
+   disagreements. That page still carries the only per-cell oracle there is. On the
+   #735 branch the reader was then run over 198 pages: the 23 Fed SEP projection pages
+   and the 175 FOMC minutes pages (35 meetings × Figures 3.A–3.E). Those have **no
+   per-cell oracle**. What they have is an independent consistency check: across the 175
+   minutes pages, 610 fully-resolved current-meeting series produce exactly one
+   participant count per meeting, with the longer-run panels one below it and **zero
+   stragglers over 35 meetings**, with no total supplied to the reader. That is strong
+   corroboration and it is not a defect rate. The seven refusal paths now in the reader
+   (rounds 2, 3 and 4 of #635, plus #735's compound-path guard, panel residual gate and
+   uncorroborated-label-row refusal) are exercised by synthetic drawings only, because
+   neither corpus draws a bar spanning two bins, a staircase that stops without
+   descending, a gap whose far end is unresolvable, a stroke thick enough to defeat the
+   half-count bound, or a page ground other than white.
 9. **A stray bar refuses a bin it barely touches.** `_doubted_by` is a raw interval
    overlap with no tolerance, so a bar of unknown binning that reaches 0.14 pt into the
    next bin's interval refuses that whole bin. Round 2 made strays much more common (a bar
@@ -156,6 +164,193 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    skipped when `~/Data/socr/fixtures/dotplot/dotplot-p20.pdf` is absent, which it is on
    CI. The strongest evidence in the ticket is therefore unenforced on every CI run; a
    green tick does not mean the golden was checked.
+
+12. **A region holding two panels reads one of them unless their tick columns differ.**
+   Two plots in one region used to read as one: the lower axis was selected, the upper
+   title was taken, and the lower chart's bars were published under it at a calibration
+   residual of 0.0. The reader now counts the plot frames in a region and refuses a region
+   that holds more than one — a refusal, not a split, because the region index is the
+   identity the crops and the Stage 0 notes are keyed on, so the reader cannot manufacture
+   new ones. Two things bound that count, and both were measured by the #735 reviewers.
+   First, the count is by LADDER IDENTITY: `_span_groups` keys a ladder on its exact x
+   span, so two plots stacked in the same column draw one span group holding both ladders'
+   heights, every candidate axis reads that one merged ladder, and the region holds one
+   frame by this count. What catches that drawing is the residual gate instead — a ladder
+   of doubled length cannot fit one scale — so the outcome is still a refusal, by a
+   different route. The refusal added here fires only where the plots' tick columns differ
+   in x. Second, where the upper plot carries NO tick ladder of its own there is one frame
+   to find, the calibration closes cleanly off the lower one, the lower panel reads
+   correctly, and the upper panel is neither read nor refused — one crop covering both, one
+   table showing one, no internal issue. That last case is the surviving silent loss, and
+   closing it belongs to the region detector, which is what draws the boundary in the first
+   place. Found by the #735 reviewers (`test_rev735b.py::test_d_...`, `test_rev735c.py`,
+   `test_rev735f.py`, `test_astra_735.py::test_good_residual_...`); the ladder-identity
+   limit is pinned as a control in `tests/test_gh735_sep_reader.py`.
+13. **`_ladders_agree` has no bound relative to the tick pitch.** The two copies of a tick
+   ladder are compared within half their own stroke width, which is the right resolution
+   for a rounding difference but is not scaled to what a count is worth: a 4 pt
+   disagreement against a 20 pt pitch is refused at a 0.4 pt stroke and accepted at a 9 pt
+   one. It cannot produce a wrong number — a displaced ladder moves `zero_y`, which lands
+   in `cal.residual`, which both the panel gate and `_resolve` charge — so it costs recall
+   or refusal, never correctness. Recorded rather than charged.
+
+14. **#734 is not closed by the #735 branch: a FILLED model grid never reaches the
+   reader.** `_derive_chart_tables` in `src/socr/pipeline/orchestrator.py` opens with a
+   structural pre-check, `if not find_empty_skeletons(text): return 0`, so chart derivation
+   runs only where the model left an EMPTY grid. A model that fills its chart table with
+   invented numbers bypasses the geometry path entirely, and nothing reconciles its values
+   against what the page draws. The reader-side half of #734 (five panels collapsing into
+   one region) is fixed; the reconciliation half is not, and #734 stays open. Found by the
+   #735 reviewer by source inspection, not by a pipeline run.
+
+15. **Labels drawn as vector art: the panel now REFUSES, and a caption at the bin centres
+   still mislabels.** Where the bin labels are OUTLINED rather than set as text, the page
+   carries no tokens on the label row at all. Through round 6 the bars then attested the
+   nearest prose row and the panel published its counts under that row's words. **At this
+   build it refuses**: the caption that used to take the bins is prose, and round 7's
+   numeric gate rejects it (`/private/tmp/rev735/test_rev735g.py::test_k`, which published
+   on every earlier commit of this branch and on `3cbf8a9`). The underlying weakness is NOT
+   closed — a NUMERIC row on such a page would still take the bins, which is item 18 — but
+   the fabrication this item described is not reachable here.
+
+   **Still live, and a different thing from fabrication.** A four-word caption drawn at the bin
+   centres BELOW a row of numeric labels is absorbed as a second LINE of those labels and
+   joined into them: the bins become `1.0-Effective`, `2.0-federal`, `3.0-funds`, `4.0-rate`
+   (`/private/tmp/rev735/test_rev735n.py::test_v`). The counts are right, the attested row is
+   the real label row, and the page's own labels survive inside the joined string — so this is
+   **mislabelling, not fabrication**, and it is pre-existing on main. In the partition rule's
+   terms (`_aligned`, replaced in `c15cdcd`, bounded in `b9cf4f3` and `67257c9`): a row below
+   is a second line when its tokens fall inside the axis and inside their own columns, give
+   every column at least one token, use every token that is inside those bounds, and run in
+   order. A column's tokens are a RUN and may be several -- that is how `1.0-North America`
+   survives -- and a token outside the bounds is DISCARDED rather than left over, which is item
+   19. A caption with exactly as many words as the chart has bins satisfies that just as a
+   printed lower bound does, and nothing geometric separates them. Note what that makes the
+   bound worth here: a FIVE-word prose row is dropped only because it cannot fill four columns,
+   while a FOUR-word one at the bin centres still joins. The prose case is closed only for word
+   counts that happen to break the partition, which is arrangement dependence of the kind
+   rounds 1-6 repeatedly died on — a reason to disclose this rather than to add a third
+   selection rule. Harmless on both corpora, whose second lines are the range endpoints.
+
+   The fragments those bounds discard are dropped silently; that is item 19.
+
+16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
+   layout fallback: where no bar covers exactly one token of any row below the axis, the
+   region has no bins and is refused. Four successive fallbacks were tried and each
+   published a prose row as the bins with fabricated counts at a perfect residual — the
+   densest row (the page's footnote), the only row in span, the first row, and both of the
+   last two required together (#735 review rounds 1–4, and `read_bins`' docstring). What it
+   costs is a dashed series with no bar anywhere on its axis, which now reads nothing. That
+   branch is reached 0 times in 835 calls over the 198 corpus pages, and both corpus dumps
+   are byte-identical across the change; the loss is therefore synthetic so far, and it is
+   a refusal rather than a wrong number. The 14 synthetic drawings in
+   `tests/test_gh635_chart_reader.py` whose point was the outline now draw one bar
+   (`WITNESS`) so their own subject still reads, and the refusal itself is pinned as a
+   difference against them.
+
+17. **A bar standing on a prose row made that row the bins (round 6), and the geometric
+   defence of it was abandoned in round 7.** Round 6 added two admission tests: a bar
+   attests a row only if it lies INSIDE the bin that row's own centres derive
+   (`_attesting_bars`), and the winner was discarded when a silent row below the axis was
+   an equally good home for the same marks (`_unruled_out_rival`). Two reviewers then broke
+   the second one in both directions — a fabrication through it, and a FALSE REFUSAL of a
+   chart the reader otherwise reads correctly, caused by nothing more than a footnote
+   printed under the chart. Round 7 **deletes `_unruled_out_rival` outright**; it is not
+   patched or narrowed. `_attesting_bars` is kept, which neither reviewer could defeat.
+
+   In its place, one rule: **every token of the chosen row must be a number, or a range of
+   numbers, as printed** (`_numeric_row`). It uses Stage 0's own key grammar
+   (`chart_data._key_atoms`) so the two halves of the feature cannot drift, and then
+   requires each atom to parse as a number — the step that grammar does not take, since it
+   accepts `B1` and `Effective` as well-formed keys. The test is a FLOAT PARSE, not a word
+   test, and the difference matters in both directions: it admits a numeric prefix, since
+   `0.13-` passes on the strength of `0.13` once the trailing range dash is stripped. The
+   strip removes a whole RUN of dashes, so `0.13--` passes too, and publishes a label Stage
+   0's own grammar then rejects when no second line completes it. And the gate judges the
+   PRIMARY row only, so a label joined from a second line is not guaranteed
+   to parse as a Stage 0 key even though the row it came from did. What is true is that a
+   row carrying a token no float parse accepts cannot be the bins, and where no row below the
+   axis is all-numeric the panel is refused.
+
+   **Measured cost: nothing on the corpus** — on all 840 `read_bins` calls the attested row is
+   all-numeric, no call has zero numeric rows below its axis, and both corpus dumps stay
+   byte-identical. The first version of the gate did NOT have that property and was caught by
+   those dumps rather than by any test: it judged each token with the raw key grammar, which
+   treats the corpora's own two-line form `0.13-` (upper bound on the next line) as malformed,
+   so it rejected the real label row on every SEP call and published `0.37` where the page says
+   `0.13-0.37`. A trailing range dash is now stripped before parsing, as `_join_atoms` already
+   does, and the case is pinned by its own test. What it does cost is charts whose bins are NOT
+   numeric: a histogram labelled by country or sector is now out of scope and refuses. The
+   repository's own synthetic fixtures were relabelled from `B1..B5` to `1.0..5.0` for the same
+   reason, and any reviewer probe still drawn with `B`-labels now refuses by design rather than
+   by defect.
+
+18. **OPEN, disclosed: ANY numeric row the bars attest becomes the bins.** The numeric
+   gate stops all three round-6 constructions from publishing under prose, but "all three
+   refuse" overstates it: two refuse outright, and the one whose stray mark sits among real
+   numeric labels reads those labels and leaves the bins the stray contests UNRESOLVED. It
+   does not close the class, and the class is wider than the first statement of
+   this item allowed. What the reader requires of a row is only that it is all-numeric,
+   that its tokens are inside the axis' span, and that the bars stand inside the bins its
+   own centres derive. **Vertical order is not consulted at all** — with the rival rule
+   deleted in round 7, nothing in the reader compares a candidate row's position against
+   any other row's.
+
+   So the route has at least two instances of one shape, both reproduced against this
+   build. Print real bin labels `1.0 2.0 3.0 4.0` at x = 160, 180, 200, 220 and a numeric
+   annotation `0 5 10 15` at x = 130, 190, 250, 310, then stand four 8pt bars of 3, 5, 4, 2
+   on the annotation's positions. With the annotation **above** the labels the panel
+   publishes 3, 5, 4, 2 under `0 | 5 | 10 | 15`; with the same annotation **below** them it
+   publishes identically (`/private/tmp/rev735/test_rev735m.py::test_s`). Every annotation
+   token parses, every bar lies wholly inside its annotation-derived 60pt bin, and no bar
+   covers a real label centre.
+
+   This is the owner-accepted class, not a new one: the reader establishes that a row is
+   label-SHAPED and attested by the marks, and never that it IS the labels. It is pinned
+   by `test_a_numeric_annotation_row_still_takes_the_bins` so it cannot drift silently, and
+   it is unmeasured — no corpus page is known to draw it.
+
+19. **OPEN, disclosed: a discarded label fragment is silent, and that is in tension with
+   this repo's no-silent-loss rule.** The bounds on a second line (`_aligned`) DISCARD a
+   token drawn outside the axis, or inside the axis but outside every bin interval, rather
+   than refusing the row. If the fragments that remain still fill every column, the row is
+   admitted **as though the discarded token had never been drawn**: the page publishes a
+   SHORTENED label with no refusal, no internal issue, no entry in `refusals`, and nothing
+   in the cell detail. Reproduced by both reviewers — the word `revised` set at x = 300 on
+   the second line vanishes, and the published labels come back byte-identical to the
+   control drawing.
+
+   Naming it here because of the tension, not merely to record a limit. This codebase's
+   stated rule is that a wrong or dropped number must surface at every level, and this is
+   the one place the chart reader discards printed page text without surfacing anything.
+   The alternative was worse and was measured: round 6 refused the whole second line when it
+   could not account for every token, which silently dropped five printed identifiers at
+   once (`1.0`..`5.0` lost their categories). Discarding the stray and keeping the real
+   endpoints is the better of the two, and it is still a loss that nothing announces.
+
+**Owner ruling, 2026-09-13 — best-effort numeric-chart extraction.** The owner has accepted
+best-effort extraction of numeric charts as the product scope, against the alternative of
+refusing every mapping the reader cannot prove. What that means, stated plainly so no
+reader of these tables is misled:
+
+* the reader establishes that a row is **label-shaped** (all numeric) and **attested** by
+  the marks standing on the axis. It does **not** establish that the row IS the bin labels,
+  and item 18 is a live construction in which it is not;
+* published chart tables are **UNVERIFIED** unless a caller's `chart_constraint_hook`
+  accepts them. The banner on every derived block says so, and nothing in Stage 1 promotes
+  a reading to verified;
+* the counts themselves are geometry, not guesses — an integer is emitted only where the
+  measured interval admits exactly one — but the COLUMN those counts are published under
+  rests on the attestation above.
+
+**Scope of every number above.** All 835 measured `read_bins` calls come from the 198
+dot-plot pages of the two Fed corpora, plus 5 more on the reference fixture. The other
+corpora in `~/Data/socr` — 29 documents, 84 pages, BoE, ECB, Banxico and the older Fed
+samples — produce **zero** calls into `read_bins`: `chart_region_bboxes` finds 49 chart
+regions among them, and not one yields a frame and calibration the reader will read bins
+for. So "no real page needs this" and "no real page is harmed by this" are measured on the
+dot-plot corpus and *assumed* everywhere else, on the strength of a reader that declines
+those pages earlier.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 

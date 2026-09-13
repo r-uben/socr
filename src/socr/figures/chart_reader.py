@@ -62,10 +62,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from socr.figures.chart_data import _key_atoms
+
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/1"
+READER_VERSION = "635-stage1/9"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -100,6 +102,22 @@ _NUM_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)$")
 #: A key's atoms are split on the range dash, exactly as Stage 0 splits a
 #: column key, so a derived bin label and a withheld one are the same string.
 _ATOM_JOIN = "-"
+#: The dash codepoints a page may set a printed range with. A label drawn over
+#: two lines carries the connector at the end of its upper line -- ``2.13-``
+#: over ``2.37``, and the Fed sets it as U+2212 -- so joining the atoms as
+#: drawn produces ``2.13--2.37``, which Stage 0's ``_key_atoms`` rejects as a
+#: key with an empty part. On the corpora measured for #735 that is 2 072 of
+#: 7 077 labels across 46 of 198 pages: a derived grid that can never be
+#: matched to a withheld one. The connector is stripped from an atom that has
+#: another atom after it, and nowhere else -- a trailing dash on the LAST atom
+#: is the page's own text and is left alone.
+_RANGE_DASHES = "-\u2212\u2013\u2014"
+
+
+def _join_atoms(atoms: list[str]) -> str:
+    """The bin label: the atoms as drawn, joined by exactly one range dash."""
+    joined = [a.rstrip(_RANGE_DASHES) for a in atoms[:-1]] + [atoms[-1]]
+    return _ATOM_JOIN.join(joined)
 
 
 # ---------------------------------------------------------------------------
@@ -222,15 +240,42 @@ def _stroked_horizontals(marks: list[Mark]) -> list[Mark]:
     return [m for m in marks if not m.filled and not m.dashed and m.horizontal]
 
 
-def _span_groups(marks: list[Mark]) -> dict[tuple[float, float], list[float]]:
-    groups: dict[tuple[float, float], list[float]] = {}
+def _span_groups(marks: list[Mark]) -> dict[tuple[float, float], tuple[list[float], float]]:
+    """Group stroked horizontals by span: ``span -> (tick heights, tolerance)``.
+
+    The tolerance travelling with each group is the widest half stroke width
+    any of its marks was drawn at -- the page's own coordinate resolution for
+    those marks, and the scale at which two of them can be said to agree.
+    """
+    groups: dict[tuple[float, float], list[Mark]] = {}
     for m in marks:
-        groups.setdefault((round(m.x0, 3), round(m.x1, 3)), []).append(m.cy)
-    return {span: sorted({round(y, 3) for y in ys}) for span, ys in groups.items()}
+        groups.setdefault((round(m.x0, 3), round(m.x1, 3)), []).append(m)
+    return {
+        span: (
+            sorted({round(m.cy, 3) for m in members}),
+            max(m.tolerance for m in members),
+        )
+        for span, members in groups.items()
+    }
 
 
-def find_frame(marks: list[Mark]) -> Frame | None:
-    """The panel's axis line and its tick values, or ``None``.
+def _ladders_agree(a: list[float], b: list[float], tolerance: float) -> bool:
+    """Two tick ladders tick the same heights, read at the page's resolution.
+
+    A ladder drawn at each end of the axis is the same ladder drawn twice, and
+    the two copies carry the generator's own rounding: on the Fed SEP pages
+    they disagree by up to 0.053pt against a 0.336pt tick stroke (#735). Exact
+    equality on rounded floats called that a contradiction and discarded the
+    axis. The marks cannot locate an edge better than half their own stroke
+    width, so that is the resolution the comparison is made at -- no constant.
+    """
+    if len(a) != len(b):
+        return False
+    return all(abs(x - y) <= max(tolerance, 1e-9) for x, y in zip(a, b, strict=False))
+
+
+def find_frames(marks: list[Mark]) -> list[Frame]:
+    """Every distinct plot frame drawn in *marks*, lowest axis first.
 
     An axis is not "a long line"; it is *the line the ticks attach to*. So the
     two are found together: a candidate axis is a stroked horizontal, and its
@@ -241,21 +286,24 @@ def find_frame(marks: list[Mark]) -> Frame | None:
     by being the candidate's own span; the page's header rule attaches to
     nothing and is never a candidate at all.
 
-    Among the candidates that have ladders, the axis is the LOWEST -- the plot's
-    bottom rule, the one a bar rests on. Ladders that disagree about which
-    heights are ticked (a left and a right ladder must agree) abstain, because a
-    scale fitted to one of two contradictory ladders is a guess.
+    One plot is drawn with several such candidates -- its bottom rule and its
+    top rule both enclose the same ticks -- so the candidates are grouped by
+    the LADDER they read, and each group yields one frame: the lowest candidate
+    of that group, the rule a bar rests on. Two groups mean two plots, drawn in
+    whatever the caller handed in as one region. Ladders that disagree about
+    which heights are ticked (a left and a right ladder must agree) abstain,
+    because a scale fitted to one of two contradictory ladders is a guess.
     """
     horizontals = _stroked_horizontals(marks)
     if not horizontals:
-        return None
+        return []
     groups = _span_groups(horizontals)
-    best: tuple[Mark, tuple[float, ...]] | None = None
+    by_ladder: dict[tuple[float, ...], Mark] = {}
     for axis in horizontals:
         span = (round(axis.x0, 3), round(axis.x1, 3))
         ladders = [
-            ys
-            for other, ys in groups.items()
+            (ys, tol)
+            for other, (ys, tol) in groups.items()
             if other != span
             and len(ys) >= 2
             and span[0] <= other[0]
@@ -264,18 +312,23 @@ def find_frame(marks: list[Mark]) -> Frame | None:
         ]
         if not ladders:
             continue
-        if len({tuple(ys) for ys in ladders}) != 1:
+        resolution = max(tol for _ys, tol in ladders)
+        first = ladders[0][0]
+        if not all(_ladders_agree(first, ys, resolution) for ys, _tol in ladders[1:]):
             logger.debug("chart_reader: tick ladders disagree at y=%.2f; skipping", axis.cy)
             continue
-        ticks = tuple(ladders[0])
+        ticks = tuple(first)
         if any(abs(axis.cy - t) <= max(axis.tolerance, 1e-6) for t in ticks):
             continue
-        if best is None or axis.cy > best[0].cy:
-            best = (axis, ticks)
-    if best is None:
-        return None
-    axis, ticks = best
-    return Frame(baseline=axis.cy, x0=axis.x0, x1=axis.x1, tick_ys=ticks)
+        held = by_ladder.get(ticks)
+        if held is None or axis.cy > held.cy:
+            by_ladder[ticks] = axis
+    found = [
+        Frame(baseline=axis.cy, x0=axis.x0, x1=axis.x1, tick_ys=ticks)
+        for ticks, axis in by_ladder.items()
+    ]
+    found.sort(key=lambda f: -f.baseline)
+    return found
 
 
 @dataclass(frozen=True)
@@ -473,23 +526,192 @@ def _alnum_tokens(row: WordRow) -> list[tuple[float, str]]:
     return [(cx, text) for cx, _w, text in row.tokens if any(ch.isalnum() for ch in text)]
 
 
-def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
+def _aligned(row: WordRow, centres: list[float], span: tuple[float, float]) -> list[str] | None:
     """The row's token nearest each of *centres*, or ``None`` if it does not align.
 
     This is how a two-line tick label is printed: the upper endpoint above the
-    lower one, in the same column. A row that reuses a token for two columns,
-    or whose picks run backwards, is not a second line of these labels.
+    lower one, in the same column. The row is read as a PARTITION of its own
+    tokens: each token goes to the column whose centre it is nearest, and the
+    row is a second line only if every column receives at least one token, no
+    token is left over, and the columns' runs are drawn in order. A run may be
+    longer than one token, which is how a multi-word entry (``North America``
+    above a column whose neighbours are single words) stays with its column.
+
+    Both halves of that are load-bearing, and each was a bug. Picking one token
+    per column and ignoring the REST let a four-label row be absorbed into a
+    two-word caption and published as ``Percent-B2 | range-B3`` (#735 round 6).
+    Requiring exactly one token per column instead, which is what round 6 first
+    shipped, threw the whole line away when a single entry ran to two words: a
+    row of five categories lost all five, and the panel published bare ``A``,
+    ``B``, ``C``, ``D``, ``E`` with no refusal, silently dropping identifiers
+    the page had printed (#735 round 6 review). Partitioning keeps every
+    fragment the page drew and still refuses a row that cannot account for
+    itself.
+
+    A token owns a column only if it is drawn inside the axis' own *span* AND
+    inside that column's own interval; a token outside either is not part of
+    this row's label at all. Both bounds are needed. The intervals are derived
+    from the primary row's centres, and the outer two mirror a half-gap, so the
+    first and last of them reach past the end of the axis -- a word printed just
+    beyond the axis would sit inside the mirrored edge and be joined in. The
+    span is the same discriminator the primary row is already held to.
+    Without that bound the outer columns extend forever, because nearest-centre
+    assignment has to put every token somewhere: two words set on the second
+    line's baseline but outside the axis -- one at each end -- were joined into
+    the outer bins as ``0.13-Additional 0.37`` and ``0.88-1.12 footnote``,
+    corrupting two already-correct numeric labels with page prose and emitting
+    keys Stage 0's own grammar rejects (#735 round 7 review). The bound drops
+    such a token rather than the whole line, so the real endpoints survive; a
+    row that then cannot fill every column is still not a second line.
+
+    Measured over the 840 ``read_bins`` calls of both corpora and the reference:
+    826 second lines are absorbed (821 over the two corpora, 5 on the
+    reference), and every one carries exactly one token per column, so no
+    corpus label is joined differently by any of these three rules.
     """
     tokens = _alnum_tokens(row)
     if len(tokens) < len(centres):
         return None
-    picked = [min(range(len(tokens)), key=lambda i: abs(tokens[i][0] - c)) for c in centres]
-    if len(set(picked)) != len(picked) or picked != sorted(picked):
+    edges = _bin_edges(centres)
+    x0, x1 = span
+    owner: list[int] = []
+    owned: list[str] = []
+    for cx, text in tokens:
+        if not x0 <= cx <= x1:
+            continue
+        column = min(range(len(centres)), key=lambda i: abs(cx - centres[i]))
+        if not edges[column] <= cx <= edges[column + 1]:
+            continue
+        owner.append(column)
+        owned.append(text)
+    if len(owned) < len(centres):
         return None
-    return [tokens[i][1] for i in picked]
+    if sorted(set(owner)) != list(range(len(centres))) or owner != sorted(owner):
+        return None
+    runs: list[list[str]] = [[] for _ in centres]
+    for text, column in zip(owned, owner, strict=True):
+        runs[column].append(text)
+    return [" ".join(run) for run in runs]
 
 
-def read_bins(frame: Frame, rows: list[WordRow]) -> list[Bin]:
+def _bin_edges(centres: list[float]) -> list[float]:
+    """The ``len(centres) + 1`` interval edges of a row of label centres.
+
+    Midpoints between consecutive centres, the outer two mirrored from the
+    neighbouring half-gap. No uniform-spacing assumption and no tolerance.
+    """
+    edges = [
+        (centres[i - 1] + c) / 2.0 if i else c - (centres[1] - centres[0]) / 2.0
+        for i, c in enumerate(centres)
+    ]
+    edges.append(centres[-1] + (centres[-1] - centres[-2]) / 2.0)
+    return edges
+
+
+def _attesting_bars(row: WordRow, bars: list[Mark]) -> list[Mark]:
+    """The bars that stand on exactly one of this row's bins, INSIDE it.
+
+    Covering exactly one token centre is half of what a histogram bar does to
+    its own label. The other half is that it stops where the neighbouring bin
+    starts: a bar is drawn within its bin, never across the boundary. A prose
+    word that a bar happens to cover near the end of its sweep fails the second
+    half, because the interval two adjacent words derive is a fraction of the
+    bar's own width.
+
+    Measured over the 840 ``read_bins`` calls of both corpora and the reference:
+    every bar that attested the winning row also lay inside the bin it covered,
+    with at least 1.08pt of clearance, and no winner moved.
+    """
+    centres = [cx for cx, _t in _alnum_tokens(row)]
+    if len(centres) < 2:
+        return []
+    edges = _bin_edges(centres)
+    attesting: list[Mark] = []
+    for bar in bars:
+        covered = [i for i, c in enumerate(centres) if bar.x0 <= c <= bar.x1]
+        if len(covered) != 1:
+            continue
+        i = covered[0]
+        if edges[i] <= bar.x0 and bar.x1 <= edges[i + 1]:
+            attesting.append(bar)
+    return attesting
+
+
+def _numeric_row(row: WordRow) -> bool:
+    """Is every token of *row* a number, or a range of numbers, as printed?
+
+    This is the whole of what round 7 asks of a candidate bin row, and it is a
+    question about the row's own text rather than about the marks. A histogram
+    of a numeric variable prints numeric bins; a caption, a unit annotation, an
+    axis title and a footnote all carry at least one word. Nothing else in this
+    module reads what a token says, and this does not read what it MEANS: it
+    asks only whether the token is a number.
+
+    The grammar is ``chart_data._key_atoms``, the same one Stage 0 uses to
+    decide whether a published column key is well formed, so the two halves of
+    the feature cannot drift apart. It splits a printed range on its dashes and
+    requires each part to be a whole token, and it keeps a negative bound
+    (``-0.5``) intact rather than splitting it. Each atom must then parse as a
+    number, which is the step ``_key_atoms`` does not take: it accepts ``B1``
+    and ``Effective`` as well-formed keys, and neither is a number.
+
+    Two things this gate does NOT promise. It admits a numeric PREFIX: the strip
+    below removes a whole RUN of trailing range dashes, so ``0.13-`` passes on
+    the strength of ``0.13`` and so does ``0.13--``. A row of such dangling
+    lower bounds, with no second line to complete them, is accepted and
+    publishes those labels as drawn -- and ``0.13--`` is then a label Stage 0's
+    own grammar rejects. And it judges the PRIMARY row
+    only -- a second line joined onto it (``_aligned``) is not re-checked, so a
+    published label is not guaranteed to parse as a Stage 0 key even though the
+    row it came from did.
+
+    The one thing asked of the token before that grammar sees it is that a
+    TRAILING range dash is stripped. Both corpora draw their bins over two
+    lines, ``0.13-`` above ``0.37``, so the row this function judges carries
+    tokens that are ranges with their upper bound on the next line. Handing
+    ``0.13-`` to the grammar unstripped splits it into ``0.13`` and an empty
+    part, which is malformed -- and the gate then rejected the real label row of
+    every one of the 103 SEP calls, chose the second line instead, and published
+    ``0.37`` where the page says ``0.13-0.37``. The corpus dumps caught it.
+
+    Measured over both corpora and the reference: 1 217 SEP, 5 860 minutes and
+    65 reference published bin labels, and every one of them passes. The gate
+    refuses nothing that the 198 dot-plot pages publish.
+
+    What it costs is charts whose bins are NOT numeric -- a categorical
+    histogram labelled by country or by sector. Those are now out of scope and
+    refuse, which is the owner's ruling recorded in STATUS: best-effort
+    extraction of NUMERIC charts, rather than a reader that also guesses at
+    categorical ones.
+    """
+    atoms: list[str] = []
+    for _cx, token in _alnum_tokens(row):
+        # A printed range whose upper bound is on the SECOND line ends in a range
+        # dash: the SEP pages draw "0.13-" above "0.37". That trailing dash is
+        # part of the label, and ``_join_atoms`` strips it for exactly this
+        # reason, so it is stripped here too -- otherwise the grammar splits the
+        # token into "0.13" and an empty part and calls the page's own bin row
+        # malformed.
+        parsed = _key_atoms(token.rstrip(_RANGE_DASHES))
+        if parsed is None:
+            return False
+        atoms.extend(parsed)
+    if not atoms:
+        return False
+    for atom in atoms:
+        try:
+            value = float(atom)
+        except ValueError:
+            return False
+        # ``float`` also accepts ``nan``, ``inf``, ``Infinity`` and their signed
+        # forms, which are words that happen to parse. A bin is a position on a
+        # printed axis, so a label that is not a finite number is not a bin.
+        if not math.isfinite(value):
+            return False
+    return True
+
+
+def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: float) -> list[Bin]:
     """The printed bin labels below the axis, with their intervals.
 
     The interval is the midpoints between consecutive label centres, with the
@@ -500,43 +722,192 @@ def read_bins(frame: Frame, rows: list[WordRow]) -> list[Bin]:
     and an interval derived from it cuts a bar's own edge. Assignment goes by
     the label CENTRE lying inside the mark -- see ``_owned_bins``. The interval
     is used only to say which bins an UNASSIGNABLE mark casts doubt over.
+
+    **Which row is the label row is a safety question, not a heuristic one,
+    and text position alone cannot answer it.** Two rules have now failed here,
+    in opposite directions. "The row below the axis with the most alphanumeric
+    tokens" is a popularity contest the page's FOOTNOTE wins: the Fed SEP pages
+    published ``Definitions | of | variables | and | ...`` as their bins, with
+    hard zeros under them, beneath the banner that says the counts were read
+    from the source (#735). "The FIRST row below the axis" is a proximity
+    contest the chart's own x-unit annotation wins: a two-word ``Percent
+    range`` set between the axis and its labels became the bins, the printed
+    labels were absorbed into it as a second atom line, and three of four bars
+    vanished behind a column the page never labelled. Density and adjacency are
+    both properties of where a generator happens to put its text.
+
+    The property actually being asserted is that the row the MARKS are assigned
+    to is a row the marks corroborate, so that is what is asked. A candidate
+    row must satisfy three conditions, and the first row below the axis that
+    satisfies all three is the label row:
+
+    * it carries more than one token, since a single label cannot make bins;
+    * every one of its tokens is drawn within the axis' own horizontal span.
+      That is what makes the row THIS frame's labels rather than a neighbour's
+      or the page's, and it is the same discriminator ``calibrate_y`` uses in
+      reverse -- a y tick label is the numeric word set OUTSIDE the span;
+    * where more than one row satisfies those two, **the bars choose between
+      them.** A row's corroboration is the number of bars standing on this axis
+      that cover exactly one of its token centres -- ``_owned_bins``, the
+      module's own assignment rule, used as an admission test. A histogram bar
+      spans its bin, so it covers that bin's label centre and no other; a
+      caption is covered two words at a time or not at all. The best
+      corroborated row wins, ties going to the upper one, because a label
+      printed over two lines puts both lines in the running and it is the upper
+      line whose centres the lower is aligned against. When the best
+      corroboration is ZERO the drawing does not pick a row at all, and the
+      panel is refused rather than read against a row nothing attests.
+
+    The bars are scored over EVERY multi-token row below the axis, including
+    the rows the span test excludes, and only the winner is then held to that
+    test. Scoring inside the span first was the round-2 defect: one unit word
+    printed on the label row's own baseline past the end of the axis
+    disqualifies that whole row, and the caption below it is then the best --
+    indeed the only -- thing left to attest, so a count was published under a
+    word the page set as prose (#735 review). Scored against all of them, the
+    real label row still wins on the bars and is then refused for being drawn
+    outside the span, which is the honest answer: the page's own best-attested
+    labels are not this frame's.
+
+    **Attesting is not the same as being the labels, and round 6 asks the two
+    further questions that gap allows.** The selection above is a maximum over
+    rows with no test that the winning row is a label row at all, and two
+    reviewers defeated it from three directions, each with the labels present
+    as ordinary text and no mock anywhere: a sparse chart where the caption and
+    the real labels both score 1 and the tie hands it to the caption; a stray
+    rectangle on the axis that no bin can claim, made valid by choosing the
+    prose that covers it; and four bars stood on a caption's words instead of
+    the bin centres, which published ``Effective | federal | funds | rate`` with
+    3, 5, 4, 2 under it at a residual of 0.0.
+
+    Round 6 answered that with two tests. The first, ``_attesting_bars``,
+    stands: a bar attests a row only if it also lies INSIDE the bin that row's
+    own centres derive for it, which is what a histogram bar does to its own
+    label and what a bar sweeping in from outside a two-word caption's interval
+    does not. Measured over all 840 ``read_bins`` calls of both corpora and the
+    reference, every attesting bar is inside its bin with at least 1.08pt of
+    clearance, and no winner moves. It is not a threshold: it compares a bar
+    against an interval the row itself derives.
+
+    The second was a rule that discarded the winner when another row below the
+    axis was an equally good home for the same marks. **Round 7 deleted it.**
+    Two reviewers broke it in both directions -- a fabrication through it, and
+    the FALSE REFUSAL of a chart this reader otherwise reads correctly, caused
+    by nothing more than a footnote printed underneath. Narrowing it further
+    would have been a fifth round of the same exercise, so the owner ruled
+    instead on scope, and what replaces it asks about the row's own text:
+
+    **the bins are a row of NUMBERS** (``_numeric_row``). Every token of a
+    candidate row must be a number or a printed range of numbers; a caption, a
+    unit annotation, an axis title and a footnote all carry at least one word.
+    Where no row below the axis is all-numeric, the panel is refused. That
+    stops all three of the constructions above from publishing under prose,
+    though not all in the same way: two of them refuse outright, and the one
+    whose stray mark sits among real numeric labels now reads those labels and
+    leaves the bins the stray contests UNRESOLVED, which is a reading rather
+    than a refusal. It costs the corpus nothing: on all 840 calls the attested
+    row is all-numeric and no call has zero numeric rows beneath it.
+
+    It does NOT close the class, and the limit is worth stating precisely here
+    rather than only in the plan notes. This module establishes that a row is
+    label-SHAPED and attested by the marks. It never establishes that the row
+    IS the labels. A NUMERIC annotation printed above the real bin labels, with
+    the bars standing on it, satisfies every test above and publishes counts
+    under the annotation's values -- pinned, as the behaviour it is, by
+    ``test_a_numeric_annotation_row_still_takes_the_bins``. What a chart table
+    carries is therefore UNVERIFIED unless a caller's constraint hook accepts
+    it, and nothing in this module promotes a reading past that.
+
+    Where NO bar attests any row -- a panel drawn with strays alone, or a
+    dashed series with no bar resting on the axis at all -- the panel is
+    REFUSED. There is no fallback. Four rounds of the #735 review each narrowed
+    one and each found another way through, for the same reason every time: the
+    only tests available without a bar are where a row is printed, and they ask
+    where the labels are, never whether the row IS the labels. Whatever such a
+    test excludes, it then reads the vacuum it created as evidence.
+
+    * "The densest row below the axis" wins the page's FOOTNOTE.
+    * "The only row inside the axis' span" is defeated by one unit word printed
+      on the label row's own baseline past the end of the axis: that row is
+      disqualified and a prose caption below it becomes unique.
+    * "The first row below the axis" is defeated by a page whose x-unit
+      annotation is set BETWEEN the axis and its labels; the labels are then
+      absorbed into the unit row as a second atom line (``Percent-B2 ...``).
+      That arrangement is this branch's FIXTURE, not a corpus page, and the
+      earlier claim here that it was "the corpus shape itself" was wrong: on all
+      840 corpus calls nothing plural and in-span is drawn above the bin labels,
+      and the real ``Percent range`` is printed BELOW them.
+    * Both of the last two together are defeated by both of their inputs on one
+      page: a unit row above the labels and one unit word past the axis end
+      leaves the unit row first AND uniquely in span (``['Percent','range']``,
+      a count of 5 published under the word ``Percent`` against a drawing of
+      3, 5, 4, 2).
+
+    Each of those published a fabricated label with a fabricated count at a
+    perfect residual. Where neither the bars nor the ticks speak -- and neither
+    corpus draws x tick marks at all -- nothing on the page establishes which
+    row the bins belong to, and the honest answer is to read nothing. The
+    fallback was reached 0 times in 835 calls over the 198 corpus pages, so
+    refusing costs nothing measured.
+
+    All of it is geometric and frame-attached, and none of it reads what the
+    tokens say: the bins of a bar chart need not be numeric, and a reader that
+    demanded numbers here would refuse every categorical panel. Note that
+    neither corpus draws x tick MARKS -- nothing at all is stroked below the
+    axis, and the ladders ``find_frames`` matches are the y ticks at each end --
+    so the bars are the only thing left that can attest one row over another.
+    A frame with no admissible row leaves the panel with no bins, and
+    ``read_chart_page`` refuses it.
     """
     below = [r for r in rows if r.y0 > frame.baseline]
     if not below:
         return []
+
+    def in_span(row: WordRow) -> bool:
+        return all(frame.x0 <= cx <= frame.x1 for cx, _text in _alnum_tokens(row))
+
+    plural = [row for row in below if len(_alnum_tokens(row)) >= 2]
+    numeric = [row for row in plural if _numeric_row(row)]
+    bars = _resting_bars(frame, residual, marks)
+    corroboration = [len(_attesting_bars(row, bars)) for row in numeric]
     best: WordRow | None = None
-    for row in below:
-        count = len(_alnum_tokens(row))
-        if count >= 2 and (best is None or count > len(_alnum_tokens(best))):
-            best = row
+    attested = max(corroboration, default=0)
+    if attested:
+        winner = numeric[corroboration.index(attested)]
+        if in_span(winner):
+            best = winner
     if best is None:
+        if not numeric:
+            why = "no row below it carries only numbers"
+        elif not attested:
+            why = "none of them"
+        else:
+            why = "a row not drawn inside the axis' own span"
+        logger.debug(
+            "chart_reader: of the %d rows drawn below the axis at y=%.2f, %d carry only "
+            "numbers, and the %d bars standing on it attest %s, so the drawing does not "
+            "say which row labels this frame's bins",
+            len(plural),
+            frame.baseline,
+            len(numeric),
+            len(bars),
+            why,
+        )
         return []
     primaries = _alnum_tokens(best)
     centres = [cx for cx, _t in primaries]
     atoms: list[list[str]] = [[t] for _cx, t in primaries]
     cursor = below.index(best)
     for row in below[cursor + 1 :]:
-        aligned = _aligned(row, centres)
+        aligned = _aligned(row, centres, (frame.x0, frame.x1))
         if aligned is None:
             break
         for i, token in enumerate(aligned):
             atoms[i].append(token)
-    if len(centres) < 2:
-        return []
-    edges: list[float] = []
-    for i, c in enumerate(centres):
-        left = (centres[i - 1] + c) / 2.0 if i else c - (centres[1] - centres[0]) / 2.0
-        right = (
-            (c + centres[i + 1]) / 2.0
-            if i + 1 < len(centres)
-            else c + (centres[-1] - centres[-2]) / 2.0
-        )
-        edges.append(left)
-        if i + 1 == len(centres):
-            edges.append(right)
+    edges = _bin_edges(centres)
     out: list[Bin] = []
     for i, c in enumerate(centres):
-        out.append(Bin(label=_ATOM_JOIN.join(atoms[i]), centre=c, lo=edges[i], hi=edges[i + 1]))
+        out.append(Bin(label=_join_atoms(atoms[i]), centre=c, lo=edges[i], hi=edges[i + 1]))
     return out
 
 
@@ -560,12 +931,37 @@ class LegendEntry:
 def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list[Bin]):
     """Legend entries in this panel: ``(entries, swatch marks)``.
 
-    A legend swatch is a mark that does NOT rest on the axis, is narrower than
-    a bin, covers no bin's printed label centre (a data mark spans at least its
-    own bin, so it does both), and has a word-row beginning to its right whose
-    vertical centre lies within the swatch's own painted extent. The name is that row's text, as drawn. The
-    style comes from the swatch's geometry -- a filled rectangle, or a dashed
-    stroke -- never from its colour, which no part of this module reads.
+    A legend swatch is a mark that does NOT rest on the axis, is not a data
+    mark, and has a word-row drawn beside it naming it. The name is that row's
+    text, as drawn. The style comes from the swatch's geometry -- a filled
+    rectangle, or a dashed stroke -- never from its colour, which no part of
+    this module reads.
+
+    A DATA mark is one that spans at least a whole bin AND covers that bin's
+    printed label centre: that conjunction is what a histogram bar or a
+    staircase level over a bin does, and it is what a swatch does not. Either
+    half alone rejects real evidence. Requiring only the second discarded the
+    legend outright on the Fed SEP pages from Dec 2020 to Dec 2023, whose
+    legend is set inside the plot directly above a bin label, so both swatches
+    covered a label centre and the whole figure lost its series names (#735).
+    Requiring only the first sits on a knife edge, since a staircase run one
+    bin wide is drawn a shade narrower than the interval derived from the
+    label centres it lies between.
+
+    Naming is held to two geometric conditions, both read off the page:
+
+    * the name is drawn BESIDE the swatch -- their painted extents overlap
+      vertically. Half the swatch's stroke width, which this used to ask for,
+      is a window of nothing at all for the zero-height dashed rule a legend
+      uses for a dashed series: it is 0.23pt on the 2025 SEP pages, the text
+      baseline sits 0.29pt off, and the dashed series was lost on the strength
+      of a stroke width (#735);
+    * the token nearest the swatch on that row is drawn INSIDE the plot's
+      horizontal span. That is the same discriminator ``calibrate_y`` uses in
+      reverse: an axis tick label is set OUTSIDE the span, where no bar,
+      outline or bin label can be. Without it a staircase run, which is a data
+      mark the width test alone lets through, takes the y tick label standing
+      far to its right on the same line for a series name.
     """
     if not bins:
         return [], []
@@ -581,28 +977,48 @@ def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list
         # from being read as a series name.
         if not (m.filled or m.horizontal):
             continue
-        # A data mark of a histogram spans at least one whole bin, so it is at
-        # least a bin wide AND it covers that bin's printed label centre. A
-        # swatch does neither. Both tests are kept: the width alone would sit on
-        # a floating-point knife edge, since an outline segment one bin wide is
-        # exactly as wide as the bin it draws.
-        if (m.x1 - m.x0) >= narrowest or any(m.x0 <= b.centre <= m.x1 for b in bins):
+        if (m.x1 - m.x0) >= narrowest and any(m.x0 <= b.centre <= m.x1 for b in bins):
             continue
         style = SOLID_FILL if m.filled else (DASHED_STROKE if m.dashed else "")
         if not style:
             continue
-        reach = max(m.tolerance, 1e-6)
-        named = [r for r in rows if r.x0 > m.x1 and (m.y0 - reach) <= r.cy <= (m.y1 + reach)]
+        # A candidate name is a row drawn to the swatch's right whose nearest
+        # token to it is INSIDE the plot's horizontal span. A y tick label
+        # standing far to the right on the same line is also "to the right",
+        # and the span is what tells the two apart -- the same discriminator
+        # ``calibrate_y`` uses in reverse to find a tick's label.
+        named = []
+        for r in rows:
+            if r.x0 <= m.x1:
+                continue
+            beside = min(
+                (tok for tok in r.tokens if tok[0] > m.x1), key=lambda tok: tok[0], default=None
+            )
+            if beside is not None and frame.x0 <= beside[0] <= frame.x1:
+                named.append(r)
+        # The name is the row the swatch is set AGAINST: the one whose own
+        # painted extent contains the swatch's centre. Legend rows in a stacked
+        # legend are drawn almost x-aligned, so which row a swatch belongs to
+        # is a vertical fact and only a vertical fact -- ordering the
+        # candidates by their left edge picked the wrong line of the SEP
+        # legends by a third of a point (#735). Where two rows contain it the
+        # nearer one to the swatch's right edge is taken.
+        named = [r for r in named if r.y0 <= m.cy <= r.y1]
         if not named:
             continue
-        # The entry's name is the row drawn NEXT to the swatch. A y tick label
-        # standing far to the right on the same line is also "to the right",
-        # and taking the nearest is what keeps it from being read as a series
-        # name. Legend text is set beside its swatch; nothing else is.
         label = min(named, key=lambda r: r.x0)
-        entries.append(
-            LegendEntry(name=label.text.strip(), style=style, swatch=(m.x0, m.y0, m.x1, m.y1))
-        )
+        # The name is what is drawn beside the swatch, and only that. A word
+        # row is every word the page set at that height, so a y tick label at
+        # the far edge joins the legend's own row: the SEP 2022 pages would
+        # have published a series called "September projections 20", a name
+        # the page never wrote. The same span test that admitted the row picks
+        # the tokens out of it.
+        name = " ".join(
+            text for cx, _w, text in label.tokens if cx > m.x1 and frame.x0 <= cx <= frame.x1
+        ).strip()
+        if not name:
+            continue
+        entries.append(LegendEntry(name=name, style=style, swatch=(m.x0, m.y0, m.x1, m.y1)))
         swatches.append(m)
     # A style named twice in one legend names nothing.
     styles = [e.style for e in entries]
@@ -726,6 +1142,25 @@ def _owned_bins(mark: Mark, bins: list[Bin]) -> list[int]:
     return [i for i, b in enumerate(bins) if mark.x0 <= b.centre <= mark.x1]
 
 
+def _resting_bars(frame: Frame, residual: float, marks: list[Mark]) -> list[Mark]:
+    """The filled marks standing on this frame's axis, inside its span.
+
+    These are the panel's bars: what ``read_solid_series`` measures, and what
+    ``read_bins`` requires its candidate label row to be corroborated by. One
+    definition, used in both places, so the row a bar is assigned to cannot be
+    a row that bar was never checked against.
+    """
+    return [
+        m
+        for m in marks
+        if m.filled
+        and abs(m.y1 - frame.baseline) <= max(m.tolerance, residual)
+        and m.y0 < frame.baseline
+        and frame.x0 <= m.x0
+        and m.x1 <= frame.x1
+    ]
+
+
 def _doubted_by(strays: list[Mark], b: Bin) -> bool:
     """A mark this reader could not place overlaps this bin's interval."""
     return any(m.x1 > b.lo and m.x0 < b.hi for m in strays)
@@ -739,15 +1174,7 @@ def read_solid_series(
     marks: list[Mark],
 ) -> SeriesReading:
     """A bar series: filled rectangles standing on the axis."""
-    bars = [
-        m
-        for m in marks
-        if m.filled
-        and abs(m.y1 - frame.baseline) <= max(m.tolerance, cal.residual)
-        and m.y0 < frame.baseline
-        and frame.x0 <= m.x0
-        and m.x1 <= frame.x1
-    ]
+    bars = _resting_bars(frame, cal.residual, marks)
     if not bars:
         return SeriesReading(
             name=name,
@@ -887,6 +1314,41 @@ def read_dashed_series(
         )
     runs = [m for m in inside if m.horizontal]
     risers = [m for m in inside if m.vertical and not m.horizontal]
+    # An outline is read as runs and risers, so every piece of it drawn inside
+    # the plot has to BE one. A generator is free to emit the whole staircase
+    # as a single compound path, and the drawing then reports one bounding box
+    # that is neither horizontal nor vertical -- the Fed SEP pages do exactly
+    # this, nine path items under one rectangle. Dropping such a piece and
+    # reading on is how the reader came to publish a hard zero in every bin of
+    # a series the page visibly draws a staircase for (#735): with no run and
+    # no riser left, every bin falls to the axis and every zero looks observed.
+    # The outline was not reconstructed, so nothing about it is established.
+    unread = [m for m in inside if not m.horizontal and not m.vertical]
+    if unread:
+        m = min(unread, key=lambda m: (m.x0, m.y0))
+        why = (
+            f"the outline is drawn as a path this reader cannot decompose -- the piece "
+            f"spanning [{m.x0:.2f}, {m.y0:.2f}] to [{m.x1:.2f}, {m.y1:.2f}] is neither a "
+            "horizontal run nor a vertical riser, so the levels it draws are not "
+            "recoverable from the drawing operators"
+        )
+        return SeriesReading(
+            name=name,
+            style=DASHED_STROKE,
+            presence=PRESENT,
+            cells=tuple(
+                Cell(
+                    bin_label=b.label,
+                    status=UNRESOLVED,
+                    count=None,
+                    interval=(0.0, 0.0),
+                    detail=why,
+                    baseline_y=frame.baseline,
+                )
+                for b in bins
+            ),
+            detail=why,
+        )
 
     def level_at(x: float) -> float:
         covering = [m for m in runs if m.x0 - m.tolerance <= x <= m.x1 + m.tolerance]
@@ -1305,13 +1767,32 @@ def read_chart_page(
     for idx, box in enumerate(bboxes, start=1):
         own = [m for m in marks if _in_box(m, box)]
         marks_by_region[idx] = own
-        frame = find_frame(own)
-        if frame is None:
+        found = find_frames(own)
+        if not found:
             reading.refusals[idx] = (
                 "no vector plot frame (a stroked axis with a tick ladder) is drawn in "
                 "this region; a raster chart is out of scope for this reader"
             )
             continue
+        # Two plot frames in one region is one region too few. Everything read
+        # below is attributed to ONE frame -- the title above it, the legend
+        # beside it, the labels under it, the marks inside it -- and none of
+        # those attributions is checked against which frame the ink belongs to.
+        # A region bridging two charts therefore publishes the lower chart's
+        # bars under the upper chart's title, at a residual of 0.0, because the
+        # residual only tests that one ladder fits one scale (#735). The
+        # reader cannot split the region: the region index is the identity the
+        # crops and the Stage 0 notes are keyed on. So it refuses, and the
+        # detector is left to separate them.
+        if len(found) > 1:
+            reading.refusals[idx] = (
+                f"this region encloses {len(found)} plot frames, with axes at y="
+                + ", ".join(f"{f.baseline:.2f}" for f in found)
+                + "; which frame any title, legend, label or mark in the region "
+                "belongs to is not established by the drawing, so nothing in it is read"
+            )
+            continue
+        frame = found[0]
         rows = rows_by_region[idx]
         cal = calibrate_y(frame, rows)
         if cal is None:
@@ -1320,9 +1801,35 @@ def read_chart_page(
                 "so no y scale could be fitted"
             )
             continue
-        bins = read_bins(frame, rows)
+        # The calibration gates the PANEL, not just the heights measured
+        # against it. ``_resolve`` already refuses a measured height whose
+        # uncertainty is not below half a count, but a panel publishes cells it
+        # never measures -- an empty bin is read as a zero from the absence of
+        # a mark, and that reading takes the calibration entirely on trust. So
+        # a panel whose scale did not close to better than half a participant
+        # publishes nothing at all: the fit is not a scale, and a bin with no
+        # bar under it is not evidence of zero when the fit that placed the
+        # axis was out by whole participants. On the SEP pages a frame picked
+        # up across five merged panels fitted at a residual of 211pt against a
+        # 2.1pt half-count and still emitted hard zeros (#735).
+        if cal.residual >= cal.half_count_points:
+            reading.refusals[idx] = (
+                f"the y scale fitted to this region's {cal.checked_ticks} labelled ticks "
+                f"closes only to {cal.residual:.3f}pt, which is not below the "
+                f"{cal.half_count_points:.3f}pt half a count occupies here, so no cell of "
+                "this panel -- including an empty bin that would otherwise read zero -- "
+                "is supported by it"
+            )
+            continue
+        bins = read_bins(frame, rows, own, cal.residual)
         if len(bins) < 2:
-            reading.refusals[idx] = "the region prints fewer than two x bin labels below its axis"
+            reading.refusals[idx] = (
+                "the row of text the bars standing on this region's axis attest is not "
+                "drawn inside the axis' own span, or no row below that axis carries only "
+                "numbers, or no bar stands on that axis at all and nothing drawn on the "
+                "page says which row below it carries the labels, so the region's x "
+                "bins are not corroborated by its own drawing"
+            )
             continue
         frames[idx] = frame
         cals[idx] = cal

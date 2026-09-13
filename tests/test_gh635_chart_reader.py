@@ -69,7 +69,7 @@ def build_chart(
     from a tick it can see. ``extra_bars`` adds raw ``(x0, x1, count)`` bars for
     the overlap cases.
     """
-    labels = bins or ["B1", "B2", "B3", "B4", "B5"]
+    labels = bins or ["1.0", "2.0", "3.0", "4.0", "5.0"]
     n = len(labels)
     x0, x1 = 100.0 * scale, 400.0 * scale
     base = 400.0 * scale
@@ -181,6 +181,22 @@ def build_chart(
     return reopened, [reopened[0].rect]
 
 
+#: One filled bar, over the first bin, in the solid series' own style.
+#:
+#: ``read_bins`` refuses a panel where no bar stands on the axis, because the
+#: only tests available without one ask where a row is printed and never
+#: whether the row IS the labels -- four rounds of the #735 review each found a
+#: page that satisfied such a test with a caption (see that module's docstring).
+#: A drawing whose point is the DASHED series therefore has to put something on
+#: the axis for the bin labels to be corroborated by. It is scaffolding: no
+#: test below is ABOUT its count, though one asserts it -- the straddling-bar
+#: test compares the whole panel's total against ``sum(WITNESS)`` to show the
+#: ambiguous bar contributed nothing. Where the drawing's point is that nothing
+#: rests on the axis it is deliberately absent and the panel is expected to
+#: refuse.
+WITNESS = [2, 0, 0, 0, 0]
+
+
 def counts(panel, name: str) -> list[str]:
     for s in panel.series:
         if s.name == name:
@@ -206,7 +222,7 @@ def test_two_series_read_back_the_counts_they_were_drawn_from(tmp_path: Path) ->
     assert counts(panel, SOLID) == ["0", "4", "2", "0", "1"]
     assert counts(panel, DASHED) == ["1", "3", "3", "2", "0"]
     assert panel.label == "PANEL A"
-    assert [b.label for b in panel.bins] == ["B1", "B2", "B3", "B4", "B5"]
+    assert [b.label for b in panel.bins] == ["1.0", "2.0", "3.0", "4.0", "5.0"]
 
 
 def test_odd_counts_between_printed_ticks_resolve(tmp_path: Path) -> None:
@@ -245,13 +261,18 @@ def test_two_bars_in_one_bin_are_unresolved_not_summed(tmp_path: Path) -> None:
         extra_bars=[(165.0, 195.0, 3)],
     )
     assert counts(panel, SOLID)[1] == UNRESOLVED_MARKER
-    cell = [c for c in panel.series[0].cells if c.bin_label == "B2"][0]
+    cell = [c for c in panel.series[0].cells if c.bin_label == "2.0"][0]
     assert cell.status == UNRESOLVED and cell.count is None
 
 
 def test_a_bar_owning_no_bin_makes_the_bins_it_touches_unresolved(tmp_path: Path) -> None:
-    """A bar straddling a boundary covers no label centre; nothing is guessed."""
-    panel = read_one(tmp_path, [0, 0, 0, 0, 0], None, extra_bars=[(205.0, 215.0, 5)])
+    """A bar straddling a boundary covers no label centre; nothing is guessed.
+
+    The straddling bar corroborates no row, so the panel needs ``WITNESS`` on
+    the axis to have bins at all; the guard being pinned is what happens to the
+    straddling bar, which is untouched by it.
+    """
+    panel = read_one(tmp_path, WITNESS, None, extra_bars=[(205.0, 215.0, 5)])
     rendered = counts(panel, SOLID)
     assert UNRESOLVED_MARKER in rendered, rendered
     assert "5" not in rendered, "an unplaceable bar was still assigned a bin"
@@ -318,7 +339,7 @@ def test_an_accepting_hook_marks_the_derivation_verified(tmp_path: Path) -> None
     panel = verify_panel(read_one(tmp_path, [1, 2, 3, 0, 0], None), "survey-2018", hook)
     assert panel.verification == VERIFIED
     assert seen == [
-        ("survey-2018", "PANEL A", {SOLID: {"B1": 1, "B2": 2, "B3": 3, "B4": 0, "B5": 0}})
+        ("survey-2018", "PANEL A", {SOLID: {"1.0": 1, "2.0": 2, "3.0": 3, "4.0": 0, "5.0": 0}})
     ]
     assert "| 1 | 2 | 3 | 0 | 0 |" in panel_block(panel)
 
@@ -484,7 +505,7 @@ def _readable_chart_pdf(tmp_path: Path) -> Path:
 CANDIDATE = (
     "Preamble sentence unique alpha\n\n"
     "### PANEL A\n\n"
-    "| Percent range | B1 | B2 | B3 | B4 | B5 |\n"
+    "| Percent range | 1.0 | 2.0 | 3.0 | 4.0 | 5.0 |\n"
     "| :--- | :---: | :---: | :---: | :---: | :---: |\n"
     "| **Participants** |  |  |  |  |  |\n"
 )
@@ -674,13 +695,13 @@ def test_a_bar_covering_two_bin_centres_is_refused_not_published_in_both(tmp_pat
     """
     narrow = read_one(
         tmp_path / "narrow",
-        None,
+        WITNESS,
         None,
         extra_bars=[(_CENTRES[1] - 20.0, _CENTRES[1] + 20.0, 7)],
     )
     wide = read_one(
         tmp_path / "wide",
-        None,
+        WITNESS,
         None,
         extra_bars=[(_CENTRES[1] - 20.0, _CENTRES[2] + 20.0, 7)],
     )
@@ -697,8 +718,9 @@ def test_a_bar_covering_two_bin_centres_is_refused_not_published_in_both(tmp_pat
             c.count or 0 for series in panel.series for c in series.cells if series.name == SOLID
         )
 
-    assert total(narrow) == 7
-    assert total(wide) == 0, "a bar of ambiguous bin contributed a count"
+    # Both panels publish the witness; only the narrow one publishes the bar.
+    assert total(narrow) - total(wide) == 7, (total(narrow), total(wide))
+    assert total(wide) == sum(WITNESS), "a bar of ambiguous bin contributed a count"
     said = [
         c.detail
         for series in wide.series
@@ -719,8 +741,8 @@ def test_a_staircase_that_never_descends_is_not_a_drawn_zero(tmp_path: Path) -> 
     picture -- so the bin is UNRESOLVED, not a fabricated zero.
     """
     levels = [4, 0, 4, 0, 0]
-    drawn = read_one(tmp_path / "drawn", None, levels)
-    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    drawn = read_one(tmp_path / "drawn", WITNESS, levels)
+    gapped = read_one(tmp_path / "gapped", WITNESS, levels, omit_dashed_risers=True)
     got_drawn = counts(drawn, DASHED)
     got_gapped = counts(gapped, DASHED)
 
@@ -733,13 +755,13 @@ def test_a_staircase_that_never_descends_is_not_a_drawn_zero(tmp_path: Path) -> 
     assert "descending to the axis" in zero.detail, zero.detail
     refused = [c for s in gapped.series if s.name == DASHED for c in s.cells][1]
     assert "no riser of the outline is drawn descending to the axis" in refused.detail
-    assert "B1" in refused.detail and "B3" in refused.detail, refused.detail
+    assert "1.0" in refused.detail and "3.0" in refused.detail, refused.detail
     assert "every riser" not in refused.detail, "a check that did not run is still claimed"
 
 
 def test_a_riser_that_joins_the_wrong_levels_still_refuses_the_series(tmp_path: Path) -> None:
     """Control for the test above: the existing riser check is still live."""
-    doc, bboxes = build_chart(tmp_path / "broken.pdf", None, [4, 0, 4, 0, 0])
+    doc, bboxes = build_chart(tmp_path / "broken.pdf", WITNESS, [4, 0, 4, 0, 0])
     page = doc[0]
     page.draw_line(
         fitz.Point(160.0, 340.0),
@@ -784,7 +806,7 @@ def test_stage0_is_byte_identical_when_derivations_is_omitted() -> None:
 
     text = (
         "Preamble\n\n"
-        "| Percent range | B1 | B2 |\n"
+        "| Percent range | 1.0 | 2.0 |\n"
         "| :--- | :---: | :---: |\n"
         "| **Participants** |  |  |\n"
     )
@@ -918,8 +940,8 @@ def test_a_gap_two_bins_wide_needs_the_descent_just_as_much(tmp_path: Path) -> N
     of a stretch the outline is never drawn crossing.
     """
     levels = [4, 0, 0, 0, 4]
-    drawn = read_one(tmp_path / "drawn", None, levels)
-    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    drawn = read_one(tmp_path / "drawn", WITNESS, levels)
+    gapped = read_one(tmp_path / "gapped", WITNESS, levels, omit_dashed_risers=True)
     got_drawn = counts(drawn, DASHED)
     got_gapped = counts(gapped, DASHED)
 
@@ -928,7 +950,7 @@ def test_a_gap_two_bins_wide_needs_the_descent_just_as_much(tmp_path: Path) -> N
     assert got_drawn[0] == got_gapped[0] == "4", (got_drawn, got_gapped)
 
     middle = [c for s in gapped.series if s.name == DASHED for c in s.cells][2]
-    assert "B1" in middle.detail and "B5" in middle.detail, middle.detail
+    assert "1.0" in middle.detail and "5.0" in middle.detail, middle.detail
     assert "no neighbouring bin carries a level" not in middle.detail
 
 
@@ -941,10 +963,10 @@ def test_a_neighbour_the_reader_could_not_resolve_is_missing_evidence(tmp_path: 
     says that bin's own level is not established, instead of asserting, as it
     once did, that no neighbouring bin carries a level at all.
     """
-    one = read_one(tmp_path / "one", None, [0, 4, 0, 0, 0], omit_dashed_risers=True)
+    one = read_one(tmp_path / "one", WITNESS, [0, 4, 0, 0, 0], omit_dashed_risers=True)
     two = read_one(
         tmp_path / "two",
-        None,
+        WITNESS,
         [0, 4, 0, 0, 0],
         omit_dashed_risers=True,
         # A second level over bin 2's own span (110 + 50i, 50 wide), drawn
@@ -969,12 +991,12 @@ def test_a_neighbour_the_reader_could_not_resolve_is_missing_evidence(tmp_path: 
 
 def test_a_complete_staircase_is_not_over_refused(tmp_path: Path) -> None:
     """Control: the rule under-refuses nothing that the page actually draws."""
-    panel = read_one(tmp_path / "ok", None, [0, 4, 6, 2, 0])
+    panel = read_one(tmp_path / "ok", WITNESS, [0, 4, 6, 2, 0])
     got = counts(panel, DASHED)
     assert got[1:4] == ["4", "6", "2"], got
     assert got[4] == "0", got
     zero = [c for s in panel.series if s.name == DASHED for c in s.cells][4]
-    assert "descending to the axis beside B4" in zero.detail, zero.detail
+    assert "descending to the axis beside 4.0" in zero.detail, zero.detail
 
 
 def test_a_stroke_too_thick_to_locate_the_axis_cannot_certify_a_zero(tmp_path: Path) -> None:
@@ -986,8 +1008,8 @@ def test_a_stroke_too_thick_to_locate_the_axis_cannot_certify_a_zero(tmp_path: P
     zero. A stroke thicker than the per-participant pitch cannot, so it may not
     certify the one number such a panel would otherwise publish.
     """
-    thin = read_one(tmp_path / "thin", None, [0, 4, 0, 0, 0], dash_width=1.5)
-    fat = read_one(tmp_path / "fat", None, [0, 4, 0, 0, 0], dash_width=14.0)
+    thin = read_one(tmp_path / "thin", WITNESS, [0, 4, 0, 0, 0], dash_width=1.5)
+    fat = read_one(tmp_path / "fat", WITNESS, [0, 4, 0, 0, 0], dash_width=14.0)
     got_thin = counts(thin, DASHED)
     got_fat = counts(fat, DASHED)
 
@@ -1001,8 +1023,8 @@ def test_the_half_count_bound_is_the_calibration_not_the_stroke_width(tmp_path: 
     """Same 14pt stroke, twice the page scale: half a count doubles and the
     same drawing becomes readable. The bound is a ratio the page supplies, not
     a width this module holds."""
-    tight = read_one(tmp_path / "tight", None, [0, 4, 0, 0, 0], dash_width=14.0)
-    roomy = read_one(tmp_path / "roomy", None, [0, 4, 0, 0, 0], dash_width=14.0, scale=2.0)
+    tight = read_one(tmp_path / "tight", WITNESS, [0, 4, 0, 0, 0], dash_width=14.0)
+    roomy = read_one(tmp_path / "roomy", WITNESS, [0, 4, 0, 0, 0], dash_width=14.0, scale=2.0)
     assert counts(tight, DASHED)[2] == "UNRESOLVED", counts(tight, DASHED)
     assert counts(roomy, DASHED)[2] == "0", counts(roomy, DASHED)
 
@@ -1011,8 +1033,8 @@ def test_a_descent_that_stops_short_of_the_axis_is_not_a_zero(tmp_path: Path) ->
     """The DIFFERENCE is how far short the descent stops, in units of the
     mark's own edge uncertainty. Inside half a stroke width is anti-aliasing
     and path rounding; a full stroke width is an unfinished path."""
-    near = read_one(tmp_path / "near", None, [0, 4, 0, 0, 0], descent_gap=0.7)
-    far = read_one(tmp_path / "far", None, [0, 4, 0, 0, 0], descent_gap=3.0)
+    near = read_one(tmp_path / "near", WITNESS, [0, 4, 0, 0, 0], descent_gap=0.7)
+    far = read_one(tmp_path / "far", WITNESS, [0, 4, 0, 0, 0], descent_gap=3.0)
     assert counts(near, DASHED)[2] == "0", counts(near, DASHED)
     assert counts(far, DASHED)[2] == "UNRESOLVED", counts(far, DASHED)
 
@@ -1061,8 +1083,8 @@ def test_a_run_near_the_axis_cannot_witness_a_zero_when_the_stroke_cannot_tell(
     message says it cannot support.
     """
     span = (_CENTRES[1] - 24.0, _CENTRES[3] + 24.0, 0.6)
-    thin = read_one(tmp_path / "thin", None, None, dash_width=1.5, extra_runs=[span])
-    fat = read_one(tmp_path / "fat", None, None, dash_width=14.0, extra_runs=[span])
+    thin = read_one(tmp_path / "thin", WITNESS, None, dash_width=1.5, extra_runs=[span])
+    fat = read_one(tmp_path / "fat", WITNESS, None, dash_width=14.0, extra_runs=[span])
     got_thin = counts(thin, DASHED)
     got_fat = counts(fat, DASHED)
 
@@ -1089,8 +1111,8 @@ def test_the_on_axis_witness_still_works_when_the_stroke_can_locate_the_axis(
     refuse. The bound removes the unsupportable readings and keeps the rest.
     """
     span = (_CENTRES[1] - 24.0, _CENTRES[3] + 24.0, 0)
-    thin = read_one(tmp_path / "thin", None, None, dash_width=1.5, extra_runs=[span])
-    fat = read_one(tmp_path / "fat", None, None, dash_width=14.0, extra_runs=[span])
+    thin = read_one(tmp_path / "thin", WITNESS, None, dash_width=1.5, extra_runs=[span])
+    fat = read_one(tmp_path / "fat", WITNESS, None, dash_width=14.0, extra_runs=[span])
     got_thin = counts(thin, DASHED)
     got_fat = counts(fat, DASHED)
 
@@ -1113,8 +1135,8 @@ def test_a_gap_against_the_page_edge_is_decided_by_the_side_that_speaks(
     intervals; omitted, both refuse.
     """
     levels = [0, 0, 4, 4, 4]
-    drawn = read_one(tmp_path / "drawn", None, levels)
-    gapped = read_one(tmp_path / "gapped", None, levels, omit_dashed_risers=True)
+    drawn = read_one(tmp_path / "drawn", WITNESS, levels)
+    gapped = read_one(tmp_path / "gapped", WITNESS, levels, omit_dashed_risers=True)
     got_drawn = counts(drawn, DASHED)
     got_gapped = counts(gapped, DASHED)
 
@@ -1122,7 +1144,7 @@ def test_a_gap_against_the_page_edge_is_decided_by_the_side_that_speaks(
     assert got_gapped[:2] == ["UNRESOLVED", "UNRESOLVED"], got_gapped
     assert got_drawn[2:] == got_gapped[2:] == ["4", "4", "4"], (got_drawn, got_gapped)
     said = [c for s in drawn.series if s.name == DASHED for c in s.cells][0].detail
-    assert "descending to the axis beside B3" in said, said
+    assert "descending to the axis beside 3.0" in said, said
 
 
 def test_half_a_count_is_recomputed_from_the_calibration_at_every_scale(
@@ -1131,7 +1153,88 @@ def test_half_a_count_is_recomputed_from_the_calibration_at_every_scale(
     """Nothing in the bound is a point value: the same drawing at twice the
     page scale reports twice the points per participant and twice half a
     count, so the veto tracks the ratio the page supplies."""
-    one = read_one(tmp_path / "one", None, [0, 4, 0, 0, 0])
-    two = read_one(tmp_path / "two", None, [0, 4, 0, 0, 0], scale=2.0)
+    one = read_one(tmp_path / "one", WITNESS, [0, 4, 0, 0, 0])
+    two = read_one(tmp_path / "two", WITNESS, [0, 4, 0, 0, 0], scale=2.0)
     assert abs(two.calibration.points_per_unit / one.calibration.points_per_unit - 2.0) < 0.01
     assert abs(two.calibration.half_count_points / one.calibration.half_count_points - 2.0) < 0.01
+
+
+def test_a_panel_with_no_bar_standing_on_its_axis_has_no_bins(tmp_path: Path) -> None:
+    """The scaffolding above is load-bearing, so it is pinned as a difference.
+
+    The same dashed staircase twice: with ``WITNESS`` on the axis the outline
+    reads, and with nothing on the axis the panel is refused outright. Nothing
+    about the outline changes between the two drawings -- what changes is
+    whether any bar corroborates the row of bin labels, which is the only
+    evidence this reader has for which row that is (#735).
+    """
+    doc, bboxes = build_chart(tmp_path / "none.pdf", None, [0, 4, 6, 2, 0])
+    bare = read_chart_page(doc[0], bboxes, page_num=1)
+    assert 1 not in bare.panels, bare.panels
+    assert "not corroborated" in bare.refusals[1], bare.refusals
+
+    witnessed = read_one(tmp_path / "witnessed", WITNESS, [0, 4, 6, 2, 0])
+    assert counts(witnessed, DASHED)[1:4] == ["4", "6", "2"], counts(witnessed, DASHED)
+
+
+def _categorical(path: Path, *, two_word_entry: bool):
+    """Five bins with a second label line, one entry of which may run to two words.
+
+    The ONLY difference between the two drawings is whether the first column's
+    second-line entry is ``America`` or ``North America``. Every bar, every bin
+    label and every other category word is identical.
+    """
+    labels = ["1.0", "2.0", "3.0", "4.0", "5.0"]
+    doc, _bboxes = build_chart(path, [2, 3, 4, 5, 6], None, bins=labels)
+    page = doc[0]
+    first = "North America" if two_word_entry else "America"
+    for centre, word in zip(
+        [135.0, 185.0, 235.0, 285.0, 335.0],
+        [first, "Europe", "Asia", "Africa", "Oceania"],
+        strict=True,
+    ):
+        width = fitz.get_text_length(word, fontsize=5)
+        page.insert_text(fitz.Point(centre - width / 2, 420.0), word, fontsize=5)
+    annotated = path.with_name(path.stem + "-second-line.pdf")
+    doc.save(str(annotated))
+    reopened = fitz.open(str(annotated))
+    return reopened, [reopened[0].rect]
+
+
+def test_a_two_word_entry_does_not_delete_the_whole_second_label_line(tmp_path: Path) -> None:
+    """One word longer in one column, and the other four columns keep their words.
+
+    Requiring a second line to carry exactly one token per column threw the
+    entire line away as soon as one entry ran to two words: the panel published
+    bare ``1.0``..``5.0``, dropping five identifiers the page had printed, and
+    refused nothing (#735 round 6 review). The line is read as a partition of
+    its own tokens instead, so the two-word entry stays with its own column and
+    the rest are untouched.
+    """
+    single_doc, single_boxes = _categorical(tmp_path / "single.pdf", two_word_entry=False)
+    single = read_chart_page(single_doc[0], single_boxes, page_num=1)
+    multi_doc, multi_boxes = _categorical(tmp_path / "multi.pdf", two_word_entry=True)
+    multi = read_chart_page(multi_doc[0], multi_boxes, page_num=1)
+
+    one, many = single.panels.get(1), multi.panels.get(1)
+    assert one is not None, single.refusals
+    assert many is not None, multi.refusals
+    assert [b.label for b in one.bins] == [
+        "1.0-America",
+        "2.0-Europe",
+        "3.0-Asia",
+        "4.0-Africa",
+        "5.0-Oceania",
+    ]
+    assert [b.label for b in many.bins] == [
+        "1.0-North America",
+        "2.0-Europe",
+        "3.0-Asia",
+        "4.0-Africa",
+        "5.0-Oceania",
+    ]
+    # The counts are the same drawing in both, and the only label that moves is
+    # the one whose entry gained a word.
+    assert [c.count for s in one.series for c in s.cells] == [2, 3, 4, 5, 6]
+    assert [c.count for s in many.series for c in s.cells] == [2, 3, 4, 5, 6]
+    assert [b.label for b in one.bins][1:] == [b.label for b in many.bins][1:]

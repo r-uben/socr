@@ -1142,8 +1142,122 @@ _CHART_MIN_CLUSTER_AREA_PT2: float = 120.0 * 120.0  # 14 400 pt²
 _CHART_CLUSTER_GAP_PT: float = 30.0
 
 
+def _to_rgb(channel) -> tuple[float, float, float] | None:
+    """One declared colour as RGB, or ``None`` when its shape is unknown.
+
+    PyMuPDF hands back whatever space the operator declared: one number for
+    grey, three for RGB, four for CMYK. Comparing those as tuples would call
+    CMYK white a different colour from RGB white, so each is converted into the
+    one space. The CMYK conversion is the standard one; nothing here is tuned.
+    """
+    try:
+        values = [float(c) for c in channel]
+    except (TypeError, ValueError):
+        return None
+    if len(values) == 1:
+        grey = values[0]
+        return (grey, grey, grey)
+    if len(values) == 3:
+        return (values[0], values[1], values[2])
+    if len(values) == 4:
+        cyan, magenta, yellow, black = values
+        return (
+            (1.0 - cyan) * (1.0 - black),
+            (1.0 - magenta) * (1.0 - black),
+            (1.0 - yellow) * (1.0 - black),
+        )
+    return None
+
+
+def _same_colour(a, b) -> bool:
+    """Two declared colours are the same ink, compared in one space."""
+    left, right = _to_rgb(a), _to_rgb(b)
+    if left is None or right is None:
+        return False
+    return all(round(x, 6) == round(y, 6) for x, y in zip(left, right, strict=True))
+
+
+#: An unpainted PDF page shows white, so that is the ground until a drawing
+#: paints another one over the whole page.
+_DEFAULT_GROUND: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+
+def _page_ground(page, drawings) -> tuple[float, float, float]:
+    """The colour this page shows where nothing is drawn on top of it.
+
+    A generator that wants a dark page paints one opaque fill over the whole of
+    it; the last such fill is what a reader sees behind everything else. With
+    no such fill the ground is the page's own white. Derived from the drawings
+    themselves -- no constant, and no measurement of the rendered pixels.
+    """
+    try:
+        page_rect = page.rect
+    except Exception:  # pragma: no cover - defensive
+        return _DEFAULT_GROUND
+    ground = _DEFAULT_GROUND
+    for d in drawings:
+        if "f" not in str(d.get("type") or ""):
+            continue
+        fill = d.get("fill")
+        rect = d.get("rect")
+        if fill is None or rect is None:
+            continue
+        alpha = d.get("fill_opacity")
+        if alpha is not None and float(alpha) < 1.0:
+            continue
+        covers = (
+            rect.x0 <= page_rect.x0
+            and rect.y0 <= page_rect.y0
+            and rect.x1 >= page_rect.x1
+            and rect.y1 >= page_rect.y1
+        )
+        if covers:
+            as_rgb = _to_rgb(fill)
+            if as_rgb is not None:
+                ground = as_rgb
+    return ground
+
+
+def _paints_nothing(d, ground: tuple[float, float, float]) -> bool:
+    """True when the drawing lays down no ink the page can show.
+
+    A drawing paints only through the channels it declares: a fill if its
+    operator fills, a stroke if its operator strokes. A channel shows nothing
+    when it is absent, when its opacity is zero, or when its colour is the
+    GROUND the drawing sits on -- the colour the page shows there anyway. That
+    ground is derived from the page's own drawings by ``_page_ground`` and
+    defaults to white, so there is no threshold and no colour literal standing
+    in for a page that was never looked at. White is not privileged: on a page
+    painted dark, a white shape is ink and a shape in the page's own dark
+    colour is not, which is the opposite of what a white test would say.
+
+    This matters because clustering asks which drawings are near each other.
+    An invisible container rectangle drawn around a panel is not near the next
+    panel's ink in any sense a reader can see, yet it touches it: the Fed SEP
+    projection pages wrap each dot-plot panel in a white-on-white rectangle
+    whose slabs sit half a point apart, and counting those as ink merged all
+    five panels into one region (#735).
+    """
+    kind = str(d.get("type") or "")
+    fill, stroke = d.get("fill"), d.get("color")
+    fill_alpha = d.get("fill_opacity")
+    stroke_alpha = d.get("stroke_opacity")
+    fill_alpha = 1.0 if fill_alpha is None else float(fill_alpha)
+    stroke_alpha = 1.0 if stroke_alpha is None else float(stroke_alpha)
+
+    def shows(channel, painted: bool, alpha: float) -> bool:
+        if not painted or channel is None or alpha <= 0:
+            return False
+        return not _same_colour(channel, ground)
+
+    return not (shows(fill, "f" in kind, fill_alpha) or shows(stroke, "s" in kind, stroke_alpha))
+
+
 def _drawing_bboxes(page) -> list[tuple[float, float, float, float]]:
-    """Return (x0, y0, x1, y1) for every non-degenerate drawing on *page*.
+    """Return (x0, y0, x1, y1) for every non-degenerate VISIBLE drawing on *page*.
+
+    A drawing that paints nothing (see ``_paints_nothing``) is not ink and is
+    excluded: it can neither anchor a cluster nor bridge two.
 
     Returns [] on error or when there are no drawings.
     """
@@ -1151,10 +1265,13 @@ def _drawing_bboxes(page) -> list[tuple[float, float, float, float]]:
         drawings = page.get_drawings()
     except Exception:
         return []
+    ground = _page_ground(page, drawings)
     boxes: list[tuple[float, float, float, float]] = []
     for d in drawings:
         rect = d.get("rect")
         if rect is None:
+            continue
+        if _paints_nothing(d, ground):
             continue
         x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
         if x1 > x0 or y1 > y0:  # skip zero-area point/line markers
