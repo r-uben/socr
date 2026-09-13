@@ -170,6 +170,63 @@ design. The assertion conflated two rules; the honest pin is the stronger one, s
 positional binder would have returned the same pairing for both arms and this one returns
 nothing for the permuted arm.
 
+## A fourth method trap: the assertion proving "applied" must be able to fail
+
+`docs/log/2026-09-13_734-filled-grid-reconciliation.md` records three properties a mutant must
+have — LOADED, APPLIED, LOAD-BEARING — and the rule that the substitution count is asserted
+rather than printed, because a pattern matching nothing is green in exactly the way a dead
+mutant is. This round found a fourth, one layer beneath: **the assertion that proves APPLIED
+must itself be capable of failing.**
+
+The review round's harness wrote
+
+    _mutated, n = re.subn(pattern, repl, src, count=1)
+    assert n == 1
+
+which is a tautology. `count=1` caps the substitution, so the returned `n` can never exceed 1
+and the assertion can never fail. It cannot distinguish "the anchor occurs once" from "the
+anchor occurs three times and I silently replaced the first". The uncapped form is the one that
+can fail:
+
+    occurrences = src.count(anchor)
+    assert occurrences == 1, f"anchor occurs {occurrences}x"
+
+**The cost was two opposite wrong conclusions in a row, on the same line.** `chosen = {}` occurs
+THREE times at the same indentation across two functions of `chart_data.py` — Stage 0's
+suppression discard, Stage B's backwards-order discard, and Stage B's 1:1 pairing discard. The
+first run hit Stage 0's and reported the pairing discard as unguarded (it is guarded, by the
+#635 suite, which was not in the run). The second hit the backwards-order discard and reported
+the line as inert (it is inert only under a fixture where the pairing branch empties the
+bindings immediately afterwards and masks it). The line actually under review was never mutated
+in either run. Resolved by running one fixture against three trees:
+
+    (page: two labelled panels PLUS one trailing unrelated table)
+    REAL              bindings {}              refusals 3
+    MUTANT line 1108  bindings {}              refusals 3   (masked)
+    MUTANT line 1138  bindings {1: 1, 2: 2}    refusals 3   (the mechanism)
+
+and against the suite, line 1138 gives 2 failed / 29 passed, dying on `assert blind == {}` and
+`assert down == {}`. Both discards are load-bearing and both are guarded; the guards differ in
+whether the page's regions and grids pair, which is exactly the variable deciding which discard
+is reachable.
+
+**This is the only defect this branch found in the enforcement mechanism rather than in the
+code under test**, which is why it is recorded at all: every other trap here describes a way a
+test can be vacuous, and this one describes a way the check for vacuity can itself be vacuous.
+
+Two consequences worth carrying forward. A surviving mutant means unguarded OR inert, and only a
+positive control — showing the mutated line changes behaviour on SOME input — separates them;
+this branch's own battery does not do that explicitly, and infers load-bearingness from a guard
+dying, which is a positive control only because the guard dies. And a literal anchor is only as
+precise as its uniqueness: the three identical `chosen = {}` lines make any literal mutation of
+them ambiguous by construction. Adding a distinguishing comment to each is a cheap mitigation
+and is deliberately NOT done in this sha, which is documentation-only.
+
+This branch's battery uses the uncapped form (`src.count(lit)` asserted against an expected
+count, with the two-occurrence anchors declared as such and the last occurrence targeted), and
+that assertion fired for real twice here — once when a mutation's anchor had been deleted by a
+later fix, and once on a log literal that matched nothing.
+
 ## What the reviewer's rounds found — one failure at four ranges
 
 Both were live on the corpus, and neither was visible to any guard that existed.
