@@ -521,6 +521,31 @@ def _resolve_anchor(
     return max(i for i, _d in hits), hits[0][1]
 
 
+def region_anchors(
+    masked: list[str],
+    table_lines: set[int],
+    interiors: dict[int, list[str]],
+) -> dict[int, tuple[int, str]]:
+    """``{region: (anchor line, panel name)}`` for each region that resolves one.
+
+    The one step #635 Stage 0 and #734 Stage B genuinely share. Both lanes must
+    agree about WHICH panel a grid sits under -- an empty grid and a filled one
+    are bound by the same evidence, and only what is then done with the binding
+    differs -- so the anchor resolution lives here rather than once per lane,
+    where the two could drift apart without any test noticing.
+
+    A region with no unique label, or whose labels each match several candidate
+    lines, is simply absent: unbound, never guessed at.
+    """
+    labels = unique_region_labels(interiors)
+    out: dict[int, tuple[int, str]] = {}
+    for region in sorted(interiors):
+        resolved = _resolve_anchor(masked, table_lines, labels.get(region, []))
+        if resolved is not None:
+            out[region] = resolved
+    return out
+
+
 def region_axis_rows(page, bboxes) -> dict[int, list[list[tuple[float, str]]]]:
     """``{region_index: [[(x centre, word), ...] top-to-bottom]}`` for each region.
 
@@ -828,13 +853,8 @@ def suppress_chart_table_skeletons(
     # heading inside a code fence is part of a sample, and letting it anchor a
     # region would put the replacement note inside the fence.
     table_lines = table_syntax_line_indices(masked)
-    labels = unique_region_labels(interiors)
     # region -> (anchor line, the label that matched)
-    anchors: dict[int, tuple[int, str]] = {}
-    for region in sorted(interiors):
-        resolved = _resolve_anchor(masked, table_lines, labels.get(region, []))
-        if resolved is not None:
-            anchors[region] = resolved
+    anchors = region_anchors(masked, table_lines, interiors)
 
     by_index = {s.table_index: s for s in skeletons}
     chosen: dict[int, int] = {}  # region -> table_index
@@ -893,7 +913,7 @@ def suppress_chart_table_skeletons(
                     by_index[chosen[region]].sha256,
                 )
             )
-        chosen = {}
+        chosen = {}  # Stage 0 discard: empty-grid bindings (#635)
 
     bound_tables = set(chosen.values())
     for skeleton in skeletons:
@@ -935,3 +955,200 @@ def suppress_chart_table_skeletons(
         )
     suppressions.reverse()
     return "\n".join(lines), suppressions, refusals
+
+
+# ---------------------------------------------------------------------------
+# #734 Stage B: binding a FILLED grid to the region it describes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GridBindingRefusal:
+    """A filled grid that no chart region could be shown to describe.
+
+    Deliberately NOT a ``SkeletonRefusal``: that one records a grid left
+    byte-identical because nothing proved it was an empty derivation, and its
+    consequence is that the page keeps a form it might have withheld. This one
+    records a grid whose numbers were never compared against geometry, and its
+    consequence is the opposite -- content ships unchecked. Reporting the
+    second under the first's name would say a decision was made to keep
+    something, where in fact no decision was reached at all.
+    """
+
+    page_num: int
+    table_index: int
+    reason: str
+    sha256: str
+
+    def to_dict(self) -> dict:
+        return {
+            "page_num": self.page_num,
+            "table_index": self.table_index,
+            "reason": self.reason,
+            "sha256": self.sha256,
+        }
+
+
+def bind_filled_grids(
+    text: str,
+    *,
+    page_num: int,
+    interiors: dict[int, list[str]],
+) -> tuple[dict[int, FilledGrid], list[GridBindingRefusal]]:
+    """Bind each of *text*'s FILLED grids to the chart region it describes.
+
+    Pure: no I/O. The caller supplies the regions' interior word rows and gets
+    back ``{region index: grid}`` plus a refusal for every filled grid left
+    unbound. A grid that binds to nothing is not an error and not a finding --
+    most filled grids on most pages are ordinary tables, and the refusals are
+    recorded only where the page actually HAS a chart (the caller's gate).
+
+    The binding rules are #635 Stage 0's, on the same anchors, for the reason
+    given in ``region_anchors``: a panel's heading, axis title and legend all
+    precede the grid derived from it, so the nearest preceding anchor bounds
+    the grid most tightly; another panel's anchor between them means the grid
+    describes THAT panel instead; and a set of bindings whose grids run
+    backwards against the regions' own source order is a candidate layout that
+    contradicts the page, so the page's whole set is refused rather than
+    keeping the ones that happen to fit.
+
+    **One Stage 0 proof is deliberately absent, and it is the stronger one.**
+    Stage 0 also requires ``_axis_attested`` -- every data column key of the
+    grid drawn IN FULL, in order, along the region's own axis. That proof is
+    not available here, and not because it is inconvenient: it is structurally
+    unreachable on the grids this ticket is about. Measured over the SEP
+    dot-plot corpus, ``_axis_attested`` attests NEITHER axis of ANY of the 37
+    filled grids -- 0 on the header axis, 0 on the row-label axis. The reason
+    is visible in ``region_axis_rows``: it groups words into horizontal rows,
+    and a dot plot draws its bin labels ROTATED on the x-axis, so no horizontal
+    word-row ever carries them. What the axis rows hold instead are the y-axis
+    tick numbers and the legend. Requiring attestation here would refuse all 37
+    grids and this lane would check nothing at all.
+
+    **An earlier version of this docstring claimed the reconciler supplied a
+    replacement proof, and that claim was false.** ``reconcile_grid`` refuses
+    unless one axis of the grid names more of the panel's bins than the other,
+    which proves the grid and the panel are about the same KIND of cell -- it
+    cannot tell two panels of one figure apart, because, as stated above, they
+    draw the same bins. So identity is blind to a wrong-panel binding by this
+    module's own account, and removing attestation left the anchors as the ONLY
+    proof of WHICH panel, not one of two independent ones. Two proofs were
+    claimed and one existed.
+
+    That matters here more than it does in Stage 0, and the asymmetry is the
+    reason for the rule below. The same mis-binding under Stage 0 withholds an
+    EMPTY grid; under Stage B it replaces published numbers with the withheld
+    marker and files a successful reconciliation. Measured end to end: a grid
+    holding panel 2's TRUE counts, reconciled against panel 1's geometry, yields
+    no refusal, 2 agreed, 2 contradicted, and two CORRECT numbers deleted from
+    the body. This is the lane that deletes, so it fails closed.
+
+    **The replacement proof is therefore a pairing requirement, not an identity
+    one: the page's regions and the candidate's filled grids must pair 1:1.**
+    Any region that resolves no anchor, or any filled grid left unbound, refuses
+    the page's whole set -- the same whole-set treatment the backwards-order
+    rule already gets, and for the same reason: the candidate's layout and the
+    page's disagree, so no binding on it is evidence of anything. Both known
+    mis-binding routes need that disagreement. A region with no anchor is simply
+    ABSENT from ``anchors``, so the intervening-label guard has nothing to fire
+    on and the grid shifts silently onto the wrong panel; and a caption drawn
+    BELOW its figure shifts every pairing by one while leaving the bindings
+    ascending, which the order check cannot see.
+
+    On the corpus this costs exactly nothing -- 8 pages, 37 regions, 37 anchors,
+    37 filled grids, pairing 1:1 on every page. It does mean a chart page that
+    ALSO carries an ordinary filled table is refused wholesale rather than
+    partly checked; that is a recall loss, it is recorded per grid rather than
+    silent, and it is the deliberate trade for never deleting a correct number.
+    """
+    grids = find_filled_grids(text)
+    if not grids or not interiors:
+        return {}, []
+
+    from socr.tables.reconcile import table_syntax_line_indices
+
+    masked = _content_mask(text.split("\n"))
+    if masked is None:  # pragma: no cover - find_filled_grids already abstained
+        return {}, []
+    table_lines = table_syntax_line_indices(masked)
+    anchors = region_anchors(masked, table_lines, interiors)
+
+    chosen: dict[int, FilledGrid] = {}
+    refusals: list[GridBindingRefusal] = []
+    for region, (anchor, _label) in anchors.items():
+        following = [g for g in grids if g.start > anchor]
+        if not following:
+            continue
+        target = following[0]
+        if any(
+            other != region and anchor < oa < target.start for other, (oa, _l) in anchors.items()
+        ):
+            refusals.append(
+                GridBindingRefusal(
+                    page_num,
+                    target.table_index,
+                    f"another chart region's label separates region {region} from the grid",
+                    target.sha256,
+                )
+            )
+            continue
+        chosen[region] = target
+
+    ordered = [chosen[r].table_index for r in sorted(chosen)]
+    if ordered != sorted(ordered):
+        for region in sorted(chosen):
+            refusals.append(
+                GridBindingRefusal(
+                    page_num,
+                    chosen[region].table_index,
+                    "the candidate's panel order runs backwards against the source order",
+                    chosen[region].sha256,
+                )
+            )
+        chosen = {}  # Stage B discard: BACKWARDS source order
+
+    # The pairing requirement (see the docstring). Checked AFTER the order rule
+    # so a page failing both is refused once, by the first reason that applies.
+    unanchored = sorted(region for region in interiors if region not in anchors)
+    paired = {g.table_index for g in chosen.values()}
+    unbound_grids = [g for g in grids if g.table_index not in paired]
+    if chosen and (unanchored or unbound_grids):
+        detail = []
+        if unanchored:
+            detail.append(
+                f"region(s) {', '.join(str(r) for r in unanchored)} resolve no label of "
+                "their own in the candidate"
+            )
+        if unbound_grids:
+            detail.append(
+                f"grid(s) {', '.join(str(g.table_index) for g in unbound_grids)} bind to no region"
+            )
+        reason = (
+            f"the page draws {len(interiors)} chart region(s) and the candidate writes "
+            f"{len(grids)} filled grid(s), which do not pair 1:1 ("
+            + "; ".join(detail)
+            + "), so no binding on this page is evidence of which panel a grid describes"
+        )
+        for region in sorted(chosen):
+            refusals.append(
+                GridBindingRefusal(
+                    page_num, chosen[region].table_index, reason, chosen[region].sha256
+                )
+            )
+        chosen = {}  # Stage B discard: a failed 1:1 PAIRING (#734 P5)
+
+    bound = {g.table_index for g in chosen.values()}
+    for grid in grids:
+        if grid.table_index not in bound and not any(
+            r.table_index == grid.table_index for r in refusals
+        ):
+            refusals.append(
+                GridBindingRefusal(
+                    page_num,
+                    grid.table_index,
+                    "no chart region binds this filled grid; its values were not compared "
+                    "against any geometry",
+                    grid.sha256,
+                )
+            )
+    return chosen, refusals

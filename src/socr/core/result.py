@@ -152,6 +152,19 @@ class FailureMode(str, Enum):
     #: that fails closed because its only grid candidate carries this outcome
     #: must say so instead of ``STRUCTURE_CLASS_LADDER_EXHAUSTED``, which
     #: claims every candidate was refused or absent -- neither happened here.
+    #: #734 Stage B: a FILLED chart grid on this page was compared, cell by
+    #: cell, against the counts read from the page's own vector geometry, and
+    #: at least one cell DISAGREED. Both readings are withheld from the body --
+    #: nothing here adjudicates between them -- and the page ships demoted.
+    #:
+    #: Deliberately NOT a reuse of ``HALLUCINATION``. That mode says a witness
+    #: read the page and the model's numbers were not there. This one says two
+    #: independent readings of one cell do not agree, and says nothing about
+    #: which is wrong: on the measured corpus 9 of 10 contradictions cluster on
+    #: a single page, which is as consistent with a reader defect as with a
+    #: model one. Calling it a hallucination would publish a verdict socr has
+    #: not reached.
+    CHART_GRID_CONTRADICTED = "chart_grid_contradicted"
     PAGE_JUDGE_TIMEOUT = "page_judge_timeout"
     #: #713: the page judge timed out on a candidate whose EVERY emitted table
     #: was accepted by the table judge ladder, and a persisted acceptance
