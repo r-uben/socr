@@ -9,8 +9,7 @@ succeeded looks like -- so the page ships them unchecked, which is how
 ``| 0.13-0.37 | 17 | 17 |`` reached the corpus beside a panel whose geometry
 derives ``17, 0, 0, ...``.
 
-The rule is the design's (``docs/plans/chart-data/DESIGN.md``, Stage 2) and this
-module implements that and nothing more:
+The rule is the design's (``docs/plans/chart-data/DESIGN.md``, Stage 2):
 
 * reconcile **by cell identity** -- a grid cell and a reader cell are the same
   cell when the labels naming them are the same label, never when they merely
@@ -28,6 +27,26 @@ module implements that and nothing more:
   about the model's number. The number survives as unverified -- neither
   corroborated nor impeached -- because refusing it would delete a reading on
   the strength of a refusal to read.
+
+**Two things here are NOT the design's, and are called out so no reader takes
+them for ratified:**
+
+* **The orientation rule is this module's own.** DESIGN.md says to reconcile by
+  cell identity and says nothing about which axis of a grid carries the bins.
+  Deciding it by counting bin matches per axis is a choice made here, and it
+  rests on a precondition the corpus happens to satisfy and no rule enforces:
+  that a grid's OTHER axis does not also carry the panel's bin labels. Where it
+  fails -- single-value bins that could head either axis -- the tie refuses the
+  grid rather than transposing it, which is the safe direction, but it is a
+  refusal caused by this rule and not by the page.
+* **``published`` does not check what Stage 2 requires.** The design says
+  agreement must satisfy calibration and constraints; ``published`` checks only
+  that the two sides hold the same integer. The calibration behind the reader's
+  number was already enforced when the reader emitted it (an unresolvable cell
+  is UNRESOLVED, and geometry with no opinion never agrees), but the
+  constraint half -- the caller's acceptance hook, ``chart_reader.verify_panel``
+  -- is not consulted here at all. A cell can therefore be ``agreed`` inside a
+  panel whose derivation a caller would reject.
 
 Pure: no I/O, no state, no page. It takes a grid the caller already parsed and
 the ``PanelReading`` for the region the caller already bound it to, and returns
@@ -53,6 +72,20 @@ CONTRADICTED = "contradicted"
 UNKNOWN_TO_GEOMETRY = "unknown_to_geometry"
 #: The grid cell carries no integer, so there is no model number to check.
 NOT_A_COUNT = "not_a_count"
+
+#: WHY a cell is unknown to geometry. Four different failures wear the same
+#: status, and only the cause tells them apart: geometry read the cell and
+#: could not resolve it; geometry read this bin under other series but nothing
+#: it read is named the way this column is; geometry read this series but no
+#: bin of it is named the way this row is; or neither label meets anything.
+#: The middle two are cells that a matching label WOULD have judged -- the
+#: laundering surface -- and folding them into "geometry was silent" states
+#: something false about the page.
+CAUSE_READER_UNRESOLVED = "reader_unresolved"
+CAUSE_CELL_ABSENT = "cell_absent"
+CAUSE_SERIES_UNMATCHED = "series_unmatched"
+CAUSE_BIN_UNMATCHED = "bin_unmatched"
+CAUSE_NEITHER_MATCHED = "neither_matched"
 
 #: Which axis of the grid carries the chart's bins. Decided by identity: the
 #: axis whose labels name the reader's bins, never by the grid's shape.
@@ -82,6 +115,9 @@ class CellVerdict:
     model_count: int | None
     reader_count: int | None
     detail: str = ""
+    #: Set only when ``status`` is UNKNOWN_TO_GEOMETRY; one of the CAUSE_*
+    #: constants. Empty for every other status.
+    cause: str = ""
 
     @property
     def published(self) -> int | None:
@@ -101,7 +137,36 @@ class CellVerdict:
             "model_text": self.model_text,
             "model_count": self.model_count,
             "reader_count": self.reader_count,
+            "cause": self.cause,
             "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class UncoveredReading:
+    """One identity GEOMETRY read that no cell of the grid addressed.
+
+    The reader→model direction, which every other coverage field lacks. A grid
+    can drop a whole series, a whole bin row, or part of one series across some
+    bins, and the first two are the only ones an axis-level field can express
+    at all -- so this is recorded per identity and any axis summary is derived
+    from it, never computed beside it.
+
+    ``reader_count`` is ``None`` when geometry read the cell and resolved no
+    count. That distinction is the point: an unaddressed UNRESOLVED cell is
+    nothing lost, while an unaddressed cell carrying a number is a reading that
+    existed, was proven, and went nowhere.
+    """
+
+    series_name: str
+    bin_label: str
+    reader_count: int | None
+
+    def to_dict(self) -> dict:
+        return {
+            "series_name": self.series_name,
+            "bin_label": self.bin_label,
+            "reader_count": self.reader_count,
         }
 
 
@@ -114,8 +179,15 @@ class GridReconciliation:
     table_index: int
     orientation: str
     cells: tuple[CellVerdict, ...] = ()
+    #: Labels the GRID names that geometry never read.
     unmatched_bins: tuple[str, ...] = ()
     unmatched_series: tuple[str, ...] = ()
+    #: The inverse direction, at CELL granularity: identities geometry read
+    #: that no grid cell addressed. A series-level field cannot express a
+    #: dropped bin row or a partial drop, and a grid that drops half a chart
+    #: while keeping real labels is otherwise a clean sheet -- every other
+    #: field here runs model→reader and has nothing to say about it.
+    uncovered: tuple[UncoveredReading, ...] = ()
     refusal: str = ""
 
     def _count(self, status: str) -> int:
@@ -137,6 +209,88 @@ class GridReconciliation:
     def not_a_count(self) -> int:
         return self._count(NOT_A_COUNT)
 
+    @property
+    def uncovered_count(self) -> int:
+        """Reader identities no grid cell addressed."""
+        return len(self.uncovered)
+
+    @property
+    def uncovered_with_count(self) -> int:
+        """Those of them geometry actually resolved a number for."""
+        return sum(1 for u in self.uncovered if u.reader_count is not None)
+
+    @property
+    def published_cells(self) -> int:
+        """Cells whose verdict supports publishing a number."""
+        return sum(1 for c in self.cells if c.published is not None)
+
+    @property
+    def uncovered_beside_published(self) -> int:
+        """Uncovered readings WITH a number on a grid that publishes cells.
+
+        The severity split, and it runs opposite to the volume. A grid that
+        published nothing -- every column caption-headed, nothing matched --
+        can leave a whole chart uncovered and still ship no number, so its
+        uncovered readings are recall loss and nothing is fabricated. The
+        dangerous shape is the small one: a grid whose cells DID agree and
+        publish, beside geometry that was never consulted. That page ships a
+        table which reads as fully checked and is half a chart.
+
+        Zero when the grid published nothing, whatever its uncovered count.
+        """
+        return self.uncovered_with_count if self.published_cells else 0
+
+    @property
+    def unpublished_series(self) -> tuple[str, ...]:
+        """Reader series NO cell of the grid addressed, derived from ``uncovered``.
+
+        Derived rather than computed beside it, so the two can never disagree:
+        a series is unpublished exactly when none of its identities was
+        addressed, and an addressed identity always leaves a cell carrying that
+        series' label. A series the grid drops only partly is deliberately
+        absent here -- it is not unpublished, and the loss is in ``uncovered``
+        where it can be counted per cell.
+        """
+        addressed = {_series_key(c.series_name) for c in self.cells}
+        out: list[str] = []
+        for entry in self.uncovered:
+            if _series_key(entry.series_name) not in addressed and entry.series_name not in out:
+                out.append(entry.series_name)
+        return tuple(out)
+
+    @property
+    def coverage_complete(self) -> bool:
+        """Every cell of both sides met a counterpart.
+
+        False whenever a grid label named nothing geometry read, or geometry
+        read a cell the grid never addressed. It says nothing about whether
+        the numbers agree -- only about whether the comparison was able to see
+        all of them.
+        """
+        return not (self.unmatched_bins or self.unmatched_series or self.uncovered)
+
+    @property
+    def verified(self) -> bool:
+        """This grid, as a whole, was checked against geometry and survived.
+
+        Requires three things, and incomplete coverage withholds it: verdicts
+        were reached at all, no cell was contradicted, and every cell on both
+        sides met a counterpart. Without the third, a model earns a clean bill
+        by renaming precisely the series that would have contradicted it --
+        the rename removes the cells rather than the disagreement.
+
+        Withholding only ever removes agreement. It cannot manufacture a
+        contradiction, and it changes no cell verdict: ``CellVerdict.published``
+        is unaffected, so an agreed cell in a partly-covered grid is still an
+        agreed cell. What is withheld is the claim about the GRID.
+        """
+        return (
+            bool(self.cells)
+            and not self.refusal
+            and self.contradicted == 0
+            and self.coverage_complete
+        )
+
     def to_dict(self) -> dict:
         return {
             "page_num": self.page_num,
@@ -148,8 +302,15 @@ class GridReconciliation:
             "contradicted": self.contradicted,
             "unknown_to_geometry": self.unknown,
             "not_a_count": self.not_a_count,
+            "coverage_complete": self.coverage_complete,
+            "verified": self.verified,
             "unmatched_bins": list(self.unmatched_bins),
             "unmatched_series": list(self.unmatched_series),
+            "unpublished_series": list(self.unpublished_series),
+            "uncovered_count": self.uncovered_count,
+            "uncovered_with_count": self.uncovered_with_count,
+            "uncovered_beside_published": self.uncovered_beside_published,
+            "uncovered": [u.to_dict() for u in self.uncovered],
             "cells": [c.to_dict() for c in self.cells],
         }
 
@@ -199,9 +360,15 @@ def _model_count(cell: str) -> int | None:
     return int(stripped) if _INT_RE.match(stripped) else None
 
 
-def _reader_index(panel: PanelReading) -> dict[tuple[str, tuple[str, ...]], Cell]:
-    """``{(series key, bin key): cell}`` for every cell the reader holds."""
-    out: dict[tuple[str, tuple[str, ...]], Cell] = {}
+def _reader_index(panel: PanelReading) -> dict[tuple[str, tuple[str, ...]], tuple[str, Cell]]:
+    """``{(series key, bin key): (series name, cell)}`` for every cell read.
+
+    The name is carried because an identity the grid never addresses has to be
+    reported in the reader's OWN words -- there is no grid label for it, which
+    is precisely what makes it uncovered. Insertion order is the panel's, so
+    anything derived from this iterates deterministically.
+    """
+    out: dict[tuple[str, tuple[str, ...]], tuple[str, Cell]] = {}
     for series in panel.series:
         key = _series_key(series.name)
         if not key:
@@ -209,7 +376,7 @@ def _reader_index(panel: PanelReading) -> dict[tuple[str, tuple[str, ...]], Cell
         for cell in series.cells:
             bin_key = _bin_key(cell.bin_label)
             if bin_key:
-                out[(key, bin_key)] = cell
+                out[(key, bin_key)] = (series.name, cell)
     return out
 
 
@@ -243,8 +410,19 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
     then share no cell identity and every verdict would be a guess about which
     label meant what.
 
-    A label repeated on either axis of either side is a refusal too: two cells
-    with one identity cannot both be the cell a verdict is about.
+    The orientation rule is this module's own and not the design's, and it has
+    a precondition: that the grid's other axis does not ALSO carry the panel's
+    bin labels. Where a chart prints single-value bins that could plausibly
+    head either axis, both axes match equally and the tie refuses the grid.
+    That is the safe direction -- a refusal, never a silent transposition --
+    but it is caused by this rule rather than by the page.
+
+    A label repeated on any of the FOUR identity axes is a refusal: the grid's
+    bins, the grid's series, the panel's series, and the panel's bins within
+    one series. Two cells with one identity cannot both be the cell a verdict
+    is about, and the panel's own axes are no more exempt than the grid's --
+    an unguarded one does not refuse, it silently keeps whichever cell was read
+    last and judges the model against it.
     """
     empty = GridReconciliation(
         page_num=panel.page_num,
@@ -256,6 +434,19 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
     index = _reader_index(panel)
     if not index:
         return _refuse(empty, "the panel holds no cell to reconcile against")
+
+    # The panel's own identity axes, checked BEFORE the grid's: an index built
+    # over a repeated label has already lost a cell by overwriting it, so no
+    # later guard can see what went missing.
+    if _duplicated([_series_key(s.name) for s in panel.series]):
+        return _refuse(empty, "the panel repeats a series name, so its cells have no identity")
+    for series in panel.series:
+        if _duplicated([_bin_key(cell.bin_label) for cell in series.cells]):
+            return _refuse(
+                empty,
+                f"the panel repeats a bin label within series “{series.name}”, "
+                "so one of its cells has no single identity",
+            )
 
     reader_bins = {bin_key for _series, bin_key in index}
     header_keys = [_bin_key(cell) for cell in grid.data_headers]
@@ -306,15 +497,20 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
                 f"the grid repeats a {axis} label, so a cell of it has no single identity",
             )
     reader_series_keys = {series for series, _bin in index}
-    if _duplicated([_series_key(s.name) for s in panel.series]):
-        return _refuse(empty, "the panel repeats a series name, so its cells have no identity")
 
     cells: list[CellVerdict] = []
     unmatched_bins: list[str] = []
     unmatched_series: list[str] = []
+    # Every identity a grid cell NAMES, matched or not. Its complement against
+    # the index is the reader→model direction: readings the grid never asked
+    # about. A cell that named a bin or series geometry never read is still an
+    # address, and simply addresses nothing.
+    addressed: set[tuple[str, tuple[str, ...]]] = set()
     for bin_label, series_name, raw in entries:
         bin_key, series_key = _bin_key(bin_label), _series_key(series_name)
-        reader_cell = index.get((series_key, bin_key))
+        addressed.add((series_key, bin_key))
+        found = index.get((series_key, bin_key))
+        reader_cell = found[1] if found is not None else None
         if reader_cell is None:
             if bin_key not in reader_bins and bin_label not in unmatched_bins:
                 unmatched_bins.append(bin_label)
@@ -324,14 +520,17 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
             reader_cell.count if reader_cell is not None and reader_cell.status == INTEGER else None
         )
         model_count = _model_count(raw)
+        cause = ""
         if model_count is None:
             status, detail = NOT_A_COUNT, "the grid cell carries no count"
         elif reader_count is None:
-            status, detail = (
-                UNKNOWN_TO_GEOMETRY,
-                "geometry holds no count for this cell; the model's value is unverified"
-                if reader_cell is not None
-                else "geometry has no such cell; the model's value is unverified",
+            status = UNKNOWN_TO_GEOMETRY
+            cause, detail = _unknown_cause(
+                reader_cell is not None,
+                bin_key in reader_bins,
+                series_key in reader_series_keys,
+                bin_label,
+                series_name,
             )
         elif reader_count == model_count:
             status, detail = AGREED, ""
@@ -349,8 +548,24 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
                 model_count=model_count,
                 reader_count=reader_count,
                 detail=detail,
+                cause=cause,
             )
         )
+
+    # The reader→model direction. Everything above runs model→reader and is
+    # therefore silent about a grid that simply publishes less than the panel
+    # holds: drop a column keeping a real series name, or drop one bin row,
+    # and every field above reports a clean sheet while half the geometry the
+    # reader proved is never consulted. This is that half, per identity.
+    uncovered = tuple(
+        UncoveredReading(
+            series_name=name,
+            bin_label=cell.bin_label,
+            reader_count=cell.count if cell.status == INTEGER else None,
+        )
+        for key, (name, cell) in index.items()
+        if key not in addressed
+    )
 
     return GridReconciliation(
         page_num=panel.page_num,
@@ -360,6 +575,48 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
         cells=tuple(cells),
         unmatched_bins=tuple(unmatched_bins),
         unmatched_series=tuple(unmatched_series),
+        uncovered=uncovered,
+    )
+
+
+def _unknown_cause(
+    cell_exists: bool, bin_matched: bool, series_matched: bool, bin_label: str, series_name: str
+) -> tuple[str, str]:
+    """Why geometry has no number here, and a detail that is true of THIS cell.
+
+    The distinction the caller cannot reconstruct afterwards: a cell geometry
+    read and could not resolve is geometry's own limit, while a cell whose bin
+    matched and whose series label did not is a reading that EXISTS and was
+    never compared. Reporting the second as the first says the page was
+    checked where it was not.
+    """
+    if cell_exists:
+        return (
+            CAUSE_READER_UNRESOLVED,
+            "geometry read this cell and resolved no count; the model's value is unverified",
+        )
+    if bin_matched and series_matched:
+        return (
+            CAUSE_CELL_ABSENT,
+            "geometry read this bin and this series but holds no cell for the pair; "
+            "the model's value is unverified",
+        )
+    if bin_matched:
+        return (
+            CAUSE_SERIES_UNMATCHED,
+            f"geometry holds a reading for bin “{bin_label}”, but no series it read is named "
+            f"“{series_name}”; this cell was never compared",
+        )
+    if series_matched:
+        return (
+            CAUSE_BIN_UNMATCHED,
+            f"geometry read series “{series_name}”, but no bin it read is named “{bin_label}”; "
+            "this cell was never compared",
+        )
+    return (
+        CAUSE_NEITHER_MATCHED,
+        f"neither bin “{bin_label}” nor series “{series_name}” names anything geometry read; "
+        "this cell was never compared",
     )
 
 
