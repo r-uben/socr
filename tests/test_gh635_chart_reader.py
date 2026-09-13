@@ -61,13 +61,20 @@ def build_chart(
     dash_width: float | None = None,
     descent_gap: float = 0.0,
     extra_runs: list[tuple[float, float, int]] = (),
+    dashed_compound_path: bool = False,
+    dashed_curve_at: int | None = None,
 ) -> tuple[fitz.Document, list]:
     """Draw a two-series histogram and return ``(doc, [full-page bbox])``.
 
     The y scale is two units per tick, so an odd count sits exactly between two
     printed ticks -- the case the reader must resolve from the fit rather than
     from a tick it can see. ``extra_bars`` adds raw ``(x0, x1, count)`` bars for
-    the overlap cases.
+    the overlap cases. ``dashed_compound_path`` draws the ENTIRE staircase
+    (every run and riser) as ONE compound path, the way the Fed SEP pages draw
+    it (#739) -- PyMuPDF then reports it as one drawing with several ``items``,
+    never as several drawings each with one. ``dashed_curve_at`` inserts a
+    curve ('c') item after that many runs, standing in for a genuinely
+    undecomposable piece the reader must still refuse.
     """
     labels = bins or ["1.0", "2.0", "3.0", "4.0", "5.0"]
     n = len(labels)
@@ -146,6 +153,8 @@ def build_chart(
         edges = [bin_x0 + bin_w * i for i in range(n + 1)]
         levels = [base - c * unit for c in dashed]
         prev = base
+        shape = page.new_shape() if dashed_compound_path else None
+        seg_count = 0
 
         def riser_end(y: float) -> float:
             # ``descent_gap`` stops a descent short of the axis, which is how a
@@ -153,22 +162,39 @@ def build_chart(
             # single level.
             return base - descent_gap if y == base else y
 
+        def draw_seg(p1: fitz.Point, p2: fitz.Point) -> None:
+            # Every run and riser of one outline, as separate ``page.draw_line``
+            # calls, is several drawings each with one item -- and that was
+            # never the shape the Fed SEP pages ship (#739). ``shape`` collects
+            # every segment under ONE drawing's ``items`` instead, so a test
+            # asking for ``dashed_compound_path`` exercises the actual defect.
+            nonlocal seg_count
+            if shape is None:
+                page.draw_line(p1, p2, **dash)
+                return
+            if dashed_curve_at is not None and seg_count == dashed_curve_at:
+                mid = fitz.Point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 - 5 * scale)
+                shape.draw_bezier(p1, mid, mid, p2)
+            else:
+                shape.draw_line(p1, p2)
+            seg_count += 1
+
         for i, level in enumerate(levels):
             if level != prev and not omit_dashed_risers:
                 ends = (riser_end(level), riser_end(prev))
-                page.draw_line(
-                    fitz.Point(edges[i], min(*ends)),
-                    fitz.Point(edges[i], max(*ends)),
-                    **dash,
-                )
+                draw_seg(fitz.Point(edges[i], min(*ends)), fitz.Point(edges[i], max(*ends)))
             if level != base:
-                page.draw_line(fitz.Point(edges[i], level), fitz.Point(edges[i + 1], level), **dash)
+                draw_seg(fitz.Point(edges[i], level), fitz.Point(edges[i + 1], level))
             prev = level
         if prev != base and not omit_dashed_risers:
             ends = (riser_end(prev), riser_end(base))
-            page.draw_line(
-                fitz.Point(edges[n], min(*ends)), fitz.Point(edges[n], max(*ends)), **dash
-            )
+            draw_seg(fitz.Point(edges[n], min(*ends)), fitz.Point(edges[n], max(*ends)))
+        if shape is not None:
+            # closePath=False: a staircase outline is not a loop, and letting
+            # Shape close it back to its start point would append a bogus
+            # extra segment no page actually draws.
+            shape.finish(**dash, closePath=False)
+            shape.commit()
     for rx0, rx1, count in extra_runs:
         page.draw_line(
             fitz.Point(rx0 * scale, base - count * unit),
@@ -776,6 +802,100 @@ def test_a_riser_that_joins_the_wrong_levels_still_refuses_the_series(tmp_path: 
     reading = read_chart_page(reopened[0], [reopened[0].rect], page_num=1)
     got = counts(reading.panels[1], DASHED)
     assert set(got) == {"UNRESOLVED"}, got
+
+
+def test_page_marks_emits_one_mark_per_item_not_per_drawing(tmp_path: Path) -> None:
+    """#739: a compound path is several items under ONE ``get_drawings()`` entry.
+
+    The Fed SEP pages draw a whole staircase this way -- nine path items under
+    one bounding rect that is neither a run nor a riser. ``page_marks`` must
+    decompose it back into one :class:`Mark` per item, each carrying the
+    parent drawing's own ``width`` and ``dashed`` down with it.
+    """
+    from socr.figures.chart_reader import page_marks
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_line(fitz.Point(10, 50), fitz.Point(40, 50))  # run
+    shape.draw_line(fitz.Point(40, 50), fitz.Point(40, 30))  # riser
+    shape.draw_line(fitz.Point(40, 30), fitz.Point(70, 30))  # run
+    shape.finish(width=1.5, dashes="[2 2] 0", color=(0, 0.4, 0.7), closePath=False)
+    shape.commit()
+    doc.save(str(tmp_path / "compound.pdf"))
+    reopened = fitz.open(str(tmp_path / "compound.pdf"))
+    drawings = reopened[0].get_drawings()
+    assert len(drawings) == 1, "the fixture is one compound path, not three drawings"
+
+    marks = page_marks(reopened[0])
+    assert len(marks) == 3, "one Mark per item, not one Mark for the whole path"
+    assert all(m.dashed and m.width == 1.5 for m in marks), (
+        "width and dashed live on the drawing, not the item -- every mark cut "
+        "from it must still carry them"
+    )
+    runs = [m for m in marks if m.horizontal]
+    risers = [m for m in marks if m.vertical and not m.horizontal]
+    assert len(runs) == 2 and len(risers) == 1, (marks,)
+    assert (runs[0].x0, runs[0].x1) == (10.0, 40.0)
+    assert (risers[0].y0, risers[0].y1) == (30.0, 50.0)
+
+
+def test_a_compound_staircase_path_now_resolves(tmp_path: Path) -> None:
+    """The regression this ticket exists for.
+
+    Drawn as ONE compound path (``dashed_compound_path``), the way the Fed SEP
+    pages draw a staircase, the outline used to arrive as a single bounding
+    box neither horizontal nor vertical and ``read_dashed_series`` refused the
+    whole series. Decomposed per item, the same drawing resolves.
+    """
+    panel = read_one(tmp_path, WITNESS, [4, 0, 4, 0, 0], dashed_compound_path=True, dash_width=1.5)
+    assert counts(panel, DASHED) == ["4", "0", "4", "0", "0"]
+
+
+def test_a_curve_inside_a_compound_path_still_refuses(tmp_path: Path) -> None:
+    """What must NOT change: a genuinely undecomposable piece still refuses.
+
+    Decomposing a compound path into its own items must not turn a curve into
+    a run or a riser it never was -- only a SYNTHETIC fixture can exercise
+    this once #739 lands, because no corpus page has any curve or diagonal
+    item left to refuse (see the brief: 0 diagonals, 0 curves measured).
+    """
+    doc, bboxes = build_chart(
+        tmp_path / "curved.pdf",
+        WITNESS,
+        [4, 0, 4, 0, 0],
+        dashed_compound_path=True,
+        dashed_curve_at=1,
+    )
+    reading = read_chart_page(doc[0], bboxes, page_num=1)
+    got = counts(reading.panels[1], DASHED)
+    assert set(got) == {"UNRESOLVED"}, got
+    detail = next(s for s in reading.panels[1].series if s.name == DASHED).detail
+    assert "cannot decompose" in detail
+
+
+def test_a_zero_length_path_stub_is_not_a_mark(tmp_path: Path) -> None:
+    """A PDF path's opening moveto, restated as a zero-length line to itself.
+
+    Every dashed staircase on the SEP corpus opens with exactly this item --
+    ``('l', p, p)`` -- ahead of its real runs and risers. It paints nothing, so
+    it must not count as an undecomposable piece the reader is forced to
+    refuse over.
+    """
+    from socr.figures.chart_reader import page_marks
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_line(fitz.Point(10, 50), fitz.Point(10, 50))  # zero-length stub
+    shape.draw_line(fitz.Point(10, 50), fitz.Point(40, 50))  # the real run
+    shape.finish(width=1.5, dashes="[2 2] 0", color=(0, 0.4, 0.7), closePath=False)
+    shape.commit()
+    doc.save(str(tmp_path / "stub.pdf"))
+    reopened = fitz.open(str(tmp_path / "stub.pdf"))
+    marks = page_marks(reopened[0])
+    assert len(marks) == 1, "the zero-length stub must not become a Mark"
+    assert marks[0].horizontal
 
 
 def test_a_pure_fill_contributes_no_stroke_widening(tmp_path: Path) -> None:

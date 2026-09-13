@@ -1088,15 +1088,17 @@ def test_the_sep_corpus_reproduces_the_measured_shape() -> None:
     """The eight pages that shipped a filled chart grid, end to end.
 
     Not a golden of every number -- those are the team lead's and are recorded
-    in the log. What is pinned here is the SHAPE the design rests on, and each
-    line of it would have to change for a conclusion in the log to be wrong:
-    every grid binds, geometry contradicts a handful of cells, the great
-    majority are unchecked rather than disputed, and NOTHING is verified.
+    in the log. What is pinned here is the SHAPE the design rests on: every
+    grid binds, geometry contradicts a minority of cells, and a comparable
+    share are unchecked rather than disputed.
 
-    Zero verified is the CORRECT answer and must never be loosened to move it:
-    on every panel the prior meeting is a dashed staircase the reader refuses
-    with a stated reason (#739), so a grid naming both series cannot reach
-    complete coverage whatever this lane does.
+    These figures moved once already, by #739: before it, every panel's prior
+    meeting was a dashed staircase the reader refused outright (one compound
+    path per outline, never decomposed), so a grid naming both series could
+    not reach complete coverage and ``verified`` was pinned at zero. #739
+    reads the outline from its own drawing items instead, and two of this
+    corpus's panels now verify. A further move needs the same kind of stated
+    reason #739 gave; this pin should not be loosened without one.
     """
     from socr.figures.chart_data import region_interior_rows
     from socr.figures.chart_reader import read_chart_page
@@ -1130,8 +1132,8 @@ def test_the_sep_corpus_reproduces_the_measured_shape() -> None:
             verified += result.verified
 
     assert bound == 37, "every filled grid on the corpus binds to a panel"
-    assert reconciled == 33 and agreed == 106 and contradicted == 10 and unknown == 424
-    assert verified == 0, "zero verified is correct here and is gated by #739, not by this lane"
+    assert reconciled == 33 and agreed == 202 and contradicted == 30 and unknown == 308
+    assert verified == 2, "#739 lifted this off zero; further movement needs a stated reason"
     assert unknown > agreed, (
         "most cells are UNCHECKED, not disputed -- never report them as checked"
     )
