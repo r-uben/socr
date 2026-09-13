@@ -71,7 +71,7 @@ constraint half — the caller's acceptance hook, `chart_reader.verify_panel` �
 consulted here at all, so a cell can be `agreed` inside a panel whose derivation a caller
 would reject.
 
-## What the reviewer's round changed
+## What the reviewer's first round changed
 
 Five findings, all in `807e060`. Two of them changed the design rather than the code.
 
@@ -107,6 +107,48 @@ Five findings, all in `807e060`. Two of them changed the design rather than the 
    model against it. Measured before the fix: a panel holding `1.0 → 5` and `1.0 → 9`
    against a grid saying `5` produced `contradicted`, `reader_count=9`.
 
+## What the reviewer's second round changed
+
+Two findings at `807e060`. The first is a route around the gate the first round built.
+
+**An uncompared cell counted as covered.** `addressed` recorded an identity before the
+cell's content was examined, so a cell left blank, a cell carrying prose, and a cell whose
+reader counterpart resolved nothing all bought coverage for a reading none of them
+checked. Measured on a panel holding four proven counts across two series:
+
+    control, both columns filled   agreed 4  not_a_count 0  unknown 0  uncovered 0  verified True
+    one column left blank          agreed 2  not_a_count 2  unknown 0  uncovered 0  verified True
+    one column carrying prose      agreed 2  not_a_count 2  unknown 0  uncovered 0  verified True
+    every cell unknown             agreed 0  not_a_count 0  unknown 2  uncovered 0  verified True
+
+Rows 2 and 3 are the rename route one move cheaper: the first round stopped a clean bill
+being earned by REMOVING a column, and leaving the column in place with empty cells bought
+the same clean bill. Geometry proved 4 and 5, nothing compared them, and the grid reported
+as verified. Row 4 is the worse claim — a grid that corroborated nothing at all was
+`verified`, which contradicted the property's own docstring.
+
+The blank-cell route measures **zero occurrences on this corpus** — of 37 grids none
+carries a blank cell and none is mixed — so it is a real and cheaply reachable defect
+rather than a live corpus problem. It is recorded here as the former.
+
+`published` was unaffected in every row, so no fabricated number could ship; what shipped
+wrong was the disclosure, which is the whole purpose of the commit. The fix is one line of
+rule: an identity counts as addressed only when a verdict actually COMPARED it — reached
+`agreed` or `contradicted`. Naming a reading is not examining it. The invariant holds:
+withholding still only ever removes agreement and cannot manufacture a contradiction,
+because nothing in it touches a cell's own verdict. The six shapes above are unchanged
+under it; only cells that compared nothing lost their coverage.
+
+**The P4 property was not protected, and the earlier answer that it was carried by the
+derivation mutant was wrong.** The reviewer removed `unpublished_series` from the dataclass
+and computed it from the PANEL instead — the panel series no grid entry names — and the
+whole file passed, 40 of 40. The divergence is real and narrow: on a panel series geometry
+read but which holds no cell at all, deriving from the identity set returns `()` because
+that series contributed no identity to lose, while computing from the panel returns that
+series. Both implementations agree on every other shape, which is exactly why the existing
+consistency test could not witness it — both of its cases hold under either. Now pinned by
+a guard whose two cases differ only in whether the absent series has a reading.
+
 ## Measurement
 
 All corpus figures are the team lead's, over the SEP dot-plot corpus at `807e060`. They
@@ -115,9 +157,55 @@ from one model and one run.
 
     grids 37, refused 4
     verdicts:  agreed 106   unknown_to_geometry 424   contradicted 10
-    reader identities 836; never addressed by any grid cell 604, on 5 pages,
-      all carrying a number; refused grids hide a further 80
-    uncovered_beside_published: 0 — zero grids, zero pages
+    reader identities 836; refused grids hide a further 80
+
+Reader-side coverage was then measured under two instruments, both from `git archive`
+trees with `socr.__file__` asserted inside them — the commit as it stood, and a prototype
+of the coverage fix below:
+
+    807e060    uncovered 604   with a number 308   without 296   beside_published 0   verified 4
+    prototype  uncovered 720   with a number 308   without 412   beside_published 0   verified 0
+
+**The increment is 116 and all of it is readings geometry could not resolve.** The
+with-a-number column is flat at 308; the without column rises 296 → 412. So the fix
+reveals no hidden readings that carry a count — it correctly reclassifies unresolved cells
+that had been buying coverage. That is recall loss and deserves its own line rather than
+being folded into a headline.
+
+**`verified` falls from 4 to 0.** The honest statement is not "nothing is verified" as a
+flat fact about the corpus, but that the fix removes verification from four grids that
+should never have earned it, leaving none verified here. That is the floor Stage B has to
+improve on rather than inherit — but see the reader limit below before reading the zero
+as a statement about reconciliation.
+
+**The zero is gated upstream of reconciliation, and must never be reported bare.**
+Measured independently on all 23 SEP pages at `807e060` — 94 panels, 188 series rows —
+**95 series resolve every cell, 93 resolve none, and none resolves partly.** On every
+panel the CURRENT meeting's series resolves all of its cells and the PRIOR meeting's
+resolves none: `sep-20201216` reads `December projections` 12/12 beside `September
+projections` 0/12, and the same shape holds on every page. Zero partials is what makes
+this a limit rather than a reader struggling.
+
+A grid naming both series therefore cannot reach complete coverage whatever the
+reconciler does, because half its identities have no reading to be compared against. That
+also accounts for the 308/412 split above: the identities carrying a number are
+approximately the current-meeting half. So "0 of 37 grids verified" is a fact about the
+reader first and about reconciliation second, and reporting the ratio without its cause
+would lead a later reader to conclude the reconciler is broken. The series-resolution
+limit is a separate and larger defect — it costs half of every chart reading on this
+corpus, its cause is not diagnosed, and it is filed on its own rather than inside #734.
+
+**Two counts that must never be added together.** Under the fix, a cell geometry could not
+resolve is BOTH `unknown_to_geometry` and uncovered: the model wrote a number nobody could
+check, and a reading existed that nothing compared. They answer different questions and
+belong in the disclosure separately; summing them double-counts one cell.
+
+Three figures reported earlier on this branch were wrong and are recorded as such rather
+than quietly replaced. "604, of which geometry had a number: 604" was a script testing
+index values instead of resolved counts — the field says 308. "Zero of 37 grids earn
+verified" was true of the prototype only, not of `807e060`, where four did. And an earlier
+604-vs-720 comparison was invalid because one side was measured against the live working
+tree rather than an archive.
 
 **The ten contradictions are the model undercounting, corroborated.** Summing each series
 per panel on `sep-20220316-p09` — a dot plot column totals the number of participants,
@@ -154,23 +242,26 @@ Row 6 is the split: unaddressed, but nothing was lost.
 
 ### What the corpus numbers do and do not support
 
-**The 604 was reproduced independently, and that corroborates the set arithmetic, not the
-identity model.** The lead computed index keys minus addressed keys in a throwaway script
+**The reproduction corroborates the set arithmetic, not the identity model.** The lead computed index keys minus addressed keys in a throwaway script
 before the field existed; the reconciler computes it internally; the two agree. But both
 build keys with the same `_series_key` / `_bin_key`, so a fold that merged two distinct
 bins or split one would fool both identically. What is confirmed is that the subtraction
 is right and that nothing in the loop silently drops identities.
 
-**The corpus-wide zero for `uncovered_beside_published` is structural, not lucky, and
-that is the sharper half.** On the affected pages the collapse is total — every panel a
+**The corpus-wide zero for `uncovered_beside_published` survives the fix, and only now is
+it worth asserting.** At `807e060` it was produced by an instrument blind to the
+blank-column form of the dangerous shape, so "the dangerous configuration does not occur
+here" was not a claim that instrument could support. Under the fixed instrument it is, and
+the zero holds. **It is structural, not lucky, and that is the sharper half.** On the affected pages the collapse is total — every panel a
 single caption-headed column — so nothing matches, nothing publishes, and the zero follows
 from the shape of the failure rather than from the model being careful. **The safe bucket
 is one rename away from the dangerous one:** a model changing nothing except heading that
-column `December projections` instead of `Number of participants` would move all 604 from
-recall loss to uncovered geometry riding beside published agreed cells. That case is not
+column `December projections` instead of `Number of participants` would move those
+readings — 720 uncovered, of which 308 carry a number — from recall loss to uncovered
+geometry riding beside published agreed cells. That case is not
 merely constructible; it is the immediate neighbour of what the corpus already does.
 
-**Both defect counts are floors, for one structural reason.** 258 model-side and 604
+**Both defect counts are floors, for one structural reason.** 258 model-side and 720
 reader-side each key on a name geometry never read, so neither reaches the case where a
 collapse keeps a real series name and produces a clean sheet in every field that existed
 at the time. That is precisely why the committed field is the reader-side one.
@@ -197,20 +288,37 @@ load-bearing are three different properties.**
    anchors. As a print, that would have been sixteen green mutants with three measuring
    nothing.
 3. **The guard must be load-bearing.** A mutation can apply to correctly loaded source and
-   the guard still not care. `verified` required `bool(self.cells) and not self.refusal and
+   the guard still not care. **This one caught the author twice on the same branch**, which
+   is the reason it is stated as its own property rather than folded into the rule about
+   running the battery. `verified` required `bool(self.cells) and not self.refusal and
    …`; deleting `bool(self.cells)` left every test green, because a refused result also has
    no cells, so the clause the guard named was never the clause under test. Fixing that
    exposed the mirror case — deleting `not self.refusal` then survived for the same reason.
    Both are now pinned by guards that construct `GridReconciliation` directly, one with no
    cells and no refusal, one with cells AND a refusal. Neither guard would exist had the
-   battery been assumed rather than run; this is the #735 rule's first catch on new work,
-   and it caught the author.
+   battery been assumed rather than run.
 
-Final battery: **20 mutants, no survivors**, each killed by the guard named for it. Two
-mutants from the previous round were retired because the stored fields they targeted were
-deleted in the rewrite — the property they protected ("the series summary cannot disagree
-with the cell-level set") is now carried by the mutant that computes the summary beside
-the set instead of deriving it, which dies on two tests.
+   The second occurrence was subtler and was found by the reviewer rather than by the
+   battery: the guard for "the series summary cannot disagree with the cell-level set"
+   passed against a genuinely different implementation of that summary, because both of
+   its cases agreed under either one. A mutant that a guard survives is not always a dead
+   mutant — sometimes it is a guard whose cases do not reach the divergence. The remedy is
+   the same discipline one level up: choose the case where the two implementations must
+   differ, and pin that, rather than a case where they happen to coincide.
+
+4. **The instrument must not be the tree under edit.** A comparison of the two coverage
+   instruments was invalid because one side was measured against the live working
+   checkout, which already carried the in-progress fix, while the other was an archive.
+   Two agents share this checkout, so any measurement taken from `$PWD/src` is a
+   measurement of whatever someone was mid-way through writing. Remedy: measure both
+   sides from `git archive` trees, and assert `socr.__file__` inside each.
+
+Final battery: **24 mutants, no survivors**, each killed by the guard named for it. Four
+were added in the second round: reverting the coverage rule so that naming an identity
+counts as examining it; counting a blank or prose cell as coverage; counting an unknown
+cell as coverage; and the reviewer's own variant of the series summary, computed from the
+panel rather than derived from the identity set. Two mutants from the first round were
+retired because the stored fields they targeted were deleted in the rewrite.
 
 ## Residuals
 
@@ -227,5 +335,6 @@ the set instead of deriving it, which dies on two tests.
 4. **Refused grids hide 80 reader identities** that no field reports, because a refusal
    reaches no verdict at all.
 5. **Whether a panel whose grid is unverifiable may ship the reader's own numbers** is a
-   separate decision, filed rather than settled here. The 604 make it concrete: geometry
-   proved those counts and nobody publishes them.
+   separate decision, filed rather than settled here. The 308 uncovered readings that
+   carry a number make it concrete: geometry proved those counts and nobody publishes
+   them.

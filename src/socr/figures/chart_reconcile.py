@@ -271,11 +271,13 @@ class GridReconciliation:
 
     @property
     def verified(self) -> bool:
-        """This grid, as a whole, was checked against geometry and survived.
+        """This grid, as a whole, was compared against geometry and survived.
 
         Requires three things, and incomplete coverage withholds it: verdicts
-        were reached at all, no cell was contradicted, and every cell on both
-        sides met a counterpart. Without the third, a model earns a clean bill
+        were reached at all, no cell was contradicted, and every reading on
+        both sides was actually COMPARED -- not merely named. A grid whose
+        cells are all unknown corroborated nothing and is not verified, which
+        is what stops "unknown" from ever being reported as checked. Without the third, a model earns a clean bill
         by renaming precisely the series that would have contradicted it --
         the rename removes the cells rather than the disagreement.
 
@@ -501,14 +503,16 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
     cells: list[CellVerdict] = []
     unmatched_bins: list[str] = []
     unmatched_series: list[str] = []
-    # Every identity a grid cell NAMES, matched or not. Its complement against
-    # the index is the reader→model direction: readings the grid never asked
-    # about. A cell that named a bin or series geometry never read is still an
-    # address, and simply addresses nothing.
+    # Every identity a grid cell actually COMPARED. Naming an identity is not
+    # examining it: a cell left blank, a cell carrying prose, and a cell whose
+    # reader counterpart resolved nothing all name a reading and check none of
+    # it. Recording the name instead of the comparison let a grid earn coverage
+    # for a column it declined to fill -- the same clean bill the rename route
+    # buys, one move cheaper, since the identity is addressed and the reading
+    # therefore never shows up as uncovered.
     addressed: set[tuple[str, tuple[str, ...]]] = set()
     for bin_label, series_name, raw in entries:
         bin_key, series_key = _bin_key(bin_label), _series_key(series_name)
-        addressed.add((series_key, bin_key))
         found = index.get((series_key, bin_key))
         reader_cell = found[1] if found is not None else None
         if reader_cell is None:
@@ -539,6 +543,12 @@ def reconcile_grid(grid: FilledGrid, panel: PanelReading) -> GridReconciliation:
                 CONTRADICTED,
                 f"geometry reads {reader_count} where the grid says {model_count}",
             )
+        # Only a verdict that put two numbers side by side is coverage. This
+        # is the whole of the rule, and it keeps the invariant: withholding
+        # still only ever removes agreement and can never manufacture a
+        # contradiction, because nothing here touches a cell's own verdict.
+        if status in (AGREED, CONTRADICTED):
+            addressed.add((series_key, bin_key))
         cells.append(
             CellVerdict(
                 bin_label=bin_label,

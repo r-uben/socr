@@ -71,6 +71,16 @@ TRIPLE_A = {RANGES[0]: 1, RANGES[1]: 2, RANGES[2]: 3}
 TRIPLE_B = {RANGES[0]: 4, RANGES[1]: 5, RANGES[2]: 6}
 
 
+#: Two series over the first TWO bins, for the coverage-by-naming cases.
+PAIR_A = {RANGES[0]: 1, RANGES[1]: 2}
+PAIR_B = {RANGES[0]: 4, RANGES[1]: 5}
+
+
+def _pair_rows(first: dict[str, int], second: dict[str, int] | None) -> list[list[str]]:
+    """Rows over the first two bins; ``None`` leaves that column's cells empty."""
+    return [[b, str(first[b]), "" if second is None else str(second[b])] for b in RANGES[:2]]
+
+
 def _rows_for(*series: dict[str, int]) -> list[list[str]]:
     """Grid rows: one per bin, one column per series, in RANGES order."""
     return [[b, *[str(s[b]) for s in series]] for b in RANGES]
@@ -716,3 +726,90 @@ def test_no_header_of_a_reconciled_grid_carries_one_of_the_panels_bins() -> None
 
     assert result.orientation == BINS_IN_COLUMN
     assert not [h for h in grid.data_headers if _bin_key(h) in panel_bins]
+
+
+# ---------------------------------------------------------------------------
+# Naming an identity is not examining it
+# ---------------------------------------------------------------------------
+
+
+def test_a_column_left_blank_earns_no_coverage_for_the_readings_it_names() -> None:
+    """The cheaper route to a clean bill: decline to fill, rather than rename.
+
+    Both grids carry both series, so every model→reader field is content. The
+    second simply leaves one column's cells empty. Geometry proved those two
+    counts and nothing compared them, so they are uncovered exactly as if the
+    column had been dropped -- which is the point: a cell that names a reading
+    and checks none of it is not coverage.
+    """
+    panel = make_panel({SOLID: PAIR_A, DASHED: PAIR_B})
+    filled = make_grid(["Percent range", SOLID, DASHED], _pair_rows(PAIR_A, PAIR_B))
+    blank = make_grid(["Percent range", SOLID, DASHED], _pair_rows(PAIR_A, None))
+
+    full, hollow = reconcile_grid(filled, panel), reconcile_grid(blank, panel)
+
+    assert (full.agreed, hollow.agreed) == (4, 2)
+    assert (full.uncovered_count, hollow.uncovered_count) == (0, 2)
+    assert (full.verified, hollow.verified) == (True, False)
+    # Withholding removes agreement only; it invents no disagreement.
+    assert hollow.contradicted == 0
+    assert hollow.not_a_count == 2
+    assert [u.reader_count for u in hollow.uncovered] == [4, 5]
+
+
+def test_a_cell_carrying_prose_covers_no_more_than_an_empty_one() -> None:
+    """Neither states a count, so neither compares one."""
+    panel = make_panel({SOLID: PAIR_A, DASHED: PAIR_B})
+    blank = make_grid(["Percent range", SOLID, DASHED], _pair_rows(PAIR_A, None))
+    prose = make_grid(
+        ["Percent range", SOLID, DASHED],
+        [[b, str(PAIR_A[b]), "n/a"] for b in RANGES[:2]],
+    )
+
+    empty, words = reconcile_grid(blank, panel), reconcile_grid(prose, panel)
+
+    assert empty.uncovered_count == words.uncovered_count == 2
+    assert empty.verified is words.verified is False
+    assert empty.not_a_count == words.not_a_count == 2
+
+
+def test_a_grid_that_corroborated_nothing_is_not_reported_as_checked() -> None:
+    """Only the panel changes: the same grid against read and unread geometry.
+
+    Every cell unknown means nothing was put beside anything. Reporting that as
+    verified would be the disclosure claiming a check that never happened.
+    """
+    grid = make_grid(["Percent range", SOLID], [[b, str(PAIR_A[b])] for b in RANGES[:2]])
+    read = make_panel({SOLID: PAIR_A})
+    unread = make_panel({SOLID: dict.fromkeys(RANGES[:2])})
+
+    proven, silent = reconcile_grid(grid, read), reconcile_grid(grid, unread)
+
+    assert (proven.agreed, silent.agreed) == (2, 0)
+    assert (proven.unknown, silent.unknown) == (0, 2)
+    assert (proven.verified, silent.verified) == (True, False)
+    assert (proven.uncovered_count, silent.uncovered_count) == (0, 2)
+    # Unaddressed, but nothing was lost: geometry held no number to begin with.
+    assert silent.uncovered_with_count == 0
+
+
+def test_a_series_geometry_read_but_holds_no_cell_for_is_not_dropped_content() -> None:
+    """The series summary is derived, so a series with no reading loses nothing.
+
+    A panel can carry a series the legend named while the reader resolved no
+    cell for it at all. Computing the summary from the PANEL -- the series no
+    grid entry names -- reports it as unpublished; deriving it from the
+    identity set does not, because it contributed no identity to lose. The two
+    implementations agree on every other shape, which is why this case is the
+    one that has to be pinned.
+    """
+    grid = make_grid(["Percent range", SOLID], [[RANGES[0], "1"]])
+    no_cells = make_panel({SOLID: {RANGES[0]: 1}, DASHED: {}})
+    a_reading = make_panel({SOLID: {RANGES[0]: 1}, DASHED: {RANGES[0]: 4}})
+
+    nothing_lost, dropped = reconcile_grid(grid, no_cells), reconcile_grid(grid, a_reading)
+
+    assert (nothing_lost.uncovered_count, dropped.uncovered_count) == (0, 1)
+    assert nothing_lost.unpublished_series == ()
+    assert dropped.unpublished_series == (DASHED,)
+    assert (nothing_lost.verified, dropped.verified) == (True, False)
