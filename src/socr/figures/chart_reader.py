@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever a change could move a published count. Persisted per cell.
-READER_VERSION = "635-stage1/7"
+READER_VERSION = "635-stage1/8"
 
 #: Audit event kinds.
 CHART_DERIVATION = "chart_counts_derived"
@@ -529,15 +529,108 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
 
     This is how a two-line tick label is printed: the upper endpoint above the
     lower one, in the same column. A row that reuses a token for two columns,
-    or whose picks run backwards, is not a second line of these labels.
+    or whose picks run backwards, is not a second line of these labels. Neither
+    is a row with tokens LEFT OVER: the second line of a two-line label has one
+    token per column and no more, and a longer row that merely happens to put
+    something near each column is a different row of the page. Accepting the
+    leftovers is how a four-label row was absorbed into a two-word caption and
+    published as ``Percent-B2 | range-B3`` (#735 round 6). Measured on both
+    corpora: every one of the 823 second lines absorbed there carries exactly
+    one token per column, so requiring it moves nothing.
     """
     tokens = _alnum_tokens(row)
-    if len(tokens) < len(centres):
+    if len(tokens) != len(centres):
         return None
     picked = [min(range(len(tokens)), key=lambda i: abs(tokens[i][0] - c)) for c in centres]
     if len(set(picked)) != len(picked) or picked != sorted(picked):
         return None
     return [tokens[i][1] for i in picked]
+
+
+def _bin_edges(centres: list[float]) -> list[float]:
+    """The ``len(centres) + 1`` interval edges of a row of label centres.
+
+    Midpoints between consecutive centres, the outer two mirrored from the
+    neighbouring half-gap. No uniform-spacing assumption and no tolerance.
+    """
+    edges = [
+        (centres[i - 1] + c) / 2.0 if i else c - (centres[1] - centres[0]) / 2.0
+        for i, c in enumerate(centres)
+    ]
+    edges.append(centres[-1] + (centres[-1] - centres[-2]) / 2.0)
+    return edges
+
+
+def _attesting_bars(row: WordRow, bars: list[Mark]) -> list[Mark]:
+    """The bars that stand on exactly one of this row's bins, INSIDE it.
+
+    Covering exactly one token centre is half of what a histogram bar does to
+    its own label. The other half is that it stops where the neighbouring bin
+    starts: a bar is drawn within its bin, never across the boundary. A prose
+    word that a bar happens to cover near the end of its sweep fails the second
+    half, because the interval two adjacent words derive is a fraction of the
+    bar's own width.
+
+    Measured over the 840 ``read_bins`` calls of both corpora and the reference:
+    every bar that attested the winning row also lay inside the bin it covered,
+    with at least 1.08pt of clearance, and no winner moved.
+    """
+    centres = [cx for cx, _t in _alnum_tokens(row)]
+    if len(centres) < 2:
+        return []
+    edges = _bin_edges(centres)
+    attesting: list[Mark] = []
+    for bar in bars:
+        covered = [i for i, c in enumerate(centres) if bar.x0 <= c <= bar.x1]
+        if len(covered) != 1:
+            continue
+        i = covered[0]
+        if edges[i] <= bar.x0 and bar.x1 <= edges[i + 1]:
+            attesting.append(bar)
+    return attesting
+
+
+def _unruled_out_rival(row: WordRow, bars: list[Mark], columns: int) -> bool:
+    """Is *row* as good a home for these marks as the row the bars attest?
+
+    The winning row is the one the bars attest. That says where the marks
+    stand; it does not say that the row IS the labels. A row the drawing is
+    SILENT about -- no bar covers any of its token centres -- carrying at least
+    *columns* tokens, is as good a candidate for the bins as the winner, and
+    the drawing has not chosen between them.
+
+    *columns* is where the one asymmetry of this module's layout lives, and it
+    is the one thing the corpora measure about it: in all 840 ``read_bins``
+    calls of both corpora and the reference, the row the bars attest is the
+    TOPMOST plural row drawn below the axis inside its span -- no corpus panel
+    prints anything between its axis and its bin labels. A silent row drawn
+    ABOVE the winner is therefore where the labels were expected, and it is a
+    rival on a tie (``columns`` is the winner's own token count). A silent row
+    BELOW has to beat it (``columns`` is one more), because every corpus page
+    draws prose there -- a unit annotation, an axis title, a footnote -- and a
+    chart may legitimately be captioned underneath.
+
+    Two further conditions keep this from swallowing that prose. A row with
+    fewer columns than asked cannot supply the winner's bins, so a short unit
+    annotation is not a rival. And a row whose own tightest column is narrower
+    than the widest bar cannot be the row those bars stand on at all: such a
+    bar would cover two of its labels at once, which is the same thing
+    ``_attesting_bars`` refuses. That is what separates a bin row from running
+    prose, and it is read off the drawing -- the bar's width against the row's
+    own spacing -- not off a cutoff.
+
+    Measured over the same 840 calls: 11 minutes panels carry a silent footnote
+    with more tokens than their bin row, and in every one of them the widest bar
+    (31.5-45.4pt) is three to four times the footnote's tightest column
+    (9.0-12.0pt), so no corpus panel is refused by this.
+    """
+    centres = [cx for cx, _t in _alnum_tokens(row)]
+    if len(centres) < columns:
+        return False
+    if any(bar.x0 <= c <= bar.x1 for bar in bars for c in centres):
+        return False
+    pitch = min(b - a for a, b in zip(centres, centres[1:], strict=False))
+    return all(bar.x1 - bar.x0 <= pitch for bar in bars)
 
 
 def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: float) -> list[Bin]:
@@ -598,6 +691,42 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     outside the span, which is the honest answer: the page's own best-attested
     labels are not this frame's.
 
+    **Attesting is not the same as being the labels, and round 6 asks the two
+    further questions that gap allows.** The selection above is a maximum over
+    rows with no test that the winning row is a label row at all, and two
+    reviewers defeated it from three directions, each with the labels present
+    as ordinary text and no mock anywhere: a sparse chart where the caption and
+    the real labels both score 1 and the tie hands it to the caption; a stray
+    rectangle on the axis that no bin can claim, made valid by choosing the
+    prose that covers it; and four bars stood on a caption's words instead of
+    the bin centres, which published ``Effective | federal | funds | rate`` with
+    3, 5, 4, 2 under it at a residual of 0.0.
+
+    So a bar attests a row only if it also lies INSIDE the bin it covers
+    (``_attesting_bars``), and the winner is discarded if any other row below
+    the axis is an equally good home for the same marks (``_unruled_out_rival``)
+    -- a row the bars are silent about, carrying at least as many columns, whose
+    own spacing those bars would fit. The first closes the tie, by disqualifying
+    a bar that sweeps in from outside the two-word caption's own interval; the
+    second closes the stray and the stood-on caption, because in both the real
+    label row is sitting there with nothing said about it.
+
+    The rival test is not symmetric, and the corpora are what make it so: the
+    attested row is the topmost such row on every one of those 840 calls, so a
+    silent row ABOVE the winner is a rival on a tie, while one BELOW -- where
+    every corpus page prints its unit annotation, its axis title and its
+    footnote -- must carry strictly more columns. That is also the limit of the
+    rule: the caption of the third construction, stood on by the bars, is
+    refused because the printed labels are above it, and a caption drawn BELOW a
+    chart's labels with as many words as the chart has bins is still read as
+    prose only because nothing attests it.
+
+    Neither test is a threshold: one compares a bar against the interval the
+    row's own centres derive, the other a bar's width against the row's own
+    tightest column. Both were measured over all 840 ``read_bins`` calls of the
+    two corpora and the reference before being shipped, and neither moves a
+    single one of them.
+
     Where NO bar attests any row -- a panel drawn with strays alone, or a
     dashed series with no bar resting on the axis at all -- the panel is
     REFUSED. There is no fallback. Four rounds of the #735 review each narrowed
@@ -645,21 +774,30 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
 
     plural = [row for row in below if len(_alnum_tokens(row)) >= 2]
     bars = _resting_bars(frame, residual, marks)
-    corroboration = [
-        sum(
-            1
-            for bar in bars
-            if sum(1 for cx, _t in _alnum_tokens(row) if bar.x0 <= cx <= bar.x1) == 1
-        )
-        for row in plural
-    ]
+    corroboration = [len(_attesting_bars(row, bars)) for row in plural]
     best: WordRow | None = None
+    rivals: list[WordRow] = []
     attested = max(corroboration, default=0)
     if attested:
-        winner = plural[corroboration.index(attested)]
-        if in_span(winner):
+        chosen = corroboration.index(attested)
+        winner = plural[chosen]
+        columns = len(_alnum_tokens(winner))
+        rivals = [
+            row
+            for i, row in enumerate(plural)
+            if i != chosen
+            and in_span(row)
+            and _unruled_out_rival(row, bars, columns if i < chosen else columns + 1)
+        ]
+        if in_span(winner) and not rivals:
             best = winner
     if best is None:
+        if not attested:
+            why = "none of them"
+        elif rivals:
+            why = "a row that another row below the axis is an equally good home for"
+        else:
+            why = "a row not drawn inside the axis' own span"
         logger.debug(
             "chart_reader: of the %d rows drawn below the axis at y=%.2f, the %d bars "
             "standing on it attest %s, so the drawing does not say which row labels "
@@ -667,7 +805,7 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
             len(plural),
             frame.baseline,
             len(bars),
-            "a row not drawn inside the axis' own span" if attested else "none of them",
+            why,
         )
         return []
     primaries = _alnum_tokens(best)
@@ -680,19 +818,7 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
             break
         for i, token in enumerate(aligned):
             atoms[i].append(token)
-    if len(centres) < 2:
-        return []
-    edges: list[float] = []
-    for i, c in enumerate(centres):
-        left = (centres[i - 1] + c) / 2.0 if i else c - (centres[1] - centres[0]) / 2.0
-        right = (
-            (c + centres[i + 1]) / 2.0
-            if i + 1 < len(centres)
-            else c + (centres[-1] - centres[-2]) / 2.0
-        )
-        edges.append(left)
-        if i + 1 == len(centres):
-            edges.append(right)
+    edges = _bin_edges(centres)
     out: list[Bin] = []
     for i, c in enumerate(centres):
         out.append(Bin(label=_join_atoms(atoms[i]), centre=c, lo=edges[i], hi=edges[i + 1]))
@@ -1613,9 +1739,11 @@ def read_chart_page(
         if len(bins) < 2:
             reading.refusals[idx] = (
                 "the row of text the bars standing on this region's axis attest is not "
-                "drawn inside the axis' own span, or no bar stands on that axis at all "
-                "and nothing drawn on the page says which row below it carries the "
-                "labels, so the region's x bins are not corroborated by its own drawing"
+                "drawn inside the axis' own span, or another row drawn below that axis "
+                "is an equally good home for those marks and nothing drawn separates "
+                "them, or no bar stands on that axis at all and nothing drawn on the "
+                "page says which row below it carries the labels, so the region's x "
+                "bins are not corroborated by its own drawing"
             )
             continue
         frames[idx] = frame

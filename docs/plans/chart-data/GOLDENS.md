@@ -3,7 +3,7 @@
 **Status: independently annotated (two channels, second reviewer) on this one document;
 not yet a defect rate.**
 
-Read by `socr.figures.chart_reader` (version `635-stage1/7`) from the page's own PDF
+Read by `socr.figures.chart_reader` (version `635-stage1/8`) from the page's own PDF
 vector operators — not from a raster, not from a model. The issue's worked example is NOT
 the oracle: its June column sums to 19, and a visual check of the 2018 panel found it
 misreads the dashed heights. These numbers replace it.
@@ -40,8 +40,16 @@ did not write the reader and did not run its code:
    ≥60% ink inside the bin column, converted with points-per-participant measured off
    the tick ladder. This channel touches no drawing operator.
 
-Channels A and B agree with each other and with the reader on **all 65 cells**: zero
-disagreements. Calibration measured independently as 3.5606 pt per participant, residual
+Channels A and B agree with each other and with the reader on **all 65 cells of the
+September series**: zero disagreements. That is the scope of the agreement, and it is not
+the whole page: the reference publishes **117** integer cells, 65 September (13 bins in
+each of the 5 panels) and 52 June (the 2021 panel draws no June outline, so 4 panels ×
+13). The June counts are read by the same code and are NOT covered by the statement above
+— channel A used the June staircase's risers to fix the bin boundaries, which is a use of
+its geometry, not an independent reading of its heights, and no record of this branch says
+the June heights were annotated by hand. Elsewhere in these notes and in the #735 log,
+"the reference reads 65 cells" means the same September-only count and not the page's
+published total. Calibration measured independently as 3.5606 pt per participant, residual
 0.0064 pt against a half-count of 1.7803 pt. Two things the reviewer checked because
 they would have hidden an off-by-one, and both hold: every printed label centre lands in
 its own bin with ~14 pt of margin (the side-bearing offset is 0.70 pt), and the 2021

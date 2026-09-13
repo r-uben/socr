@@ -188,9 +188,12 @@ def build_chart(
 #: whether the row IS the labels -- four rounds of the #735 review each found a
 #: page that satisfied such a test with a caption (see that module's docstring).
 #: A drawing whose point is the DASHED series therefore has to put something on
-#: the axis for the bin labels to be corroborated by. It is scaffolding: no test
-#: below asserts its count, and where the drawing's point is that nothing rests
-#: on the axis it is deliberately absent and the panel is expected to refuse.
+#: the axis for the bin labels to be corroborated by. It is scaffolding: no
+#: test below is ABOUT its count, though one asserts it -- the straddling-bar
+#: test compares the whole panel's total against ``sum(WITNESS)`` to show the
+#: ambiguous bar contributed nothing. Where the drawing's point is that nothing
+#: rests on the axis it is deliberately absent and the panel is expected to
+#: refuse.
 WITNESS = [2, 0, 0, 0, 0]
 
 

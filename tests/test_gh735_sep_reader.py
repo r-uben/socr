@@ -952,12 +952,6 @@ def read_dashed(tmp_path: Path, name: str, **kw):
     return reading.panels.get(1), reading.refusals.get(1)
 
 
-def _no_cell_published(panel) -> bool:
-    if panel is None:
-        return True
-    return not [c for s in panel.series for c in s.cells if c.status == INTEGER]
-
-
 def test_the_bars_are_the_only_thing_that_can_say_which_row_carries_the_bins(
     tmp_path: Path,
 ) -> None:
@@ -1014,7 +1008,6 @@ def test_no_arrangement_of_prose_under_a_dashed_axis_can_publish_a_count(
         panel, refusal = read_dashed(tmp_path, name, **kw)
         assert panel is None, (name, [b.label for b in panel.bins])
         assert refusal and "not corroborated" in refusal, (name, refusal)
-        assert _no_cell_published(panel), name
 
 
 def test_a_bar_that_covers_no_label_centre_attests_nothing(tmp_path: Path) -> None:
@@ -1039,3 +1032,123 @@ def test_a_bar_that_covers_no_label_centre_attests_nothing(tmp_path: Path) -> No
     )
     assert owning is not None, owning_refusal
     assert [b.label for b in owning.bins] == list(BINS)
+
+
+# ---------------------------------------------------------------------------
+# Round 6: a bar standing somewhere does not make the row under it the labels
+# ---------------------------------------------------------------------------
+
+
+def _narrow_bins(path: Path, *, bars_on_labels: bool) -> tuple[fitz.Document, list]:
+    """Four narrow bins mid-axis, a four-word caption spaced more widely below.
+
+    The ONLY knob is where the bars stand. Every other mark is identical, the
+    bin labels are ordinary text inside the axis' span in both, and the caption
+    is drawn in both. Standing on the label centres, the bars attest the labels;
+    standing on the caption's words, they attest the caption -- which is the
+    whole of the round-5 rule's remaining hole.
+    """
+    centres = [160.0, 180.0, 200.0, 220.0]
+    caption_centres = [130.0, 190.0, 250.0, 310.0]
+    caption = ["Effective", "federal", "funds", "rate"]
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.draw_line(fitz.Point(X0, BASE), fitz.Point(X1, BASE), width=0.4)
+    for value in TICK_VALUES:
+        y = BASE - value * UNIT
+        page.draw_line(fitz.Point(X0, y), fitz.Point(X0 + 10.0, y), width=0.4)
+        page.draw_line(fitz.Point(X1 - 10.0, y), fitz.Point(X1, y), width=0.4)
+        page.insert_text(fitz.Point(X1 + 5.0, y + 2.0), str(value), fontsize=5)
+    for centre, label in zip(centres, BINS, strict=True):
+        page.insert_text(fitz.Point(centre - len(label) * 1.4, BASE + 10.0), label, fontsize=5)
+    for centre, word in zip(caption_centres, caption, strict=True):
+        page.insert_text(fitz.Point(centre - len(word) * 1.2, BASE + 26.0), word, fontsize=5)
+    swatch_cx = 300.0
+    page.draw_rect(
+        fitz.Rect(swatch_cx - 4.0, BASE - 102.0, swatch_cx + 4.0, BASE - 98.0),
+        color=(0, 0, 0),
+        fill=(0.4, 0.6, 0.8),
+        width=0.3,
+    )
+    page.insert_text(fitz.Point(swatch_cx + 8.0, BASE - 98.5), SOLID, fontsize=5)
+    stand = centres if bars_on_labels else caption_centres
+    for centre, count in zip(stand, (3, 5, 4, 2), strict=True):
+        page.draw_rect(
+            fitz.Rect(centre - 4.0, BASE - count * UNIT, centre + 4.0, BASE),
+            color=(0, 0, 0),
+            fill=(0.4, 0.6, 0.8),
+            width=0.3,
+        )
+    doc.save(str(path))
+    reopened = fitz.open(str(path))
+    return reopened, [reopened[0].rect]
+
+
+def _published(panel) -> list[tuple[str, int | None]]:
+    if panel is None:
+        return []
+    return [(c.bin_label, c.count) for s in panel.series for c in s.cells if c.status == INTEGER]
+
+
+def test_bars_stood_on_a_caption_publish_nothing_under_its_words(tmp_path: Path) -> None:
+    """The bars moved, and nothing else. Only one of the two may be read.
+
+    Standing on the printed label centres they attest the labels and the panel
+    reads what it was drawn from. Standing on the caption's words they attest
+    the caption -- and the printed label row is then sitting below the axis,
+    inside the span, with four columns the drawing says nothing about. Two rows
+    are equally good homes for the same four marks, so the panel is refused
+    rather than published under a row of prose (#735 round 6).
+    """
+    doc, bboxes = _narrow_bins(tmp_path / "labels.pdf", bars_on_labels=True)
+    on_labels = read_chart_page(doc[0], bboxes, page_num=1)
+    panel = on_labels.panels.get(1)
+    assert panel is not None, on_labels.refusals
+    assert [b.label for b in panel.bins] == list(BINS)
+    assert _published(panel) == list(zip(BINS, (3, 5, 4, 2), strict=True))
+
+    doc, bboxes = _narrow_bins(tmp_path / "caption.pdf", bars_on_labels=False)
+    moved = read_chart_page(doc[0], bboxes, page_num=1)
+    assert moved.panels.get(1) is None, [b.label for b in moved.panels[1].bins]
+    assert "not corroborated" in moved.refusals.get(1, ""), moved.refusals
+
+
+def test_a_tie_on_one_bar_is_not_broken_by_the_row_being_higher(tmp_path: Path) -> None:
+    """A sparse chart, with and without the caption: the caption changes nothing.
+
+    One bar over ``B2`` covers exactly one printed label centre AND exactly one
+    caption word, because the caption's two words sit under the right-hand end
+    of its sweep. Scored on coverage alone both rows tie at 1 and the upper --
+    the caption -- took the bins, publishing ``Percent-B2 | range-B3``. The bar
+    is 56pt wide and the interval the caption's own two words derive is 16pt, so
+    it is not a bar of that row at all, and the labels win on the drawing.
+    """
+    plain, plain_refusal = read_captioned(tmp_path, "plain", None, {"B2": 5})
+    capt, capt_refusal = read_captioned(tmp_path, "capt", "Percent range", {"B2": 5})
+    assert plain is not None, plain_refusal
+    assert capt is not None, capt_refusal
+    assert [b.label for b in plain.bins] == list(BINS)
+    assert [b.label for b in capt.bins] == [b.label for b in plain.bins]
+    assert _published(capt) == _published(plain)
+    assert ("B2", 5) in _published(capt), _published(capt)
+
+
+def test_prose_over_a_stray_cannot_turn_it_into_a_bin(tmp_path: Path) -> None:
+    """A rectangle on the axis that no printed bin can claim, and a caption over it.
+
+    With no caption the panel is refused: the stray covers no label centre, so
+    nothing attests a row. Adding the caption used to rescue it -- the stray
+    covers one caption word, so the caption scored 1 while the complete, printed
+    label row scored 0 -- which made the mark no bin could claim into evidence
+    for the prose that happened to cover it. The four printed labels are still
+    drawn below the axis with nothing said about them, so the caption cannot
+    take the bins from them, and the caption must change nothing.
+    """
+    bare, bare_refusal = read_captioned(tmp_path, "bare", None, {}, extra_bars=((235.0, 242.0, 5),))
+    capt, capt_refusal = read_captioned(
+        tmp_path, "capt_stray", "Percent range", {}, extra_bars=((235.0, 242.0, 5),)
+    )
+    assert bare is None, [b.label for b in bare.bins]
+    assert capt is None, [b.label for b in capt.bins]
+    assert bare_refusal and "not corroborated" in bare_refusal
+    assert capt_refusal == bare_refusal

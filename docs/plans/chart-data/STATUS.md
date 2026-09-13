@@ -214,9 +214,13 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    `/private/tmp/rev735/test_rev735g.py::test_k`. The same weakness in a second hat: a
    four-word caption whose words fall over the bin centres is accepted by `_aligned` as a
    second LINE of labels and joined into them (`B1-Effective`, ...), also pre-existing on
-   main and harmless on both corpora, whose second lines are the range endpoints. This is
-   the one route by which a prose row can still become a bin label, and it needs the labels
-   to be absent from the text layer.
+   main and harmless on both corpora, whose second lines are the range endpoints. (Round 6
+   narrowed the second half: `_aligned` now requires a second line to carry exactly one
+   token per column, which stops a four-label row being absorbed into a two-word caption,
+   but a caption with exactly as many words as the chart has bins is still a well-formed
+   second line and is still joined in.) This is the one route found **that needs the labels
+   to be absent from the text layer** — not the only route. Item 17 is a second, found from
+   three directions with the labels present as ordinary text.
 
 16. **A panel with no bar standing on its axis is refused outright.** Round 5 deleted the
    layout fallback: where no bar covers exactly one token of any row below the axis, the
@@ -231,6 +235,58 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    `tests/test_gh635_chart_reader.py` whose point was the outline now draw one bar
    (`WITNESS`) so their own subject still reads, and the refusal itself is pinned as a
    difference against them.
+
+17. **A bar standing on a prose row made that row the bins (round 6, fixed).** Attesting
+   and being the labels are not the same thing, and the round-5 selection tested only the
+   first: `attested = max(corroboration)` with no test that the winning row is a label row.
+   Two reviewers reached the same surviving class from three directions, all three with the
+   bin labels present as ordinary text inside the axis' span, all three drawn with the
+   branch's own fixtures and no mock:
+   **(a)** a sparse chart whose single bar covers one printed label centre AND one word of
+   the caption above it — both rows score 1, and the tie went to the upper row, publishing
+   `Percent-B2 | range-B3`;
+   **(b)** a stray rectangle on the axis that no printed bin can claim, which round 5
+   correctly refuses — until a caption is added whose first word lies over the stray, at
+   which point the caption scores 1, the complete printed label row scores 0, and the mark
+   no bin could claim becomes evidence for the prose that covers it;
+   **(c)** four narrow bins mid-axis and a four-word caption spaced more widely below, with
+   the position of the bars as the only knob: stood on the label centres the panel reads
+   3, 5, 4, 2 against `B1..B4`; stood on the caption's words it published the same counts
+   under `Effective | federal | funds | rate` at a residual of 0.0.
+   Fixed by two further admission tests, neither a threshold and both measured over all 840
+   `read_bins` calls of the two corpora and the reference before shipping. A bar attests a
+   row only if it also lies INSIDE the bin that row's own centres derive for it — true of
+   every attesting bar on every corpus call, with ≥1.08pt of clearance, and false of a
+   56pt bar reaching into a 16pt caption interval, which closes (a). And the winner is
+   discarded when another row below the axis is an equally good home for the same marks:
+   a row the bars are SILENT about (no bar covers any of its token centres), carrying at
+   least as many columns, whose own tightest column the bars would fit inside. That closes
+   (b) and (c), because in both the printed label row is sitting there with nothing said
+   about it. The rival test is asymmetric, and the corpora are why: the attested row is the
+   topmost plural in-span row below the axis on all 840 calls, so a silent row ABOVE the
+   winner is a rival on a tie while one BELOW must carry strictly more columns — which is
+   what keeps the `Percent range` annotation, the `Number of participants` axis title and
+   the pages' footnotes from refusing every panel. Eleven minutes panels do carry a silent
+   footnote with more tokens than their bin row; in every one the widest bar (31.5–45.4pt)
+   is three to four times the footnote's tightest column (9.0–12.0pt), so the drawing rules
+   it out. Both corpus dumps are byte-identical across the change.
+   **What it does not close.** Construction (c) refuses rather than reads, and it refuses
+   symmetrically: a chart whose bins are labelled ABOVE a loosely-set caption of at least
+   as many words, with no bar over any caption word, is now refused even when the bars do
+   stand on the labels. That shape appears nowhere in either corpus (no panel prints a
+   plural in-span row above its bin labels, and the arrangement costs 0 of 840 calls), but
+   it is a real recall loss on a shape nothing has measured. A caption drawn below the
+   labels with exactly as many words as the chart has bins is still absorbed as a second
+   label line (item 15). And nothing here helps when the labels are not text at all.
+
+**Scope of every number above.** All 835 measured `read_bins` calls come from the 198
+dot-plot pages of the two Fed corpora, plus 5 more on the reference fixture. The other
+corpora in `~/Data/socr` — 29 documents, 84 pages, BoE, ECB, Banxico and the older Fed
+samples — produce **zero** calls into `read_bins`: `chart_region_bboxes` finds 49 chart
+regions among them, and not one yields a frame and calibration the reader will read bins
+for. So "no real page needs this" and "no real page is harmed by this" are measured on the
+dot-plot corpus and *assumed* everywhere else, on the strength of a reader that declines
+those pages earlier.
 
 ## Stage 2 — model-assisted proposals — **TODO**
 
