@@ -266,16 +266,22 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    topmost plural in-span row below the axis on all 840 calls, so a silent row ABOVE the
    winner is a rival on a tie while one BELOW must carry strictly more columns — which is
    what keeps the `Percent range` annotation, the `Number of participants` axis title and
-   the pages' footnotes from refusing every panel. Eleven minutes panels do carry a silent
-   footnote with more tokens than their bin row; in every one the widest bar (31.5–45.4pt)
-   is three to four times the footnote's tightest column (9.0–12.0pt), so the drawing rules
-   it out. Both corpus dumps are byte-identical across the change.
-   **What it does not close.** Construction (c) refuses rather than reads, and it refuses
-   symmetrically: a chart whose bins are labelled ABOVE a loosely-set caption of at least
-   as many words, with no bar over any caption word, is now refused even when the bars do
-   stand on the labels. That shape appears nowhere in either corpus (no panel prints a
-   plural in-span row above its bin labels, and the arrangement costs 0 of 840 calls), but
-   it is a real recall loss on a shape nothing has measured. A caption drawn below the
+   the pages' footnotes from refusing every panel. Eight minutes panels do carry a silent
+   footnote with strictly more tokens than their bin row; in every one the widest bar
+   (31.5–45.4pt) exceeds the footnote's tightest column (9.0–12.0pt) by a factor of 2.625
+   to 5.042, so the drawing rules it out. (11 calls have a silent row with at least as many tokens; the 3
+   that tie are not rivals below.) Every count here is reproducible from the tree with
+   `uv run socr-measure-chart-bins <corpus dirs>`. Both corpus dumps are byte-identical
+   across the change.
+   **What it does not close.** Construction (c)'s fabricating arm is refused and its
+   correct arm still reads: with the bars on the printed label centres the panel publishes
+   `B1..B4` with 3, 5, 4, 2, which `tests/test_gh735_sep_reader.py` pins as the difference.
+   What the rule costs instead is the mirror shape, and it follows from the asymmetry
+   rather than from construction (c): a panel that prints a plural in-span row ABOVE its
+   bin labels, carrying at least as many words as the chart has bins, which no bar covers,
+   is refused even when the bars stand correctly on the labels. No corpus panel prints
+   anything plural and in-span above its bin labels (0 of 840 calls), so the loss is real
+   but unmeasured. A caption drawn below the
    labels with exactly as many words as the chart has bins is still absorbed as a second
    label line (item 15). And nothing here helps when the labels are not text at all.
 

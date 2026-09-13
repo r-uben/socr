@@ -528,23 +528,39 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     """The row's token nearest each of *centres*, or ``None`` if it does not align.
 
     This is how a two-line tick label is printed: the upper endpoint above the
-    lower one, in the same column. A row that reuses a token for two columns,
-    or whose picks run backwards, is not a second line of these labels. Neither
-    is a row with tokens LEFT OVER: the second line of a two-line label has one
-    token per column and no more, and a longer row that merely happens to put
-    something near each column is a different row of the page. Accepting the
-    leftovers is how a four-label row was absorbed into a two-word caption and
-    published as ``Percent-B2 | range-B3`` (#735 round 6). Measured on both
-    corpora: every one of the 823 second lines absorbed there carries exactly
-    one token per column, so requiring it moves nothing.
+    lower one, in the same column. The row is read as a PARTITION of its own
+    tokens: each token goes to the column whose centre it is nearest, and the
+    row is a second line only if every column receives at least one token, no
+    token is left over, and the columns' runs are drawn in order. A run may be
+    longer than one token, which is how a multi-word entry (``North America``
+    above a column whose neighbours are single words) stays with its column.
+
+    Both halves of that are load-bearing, and each was a bug. Picking one token
+    per column and ignoring the REST let a four-label row be absorbed into a
+    two-word caption and published as ``Percent-B2 | range-B3`` (#735 round 6).
+    Requiring exactly one token per column instead, which is what round 6 first
+    shipped, threw the whole line away when a single entry ran to two words: a
+    row of five categories lost all five, and the panel published bare ``A``,
+    ``B``, ``C``, ``D``, ``E`` with no refusal, silently dropping identifiers
+    the page had printed (#735 round 6 review). Partitioning keeps every
+    fragment the page drew and still refuses a row that cannot account for
+    itself.
+
+    Measured over the 840 ``read_bins`` calls of both corpora and the reference:
+    826 second lines are absorbed (821 over the two corpora, 5 on the
+    reference), and every one carries exactly one token per column, so no
+    corpus label is joined differently by any of these three rules.
     """
     tokens = _alnum_tokens(row)
-    if len(tokens) != len(centres):
+    if len(tokens) < len(centres):
         return None
-    picked = [min(range(len(tokens)), key=lambda i: abs(tokens[i][0] - c)) for c in centres]
-    if len(set(picked)) != len(picked) or picked != sorted(picked):
+    owner = [min(range(len(centres)), key=lambda i: abs(cx - centres[i])) for cx, _t in tokens]
+    if sorted(set(owner)) != list(range(len(centres))) or owner != sorted(owner):
         return None
-    return [tokens[i][1] for i in picked]
+    runs: list[list[str]] = [[] for _ in centres]
+    for (_cx, text), column in zip(tokens, owner, strict=True):
+        runs[column].append(text)
+    return [" ".join(run) for run in runs]
 
 
 def _bin_edges(centres: list[float]) -> list[float]:
@@ -619,10 +635,13 @@ def _unruled_out_rival(row: WordRow, bars: list[Mark], columns: int) -> bool:
     prose, and it is read off the drawing -- the bar's width against the row's
     own spacing -- not off a cutoff.
 
-    Measured over the same 840 calls: 11 minutes panels carry a silent footnote
-    with more tokens than their bin row, and in every one of them the widest bar
-    (31.5-45.4pt) is three to four times the footnote's tightest column
-    (9.0-12.0pt), so no corpus panel is refused by this.
+    Measured over the same 840 calls: 8 minutes panels carry a silent footnote
+    with strictly more tokens than their bin row -- which is what the below-leg
+    asks -- and in every one of them the widest bar (31.5-45.4pt) is wider than
+    the footnote's tightest column (9.0-12.0pt) by a factor of 2.6 to 5.0, so
+    no corpus panel is refused by this. (11 calls have a silent row with at least as many
+    tokens; the 3 that tie are not rivals below, and this figure was first
+    written as 11 by quoting that wider count against the narrower rule.)
     """
     centres = [cx for cx, _t in _alnum_tokens(row)]
     if len(centres) < columns:
@@ -739,10 +758,13 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     * "The only row inside the axis' span" is defeated by one unit word printed
       on the label row's own baseline past the end of the axis: that row is
       disqualified and a prose caption below it becomes unique.
-    * "The first row below the axis" is defeated by the corpus shape itself,
-      whose x-unit annotation is set BETWEEN the axis and its labels; the
-      labels are then absorbed into the unit row as a second atom line
-      (``Percent-B2 ...``).
+    * "The first row below the axis" is defeated by a page whose x-unit
+      annotation is set BETWEEN the axis and its labels; the labels are then
+      absorbed into the unit row as a second atom line (``Percent-B2 ...``).
+      That arrangement is this branch's FIXTURE, not a corpus page, and the
+      earlier claim here that it was "the corpus shape itself" was wrong: on all
+      840 corpus calls nothing plural and in-span is drawn above the bin labels,
+      and the real ``Percent range`` is printed BELOW them.
     * Both of the last two together are defeated by both of their inputs on one
       page: a unit row above the labels and one unit word past the axis end
       leaves the unit row first AND uniquely in span (``['Percent','range']``,

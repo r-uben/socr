@@ -1175,3 +1175,66 @@ def test_a_panel_with_no_bar_standing_on_its_axis_has_no_bins(tmp_path: Path) ->
 
     witnessed = read_one(tmp_path / "witnessed", WITNESS, [0, 4, 6, 2, 0])
     assert counts(witnessed, DASHED)[1:4] == ["4", "6", "2"], counts(witnessed, DASHED)
+
+
+def _categorical(path: Path, *, two_word_entry: bool):
+    """Five bins with a second label line, one entry of which may run to two words.
+
+    The ONLY difference between the two drawings is whether the first column's
+    second-line entry is ``America`` or ``North America``. Every bar, every bin
+    label and every other category word is identical.
+    """
+    labels = ["A", "B", "C", "D", "E"]
+    doc, _bboxes = build_chart(path, [2, 3, 4, 5, 6], None, bins=labels)
+    page = doc[0]
+    first = "North America" if two_word_entry else "America"
+    for centre, word in zip(
+        [135.0, 185.0, 235.0, 285.0, 335.0],
+        [first, "Europe", "Asia", "Africa", "Oceania"],
+        strict=True,
+    ):
+        width = fitz.get_text_length(word, fontsize=5)
+        page.insert_text(fitz.Point(centre - width / 2, 420.0), word, fontsize=5)
+    annotated = path.with_name(path.stem + "-second-line.pdf")
+    doc.save(str(annotated))
+    reopened = fitz.open(str(annotated))
+    return reopened, [reopened[0].rect]
+
+
+def test_a_two_word_entry_does_not_delete_the_whole_second_label_line(tmp_path: Path) -> None:
+    """One word longer in one column, and the other four columns keep their words.
+
+    Requiring a second line to carry exactly one token per column threw the
+    entire line away as soon as one entry ran to two words: the panel published
+    bare ``A``..``E``, dropping five identifiers the page had printed, and
+    refused nothing (#735 round 6 review). The line is read as a partition of
+    its own tokens instead, so the two-word entry stays with its own column and
+    the rest are untouched.
+    """
+    single_doc, single_boxes = _categorical(tmp_path / "single.pdf", two_word_entry=False)
+    single = read_chart_page(single_doc[0], single_boxes, page_num=1)
+    multi_doc, multi_boxes = _categorical(tmp_path / "multi.pdf", two_word_entry=True)
+    multi = read_chart_page(multi_doc[0], multi_boxes, page_num=1)
+
+    one, many = single.panels.get(1), multi.panels.get(1)
+    assert one is not None, single.refusals
+    assert many is not None, multi.refusals
+    assert [b.label for b in one.bins] == [
+        "A-America",
+        "B-Europe",
+        "C-Asia",
+        "D-Africa",
+        "E-Oceania",
+    ]
+    assert [b.label for b in many.bins] == [
+        "A-North America",
+        "B-Europe",
+        "C-Asia",
+        "D-Africa",
+        "E-Oceania",
+    ]
+    # The counts are the same drawing in both, and the only label that moves is
+    # the one whose entry gained a word.
+    assert [c.count for s in one.series for c in s.cells] == [2, 3, 4, 5, 6]
+    assert [c.count for s in many.series for c in s.cells] == [2, 3, 4, 5, 6]
+    assert [b.label for b in one.bins][1:] == [b.label for b in many.bins][1:]
