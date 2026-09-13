@@ -1409,3 +1409,82 @@ def test_words_outside_the_axis_are_not_joined_into_the_bin_labels(tmp_path: Pat
     assert fringed_cells == clean_cells
     # Every published key still parses as a Stage 0 column key.
     assert all(_key_atoms(label) is not None for label in fringed_bins), fringed_bins
+
+
+def test_a_five_word_prose_row_below_the_labels_joins_none_of_itself(tmp_path: Path) -> None:
+    """Prose under the chart is not a second line of its labels.
+
+    Five words set below four numeric columns published
+    ``1.0-Note excludes | 2.0-one | 3.0-absent | 4.0-participant``, whose first
+    key Stage 0's grammar rejects outright (#735 round 7 review). A token joins
+    a column only if it is drawn inside the axis and inside that column's own
+    interval, so the words that fall outside are dropped and the row cannot
+    account for every column.
+    """
+    plain_bins, plain_cells = _read_numeric(tmp_path / "plain.pdf")
+    prose_bins, prose_cells = _read_numeric(
+        tmp_path / "prose.pdf",
+        extra_row=("Note", "excludes", "one", "absent", "participant"),
+        extra_centres=[150.0, 163.0, 180.0, 200.0, 220.0],
+    )
+    assert plain_bins == list(BINS)
+    assert prose_bins == plain_bins, prose_bins
+    assert prose_cells == plain_cells
+
+
+def test_every_published_bin_label_parses_as_a_stage_0_key(tmp_path: Path) -> None:
+    """The branch's own invariant, on synthetic pages rather than on the corpus.
+
+    Two defects reached a commit on this branch that this one property would
+    have caught, and in both cases the only thing that noticed was a corpus
+    dump: the numeric gate's first version relabelled every SEP page from
+    ``0.13-0.37`` to ``0.37``, and the partition rule joined out-of-axis prose
+    into genuine ranges as ``0.13-Additional 0.37``, whose key is malformed.
+    Neither needs a corpus to detect -- every label this reader publishes is
+    supposed to parse through the grammar Stage 0 uses for a column key, and
+    that is asserted here directly, hermetically, over the shapes the reviews
+    produced.
+
+    Note what this does NOT assert: that the label is the RIGHT one. A prose
+    caption drawn at the bin centres is joined in as ``1.0-Effective``, which
+    parses perfectly well and is the wrong header (STATUS item 15). Parsing is
+    a floor, not a proof.
+    """
+    from socr.figures.chart_data import _key_atoms
+
+    ranged = dict(labels=("0.13-", "0.38-", "0.63-", "0.88-"), extra_y=BASE + 20.0)
+    drawings = {
+        "plain": {},
+        "two_line_range": dict(
+            extra_row=("0.37", "0.62", "0.87", "1.12"), extra_centres=list(_R7_CENTRES), **ranged
+        ),
+        "off_axis_prose": dict(
+            extra_row=("Additional", "0.37", "0.62", "0.87", "1.12", "footnote"),
+            extra_centres=[40.0, *_R7_CENTRES, 460.0],
+            **ranged,
+        ),
+        "prose_row": dict(
+            extra_row=("Note", "excludes", "one", "absent", "participant"),
+            extra_centres=[150.0, 163.0, 180.0, 200.0, 220.0],
+        ),
+        "caption_at_centres": dict(
+            extra_row=("Effective", "federal", "funds", "rate"),
+            extra_centres=list(_R7_CENTRES),
+            extra_y=BASE + 20.0,
+        ),
+        "numeric_annotation": dict(
+            extra_row=("0", "5", "10", "15"),
+            extra_y=BASE + 10.0,
+            label_y=BASE + 26.0,
+            bars_on_extra=True,
+        ),
+    }
+    published = 0
+    for name, options in drawings.items():
+        bins, _cells = _read_numeric(tmp_path / f"{name}.pdf", **options)
+        if bins is None:
+            continue
+        published += 1
+        malformed = [label for label in bins if _key_atoms(label) is None]
+        assert not malformed, (name, bins, malformed)
+    assert published == len(drawings), published

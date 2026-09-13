@@ -526,7 +526,7 @@ def _alnum_tokens(row: WordRow) -> list[tuple[float, str]]:
     return [(cx, text) for cx, _w, text in row.tokens if any(ch.isalnum() for ch in text)]
 
 
-def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
+def _aligned(row: WordRow, centres: list[float], span: tuple[float, float]) -> list[str] | None:
     """The row's token nearest each of *centres*, or ``None`` if it does not align.
 
     This is how a two-line tick label is printed: the upper endpoint above the
@@ -548,8 +548,13 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     fragment the page drew and still refuses a row that cannot account for
     itself.
 
-    A token owns a column only if it is drawn INSIDE that column's own interval,
-    and a token outside every interval is not part of this row's label at all.
+    A token owns a column only if it is drawn inside the axis' own *span* AND
+    inside that column's own interval; a token outside either is not part of
+    this row's label at all. Both bounds are needed. The intervals are derived
+    from the primary row's centres, and the outer two mirror a half-gap, so the
+    first and last of them reach past the end of the axis -- a word printed just
+    beyond the axis would sit inside the mirrored edge and be joined in. The
+    span is the same discriminator the primary row is already held to.
     Without that bound the outer columns extend forever, because nearest-centre
     assignment has to put every token somewhere: two words set on the second
     line's baseline but outside the axis -- one at each end -- were joined into
@@ -568,9 +573,12 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     if len(tokens) < len(centres):
         return None
     edges = _bin_edges(centres)
+    x0, x1 = span
     owner: list[int] = []
     owned: list[str] = []
     for cx, text in tokens:
+        if not x0 <= cx <= x1:
+            continue
         column = min(range(len(centres)), key=lambda i: abs(cx - centres[i]))
         if not edges[column] <= cx <= edges[column + 1]:
             continue
@@ -889,7 +897,7 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     atoms: list[list[str]] = [[t] for _cx, t in primaries]
     cursor = below.index(best)
     for row in below[cursor + 1 :]:
-        aligned = _aligned(row, centres)
+        aligned = _aligned(row, centres, (frame.x0, frame.x1))
         if aligned is None:
             break
         for i, token in enumerate(aligned):

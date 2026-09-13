@@ -253,8 +253,12 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    numbers, as printed** (`_numeric_row`). It uses Stage 0's own key grammar
    (`chart_data._key_atoms`) so the two halves of the feature cannot drift, and then
    requires each atom to parse as a number — the step that grammar does not take, since it
-   accepts `B1` and `Effective` as well-formed keys. A row with any word token cannot be
-   the bins, and where no row below the axis is all-numeric the panel is refused.
+   accepts `B1` and `Effective` as well-formed keys. The test is a FLOAT PARSE, not a word
+   test, and the difference matters in both directions: it admits a numeric prefix, since
+   `0.13-` passes on the strength of `0.13` once the trailing range dash is stripped, and
+   it judges the PRIMARY row only, so a label joined from a second line is not guaranteed
+   to parse as a Stage 0 key even though the row it came from did. What is true is that a
+   row carrying a token no float parse accepts cannot be the bins, and where no row below the axis is all-numeric the panel is refused.
 
    **Measured cost: nothing on the corpus** — on all 840 `read_bins` calls the attested row
    is all-numeric, no call has zero numeric rows below its axis, and both corpus dumps stay
