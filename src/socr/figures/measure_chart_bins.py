@@ -136,7 +136,10 @@ def _run(targets: list[Path]) -> dict:
                     continue
                 _instrument(page, boxes, [corpus, total], absorbed)
             doc.close()
-        per_corpus[target.name] = {"files": len(files), **corpus.report()}
+        # Keyed by the path as given rather than its basename: two corpora
+        # both called "in" under different parents would otherwise
+        # overwrite each other's report while the totals kept both.
+        per_corpus[str(target)] = {"files": len(files), **corpus.report()}
     return {
         "per_corpus": per_corpus,
         "total": total.report(),

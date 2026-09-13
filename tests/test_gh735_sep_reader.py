@@ -1373,3 +1373,39 @@ def test_the_measurement_tool_is_runnable_as_a_module() -> None:
     )
     assert done.returncode == 0, done.stderr
     assert "corpus" in done.stdout, done.stdout
+
+
+def test_words_outside_the_axis_are_not_joined_into_the_bin_labels(tmp_path: Path) -> None:
+    """A second line owns only what is drawn inside the bins, and nothing else.
+
+    Nearest-centre assignment has to put every token somewhere, so the outer
+    columns extend without limit unless bounded: two words set on the second
+    line's baseline but OUTSIDE the axis, one at each end, were joined into the
+    outer bins as ``0.13-Additional 0.37`` and ``0.88-1.12 footnote``. That
+    corrupts two already-correct numeric labels with page prose, and both keys
+    are rejected by Stage 0's own grammar (#735 round 7 review).
+
+    The difference is only those two words. Every bar, every endpoint and the
+    attested label row are identical in both drawings, so the labels must be too.
+    """
+    from socr.figures.chart_data import _key_atoms
+
+    ranged = dict(
+        labels=("0.13-", "0.38-", "0.63-", "0.88-"),
+        extra_centres=list(_R7_CENTRES),
+        extra_y=BASE + 20.0,
+    )
+    clean_bins, clean_cells = _read_numeric(
+        tmp_path / "clean.pdf", extra_row=("0.37", "0.62", "0.87", "1.12"), **ranged
+    )
+    ranged["extra_centres"] = [40.0, *_R7_CENTRES, 460.0]
+    fringed_bins, fringed_cells = _read_numeric(
+        tmp_path / "fringed.pdf",
+        extra_row=("Additional", "0.37", "0.62", "0.87", "1.12", "footnote"),
+        **ranged,
+    )
+    assert clean_bins == ["0.13-0.37", "0.38-0.62", "0.63-0.87", "0.88-1.12"], clean_bins
+    assert fringed_bins == clean_bins, fringed_bins
+    assert fringed_cells == clean_cells
+    # Every published key still parses as a Stage 0 column key.
+    assert all(_key_atoms(label) is not None for label in fringed_bins), fringed_bins

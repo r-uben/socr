@@ -548,6 +548,17 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     fragment the page drew and still refuses a row that cannot account for
     itself.
 
+    A token owns a column only if it is drawn INSIDE that column's own interval,
+    and a token outside every interval is not part of this row's label at all.
+    Without that bound the outer columns extend forever, because nearest-centre
+    assignment has to put every token somewhere: two words set on the second
+    line's baseline but outside the axis -- one at each end -- were joined into
+    the outer bins as ``0.13-Additional 0.37`` and ``0.88-1.12 footnote``,
+    corrupting two already-correct numeric labels with page prose and emitting
+    keys Stage 0's own grammar rejects (#735 round 7 review). The bound drops
+    such a token rather than the whole line, so the real endpoints survive; a
+    row that then cannot fill every column is still not a second line.
+
     Measured over the 840 ``read_bins`` calls of both corpora and the reference:
     826 second lines are absorbed (821 over the two corpora, 5 on the
     reference), and every one carries exactly one token per column, so no
@@ -556,11 +567,21 @@ def _aligned(row: WordRow, centres: list[float]) -> list[str] | None:
     tokens = _alnum_tokens(row)
     if len(tokens) < len(centres):
         return None
-    owner = [min(range(len(centres)), key=lambda i: abs(cx - centres[i])) for cx, _t in tokens]
+    edges = _bin_edges(centres)
+    owner: list[int] = []
+    owned: list[str] = []
+    for cx, text in tokens:
+        column = min(range(len(centres)), key=lambda i: abs(cx - centres[i]))
+        if not edges[column] <= cx <= edges[column + 1]:
+            continue
+        owner.append(column)
+        owned.append(text)
+    if len(owned) < len(centres):
+        return None
     if sorted(set(owner)) != list(range(len(centres))) or owner != sorted(owner):
         return None
     runs: list[list[str]] = [[] for _ in centres]
-    for (_cx, text), column in zip(tokens, owner, strict=True):
+    for text, column in zip(owned, owner, strict=True):
         runs[column].append(text)
     return [" ".join(run) for run in runs]
 
@@ -625,6 +646,14 @@ def _numeric_row(row: WordRow) -> bool:
     (``-0.5``) intact rather than splitting it. Each atom must then parse as a
     number, which is the step ``_key_atoms`` does not take: it accepts ``B1``
     and ``Effective`` as well-formed keys, and neither is a number.
+
+    Two things this gate does NOT promise. It admits a numeric PREFIX: with the
+    trailing range dash stripped, ``0.13-`` passes on the strength of ``0.13``,
+    so a row of dangling lower bounds with no second line to complete them is
+    accepted and publishes those labels as drawn. And it judges the PRIMARY row
+    only -- a second line joined onto it (``_aligned``) is not re-checked, so a
+    published label is not guaranteed to parse as a Stage 0 key even though the
+    row it came from did.
 
     The one thing asked of the token before that grammar sees it is that a
     TRAILING range dash is stripped. Both corpora draw their bins over two
@@ -762,9 +791,12 @@ def read_bins(frame: Frame, rows: list[WordRow], marks: list[Mark], residual: fl
     candidate row must be a number or a printed range of numbers; a caption, a
     unit annotation, an axis title and a footnote all carry at least one word.
     Where no row below the axis is all-numeric, the panel is refused. That
-    rejects all three of the constructions above, since each selected a row
-    containing words, and it costs the corpus nothing: on all 840 calls the
-    attested row is all-numeric and no call has zero numeric rows beneath it.
+    stops all three of the constructions above from publishing under prose,
+    though not all in the same way: two of them refuse outright, and the one
+    whose stray mark sits among real numeric labels now reads those labels and
+    leaves the bins the stray contests UNRESOLVED, which is a reading rather
+    than a refusal. It costs the corpus nothing: on all 840 calls the attested
+    row is all-numeric and no call has zero numeric rows beneath it.
 
     It does NOT close the class, and the limit is worth stating precisely here
     rather than only in the plan notes. This module establishes that a row is

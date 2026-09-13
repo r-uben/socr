@@ -270,8 +270,10 @@ on four panels, one on 2021), the page's own prose, and the five crops.
    rather than by defect.
 
 18. **OPEN, disclosed: ANY numeric row the bars attest becomes the bins.** The numeric
-   gate rejects all three round-6 constructions, because each selected a row containing
-   words. It does not close the class, and the class is wider than the first statement of
+   gate stops all three round-6 constructions from publishing under prose, but "all three
+   refuse" overstates it: two refuse outright, and the one whose stray mark sits among real
+   numeric labels reads those labels and leaves the bins the stray contests UNRESOLVED. It
+   does not close the class, and the class is wider than the first statement of
    this item allowed. What the reader requires of a row is only that it is all-numeric,
    that its tokens are inside the axis' span, and that the bars stand inside the bins its
    own centres derive. **Vertical order is not consulted at all** — with the rival rule
