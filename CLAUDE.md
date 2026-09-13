@@ -82,17 +82,6 @@ pages, audits quality, and falls back. One control loop: the
   Failures must surface at *every* level (page status, document status, metadata, CLI) — not just one.
 - Branch per change (`feat/NN-…` / `fix/NN-…`); stage by name (never `git add -A`); one commit per
   ticket; **wait for CI green before merging**.
-- **A guard that has never been seen to fail has not been shown to guard anything.** Before
-  claiming a test protects a fix, delete the fix in a MUTANT COPY and watch that test fail.
-  Copy `src` **and** `tests` outside the repo, because `pythonpath = ["src"]` in the pytest
-  config silently beats `PYTHONPATH` and re-injects the real source; assert `socr.__file__`
-  inside the mutant. Confirm the failure comes from the named regression and not from an
-  unrelated setup error. This is the sibling of *pin a DIFFERENCE, not a value*: that one
-  says a green assertion can measure the wrong thing, this one says it can measure nothing
-  at all. Four #735 guards were green against the very regression they named — the first
-  numeric gate, the trailing-dash near-miss, the `read_bins` no-op mutation, and the
-  measurement-tool guard in both of its forms. The instances are in
-  `docs/log/2026-09-12_735-sep-reader.md`.
 
 ## Plan / history
 
