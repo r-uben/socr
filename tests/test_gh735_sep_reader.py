@@ -1355,26 +1355,45 @@ def test_a_row_of_infinities_is_not_a_row_of_bins() -> None:
         assert not _numeric_row(row(*words)), words
 
 
-def test_the_measurement_tool_is_runnable_as_a_module() -> None:
-    """``python -m socr.figures.measure_chart_bins`` must not exit 0 in silence.
+def test_the_measurement_tool_actually_measures_a_page(tmp_path: Path) -> None:
+    """The tool must RUN, not merely import and print its usage.
 
-    Without a ``__main__`` guard the module imports, defines ``main``, never
-    calls it, and exits 0 having printed nothing — which reads exactly like a
-    corpus with no chart pages. The log cites this tool as the reason its 840-call
-    table can be re-derived from the tree, so it has to actually run. A silent
-    success is how the first numeric gate got through (#735 round 7 review).
+    Two ways this has already failed. Without a ``__main__`` guard the module
+    imported, defined ``main``, never called it and exited 0 in silence, which
+    reads exactly like a corpus with no chart pages. The guard fixed that, and
+    the test written for it asked only for ``--help`` — which returns from
+    ``argparse`` before any page is read. So when ``_aligned`` gained its
+    axis-span argument and the tool's own two-argument wrapper stopped matching
+    it, every corpus page raised ``TypeError`` from inside ``read_bins`` while
+    ``--help`` went on exiting 0 (#735 round 8 review). The log cites this tool
+    as the reason its 840-call table need not be taken on trust, so the test
+    drives it over a real drawing and reads its numbers back.
     """
+    import json
     import subprocess
     import sys
 
+    _numeric_panel(tmp_path / "one.pdf")
+    report_path = tmp_path / "report.json"
     done = subprocess.run(
-        [sys.executable, "-m", "socr.figures.measure_chart_bins", "--help"],
+        [
+            sys.executable,
+            "-m",
+            "socr.figures.measure_chart_bins",
+            str(tmp_path / "one.pdf"),
+            "--json",
+            str(report_path),
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert done.returncode == 0, done.stderr
-    assert "corpus" in done.stdout, done.stdout
+    # Read the report from the file rather than stdout: PyMuPDF prints a
+    # deprecation banner to stdout, so stdout is not pure JSON.
+    report = json.loads(report_path.read_text())
+    assert report["total"]["calls"] >= 1, report
+    assert report["total"]["winner_is_numeric"] == report["total"]["calls"], report
 
 
 def test_words_outside_the_axis_are_not_joined_into_the_bin_labels(tmp_path: Path) -> None:
@@ -1434,14 +1453,31 @@ def test_a_five_word_prose_row_below_the_labels_joins_none_of_itself(tmp_path: P
     assert prose_cells == plain_cells
 
 
-def test_every_published_bin_label_parses_as_a_stage_0_key(tmp_path: Path) -> None:
-    """The branch's own invariant, on synthetic pages rather than on the corpus.
+def test_numeric_chart_labels_parse_and_none_of_these_drawings_refuses(
+    tmp_path: Path,
+) -> None:
+    """Two properties of these six NUMERIC drawings, named for what they are.
 
-    Two defects reached a commit on this branch that this one property would
-    have caught, and in both cases the only thing that noticed was a corpus
-    dump: the numeric gate's first version relabelled every SEP page from
-    ``0.13-0.37`` to ``0.37``, and the partition rule joined out-of-axis prose
-    into genuine ranges as ``0.13-Additional 0.37``, whose key is malformed.
+    The name matters because the obvious one -- "every published bin label
+    parses as a Stage 0 key" -- is false on this branch, and its counterexample
+    is a test kept deliberately passing: ``1.0-North America`` in
+    ``tests/test_gh635_chart_reader.py`` is published and rejected by
+    ``_key_atoms``, since a multi-word run is not a whole token. It is required
+    output, not a defect. The property that holds is about NUMERIC charts, which
+    is what all six drawings here are.
+
+    This carries a second assertion that is not an invariant at all: that every
+    drawing still publishes. That is a refusal-regression guard, and it is the
+    one that fires if a future change starts refusing these shapes.
+
+    One defect reached a commit on this branch that the parse half would have
+    caught: the partition rule joined out-of-axis prose into genuine ranges as
+    ``0.13-Additional 0.37``, whose key is malformed. It would NOT have caught
+    the other one the earlier version of this docstring claimed -- the numeric
+    gate's first version relabelled every SEP page from ``0.13-0.37`` to
+    ``0.37``, and both of those parse. The real guards for that are
+    ``test_a_two_line_range_label_joins_with_exactly_one_dash`` and
+    ``test_a_two_line_range_label_with_a_trailing_dash_is_still_the_bins``.
     Neither needs a corpus to detect, so the property is asserted here directly
     and hermetically over the shapes the reviews produced.
 

@@ -159,8 +159,12 @@ def _instrument(page, boxes, measurements: list[Measurement], absorbed: Counter)
             m.observe(frame, rows, marks, residual)
         return read_bins(frame, rows, marks, residual)
 
-    def watched_aligned(row, centres):
-        out = aligned(row, centres)
+    def watched_aligned(*args, **kwargs):
+        # Signature-agnostic on purpose. This wrapper took (row, centres) and
+        # broke the whole tool the moment ``_aligned`` gained its axis-span
+        # argument: every corpus page raised TypeError from inside read_bins,
+        # while the tool's own --help still exited 0 (#735 round 8 review).
+        out = aligned(*args, **kwargs)
         if out is not None:
             absorbed["absorbed"] += 1
             absorbed["multi_token_column"] += any(" " in fragment for fragment in out)
