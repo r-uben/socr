@@ -185,8 +185,56 @@ def _dashed(pattern) -> bool:
     return False
 
 
+def _item_bbox(item) -> tuple[float, float, float, float] | None:
+    """The bounding box of one drawing ITEM's own points -- never the drawing's.
+
+    A generator is free to emit a whole staircase as one compound path, and
+    PyMuPDF then reports a single ``rect`` for it: the bounding box of every
+    run and riser together, which is neither horizontal nor vertical. Each
+    ``items`` entry is one drawing operator -- a line, a curve, a rect, a
+    quad -- and building the box from ITS points instead recovers the run or
+    riser the staircase reader wants, because the Fed SEP pages draw the
+    whole outline as ``'l'`` segments already collapsed to run or riser.
+
+    ``'c'`` (curve) is bounded by all four control points, not just its two
+    endpoints: a curve whose endpoints happen to be level is still a curve,
+    and the reader must still refuse it as neither a run nor a riser.
+    """
+    kind = item[0]
+    if kind == "re":
+        rect = item[1]
+        return float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)
+    if kind == "qu":
+        rect = item[1].rect
+        return float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)
+    if kind == "l":
+        points = item[1:3]
+    elif kind == "c":
+        points = item[1:5]
+    else:  # pragma: no cover - defensive: an operator this reader has no bbox for
+        return None
+    xs = [float(p.x) for p in points]
+    ys = [float(p.y) for p in points]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    if kind == "l" and x0 == x1 and y0 == y1:
+        # A zero-length 'l' item paints nothing: PDF path builders routinely
+        # emit one as the path's opening moveto, restated as a line to itself
+        # (measured on the SEP corpus: every dashed staircase's first item).
+        # It is not a diagonal piece the reader failed to decompose -- it is
+        # not a piece of the outline at all, so it must not reach the refusal
+        # every genuinely undecomposable item still must.
+        return None
+    return x0, y0, x1, y1
+
+
 def page_marks(page) -> list[Mark]:
-    """Every drawing on *page*, as :class:`Mark`. Never raises."""
+    """Every drawing ITEM on *page*, as :class:`Mark`. Never raises.
+
+    One :class:`Mark` per ``items`` entry, not per drawing -- see
+    :func:`_item_bbox`. ``width`` and ``dashed`` are stroke properties of the
+    parent drawing, not of any one item, so every mark cut from the same
+    drawing carries the same values down.
+    """
     try:
         drawings = page.get_drawings() or []
     except Exception as exc:  # pragma: no cover - defensive
@@ -194,21 +242,20 @@ def page_marks(page) -> list[Mark]:
         return []
     out: list[Mark] = []
     for d in drawings:
-        try:
-            rect = d["rect"]
-            out.append(
-                Mark(
-                    filled=d.get("fill") is not None,
-                    dashed=_dashed(d.get("dashes")),
-                    width=float(d.get("width") or 0.0),
-                    x0=float(rect.x0),
-                    y0=float(rect.y0),
-                    x1=float(rect.x1),
-                    y1=float(rect.y1),
+        filled = d.get("fill") is not None
+        dashed = _dashed(d.get("dashes"))
+        width = float(d.get("width") or 0.0)
+        for item in d.get("items") or []:
+            try:
+                bbox = _item_bbox(item)
+                if bbox is None:
+                    continue
+                x0, y0, x1, y1 = bbox
+                out.append(
+                    Mark(filled=filled, dashed=dashed, width=width, x0=x0, y0=y0, x1=x1, y1=y1)
                 )
-            )
-        except Exception:  # pragma: no cover - defensive
-            continue
+            except Exception:  # pragma: no cover - defensive
+                continue
     return out
 
 
