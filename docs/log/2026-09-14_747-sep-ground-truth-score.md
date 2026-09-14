@@ -165,6 +165,17 @@ harness can and does say "no" instead of defaulting to "yes" — see the two
 reader defects below, which are real declined-to-match cases, not synthetic
 ones.
 
+**Why the cold-cache 403 (see below) stayed hidden through two independent
+runs.** My run and team-lead's first reproduction attempt differed only in
+whether their cache directory already had files in it. Once a cache is
+warm, the cold-fetch path never executes again for anyone reading from it —
+so the harness looked complete from every angle available to the person who
+built it, and only a second run starting from a genuinely different
+condition (an empty directory) told the two states apart. Same shape as the
+5-vs-7 document count and the "concentrated on one document" claim below:
+a defect and a correct state can be indistinguishable from outside until
+something forces the untested branch to run.
+
 The 50 `no_ground_truth` cells are a genuine reader defect, found by this
 measurement, not a scoring-harness artifact:
 - `sep-20250319-p09` and `sep-20250618-p09`: **every panel's `label` reads as
@@ -249,7 +260,12 @@ fixed. `sep-20220316-p09` remains the standout: 24 of its cells are wrong,
 against 6 spread across the other document and zero on the remaining 21.
 That document was already this corpus's outlier before this ticket — 9 of
 the 10 pre-existing #734b contradictions were on it too, through a
-mechanism this ticket did not touch.
+mechanism this ticket did not touch. Stated on its own account because it
+generalises past this one case: **a concentration measured through a
+broken parser tells you where the parser failed, not where the model
+failed.** The six errors on `sep-20201216-p09` were always there; the
+harness bug only decided whether they were visible as mistakes or invisible
+as `no_ground_truth`.
 
 **Cross-validation on `sep-20220316-p09`'s Longer-run panel.** This parser's
 `ReleaseTable` for `20220316` reads, for the December 2021 projections

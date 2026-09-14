@@ -339,8 +339,15 @@ def cached_release_table(
 ) -> ReleaseTable:
     """The parsed :class:`ReleaseTable` for *release_date*, fetching once.
 
-    Raw HTML is cached at ``<cache_dir>/raw/<release_date>.htm`` so a rerun of
-    the scoring harness never re-fetches the Fed's site. The cache holds the
+    Raw HTML is cached at ``<cache_dir>/raw/<release_date>.htm``. This is not
+    merely an optimisation against re-fetching: network-restricted
+    environments (CI has no network at all) cannot run this harness without
+    one, and a caller in such an environment should populate
+    ``cache_dir/raw/`` ahead of time rather than calling this expecting the
+    network path to work. The live fetch itself DOES work -- what
+    federalreserve.gov refuses is urllib's *default* User-Agent, which
+    `fetch_release_html` replaces, wrapping any remaining failure in
+    `GroundTruthUnavailable`. The cache holds the
     RAW page, not the parsed table: `parse_release_html` can change (a bug fix,
     a new field) without invalidating a byte a network call already paid for.
     """
