@@ -1719,13 +1719,24 @@ def _panel_label(frame: Frame, rows: list[WordRow], shared: set[str]) -> str:
     the figure's axis titles (drawn in every panel, and overhanging the plot
     where the tick labels are), the tick labels themselves, and the legend
     (below the heading).
+
+    (c) is read off the row's VERTICAL CENTRE, not its bottom edge. PyMuPDF's
+    word bbox carries the font's own line-height padding (ascent and descent)
+    below the glyphs' ink, and that padding is a font constant unrelated to
+    where the tick is drawn: on two SEP releases (#750) the heading row's
+    padded bottom edge dips 0.45pt past the top tick even though the glyphs
+    themselves -- and the row's centre -- sit clearly above it, on the other
+    21 releases the same padding stays clear of the tick by 0.34-9.38pt only
+    because the axis happened to be drawn a little further down. Comparing
+    against the centre removes that font-padding noise instead of adding a
+    tolerance to absorb it -- there is no threshold to name.
     """
     top_tick = min(frame.tick_ys) if frame.tick_ys else frame.baseline
     for row in rows:
         text = row.text.strip()
         if not text or text in shared:
             continue
-        if row.y1 > top_tick:
+        if row.cy > top_tick:
             continue
         if not (frame.x0 <= row.x0 and row.x1 <= frame.x1):
             continue
@@ -1952,12 +1963,21 @@ def read_chart_page(
             )
             continue
         rows = rows_by_region[idx]
+        label = _panel_label(frame, rows, shared)
+        if not label:
+            reading.refusals[idx] = (
+                "no row above this panel's highest tick, drawn wholly inside the plot's "
+                "horizontal span and not shared with another panel, could be found to serve "
+                "as its heading, so the panel's identity is not established and its readings "
+                "cannot be attached to a year"
+            )
+            continue
         count_unit, bin_unit = group_units.get(idx, ("", ""))
         digest = (crop_digests or {}).get(idx, ("", 0, (0.0, 0.0, 0.0, 0.0)))
         panel = PanelReading(
             page_num=page_num,
             region_index=idx,
-            label=_panel_label(frame, rows, shared),
+            label=label,
             bins=tuple(bins),
             series=tuple(series),
             calibration=cal,
