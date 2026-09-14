@@ -352,14 +352,54 @@ for. So "no real page needs this" and "no real page is harmed by this" are measu
 dot-plot corpus and *assumed* everywhere else, on the strength of a reader that declines
 those pages earlier.
 
-## Stage 2 — model-assisted proposals — **TODO**
+## Stage 2 — model-assisted proposals — **DONE**
 
-Not started. Depends on Stage 1's geometry being the authority.
+Built and wired 2026-09-13/14. `src/socr/figures/chart_reconcile.py` (#740, `65133a2`)
+holds the pure reconciliation; `_reconcile_chart_table_grids` wires it in (#741,
+`9b15379`), so a FILLED model grid bound to a chart region is now checked against the
+page's own geometry instead of shipping unchecked. A contradicted cell is WITHHELD from
+the body — both numbers go on the event, neither is adjudicated. Demotion is by page
+status, never `audit_passed`. Seven blocking review findings closed; P8's order-dependence
+is pinned by a self-retiring guard (#744, `e63c01d`) that goes red when #742 lands.
+
+## What landed after Stage 2
+
+- **#739** (`c0fa426`): `page_marks` emitted one `Mark` per *drawing*, from its bounding
+  box, so a compound dashed staircase arrived undecomposable and `read_dashed_series`
+  refused it — 90 of 188 series rows, the prior-meeting series on every panel. It now
+  emits one mark per drawing ITEM. Series resolution 95 → 185 of 188.
+- **#747** (`374fb93`): the corpus is scored against the Fed's published per-bin tables.
+  Entry point `socr-score-sep-ground-truth`.
+- **#750** (`9547e79`): a year heading's padded bbox dipped 0.45pt past the top tick on
+  two releases, leaving every panel unlabelled. `_panel_label` now compares the row's
+  centre, and a panel whose identity cannot be established REFUSES rather than yielding
+  an empty label.
+
+**Current corpus score (23 documents, merged main):**
+
+```
+reader  2391 cells  2381 exact  10 no_ground_truth  zero errors of every other class
+```
+
+The residual 10 are `sep-20250917-p09`'s 2028 panel, a column the Fed's own table does
+not carry. Model side, from a STALE run: 525 cells, 202 exact, 21 wrong_count, 9
+wrong_bin, 293 unmatched — errors on two documents only.
+
+Open: **#752** (the scorer keys panels by label, so same-label panels silently overwrite
+each other), **#746**, **#742**, **#738**, **#737**.
 
 ## Owner decision — **ANSWERED (yes)**
 
 From DESIGN.md: *may expected totals be keyed by survey and horizon, with absent series
 represented explicitly?* **Yes**, recorded with the Stage 1 brief. Implemented as
 `PipelineConfig.chart_constraint_hook`, which receives the survey key and the horizon
-separately and whose payload carries only the series the panel actually draws. No
-expected total exists anywhere in this codebase.
+separately and whose payload carries only the series the panel actually draws.
+
+**CORRECTION 2026-09-14.** This section used to end "No expected total exists anywhere in
+this codebase." That is now false. The Fed publishes per-bin counts for every SEP release
+at `fomcprojtabl<YYYYMMDD>.htm`, and #747 reads them, so **#737** can source real totals
+for the hook rather than deriving them. Noted as a correction rather than silently edited
+because it is the second never-revisited claim this lane tripped over — the first was
+#734 Stage A's "no external ground-truth table exists for these pages", which was also
+false and which misdirected a month of argument.
+
