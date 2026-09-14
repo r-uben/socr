@@ -44,10 +44,12 @@ output/
 *.md
 !README.md
 !CLAUDE.md
+!AGENTS.md
 !docs/*.md
 !docs/**/*.md
 !examples/**/*.md
 !src/**/*.md
+!.gemini/styleguide.md
 !TICKETS.md
 !TODO.md
 
