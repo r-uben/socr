@@ -2173,6 +2173,107 @@ class TestGH249ChartPageAbstains:
         assert result.warn is False
 
 
+class TestGH249RowClusterGapIsSelfDerived:
+    """A real table's own row spacing must never fracture its rows into
+    separate single-row clusters, at ANY pitch — a gap boundary can only
+    be identified relative to the row set's OWN geometry, not a fixed
+    constant borrowed from an unrelated computation (GH-249 review)."""
+
+    def test_organic_row_spacing_still_hard_fails(self):
+        """A genuine 2-row, 2-lane table laid out at an organic row pitch
+        (47.5pt — not a multiple of the old fixed 30pt threshold) with a
+        dropped value must still hard-fail via the value guard.
+
+        Fails without the fix: the previous version of
+        ``_native_row_clusters`` split on any gap > 30pt, so a 47.5pt row
+        pitch fractured this exact two-row table into two 1-row clusters —
+        neither can satisfy ``rows_establish_grid`` (needs >= 2 rows) — and
+        the grid gate wrongly abstained instead of reaching the value
+        guard, silently letting the dropped value ship unreported.
+        """
+        page = _make_fitz_page_explicit(
+            [
+                (100.0, 100.0, "1.2"),
+                (100.0, 100.0 + _PHYS_COL_GAP, "2.3"),
+                (147.5, 100.0, "3.4"),
+                (147.5, 100.0 + _PHYS_COL_GAP, "4.5"),
+            ]
+        )
+        # Output drops "2.3" — a genuine multiset mismatch.
+        output_text = _md_table(
+            ["label", "c1", "c2"],
+            [["row1", "1.2", ""], ["row2", "3.4", "4.5"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is True, (
+            "A dropped value on a real table must still hard-fail regardless of "
+            f"its native row pitch. Got: {result!r}"
+        )
+        assert "multiset_mismatch" in result.reason
+
+    def test_organic_row_spacing_hard_fails_only_with_the_fix(self):
+        """Directly pins the fixed bug as a DIFFERENCE: same fixture as
+        above, gate forced to abstain (simulating the pre-fix clustering)
+        vs. left alone -- the two must differ exactly as intended."""
+        page = _make_fitz_page_explicit(
+            [
+                (100.0, 100.0, "1.2"),
+                (100.0, 100.0 + _PHYS_COL_GAP, "2.3"),
+                (147.5, 100.0, "3.4"),
+                (147.5, 100.0 + _PHYS_COL_GAP, "4.5"),
+            ]
+        )
+        output_text = _md_table(
+            ["label", "c1", "c2"],
+            [["row1", "1.2", ""], ["row2", "3.4", "4.5"]],
+        )
+
+        with_fix = verify_native_table(page, output_text)
+        with patch(
+            "socr.tables.native_verifier._native_rows_establish_any_grid",
+            return_value=False,
+        ):
+            without_fix = verify_native_table(page, output_text)
+
+        assert with_fix.hard_fail is True
+        assert without_fix.hard_fail is False
+        assert "native_grid_gate" in without_fix.reason
+        assert (with_fix.hard_fail, with_fix.reason) != (
+            without_fix.hard_fail,
+            without_fix.reason,
+        ), "the fix must change this table's outcome from abstain to hard-fail"
+
+    def test_widely_separated_two_row_table_narrowing_is_disclosed(self):
+        """Honesty check, same shape as the lane_count == 1 disclosure.
+
+        With only one gap available (<= 2 rows), there is no internal
+        reference to call any spacing an outlier by — so a 2-row table
+        can never be fractured by ``_native_row_clusters``, but the
+        inverse holds too: two widely-separated rows that happen to share
+        a lane count are pooled and graded as if they were one table's
+        rows. This is the accepted, disclosed trade-off that fixing the
+        reported bug requires (2-row tables must never be split), not an
+        unrelated gap in the fix.
+        """
+        page = _make_fitz_page_explicit(
+            [
+                (100.0, 100.0, "1.2"),
+                (100.0, 100.0 + _PHYS_COL_GAP, "2.3"),
+                (700.0, 100.0, "3.4"),
+                (700.0, 100.0 + _PHYS_COL_GAP, "4.5"),
+            ]
+        )
+        output_text = _md_table(
+            ["label", "c1", "c2"],
+            [["row1", "1.2", "2.3"], ["row2", "3.4", "4.5"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert "native_grid_gate" not in result.reason, (
+            "two rows are always pooled into one cluster regardless of their "
+            f"y-separation — this is the documented trade-off. Got: {result!r}"
+        )
+
+
 class TestGH249SingleNumericColumnStillVerified:
     """Acceptance criterion 3: a single-numeric-column table must STILL be
     verified — no collateral loss from the GH-249 grid gate.

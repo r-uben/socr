@@ -94,6 +94,13 @@ _YBAND_SINGLE_ROW_HEIGHT_PT: float = 15.0
 # on the same page (the residual "bad localization" failure mode).
 _YBAND_ROW_HEIGHT_CAP_PT: float = 30.0
 
+# GH-249: the multiple a y-gap between native rows must exceed this row
+# block's OWN tightest observed gap before it counts as the boundary between
+# two unrelated row groups (see _native_row_clusters). Not a fresh pick: it
+# is the ratio already implicit between this file's two row-height
+# constants above (_YBAND_ROW_HEIGHT_CAP_PT / _YBAND_SINGLE_ROW_HEIGHT_PT).
+_ROW_CLUSTER_GAP_MULTIPLE: float = _YBAND_ROW_HEIGHT_CAP_PT / _YBAND_SINGLE_ROW_HEIGHT_PT
+
 # Minimum distinct well-separated lanes in one row to allow the hard-fail
 # predicate.  A row with < 2 numeric values cannot demonstrate collapse.
 _MIN_HARD_FAIL_LANES: int = 2
@@ -1086,21 +1093,46 @@ def _header_excluded_native_rows(
 def _native_row_clusters(
     rows: list[tuple[float, list[tuple[float, str]]]],
 ) -> list[list[tuple[float, list[tuple[float, str]]]]]:
-    """Split *rows* (sorted by y) into contiguous groups on a large y-gap.
+    """Split *rows* (sorted by y) into contiguous groups on an outlier y-gap.
 
     GH-249: a page can carry a chart's axis ticks AND a real table — two
-    unrelated row sets that happen to share one native word list. A gap
-    larger than ``_YBAND_ROW_HEIGHT_CAP_PT`` between consecutive rows is the
-    same threshold the TR-6 y-band margin already uses to guarantee it "can
-    never engulf an adjacent table's rows on the same page" (see that
-    constant's docstring) — reused here, not a new magic number, as the
-    boundary between one row block and the next.
+    unrelated row sets that happen to share one native word list.
+
+    The boundary is derived from *this row set's own* geometry, not
+    borrowed from elsewhere: the smallest consecutive y-gap among these
+    rows is the best available estimate of the block's genuine row-to-row
+    rhythm (a real table's rows recur at roughly one spacing), and a gap
+    only counts as a boundary once it exceeds that local minimum by more
+    than ``_ROW_CLUSTER_GAP_MULTIPLE``. An earlier version compared each
+    gap to the fixed ``_YBAND_ROW_HEIGHT_CAP_PT`` constant instead — a
+    ceiling on a DIFFERENT quantity (the TR-6 y-band margin estimate) — so
+    any real table whose own row pitch happened to exceed 30pt was
+    wrongly fractured into single-row clusters and silently lost its
+    verification (GH-249 review finding).
+
+    With fewer than two gaps (<= 2 rows) there is no reference spacing to
+    compare against, so the rows are kept as one cluster. This is also
+    what fixes the reported bug directly: a 2-row table — the shape of
+    the minimal real table this predicate must protect — can never be
+    fractured by this function, at any row spacing. The accepted
+    trade-off (like the lane_count == 1 case in _verify_from_words) is
+    that two widely-separated rows with matching lane counts are then
+    geometrically indistinguishable from a genuine two-row table with a
+    large gap between them; with only one gap to measure, there is no
+    internal reference to call it an outlier by.
     """
     if not rows:
         return []
+    if len(rows) < 3:
+        return [rows]
+    gaps = [rows[i + 1][0] - rows[i][0] for i in range(len(rows) - 1)]
+    positive_gaps = [g for g in gaps if g > 0]
+    if not positive_gaps:
+        return [rows]
+    boundary = min(positive_gaps) * _ROW_CLUSTER_GAP_MULTIPLE
     clusters: list[list[tuple[float, list[tuple[float, str]]]]] = [[rows[0]]]
     for prev, curr in zip(rows, rows[1:]):
-        if curr[0] - prev[0] > _YBAND_ROW_HEIGHT_CAP_PT:
+        if curr[0] - prev[0] > boundary:
             clusters.append([])
         clusters[-1].append(curr)
     return clusters
