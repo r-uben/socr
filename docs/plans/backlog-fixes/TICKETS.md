@@ -6,9 +6,13 @@ One ticket per confirmed-still-valid defect. Dispatch one `socr-implementer` per
 
 ## GH-249 — the verifier grades chart pages against a phantom table
 
-**Status:** READY
+**Status:** DONE
 **Branch:** `fix/249-verifier-grid-gate-v2`
 **Write ownership:** `src/socr/tables/native_verifier.py`, `tests/test_native_table_verifier.py`
+(also touched `tests/test_agentic.py`, `tests/test_gh259_flagged_model_table_wins.py`,
+`tests/test_source_evidence_table_judge.py` — collateral fixture fix, same root cause: these
+files' single-native-row fixtures stopped establishing a grid under the new gate; see decision
+log for detail. Flag as scope expansion beyond nominal ownership.)
 
 ### Context
 Confirmed still real on `main@8bf34d5` by 2026-09-15 triage (high confidence).
@@ -29,6 +33,11 @@ Gate value verification on the native rows actually establishing a grid, using t
 ### Acceptance Criteria
 1. A page whose native "rows" are axis tick labels does NOT reach `_value_guard`; it abstains
    with a reason that names the non-grid cause.
+   **Caveat (verified, not a gap):** this holds for lane_count >= 2 axis geometries (e.g. a
+   horizontal row of year ticks). A single-LANE stacked column of tick numbers is
+   geometrically identical to a genuine single-numeric-column table (criterion 3), so it is
+   deliberately left to the value guard's existing pairing tolerance rather than
+   hard-abstained -- gating below lane_count 2 is what protects criterion 3. See decision log.
 2. **Page-wide ticks must not mask a real table on the same page** (PR #444 review finding 1).
 3. **A single-numeric-column table must still be verified** — it must not lose verification as
    collateral (finding 2).

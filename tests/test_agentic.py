@@ -452,9 +452,22 @@ class TestStructuralEscalationGate:
         """Disjunction control (b): a rectangular candidate with an intact
         header but a numeric-multiset mismatch must still be rejected -- by
         TR-3's own hard-fail, independent of the structural gate."""
+        # Two native data rows: the GH-249 grid gate needs two rows at the
+        # modal width before the native layer can serve as ground truth at
+        # all (_table_page_with_header only lays down one).
         page = _table_page_with_header(["Low%", "Mid%", "High%"], ["0.1", "0.2", "0.3"])
+        page.insert_text((20.0, 170.0), "row2", fontsize=9)
+        for x, val in zip([100.0 + i * _GAP for i in range(3)], ["0.4", "0.5", "0.6"], strict=True):
+            page.insert_text((x, 170.0), val, fontsize=9)
         # Output drops 0.3 and invents 0.9 -- multiset mismatch, header intact.
-        output_text = _md(["Currency", "Low%", "Mid%", "High%"], [["row1", "0.1", "0.2", "0.9"]])
+        # Row 2 is clean.
+        output_text = _md(
+            ["Currency", "Low%", "Mid%", "High%"],
+            [
+                ["row1", "0.1", "0.2", "0.9"],
+                ["row2", "0.4", "0.5", "0.6"],
+            ],
+        )
         output = PageOutput(page_num=5, text=output_text, status=PageStatus.SUCCESS, confidence=0.9)
         inner = _stub_inner(accept=True)
         judge = NativeTableVerifierJudge(

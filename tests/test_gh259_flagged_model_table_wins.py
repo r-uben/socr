@@ -444,18 +444,28 @@ def test_verifier_hard_fail_still_falls_back_to_native(tmp_path: Path) -> None:
     must NOT be kept — shipping it would replace native with a table socr has
     proved wrong.
     """
+    # Two rows: the GH-249 grid gate needs two rows at the modal width
+    # before the native layer can serve as ground truth at all. Row 1 is
+    # clean; row 0 collapses.
     fitz_page = _fitz_page_with_numeric_rows(
         [
             [
                 (100.0, "0.1"),
                 (100.0 + _PHYS_COL_GAP, "0.2"),
                 (100.0 + 2 * _PHYS_COL_GAP, "0.3"),
-            ]
+            ],
+            [
+                (100.0, "0.4"),
+                (100.0 + _PHYS_COL_GAP, "0.5"),
+                (100.0 + 2 * _PHYS_COL_GAP, "0.6"),
+            ],
         ]
     )
-    # 3 native lanes collapsed into 2 populated cells.
+    # 3 native lanes collapsed into 2 populated cells for row 0.
     decision, output = _assess_with_real_verifier(
-        fitz_page, _md(["label", "vals"], [["row1", "0.1"]]), inner_accepts=True
+        fitz_page,
+        _md(["label", "vals"], [["row1", "0.1"], ["row2", "0.4 0.5 0.6"]]),
+        inner_accepts=True,
     )
     assert decision.accept is False, decision
     assert "native_table_verifier" in decision.reason, decision.reason
@@ -503,8 +513,18 @@ def test_ambiguous_deferral_refused_by_the_inner_judge_is_marked_soft() -> None:
     "paired/spanning headers possible — deferring to VLM" and then the judge,
     not a deterministic gate, said no.
     """
-    fitz_page = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]])
-    output_text = _md(["label", "c1", "c2", "c3"], [["row1", "1.1", "2.2", ""]])
+    # Two rows: the GH-249 grid gate needs two rows at the modal width
+    # before the native layer can serve as ground truth at all.
+    fitz_page = _fitz_page_with_numeric_rows(
+        [
+            [(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")],
+            [(100.0, "3.3"), (100.0 + _PHYS_COL_GAP, "4.4")],
+        ]
+    )
+    output_text = _md(
+        ["label", "c1", "c2", "c3"],
+        [["row1", "1.1", "2.2", ""], ["row2", "3.3", "4.4", ""]],
+    )
 
     decision, output = _assess_with_real_verifier(fitz_page, output_text, inner_accepts=False)
     assert decision.accept is False, decision
@@ -670,7 +690,20 @@ def test_ragged_kept_grid_is_flagged_not_handed_back_to_native(tmp_path: Path) -
     """
     from socr.tables.structure_check import table_output_defect
 
-    pg = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (160.0, "2.2")]])
+    # Three rows: the GH-249 grid gate needs two rows at the modal width
+    # before the native layer can serve as ground truth at all. Row 1
+    # (unrelated to the output) sits inside the y-band the pairing derives
+    # from rows 0 and 2, so it still counts toward the effective native row
+    # total and preserves the native/output row-COUNT mismatch (3 vs 2)
+    # this test exercises — a matched count would flip the multiset
+    # mismatch below from AMBIGUOUS (ship flagged) to a hard CERTAIN_FAIL.
+    pg = _fitz_page_with_numeric_rows(
+        [
+            [(100.0, "1.1"), (160.0, "2.2")],
+            [(100.0, "7.7"), (160.0, "8.8")],
+            [(100.0, "5.5"), (160.0, "6.6")],
+        ]
+    )
     ragged = (
         "| a | b | c | d |\n| --- | --- | --- | --- |\n| 1.1 | 2.2 | 3.3 | 4.4 |\n| 5.5 | 6.6 |\n"
     )

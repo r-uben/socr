@@ -62,7 +62,9 @@ import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
+from socr.core.table_grid import rows_establish_grid
 from socr.tables.reconstruct import (
     _LANE_X_TOL_PT,
     _NUM_TOKEN_RE,
@@ -1046,6 +1048,164 @@ def _count_adjacent_interleaved_pairs(
     return adjacent_pairs, clean_labeled
 
 
+def _header_excluded_native_rows(
+    words: list,
+    output_text: str,
+) -> list[tuple[float, list[tuple[float, str]]]]:
+    """Native numeric rows with LEADING header-like rows dropped.
+
+    Drops native rows (spec-number headers, year-label rows) whose tokens
+    were absorbed into the output's markdown column header. POSITIONAL
+    CONSTRAINT: only rows above the first data-like native row are dropped,
+    so footer year-annotations are not incorrectly excluded.
+    """
+    native_rows_map = _rows_by_y_from_words(words)
+    native_row_list = sorted(native_rows_map.items())
+
+    output_header_tokens = _output_header_numeric_tokens(output_text)
+
+    def _is_header_like(row_tokens: list[tuple[float, str]]) -> bool:
+        return bool(
+            output_header_tokens
+            and all(_normalize_numeric_token(w) in output_header_tokens for _x, w in row_tokens)
+        )
+
+    first_data_y: float | None = None
+    for y, row_tokens in native_row_list:
+        if not _is_header_like(row_tokens):
+            first_data_y = y
+            break
+
+    return [
+        (y, row_tokens)
+        for y, row_tokens in native_row_list
+        if not (_is_header_like(row_tokens) and (first_data_y is None or y < first_data_y))
+    ]
+
+
+def _native_row_clusters(
+    rows: list[tuple[float, list[tuple[float, str]]]],
+) -> list[list[tuple[float, list[tuple[float, str]]]]]:
+    """Split *rows* (sorted by y) into contiguous groups on a large y-gap.
+
+    GH-249: a page can carry a chart's axis ticks AND a real table — two
+    unrelated row sets that happen to share one native word list. A gap
+    larger than ``_YBAND_ROW_HEIGHT_CAP_PT`` between consecutive rows is the
+    same threshold the TR-6 y-band margin already uses to guarantee it "can
+    never engulf an adjacent table's rows on the same page" (see that
+    constant's docstring) — reused here, not a new magic number, as the
+    boundary between one row block and the next.
+    """
+    if not rows:
+        return []
+    clusters: list[list[tuple[float, list[tuple[float, str]]]]] = [[rows[0]]]
+    for prev, curr in zip(rows, rows[1:]):
+        if curr[0] - prev[0] > _YBAND_ROW_HEIGHT_CAP_PT:
+            clusters.append([])
+        clusters[-1].append(curr)
+    return clusters
+
+
+def _native_rows_establish_any_grid(
+    rows: list[tuple[float, list[tuple[float, str]]]],
+) -> bool:
+    """True when SOME contiguous y-block of *rows* establishes a table grid.
+
+    GH-249 grid gate. Deliberately clusters BEFORE calling
+    ``rows_establish_grid`` (rather than running it once over the whole
+    scope): a chart's axis ticks are usually far more numerous than a real
+    table's rows, so pooling them into one ``Counter`` lets the ticks'
+    row-width become the page-wide mode and hide a real table that shares
+    the page (#444 review finding 1). Checking each contiguous block on its
+    own geometry means a real table's own rows are judged only against each
+    other, never diluted by an unrelated chart elsewhere on the page.
+    """
+    return any(
+        rows_establish_grid(
+            [SimpleNamespace(values=tuple(w for _x, w in row_tokens)) for _y, row_tokens in cluster]
+        )
+        for cluster in _native_row_clusters(rows)
+    )
+
+
+def _effective_native_rows_for_output(
+    words: list,
+    output_text: str,
+    scope_label: str = "page",
+) -> list[tuple[float, list[tuple[float, str]]]]:
+    """Native numeric rows scoped to the y-band the *output* table occupies.
+
+    Factored out of ``_value_guard`` (TR-6) so the GH-249 grid gate in
+    ``_verify_from_words`` can ask "does this table's own native geometry
+    establish a grid?" using the exact same scoping the value guard's
+    row-count/multiset checks already rely on. Without this scoping, a
+    whole-page (or whole-region) row list mixes in content that never
+    appears in *output_text* — a chart's axis ticks, a second table, prose
+    numerals — and letting that unrelated content dominate the row count
+    would mask a real table it happens to share a page with (#444 review
+    finding 1).
+
+    Restricts the header-excluded native rows (``_header_excluded_native_rows``)
+    to the y-band the output's own rows pair against, plus a half-row margin —
+    derived from the pairing itself, not a magic constant.
+
+    Returns the header-filtered rows unscoped when nothing in *output_text*
+    pairs to native content, since there is then no evidence to scope by.
+    """
+    effective_native_rows = _header_excluded_native_rows(words, output_text)
+    output_data_rows = _parse_output_data_rows(output_text)
+
+    # --- TR-6 Pairing-derived y-band scoping ---
+    # Run a preliminary overlap-based pairing to discover which y-range of native
+    # rows actually aligns with the output table.  Restrict effective_native_rows
+    # to this matched y-band + a half-row margin before counting.  This excludes
+    # chart tick labels, prose figures, and historical-table rows that share the
+    # native word list (whole-page scope) but are absent from the output table
+    # being verified.  "Table region" is derived from the pairing itself, not a
+    # magic constant or an unreliable bbox cluster.
+    if effective_native_rows and output_data_rows:
+        prelim_pairs = _pair_output_to_native_rows(effective_native_rows, output_data_rows)
+        if prelim_pairs:
+            # Collect y-values of matched native rows directly from the pairing.
+            native_tok_to_y: dict[int, float] = {id(rt): y for y, rt in effective_native_rows}
+            matched_ys_direct: list[float] = []
+            for _out_row, matched_toks in prelim_pairs:
+                tok_id = id(matched_toks)
+                if tok_id in native_tok_to_y:
+                    matched_ys_direct.append(native_tok_to_y[tok_id])
+            if matched_ys_direct:
+                # Estimate row-height as median gap between consecutive matched ys,
+                # capped at 30pt.  Use half this as the margin around the y-band.
+                sorted_matched = sorted(matched_ys_direct)
+                if len(sorted_matched) >= 2:
+                    gaps = [b - a for a, b in zip(sorted_matched, sorted_matched[1:]) if b > a]
+                    row_height_est = (
+                        sorted(gaps)[len(gaps) // 2] if gaps else _YBAND_SINGLE_ROW_HEIGHT_PT
+                    )
+                else:
+                    row_height_est = _YBAND_SINGLE_ROW_HEIGHT_PT
+                row_height_est = min(row_height_est, _YBAND_ROW_HEIGHT_CAP_PT)
+                margin = row_height_est * 0.5
+                band_y0 = sorted_matched[0] - margin
+                band_y1 = sorted_matched[-1] + margin
+                scoped_native_rows = [
+                    (y, rt) for y, rt in effective_native_rows if band_y0 <= y <= band_y1
+                ]
+                logger.debug(
+                    "native_verifier [%s] TR-6 pairing y-band: y=%.0f..%.0f "
+                    "(%d → %d effective native rows; margin=%.1fpt)",
+                    scope_label,
+                    band_y0,
+                    band_y1,
+                    len(effective_native_rows),
+                    len(scoped_native_rows),
+                    margin,
+                )
+                effective_native_rows = scoped_native_rows
+
+    return effective_native_rows
+
+
 def _value_guard(
     words: list,
     output_text: str,
@@ -1099,86 +1259,12 @@ def _value_guard(
         row_count_warn_info: Dict with row-count details if a mismatch was
                              detected (table ships, status → WARNING); else None.
     """
-    native_rows_map = _rows_by_y_from_words(words)
-    native_row_list = sorted(native_rows_map.items())
     output_data_rows = _parse_output_data_rows(output_text)
     numeric_output_rows, label_only_rows = _parse_all_data_rows(output_text)
+    effective_native_rows = _effective_native_rows_for_output(words, output_text, scope_label)
 
     drifted: list[dict] = []
     row_count_warn_info: dict | None = None
-
-    # --- Header-like row exclusion ---
-    # Exclude LEADING header-like native rows (spec-number headers, year-label
-    # rows) whose tokens were absorbed into the output's markdown column header.
-    # POSITIONAL CONSTRAINT: only exclude rows above the first data-like native
-    # row so footer year-annotations are not incorrectly excluded.
-    output_header_tokens = _output_header_numeric_tokens(output_text)
-
-    def _is_header_like(row_tokens: list[tuple[float, str]]) -> bool:
-        return bool(
-            output_header_tokens
-            and all(_normalize_numeric_token(w) in output_header_tokens for _x, w in row_tokens)
-        )
-
-    first_data_y: float | None = None
-    for y, row_tokens in native_row_list:
-        if not _is_header_like(row_tokens):
-            first_data_y = y
-            break
-
-    effective_native_rows = [
-        (y, row_tokens)
-        for y, row_tokens in native_row_list
-        if not (_is_header_like(row_tokens) and (first_data_y is None or y < first_data_y))
-    ]
-
-    # --- TR-6 Pairing-derived y-band scoping ---
-    # Run a preliminary overlap-based pairing to discover which y-range of native
-    # rows actually aligns with the output table.  Restrict effective_native_rows
-    # to this matched y-band + a half-row margin before counting.  This excludes
-    # chart tick labels, prose figures, and historical-table rows that share the
-    # native word list (whole-page scope) but are absent from the output table
-    # being verified.  "Table region" is derived from the pairing itself, not a
-    # magic constant or an unreliable bbox cluster.
-    if effective_native_rows and output_data_rows:
-        prelim_pairs = _pair_output_to_native_rows(effective_native_rows, output_data_rows)
-        if prelim_pairs:
-            # Collect y-values of matched native rows directly from the pairing.
-            native_tok_to_y: dict[int, float] = {id(rt): y for y, rt in effective_native_rows}
-            matched_ys_direct: list[float] = []
-            for _out_row, matched_toks in prelim_pairs:
-                tok_id = id(matched_toks)
-                if tok_id in native_tok_to_y:
-                    matched_ys_direct.append(native_tok_to_y[tok_id])
-            if matched_ys_direct:
-                # Estimate row-height as median gap between consecutive matched ys,
-                # capped at 30pt.  Use half this as the margin around the y-band.
-                sorted_matched = sorted(matched_ys_direct)
-                if len(sorted_matched) >= 2:
-                    gaps = [b - a for a, b in zip(sorted_matched, sorted_matched[1:]) if b > a]
-                    row_height_est = (
-                        sorted(gaps)[len(gaps) // 2] if gaps else _YBAND_SINGLE_ROW_HEIGHT_PT
-                    )
-                else:
-                    row_height_est = _YBAND_SINGLE_ROW_HEIGHT_PT
-                row_height_est = min(row_height_est, _YBAND_ROW_HEIGHT_CAP_PT)
-                margin = row_height_est * 0.5
-                band_y0 = sorted_matched[0] - margin
-                band_y1 = sorted_matched[-1] + margin
-                scoped_native_rows = [
-                    (y, rt) for y, rt in effective_native_rows if band_y0 <= y <= band_y1
-                ]
-                logger.debug(
-                    "native_verifier [%s] TR-6 pairing y-band: y=%.0f..%.0f "
-                    "(%d → %d effective native rows; margin=%.1fpt)",
-                    scope_label,
-                    band_y0,
-                    band_y1,
-                    len(effective_native_rows),
-                    len(scoped_native_rows),
-                    margin,
-                )
-                effective_native_rows = scoped_native_rows
 
     # --- Row-count check: SOFT WARNING → AMBIGUOUS state (table ships; status → WARNING) ---
     native_numeric_count = len(effective_native_rows)
@@ -1406,6 +1492,37 @@ def _verify_from_words(
 
     if lane_count == 0:
         return result
+
+    # ------------------------------------------------------------------
+    # GH-249: grid gate — multi-lane native content that never forms a table
+    # grid (a chart's axis ticks: a lone numeral per row, or every tick
+    # crammed onto one axis line) must not reach the value guard as if it
+    # were the table's ground truth, or every candidate rung fails against a
+    # phantom and the tick labels ship instead. Scoped to the same y-band
+    # the value guard itself uses (``_effective_native_rows_for_output``) so
+    # unrelated content elsewhere on the page — a chart, say — cannot
+    # outnumber a real table's own rows and mask it (#444 review finding 1).
+    #
+    # Skipped below lane_count 2: ``rows_establish_grid`` requires >= 2
+    # value columns by construction (a grid needs width, not just rows), so
+    # a single-numeric-column table — one real value per row, same as a
+    # chart's y-axis at the geometry level — can never satisfy it. Native
+    # geometry alone cannot tell those two apart at one lane, and abstaining
+    # here would cost every single-column table its verification, which the
+    # value guard already polices via the row-count/pairing/multiset checks
+    # below (#444 review finding 2).
+    if lane_count >= 2:
+        grid_rows = _header_excluded_native_rows(words, output_text)
+        if not _native_rows_establish_any_grid(grid_rows):
+            result.reason = (
+                f"native_grid_gate: {len(grid_rows)} native row(s) in [{scope_label}] "
+                f"(across every contiguous y-block) do not establish a table grid "
+                f"(need >= 2 value columns shared by >= 2 rows) — likely chart axis "
+                f"ticks or prose, not a native table; abstaining rather than grading "
+                f"candidates against it"
+            )
+            logger.debug("native_verifier [%s] grid gate: %s", scope_label, result.reason)
+            return result
 
     # ------------------------------------------------------------------
     # Tier 1: Hard-fail — value-guard (TR-4 row-count + multiset + label-binding)
