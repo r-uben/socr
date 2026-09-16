@@ -1704,7 +1704,7 @@ def _word_in_any_bbox(w: tuple, bboxes: list) -> bool:
     return False
 
 
-def rowize_from_words(page) -> list[tuple[object, str]]:
+def rowize_from_words(page, *, orphan_drops: list[dict] | None = None) -> list[tuple[object, str]]:
     """Return ``(rect, markdown)`` pairs built from word geometry on ``page``.
 
     This is the TR-1 fallback for pages where ``find_tables(strategy="text")``
@@ -1746,12 +1746,16 @@ def rowize_from_words(page) -> list[tuple[object, str]]:
     from socr.core.born_digital import upright_rotation_for
 
     rotation = upright_rotation_for(page)
-    return rowize_from_word_list(words, rotation=rotation, page_rect=page.rect)
+    return rowize_from_word_list(
+        words, rotation=rotation, page_rect=page.rect, orphan_drops=orphan_drops
+    )
 
 
 def rowize_from_words_chart_aware(
     page,
     page_num: int = 1,
+    *,
+    orphan_drops: list[dict] | None = None,
 ) -> list[tuple[object, str]]:
     """Return ``(rect, content)`` pairs for table AND chart regions on *page*.
 
@@ -1775,11 +1779,14 @@ def rowize_from_words_chart_aware(
 
     Never raises.  Returns ``[]`` if no valid table segment is found and no chart
     regions exist.
+
+    GH-418 step 1: ``orphan_drops``, when given, receives the drop records from
+    whichever table path actually ran (the same word never appears twice).
     """
     chart_bboxes = chart_region_bboxes(page)
     if not chart_bboxes:
         # No chart regions — fall back to the plain rowizer (TR-1 path).
-        return rowize_from_words(page)
+        return rowize_from_words(page, orphan_drops=orphan_drops)
 
     # Structural gate on the full word set (chart words included): if the page
     # doesn't form a numeric grid at all, skip expensive clustering below.
@@ -1795,7 +1802,7 @@ def rowize_from_words_chart_aware(
     try:
         all_words = page.get_text("words")
     except Exception:
-        return rowize_from_words(page)
+        return rowize_from_words(page, orphan_drops=orphan_drops)
 
     # Split words into chart words and non-chart (table/prose) words.
     non_chart_words = [w for w in all_words if not _word_in_any_bbox(w, chart_bboxes)]
@@ -1804,7 +1811,9 @@ def rowize_from_words_chart_aware(
     from socr.core.born_digital import upright_rotation_for
 
     rotation = upright_rotation_for(page)
-    table_regions = rowize_from_word_list(non_chart_words, rotation=rotation, page_rect=page.rect)
+    table_regions = rowize_from_word_list(
+        non_chart_words, rotation=rotation, page_rect=page.rect, orphan_drops=orphan_drops
+    )
 
     # Build placeholder entries for each chart cluster.
     chart_regions: list[tuple[object, str]] = []
@@ -2031,7 +2040,9 @@ def _has_row_labels(words: list) -> bool:
     return labeled >= _MIN_TABLE_ROWS and labeled / len(rows) >= _MIN_DATA_ROW_FRAC
 
 
-def _rowize_word_group(words: list) -> list[tuple[object, str]]:
+def _rowize_word_group(
+    words: list, *, orphan_drops: list[dict] | None = None
+) -> list[tuple[object, str]]:
     """Rowize one x-band's worth of words into ``(rect, markdown)`` regions.
 
     Coordinates are assumed already upright (rotation, if any, has been
@@ -2039,6 +2050,14 @@ def _rowize_word_group(words: list) -> list[tuple[object, str]]:
     of ``rowize_from_word_list``, factored out so GH-152's column split can
     call it once per x-band and once for the unsplit fallback without
     duplicating the logic.
+
+    GH-418 step 1: ``orphan_drops``, when given, receives one record per word
+    dropped by ``_rowize_segment`` -- but ONLY for a segment that ships (passes
+    ``_looks_tabular`` and produces markdown below). A grid the prose guard
+    rejects sends its page down the prose path, so its drops are not table
+    losses; reporting them would be noise, not signal (panel ruling refinement
+    1). Each segment's drops are buffered locally and merged into
+    ``orphan_drops`` only on the same branch that appends to ``out``.
     """
     if not words:
         return []
@@ -2091,7 +2110,8 @@ def _rowize_word_group(words: list) -> list[tuple[object, str]]:
         for y in seg_ys:
             seg_words.extend(rows_by_y[y])
 
-        grid_and_rect = _rowize_segment(seg_words, seg_ys, rows_by_y)
+        _seg_drops: list[dict] = []
+        grid_and_rect = _rowize_segment(seg_words, seg_ys, rows_by_y, orphan_drops=_seg_drops)
         if grid_and_rect is None:
             continue
         grid, x0, y0, x1, y1 = grid_and_rect
@@ -2122,6 +2142,10 @@ def _rowize_word_group(words: list) -> list[tuple[object, str]]:
             rect = fitz.Rect(x0, y0, x1, y1)
             out.append((rect, md))
             consumed.add(i)
+            if orphan_drops is not None:
+                # This segment shipped: its drops are real table losses, not
+                # prose-guard noise (GH-418 scoping requirement).
+                orphan_drops.extend(_seg_drops)
 
     return out
 
@@ -2130,6 +2154,8 @@ def rowize_from_word_list(
     words: list,
     rotation: int = 0,
     page_rect: object | None = None,
+    *,
+    orphan_drops: list[dict] | None = None,
 ) -> list[tuple[object, str]]:
     """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
 
@@ -2170,6 +2196,11 @@ def rowize_from_word_list(
     to unrotated behaviour.
 
     Never raises. Returns ``[]`` if no valid table segment is found.
+
+    GH-418 step 1: ``orphan_drops``, when given, receives the drop records
+    from whichever attempt actually produced ``out`` (the gutter split if it
+    fires, else the unsplit call) -- never both, so a word is never reported
+    twice for the same page.
     """
     try:
         import fitz  # noqa: F401
@@ -2202,6 +2233,7 @@ def rowize_from_word_list(
 
     out: list[tuple[object, str]] = []
     gutter_x = _detect_column_gutter(words)
+    _split_drops: list[dict] = []
     if gutter_x is not None:
         left_words = [w for w in words if w[2] <= gutter_x]
         right_words = [w for w in words if w[0] >= gutter_x]
@@ -2211,14 +2243,18 @@ def rowize_from_word_list(
             and _has_row_labels(left_words)
             and _has_row_labels(right_words)
         ):
-            left_regions = _rowize_word_group(left_words)
-            right_regions = _rowize_word_group(right_words)
+            left_regions = _rowize_word_group(left_words, orphan_drops=_split_drops)
+            right_regions = _rowize_word_group(right_words, orphan_drops=_split_drops)
             if left_regions and right_regions:
                 out = left_regions + right_regions
                 out.sort(key=lambda r: (r[0].y0, r[0].x0))
 
     if not out:
-        out = _rowize_word_group(words)
+        _split_drops = []
+        out = _rowize_word_group(words, orphan_drops=_split_drops)
+
+    if orphan_drops is not None:
+        orphan_drops.extend(_split_drops)
 
     if rotation != 0 and _rotation_center_x is not None:
         out = [
@@ -2694,6 +2730,8 @@ def _rowize_segment(
     seg_words: list,
     seg_ys: list[int],
     rows_by_y: dict[int, list],
+    *,
+    orphan_drops: list[dict] | None = None,
 ) -> tuple[list[list[str]], float, float, float, float] | None:
     """Build a raw grid from the words in one y-segment.
 
@@ -2704,6 +2742,16 @@ def _rowize_segment(
     left of the first lane (minus a snap margin) are collected into a single
     label cell per row.  A lane absent from a row produces ``""`` — the blank
     cell that maps to ``"na"`` in parity checks.
+
+    GH-418 step 1: a word further than the snap radius from every lane (and
+    not a folded-marginal note) falls through both branches below with no
+    ``else`` -- it never reaches ``grid_row`` and the grid is unchanged. Pass
+    ``orphan_drops`` to receive one record per such word (``{"word", "x",
+    "y"}``). This function does NOT know whether its caller's grid will ship
+    (that verdict is ``_looks_tabular``, applied later in
+    ``_rowize_word_group`` on the cleaned grid) -- so it records every drop
+    unconditionally, and the caller is responsible for keeping only the
+    records for segments that actually become a table.
     """
     # Find numeric tokens to detect column lanes
     # The density floor stays on the RAW words. It asks "is this block dense
@@ -2781,6 +2829,12 @@ def _rowize_segment(
             elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+            elif orphan_drops is not None:
+                # GH-418 step 1: further than the snap radius from every lane.
+                # This is the drop the ticket exists to surface -- no cell,
+                # no capture, unchanged from before this ticket. Only the
+                # visibility is new.
+                orphan_drops.append({"word": w[4], "x": round(w[0], 1), "y": round(w[1], 1)})
 
         # Always emit the label as a first cell so all rows share the same
         # column layout.  An empty label yields "" (empty first cell). The

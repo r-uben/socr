@@ -135,6 +135,13 @@ class PageState:
     #: and the document to AUDIT_FAILED, because the issue requires the
     #: rejection to surface at page and document status, not only in a log.
     text_grid_rejected: bool = False
+    #: GH-418 step 1: one record per word the word-geometry rowizer dropped
+    #: further than the snap radius from every column lane, on a table that
+    #: shipped. No cell is changed by this -- the word was already gone
+    #: before this ticket; the record is the visibility. Carried from
+    #: ``PageAssessment.orphan_word_drops`` (``apply_born_digital``); empty on
+    #: a page with no drops, or where no table shipped from the rowizer.
+    orphan_word_drops: list[dict] = field(default_factory=list)
     #: #263: rotated page whose native layer is confetti (one glyph run per
     #: extracted line). Set once in ``apply_born_digital`` from the assessment
     #: flag of the same name, never re-derived. Read by
@@ -692,6 +699,9 @@ class DocumentState:
                     # so it can reach page status and document status.
                     if getattr(pa, "text_grid_rejections", None):
                         ps.text_grid_rejected = True
+                    # GH-418 step 1: carry the orphan-word drop records onto the
+                    # page so they reach the sidecar and the document-level count.
+                    ps.orphan_word_drops = list(getattr(pa, "orphan_word_drops", []) or [])
                     # #263: carry the rotated-shredded verdict so the ship
                     # surface can refuse the confetti.
                     ps.native_rotated_text_shredded = getattr(

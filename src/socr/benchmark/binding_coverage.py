@@ -273,7 +273,17 @@ def _discover_native_regions(
             # drifted. rowize_from_words (the reconstruct fallback) applies a
             # page-wide rotation, which is a second policy -- the harness must
             # not invent a third.
-            for rect, content in rowize_from_word_list(region_words) or []:
+            #
+            # GH-418 step 1: production's lane-stacked call now passes
+            # orphan_drops=<list> (born_digital.extract_structured ~3590).
+            # The harness has nothing to do with a dropped word -- it is not
+            # surfacing anything -- but the kwarg shape must match or this
+            # benchmark silently drifts from the call it exists to mirror
+            # (test_gh351_harness_matches_production pins exactly this).
+            _region_drops: list[dict] = []
+            for rect, content in (
+                rowize_from_word_list(region_words, orphan_drops=_region_drops) or []
+            ):
                 lane_stacked_regions.append(NativeExtractionRegion(rect, content, "lane_stacked"))
         else:
             content = detector._table_to_markdown(table)
