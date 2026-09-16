@@ -537,8 +537,15 @@ def _candidate_data_column_indices(grid: Grid) -> tuple[int, ...]:
                 numeric_columns_by_row.append(set())
             if column >= len(row):
                 continue
+            # #768: decode entities before the numeric gate -- an
+            # all-entity-encoded column (`&minus;2.5`) fails `is_numeric_token`
+            # on its raw form, so `_candidate_data_column_indices` never
+            # recognises it as a data column and `_project_candidate_data_columns`
+            # strips it from the grid before `bind()` compares anything.
             if any(
-                is_numeric_token(token) and not _SPEC_NUMBER_RE.match(strip_presentation(token))
+                (normalized := _normalize_cell(token))
+                and is_numeric_token(normalized)
+                and not _SPEC_NUMBER_RE.match(strip_presentation(normalized))
                 for token in re.split(r"\s+", row[column].strip())
                 if token
             ):
@@ -2082,7 +2089,14 @@ def bind(
         row_path = (cand_row[0],) if cand_row and cand_row[0] else ()
         for col in range(1, len(cand_row)):
             model_value = cand_row[col].strip()
-            if not model_value or not is_numeric_token(model_value):
+            # #770: decode entities before the numeric gate -- an invented
+            # `&minus;7.7` fails `is_numeric_token` on its raw form and this
+            # unbound-row invention is never surfaced as `model_unbound`.
+            # `model_value` (raw) is what gets recorded below: the token is
+            # the honest record of what the model wrote, only the numeric
+            # TEST is decoded.
+            model_normalized = _normalize_cell(model_value) if model_value else ""
+            if not model_normalized or not is_numeric_token(model_normalized):
                 continue
             lane = col - 1
             chp = header_paths_by_lane.get(lane)
@@ -2156,7 +2170,14 @@ def bind(
             for lane, col_idx in lane_to_col.items():
                 col = col_idx + 1
                 cand_text = cand_row[col].strip() if col < len(cand_row) else ""
-                if lane in native_row.lane_tokens or (cand_text and is_numeric_token(cand_text)):
+                # #770: decode entities before the numeric gate -- an
+                # entity-encoded mapped-lane value otherwise fails the raw
+                # test and the "known geometry, not convictable either way"
+                # signal is under-reported instead of counted.
+                cand_normalized = _normalize_cell(cand_text) if cand_text else ""
+                if lane in native_row.lane_tokens or (
+                    cand_normalized and is_numeric_token(cand_normalized)
+                ):
                     result.ambiguous_count += 1
 
             for lane, (text, ambiguous) in native_row.lane_tokens.items():
@@ -2176,7 +2197,14 @@ def bind(
                     continue
                 col = col_idx + 1
                 cand_text = cand_row[col].strip() if col < len(cand_row) else ""
-                if not cand_text or not is_numeric_token(cand_text):
+                # #770: decode entities before the numeric gate -- an
+                # entity-encoded invented value in an unmapped column
+                # otherwise fails the raw test and never becomes an
+                # `UnboundCell`. `cand_text` (raw) is what gets recorded
+                # below -- the token is the honest record of what the model
+                # wrote, only the numeric TEST is decoded.
+                cand_normalized = _normalize_cell(cand_text) if cand_text else ""
+                if not cand_normalized or not is_numeric_token(cand_normalized):
                     continue
                 chp = header_paths_by_lane.get(col_idx)
                 col_path = chp.path if chp else (str(col_idx),)
