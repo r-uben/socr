@@ -998,12 +998,16 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
     markdown without invoking any OCR engine or model. Safe to run headless/HPC.
     """
     from socr.core.cache import BlobStore
-    from socr.core.manifest import Manifest, stale_pages
+    from socr.core.manifest import Manifest, copy_page_assets, stale_assets, stale_pages
     from socr.core.manifest import replay as do_replay
 
     cache_dir = cache_dir or manifest_path.parent / "cache"
     manifest = Manifest.load(manifest_path)
     store = BlobStore(cache_dir)
+    # Visual assets (figures/charts/equation crops) live alongside the manifest
+    # itself, not in the text BlobStore -- their logical_path is relative to
+    # manifest.json's own directory (see build_manifest's `doc_dir`).
+    source_dir = manifest_path.resolve().parent
 
     missing = stale_pages(manifest, store)
     if missing:
@@ -1012,13 +1016,40 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
             f"re-run `socr agent` to regenerate them."
         )
 
+    # GH-170: a page blob can be intact while the figure/chart/equation PNG it
+    # links to is gone, corrupted, or was never verified because it predates
+    # asset provenance. Fail explicitly here -- BEFORE reassembling the
+    # markdown -- rather than silently shipping a document with broken links.
+    asset_issues = stale_assets(manifest, source_dir)
+    if asset_issues:
+        by_kind: dict[str, list[str]] = {"missing": [], "modified": []}
+        for issue in asset_issues:
+            by_kind.setdefault(issue.kind, []).append(
+                f"page {issue.page_num}: {issue.logical_path} ({issue.detail})"
+            )
+        parts = [
+            f"{kind} ({len(items)}): " + "; ".join(items)
+            for kind, items in by_kind.items()
+            if items
+        ]
+        raise click.ClickException(
+            f"cache at {source_dir} has {len(asset_issues)} broken visual asset(s) -- "
+            + " | ".join(parts)
+            + "; re-run `socr agent` to regenerate them."
+        )
+
     markdown = do_replay(manifest, store)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(markdown, encoding="utf-8")
+        # GH-170 acceptance #3: replaying to a directory other than the
+        # manifest's own must not ship relative image links pointing at
+        # nothing there. Copy the (already-verified) assets alongside it.
+        copied = copy_page_assets(manifest, source_dir, output.parent)
+        asset_note = f", {len(copied)} asset(s) copied" if copied else ""
         console.print(
             f"[green]Replayed[/green] {manifest.pdf_filename} "
-            f"({manifest.page_count} pages) -> {output} [dim](0 model calls)[/dim]"
+            f"({manifest.page_count} pages) -> {output} [dim](0 model calls{asset_note})[/dim]"
         )
     else:
         click.echo(markdown)
