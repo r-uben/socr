@@ -13791,8 +13791,20 @@ class UnifiedPipeline:
                 final_result.error = _unresolved_note
 
         if math_font_unresolved_pages:
-            # #140: same "no flag advice, just the evidence" contract as the
-            # PUA note immediately above.
+            # #140 REVISE: deliberately NOT appended to ``final_result.error``.
+            # That field is load-bearing -- ``cli.py`` greps it for
+            # ``LOST_CONTENT_NOTE`` and GH-177's contract documents it as
+            # "already AUDIT_FAILED" -- so a populated ``error`` on a
+            # ``success=True`` result is a state a reader checking ``error``
+            # before ``status`` would misread as the full failure blast
+            # radius this ticket's criterion-4 revision specifically chose
+            # NOT to impose (see the decision log). This is an interim
+            # observability patch, not a confirmed-loss note: font presence
+            # is a suspicion, not evidence anything was actually garbled (no
+            # false-positive rate has been measured). It rides in
+            # ``audit_notes`` instead -- additive, never read as a failure
+            # signal -- while the event, sidecar persistence, retire-readd
+            # reconciliation and CLI line (below) are unchanged.
             _math_font_note = (
                 "math-font typesetting no retained equation-lane recovery covers on "
                 "page(s) "
@@ -13804,10 +13816,8 @@ class UnifiedPipeline:
                 )
                 + ")"
             )
-            if final_result.error:
-                final_result.error = f"{final_result.error}; {_math_font_note}"
-            else:
-                final_result.error = _math_font_note
+            if _math_font_note not in final_result.audit_notes:
+                final_result.audit_notes.append(_math_font_note)
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.

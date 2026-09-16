@@ -438,6 +438,7 @@ def test_fully_covered_page_raises_no_event(tmp_path: Path) -> None:
 
     assert _math_font_events(state) == []
     assert "math-font typesetting" not in (result.error or "")
+    assert not any("math-font typesetting" in n for n in result.audit_notes)
     from socr.core.manifest import finalized_page_record
 
     assert finalized_page_record(state, 1).output.status is PageStatus.SUCCESS
@@ -457,7 +458,14 @@ def test_no_provider_leaves_the_math_uncovered_and_reported(tmp_path: Path) -> N
     assert events[0].data["regions_total"] == 1
     assert events[0].data["regions_covered"] == 0
     assert state.status is DocumentStatus.SUCCESS
-    assert "math-font typesetting" in (result.error or "")
+    assert "math-font typesetting" not in (result.error or ""), (
+        "the note must never land in `error` -- that field is load-bearing "
+        "(cli.py greps it for LOST_CONTENT_NOTE, GH-177 documents it as "
+        "'already AUDIT_FAILED'); a populated error on a success=True result "
+        "would smuggle the full failure blast radius back in through a field "
+        "a reasonable caller checks before status"
+    )
+    assert any("math-font typesetting" in n for n in result.audit_notes)
 
     from socr.core.manifest import finalized_page_record
 

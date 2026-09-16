@@ -6,7 +6,10 @@ One ticket per confirmed-still-valid defect. Dispatch one `socr-implementer` per
 
 ## GH-140 — math-font pages ship trusted-native with no audit of known-lossy math
 
-**Status:** DONE (implemented, REVISE round applied, committed, awaiting review/CI/merge)
+**Status:** DONE as an interim observability patch (implemented, two REVISE
+rounds applied, committed, awaiting review/CI/merge). **NOT fully resolved:**
+see the second REVISE note below — the underlying demote-or-not question is
+deferred, not closed.
 
 **REVISE (2026-09-16):** criterion 4's original "yes, demote" answer was
 reversed. Measured against `docs/log/2026-09-02_p4m-trigger-rates.md`
@@ -17,6 +20,24 @@ equation exists to recover). Demotion is withheld pending a separate-ticket
 sidecar persistence, page note and CLI/document-note surfacing all still
 ship. Also added: a resume round-trip test, and a docstring caveat on
 `regions_covered` ("not invented", not "verified correct"). See
+`docs/log/2026-09-16_140.md`.
+
+**Second REVISE (2026-09-16, design panel):** the document-level note moved
+out of `final_result.error` into `final_result.audit_notes` — `error` is
+load-bearing (`cli.py` greps it for `LOST_CONTENT_NOTE`; GH-177 documents it
+as "already AUDIT_FAILED"), so a populated `error` on a `success=True`
+result would smuggle the full failure blast radius back in through a field
+a reasonable caller checks before `status`. Also recorded here: **this
+ticket does not establish that the math-font signal is a confirmed defect**
+— it is prevalence-only (the trigger-rates log), with no measured
+false-positive rate, so every other note bucket in this block reports an
+observed defect while this one reports a suspicion. Named follow-up (not
+implemented, both panel models converged on it independently): demote only
+when `equation_region_evidence` shows a region was FOUND
+(`regions_total > 0`) and recovery FAILED to cover it
+(`regions_covered < regions_total`) — a structural gate needing no invented
+character-count threshold, under which the 8.0% no-region slice correctly
+never confirms rather than being permanently stuck. See
 `docs/log/2026-09-16_140.md`.
 **Branch:** `fix/140-math-font-audit`
 **Write ownership:** `src/socr/math/accounting.py`, `src/socr/core/born_digital.py`,
