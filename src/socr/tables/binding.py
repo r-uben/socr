@@ -1585,9 +1585,17 @@ def _best_lane_column_map(
             for col_idx in range(n_cand_cols):
                 col = col_idx + 1
                 cand_text = cand_row[col].strip() if col < len(cand_row) else ""
-                if not cand_text or not is_numeric_token(cand_text):
+                # #766: decode entities/strip presentation BEFORE the numeric
+                # gate, same as the #690 fix to `_candidate_row_multiset` --
+                # otherwise `&minus;1.5` fails `is_numeric_token` on its raw
+                # form and the DP never scores a lane that genuinely matches,
+                # so it gets mapped elsewhere (or left unmapped) instead.
+                cand_normalized = _normalize_cell(cand_text) if cand_text else ""
+                if not cand_normalized or not is_numeric_token(cand_normalized):
                     continue
-                if _normalize_numeric_token(native_text) == _normalize_numeric_token(cand_text):
+                if _normalize_numeric_token(native_text) == _normalize_numeric_token(
+                    cand_normalized
+                ):
                     score[lane][col_idx] += 1
 
     dp = [[0] * (n_cand_cols + 1) for _ in range(lane_count + 1)]
@@ -1651,7 +1659,14 @@ def _record_inventions_on_parent_row(
     for col_idx in range(n_cand_cols):
         col = col_idx + 1
         cand_text = cand_row[col].strip() if col < len(cand_row) else ""
-        if not cand_text or not is_numeric_token(cand_text):
+        # #766: same raw-cell gate as `_best_lane_column_map` above -- an
+        # entity-encoded value (`&minus;1.5`) must clear `_normalize_cell`
+        # before the numeric test, or a genuine number on a parent row is
+        # silently dropped instead of reported as invented. `cand_text`
+        # (raw) is what gets recorded below -- the token is the honest
+        # record of what the model wrote, only the numeric TEST is decoded.
+        cand_normalized = _normalize_cell(cand_text) if cand_text else ""
+        if not cand_normalized or not is_numeric_token(cand_normalized):
             continue
         lane = col_to_lane.get(col_idx)
         chp = header_paths_by_lane.get(lane) if lane is not None else None
@@ -2219,7 +2234,17 @@ def bind(
                     UnboundCell(row_path=native_row.row_path, col_path=col_path, token=native_value)
                 )
             else:
-                if not is_numeric_token(model_value):
+                # #766: decode entities/strip presentation BEFORE the numeric
+                # gate and the value comparison -- `is_numeric_token` and
+                # `_normalize_numeric_token` both anchor on ASCII, so a raw
+                # `&minus;1.5` fails the numeric test outright and a real
+                # match gets reported as a contradiction. `ContradictedCell`
+                # keeps the RAW `model_value` (below): the token is the
+                # honest record of what the model actually emitted, the
+                # normalized form is only this check's internal detail --
+                # the same choice `UnboundCell` already makes for its token.
+                model_value_normalized = _normalize_cell(model_value)
+                if not is_numeric_token(model_value_normalized):
                     # candidate cell isn't a numeric token at all: treat as a
                     # value mismatch against a native number.
                     result.contradicted_cells.append(
@@ -2232,7 +2257,9 @@ def bind(
                         )
                     )
                     continue
-                if _normalize_numeric_token(native_value) == _normalize_numeric_token(model_value):
+                if _normalize_numeric_token(native_value) == _normalize_numeric_token(
+                    model_value_normalized
+                ):
                     result.matched_cells.append(
                         MatchedCell(
                             row_path=native_row.row_path, col_path=col_path, value=native_value

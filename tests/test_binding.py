@@ -2493,5 +2493,151 @@ def test_gh624b_two_baseline_label_does_not_merge_without_spans():
     assert result.candidate_row_labels == ("Other authorized", "European currencies")
 
 
+# ---------------------------------------------------------------------------
+# GH-766: an entity-encoded candidate value must not read as a false
+# contradiction against a native number it actually agrees with.
+# ---------------------------------------------------------------------------
+
+
+def test_gh766_entity_encoded_minus_matches_native_not_contradicted():
+    """Native '-1.5' and candidate '&minus;1.5' are the same value -- the
+    ONLY difference is that the model emitted the HTML entity for U+2212
+    instead of ASCII '-'. Before the fix, `bind()`'s equal-lane-count walk
+    ran `is_numeric_token` on the RAW cell, which fails on the undecoded
+    entity, so this fell straight into the "not a numeric token at all"
+    branch and was reported as a `ContradictedCell` even though the values
+    agree. Must be a `MatchedCell`."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "-1.5"),
+    ]
+    md = """
+|       | Val      |
+|-------|----------|
+| Yield | &minus;1.5 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.contradicted_cells == []
+    assert len(result.matched_cells) == 1
+    assert result.matched_cells[0].value == "-1.5"
+
+
+def test_gh766_entity_encoded_nbsp_matches_native_not_contradicted():
+    """Same defect, different entity: a leading `&nbsp;` decoration on an
+    otherwise-agreeing value must not turn a match into a contradiction."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "1.5"),
+    ]
+    md = """
+|       | Val         |
+|-------|-------------|
+| Yield | &nbsp;1.5   |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.contradicted_cells == []
+    assert len(result.matched_cells) == 1
+    assert result.matched_cells[0].value == "1.5"
+
+
+def test_gh766_entity_encoded_candidate_still_contradicts_when_genuinely_different():
+    """The fix must not turn off the contradiction gate: an
+    entity-decoration difference is forgiven, a VALUE difference is not.
+    Native '-1.5' vs candidate '&minus;9.5' decode to different numbers and
+    must still contradict -- and `ContradictedCell.model_token` must carry
+    the RAW candidate cell (what the model actually wrote), not the
+    normalized form the comparison used internally, consistent with how
+    `UnboundCell.token` already reports raw tokens elsewhere in this
+    module."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "-1.5"),
+    ]
+    md = """
+|       | Val        |
+|-------|------------|
+| Yield | &minus;9.5 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.matched_cells == []
+    assert len(result.contradicted_cells) == 1
+    bad = result.contradicted_cells[0]
+    assert bad.native_token == "-1.5"
+    assert bad.model_token == "&minus;9.5"
+
+
+def test_gh766_entity_encoded_value_wins_salvage_dp_column_mapping():
+    """Salvage-DP counterpart of the two tests above (`_best_lane_column_map`,
+    binding.py ~1587): under a lane/column-count mismatch, the DP maps the
+    native lane to whichever candidate column scores the most agreements.
+    'Val' carries the genuine match, entity-encoded twice (rows A, C:
+    ``&minus;1.5``); 'Extra' is a decoy that only coincidentally agrees
+    with row B's native value. Before the fix, the entity-encoded cells
+    scored zero on their raw form (`&minus;1.5` fails `is_numeric_token`),
+    so Val's true score of 2 collapsed to 0 and the decoy Extra (score 1,
+    from its one coincidental plain-text agreement) won the mapping
+    instead -- the DP picks the WRONG column, not merely an unclaimed one.
+    With the fix Val correctly outscores Extra (2 vs 1) and wins, so the
+    unmapped Extra decoys are what surface as unbound, not Val."""
+    words = [
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "-1.5"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "9.9"),
+        w(50, 160, 90, 170, "C"),
+        w(150, 160, 180, 170, "-1.5"),
+    ]
+    md = """
+|   | Val         | Extra |
+|---|-------------|-------|
+| A | &minus;1.5  | 3.3   |
+| B | 2.2         | 9.9   |
+| C | &minus;1.5  | 3.3   |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    assert result.native_unbound == []
+    model_tokens = {u.token for u in result.model_unbound}
+    # Val (the genuine match) is absorbed into the mapped-pair accounting;
+    # only the Extra decoy surfaces as unbound.
+    assert model_tokens == {"3.3", "9.9"}
+    assert result.ambiguous_count == 3
+
+
+def test_gh766_entity_encoded_invented_digit_on_parent_row_is_reported():
+    """Salvage-DP counterpart of `_record_inventions_on_parent_row`
+    (binding.py ~1653): a parent (heading) row has no native lane tokens,
+    so any numeric candidate cell under it is an INVENTED digit that must
+    surface as `model_unbound`. Before the fix, an entity-encoded invented
+    value (`&minus;9.9`) failed the raw `is_numeric_token` gate and was
+    silently dropped -- not just misclassified, but never reported at all.
+    Mirrors `test_parent_row_inventions_use_native_lane_headers_in_salvage_walk`
+    but with the invented value entity-encoded."""
+    words = [
+        w(150, 70, 180, 80, "Alpha"),
+        w(250, 70, 280, 80, "Beta"),
+        w(350, 70, 380, 80, "Gamma"),
+        w(50, 100, 100, 110, "Panel"),
+        w(105, 100, 115, 110, "A"),
+        w(50, 130, 90, 140, "Total"),
+        w(150, 130, 180, 140, "10.0"),
+        w(250, 130, 280, 140, "20.0"),
+        w(350, 130, 380, 140, "30.0"),
+    ]
+    md = """
+|         | Beta        | Gamma |
+|---------|-------------|-------|
+| Panel A | &minus;9.9  | 8.8   |
+| Total   | 20.0        | 30.0  |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    unbound = {(u.token, u.col_path) for u in result.model_unbound}
+    assert unbound == {("&minus;9.9", ("Beta",)), ("8.8", ("Gamma",))}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
