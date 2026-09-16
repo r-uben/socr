@@ -3944,6 +3944,39 @@ def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, audit_notes=notes)
 
 
+def _apply_math_font_unrecovered_guard(output: PageOutput, p) -> PageOutput:
+    """#140: note a page whose math-font typesetting no retained recovery covers.
+
+    Reports, does not demote. Measured trigger rate (`docs/log/2026-09-02_p4m-
+    trigger-rates.md`, 23,190 pages): `has_math_font_typesetting` fires on
+    36.1% of the free lane, ~15x the PUA class this ticket's accounting
+    mirrors (2.4%), and an 8.0% slice of those pages (inline symbols in prose,
+    no display equation) can never clear -- the region locator has nothing to
+    find. Demoting page/document status the way `_apply_unresolved_math_guard`
+    does would make that slice a permanent, unclearable AUDIT_FAILED and could
+    plausibly dominate the bucket on regression-table-heavy corpora (Fed/ECB
+    style). So this guard only appends the audit note; it never touches
+    `output.status`. The event is still durable (sidecar, resume) and still
+    surfaced (CLI, page note) -- reported and visible, not failing the
+    document. Revisit if `trigger_rates.py` is extended to measure the
+    clearable share (deferred, separate ticket).
+    """
+    from socr.math.accounting import math_font_unrecovered_detail
+
+    detail = math_font_unrecovered_detail(
+        has_math_font_typesetting=bool(getattr(p, "has_math_font_typesetting", False)),
+        has_corrupt_math=bool(getattr(p, "has_corrupt_math", False)),
+        has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
+        evidence=getattr(p, "equation_region_evidence", None),
+    )
+    if detail is None:
+        return output
+    notes = list(output.audit_notes or [])
+    if detail.detail not in notes:
+        notes.append(detail.detail)
+    return replace(output, audit_notes=notes)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -3958,10 +3991,11 @@ def _select_and_finalize_page(
       3. _apply_table_emission_guard
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
-      6. _apply_label_unverified_guard
-      7. _apply_ditto_guard
-      8. _apply_chart_region_guard
-      9. Disposition construction from the guarded output and provenance.
+      6. _apply_math_font_unrecovered_guard (note-only, no demotion -- see its docstring)
+      7. _apply_label_unverified_guard
+      8. _apply_ditto_guard
+      9. _apply_chart_region_guard
+      10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -3971,6 +4005,7 @@ def _select_and_finalize_page(
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
+        output = _apply_math_font_unrecovered_guard(output, p)
     output = _apply_label_unverified_guard(output)
     output = _apply_ditto_guard(output, page_num)
     if p is not None:

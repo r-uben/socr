@@ -34,6 +34,16 @@ records do not map back to the damaged source spans -- stays unresolved. That
 is a conservative answer, not a complete one: a lane gains the ability to clear
 this signal by recording span-level coverage evidence, not by succeeding.
 
+A second, distinct damage class shares this module: math-FONT typesetting
+(``has_math_font_typesetting``, via ``_detect_math_fonts`` -- a strict subset
+of ``has_equations``, which also folds in a raw-LaTeX-string fallback that
+extracts fine and is out of scope here) that the extractor mangles
+while the extracted STRING still reads as ordinary prose -- no PUA glyphs,
+nothing a string-based checker would flag. ``math_font_unrecovered_detail``
+answers the same question for it, from the equation lane's own region-outcome
+evidence rather than from a residual-glyph count, and is mutually exclusive
+with the PUA event above by construction (see ``MATH_FONT_UNRECOVERED_KIND``).
+
 This module is pure. It opens no PDF, renders no crop and calls no provider,
 because its callers run inside repeated page finalization.
 """
@@ -46,6 +56,16 @@ from dataclasses import dataclass
 #: The audit-event kind naming detected math-glyph damage that survived into the
 #: shipped page. One per affected page.
 UNRESOLVED_MATH_KIND = "native_math_unrecovered"
+
+#: #140: the audit-event kind naming math-FONT typesetting (Computer Modern,
+#: STIX, ...) that extracts unreliably -- subscripts flatten, Greek letters
+#: drop, reading order breaks around equations -- and that no retained
+#: equation-lane recovery covers. Distinct from ``UNRESOLVED_MATH_KIND``
+#: because the damage class is different (a font-metadata signal on text that
+#: LOOKS clean to any string-based checker, not unmapped/PUA glyphs), and the
+#: two are mutually exclusive by construction: a page with unmapped math
+#: glyphs already raises ``UNRESOLVED_MATH_KIND`` and never this kind too.
+MATH_FONT_UNRECOVERED_KIND = "native_math_font_unrecovered"
 
 #: The only lane whose evidence can currently prove span coverage.
 LANE_CORRUPT_REGION = "corrupt_math_region"
@@ -262,6 +282,121 @@ def unresolved_math_detail(
             regions_total=regions_total,
             regions_covered=regions_covered,
             residual_pua=residual,
+        )
+
+    return None
+
+
+@dataclass(frozen=True)
+class MathFontUnrecoveredDetail:
+    """Why a page's math-font typesetting is still unresolved (#140).
+
+    Mirrors :class:`UnresolvedMathDetail`'s shape and role but for a different
+    damage class: font-metadata-detected math typesetting (Computer Modern,
+    STIX, ...) that PyMuPDF's extraction mangles -- subscripts flatten, Greek
+    letters drop, reading order breaks -- while the extracted STRING still
+    looks like ordinary prose to any text-based checker. There is no
+    private-use-codepoint signal for this class, so unlike the PUA case there
+    is no residual-glyph corroboration term: the region-level equation-lane
+    outcome (attached vs. not) is the only evidence available.
+
+    Caveat inherited from the equation lane, not introduced here:
+    ``regions_covered`` means the attach guard's numeric-presence check did
+    not positively reject the reading -- "not invented" (its own words, the
+    Ruling 4 comment in ``_agentic_equation_region_page``), never "verified
+    correct". A binding-swap error of the #273 identical-bag class (same
+    multiset of values, wrong row/column) can attach successfully and silence
+    this event. Do not read ``regions_covered == regions_total`` as a
+    correctness guarantee.
+    """
+
+    reason: str
+    regions_total: int
+    regions_covered: int
+
+    @property
+    def detail(self) -> str:
+        """The audit-event / note prose. Deterministic: no counts of runs or time."""
+        return (
+            "born-digital native text shipped from a page whose math-font "
+            "typesetting extracts unreliably (subscripts flatten, Greek "
+            "letters drop, reading order breaks around equations) and that no "
+            f"retained equation-lane recovery covers: {self.reason}"
+        )
+
+    def as_data(self) -> dict:
+        return {
+            "reason": self.reason,
+            "regions_total": self.regions_total,
+            "regions_covered": self.regions_covered,
+        }
+
+
+def math_font_unrecovered_detail(
+    *,
+    has_math_font_typesetting: bool,
+    has_corrupt_math: bool,
+    has_unmapped_math_glyphs: bool,
+    evidence: dict | None,
+) -> MathFontUnrecoveredDetail | None:
+    """Whether this page's math-font typesetting remains unresolved (#140).
+
+    Outcome-based, not configuration-based (#165's own rule, applied to the
+    adjacent damage class this ticket closes): whether ``--detect-equations``
+    / ``--recover-clean-equations`` / ``--equation-region-lane`` are on or off
+    is irrelevant here. What matters is ``evidence`` -- the equation lane's
+    OWN record of what it actually located and attached on THIS page, built
+    the same way ``corrupt_region_evidence`` is for the PUA class: recorded by
+    the lane that ran, read here without re-deriving it.
+
+    Returns ``None`` when:
+      * the page carries no math-font-typesetting signal at all
+        (``has_math_font_typesetting`` false -- note this is the font-metadata
+        signal alone, NOT the broader ``has_equations`` union, which also
+        includes a raw-LaTeX-string fallback that extracts fine);
+      * the page's math is already accounted for by a MORE specific damage
+        class -- font-map corruption (``has_corrupt_math``, its own recovery
+        lane and its own AUDIT_FAILED bucket) or unmapped/PUA glyphs
+        (``has_unmapped_math_glyphs``, ``UNRESOLVED_MATH_KIND`` above).
+        Reporting both would double-report the SAME maths under two kinds;
+      * the equation lane detected at least one display-equation region and
+        every one of them ended with an attached, validated reading.
+
+    Otherwise returns the detail naming what is still missing: no evidence was
+    retained at all (the lane never ran, or ran and located nothing), or some
+    detected region kept no attached reading.
+    """
+    if not has_math_font_typesetting or has_corrupt_math or has_unmapped_math_glyphs:
+        return None
+
+    if not evidence:
+        return MathFontUnrecoveredDetail(
+            reason="no equation-lane recovery evidence was retained for this page",
+            regions_total=0,
+            regions_covered=0,
+        )
+
+    regions_total = int(evidence.get("regions_total") or 0)
+    regions_covered = int(evidence.get("regions_covered") or 0)
+
+    if regions_total == 0:
+        return MathFontUnrecoveredDetail(
+            reason=(
+                "the equation lane located no display-equation region on a page "
+                "detected as math-font typeset"
+            ),
+            regions_total=0,
+            regions_covered=0,
+        )
+
+    if regions_covered != regions_total:
+        return MathFontUnrecoveredDetail(
+            reason=(
+                f"{regions_total - regions_covered} of {regions_total} detected "
+                "region(s) kept no attached, validated reading"
+            ),
+            regions_total=regions_total,
+            regions_covered=regions_covered,
         )
 
     return None

@@ -4,51 +4,118 @@ One ticket per confirmed-still-valid defect. Dispatch one `socr-implementer` per
 
 ---
 
-## GH-249 — the verifier grades chart pages against a phantom table
+## GH-140 — math-font pages ship trusted-native with no audit of known-lossy math
 
-**Status:** DONE
-**Branch:** `fix/249-verifier-grid-gate-v2`
-**Write ownership:** `src/socr/tables/native_verifier.py`, `tests/test_native_table_verifier.py`
-(also touched `tests/test_agentic.py`, `tests/test_gh259_flagged_model_table_wins.py`,
-`tests/test_source_evidence_table_judge.py` — collateral fixture fix, same root cause: these
-files' single-native-row fixtures stopped establishing a grid under the new gate; see decision
-log for detail. Flag as scope expansion beyond nominal ownership.)
+**Status:** DONE as an interim observability patch (implemented, two REVISE
+rounds applied, committed, awaiting review/CI/merge). **NOT fully resolved:**
+see the second REVISE note below — the underlying demote-or-not question is
+deferred, not closed.
 
-### Context
-Confirmed still real on `main@8bf34d5` by 2026-09-15 triage (high confidence).
-`native_verifier._verify_from_words` goes from lane detection straight into `_value_guard`.
-It neither imports nor calls `rows_establish_grid`, while `orchestrator.py:5443` already uses
-that predicate for `table_not_scorable`. So a chart page's axis tick labels are treated as a
-native table, every ladder rung is graded against that phantom, all rungs are rejected, and
-the tick labels ship.
+**REVISE (2026-09-16):** criterion 4's original "yes, demote" answer was
+reversed. First reversal argument (36.1% vs. the PUA precedent's 2.4% is
+"~15x, unaffordable") was itself corrected in the third round below —
+prevalence alone does not justify suppressing a signal, and the trigger-
+rates ruling explicitly accepts the same 36% figure for routing. The
+correct argument: that acceptance is conditioned on over-routing being a
+cost, not a correctness risk (native prose ships regardless); status
+demotion changes what every consumer sees and flips the exit code, so the
+acceptance does not transfer. Separately, and regardless of the prevalence
+question: an 8.0% slice (≤10 math-font chars) has no display equation to
+ever recover, so it would be a permanent, unclearable `AUDIT_FAILED` under
+the original design. Demotion withheld pending a separate-ticket
+`trigger_rates.py` extension measuring the false-positive rate and the
+clearable share; the event, sidecar persistence, page note and
+CLI/document-note surfacing all still ship. Also added: a resume
+round-trip test, and a docstring caveat on `regions_covered` ("not
+invented", not "verified correct"). See `docs/log/2026-09-16_140.md`.
 
-PR #444 attempted this and was CLOSED 2026-09-15: 593 commits behind, and `native_verifier.py`
-moved 1219 -> 1540 lines beneath it. Do NOT revive that branch. Its three review findings are
-the acceptance criteria below.
+**Second REVISE (2026-09-16, design panel):** the document-level note moved
+out of `final_result.error` into `final_result.audit_notes` — `error` is
+load-bearing (`cli.py` greps it for `LOST_CONTENT_NOTE`; GH-177 documents it
+as "already AUDIT_FAILED"), so a populated `error` on a `success=True`
+result would smuggle the full failure blast radius back in through a field
+a reasonable caller checks before `status`. Also recorded here: **this
+ticket does not establish that the math-font signal is a confirmed defect**
+— it is prevalence-only (the trigger-rates log), with no measured
+false-positive rate, so every other note bucket in this block reports an
+observed defect while this one reports a suspicion. Named follow-up (not
+implemented, both panel models converged on it independently): demote only
+when `equation_region_evidence` shows a region was FOUND
+(`regions_total > 0`) and recovery FAILED to cover it
+(`regions_covered < regions_total`) — a structural gate needing no invented
+character-count threshold, under which the 8.0% no-region slice correctly
+never confirms rather than being permanently stuck. See
+`docs/log/2026-09-16_140.md`.
+**Branch:** `fix/140-math-font-audit`
+**Write ownership:** `src/socr/math/accounting.py`, `src/socr/core/born_digital.py`,
+`tests/` (a new test module for this ticket). **Deviation:** also touched
+`src/socr/core/state.py`, `src/socr/core/manifest.py`,
+`src/socr/pipeline/orchestrator.py` — necessarily, the PUA precedent this
+ticket mirrors spans exactly these same three files. See
+`docs/log/2026-09-16_140.md`.
+
+### Context — confirmed still real on `main@5478b42`
+
+`born_digital.py:2991` still reads:
+
+```python
+needs_ocr_enhancement = has_corrupt_math
+```
+
+`_detect_math_fonts` (`born_digital.py:3276`) feeds `has_equations`, which is metadata and
+deliberately does NOT request enhancement. So a page whose maths is typeset in math fonts —
+detected, and known by that detector's own docstring to extract badly ("subscripts flatten,
+Greek letters drop, reading order breaks around equations") — takes the free native lane and
+ships SUCCESS.
+
+Recovery exists only behind `--detect-equations` / `--recover-clean-equations`, both default
+False, so by default nothing recovers it **and nothing records the loss**.
+
+The adjacent PUA class is handled better: `socr/math/accounting.py` emits
+`native_math_unrecovered` (`UNRESOLVED_MATH_KIND`) for unmapped-glyph damage. Note that
+module's docstring already names #140 — the PUA half landed, this half did not. A math-font
+page with no PUA codepoints emits nothing at all. Same class of loss, strictly less surface.
+
+`born_digital.py` has had **0 commits** since the triage baseline, so this diagnosis is current.
+
+### Scope — the audit event ONLY
+
+The issue offers two remedies and settles neither:
+1. emit a mandatory audit event when the recovery flags are off;
+2. route math-font pages to whole-page OCR.
+
+**(2) is explicitly OUT OF SCOPE.** The issue itself notes `born_digital.py:687` warns that
+lane was *empirically worse* for the adjacent PUA class because it falls back to the same
+broken native layer, and whether that transfers here is an unmeasured empirical question. Do
+not change routing. Do not change `needs_ocr_enhancement`.
 
 ### Plan
-Gate value verification on the native rows actually establishing a grid, using the existing
-`socr.core.table_grid.rows_establish_grid` predicate. Reuse it — do not write a second one.
+Mirror the existing PUA accounting for the math-font case: when a page is trusted native, math
+fonts were detected, and no retained recovery covers that maths, record it.
+
+Follow `socr/math/accounting.py`'s existing discipline: it is **pure** — opens no PDF, renders
+no crop, calls no provider, because callers run inside repeated page finalization. Keep it so.
+Reuse that module rather than inventing a parallel one.
 
 ### Acceptance Criteria
-1. A page whose native "rows" are axis tick labels does NOT reach `_value_guard`; it abstains
-   with a reason that names the non-grid cause.
-   **Caveat (verified, not a gap):** this holds for lane_count >= 2 axis geometries (e.g. a
-   horizontal row of year ticks). A single-LANE stacked column of tick numbers is
-   geometrically identical to a genuine single-numeric-column table (criterion 3), so it is
-   deliberately left to the value guard's existing pairing tolerance rather than
-   hard-abstained -- gating below lane_count 2 is what protects criterion 3. See decision log.
-2. **Page-wide ticks must not mask a real table on the same page** (PR #444 review finding 1).
-3. **A single-numeric-column table must still be verified** — it must not lose verification as
-   collateral (finding 2).
-4. Tests must exercise the value guard, NOT pass by early abstention (finding 3). For each new
-   test, show it fails without the change.
-5. No new threshold. No magic number.
+1. A born-digital page with detected math fonts, no PUA damage, and recovery flags off emits a
+   durable audit event naming the loss. The event survives into the page sidecar.
+2. The signal is **outcome-based, not configuration-based**. Turning the two recovery flags on
+   must not silence the event unless recovery actually covered the maths — that inversion is
+   the exact bug #165 fixed for the PUA class; do not reintroduce it here.
+3. No double-reporting: a page that already emits `native_math_unrecovered` for PUA damage must
+   not also emit the new event for the same maths.
+4. **Decide explicitly whether the new kind joins the status-demoting set at
+   `orchestrator.py:2559`**, and justify the choice in the decision log. This repo's rule is
+   that loss surfaces at every level — page status, document status, metadata, CLI — not just
+   one. Silent-by-default is the failure mode this ticket exists to close, so argue the case
+   either way rather than defaulting quietly.
+5. No new magic threshold.
 
 ### Verification
-- `~/venvs/socr/bin/pytest tests/test_native_table_verifier.py tests/test_agentic.py -q`
-- `uvx ruff@0.16.0 format --check .`
-- Pin a DIFFERENCE, not a locally-measured tuple: run the same page with the gate on and off in
-  one process and assert the outcomes differ exactly as intended. CI has no provider, so an
-  absolute outcome measured here will not reproduce there.
-- Do not `Closes #249` unless criteria 1-4 all hold; say which remain otherwise.
+- Run the **FULL** suite: `PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest -q`. **Not** a `-k`
+  subset — a keyword filter is exactly how GH-249's regression reached CI.
+- `uvx ruff@0.16.0 format --check .` (NOT the venv's older ruff).
+- Every new test must be shown to FAIL without the change.
+- Pin a DIFFERENCE, not an absolute outcome measured locally: CI has no ollama and no provider.
+- Do not `Closes #140` unless criteria 1-4 all hold; say which remain otherwise.

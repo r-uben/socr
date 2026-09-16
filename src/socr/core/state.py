@@ -79,6 +79,10 @@ class PageState:
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
+    #: #140: the font-metadata signal alone (`_detect_math_fonts`), a strict
+    #: subset of `has_equations`. See `PageAssessment.has_math_font_typesetting`
+    #: in born_digital.py -- this is the flag the #140 audit gates on.
+    has_math_font_typesetting: bool = False
     has_corrupt_math: bool = False  # native equation glyphs are positively font-corrupted
     has_unmapped_math_glyphs: bool = False  # PUA glyphs in native layer -> silent math-glyph loss
     #: #136: text layer shows COSMETIC encoding corruption (lost spaces, fused
@@ -99,6 +103,14 @@ class PageState:
     #: recorded coverage", which is UNKNOWN and therefore unresolved -- never
     #: "nothing was damaged" (that is ``has_unmapped_math_glyphs``).
     math_recovery_evidence: dict | None = None
+    #: #140: sparse, region-level coverage evidence from whichever equation
+    #: lane (P4-R region lane or the legacy detect/recover-clean-equations
+    #: seam) actually attempted this page's math-font typesetting, recorded
+    #: after the lane's own attach/reject verdicts. Read only by
+    #: ``socr.math.accounting.math_font_unrecovered_detail``; ``None`` means
+    #: "no lane recorded coverage" -- unresolved, not "no math-font damage"
+    #: (that is ``has_math_font_typesetting and not has_corrupt_math``).
+    equation_region_evidence: dict | None = None
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
@@ -602,6 +614,7 @@ class DocumentState:
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations
+                ps.has_math_font_typesetting = getattr(pa, "has_math_font_typesetting", False)
                 ps.has_corrupt_math = pa.has_corrupt_math
                 ps.has_unmapped_math_glyphs = getattr(pa, "has_unmapped_math_glyphs", False)
                 ps.has_encoding_hygiene_suspect = getattr(pa, "has_encoding_hygiene_suspect", False)

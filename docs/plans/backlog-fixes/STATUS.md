@@ -1,21 +1,54 @@
 # STATUS — backlog fixes
 
-> **Current truth, 2026-09-15.** First ticket in this folder. GH-249 dispatched, implemented,
-> reviewed (one REVISE round), and fixed. Purpose: measure the real cycle time and failure rate
-> of fixing one confirmed defect end-to-end, before deciding whether the remaining 58 are worth
-> automating the same way.
+> **Current truth, 2026-09-16.** GH-249 is DONE and merged (`5478b42`, PR #756).
+> GH-140 is DONE as an interim observability patch (two REVISE rounds
+> applied), committed on `fix/140-math-font-audit`, awaiting review/CI/merge.
+> Not fully resolved — the demote-or-not question is deferred, see below.
+> The full ranked queue of remaining work lives at
+> `~/.local/state/socr-housekeeping/QUEUE.md` (51 ready, 26 needing scoping, 8 to
+> locate, 1 closure candidate).
 
 ## Live
-- **GH-249** — DONE. Grid gate implemented on `fix/249-verifier-grid-gate-v2`
-  (`native_verifier.py` + `test_native_table_verifier.py`, plus a required fixture update in
-  `test_agentic.py`, `test_gh259_flagged_model_table_wins.py`, `test_source_evidence_table_judge.py`
-  — single-native-row fixtures no longer establish a grid). All 4 acceptance criteria verified;
-  see `docs/log/2026-09-15_249.md`.
+(none — GH-140 moved to Done below)
 
-## Active Agents
-| Agent | Ticket | Scope | Status |
-| --- | --- | --- | --- |
-| socr-implementer | GH-249 | `src/socr/tables/native_verifier.py`, `tests/test_native_table_verifier.py` | DONE |
+## Done
+- **GH-140** — implemented on `fix/140-math-font-audit`, REVISE round
+  applied, not yet merged. Full suite 5405 passed / 4 xfailed, `ruff format
+  --check` clean. See `docs/log/2026-09-16_140.md` for the criterion-4
+  argument and a correction to the ticket's own stated context (the P4-R
+  equation lane is already default-on; also had to narrow `has_equations` to
+  a new `has_math_font_typesetting` field after the full suite caught a
+  #269-shaped regression the ticket's literal framing would have
+  reintroduced). REVISE: criterion 4 reversed after review measured the
+  trigger rate against `docs/log/2026-09-02_p4m-trigger-rates.md`. The
+  36.1%-vs-2.4% comparison first cited as grounds for rejection was itself
+  corrected (design panel, Astra): prevalence alone cannot justify
+  suppressing a signal, and the log's own ruling explicitly accepts 36% —
+  for routing. The demotion survives rejection on the ruling's actual
+  stated condition instead: it accepted 36% because over-routing is a cost,
+  not a correctness risk (native prose ships either way); status demotion
+  changes what every consumer sees and flips the exit code, so that
+  acceptance does not transfer. The unclearable 8.0% slice (no display
+  equation to ever recover) would still be a permanent `AUDIT_FAILED` under
+  the original design, independent of the prevalence question. The
+  event/note/CLI surfacing stays; the document-status demotion was removed.
+  Also added a resume round-trip test and a docstring caveat on
+  `regions_covered` ("not invented" vs "verified correct"). Second REVISE
+  (design panel): moved the document note out of `final_result.error`
+  (load-bearing — `cli.py`/GH-177 read it as confirmed-lost-content) into
+  `final_result.audit_notes`. Recorded as an **interim observability
+  patch, not fully resolved**: the signal is prevalence-only, no
+  false-positive rate measured; named follow-up (deferred) is to demote
+  only when a display-equation region was found AND recovery failed to
+  cover it (structural gate, no character-count threshold).
+- **GH-249** — merged in PR #756. Cost: 3 implementer passes, 1 adversarial review,
+  1 CI catch. See `docs/log/2026-09-15_249.md`.
+
+## Standing rules learned from GH-249
+- Run the FULL suite, never a `-k` subset — that filter let a regression reach CI.
+- Verify every reported number; two agents independently quoted a test count that
+  was impossible.
+- Abstention is not neutral in this pipeline: downstream it reads as consent.
 
 ## Next action
-Dispatch `socr-reviewer` on the diff, then wait for CI green before merging.
+Await review (`socr-reviewer`) and CI-gated merge for GH-140.
