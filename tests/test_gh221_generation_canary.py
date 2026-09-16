@@ -134,6 +134,61 @@ def test_openai_compatible_backend_same_distinction(monkeypatch) -> None:
     assert probe_openai_server_idle("http://gpu-node:8000/v1") is True
 
 
+def test_ollama_canary_exercises_the_vision_path_not_a_text_one(monkeypatch) -> None:
+    """Review gap: the workload this guards (``TableCropExtractor``) reads
+    IMAGES, not plain text. A probe that sends no image exercises a different
+    code path than the one that wedges — a hang localised to image handling
+    could pass a text-only canary while the vision path stays jammed. The
+    canary's request must carry ``images``, matching every other vision call
+    in this codebase (judge/ollama_judge.py, judge/table_rung_ollama.py,
+    math/equation_latex.py, engines/gemini_api.py)."""
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+    captured: dict = {}
+
+    def _fake_post(url, *args, **kwargs):
+        captured.update(kwargs.get("json", {}))
+        return _Resp()
+
+    monkeypatch.setattr(extract_mod.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(extract_mod.httpx, "post", _fake_post)
+
+    probe_ollama_idle("http://gpu-node:11434")
+
+    assert captured.get("images"), "the Ollama canary sent no image payload"
+    assert isinstance(captured["images"][0], str) and captured["images"][0], (
+        "the image payload must be a non-empty base64 string"
+    )
+
+
+def test_openai_canary_exercises_the_vision_path_not_a_text_one(monkeypatch) -> None:
+    """Same gap, OpenAI-compatible sibling: the message must carry an
+    ``image_url`` part, not text only."""
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+    captured: dict = {}
+
+    def _fake_post(url, *args, **kwargs):
+        captured.update(kwargs.get("json", {}))
+        return _Resp()
+
+    monkeypatch.setattr(extract_mod.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(extract_mod.httpx, "post", _fake_post)
+
+    probe_openai_server_idle("http://gpu-node:8000/v1")
+
+    content = captured["messages"][0]["content"]
+    image_parts = [part for part in content if part.get("type") == "image_url"]
+    assert image_parts, "the OpenAI-compatible canary sent no image_url part"
+    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 # ---------------------------------------------------------------------------
 # AC3 — the canary must not run on the happy path (no timeout observed).
 # ---------------------------------------------------------------------------

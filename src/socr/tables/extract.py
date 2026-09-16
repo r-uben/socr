@@ -182,6 +182,19 @@ def _default_canary_model() -> str:
     return PROFILE_QWEN_LOCAL.model
 
 
+# GH-221 review: every vision call in this codebase sends an ``images``/``image_url``
+# payload (judge/ollama_judge.py, judge/table_rung_ollama.py, math/equation_latex.py,
+# engines/gemini_api.py) -- and so does TableCropExtractor, the workload this canary
+# guards. A text-only probe exercises a different code path than the one that wedges,
+# so it must send an image too: a probe that answers healthy for the exact failure it
+# exists to detect is the same failure class GH-221 was filed to close. This is the
+# smallest legal PNG (1x1, transparent) -- a decoded, fixed image so the canary payload
+# never depends on disk state or an actual table crop.
+_CANARY_IMAGE_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
 def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     """GH-221: the only thing that tells "HTTP alive" from "GPU available".
 
@@ -193,6 +206,11 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     answers almost instantly on a genuinely idle backend and blocks for the
     full *timeout* on a wedged one — which is exactly the distinction
     ``/api/tags`` cannot make.
+
+    Carries ``images`` because the workload this guards (``TableCropExtractor``)
+    is a vision call, not a text one: a probe must exercise the code path it
+    guards, or a hang localised to image handling could pass a text-only canary
+    while the vision path stays wedged.
     """
     try:
         resp = httpx.post(
@@ -200,6 +218,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
             json={
                 "model": model,
                 "prompt": "ok",
+                "images": [_CANARY_IMAGE_B64],
                 "stream": False,
                 "options": {"num_predict": 1},
             },
@@ -217,7 +236,8 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
     Same reasoning: a chat-completion request with ``max_tokens: 1`` queues
     behind an in-flight generation on the same server rather than returning,
     so it distinguishes "the HTTP layer answers" from "the GPU can serve a new
-    request within *timeout*".
+    request within *timeout*". Carries an ``image_url`` message part for the
+    same reason as the Ollama canary: the workload it guards is a vision call.
     """
     try:
         resp = httpx.post(
@@ -225,7 +245,18 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
             json={
                 "model": model,
                 "max_tokens": 1,
-                "messages": [{"role": "user", "content": "ok"}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "ok"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{_CANARY_IMAGE_B64}"},
+                            },
+                        ],
+                    }
+                ],
             },
             timeout=timeout,
         )
