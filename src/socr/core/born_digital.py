@@ -1661,6 +1661,69 @@ def _rect_coverage(inner, outer) -> float:
     return overlap.get_area() / area
 
 
+def _regions_are_band_siblings(rects: list) -> bool:
+    """True when every pair of ``rects`` sits side by side: disjoint in x,
+    overlapping in y.
+
+    GH-779: ``reconstruct_table_regions`` (GH-152) splits one wide table into
+    a left-band and a right-band region at a single x gutter when it detects
+    two side-by-side tables. Both bands cover the SAME row range (they came
+    from the same words, partitioned only by x), so this geometric signature
+    -- x-disjoint, y-overlapping -- is exactly what a band split produces and
+    nothing else on an ordinary page reliably does. It is the only provenance
+    available at this call site: ``reconstruct_table_regions`` returns a flat
+    ``list[(rect, markdown)]`` with no tag saying which regions came from the
+    same split (confirmed by reading it — GH-152 concatenates
+    ``left_out + right_out`` with no marker), and this file must not import
+    band bookkeeping from that module to reconstruct it (out of scope, and it
+    would re-open GH-152's own split logic).
+    """
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            a, b = rects[i], rects[j]
+            x_disjoint = a.x1 <= b.x0 or b.x1 <= a.x0
+            y_overlap = a.y0 < b.y1 and b.y0 < a.y1
+            if not (x_disjoint and y_overlap):
+                return False
+    return True
+
+
+def _union_coverage(inner, outers: list) -> float:
+    """Fraction of ``inner``'s area covered by the UNION of ``outers`` (0.0-1.0).
+
+    Unlike ``_rect_coverage``, this accounts for overlap between the outer
+    rects themselves, so two overlapping regions are not double-counted.
+    Computed by clipping each outer rect to ``inner`` and rasterising the
+    clipped pieces onto a grid built from their own x/y boundaries (exact for
+    axis-aligned rectangles, and cheap for the handful of regions a page
+    ever produces).
+    """
+    area = inner.get_area()
+    if area <= 0:
+        return 0.0
+    clipped = []
+    for outer in outers:
+        overlap = inner & outer
+        if overlap.is_valid and not overlap.is_empty:
+            clipped.append(overlap)
+    if not clipped:
+        return 0.0
+    if len(clipped) == 1:
+        return clipped[0].get_area() / area
+    xs = sorted({r.x0 for r in clipped} | {r.x1 for r in clipped})
+    ys = sorted({r.y0 for r in clipped} | {r.y1 for r in clipped})
+    covered = 0.0
+    for xi in range(len(xs) - 1):
+        x0, x1 = xs[xi], xs[xi + 1]
+        cx = (x0 + x1) / 2.0
+        for yi in range(len(ys) - 1):
+            y0, y1 = ys[yi], ys[yi + 1]
+            cy = (y0 + y1) / 2.0
+            if any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 for r in clipped):
+                covered += (x1 - x0) * (y1 - y0)
+    return covered / area
+
+
 #: Fraction of a span that must lie inside a link rectangle before the span is
 #: treated as carrying that link. Same midpoint reasoning as
 #: ``_REGION_COVERAGE_DROP`` above: most of the span is inside the rectangle, so
@@ -3707,6 +3770,50 @@ class BornDigitalDetector:
                 for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)
                 if _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
             ]
+
+            # GH-779: GH-152 can split one wide table into a left-band and a
+            # right-band region. Each band covers only its own half of the
+            # x-range, so a text block whose own line-grouping spans BOTH
+            # bands (a row that happens to land in one PyMuPDF block/line
+            # pair) clears neither region's coverage alone -- the check
+            # above sees two ~35% overlaps and drops neither, so the row
+            # ships a second time as plain text beneath the two correctly
+            # split markdown tables.
+            #
+            # Only engage the union test when the per-region check above
+            # found nothing: this is strictly additive, and a page with one
+            # region per table (no split, or a block that legitimately sits
+            # over just one region) is untouched -- ``touching`` never
+            # exceeds one member there, so the length gate below never
+            # fires and behaviour is byte-identical to before this change.
+            #
+            # ``_regions_are_band_siblings`` is the guard against reopening
+            # the #145/#718b bug this suppression path exists to avoid: a
+            # combined token index across two UNRELATED regions lets one
+            # region delete a line because its words happen to appear in a
+            # different table elsewhere on the page
+            # (``test_tokens_are_matched_against_the_covering_region_only``).
+            # Restricting union candidates to regions that are geometrically
+            # siblings of a single band split -- disjoint in x, overlapping
+            # in y, i.e. columns of the SAME row range -- keeps two
+            # unrelated tables (different y, or overlapping x) from ever
+            # being unioned, even though each might individually brush the
+            # block. A region that does not touch the block at all
+            # contributes zero area to the union regardless, so restricting
+            # the candidate set to regions that touch this block costs
+            # nothing.
+            if not covering:
+                touching = [
+                    (r, raw_md)
+                    for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)
+                    if _rect_coverage(block_rect, r) > 0.0
+                ]
+                if len(touching) > 1 and _regions_are_band_siblings([r for r, _ in touching]):
+                    if (
+                        _union_coverage(block_rect, [r for r, _ in touching])
+                        >= _REGION_COVERAGE_DROP
+                    ):
+                        covering = touching
 
             lines = block.get("lines", []) or []
             if covering:
