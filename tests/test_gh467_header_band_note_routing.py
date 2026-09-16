@@ -82,13 +82,24 @@ def test_a_note_folded_onto_the_header_row_does_not_corrupt_a_header_cell() -> N
     without = _rows(with_note=False)
     with_note = _rows(with_note=True)
 
-    width = len(without[0])
-    assert with_note[0][:width] == without[0], (
-        f"the note corrupted a header cell: {with_note[0][:width]} != {without[0]}"
+    # GH-418 step 2 retarget: this fixture's own row-number lane (x=60, see
+    # "2"/"3"/"4"/"5") puts the label boundary to the LEFT of "Treasury", so
+    # "Treasury" is a genuine orphan on every data row -- it is now captured
+    # into the same trailing column the header band's note routing shares,
+    # so even the no-note baseline carries that trailing column already.
+    # Restate the guard against the data-lane cells (everything except the
+    # trailing column), which is what this test actually protects: a note
+    # must land in the dedicated column, not corrupt `R2`.
+    data_width = len(without[0]) - 1  # label + lane cells, excludes the trailing column
+    assert with_note[0][:data_width] == without[0][:data_width], (
+        f"the note corrupted a header cell: {with_note[0][:data_width]} != {without[0][:data_width]}"
     )
-
-    extra = [c for c in with_note[0][width:] if c.strip()]
-    assert extra == [NOTE], f"the note is not in the header band's own note column: {with_note[0]}"
+    assert without[0][data_width] == "", (
+        f"the no-note header row must have an empty trailing cell: {without[0]}"
+    )
+    assert with_note[0][data_width] == NOTE, (
+        f"the note is not in the header band's own note column: {with_note[0]}"
+    )
 
 
 def test_the_data_rows_are_untouched_by_a_header_note() -> None:

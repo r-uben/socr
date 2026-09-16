@@ -54,12 +54,22 @@ def _grid(words: list) -> list[list[str]]:
 
 class TestGutterMarksDoNotSwallowAColumn:
     def test_markers_do_not_change_the_column_count(self) -> None:
+        # GH-418 step 2 retarget: a captured marker now legitimately gains a
+        # trailing column of its own (GH-461's `orphan_marginals`, emitted on
+        # every row and dropped by `_clean_grid` only when no row uses it) --
+        # so the WITH-markers grid is one column WIDER than the without-
+        # markers grid by design, and the total-column-count proxy this test
+        # used to assert no longer holds. What it actually protects -- the
+        # marker does not move the label boundary or swallow a data lane --
+        # is restated against the data-lane cells only (label + numeric
+        # lanes), excluding that trailing column.
         without = _grid(_four_data_lanes(markers=False))
         with_marks = _grid(_four_data_lanes(markers=True))
 
-        assert len(with_marks[0]) == len(without[0]), (
-            f"a recurring gutter mark moved the label boundary: "
-            f"{len(without[0])} columns became {len(with_marks[0])}"
+        data_width = len(without[0])  # no markers -> trailing column is empty, dropped
+        assert [row[:data_width] for row in with_marks] == without, (
+            f"a recurring gutter mark moved the label boundary or a data lane: "
+            f"{[row[:data_width] for row in with_marks]} != {without}"
         )
 
     def test_no_data_value_is_lost_into_the_label(self) -> None:
@@ -72,22 +82,28 @@ class TestGutterMarksDoNotSwallowAColumn:
             for c in range(4):
                 assert f"{r}{c}.5" in emitted, f"data value {r}{c}.5 was lost"
 
-        # GH-416 review: the marker itself does NOT survive here, and that is a
-        # pre-existing placement rule, not something this fix chose. A word
-        # further than the snap radius from every lane is dropped by
-        # _rowize_segment -- the same rule that stops a prose page being gridded
-        # whole. Narrowing the promotion made the loss visible by no longer
-        # sweeping such words into the label cell. Filed separately; asserted
-        # here so the trade-off is recorded rather than implied.
-        assert "n.a." not in emitted, (
-            "marker now survives -- if this fails, the orphan-word drop was "
-            "fixed and this assertion should become the positive one"
-        )
+        # GH-418 step 2 retarget -- the intended flip: this row populates all
+        # 4 numeric lanes, so the marker is now CAPTURED into the trailing
+        # column instead of deleted, and no drop event fires for it. Before
+        # this ticket the marker was silently dropped; asserting its absence
+        # was pinning that loss as correct. "Absence-of-token is not a
+        # behaviour to preserve" (panel ruling, docs/log/2026-09-16_418-design.md).
+        assert "n.a." in emitted, "the marker should now be captured, not dropped"
+
+        drops: list[dict] = []
+        regions = rowize_from_word_list(_four_data_lanes(markers=True), orphan_drops=drops)
+        assert regions, "fixture must produce a table region"
+        assert drops == [], f"a captured marker must not also be reported as a drop: {drops}"
 
     def test_a_dagger_footnote_behaves_the_same_as_n_a(self) -> None:
         """The ticket names both shapes; neither is numeric, so neither should
         be read as a stub column."""
+        # GH-418 step 2 retarget: same reasoning as
+        # test_markers_do_not_change_the_column_count -- restated against the
+        # data-lane cells, since the dagger is now captured into its own
+        # trailing column too.
         dagger = _grid(_four_data_lanes(markers=True, marker="†"))
         without = _grid(_four_data_lanes(markers=False))
 
-        assert len(dagger[0]) == len(without[0])
+        data_width = len(without[0])
+        assert [row[:data_width] for row in dagger] == without

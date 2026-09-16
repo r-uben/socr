@@ -101,8 +101,15 @@ class TestSideBySideTablesAreSeparated:
         grid = _cells(regions[0][1])
         labels = [row[0] for row in grid]
         assert all(lab.startswith("LeftLab") for lab in labels), labels
-        assert not any("RightLab" in " ".join(row) for row in grid), (
-            "RightLab tokens must be entirely absent pre-fix -- that is the defect"
+
+        # GH-418 step 2 retarget: each merged row here already populates 5
+        # numeric lanes (>= 2), so RightLab{i} is now CAPTURED into the
+        # trailing column instead of silently dropped -- it no longer reads
+        # as absent. That does NOT fix GH-152's actual defect, which this
+        # fixture exists to reproduce: RightLab's own VALUES are still
+        # misattributed onto LeftLab's row under LeftLab's own label.
+        assert all(f"RightLab{i}" in grid[i][-1] for i in range(len(grid))), (
+            f"RightLab tokens should now be captured in the trailing column: {grid}"
         )
         # The misattribution itself: LeftLab0's row picks up a value that is
         # really RightLab0's ("0.33"), under LeftLab0's own label.
@@ -111,6 +118,15 @@ class TestSideBySideTablesAreSeparated:
             "expected the merged row to misattribute RightLab0's first value "
             f"(0.33) onto LeftLab0's row: {grid[0]}"
         )
+
+        drops: list[dict] = []
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(reconstruct, "_detect_column_gutter", lambda _words: None)
+        try:
+            rowize_from_word_list(words, orphan_drops=drops)
+        finally:
+            monkey.undo()
+        assert drops == [], f"a captured RightLab token must not also report as a drop: {drops}"
 
     def test_two_regions_each_with_correct_labels_and_values(self):
         words = _two_tables()
@@ -409,7 +425,19 @@ class TestGH780DensityFloorTripwire:
         grid = _cells(regions[0][1])
         labels = [row[0] for row in grid]
         assert all(lab.startswith("LeftLab") for lab in labels), labels
-        assert not any("RightLab" in " ".join(row) for row in grid), (
-            "GH-780: RightLab should currently be dropped by the merge -- "
-            "if this starts passing, the limitation may already be fixed"
+
+        # GH-418 step 2 retarget: each merged row here populates 3 numeric
+        # lanes (>= 2: 1 left + 2 right), so RightLab{i} is now CAPTURED into
+        # the trailing column instead of silently dropped. The
+        # known-limitation this tripwire pins -- RightLab's VALUES
+        # misattributed under LeftLab's label -- is unchanged; see the
+        # assertion on "0.33" the sibling test in this file pins for the
+        # analogous case.
+        assert all(f"RightLab{i}" in grid[i][-1] for i in range(len(grid))), (
+            f"GH-780: RightLab should now be captured in the trailing column -- "
+            f"if this fails, check whether GH-780's per-band floor rescale landed: {grid}"
         )
+
+        drops: list[dict] = []
+        rowize_from_word_list(words, orphan_drops=drops)
+        assert drops == [], f"a captured RightLab token must not also report as a drop: {drops}"

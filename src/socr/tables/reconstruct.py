@@ -2744,14 +2744,25 @@ def _rowize_segment(
     cell that maps to ``"na"`` in parity checks.
 
     GH-418 step 1: a word further than the snap radius from every lane (and
-    not a folded-marginal note) falls through both branches below with no
-    ``else`` -- it never reaches ``grid_row`` and the grid is unchanged. Pass
-    ``orphan_drops`` to receive one record per such word (``{"word", "x",
-    "y"}``). This function does NOT know whether its caller's grid will ship
-    (that verdict is ``_looks_tabular``, applied later in
-    ``_rowize_word_group`` on the cleaned grid) -- so it records every drop
-    unconditionally, and the caller is responsible for keeping only the
-    records for segments that actually become a table.
+    not a folded-marginal note) used to fall through with no ``else`` -- no
+    cell, no record. Pass ``orphan_drops`` to receive one record per word
+    still dropped (``{"word", "x", "y"}``). This function does NOT know
+    whether its caller's grid will ship (that verdict is ``_looks_tabular``,
+    applied later in ``_rowize_word_group`` on the cleaned grid) -- so it
+    records every remaining drop unconditionally, and the caller is
+    responsible for keeping only the records for segments that actually
+    become a table.
+
+    GH-418 step 2: such a word is no longer unconditionally dropped. If its
+    own row already populates >= 2 numeric lanes -- the same predicate
+    ``_looks_tabular`` (``:978``) uses to call a row a "data row" -- it is
+    captured into GH-461's trailing ``orphan_marginals`` column instead
+    (never into a lane cell, never into the label). Rows with fewer than two
+    numeric lanes (a sparse row, a header row) still drop the word and still
+    record it when ``orphan_drops`` is given -- that residual is deliberate,
+    not a gap: the same row-shape that would falsely tabularise a prose page
+    if the gate were relaxed further (see the design note this ticket ships
+    against, ``docs/log/2026-09-16_418-design.md`` §3.4).
     """
     # Find numeric tokens to detect column lanes
     # The density floor stays on the RAW words. It asks "is this block dense
@@ -2799,6 +2810,29 @@ def _rowize_segment(
         ]
         label = " ".join(label_words) if label_words else ""
 
+        # GH-418 step 2: does this row already populate >= 2 numeric lanes,
+        # via the same snap rule used below? This is `_looks_tabular`'s own
+        # definition of a "data row" (`reconstruct.py:978`,
+        # `sum(... >= 2 numeric cells)`), applied one step earlier, and it is
+        # computed over EVERY word in the row before any orphan is classified
+        # -- an orphan word is (by construction) never inside the snap radius
+        # of a lane, so it can never itself change this count, but computing
+        # it up front keeps the capture decision independent of word order.
+        row_numeric_lanes: set[int] = set()
+        for w in row_ws:
+            if w[0] < data_start_x - snap_margin and not _is_folded_marginal(w):
+                continue
+            if _is_folded_marginal(w):
+                continue
+            best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
+            if (
+                abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT
+                and _NUM_TOKEN_RE.match(w[4])
+                and _NUMERIC_RE.search(w[4])
+            ):
+                row_numeric_lanes.add(best)
+        is_data_row = len(row_numeric_lanes) >= 2
+
         # Data cells: assign each word to the nearest lane by x-distance.
         # A lane with no word assigned stays "" (blank / na).
         row_cells = [""] * len(lane_centers)
@@ -2829,11 +2863,24 @@ def _rowize_segment(
             elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+            elif is_data_row:
+                # GH-418 step 2: further than the snap radius from every lane,
+                # but the row already populates >= 2 numeric lanes -- the same
+                # predicate that makes this a "data row" -- so capture the
+                # qualifier into the trailing column instead of deleting it.
+                # Never into a lane cell (would corrupt a value) and never
+                # into the label (would corrupt the row's identity) -- the
+                # same discipline GH-461's own capture above already follows.
+                # No event: this word is no longer dropped, so it must not be
+                # reported as one.
+                orphan_marginals.append(w[4])
             elif orphan_drops is not None:
-                # GH-418 step 1: further than the snap radius from every lane.
-                # This is the drop the ticket exists to surface -- no cell,
-                # no capture, unchanged from before this ticket. Only the
-                # visibility is new.
+                # GH-418 step 1: still further than the snap radius from every
+                # lane, and the row does not populate >= 2 numeric lanes, so
+                # the gate above does not apply and the word is still deleted.
+                # This is the residual the panel ruling requires stay
+                # measurable -- no cell, no capture, only the visibility is
+                # new.
                 orphan_drops.append({"word": w[4], "x": round(w[0], 1), "y": round(w[1], 1)})
 
         # Always emit the label as a first cell so all rows share the same

@@ -56,10 +56,19 @@ def _cells(words: list) -> list[list[str]]:
 
 
 def test_gutter_marks_do_not_change_the_table_shape() -> None:
+    # GH-418 step 2 retarget: every row here populates >= 2 numeric lanes, so
+    # the marker is now CAPTURED into its own trailing column (GH-461's
+    # `orphan_marginals`) instead of dropped -- the with-markers grid is
+    # legitimately one column wider than the markers-free grid, which is
+    # empty-trailing and dropped by `_clean_grid`. Restate the guard against
+    # the data-lane cells this test actually protects (label + the real
+    # lanes), not the total column count.
     with_marks = _cells(_rows(markers=True))
     without = _cells(_rows(markers=False))
-    assert len(with_marks[0]) == len(without[0]), (
-        f"recurring gutter marks swallowed a column: {len(without[0])} -> {len(with_marks[0])}"
+    data_width = len(without[0])
+    assert [row[:data_width] for row in with_marks] == without, (
+        f"recurring gutter marks swallowed a data lane or moved the label boundary: "
+        f"{[row[:data_width] for row in with_marks]} != {without}"
     )
 
 
