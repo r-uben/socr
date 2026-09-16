@@ -44,6 +44,7 @@ from typing import Callable, Literal
 
 from socr.tables.binding import BindingResult, ContradictedCell, RowLabelContradiction
 from socr.tables.native_verifier import (
+    _normalize_cell,
     _normalize_numeric_token,
     is_numeric_token,
     label_key,
@@ -179,8 +180,16 @@ def tokens_agree(left: str, right: str, *, kind: ContradictionKind) -> bool:
         if not left_key or label_key_is_bare_symbolic(left_key):
             return False
         return left_key == right_key
-    if is_numeric_token(left) and is_numeric_token(right):
-        return _normalize_numeric_token(left) == _normalize_numeric_token(right)
+    # GH-772: `left` (`item.model_token`) is kept RAW by #766's ruling, so an
+    # entity-encoded model token (`&minus;1.5`) fails `is_numeric_token` and
+    # falls through to the string compare below, which can never agree with
+    # a decoded raster re-transcription of the identical value -- the
+    # adjudicator loses its only path to exonerate a correct-but-encoded
+    # cell. Decode both sides for the numeric TEST only; nothing is stored.
+    left_decoded = _normalize_cell(left)
+    right_decoded = _normalize_cell(right)
+    if is_numeric_token(left_decoded) and is_numeric_token(right_decoded):
+        return _normalize_numeric_token(left_decoded) == _normalize_numeric_token(right_decoded)
     return left.strip() == right.strip()
 
 

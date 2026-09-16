@@ -58,6 +58,21 @@ class TestTokensAgree:
         assert not tokens_agree("RowA", "RowB", kind="row_label")
         assert not tokens_agree("100", "200", kind="cell")
 
+    def test_entity_encoded_model_token_agrees_with_plain_retranscription(
+        self,
+    ) -> None:
+        """GH-772: `left` is `item.model_token`, kept RAW by #766's ruling.
+
+        A raster re-transcription that reads the same value as an
+        entity-encoded model token must EXONERATE, not stay contradicted --
+        this is the disproof path #367 exists to run.
+        """
+        assert tokens_agree("&minus;1.5", "-1.5", kind="cell")
+        assert tokens_agree("&nbsp;62.5", "62.5", kind="cell")
+        # The check is narrowed, not disabled: a genuinely different value
+        # must still disagree even once decoded.
+        assert not tokens_agree("&minus;1.5", "-2.5", kind="cell")
+
     def test_inline_math_wrapped_cell_agrees_with_plain_value(self) -> None:
         """GH-582: a VLM cell typeset as inline math must be disprovable by
         the raster transcriber, not held forever because the wrap defeats

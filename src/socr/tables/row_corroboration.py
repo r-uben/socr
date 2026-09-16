@@ -79,7 +79,11 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
-from socr.tables.native_verifier import is_numeric_token, strip_presentation
+from socr.tables.native_verifier import (
+    _normalize_cell,
+    is_numeric_token,
+    strip_presentation,
+)
 
 #: A spec-number decoration token, e.g. "(1)", "(12)" — numeric by
 #: ``is_numeric_token`` but header/footnote decoration, not a data value.
@@ -255,9 +259,17 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     decoration, not a data value — excluded here the same way
     ``binding._project_candidate_data_columns`` excludes it.
     """
-    if not is_numeric_token(text):
+    # GH-772: `text` comes straight from `table_blocks()` model markdown, so
+    # it can be entity-encoded (`&minus;1.5`, `&nbsp;62.5`). Decode before
+    # the numeric gate the same way `binding.py`'s sites do (#768/#770), or
+    # a genuine value undercounts the numeric-body-row count used for
+    # row-shape reconciliation. `(1)` and its entity forms (`&lpar;1&rpar;`)
+    # must still be excluded -- decoding `&lpar;1&rpar;` yields the plain
+    # `(1)` shape `_SPEC_NUMBER_RE` already rejects, so the exclusion holds.
+    decoded = _normalize_cell(text)
+    if not is_numeric_token(decoded):
         return False, ""
-    normalized = strip_presentation(text)
+    normalized = strip_presentation(decoded)
     if _SPEC_NUMBER_RE.match(normalized):
         return False, ""
     return True, normalized
