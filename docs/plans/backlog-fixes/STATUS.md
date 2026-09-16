@@ -29,9 +29,18 @@
   widened the disclosure after review found the class is broader than chart-axis alone
   (also book-index pages — #213's shape — and numbered lists); no trigger rate is claimed
   (two independent review probes disagreed with each other); test module grew from 13 to
-  15 tests (mutation rerun: 6 of 15 fail, exactly the ones requiring the predicate to fire);
-  corpus trigger-rate measurement recorded as a deferred, unimplemented follow-up. See
-  `docs/log/2026-09-16_64.md`. Not yet merged.
+  15 tests (mutation rerun: 6 of 15 fail, exactly the ones requiring the predicate to fire).
+  **2026-09-16, second review round:** the original "byte-identical" test only recomputed
+  the formula on one fixture far from either threshold, so mutating `>= 15` to `>= 10` or
+  `> 0.50` to `> 0.30` still passed it — renamed to
+  `test_detect_columnar_numbers_matches_the_pre_pp6_thresholds` with a corrected docstring,
+  and added `TestPredicateThresholdsPinned` (4 boundary fixtures with an exact,
+  controllable single-token/padding-line count) to actually pin both constants; each
+  fixture verified empirically before the assertion, and each threshold mutation confirmed
+  to flip its corresponding boundary fixture. Module: 15 -> 19 tests; full-neuter mutation
+  rerun: 8 of 19 fail, exactly the ones requiring the predicate to fire, restore
+  byte-identical. Corpus trigger-rate measurement remains a deferred, unimplemented
+  follow-up. See `docs/log/2026-09-16_64.md`. Not yet merged.
 - **GH-221** — implemented on `fix/221-wedge-canary` (off `3e04f1c`). Replaced the
   `/api/tags`-only liveness probe with a functional generation canary (minimal
   `num_predict: 1` / `max_tokens: 1` request, run only after the existing precondition

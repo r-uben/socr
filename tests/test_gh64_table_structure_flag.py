@@ -382,11 +382,39 @@ class TestNoDoubleReportingWhenTableRouted:
 # ---------------------------------------------------------------------------
 
 
+def _create_boundary_pdf(path: Path, single_token_count: int, multi_token_count: int) -> None:
+    """A page with an exact, controllable count of single-token lines
+    followed by an exact count of two-token padding lines -- lets the
+    boundary tests below dial ``single_token`` and the resulting ratio to
+    a specific value, rather than relying on a fixture that merely happens
+    to land on one side of a threshold."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    y = 50
+    for i in range(single_token_count):
+        page.insert_text((72, y), f"Term{i}", fontsize=9, fontname="helv")
+        y += 14
+    for i in range(multi_token_count):
+        page.insert_text((72, y), f"Two words{i}", fontsize=9, fontname="helv")
+        y += 14
+    doc.save(str(path))
+    doc.close()
+
+
 class TestReusesExistingPredicateOnly:
-    def test_detect_columnar_numbers_is_byte_identical_to_pre_pp6(self, tmp_path: Path) -> None:
-        """Pin the restored ``_detect_columnar_numbers`` against the exact
-        pre-PP-6 heuristic values (>=15 single-token lines, >50% ratio) so a
-        future edit cannot quietly turn it into a new, invented threshold."""
+    def test_detect_columnar_numbers_matches_the_pre_pp6_thresholds(self, tmp_path: Path) -> None:
+        """Recompute the pre-PP-6 formula (>=15 single-token lines, >50%
+        ratio) independently on the label|value fixture and check it
+        matches the restored method.
+
+        This is NOT a byte-identity or a constants-pinning test: the
+        fixture flags overwhelmingly (single_token well above 15, ratio
+        well above 0.50), so it would still pass if the thresholds were
+        edited to e.g. ``>= 10`` or ``> 0.30`` -- it only catches a sign
+        flip or a change to the boolean structure. The thresholds
+        themselves are pinned separately, by
+        ``TestPredicateThresholdsPinned`` below.
+        """
         pdf_path = tmp_path / "label_value.pdf"
         _create_label_value_table_pdf(pdf_path)
 
@@ -398,6 +426,58 @@ class TestReusesExistingPredicateOnly:
             expected = single_token >= 15 and single_token / len(nonempty) > 0.50
 
             assert BornDigitalDetector._detect_columnar_numbers(page) == expected
+
+
+class TestPredicateThresholdsPinned:
+    """Pin the two literal thresholds inside ``_detect_columnar_numbers``
+    (the ``>= 15`` count floor and the ``> 0.50`` ratio floor) against
+    fixtures built to land exactly on each boundary, so a future edit that
+    quietly loosens either constant is caught even though the module's
+    other fixtures are nowhere near either boundary.
+
+    Each fixture's expected result was verified empirically against the
+    live ``_detect_columnar_numbers`` before the assertion below was
+    written, and the mutation demonstration in
+    ``docs/log/2026-09-16_64.md`` confirms flipping either constant flips
+    the corresponding boundary fixture's result.
+    """
+
+    def test_count_floor_14_lines_not_flagged(self, tmp_path: Path) -> None:
+        """14 single-token lines, ratio held well above 0.50 (5 padding
+        lines) -- below the >=15 floor, must not flag."""
+        pdf_path = tmp_path / "count_14.pdf"
+        _create_boundary_pdf(pdf_path, single_token_count=14, multi_token_count=5)
+
+        with fitz.open(str(pdf_path)) as doc:
+            assert BornDigitalDetector._detect_columnar_numbers(doc[0]) is False
+
+    def test_count_floor_15_lines_flagged(self, tmp_path: Path) -> None:
+        """15 single-token lines, same padding shape as the 14-line case
+        above -- exactly at the >=15 floor, must flag."""
+        pdf_path = tmp_path / "count_15.pdf"
+        _create_boundary_pdf(pdf_path, single_token_count=15, multi_token_count=5)
+
+        with fitz.open(str(pdf_path)) as doc:
+            assert BornDigitalDetector._detect_columnar_numbers(doc[0]) is True
+
+    def test_ratio_floor_at_exactly_half_not_flagged(self, tmp_path: Path) -> None:
+        """15 single-token lines + 15 two-token padding lines -> ratio is
+        exactly 0.50. The check is strictly ``> 0.50``, so this must not
+        flag."""
+        pdf_path = tmp_path / "ratio_half.pdf"
+        _create_boundary_pdf(pdf_path, single_token_count=15, multi_token_count=15)
+
+        with fitz.open(str(pdf_path)) as doc:
+            assert BornDigitalDetector._detect_columnar_numbers(doc[0]) is False
+
+    def test_ratio_floor_just_over_half_flagged(self, tmp_path: Path) -> None:
+        """15 single-token lines + 14 two-token padding lines -> ratio is
+        15/29 ~= 0.517, just over 0.50. Must flag."""
+        pdf_path = tmp_path / "ratio_just_over_half.pdf"
+        _create_boundary_pdf(pdf_path, single_token_count=15, multi_token_count=14)
+
+        with fitz.open(str(pdf_path)) as doc:
+            assert BornDigitalDetector._detect_columnar_numbers(doc[0]) is True
 
 
 # ---------------------------------------------------------------------------
