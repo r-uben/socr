@@ -47,14 +47,6 @@ CHAR_W = 6.0
 FS = 10
 
 
-def _assert_worktree_source():
-    import socr
-
-    assert "/socr-152/" in socr.__file__, (
-        f"expected the socr-152 worktree's source, got {socr.__file__}"
-    )
-
-
 def _row_text(cells: list[tuple[float, str]], x0: float) -> str:
     """A single courier-spaced string whose cells land near their target x.
 
@@ -157,7 +149,6 @@ class TestBandClippedFindTablesRestoresAttribution:
         from socr.core.born_digital import BornDigitalDetector
         from socr.tables import reconstruct
 
-        _assert_worktree_source()
         doc = _two_tables_pdf()
         page = doc[0]
 
@@ -175,7 +166,6 @@ class TestBandClippedFindTablesRestoresAttribution:
     def test_two_tables_emitted_separately_and_correctly_attributed(self):
         from socr.core.born_digital import BornDigitalDetector
 
-        _assert_worktree_source()
         doc = _two_tables_pdf()
         page = doc[0]
 
@@ -205,7 +195,6 @@ class TestWideSingleTableFalsePositiveGuardHoldsAtThisRung:
     def test_wide_single_table_stays_one_region(self):
         from socr.core.born_digital import BornDigitalDetector
 
-        _assert_worktree_source()
         doc = _wide_single_table_pdf()
         page = doc[0]
 
@@ -224,8 +213,6 @@ class TestSingleColumnByteIdentityAtThisRung:
         output for a page with no genuine second table."""
         from socr.core.born_digital import BornDigitalDetector
         from socr.tables import reconstruct
-
-        _assert_worktree_source()
 
         def _render():
             doc = _wide_single_table_pdf()
