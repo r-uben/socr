@@ -1543,9 +1543,18 @@ def _verify_from_words(
     # here would cost every single-column table its verification, which the
     # value guard already polices via the row-count/pairing/multiset checks
     # below (#444 review finding 2).
+    #
+    # Also skipped below 2 native ROWS in scope (CI regression, GH-249 round
+    # 3, gh262 fixture: one row, three lanes, output ships only one value).
+    # One row is not evidence of chart-ness -- it is simply too little
+    # geometry for a native-only predicate to judge -- so the gate must not
+    # convert that absence of evidence into an abstain, which downstream
+    # reads as consent and lets a genuinely dropped value ship. With < 2
+    # rows the value guard's own multiset/pairing checks remain the sole
+    # authority, exactly as before this gate existed.
     if lane_count >= 2:
         grid_rows = _header_excluded_native_rows(words, output_text)
-        if not _native_rows_establish_any_grid(grid_rows):
+        if len(grid_rows) >= 2 and not _native_rows_establish_any_grid(grid_rows):
             result.reason = (
                 f"native_grid_gate: {len(grid_rows)} native row(s) in [{scope_label}] "
                 f"(across every contiguous y-block) do not establish a table grid "

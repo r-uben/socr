@@ -2000,8 +2000,20 @@ class TestGH249ChartPageAbstains:
     a correct "there is no table here" transcript mismatched the ticks and
     hard-failed, while a transcript that dumped every tick verbatim matched
     them and shipped. ``rows_establish_grid`` (GH-113) needs >= 2 rows at
-    the modal width, which a single axis LINE structurally can never supply
-    (one row, however many lanes) -- so a page-wide row of ticks is caught.
+    the modal width, so a row set whose widths genuinely disagree (a
+    realistic shape for inconsistent chart-tick geometry) is caught.
+
+    GH-249 round 3 (CI regression, gh262 fixture) narrowed this further:
+    the gate also requires >= 2 total native ROWS in scope. A single row,
+    however many lanes, is too little geometry for a native-only predicate
+    to call "not a grid" — that absence of evidence was being read as
+    consent, and a single-row table that dropped values shipped unreported
+    (test_a_certain_fail_leaves_no_disposition_behind). Single-row native
+    content — INCLUDING a single-row axis-tick line, which is the same
+    shape — is therefore left entirely to the value guard's own
+    row-count/pairing/multiset checks now; see
+    test_single_row_native_no_longer_abstains_value_guard_is_authoritative
+    for the accepted, disclosed cost of that choice.
 
     A single-LANE axis (one number per line, stacked vertically) is
     geometrically identical to a genuine single-numeric-column table -- no
@@ -2016,9 +2028,32 @@ class TestGH249ChartPageAbstains:
     def _axis_tick_row_page() -> fitz.Page:
         """A page-wide x-axis: one row of well-separated numeric tick
         labels, all lanes on the SAME y-line -- e.g. the year labels along
-        the bottom of a chart. lane_count >= 2, but only one row."""
+        the bottom of a chart. lane_count >= 2, but only one row.
+
+        No longer gated on its own (round 3): see the class docstring.
+        Kept for test_single_row_native_no_longer_abstains_value_guard_is_authoritative.
+        """
         return _make_fitz_page_with_words(
             [[(100.0 + i * _PHYS_COL_GAP, str(2020 + i)) for i in range(4)]],
+        )
+
+    @staticmethod
+    def _mismatched_width_two_row_page() -> fitz.Page:
+        """Two native rows whose widths genuinely disagree (4 lanes, then
+        2 lanes): rows_establish_grid needs >= 2 rows at the SAME modal
+        width, so this is caught even under the round-3 >= 2-row
+        requirement -- unlike a single axis-tick line, there are two real
+        rows here to compare against each other and neither can call the
+        other's width a coincidence."""
+        return _make_fitz_page_explicit(
+            [
+                (100.0, 100.0, "2020"),
+                (100.0, 100.0 + _PHYS_COL_GAP, "2021"),
+                (100.0, 100.0 + 2 * _PHYS_COL_GAP, "2022"),
+                (100.0, 100.0 + 3 * _PHYS_COL_GAP, "2023"),
+                (130.0, 100.0, "1.5"),
+                (130.0, 100.0 + _PHYS_COL_GAP, "2.5"),
+            ]
         )
 
     def test_axis_tick_row_is_not_a_grid(self):
@@ -2032,11 +2067,12 @@ class TestGH249ChartPageAbstains:
             "A single row can never establish a grid regardless of its width."
         )
 
-    def test_verifier_abstains_on_axis_tick_row_page(self):
-        """Acceptance criterion 1: a page whose native 'rows' are axis tick
-        labels does not reach the value guard — it abstains, naming the
-        non-grid cause, instead of grading candidates against the ticks."""
-        page = self._axis_tick_row_page()
+    def test_verifier_abstains_on_mismatched_width_two_row_page(self):
+        """Acceptance criterion 1: a page whose native rows disagree on
+        width (not a real table's grid) does not reach the value guard —
+        it abstains, naming the non-grid cause, instead of grading
+        candidates against them."""
+        page = self._mismatched_width_two_row_page()
         # A candidate that reads the chart correctly (no table here) but
         # happens to partially overlap the tick values (a real risk: chart
         # data legitimately clusters near its own axis ticks).
@@ -2044,20 +2080,20 @@ class TestGH249ChartPageAbstains:
         result = verify_native_table(page, output_text)
 
         assert result.hard_fail is False, (
-            f"Axis-tick row must not hard-fail a correct candidate: {result!r}"
+            f"Mismatched-width rows must not hard-fail a correct candidate: {result!r}"
         )
         assert "native_grid_gate" in result.reason, (
             f"Abstain must name the non-grid cause; got reason={result.reason!r}"
         )
 
-    def test_axis_tick_row_hard_fails_without_the_gate(self):
+    def test_mismatched_width_two_row_page_hard_fails_without_the_gate(self):
         """Criterion 4: demonstrate the fix is load-bearing, not vacuous.
 
         Same fixture and candidate as the previous test. With the GH-249
         grid gate disabled (patched to always report "it's a grid"), the
         exact same candidate DOES hard-fail — proving the abstain above is
         the gate doing work, not an unrelated pass."""
-        page = self._axis_tick_row_page()
+        page = self._mismatched_width_two_row_page()
         output_text = _md_table(["label", "a", "b", "c"], [["CPI", "2020", "2021", ""]])
 
         with patch(
@@ -2067,8 +2103,8 @@ class TestGH249ChartPageAbstains:
             unguarded = verify_native_table(page, output_text)
 
         assert unguarded.hard_fail is True, (
-            "Without the grid gate, the axis-tick row is graded as ground truth "
-            f"and the correct candidate hard-fails: {unguarded!r}"
+            "Without the grid gate, the mismatched-width rows are graded as ground "
+            f"truth and the correct candidate hard-fails: {unguarded!r}"
         )
         assert "multiset_mismatch" in unguarded.reason
 
@@ -2079,7 +2115,7 @@ class TestGH249ChartPageAbstains:
         closer to the phantom "table" than one that reported no table at
         all. Both are now abstained on identically, because neither is
         being scored against the ticks."""
-        page = self._axis_tick_row_page()
+        page = self._mismatched_width_two_row_page()
         correct = _md_table(
             ["Figure", "Note"],
             [["Figure 2.A", "Year labels along the horizontal axis"]],
@@ -2154,14 +2190,21 @@ class TestGH249ChartPageAbstains:
             f"GH-249 gate. Got: {result!r}"
         )
 
-    def test_single_row_native_now_abstains(self):
-        """The narrowing this fix carries, recorded rather than hidden.
+    def test_single_row_native_no_longer_abstains_value_guard_is_authoritative(self):
+        """GH-249 round 3 (CI regression): a single native row — INCLUDING a
+        single-row axis-tick line — is no longer abstained on. It flows
+        straight to the value guard, which hard-fails a dropped value here
+        exactly as it would for a real one-row table
+        (test_a_certain_fail_leaves_no_disposition_behind, gh262 fixture).
 
-        ``rows_establish_grid`` requires TWO rows at the modal width, so a
-        one-data-row, multi-lane native table is no longer verifiable —
-        a single numeric line is exactly what the predicate cannot tell
-        apart from prose or a stray axis label. Pinned so the cost is
-        visible and any future change to it is a decision, not a surprise.
+        Disclosed cost: a correct "there is no table here" reading of a
+        genuine single-row axis-tick line will also hard-fail via this
+        same path, since one row cannot be told apart from a real one-row
+        table by native geometry alone. Between silently shipping a
+        dropped value (round-3 regression) and over-flagging a correct
+        chart-only reading, this repo's cardinal rule (a wrong/dropped
+        number is worse than a missing one) makes the latter the accepted
+        trade-off.
         """
         page = _make_fitz_page_with_words(
             [[(100.0, "1.2"), (100.0 + _PHYS_COL_GAP, "2.3")]],
@@ -2169,8 +2212,53 @@ class TestGH249ChartPageAbstains:
         output_text = _md_table(["c1", "c2"], [["1.2", ""]])
         result = verify_native_table(page, output_text)
 
-        assert result.hard_fail is False
-        assert result.warn is False
+        assert result.hard_fail is True, (
+            f"a single-row table's dropped value must hard-fail, not abstain: {result!r}"
+        )
+        assert "native_grid_gate" not in result.reason
+
+    def test_gh262_single_row_three_lane_dropped_value_hard_fails(self):
+        """The CI-caught round-3 regression, pinned directly in this file
+        (also covered end-to-end by
+        test_gh262_d3_marker_over_cached_grid.py::test_a_certain_fail_leaves_no_disposition_behind).
+
+        One native row, three lanes; the output ships only one of the
+        three values. Fails without the fix: reconstructs the pre-round-3
+        gate condition (``lane_count >= 2`` alone, no row-count floor)
+        directly against the real helpers, showing it would have
+        abstained here -- a single row can never establish a grid, so
+        `_native_rows_establish_any_grid` returns False regardless of
+        content, and the old gate read that as "not a table" instead of
+        "too little geometry to judge".
+        """
+        from socr.tables.native_verifier import (
+            _header_excluded_native_rows,
+            _native_rows_establish_any_grid,
+        )
+
+        page = _make_fitz_page_with_words(
+            [
+                [
+                    (100.0, "0.1"),
+                    (100.0 + _PHYS_COL_GAP, "0.2"),
+                    (100.0 + 2 * _PHYS_COL_GAP, "0.3"),
+                ]
+            ],
+        )
+        output_text = _md_table(["label", "vals"], [["row1", "0.1"]])
+        words = page.get_text("words")
+
+        grid_rows = _header_excluded_native_rows(words, output_text)
+        assert _native_rows_establish_any_grid(grid_rows) is False, (
+            "a single row can never establish a grid, so the pre-round-3 gate "
+            "(lane_count >= 2 alone) would have abstained on this fixture"
+        )
+
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is True, (
+            f"a single-row table's dropped value must hard-fail, not abstain: {result!r}"
+        )
+        assert "native_grid_gate" not in result.reason
 
 
 class TestGH249RowClusterGapIsSelfDerived:
