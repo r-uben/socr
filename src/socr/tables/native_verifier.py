@@ -392,12 +392,16 @@ def _output_header_numeric_tokens(text: str) -> frozenset[str]:
         header_line = lines[i - 1]
         if "|" not in header_line:
             continue
-        # Collect numeric tokens from the header line
+        # Collect numeric tokens from the header line. ``text`` is always
+        # model output markdown (never native PyMuPDF text -- see the
+        # docstring), so an entity-encoded token (``&lpar;1&rpar;``) is
+        # decoded through ``is_numeric_token``/``_normalize_numeric_token``
+        # before the numeric-token test or it is silently dropped (GH-773 S8).
         header_tokens: set[str] = set()
         for cell in header_line.strip().strip("|").split("|"):
-            for tok in re.split(r"\s+", cell.strip()):
-                if tok and _NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok):
-                    header_tokens.add(_normalize_numeric_token(tok))
+            for raw_tok in re.split(r"\s+", cell.strip()):
+                if raw_tok and is_numeric_token(raw_tok):
+                    header_tokens.add(_normalize_numeric_token(raw_tok))
         return frozenset(header_tokens)
     return frozenset()
 
@@ -427,11 +431,23 @@ def _parse_output_data_rows(text: str) -> list[tuple[int, int, str]]:
 
 
 def _numeric_tokens_from_text(text: str) -> list[str]:
-    """Return table-value-like numeric tokens from a Markdown row."""
+    """Return table-value-like numeric tokens from a Markdown row.
+
+    ``text`` is always model output markdown (both callers read a model-
+    emitted row), never native PyMuPDF text, so each candidate is run
+    through ``_decoded_numeric_candidate`` before the numeric-token test.
+    ``html.unescape`` alone is not enough here: ``&minus;`` decodes to the
+    Unicode minus sign (U+2212), which the anchored ``_NUM_TOKEN_RE`` does
+    not match without ``strip_presentation``'s ASCII fold. Without both
+    steps an entity-encoded value (``&minus;9.9``) matches no candidate
+    here, the row fails to pair against its native counterpart, and it
+    drops out of both the multiset comparison AND the row count that would
+    otherwise flag the gap (GH-773 S1/S3).
+    """
     candidates = re.split(r"[\s|]+", text.strip())
     return [
         token
-        for token in (c.strip() for c in candidates)
+        for token in (_decoded_numeric_candidate(c.strip()) for c in candidates)
         if token and _NUM_TOKEN_RE.match(token) and _NUMERIC_RE.search(token)
     ]
 
@@ -959,9 +975,24 @@ def _normalize_cell(raw: str) -> str:
     return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
 
 
+def _decoded_numeric_candidate(tok: str) -> str:
+    """Decode HTML entities, then strip presentation decoration.
+
+    Shared first step of every "is this a numeric token" predicate in this
+    module (GH-773). ``html.unescape`` runs BEFORE ``strip_presentation``
+    because an entity like ``&minus;`` decodes to the Unicode minus sign
+    (U+2212), which ``strip_presentation`` folds to ASCII ``-`` -- decoding
+    after presentation-stripping would miss that fold and leave the token
+    unmatched by the anchored ``_NUM_TOKEN_RE``. Provably inert on native
+    PyMuPDF text, which never contains a literal HTML entity, so this is safe
+    to apply uniformly rather than gating it by call-site provenance.
+    """
+    return strip_presentation(html.unescape(tok))
+
+
 def is_numeric_token(tok: str) -> bool:
-    """True when *tok* is a table value once presentation is stripped."""
-    cleaned = strip_presentation(tok)
+    """True when *tok* is a table value once entities/presentation are stripped."""
+    cleaned = _decoded_numeric_candidate(tok)
     return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
 
 
@@ -979,9 +1010,12 @@ def _normalize_numeric_token(tok: str) -> str:
        preserved (``2.10`` ≠ ``2.1``); no float/Decimal cast is performed.
 
     Both native tokens and output tokens are normalized with this function
-    before multiset comparison, so the comparison is always N2↔N2.
+    before multiset comparison, so the comparison is always N2↔N2. Entities
+    are decoded here too (GH-773) so a stored value reflects what the model
+    actually wrote (``&minus;9.9`` normalizes to the same string ``-9.9``
+    would), not the pre-decode literal.
     """
-    tok = strip_presentation(tok)
+    tok = _decoded_numeric_candidate(tok)
     # Strip parenthesis wrappers (econ-table negative-sign: (X) means -X)
     if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
         tok = tok[1:-1]
@@ -1003,6 +1037,21 @@ def _numeric_multiset_from_tokens(
     Only tokens that match ``_NUM_TOKEN_RE`` AND ``_NUMERIC_RE`` are included;
     non-numeric strings (labels, punctuation) are discarded.  Each included
     token is normalized with ``_normalize_numeric_token`` (N2) before counting.
+
+    ``raw_tokens`` is a SHARED sink read from both native PyMuPDF words
+    (e.g. ``header_repair.py``, ``witness.py``, ``:1432`` below) and model
+    markdown cells (e.g. ``:1431`` below, ``header_cut.py``). ``is_numeric_token``
+    and ``_normalize_numeric_token`` both decode HTML entities internally
+    (``_decoded_numeric_candidate``), closing the entity-encoding gap on the
+    model side (GH-773 S1/S2/S5/S6/S7): an entity-encoded fabricated value
+    such as ``&minus;9.9`` previously failed ``is_numeric_token`` outright and
+    vanished from the comparison rather than being flagged as a mismatch.
+    Decoding is ``html.unescape`` only -- NOT the trailing-dash strip that
+    ``_normalize_cell`` also applies -- deliberately: a native PyMuPDF word
+    never contains an HTML entity, so unescaping is a no-op on the native
+    side, but the dash strip is not (``'1990-'`` -> ``'1990'``), which would
+    change native-side comparisons this call is not meant to touch (measured
+    2026-09-16, docs/log/2026-09-16_773-fix.md).
     """
     result: Counter = Counter()
     for tok in raw_tokens:
