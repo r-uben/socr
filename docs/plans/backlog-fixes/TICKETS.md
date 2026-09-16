@@ -294,9 +294,17 @@ passes here because Ollama is running locally and fails in CI is worse than no t
 
 ## GH-64 — a tabular-looking page falls to native with no flag, silently
 
-**Status:** READY
+**Status:** DONE
 **Branch:** `fix/64-tabular-native-flag`
-**Write ownership:** `src/socr/core/born_digital.py`, `tests/` (a new module for this ticket)
+**Write ownership:** `src/socr/core/born_digital.py`, `tests/` (a new module for this ticket).
+**EXPANDED during implementation** to also include `src/socr/core/state.py` (one field on
+`PageState` + one propagation line in `apply_born_digital`) and
+`src/socr/pipeline/orchestrator.py` (one `AuditEvent` append in `_agentic_native_page`).
+Requested by the implementer before editing either file, verified against the #136/#217
+precedent (both span exactly these same three files) and the same-night GH-140 precedent
+(`has_math_font_typesetting`, identical three-file shape), and granted by the team lead —
+recorded here so the record shows it was not taken silently. See
+`docs/log/2026-09-16_64.md` for the full evidence trail.
 
 ### Context — confirmed still real on `main@ba92c19`
 

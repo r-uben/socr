@@ -9555,8 +9555,9 @@ class UnifiedPipeline:
 
         Effects are mutations on objects passed in: appends the native
         ``PageOutput`` to ``ps.attempts``, sets ``ps.best_output``, and appends
-        up to two audit events (#136 encoding hygiene, #217 unrecovered symbol
-        glyphs) to ``state.events``. The #92 unmapped-math-glyph record moved to
+        up to three audit events (#136 encoding hygiene, #217 unrecovered
+        symbol glyphs, GH-64 unreconstructed table structure) to
+        ``state.events``. The #92 unmapped-math-glyph record moved to
         outcome-time accounting in ``_phase_assemble`` (#165).
         """
         # Tier 1: born-digital trusted native text — free, no OCR.
@@ -9648,6 +9649,33 @@ class UnifiedPipeline:
                         "as a digit, flipping a coefficient's sign)"
                     ),
                     data={"class": "symbol_glyph"},
+                )
+            )
+
+        # GH-64: PP-6 narrowed table routing to the lane-cooccupancy gate
+        # (has_numeric_columns, >= 3 co-occupied numeric lanes per row), which
+        # structurally cannot reach a 2-column borderless label|value table --
+        # one numeric lane per row. The pre-PP-6 heuristic
+        # (_detect_columnar_numbers, restored as an audit-only predicate in
+        # born_digital.py) still recognises that shape. Report only -- never
+        # demotes status, same as the two audit events above; unlike them, no
+        # trigger-rate has been measured for this signal (see docs/log/2026-09-16_64.md).
+        if getattr(ps, "possible_table_structure_not_reconstructed", False):
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="possible_table_structure_not_reconstructed",
+                    engine="native",
+                    detail=(
+                        "page has the shape of a borderless label|value table (>=15 "
+                        "single-token lines, >50% of non-empty lines) but did not route "
+                        "to table handling -- has_numeric_columns requires >=3 "
+                        "co-occupied numeric lanes per row and a 2-column table has one; "
+                        "grid structure not reconstructed, native prose shipped instead"
+                    ),
+                    data={"class": "table_structure"},
                 )
             )
 

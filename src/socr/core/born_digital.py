@@ -2260,6 +2260,18 @@ class PageAssessment:
     #: Propagated to PageState so the agentic native lane can emit a durable audit
     #: event; the historical ``notes`` entry alone reached nothing that ships.
     has_encoding_hygiene_suspect: bool = False
+    #: GH-64: PP-6 narrowed table routing to the lane-cooccupancy gate
+    #: (``has_numeric_columns``, ``_MIN_LANES_PER_ROW >= 3``), which never fires
+    #: on a 2-column label|value table -- there is only one numeric lane per row.
+    #: The PRE-PP-6 heuristic (``_detect_columnar_numbers``, restored below as an
+    #: audit-only predicate) still catches that shape: PyMuPDF's own line
+    #: grouping splits a whitespace-aligned label|value pair across the wide gap,
+    #: so each row surfaces as two single-token lines. Set ONLY when ``has_tables``
+    #: is False for this page AND the old heuristic fires -- i.e. exactly the set
+    #: of pages whose routing PP-6 changed. Never used for routing itself (that
+    #: would re-widen the gate PP-6 deliberately narrowed); it exists so the grid
+    #: structure loss on these pages is visible instead of silent.
+    possible_table_structure_not_reconstructed: bool = False
     #: GH-147 A2: set ONLY by the refusal branch in ``_assess_page_signals`` when
     #: the native table lane is actually refused (rotated text direction + table
     #: detected on a born-digital page). ``has_tables and text_is_rotated`` alone
@@ -3027,6 +3039,22 @@ class BornDigitalDetector:
         if encoding_hygiene_suspect:
             notes.append(f"text-layer encoding suspect ({encoding_corruption:.1%})")
 
+        # GH-64: this page fell to native (no table lane reused across data
+        # rows -- ``has_tables`` is False) but the pre-PP-6 heuristic still
+        # recognises it as tabular. Guarded on ``not has_tables`` so a page
+        # that DID route to table handling never double-reports (criterion 3).
+        possible_table_structure_not_reconstructed = (
+            not has_tables and self._detect_columnar_numbers(page)
+        )
+        if possible_table_structure_not_reconstructed:
+            notes.append(
+                "born-digital: page has the shape of a borderless label|value table "
+                "(>=15 single-token lines, >50% of non-empty lines) but did not route to "
+                "table handling -- has_numeric_columns requires >=3 co-occupied numeric "
+                "lanes per row and a 2-column table has one; grid structure not "
+                "reconstructed, native prose shipped instead"
+            )
+
         # GH-195: same side-channel shape as the TR-3 flag above — reset per
         # page so a rejection on page 7 is never attributed to page 8.
         self._last_extraction_grid_rejections: list[dict] = []
@@ -3190,6 +3218,7 @@ class BornDigitalDetector:
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
+            possible_table_structure_not_reconstructed=possible_table_structure_not_reconstructed,
             native_table_lane_refused=native_table_lane_refused,
             native_rotated_text_shredded=native_rotated_text_shredded,
             native_table_structure_defective=native_table_structure_defective,
@@ -3244,6 +3273,32 @@ class BornDigitalDetector:
         from socr.tables.reconstruct import has_numeric_columns
 
         return has_numeric_columns(page)
+
+    @staticmethod
+    def _detect_columnar_numbers(page: fitz.Page) -> bool:
+        """GH-64: the pre-PP-6 single-token-line-ratio heuristic, restored.
+
+        AUDIT-ONLY. Never call this for routing -- ``_detect_tables`` above is
+        the sole routing gate, and PP-6 (GH-54/GH-248/GH-348) deliberately
+        replaced this heuristic there because it false-fired on chart-axis
+        labels and CE front-matter (see the docstring on ``_detect_tables``).
+        This copy exists only to recognise the set of pages whose ROUTING PP-6
+        changed, so that a 2-column label|value table -- which
+        ``has_numeric_columns`` structurally cannot catch, since it requires
+        ``_MIN_LANES_PER_ROW >= 3`` co-occupied numeric lanes and a 2-column
+        table has one -- is flagged rather than silently dropped to native
+        prose with its grid unreconstructed.
+
+        Heuristic, unchanged from the pre-PP-6 version: if >50% of non-empty
+        lines are single-token AND there are at least 15 such lines, the page
+        is almost certainly tabular.
+        """
+        lines = page.get_text("text").splitlines()
+        nonempty = [ln.strip() for ln in lines if ln.strip()]
+        if not nonempty:
+            return False
+        single_token = sum(1 for ln in nonempty if len(ln.split()) == 1)
+        return single_token >= 15 and single_token / len(nonempty) > 0.50
 
     @staticmethod
     def _detect_table_regions(

@@ -96,6 +96,13 @@ class PageState:
     #: CAN be a digit or an operator -- an unrecovered minus is a sign flip -- so
     #: the page must never be silently trusted.
     has_unrecovered_symbol_glyphs: bool = False
+    #: GH-64: this page fell to native (``has_tables`` False, no lane reuse
+    #: across data rows) but the restored pre-PP-6 heuristic
+    #: (``_detect_columnar_numbers``) still recognises the borderless
+    #: label|value shape ``has_numeric_columns`` structurally cannot reach
+    #: (one numeric lane per row, gate requires >= 3). Audit-only, reports
+    #: never demotes -- see ``PageAssessment.possible_table_structure_not_reconstructed``.
+    possible_table_structure_not_reconstructed: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
     #: actually ran on this page, recorded AFTER the splice so it describes what
     #: went into the body rather than what a model returned. Read only by
@@ -620,6 +627,9 @@ class DocumentState:
                 ps.has_encoding_hygiene_suspect = getattr(pa, "has_encoding_hygiene_suspect", False)
                 ps.has_unrecovered_symbol_glyphs = getattr(
                     pa, "has_unrecovered_symbol_glyphs", False
+                )
+                ps.possible_table_structure_not_reconstructed = getattr(
+                    pa, "possible_table_structure_not_reconstructed", False
                 )
                 if pa.is_born_digital:
                     # #688 round 2: the native reading is a CANDIDATE -- it is

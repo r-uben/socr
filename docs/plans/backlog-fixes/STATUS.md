@@ -9,6 +9,23 @@
 > locate, 1 closure candidate).
 
 ## Live
+- **GH-64** — implemented on `fix/64-tabular-native-flag` (off `ba92c19`). Restored the
+  pre-PP-6 `_detect_columnar_numbers` heuristic in `born_digital.py` as a private,
+  audit-only predicate (never wired into routing), computing
+  `possible_table_structure_not_reconstructed` whenever a page falls to native
+  (`not has_tables`) but still has the pre-PP-6 borderless label|value shape.
+  Write-ownership expanded (requested, verified against #136/#217/#140, granted) to
+  `state.py` (field + propagation) and `orchestrator.py` (`_agentic_native_page`, one
+  `AuditEvent` append) — the same seam GH-140 used the same night — since
+  `PageAssessment.notes` alone reaches nothing the pipeline reads. Report-only, no status
+  demotion (ticket's hard scope limit 2; no trigger-rate measured for this signal yet).
+  Full suite 5444 passed / 4 xfailed (5431 main baseline + 13 new tests, exact);
+  `ruff format --check` clean; mutation-tested (neutering the predicate fails exactly the
+  4 tests that require it to fire, 9 others correctly unaffected, including both
+  `_agentic_native_page` orchestrator-seam tests). Inherits the pre-PP-6 heuristic's known
+  chart-axis false-positive class by construction (ticket forbids a new threshold to
+  narrow it) — documented explicitly, not silently absorbed into criterion 2. See
+  `docs/log/2026-09-16_64.md`. Not yet merged.
 - **GH-221** — implemented on `fix/221-wedge-canary` (off `3e04f1c`). Replaced the
   `/api/tags`-only liveness probe with a functional generation canary (minimal
   `num_predict: 1` / `max_tokens: 1` request, run only after the existing precondition
