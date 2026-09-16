@@ -324,3 +324,92 @@ class TestUnhandledLayouts:
 
         assert len(normal) == 1, "a spanning caption must disable the split"
         assert [md for _r, md in normal] == [md for _r, md in forced_off]
+
+
+class TestGH780DensityFloorTripwire:
+    """Pins a KNOWN LIMITATION, not desired behaviour -- see GH-780.
+
+    ``rowize_from_word_list`` is the FALLBACK rung, reached only when the
+    PRIMARY rung (``reconstruct_table_regions``'s band-clipped
+    ``find_tables``) rejects or empties for a band -- e.g. GH-146's
+    ruling-line character-destruction failure mode. On a clean page the
+    primary rung does not consult socr's density floor at all and a
+    one-value-column table beside a wider one splits correctly (see
+    ``test_gh152_reconstruct_band_clip.py``); this test is about the
+    fallback path only.
+
+    Inside the fallback, ``_rowize_segment`` (``reconstruct.py:2412``, at
+    the time this was written) applies a pre-existing, PAGE-SIZED density
+    floor -- ``len(num_words) >= _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS`` (9
+    raw numeric tokens per segment) -- to keep the whole-page rowizer off
+    prose pages. GH-152 does not touch this floor and must not: it is a
+    documented pairing with corpus-wide blast radius, a separate design
+    decision (GH-780), not this ticket's.
+
+    A narrow band can fall below 9 raw numeric tokens where the merged
+    whole page would not (this fixture: left band 4 tokens, right band 8 --
+    both under the floor; merged, 12, clears it easily). When that happens,
+    ``rowize_from_word_list``'s split-then-fallback logic has nothing valid
+    from either band, so it falls through to the UNSPLIT whole-page call --
+    reverting to the pre-GH-152 merge, misattribution included. That is
+    what this test asserts CURRENTLY happens. It is a tripwire, not a
+    guard: if GH-780 rescales the floor per band, this test SHOULD start
+    failing and must be updated (or deleted with GH-780's own coverage
+    replacing it), not silently left red.
+    """
+
+    def test_band_below_density_floor_falls_back_to_the_pre_gh152_merge(self):
+        from socr.tables import reconstruct
+
+        words: list = []
+        y = 100.0
+        for i in range(4):
+            row_y = y + i * ROW_H
+            # Left band: label + ONE numeric lane -- 4 rows = 4 raw numeric
+            # tokens, under the floor no matter how the split behaves.
+            words.append(_w(60.0, row_y, f"LeftLab{i}", block=0, line=i))
+            words.append(_w(140.0, row_y, f"{i}.11", block=0, line=i))
+            # Right band: label + TWO numeric lanes -- 4 rows = 8 raw
+            # numeric tokens, one short of the floor.
+            words.append(_w(350.0, row_y, f"RightLab{i}", block=1, line=i))
+            words.append(_w(420.0, row_y, f"{i}.22", block=1, line=i))
+            words.append(_w(470.0, row_y, f"{i}.33", block=1, line=i))
+
+        floor = reconstruct._MIN_LANES_PER_ROW * reconstruct._MIN_TABLE_ROWS
+        num_left = [
+            w
+            for w in words
+            if w[5] == 0
+            and reconstruct._NUM_TOKEN_RE.match(w[4])
+            and reconstruct._NUMERIC_RE.search(w[4])
+        ]
+        num_right = [
+            w
+            for w in words
+            if w[5] == 1
+            and reconstruct._NUM_TOKEN_RE.match(w[4])
+            and reconstruct._NUMERIC_RE.search(w[4])
+        ]
+        assert len(num_left) < floor, "fixture must sit under the floor to pin the gap"
+        assert len(num_right) < floor, "fixture must sit under the floor to pin the gap"
+
+        gutter = reconstruct._detect_column_gutter(words)
+        assert gutter is not None, "the gutter itself must still be found"
+
+        regions = rowize_from_word_list(words)
+
+        # Current (limitation) behaviour: refused split, one merged region,
+        # RightLab entirely absent, its values reattributed under LeftLab.
+        assert len(regions) == 1, (
+            "GH-780: expected the known-limitation single merged region; "
+            f"got {len(regions)} -- if the density floor was rescaled per "
+            "band, update or retire this tripwire rather than leaving it "
+            "red"
+        )
+        grid = _cells(regions[0][1])
+        labels = [row[0] for row in grid]
+        assert all(lab.startswith("LeftLab") for lab in labels), labels
+        assert not any("RightLab" in " ".join(row) for row in grid), (
+            "GH-780: RightLab should currently be dropped by the merge -- "
+            "if this starts passing, the limitation may already be fixed"
+        )

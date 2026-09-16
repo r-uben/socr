@@ -39,8 +39,22 @@ under this repo's cardinal rule duplication is a strictly better failure than th
 this ticket exists to close (every value stays correct and correctly labelled). Team-lead is
 filing this as its own tracked issue.
 
-Both — see `docs/log/2026-09-16_152.md` for the full trace.
+**GH-780** (a page-sized density floor applied to a band) — `rowize_from_word_list`'s
+fallback rung (reached only when the primary rung's band-clipped `find_tables` rejects or
+empties for a band) inherits a pre-existing `>= 9` raw-numeric-token floor in
+`_rowize_segment`. A narrow band — e.g. a one-value-column table matching the motivating
+page's actual TABLE A5 shape ("Measure/Correlation, 3 rows") — can fall below it where the
+merged whole page would not, reverting that page to the pre-GH-152 merge. Conditional, not
+absolute: a clean page (no ruling lines) splits this exact shape correctly via the primary
+rung, which never consults the floor. **Whether the real A5/A6 page is affected is UNKNOWN**
+— unverified, not guessed; checking needs the corpus, out of bounds for this dispatch. The
+floor itself is unchanged — rescaling it per band is GH-780's separate design decision, filed
+by team-lead, cross-linked to GH-152 and GH-418. Pinned as a tripwire (current behaviour, not
+desired behaviour, will need updating if GH-780 rescales the floor) in
+`tests/test_gh152_column_aware_rowize.py::TestGH780DensityFloorTripwire`.
+
+Both remainders plus GH-780 — see `docs/log/2026-09-16_152.md` for the full trace.
 
 ## Next action
-None outstanding for this plan. #418 is tracked separately; the duplication finding will get
-its own issue filed by team-lead.
+None outstanding for this plan. #418 and #780 are tracked separately; the duplication finding
+will get its own issue filed by team-lead.

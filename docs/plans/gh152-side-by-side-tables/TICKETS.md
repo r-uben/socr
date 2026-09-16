@@ -59,7 +59,7 @@ through `extract_structured` or `process()` — never an isolated rung, never a
 standalone-module import. (Wave 2's #192 review produced a false blocking finding exactly
 this way.)
 
-### TICKET-A2 — consume the helper at BOTH merging rungs · DONE · depends-on: A1 · wave 4 · related: GH-418
+### TICKET-A2 — consume the helper at BOTH merging rungs · DONE · depends-on: A1 · wave 4 · related: GH-418, GH-780
 **Problem:** Two tables need two grids, emitted left-to-right then top-to-bottom.
 
 ⚠️ **RECUT 2026-08-13, per A1's retarget ruling.** The original A2 ("rowize each band
@@ -91,6 +91,27 @@ describes. "GH-152 fixed" does not mean "side-by-side tables are safe" unconditi
 means safe specifically when the gutter is detected. See `docs/log/2026-09-16_152.md` for the
 full trace. **related: GH-418** (cross-link this both ways — GH-418's issue should point back
 here too).
+
+⚠️ **Second partial-closure note — GH-780, a page-sized density floor applied
+to a band.** Distinct from the GH-418 gap above. `rowize_from_word_list`
+(the fallback rung, reached only when the PRIMARY rung's band-clipped
+`find_tables` rejects or empties for a band — e.g. GH-146's ruling-line
+character-destruction failure mode) inherits a pre-existing, page-sized
+density floor in `_rowize_segment` (`>= 9` raw numeric tokens per segment,
+`reconstruct.py:2412`). A narrow band — e.g. a one-value-column table like
+the motivating page's actual TABLE A5 ("Measure/Correlation, 3 rows") —
+can fall below it where the merged whole page would not, reverting that
+page to the pre-GH-152 merge. **Conditional, not absolute:** measured
+directly that a clean page (no ruling lines) splits this exact shape
+correctly via the PRIMARY rung, which does not consult the floor at all —
+the gap only bites when `find_tables` also rejects the band. **Whether the
+real A5/A6 page is affected is UNKNOWN**, unverified rather than guessed
+(checking needs the corpus, out of bounds here). The floor itself is NOT
+changed — rescaling it per band is GH-780's separate design decision, not
+this ticket's; filed by team-lead, cross-linked here and to GH-418. Pinned
+as a tripwire (documents current behaviour, not desired behaviour) in
+`tests/test_gh152_column_aware_rowize.py::TestGH780DensityFloorTripwire`.
+See `docs/log/2026-09-16_152.md` for the full trace.
 
 
 ## Stream B — evidence
