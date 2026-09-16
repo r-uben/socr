@@ -11,7 +11,9 @@ from __future__ import annotations
 from socr.tables.row_corroboration import (
     EXTRA_NUMBERS_MAX_SHARE,
     ROW_CORROBORATION_MIN,
+    _is_genuine_numeric,
     corroborate_rows,
+    numeric_body_rows,
 )
 
 REGION = (0.0, 0.0, 400.0, 400.0)
@@ -305,6 +307,52 @@ def test_all_markdown_table_blocks_handled_not_just_first():
     result = corroborate_rows(words, markdown, region)
     assert result.total == 2
     assert result.bound == 2
+
+
+def test_entity_encoded_numeric_counted_as_genuine():
+    """GH-772: candidate text is fed from `table_blocks()` model markdown,
+    which can carry HTML entities. An entity-encoded value must be counted
+    as genuine, the same as its plain form."""
+    assert _is_genuine_numeric("-1.5") == (True, "-1.5")
+    is_numeric, normalized = _is_genuine_numeric("&minus;1.5")
+    assert is_numeric is True
+    assert normalized  # decoded to a real numeric string, not dropped
+    is_numeric, normalized = _is_genuine_numeric("&nbsp;62.5")
+    assert is_numeric is True
+    assert normalized
+
+
+def test_spec_number_decoration_excluded_plain_and_entity_encoded():
+    """GH-772 trap: a spec-number footnote marker (`(1)`) must stay excluded
+    -- including its entity-encoded round-trip -- while genuine values are
+    recovered. A careless decode-then-loosen fix would start counting
+    footnote markers as data."""
+    assert _is_genuine_numeric("(1)") == (False, "")
+    assert _is_genuine_numeric("&lpar;1&rpar;") == (False, "")
+
+
+def test_numeric_body_rows_count_matches_plain_and_entity_encoded_table():
+    """GH-772: the numeric-body-row count used for row-shape reconciliation
+    must not depend on whether the model happened to entity-encode a
+    value."""
+    plain_rows = [["Revenue", "1204", "980"], ["Costs", "-500", "410"]]
+    entity_rows = [["Revenue", "1204", "980"], ["Costs", "&minus;500", "410"]]
+    assert len(numeric_body_rows(plain_rows)) == len(numeric_body_rows(entity_rows))
+    assert numeric_body_rows(plain_rows) == numeric_body_rows(entity_rows)
+
+
+def test_entity_encoded_candidate_table_still_clears_against_native_page():
+    """Integration-level pin: an entity-encoded rendering of the same table
+    corroborates identically to the plain rendering."""
+    words = native_row(10.0, "Revenue", ["1,204", "-980"])
+    plain_markdown = md_table(["Item", "2023", "2022"], [["Revenue", "1,204", "-980"]])
+    entity_markdown = md_table(["Item", "2023", "2022"], [["Revenue", "1,204", "&minus;980"]])
+    plain_result = corroborate_rows(words, plain_markdown, REGION)
+    entity_result = corroborate_rows(words, entity_markdown, REGION)
+    assert plain_result.bound == entity_result.bound == 1
+    assert plain_result.total == entity_result.total == 1
+    assert plain_result.clears is True
+    assert entity_result.clears is True
 
 
 def test_column_index_legend_row_excluded_not_counted_as_data_row():
