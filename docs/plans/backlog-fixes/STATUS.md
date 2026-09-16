@@ -1,21 +1,22 @@
 # STATUS — backlog fixes
 
-> **Current truth, 2026-09-15.** First ticket in this folder. GH-249 dispatched, implemented,
-> reviewed (one REVISE round), and fixed. Purpose: measure the real cycle time and failure rate
-> of fixing one confirmed defect end-to-end, before deciding whether the remaining 58 are worth
-> automating the same way.
+> **Current truth, 2026-09-16.** GH-249 is DONE and merged (`5478b42`, PR #756).
+> GH-140 is READY and dispatched. The full ranked queue of remaining work lives at
+> `~/.local/state/socr-housekeeping/QUEUE.md` (51 ready, 26 needing scoping, 8 to
+> locate, 1 closure candidate).
 
 ## Live
-- **GH-249** — DONE. Grid gate implemented on `fix/249-verifier-grid-gate-v2`
-  (`native_verifier.py` + `test_native_table_verifier.py`, plus a required fixture update in
-  `test_agentic.py`, `test_gh259_flagged_model_table_wins.py`, `test_source_evidence_table_judge.py`
-  — single-native-row fixtures no longer establish a grid). All 4 acceptance criteria verified;
-  see `docs/log/2026-09-15_249.md`.
+- **GH-140** — READY, dispatched. Branch `fix/140-math-font-audit` off `5478b42`.
 
-## Active Agents
-| Agent | Ticket | Scope | Status |
-| --- | --- | --- | --- |
-| socr-implementer | GH-249 | `src/socr/tables/native_verifier.py`, `tests/test_native_table_verifier.py` | DONE |
+## Done
+- **GH-249** — merged in PR #756. Cost: 3 implementer passes, 1 adversarial review,
+  1 CI catch. See `docs/log/2026-09-15_249.md`.
+
+## Standing rules learned from GH-249
+- Run the FULL suite, never a `-k` subset — that filter let a regression reach CI.
+- Verify every reported number; two agents independently quoted a test count that
+  was impossible.
+- Abstention is not neutral in this pipeline: downstream it reads as consent.
 
 ## Next action
-Dispatch `socr-reviewer` on the diff, then wait for CI green before merging.
+Await the implementer's report on GH-140, then `socr-reviewer`, then CI-gated merge.
