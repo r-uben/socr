@@ -44,6 +44,7 @@ import re
 import statistics
 from collections import defaultdict
 
+from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
 from socr.core.table_grid import NUM_TOKEN_RE as _NUM_TOKEN_RE
 from socr.core.table_grid import NUMERIC_RE as _NUMERIC_RE
 
@@ -146,10 +147,34 @@ def reconstruct_table_regions(
     than a changed return type: every caller of this function unpacks
     ``(rect, markdown)`` pairs, and widening the tuple would touch all of them
     for a signal only one caller wants.
+
+    GH-152: an unclipped ``page.find_tables(strategy="text")`` call sees BOTH
+    tables when two are printed side by side in separate x-bands, and merges
+    them into one grid — worse than losing structure, the merged grid ships
+    each row's LABEL from one table glued to the OTHER table's values,
+    because the lane/label boundary that call infers is computed once across
+    both tables. Detect a single column gutter with the same detector
+    ``rowize_from_word_list`` uses (``_detect_column_gutter``, reusing
+    ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` — no new threshold) and, only when
+    BOTH sides independently carry their own label column
+    (``_has_row_labels`` — the same guard that stops a single wide table's
+    own label→value gap from being mis-split), run ``find_tables`` again
+    with an explicit ``clip`` per band instead of the unclipped page-wide
+    call. Deliberately NOT gated on ``has_numeric_columns`` /
+    ``_MIN_LANES_PER_ROW`` (per the GH-152 plan's wave-3 ruling): that gate
+    needs three numeric lanes co-occupied per row, and a genuine two-table
+    page can be a 1- or 2-lane schema on one or both sides. Any doubt — no
+    gutter, one side has no label column, or either band comes back empty —
+    falls through to today's single unclipped call, unchanged.
+
+    Deliberately does not reorder across bands: this file returns
+    ``(rect, markdown)`` pairs left-band-first then right-band-first, and the
+    sole caller (``born_digital.py``) re-sorts everything it collects by
+    ``y0`` alone. Correct left-to-right reading order is therefore a known
+    remainder, not delivered here — it would need a change to that file's
+    own sort, which is out of scope for this ticket.
     """
     try:
-        import fitz
-
         # Structural gate: only reconstruct where numbers actually form a grid
         # (multiple numeric lanes co-occupied per row). This skips references /
         # prose pages that the cheap columnar heuristic false-fires on — and which
@@ -161,7 +186,85 @@ def reconstruct_table_regions(
         if len(words) > _MAX_PAGE_WORDS:
             logger.debug("skipping text-strategy reconstruct: page too dense")
             return []
-        result = page.find_tables(vertical_strategy="text", horizontal_strategy="text")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("text-strategy find_tables failed: %s", exc)
+        return []
+
+    try:
+        gutter_x = _detect_column_gutter(words)
+    except Exception:  # pragma: no cover - defensive
+        gutter_x = None
+
+    if gutter_x is not None:
+        left_words = [w for w in words if w[2] <= gutter_x]
+        right_words = [w for w in words if w[0] >= gutter_x]
+        if (
+            left_words
+            and right_words
+            and _has_row_labels(left_words)
+            and _has_row_labels(right_words)
+        ):
+            try:
+                left_out = _reconstruct_table_regions_for_words(
+                    page,
+                    left_words,
+                    clip=_clip_rect_for_words(left_words),
+                    rejections=rejections,
+                )
+                right_out = _reconstruct_table_regions_for_words(
+                    page,
+                    right_words,
+                    clip=_clip_rect_for_words(right_words),
+                    rejections=rejections,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("band-scoped text-strategy reconstruct failed: %s", exc)
+                left_out, right_out = [], []
+            if left_out and right_out:
+                return left_out + right_out
+
+    return _reconstruct_table_regions_for_words(page, words, rejections=rejections)
+
+
+def _clip_rect_for_words(words: list):
+    """``fitz.Rect`` covering exactly these words.
+
+    Used as ``find_tables(clip=...)``'s boundary so a GH-152 band's own call
+    cannot read text across the gutter into the other table.
+    """
+    import fitz
+
+    x0 = min(w[0] for w in words)
+    y0 = min(w[1] for w in words)
+    x1 = max(w[2] for w in words)
+    y1 = max(w[3] for w in words)
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _reconstruct_table_regions_for_words(
+    page,
+    words: list,
+    *,
+    clip: object | None = None,
+    rejections: list[dict] | None = None,
+) -> list[tuple[object, str]]:
+    """Text-strategy ``find_tables`` + destroyed-token fallback, scoped to ``words``.
+
+    Shared body for ``reconstruct_table_regions``'s whole-page call and its
+    GH-152 per-band calls. ``words`` and ``clip`` (when given) must describe
+    the SAME region — the destroyed-token check and its rowizer fallback
+    below read only from ``words``, so a band call never sees a word from the
+    other band.
+    """
+    import fitz
+
+    try:
+        if clip is not None:
+            result = page.find_tables(
+                clip=clip, vertical_strategy="text", horizontal_strategy="text"
+            )
+        else:
+            result = page.find_tables(vertical_strategy="text", horizontal_strategy="text")
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("text-strategy find_tables failed: %s", exc)
         return []
@@ -1785,62 +1888,113 @@ def _fold_marginal_bands(rows_by_y: dict) -> dict:
     return folded
 
 
-def rowize_from_word_list(
-    words: list,
-    rotation: int = 0,
-    page_rect: object | None = None,
-) -> list[tuple[object, str]]:
-    """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
+def _median_word_gap(words: list) -> float | None:
+    """Median horizontal gap between horizontally-adjacent words on the same
+    PyMuPDF text line (``block_no``, ``line_no`` -- tuple indices 5 and 6).
 
-    The word list has the PyMuPDF ``get_text("words")`` shape:
-    ``(x0, y0, x1, y1, text, block_no, line_no, word_no)``.
-
-    Segmentation: rows are grouped by rounded ``y0``; consecutive y-groups
-    separated by a gap > max(_SPLIT_GAP_MULT × median_gap, _SPLIT_GAP_MIN_PT)
-    are treated as distinct regions. Each segment passes through the same
-    ``_looks_tabular`` gate as ``reconstruct_table_regions``.
-
-    Column detection: numeric token x-positions are clustered into lanes (same
-    ``_LANE_X_TOL_PT`` as ``has_numeric_columns``); words to the left of the
-    leftmost lane minus a snap margin are concatenated into the label cell for
-    that row. A lane with no token in a given row becomes a blank (``""``)
-    cell — never dropped.
-
-    When ``rotation`` is non-zero, word coordinates are rotated into an upright
-    frame before rowization; returned region rects are rotated back to the
-    original orientation. ``page_rect`` (a fitz.Rect) provides the center point
-    for rotation; if not supplied, rotation defaults to unrotated behaviour.
-
-    Never raises. Returns ``[]`` if no valid table segment is found.
+    The page's own yardstick for "a normal word space", reused (not
+    reinvented) as the unit for ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` when
+    ``_detect_column_gutter`` (GH-152) decides whether an x-gap is a genuine
+    column gutter rather than ordinary word spacing. Mirrors
+    ``socr.core.born_digital._median_word_space_width``, kept local because
+    that helper is private to its own module. Returns ``None`` with fewer
+    than one measurable gap.
     """
-    try:
-        import fitz
-    except ImportError:  # pragma: no cover
-        return []
+    by_line: dict[tuple, list] = defaultdict(list)
+    for w in words:
+        by_line[(w[5], w[6])].append(w)
 
+    gaps: list[float] = []
+    for line_words in by_line.values():
+        ordered = sorted(line_words, key=lambda w: w[0])
+        for a, b in zip(ordered, ordered[1:]):
+            gap = b[0] - a[2]
+            if gap > 0:
+                gaps.append(gap)
+
+    if not gaps:
+        return None
+    return statistics.median(gaps)
+
+
+def _detect_column_gutter(words: list) -> float | None:
+    """Find a single vertical gutter that splits ``words`` into two disjoint
+    x-bands (GH-152: two tables printed side by side are otherwise rowized as
+    one region, and their values get attributed to the wrong table's labels).
+
+    A candidate gutter is an x-interval crossed by NO word's bbox, anywhere on
+    the page, that is wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` (reused
+    from ``born_digital``, not a new constant -- see that constant's docstring
+    for the measurement backing it) times this word list's own median word
+    gap. Any word spanning the interval -- a running header, a full-width
+    caption -- rules it out, so a two-column layout with a spanning line fails
+    closed to today's single-region behaviour.
+
+    Returns ``None`` (do not split) when zero or more than one such interval
+    is found. More than one means 3+ x-bands, which GH-152 leaves unhandled
+    rather than guessing a merge order for the middle band.
+    """
+    if len(words) < 2:
+        return None
+    word_gap = _median_word_gap(words)
+    if word_gap is None:
+        return None
+    min_gutter_pt = ALIGNED_RUN_GAP_MAX_WORD_SPACES * word_gap
+
+    intervals = sorted((w[0], w[2]) for w in words)
+    merged: list[list[float]] = []
+    for x0, x1 in intervals:
+        if merged and x0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], x1)
+        else:
+            merged.append([x0, x1])
+
+    gutters = [
+        (merged[i][1], merged[i + 1][0])
+        for i in range(len(merged) - 1)
+        if merged[i + 1][0] - merged[i][1] >= min_gutter_pt
+    ]
+    if len(gutters) != 1:
+        return None
+    gap_start, gap_end = gutters[0]
+    return (gap_start + gap_end) / 2.0
+
+
+def _has_row_labels(words: list) -> bool:
+    """True when a majority of this word-group's y-rows carry a non-numeric
+    (label) token.
+
+    This is the structural signature of an independent table's own label
+    column, as distinct from a bare block of value columns that would result
+    from mis-splitting a SINGLE table's wide inter-column gap (e.g. the gap
+    between a "Mean" column-group and an "SD" column-group). Reuses
+    ``_MIN_DATA_ROW_FRAC`` for "majority" rather than inventing a second
+    threshold with the same meaning.
+    """
+    rows: dict[int, list] = defaultdict(list)
+    for w in words:
+        rows[round(w[1])].append(w)
+    if not rows:
+        return False
+    labeled = sum(
+        1
+        for row_words in rows.values()
+        if any(not (_NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])) for w in row_words)
+    )
+    return labeled / len(rows) >= _MIN_DATA_ROW_FRAC
+
+
+def _rowize_word_group(words: list) -> list[tuple[object, str]]:
+    """Rowize one x-band's worth of words into ``(rect, markdown)`` regions.
+
+    Coordinates are assumed already upright (rotation, if any, has been
+    normalised by the caller). This is the y-segmentation + grid-building body
+    of ``rowize_from_word_list``, factored out so GH-152's column split can
+    call it once per x-band and once for the unsplit fallback without
+    duplicating the logic.
+    """
     if not words:
         return []
-
-    if rotation == 0 or not page_rect:
-        rotation = 0
-
-    if rotation != 0:
-        if words:
-            xs = [w[0] for w in words]
-            ys = [w[1] for w in words]
-            cx = (min(xs) + max(xs)) / 2
-            cy = (min(ys) + max(ys)) / 2
-        else:
-            cx = (page_rect.x0 + page_rect.x1) / 2
-            cy = (page_rect.y0 + page_rect.y1) / 2
-        words = [_rotate_word_bbox(w, cx, cy, -rotation) for w in words]
-
-    # Save the rotation center if rotating, so we can use it for output rect rotation
-    if rotation != 0:
-        _rotation_center_x = cx
-        _rotation_center_y = cy
-    else:
-        _rotation_center_x = _rotation_center_y = None
 
     # ------------------------------------------------------------------
     # 1. Group words into y-rows (round y0 to nearest point to merge
@@ -1916,11 +2070,114 @@ def rowize_from_word_list(
             continue
         md = _grid_to_markdown(cleaned)
         if md:
+            import fitz
+
             rect = fitz.Rect(x0, y0, x1, y1)
-            if rotation != 0 and _rotation_center_x is not None:
-                rect = _rotate_rect(rect, _rotation_center_x, _rotation_center_y, rotation)
             out.append((rect, md))
             consumed.add(i)
+
+    return out
+
+
+def rowize_from_word_list(
+    words: list,
+    rotation: int = 0,
+    page_rect: object | None = None,
+) -> list[tuple[object, str]]:
+    """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
+
+    The word list has the PyMuPDF ``get_text("words")`` shape:
+    ``(x0, y0, x1, y1, text, block_no, line_no, word_no)``.
+
+    Column split (GH-152): before rowizing, ``_detect_column_gutter`` looks
+    for a single wide x-gap crossed by no word anywhere on the page. If found,
+    words are partitioned into a left and right band at the gutter and each
+    band is rowized independently (``_rowize_word_group``) -- the same
+    clip-then-rowize approach already used for a region bbox, applied to
+    columns first. The split is used only when BOTH bands independently (a)
+    yield at least one valid table region and (b) keep their own row-label
+    column (``_has_row_labels``); otherwise the words are rowized as one
+    group, unchanged from before this ticket. That guard is what keeps a
+    single wide table -- whose own label-to-value gap, or a gap between
+    column-groups, can itself look like a gutter -- from being torn in half:
+    a label-only band has no numeric lanes and never forms a valid table, and
+    a value-only band has no label words and fails ``_has_row_labels``, so
+    both routes fall back to the unsplit page, byte-identical to today.
+
+    Segmentation within a band: rows are grouped by rounded ``y0``; consecutive
+    y-groups separated by a gap > max(_SPLIT_GAP_MULT × median_gap,
+    _SPLIT_GAP_MIN_PT) are treated as distinct regions. Each segment passes
+    through the same ``_looks_tabular`` gate as ``reconstruct_table_regions``.
+
+    Column detection within a segment: numeric token x-positions are clustered
+    into lanes (same ``_LANE_X_TOL_PT`` as ``has_numeric_columns``); words to
+    the left of the leftmost lane minus a snap margin are concatenated into
+    the label cell for that row. A lane with no token in a given row becomes a
+    blank (``""``) cell — never dropped.
+
+    When ``rotation`` is non-zero, word coordinates are rotated into an upright
+    frame before rowization (and before the column-gutter check, so the split
+    reasons about the page's own upright geometry); returned region rects are
+    rotated back to the original orientation. ``page_rect`` (a fitz.Rect)
+    provides the center point for rotation; if not supplied, rotation defaults
+    to unrotated behaviour.
+
+    Never raises. Returns ``[]`` if no valid table segment is found.
+    """
+    try:
+        import fitz  # noqa: F401
+    except ImportError:  # pragma: no cover
+        return []
+
+    if not words:
+        return []
+
+    if rotation == 0 or not page_rect:
+        rotation = 0
+
+    if rotation != 0:
+        if words:
+            xs = [w[0] for w in words]
+            ys = [w[1] for w in words]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+        else:
+            cx = (page_rect.x0 + page_rect.x1) / 2
+            cy = (page_rect.y0 + page_rect.y1) / 2
+        words = [_rotate_word_bbox(w, cx, cy, -rotation) for w in words]
+
+    # Save the rotation center if rotating, so we can use it for output rect rotation
+    if rotation != 0:
+        _rotation_center_x = cx
+        _rotation_center_y = cy
+    else:
+        _rotation_center_x = _rotation_center_y = None
+
+    out: list[tuple[object, str]] = []
+    gutter_x = _detect_column_gutter(words)
+    if gutter_x is not None:
+        left_words = [w for w in words if w[2] <= gutter_x]
+        right_words = [w for w in words if w[0] >= gutter_x]
+        if (
+            left_words
+            and right_words
+            and _has_row_labels(left_words)
+            and _has_row_labels(right_words)
+        ):
+            left_regions = _rowize_word_group(left_words)
+            right_regions = _rowize_word_group(right_words)
+            if left_regions and right_regions:
+                out = left_regions + right_regions
+                out.sort(key=lambda r: (r[0].y0, r[0].x0))
+
+    if not out:
+        out = _rowize_word_group(words)
+
+    if rotation != 0 and _rotation_center_x is not None:
+        out = [
+            (_rotate_rect(rect, _rotation_center_x, _rotation_center_y, rotation), md)
+            for rect, md in out
+        ]
 
     return out
 
