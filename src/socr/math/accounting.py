@@ -299,6 +299,15 @@ class MathFontUnrecoveredDetail:
     private-use-codepoint signal for this class, so unlike the PUA case there
     is no residual-glyph corroboration term: the region-level equation-lane
     outcome (attached vs. not) is the only evidence available.
+
+    Caveat inherited from the equation lane, not introduced here:
+    ``regions_covered`` means the attach guard's numeric-presence check did
+    not positively reject the reading -- "not invented" (its own words, the
+    Ruling 4 comment in ``_agentic_equation_region_page``), never "verified
+    correct". A binding-swap error of the #273 identical-bag class (same
+    multiset of values, wrong row/column) can attach successfully and silence
+    this event. Do not read ``regions_covered == regions_total`` as a
+    correctness guarantee.
     """
 
     reason: str

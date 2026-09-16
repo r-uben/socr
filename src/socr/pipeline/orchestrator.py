@@ -12919,9 +12919,16 @@ class UnifiedPipeline:
         # doubt bucket above takes.
         pages_ok = pages_ok and not unresolved_math_pages
         # #140: math-font typesetting no retained equation-lane recovery
-        # covers. Same reasoning as the PUA bucket immediately above -- the
-        # page keeps its prose, so this is AUDIT_FAILED, not ERROR.
-        pages_ok = pages_ok and not math_font_unresolved_pages
+        # covers is deliberately NOT folded into ``pages_ok``/AUDIT_FAILED.
+        # Measured trigger rate (docs/log/2026-09-02_p4m-trigger-rates.md,
+        # 23,190 pages): the signal fires on 36.1% of the free lane, ~15x the
+        # PUA bucket immediately above (2.4%), and an unclearable 8.0% slice
+        # (inline symbols, no display equation for the region locator to
+        # find) would become a permanent AUDIT_FAILED with no path out on
+        # regression-table-heavy corpora. The event/note/CLI line still ship
+        # (see below); only the document-status demotion is withheld pending
+        # a trigger_rates.py extension that measures the clearable share
+        # (deferred, separate ticket).
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest

@@ -215,16 +215,20 @@ def _page_state(**overrides) -> PageState:
     return PageState(**base)
 
 
-def test_guard_demotes_success_and_notes_the_loss() -> None:
+def test_guard_notes_the_loss_without_demoting_status() -> None:
+    """Reports, does not demote: the measured trigger rate (36.1% of the free
+    lane, ~15x the PUA class this mirrors, per docs/log/2026-09-02_p4m-
+    trigger-rates.md) makes an unconditional demotion an unclearable
+    AUDIT_FAILED for the 8.0% slice with no display equation to locate."""
     from socr.core.manifest import _apply_math_font_unrecovered_guard
 
     out = PageOutput(page_num=1, text="prose", status=PageStatus.SUCCESS, engine="native")
     p = _page_state()
 
-    demoted = _apply_math_font_unrecovered_guard(out, p)
+    result = _apply_math_font_unrecovered_guard(out, p)
 
-    assert demoted.status is PageStatus.WARNING
-    assert any("math-font typesetting" in n for n in demoted.audit_notes)
+    assert result.status is PageStatus.SUCCESS
+    assert any("math-font typesetting" in n for n in result.audit_notes)
 
 
 def test_guard_leaves_a_covered_page_untouched() -> None:
@@ -250,7 +254,7 @@ def test_guard_leaves_a_math_free_page_untouched() -> None:
     assert result is out
 
 
-def test_guard_never_upgrades_an_already_worse_status() -> None:
+def test_guard_never_touches_status_whatever_it_starts_as() -> None:
     from socr.core.manifest import _apply_math_font_unrecovered_guard
 
     out = PageOutput(page_num=1, text="prose", status=PageStatus.ERROR, engine="native")
@@ -420,7 +424,7 @@ def _run(
         result = pipeline._phase_assemble(state, out_dir)
         route.assert_not_called()
 
-    return state, result, out_dir
+    return pipeline, state, result, out_dir
 
 
 def _math_font_events(state: DocumentState) -> list:
@@ -430,7 +434,7 @@ def _math_font_events(state: DocumentState) -> list:
 def test_fully_covered_page_raises_no_event(tmp_path: Path) -> None:
     """The lane locates the one region, the reading is accepted and aligned:
     covered, so no event and the page is not demoted for this reason."""
-    state, result, _ = _run(tmp_path, provider=True, tag="covered")
+    pipeline, state, result, _ = _run(tmp_path, provider=True, tag="covered")
 
     assert _math_font_events(state) == []
     assert "math-font typesetting" not in (result.error or "")
@@ -441,21 +445,23 @@ def test_fully_covered_page_raises_no_event(tmp_path: Path) -> None:
 
 def test_no_provider_leaves_the_math_uncovered_and_reported(tmp_path: Path) -> None:
     """With no provider the lane locates the region but every call is skipped
-    (`equation_region_reading_unvalidated`): uncovered, so the event fires,
-    the page is demoted and the document note names it."""
-    state, result, out_dir = _run(tmp_path, provider=False, tag="noprovider")
+    (`equation_region_reading_unvalidated`): uncovered, so the event fires and
+    the document note names it. Status stays SUCCESS -- the demotion was
+    considered and rejected on measured blast radius (see the decision log);
+    this is "reported and visible", not "fails the document"."""
+    pipeline, state, result, out_dir = _run(tmp_path, provider=False, tag="noprovider")
 
     events = _math_font_events(state)
     assert len(events) == 1
     assert events[0].page_num == 1
     assert events[0].data["regions_total"] == 1
     assert events[0].data["regions_covered"] == 0
-    assert state.status is DocumentStatus.AUDIT_FAILED
+    assert state.status is DocumentStatus.SUCCESS
     assert "math-font typesetting" in (result.error or "")
 
     from socr.core.manifest import finalized_page_record
 
-    assert finalized_page_record(state, 1).output.status is PageStatus.WARNING
+    assert finalized_page_record(state, 1).output.status is PageStatus.SUCCESS
 
     # Criterion 1: the event survives into the page sidecar.
     sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
@@ -467,34 +473,36 @@ def test_lane_off_and_no_evidence_is_reported_the_same_way(tmp_path: Path) -> No
     """Criterion 1, the literal case: the equation lane disabled entirely (no
     `--equation-region-lane`) means no evidence is EVER retained for this
     page. The event must still fire -- this is the exact silent-by-default
-    gap #140 exists to close."""
-    state, result, _ = _run(tmp_path, lane=False, provider=True, tag="laneoff")
+    gap #140 exists to close -- even though the document itself still reports
+    SUCCESS (the demotion is deliberately withheld)."""
+    pipeline, state, result, _ = _run(tmp_path, lane=False, provider=True, tag="laneoff")
 
     events = _math_font_events(state)
     assert len(events) == 1
     assert events[0].data["regions_total"] == 0
-    assert state.status is DocumentStatus.AUDIT_FAILED
+    assert state.status is DocumentStatus.SUCCESS
 
 
 def test_covered_vs_uncovered_is_the_pinned_difference(tmp_path: Path) -> None:
     """Repo convention: pin the DIFFERENCE the change under test controls, not
     an absolute value that provider-dependent machinery could legitimately
     vary in CI. Here both runs are fully hermetic (provider ladder is an
-    explicit parameter), so the difference is exact."""
-    covered_state, _, _ = _run(tmp_path, provider=True, tag="diff_covered")
-    uncovered_state, _, _ = _run(tmp_path, provider=False, tag="diff_uncovered")
+    explicit parameter), so the difference is exact: the event fires or not,
+    document status is unaffected either way (see the decision log)."""
+    _, covered_state, _, _ = _run(tmp_path, provider=True, tag="diff_covered")
+    _, uncovered_state, _, _ = _run(tmp_path, provider=False, tag="diff_uncovered")
 
     assert _math_font_events(covered_state) == []
     assert len(_math_font_events(uncovered_state)) == 1
     assert covered_state.status is DocumentStatus.SUCCESS
-    assert uncovered_state.status is DocumentStatus.AUDIT_FAILED
+    assert uncovered_state.status is DocumentStatus.SUCCESS
 
 
 def test_a_pua_page_never_also_raises_the_math_font_event(tmp_path: Path) -> None:
     """Criterion 3, end to end: a page carrying BOTH signals (math-font
     typesetting detected AND unmapped/PUA glyphs) raises only
     `UNRESOLVED_MATH_KIND`, never `MATH_FONT_UNRECOVERED_KIND` too."""
-    state, _, _ = _run(tmp_path, provider=False, tag="pua_overlap")
+    pipeline, state, _, _ = _run(tmp_path, provider=False, tag="pua_overlap")
     state.pages[1].has_unmapped_math_glyphs = True
     state._last_assessment.pages[0].has_unmapped_math_glyphs = True
 
@@ -513,3 +521,51 @@ def test_a_pua_page_never_also_raises_the_math_font_event(tmp_path: Path) -> Non
         )
         is None
     )
+
+
+def test_the_event_and_the_note_survive_a_resume(tmp_path: Path) -> None:
+    """A resumed page is not re-assessed and not re-recovered (PP-5): the
+    equation lane never runs a second time, so the ONLY way an uncovered
+    page's record can still be visible on resume is if the sidecar-persisted
+    ``equation_region_evidence`` and the ``MATH_FONT_UNRECOVERED_KIND`` event
+    are both actually restored -- neither is exercised by any test above.
+    Pins the identical event and page-level outcome (still SUCCESS, per the
+    criterion-4 decision) across run 1 -> resume."""
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import finalized_page_record
+
+    pipeline, state, result, out_dir = _run(tmp_path, provider=False, tag="resume")
+    assert _math_font_events(state)
+    assert result.status is DocumentStatus.SUCCESS
+
+    sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+    assert sidecar.get("equation_region_evidence") == {
+        "regions_total": 1,
+        "regions_covered": 0,
+    }
+    assert MATH_FONT_UNRECOVERED_KIND in [e.get("kind") for e in sidecar["audit_events"]]
+
+    resumed = DocumentState(handle=DocumentHandle.from_path(state.handle.path))
+    assert not resumed.events, "nothing restored yet; the test would be vacuous otherwise"
+    page_out = PageOutput(
+        page_num=1,
+        text=_EQ_NATIVE,
+        status=PageStatus.SUCCESS,
+        engine="native",
+        audit_passed=True,
+    )
+    pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
+
+    assert resumed.pages[1].equation_region_evidence == {
+        "regions_total": 1,
+        "regions_covered": 0,
+    }
+    resumed_events = _math_font_events(resumed)
+    assert len(resumed_events) == 1, "the record vanished (or duplicated) on resume"
+    assert (
+        resumed_events[0].data
+        == sidecar["audit_events"][
+            [e.get("kind") for e in sidecar["audit_events"]].index(MATH_FONT_UNRECOVERED_KIND)
+        ]["data"]
+    )
+    assert finalized_page_record(resumed, 1).output.status is PageStatus.SUCCESS

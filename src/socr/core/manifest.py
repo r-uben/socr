@@ -3945,15 +3945,21 @@ def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
 
 
 def _apply_math_font_unrecovered_guard(output: PageOutput, p) -> PageOutput:
-    """#140: demote a page whose math-font typesetting no retained recovery covers.
+    """#140: note a page whose math-font typesetting no retained recovery covers.
 
-    Same contract as ``_apply_unresolved_math_guard`` immediately above, for
-    the sibling damage class: font-metadata-detected math typesetting that
-    extracts as plausible-looking prose (no PUA glyphs) but is known, by the
-    detector's own docstring, to mangle subscripts, Greek letters and reading
-    order. A REPORTING guard, not a routing one -- nothing here re-selects or
-    re-routes, it only demotes the reported status of the bytes that already
-    won.
+    Reports, does not demote. Measured trigger rate (`docs/log/2026-09-02_p4m-
+    trigger-rates.md`, 23,190 pages): `has_math_font_typesetting` fires on
+    36.1% of the free lane, ~15x the PUA class this ticket's accounting
+    mirrors (2.4%), and an 8.0% slice of those pages (inline symbols in prose,
+    no display equation) can never clear -- the region locator has nothing to
+    find. Demoting page/document status the way `_apply_unresolved_math_guard`
+    does would make that slice a permanent, unclearable AUDIT_FAILED and could
+    plausibly dominate the bucket on regression-table-heavy corpora (Fed/ECB
+    style). So this guard only appends the audit note; it never touches
+    `output.status`. The event is still durable (sidecar, resume) and still
+    surfaced (CLI, page note) -- reported and visible, not failing the
+    document. Revisit if `trigger_rates.py` is extended to measure the
+    clearable share (deferred, separate ticket).
     """
     from socr.math.accounting import math_font_unrecovered_detail
 
@@ -3968,8 +3974,6 @@ def _apply_math_font_unrecovered_guard(output: PageOutput, p) -> PageOutput:
     notes = list(output.audit_notes or [])
     if detail.detail not in notes:
         notes.append(detail.detail)
-    if output.status is PageStatus.SUCCESS:
-        return replace(output, status=PageStatus.WARNING, audit_notes=notes)
     return replace(output, audit_notes=notes)
 
 
@@ -3987,7 +3991,7 @@ def _select_and_finalize_page(
       3. _apply_table_emission_guard
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
-      6. _apply_math_font_unrecovered_guard
+      6. _apply_math_font_unrecovered_guard (note-only, no demotion -- see its docstring)
       7. _apply_label_unverified_guard
       8. _apply_ditto_guard
       9. _apply_chart_region_guard

@@ -6,7 +6,18 @@ One ticket per confirmed-still-valid defect. Dispatch one `socr-implementer` per
 
 ## GH-140 — math-font pages ship trusted-native with no audit of known-lossy math
 
-**Status:** DONE (implemented, committed, awaiting review/CI/merge)
+**Status:** DONE (implemented, REVISE round applied, committed, awaiting review/CI/merge)
+
+**REVISE (2026-09-16):** criterion 4's original "yes, demote" answer was
+reversed. Measured against `docs/log/2026-09-02_p4m-trigger-rates.md`
+(23,190 pages), `has_math_font_typesetting` fires on 36.1% of the free lane
+vs. the PUA precedent's 2.4%, and an 8.0% slice can never clear (no display
+equation exists to recover). Demotion is withheld pending a separate-ticket
+`trigger_rates.py` extension measuring the clearable share; the event,
+sidecar persistence, page note and CLI/document-note surfacing all still
+ship. Also added: a resume round-trip test, and a docstring caveat on
+`regions_covered` ("not invented", not "verified correct"). See
+`docs/log/2026-09-16_140.md`.
 **Branch:** `fix/140-math-font-audit`
 **Write ownership:** `src/socr/math/accounting.py`, `src/socr/core/born_digital.py`,
 `tests/` (a new test module for this ticket). **Deviation:** also touched
