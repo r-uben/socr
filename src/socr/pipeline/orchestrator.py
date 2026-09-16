@@ -10663,6 +10663,7 @@ class UnifiedPipeline:
                 fingerprint_inputs=self._fingerprint_inputs(state),
                 saved_body=saved_body,
                 records=records,
+                doc_dir=doc_dir,
             )
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:

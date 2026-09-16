@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import re
+import shutil
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -69,6 +70,22 @@ logger = logging.getLogger(__name__)
 # zero-width spaces / soft hyphens stripped, exotic spaces normalized. This changes
 # the saved native bytes for any born-digital page that carried publisher invisibles
 # (native text bypasses OutputNormalizer), so pages cached under v2 must reprocess.
+#
+# MANIFEST_SCHEMA_VERSION is a document-shape version (distinct from the
+# fingerprint versions above, which trigger re-OCR), currently kept but not
+# branched on anywhere in this file -- every optional field on ``Manifest`` /
+# ``ManifestEntry`` (``timings_s``, ``agentic_ladder``, and now ``assets``,
+# GH-170) is instead detected by presence, the same pattern already used here
+# for every prior addition. ``ManifestEntry.assets`` -- content hash + logical
+# path for every visual asset (figure/chart/equation crop PNG) a page's saved
+# text references -- follows that pattern: a manifest written before GH-170
+# simply omits the key, and ``stale_assets`` treats that as "nothing recorded
+# to verify", NOT "verified intact" — it does not fail closed on pre-existing
+# caches (see GH-170 decision log), but it also cannot catch a broken image
+# link in one. Only manifests written from now on get the new guarantee. Not
+# bumping the version number here is deliberate: nothing reads it, so bumping
+# it would be purely cosmetic while creating a spurious top-level diff for
+# every unrelated golden/byte-identity fixture in the tree.
 MANIFEST_SCHEMA_VERSION = "1"
 NORMALIZER_VERSION = "3"
 ASSEMBLY_VERSION = "3"
@@ -246,6 +263,30 @@ class PageFingerprint:
 
 
 @dataclass
+class AssetRef:
+    """One visual asset (figure/chart/equation crop) a page's saved text references.
+
+    ``logical_path`` is doc-dir-relative POSIX, matching the destination actually
+    embedded in the page's markdown image link (e.g. ``"figures/figure_1_page3.png"``)
+    — not a canonical filename guess, so it stays correct if the embedding scheme
+    changes. ``content_hash`` is the sha256 of the asset's bytes at manifest-build
+    time, so replay can tell a missing asset from a since-modified one instead of
+    silently emitting a document whose figure link resolves to nothing or to the
+    wrong picture (GH-170).
+    """
+
+    logical_path: str
+    content_hash: str
+
+    def to_dict(self) -> dict:
+        return {"logical_path": self.logical_path, "content_hash": self.content_hash}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AssetRef:
+        return cls(logical_path=d["logical_path"], content_hash=d["content_hash"])
+
+
+@dataclass
 class ManifestEntry:
     """One page's record: fingerprint + pointer to its frozen output blob."""
 
@@ -254,6 +295,10 @@ class ManifestEntry:
     fingerprint: PageFingerprint
     journal: list[dict] = field(default_factory=list)  # provenance: attempts tried
     disposition: PageDisposition | None = None
+    # GH-170: visual assets this page's saved text references. Empty on a
+    # manifest predating GH-170 (or a page with no images) -- see
+    # ``stale_assets`` for how that distinction is preserved on replay.
+    assets: list[AssetRef] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -264,6 +309,12 @@ class ManifestEntry:
         }
         if self.disposition is not None:
             d["disposition"] = self.disposition.to_dict()
+        if self.assets:
+            # Omitted when empty (matches the ``timings_s``/``agentic_ladder``
+            # convention on ``Manifest`` itself): a page with no images produces
+            # the exact same JSON as before GH-170, so every golden/byte-identity
+            # fixture that never had figures is untouched by this field existing.
+            d["assets"] = [a.to_dict() for a in self.assets]
         return d
 
     @classmethod
@@ -273,6 +324,7 @@ class ManifestEntry:
         return cls(
             page_num=d["page_num"],
             blob_ref=d["blob_ref"],
+            assets=[AssetRef.from_dict(a) for a in d.get("assets", [])],
             fingerprint=PageFingerprint(**d["fingerprint"]),
             journal=d.get("journal", []),
             disposition=disposition,
@@ -4217,6 +4269,71 @@ def _base_engine_name(engine: str) -> str:
     return engine
 
 
+def _local_page_asset_refs(text: str, doc_dir: Path) -> list[AssetRef]:
+    """Content-hash every LIVE local image link a page's saved text makes.
+
+    Reuses the chart-region module's own markdown scanner (``live_image_tokens`` +
+    ``markdown_literal_context``) rather than a second regex -- a hand-rolled one
+    here could disagree with the one that actually embeds/reconciles figure links
+    about what counts as an image, which is exactly the two-scanner drift this
+    repo's fence/comment handling already learned to avoid once.
+
+    A destination that is not a local file (a URL, a data: URI, a bare anchor) is
+    skipped -- there is nothing on disk to verify. A destination that IS local but
+    missing at build time is logged and skipped too: the manifest can only record
+    provenance for bytes that exist, and "never recorded" is a distinct, honest
+    state from "recorded and later went missing" (see ``stale_assets``). A
+    destination that resolves outside ``doc_dir`` is also skipped and logged --
+    manifest asset paths are doc-dir-relative by construction; one that escapes it
+    cannot be a real figure/chart/equation crop this run wrote.
+    """
+    if not text:
+        return []
+    from socr.figures.chart_regions import live_image_tokens, markdown_literal_context
+
+    doc_dir = doc_dir.resolve()
+    lines = text.split("\n")
+    literal_lines, ranges = markdown_literal_context(lines)
+    assets: list[AssetRef] = []
+    seen: set[str] = set()
+    for idx, line in enumerate(lines):
+        if idx in literal_lines:
+            continue
+        for _start, _end, dest in live_image_tokens(line, ranges.get(idx, [])):
+            dest = dest.strip()
+            if not dest or "://" in dest or dest.startswith("data:") or dest.startswith("#"):
+                continue
+            if dest in seen:
+                continue
+            seen.add(dest)
+            asset_path = (doc_dir / dest).resolve()
+            try:
+                asset_path.relative_to(doc_dir)
+            except ValueError:
+                logger.warning(
+                    "manifest: page asset %r resolves outside doc_dir (%s); omitted "
+                    "from provenance",
+                    dest,
+                    doc_dir,
+                )
+                continue
+            if not asset_path.is_file():
+                logger.warning(
+                    "manifest: page references asset %r but %s does not exist; omitted "
+                    "from provenance",
+                    dest,
+                    asset_path,
+                )
+                continue
+            try:
+                content_hash = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                logger.warning("manifest: could not hash asset %r (%s); omitted", dest, exc)
+                continue
+            assets.append(AssetRef(logical_path=dest, content_hash=content_hash))
+    return assets
+
+
 def build_manifest(
     state: DocumentState,
     blobs: BlobStore,
@@ -4225,6 +4342,7 @@ def build_manifest(
     fingerprint_inputs: dict[str, tuple[str, str, str | None, str | None]] | None = None,
     saved_body: str | None = None,
     records: list[FinalizedPageRecord] | None = None,
+    doc_dir: Path | None = None,
 ) -> Manifest:
     """Freeze a completed ``DocumentState`` into (manifest, cached blobs).
 
@@ -4252,6 +4370,14 @@ def build_manifest(
     manifest construction cannot select or guard those pages a second time.
     Direct callers omit it and get one record per page from
     :func:`finalized_page_records`, using the same seam.
+
+    ``doc_dir`` is the directory the page's image links are relative to (where
+    ``manifest.json`` itself is written). When given, every page's frozen text is
+    scanned for live local image links and each is recorded as an
+    :class:`AssetRef` (GH-170) -- content hash + doc-dir-relative logical path.
+    Omitted (``None``), no asset provenance is recorded, matching a pre-GH-170
+    manifest; callers that never had a doc dir to give (most direct/test callers)
+    get the old behaviour unchanged.
     """
     handle = state.handle
     dpi = dpi if dpi is not None else 200
@@ -4387,12 +4513,14 @@ def build_manifest(
             }
             for a in state.pages[page_num].attempts
         ]
+        page_assets = _local_page_asset_refs(page.text, doc_dir) if doc_dir is not None else []
         manifest.entries[page_num] = ManifestEntry(
             page_num=page_num,
             blob_ref=blob_ref,
             fingerprint=fp,
             journal=journal,
             disposition=record.disposition,
+            assets=page_assets,
         )
     return manifest
 
@@ -4425,6 +4553,118 @@ def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:
         for pn in range(1, manifest.page_count + 1)
         if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)
     ]
+
+
+@dataclass(frozen=True)
+class AssetIntegrityIssue:
+    """One recorded visual asset that failed verification against *doc_dir*."""
+
+    page_num: int
+    logical_path: str
+    kind: str  # "missing" or "modified" -- distinct operator actions (GH-170)
+    detail: str
+
+
+def stale_assets(manifest: Manifest, doc_dir: Path | str) -> list[AssetIntegrityIssue]:
+    """Recorded visual assets that are missing or corrupted under *doc_dir*.
+
+    *doc_dir* is the directory the manifest's asset ``logical_path``s are
+    relative to -- for a saved manifest this is ``manifest_path.parent`` (where
+    ``manifest.json`` and ``figures/`` live side by side).
+
+    A page's ``entry.assets`` is empty on a manifest predating GH-170
+    (or a page with no images), and an empty list here reports NO issues --
+    "nothing was ever recorded to check" is a distinct state from "checked and
+    found intact", and this function deliberately cannot tell the two apart from
+    an empty list alone. It is honest about what it verifies: only assets this
+    manifest actually promised.
+
+    Distinguishes "missing" (no file at the recorded path) from "modified" (a
+    file is there but its content hash no longer matches) because they call for
+    different operator action -- restore/relocate the file vs. investigate what
+    overwrote it.
+    """
+    doc_dir = Path(doc_dir).resolve()
+    issues: list[AssetIntegrityIssue] = []
+    for page_num in range(1, manifest.page_count + 1):
+        entry = manifest.entries.get(page_num)
+        if entry is None:
+            continue
+        for asset in entry.assets:
+            asset_path = (doc_dir / asset.logical_path).resolve()
+            if not asset_path.is_file():
+                issues.append(
+                    AssetIntegrityIssue(
+                        page_num=page_num,
+                        logical_path=asset.logical_path,
+                        kind="missing",
+                        detail=f"no file at {asset_path}",
+                    )
+                )
+                continue
+            try:
+                actual_hash = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                issues.append(
+                    AssetIntegrityIssue(
+                        page_num=page_num,
+                        logical_path=asset.logical_path,
+                        kind="missing",
+                        detail=f"unreadable at {asset_path}: {exc}",
+                    )
+                )
+                continue
+            if actual_hash != asset.content_hash:
+                issues.append(
+                    AssetIntegrityIssue(
+                        page_num=page_num,
+                        logical_path=asset.logical_path,
+                        kind="modified",
+                        detail=(
+                            f"content hash mismatch at {asset_path} "
+                            f"(expected {asset.content_hash[:12]}…, got {actual_hash[:12]}…)"
+                        ),
+                    )
+                )
+    return issues
+
+
+def copy_page_assets(
+    manifest: Manifest, source_dir: Path | str, dest_dir: Path | str
+) -> list[Path]:
+    """Copy every recorded visual asset from *source_dir* to *dest_dir*.
+
+    Preserves each asset's ``logical_path`` relative to *dest_dir*
+    (e.g. ``figures/figure_1_page3.png``), so a document replayed to a
+    directory OTHER than the manifest's own no longer ships a relative image
+    link that resolves to nothing there (GH-170 acceptance #3: "replay to
+    another directory copies assets or rewrites paths"). A no-op when the two
+    directories are the same path.
+
+    Callers are expected to have already run :func:`stale_assets` against
+    *source_dir* and refused to proceed on any issue -- this function does not
+    re-verify content, it only relocates already-verified bytes.
+    """
+    source_dir = Path(source_dir).resolve()
+    dest_dir = Path(dest_dir).resolve()
+    copied: list[Path] = []
+    if source_dir == dest_dir:
+        return copied
+    seen: set[str] = set()
+    for page_num in range(1, manifest.page_count + 1):
+        entry = manifest.entries.get(page_num)
+        if entry is None:
+            continue
+        for asset in entry.assets:
+            if asset.logical_path in seen:
+                continue
+            seen.add(asset.logical_path)
+            src = source_dir / asset.logical_path
+            dst = dest_dir / asset.logical_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            copied.append(dst)
+    return copied
 
 
 def splice_all_table_regions(
