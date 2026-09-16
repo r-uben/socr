@@ -246,11 +246,25 @@ class TestKnownFalsePositiveClassInherited:
     The ticket requires reusing ``_detect_columnar_numbers`` VERBATIM ("do
     not write a new ratio, row-count cut, or lane threshold"). That heuristic
     is known (PP-6's own commit message and ``TestLaneCooccupancyRoutingGate``
-    in ``test_born_digital.py``) to false-fire on chart-axis tick columns,
-    which are single-token lines but share one x-lane, not a table. Reusing
-    the predicate verbatim inherits that false-positive class by construction;
-    this is called out explicitly here and in the decision log rather than
-    silently narrowed with a new threshold this ticket forbids.
+    in ``test_born_digital.py``) to false-fire on chart-axis tick columns.
+    Review (2026-09-16) found the inherited class is BROADER than chart axes
+    alone: any page dominated by single-token-line "page furniture" --
+    chart-axis ticks, book-index term|page-number pairs (also the shape named
+    in backlog item #213, "book indexes are routed to table reconstruction"),
+    and bare numbered-list markers -- shares the same >=15-single-token-line,
+    >50%-ratio profile and trips the flag. None of these are a table; all
+    were routed True by the pre-PP-6 heuristic before this ticket, and remain
+    True now that the ticket restores it verbatim.
+
+    Reusing the predicate verbatim inherits this WHOLE class by construction;
+    it is called out explicitly here and in the decision log rather than
+    silently narrowed with a new threshold this ticket forbids. The trigger
+    rate of this class across the real corpus is UNMEASURED -- two
+    independent synthetic-fixture probes during review disagreed with each
+    other (a TOC fixture that flagged on one run returned False on another;
+    a multi-token label|value control that was expected to flag did not), so
+    no rate is claimed here, only the fact that the class exists and is
+    wider than a single named shape.
     """
 
     def test_chart_axis_labels_still_flag_a_known_false_positive(self, tmp_path: Path) -> None:
@@ -263,9 +277,81 @@ class TestKnownFalsePositiveClassInherited:
         assert not page.has_tables, "PP-6 routing gate must still reject this (unchanged)"
         assert page.possible_table_structure_not_reconstructed, (
             "Inherited false positive: verbatim reuse of the pre-PP-6 heuristic "
-            "means chart-axis tick columns (its known false-positive class) still "
-            "trip the audit flag. This is a documented trade-off of 'no new "
-            "threshold', not a regression -- see docs/log/2026-09-16_64.md."
+            "means chart-axis tick columns (one instance of its known false-positive "
+            "class) still trip the audit flag. This is a documented trade-off of 'no "
+            "new threshold', not a regression -- see docs/log/2026-09-16_64.md."
+        )
+
+    def test_book_index_page_also_flags(self, tmp_path: Path) -> None:
+        """A term|page-number index (the #213 shape) is single-token-line-heavy
+        page furniture, not a table -- and trips the same inherited class."""
+        pdf_path = tmp_path / "index.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 50), "Index", fontsize=12, fontname="helv")
+        terms = [
+            "Accountability",
+            "Bonds",
+            "Capital",
+            "Debt",
+            "Equity",
+            "Forecasting",
+            "GDP",
+            "Hedging",
+            "Inflation",
+            "Jobs",
+            "Keynes",
+            "Liquidity",
+            "Monetary",
+            "Nominal",
+            "Output",
+            "Prices",
+            "Quantitative easing",
+            "Rates",
+            "Supply",
+            "Trade",
+            "Unemployment",
+            "Volatility",
+            "Wages",
+            "Yield",
+            "Zero bound",
+        ]
+        for i, term in enumerate(terms):
+            y = 90 + i * 20
+            page.insert_text((72, y), term, fontsize=9, fontname="helv")
+            page.insert_text((500, y), str(100 + i), fontsize=9, fontname="helv")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result_page = detector.detect(pdf_path).pages[0]
+
+        assert not result_page.has_tables, "An index is not a table; PP-6's gate must reject it"
+        assert result_page.possible_table_structure_not_reconstructed, (
+            "Inherited false positive: a book-index page (term|page-number, "
+            "#213's shape) is single-token-line-heavy page furniture that the "
+            "verbatim pre-PP-6 heuristic still flags."
+        )
+
+    def test_numbered_list_markers_also_flag(self, tmp_path: Path) -> None:
+        """Bare numbered-list markers ('1.', '2.', ...) are single-token lines
+        too -- another instance of the same inherited class, not a table."""
+        pdf_path = tmp_path / "numbered_list.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 50), "References", fontsize=12, fontname="helv")
+        for i in range(20):
+            page.insert_text((72, 90 + i * 30), f"{i + 1}.", fontsize=10, fontname="helv")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result_page = detector.detect(pdf_path).pages[0]
+
+        assert not result_page.has_tables
+        assert result_page.possible_table_structure_not_reconstructed, (
+            "Inherited false positive: bare numbered-list markers are "
+            "single-token lines and trip the same inherited class."
         )
 
 

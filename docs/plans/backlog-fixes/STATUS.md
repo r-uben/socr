@@ -19,12 +19,18 @@
   `AuditEvent` append) — the same seam GH-140 used the same night — since
   `PageAssessment.notes` alone reaches nothing the pipeline reads. Report-only, no status
   demotion (ticket's hard scope limit 2; no trigger-rate measured for this signal yet).
-  Full suite 5444 passed / 4 xfailed (5431 main baseline + 13 new tests, exact);
-  `ruff format --check` clean; mutation-tested (neutering the predicate fails exactly the
-  4 tests that require it to fire, 9 others correctly unaffected, including both
+  Full suite 5444 passed / 4 xfailed (5431 main baseline + 13 new tests, exact) — this run
+  predates the disclosure widening below and was not rerun for it per the team lead's
+  instruction; `ruff format --check` clean; mutation-tested (neutering the predicate fails
+  exactly the tests that require it to fire, all others correctly unaffected, including both
   `_agentic_native_page` orchestrator-seam tests). Inherits the pre-PP-6 heuristic's known
-  chart-axis false-positive class by construction (ticket forbids a new threshold to
-  narrow it) — documented explicitly, not silently absorbed into criterion 2. See
+  false-positive class by construction (ticket forbids a new threshold to narrow it) —
+  documented explicitly, not silently absorbed into criterion 2. **2026-09-16 review round:**
+  widened the disclosure after review found the class is broader than chart-axis alone
+  (also book-index pages — #213's shape — and numbered lists); no trigger rate is claimed
+  (two independent review probes disagreed with each other); test module grew from 13 to
+  15 tests (mutation rerun: 6 of 15 fail, exactly the ones requiring the predicate to fire);
+  corpus trigger-rate measurement recorded as a deferred, unimplemented follow-up. See
   `docs/log/2026-09-16_64.md`. Not yet merged.
 - **GH-221** — implemented on `fix/221-wedge-canary` (off `3e04f1c`). Replaced the
   `/api/tags`-only liveness probe with a functional generation canary (minimal
