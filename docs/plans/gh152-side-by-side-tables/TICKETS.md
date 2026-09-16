@@ -92,6 +92,30 @@ means safe specifically when the gutter is detected. See `docs/log/2026-09-16_15
 full trace. **related: GH-418** (cross-link this both ways — GH-418's issue should point back
 here too).
 
+### TICKET-A1 follow-up — GH-783: the positional clause A1 specified was dropped in
+implementation · DONE · depends-on: A1 · found post-merge
+
+A1's ruling (above) specifies `_has_row_labels`'s label predicate as "a non-numeric word
+**left of that side's leftmost numeric lane**, in at least `_MIN_TABLE_ROWS` rows". The
+implementation that shipped kept only "does any non-numeric token appear in this row" — the
+positional half of the requirement was never carried over. That gap was **not** caught by
+this plan's own acceptance criteria or test suite; it surfaced from **cubic's automated
+review of PR #782** (a later, unrelated ticket that happened to touch the same file), not
+from anything in this plan's `Done when` checks. A plan recording only what went right would
+not have shown this.
+
+**Measured effect:** a value-only band whose cells carry a significance marker (`0.253***`)
+or `n.a.` — corpus-realistic, not constructed — registered as having its own label column,
+defeating GH-152's entire false-positive guard on exactly the case that guard exists for.
+
+**Fix:** GH-783, `src/socr/tables/reconstruct.py::_has_row_labels` now requires the
+non-numeric token to sit strictly left of the band's leftmost RECURRING numeric lane (a
+cluster via `_adjacent_lane_of`, gated on `_MIN_TABLE_ROWS` recurrence so a one-off numeric
+token can't found its own lane and blind the check for every other row — see
+`docs/log/2026-09-16_783.md` for why the naive "global min x0" reading fails), plus an
+absolute `_MIN_TABLE_ROWS` floor on the labeled-row count. Tests:
+`tests/test_gh783_row_label_position.py`.
+
 ⚠️ **Second partial-closure note — GH-780, a page-sized density floor applied
 to a band.** Distinct from the GH-418 gap above. `rowize_from_word_list`
 (the fallback rung, reached only when the PRIMARY rung's band-clipped

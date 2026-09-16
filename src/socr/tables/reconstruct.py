@@ -1962,26 +1962,73 @@ def _detect_column_gutter(words: list) -> float | None:
 
 def _has_row_labels(words: list) -> bool:
     """True when a majority of this word-group's y-rows carry a non-numeric
-    (label) token.
+    (label) token that sits POSITIONALLY to the left of the band's own
+    leftmost numeric lane.
 
     This is the structural signature of an independent table's own label
     column, as distinct from a bare block of value columns that would result
     from mis-splitting a SINGLE table's wide inter-column gap (e.g. the gap
     between a "Mean" column-group and an "SD" column-group). Reuses
     ``_MIN_DATA_ROW_FRAC`` for "majority" rather than inventing a second
-    threshold with the same meaning.
+    threshold with the same meaning, and gates on ``_MIN_TABLE_ROWS`` as an
+    absolute floor (per the GH-152 plan's TICKET-A1 ruling) so a handful of
+    rows cannot satisfy the fraction alone.
+
+    GH-783: a token that fails ``_NUM_TOKEN_RE`` (e.g. a value carrying a
+    significance marker, ``0.253***``, or ``n.a.``) used to count as a
+    "label" no matter WHERE it sat, so a value-only band whose cells happen
+    to carry such markers read as having its own label column. Requiring the
+    non-numeric token to sit left of the band's leftmost numeric LANE is
+    what distinguishes an actual label cell from a decorated value sharing a
+    value lane: a decorated value's x0 lands inside (or right of) the
+    numeric lanes it is dressing up, never to their left.
+
+    "Leftmost numeric lane" is a CLUSTER, not a single token's x0: numeric
+    x0s are grouped with ``_adjacent_lane_of`` (the same greedy-adjacency
+    clustering ``has_numeric_columns`` uses) and only a lane that recurs
+    across at least ``_MIN_TABLE_ROWS`` distinct rows counts -- a one-off
+    numeric token stranded in the label column (e.g. a single row's ID
+    number) would otherwise found its own "lane" and drag the boundary left,
+    making every OTHER row's genuine text label read as sitting to the
+    right of it and so invisible to this positional check.
     """
     rows: dict[int, list] = defaultdict(list)
     for w in words:
         rows[round(w[1])].append(w)
     if not rows:
         return False
+
+    numeric_words = [w for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
+    if not numeric_words:
+        # No numeric lane to be positioned relative to -- a label-only band
+        # has no value column to distinguish itself from, so it cannot be
+        # shown to be an independent table's OWN label column here (it is
+        # rejected elsewhere for having zero numeric lanes; see the
+        # docstring on ``rowize_from_word_list``).
+        return False
+
+    xs = sorted({w[0] for w in numeric_words})
+    lane_of = _adjacent_lane_of(xs)
+    lane_rows: dict[int, set] = defaultdict(set)
+    for w in numeric_words:
+        lane_rows[lane_of[w[0]]].add(round(w[1]))
+    recurring_lanes = [lane for lane, ys in lane_rows.items() if len(ys) >= _MIN_TABLE_ROWS]
+    if not recurring_lanes:
+        # No numeric lane behaves like a COLUMN here (recurs down the page),
+        # so there is nothing column-like to be left of.
+        return False
+    leftmost_lane = min(recurring_lanes)
+    leftmost_lane_x0 = min(w[0] for w in numeric_words if lane_of[w[0]] == leftmost_lane)
+
     labeled = sum(
         1
         for row_words in rows.values()
-        if any(not (_NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])) for w in row_words)
+        if any(
+            w[0] < leftmost_lane_x0 and not (_NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4]))
+            for w in row_words
+        )
     )
-    return labeled / len(rows) >= _MIN_DATA_ROW_FRAC
+    return labeled >= _MIN_TABLE_ROWS and labeled / len(rows) >= _MIN_DATA_ROW_FRAC
 
 
 def _rowize_word_group(words: list) -> list[tuple[object, str]]:
