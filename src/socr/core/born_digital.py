@@ -2318,6 +2318,17 @@ class PageAssessment:
     #: and the selector said so; only this one disagreed, and it is the one a
     #: reader of the detector meets first.
     text_grid_rejections: list[dict] = field(default_factory=list)
+    #: GH-418 step 1: one record (``{"word", "x", "y"}``) per word the
+    #: word-geometry rowizer (``_rowize_segment``) dropped -- further than the
+    #: snap radius from every column lane, on a segment that still shipped as
+    #: a table. This is the SAME drop the codebase has always made (the bare
+    #: ``elif`` with no ``else`` that stops a prose page being gridded whole);
+    #: nothing here changes what cell the word lands in -- it still lands in
+    #: none. Scoped to segments that pass ``_looks_tabular`` (panel ruling
+    #: refinement 1): a segment the prose guard rejects sends its page down
+    #: the prose path, so its drops are not table losses. Empty on a page with
+    #: no drops.
+    orphan_word_drops: list[dict] = field(default_factory=list)
     #: #136: mid-band encoding corruption of the COSMETIC class (lost spaces, fused
     #: words) — the page is trustworthy for content but its text layer is suspect.
     #: Propagated to PageState so the agentic native lane can emit a durable audit
@@ -2581,6 +2592,12 @@ class BornDigitalDetector:
         self._last_extraction_failed_ordinals: list[int] = []
         self._last_extraction_table_count: int = 0
         self._last_extraction_region_identities: list[str] = []
+        # GH-418 step 1: extract_structured() can be called directly (e.g.
+        # test harnesses that exercise it without going through
+        # _assess_page first), so this needs a value before that reset ever
+        # runs -- gh351/gh372 hit exactly that path and raised AttributeError
+        # without this line.
+        self._last_extraction_orphan_drops: list[dict] = []
 
     def detect(self, pdf_path: Path | str) -> DocumentAssessment:
         """Analyze all pages of a PDF for born-digital content.
@@ -3121,6 +3138,9 @@ class BornDigitalDetector:
         # GH-195: same side-channel shape as the TR-3 flag above — reset per
         # page so a rejection on page 7 is never attributed to page 8.
         self._last_extraction_grid_rejections: list[dict] = []
+        # GH-418 step 1: same reset discipline, for the word-geometry
+        # rowizer's orphan-word drop events.
+        self._last_extraction_orphan_drops: list[dict] = []
 
         native_table_lane_refused = False
         native_rotated_text_shredded = False
@@ -3233,6 +3253,9 @@ class BornDigitalDetector:
         has_unverifiable_table_region = self._last_extraction_had_unverifiable
         # GH-195: text-strategy grids rejected for numeric-token destruction.
         text_grid_rejections = list(self._last_extraction_grid_rejections)
+        # GH-418 step 1: this page's orphan-word drop events (already scoped
+        # to segments that shipped, by ``_rowize_word_group``).
+        orphan_word_drops = list(self._last_extraction_orphan_drops)
 
         if has_complex_content:
             content_types = []
@@ -3280,6 +3303,7 @@ class BornDigitalDetector:
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
+            orphan_word_drops=orphan_word_drops,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             possible_table_structure_not_reconstructed=possible_table_structure_not_reconstructed,
             native_table_lane_refused=native_table_lane_refused,
@@ -3562,7 +3586,10 @@ class BornDigitalDetector:
                 region_words = [
                     w for w in page.get_text("words") if bbox.contains(fitz.Point(w[0], w[1]))
                 ]
-                rowized = rowize_from_word_list(region_words)
+                _region_drops: list[dict] = []
+                rowized = rowize_from_word_list(region_words, orphan_drops=_region_drops)
+                if _region_drops:
+                    self._last_extraction_orphan_drops.extend(_region_drops)
                 for rect, md in rowized:
                     lane_stacked_regions.append((rect, md))
             else:
@@ -3612,7 +3639,16 @@ class BornDigitalDetector:
             from socr.tables.reconstruct import rowize_from_words_chart_aware
 
             page_num = getattr(page, "number", 0) + 1
-            table_regions = rowize_from_words_chart_aware(page, page_num=page_num)
+            # GH-418 step 1: collect drop events from the TR-1/TR-2 rowizer,
+            # the only path that actually calls ``_rowize_segment`` when it is
+            # the FIRST attempt at this page (the lane-stacked branch above
+            # only fires when find_tables already found a table).
+            _tr_drops: list[dict] = []
+            table_regions = rowize_from_words_chart_aware(
+                page, page_num=page_num, orphan_drops=_tr_drops
+            )
+            if _tr_drops:
+                self._last_extraction_orphan_drops.extend(_tr_drops)
 
         if not table_regions:
             # GH-127: this is the prose-page path -- no dict walk happens here,

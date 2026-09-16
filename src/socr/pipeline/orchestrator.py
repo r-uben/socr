@@ -1782,6 +1782,48 @@ class UnifiedPipeline:
                 f"{_rejected_pages}[/yellow]"
             )
 
+        # GH-418 step 1: the word-geometry rowizer's ``_rowize_segment`` drops
+        # a word further than the snap radius from every column lane -- the
+        # same bare ``elif`` with no ``else`` that stops a prose page being
+        # gridded whole, but which also silently deletes qualifiers such as
+        # ``n.a.`` and ``†`` from genuine data rows. Panel ruling (three-seat,
+        # unanimous, docs/log/2026-09-16_418-design.md): surface it first,
+        # repair later. No cell, column count or markdown byte changes here --
+        # this only makes the existing loss visible.
+        for pa in assessment.pages:
+            drops = getattr(pa, "orphan_word_drops", None) or []
+            if not drops:
+                continue
+            words = [str(rec.get("word", "")) for rec in drops]
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="orphan_word_dropped",
+                    engine="native",
+                    detail=(
+                        f"{len(drops)} word(s) dropped by the word-geometry table rowizer "
+                        f"(further than the snap radius from every column lane): "
+                        f"{', '.join(words)}. The table shipped without them -- no cell "
+                        "carries this content."
+                    ),
+                    data={"dropped_count": len(drops), "words": words},
+                )
+            )
+        _orphan_drop_pages = sorted(
+            pa.page_num for pa in assessment.pages if getattr(pa, "orphan_word_drops", None)
+        )
+        if _orphan_drop_pages and not self.config.quiet:
+            _orphan_drop_total = sum(
+                len(pa.orphan_word_drops)
+                for pa in assessment.pages
+                if getattr(pa, "orphan_word_drops", None)
+            )
+            console.print(
+                f"  [yellow]{_orphan_drop_total} word(s) dropped by the table rowizer on "
+                f"{len(_orphan_drop_pages)} page(s) (further than the snap radius from every "
+                f"column lane): {_orphan_drop_pages}[/yellow]"
+            )
+
         self._emit_tr3_detection_events(state, assessment)
 
         bd_count = assessment.born_digital_count
