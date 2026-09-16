@@ -65,8 +65,10 @@ from socr.core.state import DocumentState, PageState, canonical_native_text, add
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
+    MATH_FONT_UNRECOVERED_KIND,
     UNRESOLVED_MATH_KIND,
     UnresolvedMathDetail,
+    math_font_unrecovered_detail,
     missing_coverage_witnesses,
     unresolved_math_detail,
 )
@@ -2557,6 +2559,12 @@ class UnifiedPipeline:
             # run would report a clean SUCCESS on a document whose mathematics
             # is known to be missing.
             | {UNRESOLVED_MATH_KIND}
+            # #140: same contract as ``UNRESOLVED_MATH_KIND`` immediately above,
+            # for the sibling math-font damage class -- a standing property of
+            # the page's source, not of the run that noticed it. Without this
+            # replay a resumed page would lose the record and report a clean
+            # SUCCESS on math the equation lane never covered.
+            | {MATH_FONT_UNRECOVERED_KIND}
             # #659: the terminal ``table_label_unverified`` field on the
             # winning ``PageOutput`` is what makes the page note/CLI line
             # retire when a later, fully-supported candidate wins -- and that
@@ -2842,6 +2850,10 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.warning("equation lane: region detection failed on p%d: %s", page_num, exc)
             regions = []
+            # #140: recorded even on the failure path -- "detection never ran"
+            # is exactly the "no evidence retained" case the accounting reads,
+            # never a false "nothing was damaged".
+            ps.equation_region_evidence = {"regions_total": 0, "regions_covered": 0}
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
@@ -2855,6 +2867,9 @@ class UnifiedPipeline:
                 )
             )
         if not regions:
+            # #140: zero regions located is itself a coverage verdict -- a page
+            # detected as math-font typeset whose lane found nothing to attach.
+            ps.equation_region_evidence = {"regions_total": 0, "regions_covered": 0}
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
@@ -2869,6 +2884,14 @@ class UnifiedPipeline:
                 )
             )
             return
+
+        # #140: the denominator for coverage -- how many regions the lane
+        # actually enumerated on this page, regardless of what happens to
+        # each below. Assigned unconditionally (mirrors ``corrupt_region_
+        # evidence``'s own comment): a page reprocessed under a different
+        # provider state must not inherit a stale prior attempt's count.
+        regions_total = len(regions)
+        ps.equation_region_evidence = {"regions_total": regions_total, "regions_covered": 0}
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
         profile, skip_reason = self._equation_lane_provider(available_profiles)
@@ -3129,6 +3152,14 @@ class UnifiedPipeline:
 
         text, unaligned = attach_equation_sidecars_in_place(native_text, attachable)
         unaligned_set = set(unaligned)
+        # #140: the actual numerator -- a region only counts as covered once it
+        # has an aligned, attached reading in the shipped body, not merely a
+        # syntax-valid model return (``attachable`` still includes readings
+        # ``attach_equation_sidecars_in_place`` could not place).
+        ps.equation_region_evidence = {
+            "regions_total": regions_total,
+            "regions_covered": sum(1 for r in attachable if r.region_index not in unaligned_set),
+        }
         for result in attachable:
             if result.region_index in unaligned_set:
                 state.events.append(
@@ -10980,6 +11011,14 @@ class UnifiedPipeline:
             if evidence:
                 payload["math_recovery_evidence"] = dict(evidence)
 
+        # #140: the sibling equation-lane coverage evidence, same sparse rule.
+        # Written whenever the lane recorded an attempt on this page (whether
+        # it covered anything or not), so a page the lane never touched
+        # restores as "no evidence", never as a false "damage since covered".
+        eq_evidence = getattr(ps, "equation_region_evidence", None) if ps else None
+        if eq_evidence:
+            payload["equation_region_evidence"] = dict(eq_evidence)
+
         # P1: sparse table retry latch -- persisted ONLY when True so default-off
         # sidecars remain byte-identical and satisfy P6 disposition persistence contracts.
         if bool(getattr(ps, "table_judge_retry_pending", False)):
@@ -11860,6 +11899,12 @@ class UnifiedPipeline:
                 restored_evidence = meta.get("math_recovery_evidence")
                 if isinstance(restored_evidence, dict):
                     ps.math_recovery_evidence = dict(restored_evidence)
+            # #140: same OR'd-restore contract as the PUA evidence immediately
+            # above, for the equation lane's coverage record.
+            if ps.equation_region_evidence is None:
+                restored_eq_evidence = meta.get("equation_region_evidence")
+                if isinstance(restored_eq_evidence, dict):
+                    ps.equation_region_evidence = dict(restored_eq_evidence)
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
@@ -12825,6 +12870,26 @@ class UnifiedPipeline:
                 unresolved_math_details[r.output.page_num] = _detail
         unresolved_math_pages = sorted(unresolved_math_details)
 
+        # #140: the sibling reduction for math-font typesetting, sourced from
+        # the equation lane's OWN region-outcome evidence rather than from a
+        # residual-glyph count against ``final_text`` -- there is no PUA byte
+        # count for this damage class, so no analogous post-hoc witness check
+        # is possible (or needed: the lane's ``attached``/``unaligned`` split
+        # is already computed against the shipped body, see
+        # ``_agentic_equation_region_page``).
+        math_font_unresolved_details = {}
+        for r in pre_records:
+            _mp = state.pages.get(r.output.page_num)
+            _mf_detail = math_font_unrecovered_detail(
+                has_math_font_typesetting=bool(getattr(_mp, "has_math_font_typesetting", False)),
+                has_corrupt_math=bool(getattr(_mp, "has_corrupt_math", False)),
+                has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
+                evidence=getattr(_mp, "equation_region_evidence", None),
+            )
+            if _mf_detail is not None:
+                math_font_unresolved_details[r.output.page_num] = _mf_detail
+        math_font_unresolved_pages = sorted(math_font_unresolved_details)
+
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
@@ -12853,6 +12918,10 @@ class UnifiedPipeline:
         # "completed with warnings, output written" path every other content-
         # doubt bucket above takes.
         pages_ok = pages_ok and not unresolved_math_pages
+        # #140: math-font typesetting no retained equation-lane recovery
+        # covers. Same reasoning as the PUA bucket immediately above -- the
+        # page keeps its prose, so this is AUDIT_FAILED, not ERROR.
+        pages_ok = pages_ok and not math_font_unresolved_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -13004,6 +13073,43 @@ class UnifiedPipeline:
                     )
                 )
 
+        # #140: same retire-then-readd shape as ``UNRESOLVED_MATH_KIND`` above,
+        # for the sibling math-font damage class -- a standing property of the
+        # page's source that a resumed run replays (``resume_restore_kinds``)
+        # before this point, and that a re-run can change the answer to.
+        if math_font_unresolved_pages or any(
+            getattr(ev, "kind", "") == MATH_FONT_UNRECOVERED_KIND for ev in state.events
+        ):
+            from socr.core.audit_log import AuditEvent as _MathFontEvent
+
+            _kept_mf: list = []
+            _current_mf_pages: set[int] = set()
+            for ev in state.events:
+                if getattr(ev, "kind", "") != MATH_FONT_UNRECOVERED_KIND:
+                    _kept_mf.append(ev)
+                    continue
+                _mf_detail = math_font_unresolved_details.get(ev.page_num)
+                if (
+                    _mf_detail is not None
+                    and ev.detail == _mf_detail.detail
+                    and ev.page_num not in _current_mf_pages
+                ):
+                    _kept_mf.append(ev)
+                    _current_mf_pages.add(ev.page_num)
+            state.events[:] = _kept_mf
+            for n in math_font_unresolved_pages:
+                if n in _current_mf_pages:
+                    continue
+                state.events.append(
+                    _MathFontEvent(
+                        page_num=n,
+                        kind=MATH_FONT_UNRECOVERED_KIND,
+                        engine="native",
+                        detail=math_font_unresolved_details[n].detail,
+                        data=math_font_unresolved_details[n].as_data(),
+                    )
+                )
+
         # #625: same retire-then-readd shape as ``UNRESOLVED_MATH_KIND`` above,
         # and for the same reason -- this is computed fresh from
         # ``pre_records`` every run, including a resumed one where a REPLAYED
@@ -13079,6 +13185,7 @@ class UnifiedPipeline:
             or d3_model_table_pages
             or corrupt_math_hybrid_pages
             or unresolved_math_pages
+            or math_font_unresolved_pages
             or value_drift_pages
             or table_rejected_pages
             or table_unverified_pages
@@ -13401,6 +13508,13 @@ class UnifiedPipeline:
                         "math glyphs no retained recovery covers; the mathematics on them "
                         f"is lost, not merely unverified: {unresolved_math_pages}[/yellow]"
                     )
+                if math_font_unresolved_pages:
+                    console.print(
+                        f"  [yellow]{len(math_font_unresolved_pages)} page(s) shipped "
+                        "math-font typesetting no retained equation-lane recovery covers "
+                        f"(subscripts, Greek letters, reading order): "
+                        f"{math_font_unresolved_pages}[/yellow]"
+                    )
                 if native_only_distrust_pages:
                     console.print(
                         f"  [yellow]{len(native_only_distrust_pages)} page(s) shipped native "
@@ -13668,6 +13782,25 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_unresolved_note}"
             else:
                 final_result.error = _unresolved_note
+
+        if math_font_unresolved_pages:
+            # #140: same "no flag advice, just the evidence" contract as the
+            # PUA note immediately above.
+            _math_font_note = (
+                "math-font typesetting no retained equation-lane recovery covers on "
+                "page(s) "
+                + ", ".join(str(n) for n in math_font_unresolved_pages)
+                + "; inspect the source page and any retained equation crops ("
+                + "; ".join(
+                    f"p{n}: {math_font_unresolved_details[n].reason}"
+                    for n in math_font_unresolved_pages
+                )
+                + ")"
+            )
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_math_font_note}"
+            else:
+                final_result.error = _math_font_note
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.

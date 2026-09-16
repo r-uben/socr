@@ -2189,6 +2189,11 @@ class PageAssessment:
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded images (alias for has_images)
     has_equations: bool = False  # page contains math/equations
+    #: #140: the font-metadata signal alone (`_detect_math_fonts`), a strict
+    #: subset of `has_equations` -- excludes the raw-LaTeX-string fallback and
+    #: `has_corrupt_math`, neither of which is the "extraction mangles this"
+    #: damage class. This is the flag the #140 audit gates on, never the union.
+    has_math_font_typesetting: bool = False
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
@@ -2707,8 +2712,17 @@ class BornDigitalDetector:
         has_tables = self._detect_tables(page)
         has_figures = has_images  # figures = embedded raster images
         has_corrupt_math = self._detect_corrupt_math(raw_text)
+        # #140: the font-metadata signal alone, kept separate from the
+        # `has_equations` union below. `_detect_equations`'s raw-LaTeX-string
+        # fallback and `has_corrupt_math` are NOT the "extraction mangles this"
+        # damage class `_detect_math_fonts` documents (subscripts flatten,
+        # Greek letters drop, reading order breaks) -- a page whose only
+        # equation signal is one of those two extracts fine, so gating the
+        # #140 audit on the umbrella flag flagged pages that were never
+        # lossy (regressed #269's "equation-only pages ship unaffected by S1").
+        has_math_font_typesetting = self._detect_math_fonts(page)
         has_equations = (
-            self._detect_math_fonts(page) or self._detect_equations(raw_text) or has_corrupt_math
+            has_math_font_typesetting or self._detect_equations(raw_text) or has_corrupt_math
         )
 
         # --- Decision logic ---
@@ -2732,6 +2746,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2784,6 +2799,7 @@ class BornDigitalDetector:
                     has_tables=has_tables,
                     has_figures=has_figures,
                     has_equations=has_equations,
+                    has_math_font_typesetting=has_math_font_typesetting,
                     notes=notes,
                 )
 
@@ -2816,6 +2832,7 @@ class BornDigitalDetector:
                     has_tables=has_tables,
                     has_figures=has_figures,
                     has_equations=has_equations,
+                    has_math_font_typesetting=has_math_font_typesetting,
                     notes=notes,
                 )
 
@@ -2842,6 +2859,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2860,6 +2878,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2878,6 +2897,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2896,6 +2916,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2913,6 +2934,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -2950,6 +2972,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
         if encoding_corruption > self.MAX_ENCODING_CORRUPTION:
@@ -2966,6 +2989,7 @@ class BornDigitalDetector:
                 has_tables=has_tables,
                 has_figures=has_figures,
                 has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
             )
 
@@ -3159,6 +3183,7 @@ class BornDigitalDetector:
             has_tables=has_tables,
             has_figures=has_figures,
             has_equations=has_equations,
+            has_math_font_typesetting=has_math_font_typesetting,
             needs_ocr_enhancement=needs_ocr_enhancement,
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,

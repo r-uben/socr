@@ -6,10 +6,14 @@ One ticket per confirmed-still-valid defect. Dispatch one `socr-implementer` per
 
 ## GH-140 — math-font pages ship trusted-native with no audit of known-lossy math
 
-**Status:** READY
+**Status:** DONE (implemented, committed, awaiting review/CI/merge)
 **Branch:** `fix/140-math-font-audit`
 **Write ownership:** `src/socr/math/accounting.py`, `src/socr/core/born_digital.py`,
-`tests/` (a new test module for this ticket)
+`tests/` (a new test module for this ticket). **Deviation:** also touched
+`src/socr/core/state.py`, `src/socr/core/manifest.py`,
+`src/socr/pipeline/orchestrator.py` — necessarily, the PUA precedent this
+ticket mirrors spans exactly these same three files. See
+`docs/log/2026-09-16_140.md`.
 
 ### Context — confirmed still real on `main@5478b42`
 

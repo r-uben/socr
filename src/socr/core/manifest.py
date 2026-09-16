@@ -3944,6 +3944,35 @@ def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, audit_notes=notes)
 
 
+def _apply_math_font_unrecovered_guard(output: PageOutput, p) -> PageOutput:
+    """#140: demote a page whose math-font typesetting no retained recovery covers.
+
+    Same contract as ``_apply_unresolved_math_guard`` immediately above, for
+    the sibling damage class: font-metadata-detected math typesetting that
+    extracts as plausible-looking prose (no PUA glyphs) but is known, by the
+    detector's own docstring, to mangle subscripts, Greek letters and reading
+    order. A REPORTING guard, not a routing one -- nothing here re-selects or
+    re-routes, it only demotes the reported status of the bytes that already
+    won.
+    """
+    from socr.math.accounting import math_font_unrecovered_detail
+
+    detail = math_font_unrecovered_detail(
+        has_math_font_typesetting=bool(getattr(p, "has_math_font_typesetting", False)),
+        has_corrupt_math=bool(getattr(p, "has_corrupt_math", False)),
+        has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
+        evidence=getattr(p, "equation_region_evidence", None),
+    )
+    if detail is None:
+        return output
+    notes = list(output.audit_notes or [])
+    if detail.detail not in notes:
+        notes.append(detail.detail)
+    if output.status is PageStatus.SUCCESS:
+        return replace(output, status=PageStatus.WARNING, audit_notes=notes)
+    return replace(output, audit_notes=notes)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -3958,10 +3987,11 @@ def _select_and_finalize_page(
       3. _apply_table_emission_guard
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
-      6. _apply_label_unverified_guard
-      7. _apply_ditto_guard
-      8. _apply_chart_region_guard
-      9. Disposition construction from the guarded output and provenance.
+      6. _apply_math_font_unrecovered_guard
+      7. _apply_label_unverified_guard
+      8. _apply_ditto_guard
+      9. _apply_chart_region_guard
+      10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -3971,6 +4001,7 @@ def _select_and_finalize_page(
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
+        output = _apply_math_font_unrecovered_guard(output, p)
     output = _apply_label_unverified_guard(output)
     output = _apply_ditto_guard(output, page_num)
     if p is not None:
