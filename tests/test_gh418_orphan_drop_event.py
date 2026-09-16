@@ -56,21 +56,31 @@ FIXTURE_PDF = Path(__file__).parent / "fixtures" / "table_repair" / "ce_like_p4.
 
 def _ce_like_with_orphan_word(tmp_path: Path) -> Path:
     """The TR-1 fixture (real PyMuPDF-rendered page, no synthetic tuples) with
-    one extra word inserted mid-gutter on the main table's first data row.
+    one extra ROW appended below the main table: a label, a single numeric
+    lane (``1.5``), and an orphan word (``n.a.``) mid-gutter.
 
-    ``(240.0, 77.0)`` is the real baseline origin of that row's own spans
-    (measured off the fixture's own ``get_text("dict")`` output), so the
-    inserted word lands in the SAME PyMuPDF text line as ``Ashford Capital``
-    and ``2.1`` -- it is not folded into a neighbouring row by the y-band
-    fallback ``_fold_marginals`` uses for stray glyphs. ``240`` sits 40pt from
-    the ``GDP 2024`` lane (200) and 45pt from ``GDP 2025`` (285), both well
-    past the 18pt snap radius, and right of the label boundary (182), so it is
-    neither absorbed into the label cell nor snapped into a data lane -- the
-    exact geometry ``_rowize_segment``'s orphan branch exists for.
+    GH-418 step 2 retarget: the original version of this fixture put the
+    orphan on ``Ashford Capital``'s row, which populates all 4 numeric
+    lanes -- under step 2 that word is now CAPTURED, not dropped, so it no
+    longer exercises this test's purpose (the step-1 drop event still
+    reaching every surface). A single-numeric-lane row stays below the
+    ``>= 2`` capture gate, so its orphan is still deleted and still recorded
+    -- this is the residual the panel ruling requires stay measurable.
+
+    ``(240.0, 144.0)`` is the insertion point for the new row's own text
+    origin; PyMuPDF's own reported word bbox for it is
+    ``(240.0, 135.4, 253.3, 146.4, "n.a.")`` (measured off this fixture's own
+    ``get_text("words")`` output), 40pt from the ``GDP 2024`` lane (200),
+    past the 18pt snap radius and right of the label boundary -- the exact
+    geometry ``_rowize_segment``'s orphan branch exists for. ``1.5`` at
+    x=200 is the row's only numeric lane, so the row's numeric-lane count is
+    1, under the ``>= 2`` capture gate.
     """
     doc = fitz.open(str(FIXTURE_PDF))
     page = doc[0]
-    page.insert_text((240.0, 77.0), "n.a.", fontsize=8, fontname="helv")
+    page.insert_text((36.0, 144.0), "Gullwing Fund", fontsize=8, fontname="helv")
+    page.insert_text((200.0, 144.0), "1.5", fontsize=8, fontname="helv")
+    page.insert_text((240.0, 144.0), "n.a.", fontsize=8, fontname="helv")
     out = tmp_path / "ce_like_p4_orphan.pdf"
     doc.save(str(out))
     doc.close()
@@ -188,13 +198,28 @@ def _rejected_segment_with_orphan() -> list:
 
 def test_shipping_segment_orphan_is_recorded() -> None:
     """Positive control for the scoping test below: the SAME geometry, when
-    the segment ships, does produce a record naming the word."""
+    the segment ships, does produce a record naming the word.
+
+    GH-418 step 2 retarget: this row populates all 4 numeric lanes (>= 2), so
+    the orphan is now CAPTURED into the trailing column instead of dropped --
+    it must therefore no longer report as a drop. The scoping test right
+    below this one is unaffected (its diluting rows keep it under the
+    ``>= 2`` gate), and stays the positive control that a genuine drop still
+    reaches ``orphan_drops``.
+    """
     words = _shipping_segment_with_orphan()
     drops: list[dict] = []
     regions = rowize_from_word_list(words, orphan_drops=drops)
 
     assert regions, "fixture must produce a shipping table region"
-    assert drops == [{"word": "note", "x": 160.0, "y": 100.0}], drops
+    assert drops == [], f"a captured orphan must not also report as a drop: {drops}"
+    grid = [
+        [c.strip() for c in line.strip().strip("|").split("|")]
+        for line in regions[0][1].splitlines()
+        if line.lstrip().startswith("|") and "---" not in line
+    ]
+    row0 = [row for row in grid if row and row[0] == "Row0"][0]
+    assert row0[-1] == "note", f"the orphan must be captured in the trailing column: {row0}"
 
 
 def test_scoping_no_record_when_segment_is_rejected() -> None:
