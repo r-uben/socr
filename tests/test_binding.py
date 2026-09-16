@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from socr.tables.binding import BindingResult, bind, parse_grid
+from socr.tables.binding import (
+    BindingResult,
+    _candidate_data_column_indices,
+    _project_candidate_data_columns,
+    bind,
+    parse_grid,
+)
 
 
 def w(x0: float, y0: float, x1: float, y1: float, text: str) -> tuple:
@@ -2637,6 +2643,205 @@ def test_gh766_entity_encoded_invented_digit_on_parent_row_is_reported():
     assert result.column_binding_unverifiable is True
     unbound = {(u.token, u.col_path) for u in result.model_unbound}
     assert unbound == {("&minus;9.9", ("Beta",)), ("8.8", ("Gamma",))}
+
+
+# ---------------------------------------------------------------------------
+# GH-770: an entity-encoded INVENTED value must still be surfaced as
+# model_unbound -- the fabrication signal must not disappear just because
+# the model wrote the HTML entity instead of ASCII.
+# ---------------------------------------------------------------------------
+
+
+def test_gh770_entity_encoded_invented_row_surfaces_as_model_unbound():
+    """A 'Ghost' row has no native counterpart at all, so `_bind_rows` cannot
+    anchor it to anything and it falls into the unbound-candidate-row walk
+    (binding.py ~2085). Before the fix that site tested `is_numeric_token`
+    on the RAW cell, so an entity-encoded invention (`&minus;7.7`) silently
+    vanished instead of surfacing as `model_unbound` -- the worst case the
+    project's 'wrong number is worse than missing' rule describes."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "1.5"),
+    ]
+    md = """
+|       | Val         |
+|-------|-------------|
+| Yield | 1.5         |
+| Ghost | &minus;7.7  |
+"""
+    result = bind(words, md)
+    assert result.matched_cells and result.matched_cells[0].value == "1.5"
+    unbound = {(u.row_path, u.token) for u in result.model_unbound}
+    assert unbound == {(("Ghost",), "&minus;7.7")}
+
+
+def test_gh770_entity_encoded_invented_unmapped_column_surfaces_as_model_unbound():
+    """Column-mismatch counterpart: 'Extra' has no native lane at all, so
+    under the salvage walk it is never a candidate for `lane_to_col` and
+    falls into the unmapped-column walk (binding.py ~2179). Before the fix
+    that site tested the raw cell, so the entity-encoded invention
+    (`&minus;5.5` / `&minus;6.6`) never became an `UnboundCell` -- it was
+    absent from every collection, not merely unclassified."""
+    words = [
+        w(150, 70, 180, 80, "Alpha"),
+        w(250, 70, 280, 80, "Beta"),
+        w(350, 70, 380, 80, "Gamma"),
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "1.1"),
+        w(250, 100, 280, 110, "2.1"),
+        w(350, 100, 380, 110, "3.1"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "1.2"),
+        w(250, 130, 280, 140, "2.2"),
+        w(350, 130, 380, 140, "3.2"),
+    ]
+    md = """
+|   | Alpha | Beta | Gamma | Extra |
+|---|-------|------|-------|-------|
+| A | 1.1   | 2.1  | 3.1   | &minus;5.5 |
+| B | 1.2   | 2.2  | 3.2   | &minus;6.6 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    assert result.native_unbound == []
+    unbound = {(u.row_path, u.token) for u in result.model_unbound}
+    assert unbound == {(("A",), "&minus;5.5"), (("B",), "&minus;6.6")}
+
+
+def test_gh770_entity_encoded_mapped_lane_still_counts_as_ambiguous():
+    """The lower-severity site (binding.py ~2159): under the salvage walk, a
+    mapped lane with no value in THIS row's native tokens is 'known
+    geometry, not confidently convictable either way' when its candidate
+    cell is numeric -- counted in `ambiguous_count`. Row A has no native
+    word under 'Beta', so this is the exact shape the site guards. Before
+    the fix the entity-encoded cell (`&minus;9.9`) failed the raw test and
+    this uncertainty went uncounted instead of flagged."""
+    words = [
+        w(150, 70, 180, 80, "Alpha"),
+        w(250, 70, 280, 80, "Beta"),
+        w(350, 70, 380, 80, "Gamma"),
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "1.1"),
+        w(350, 100, 380, 110, "3.1"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "1.2"),
+        w(250, 130, 280, 140, "2.2"),
+        w(350, 130, 380, 140, "3.2"),
+    ]
+    md = """
+|   | Alpha | Beta        | Gamma | Extra |
+|---|-------|-------------|-------|-------|
+| A | 1.1   | &minus;9.9  | 3.1   | 5.5   |
+| B | 1.2   | 2.2         | 3.2   | 6.6   |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    # Without the fix this is 5 -- the entity-encoded Beta cell in row A
+    # fails the raw gate and contributes nothing to ambiguous_count.
+    assert result.ambiguous_count == 6
+
+
+def test_gh770_genuinely_nonnumeric_cell_still_not_reported_as_invention():
+    """The fix must not make the detector trigger-happy: a candidate cell
+    that is NOT a number even after decoding (plain prose) must not surface
+    as model_unbound at any of the three GH-770 sites."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "1.5"),
+    ]
+    md = """
+|       | Val   |
+|-------|-------|
+| Yield | 1.5   |
+| Notes | &nbsp;see appendix |
+"""
+    result = bind(words, md)
+    assert result.model_unbound == []
+
+
+# ---------------------------------------------------------------------------
+# GH-768: an all-entity-encoded candidate column must be recognised as data
+# and reach `bind()`'s comparison, not be silently projected away before any
+# check runs.
+# ---------------------------------------------------------------------------
+
+
+def test_gh768_entity_encoded_column_recognised_alongside_plain_numeric_column():
+    """Mixed shape (the common, silent one): 'Val' is entity-encoded in
+    every row while 'P' and 'Q' are plain numeric. Before the fix,
+    `_candidate_data_column_indices` tested the raw cell, so 'Val' never
+    scored width and `data_columns == (1, 2)` -- excluding it. The call-site
+    empty-case fallback (binding.py ~1908) only fires when NO data column is
+    found at all, so it does NOT rescue this shape: 'Val' is dropped from
+    the projected grid before `bind()` compares anything. With the fix, all
+    three columns reach comparison and match their native counterparts."""
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 180, 110, "1.5"),
+        w(250, 100, 280, 110, "9.9"),
+        w(350, 100, 380, 110, "-2.5"),
+        w(50, 130, 90, 140, "Forward"),
+        w(150, 130, 180, 140, "3.5"),
+        w(250, 130, 280, 140, "8.8"),
+        w(350, 130, 380, 140, "-4.5"),
+    ]
+    md = """
+| Item    | P   | Q   | Val         |
+|---------|-----|-----|-------------|
+| Yield   | 1.5 | 9.9 | &minus;2.5  |
+| Forward | 3.5 | 8.8 | &minus;4.5  |
+"""
+    grid = parse_grid(md)
+    assert _candidate_data_column_indices(grid) == (1, 2, 3)
+
+    result = bind(words, md)
+    matched_values = {m.value for m in result.matched_cells}
+    assert matched_values == {"1.5", "9.9", "-2.5", "3.5", "8.8", "-4.5"}
+    assert result.contradicted_cells == []
+    assert result.model_unbound == []
+    assert result.native_unbound == []
+
+
+def test_gh768_single_entity_column_shape_unchanged_by_the_fix():
+    """The other shape from the issue: the entity-encoded column is the
+    ONLY candidate data column. Before the fix this hit the empty-case
+    fallback (`data_columns == ()` -> unprojected `candidate_grid` used
+    directly) and worked by accident. With the fix the column is directly
+    recognised (`data_columns == (1,)`), and because it is the sole column
+    the projection is a no-op -- so the projected rows are identical either
+    way. Pinning both to guard against the fix changing this shape's
+    observable behaviour."""
+    md = """
+| Item    | Val         |
+|---------|-------------|
+| Yield   | &minus;2.5  |
+| Forward | &minus;4.5  |
+"""
+    grid = parse_grid(md)
+    assert _candidate_data_column_indices(grid) == (1,)
+    projected = _project_candidate_data_columns(grid)
+    assert (
+        projected.rows
+        == grid.rows
+        == (
+            ("Yield", "&minus;2.5"),
+            ("Forward", "&minus;4.5"),
+        )
+    )
+
+
+def test_gh768_genuinely_nonnumeric_column_still_excluded():
+    """The narrowing must not be turned off: a column of plain prose (not a
+    number even once decoded) must still be excluded from the data columns,
+    entity-decoding or not."""
+    md = """
+| Item    | P   | Note        |
+|---------|-----|-------------|
+| Yield   | 1.5 | see below   |
+| Forward | 3.5 | flagged     |
+"""
+    grid = parse_grid(md)
+    assert _candidate_data_column_indices(grid) == (1,)
 
 
 if __name__ == "__main__":
