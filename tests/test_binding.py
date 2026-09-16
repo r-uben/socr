@@ -2844,5 +2844,35 @@ def test_gh768_genuinely_nonnumeric_column_still_excluded():
     assert _candidate_data_column_indices(grid) == (1,)
 
 
+def test_gh768_empty_case_fallback_still_reachable_after_the_fix():
+    """The team lead asked whether the 1908 empty-case fallback is now dead
+    code for every shape, since decoding rescues the single-entity-column
+    case that used to be its only known trigger. It is not dead: a candidate
+    table with NO numeric column in ANY row -- every column stays prose even
+    once decoded -- still makes `_candidate_data_column_indices` return `()`,
+    so `bind()`'s `if not candidate_data_columns:` branch still fires. Pinned
+    at both layers: the helper directly, and a full `bind()` call that must
+    not crash and must report no content on either side (there IS none)."""
+    md = """
+| Item    | Note        |
+|---------|-------------|
+| Yield   | see below   |
+| Forward | flagged     |
+"""
+    grid = parse_grid(md)
+    assert _candidate_data_column_indices(grid) == ()
+
+    words = [
+        w(50, 100, 90, 110, "Yield"),
+        w(150, 100, 250, 110, "see below"),
+        w(50, 130, 90, 140, "Forward"),
+        w(150, 130, 250, 140, "flagged"),
+    ]
+    result = bind(words, md)
+    assert result.matched_cells == []
+    assert result.model_unbound == []
+    assert result.native_unbound == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
