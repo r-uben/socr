@@ -12,15 +12,22 @@ see the second REVISE note below — the underlying demote-or-not question is
 deferred, not closed.
 
 **REVISE (2026-09-16):** criterion 4's original "yes, demote" answer was
-reversed. Measured against `docs/log/2026-09-02_p4m-trigger-rates.md`
-(23,190 pages), `has_math_font_typesetting` fires on 36.1% of the free lane
-vs. the PUA precedent's 2.4%, and an 8.0% slice can never clear (no display
-equation exists to recover). Demotion is withheld pending a separate-ticket
-`trigger_rates.py` extension measuring the clearable share; the event,
-sidecar persistence, page note and CLI/document-note surfacing all still
-ship. Also added: a resume round-trip test, and a docstring caveat on
-`regions_covered` ("not invented", not "verified correct"). See
-`docs/log/2026-09-16_140.md`.
+reversed. First reversal argument (36.1% vs. the PUA precedent's 2.4% is
+"~15x, unaffordable") was itself corrected in the third round below —
+prevalence alone does not justify suppressing a signal, and the trigger-
+rates ruling explicitly accepts the same 36% figure for routing. The
+correct argument: that acceptance is conditioned on over-routing being a
+cost, not a correctness risk (native prose ships regardless); status
+demotion changes what every consumer sees and flips the exit code, so the
+acceptance does not transfer. Separately, and regardless of the prevalence
+question: an 8.0% slice (≤10 math-font chars) has no display equation to
+ever recover, so it would be a permanent, unclearable `AUDIT_FAILED` under
+the original design. Demotion withheld pending a separate-ticket
+`trigger_rates.py` extension measuring the false-positive rate and the
+clearable share; the event, sidecar persistence, page note and
+CLI/document-note surfacing all still ship. Also added: a resume
+round-trip test, and a docstring caveat on `regions_covered` ("not
+invented", not "verified correct"). See `docs/log/2026-09-16_140.md`.
 
 **Second REVISE (2026-09-16, design panel):** the document-level note moved
 out of `final_result.error` into `final_result.audit_notes` — `error` is

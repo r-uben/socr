@@ -20,14 +20,22 @@
   a new `has_math_font_typesetting` field after the full suite caught a
   #269-shaped regression the ticket's literal framing would have
   reintroduced). REVISE: criterion 4 reversed after review measured the
-  trigger rate against `docs/log/2026-09-02_p4m-trigger-rates.md` — the
-  demotion's blast radius is ~15x the PUA precedent it copied and would make
-  an unclearable 8.0% slice a permanent `AUDIT_FAILED`. The event/note/CLI
-  surfacing stays; the document-status demotion was removed. Also added a
-  resume round-trip test and a docstring caveat on `regions_covered`
-  ("not invented" vs "verified correct"). Second REVISE (design panel):
-  moved the document note out of `final_result.error` (load-bearing —
-  `cli.py`/GH-177 read it as confirmed-lost-content) into
+  trigger rate against `docs/log/2026-09-02_p4m-trigger-rates.md`. The
+  36.1%-vs-2.4% comparison first cited as grounds for rejection was itself
+  corrected (design panel, Astra): prevalence alone cannot justify
+  suppressing a signal, and the log's own ruling explicitly accepts 36% —
+  for routing. The demotion survives rejection on the ruling's actual
+  stated condition instead: it accepted 36% because over-routing is a cost,
+  not a correctness risk (native prose ships either way); status demotion
+  changes what every consumer sees and flips the exit code, so that
+  acceptance does not transfer. The unclearable 8.0% slice (no display
+  equation to ever recover) would still be a permanent `AUDIT_FAILED` under
+  the original design, independent of the prevalence question. The
+  event/note/CLI surfacing stays; the document-status demotion was removed.
+  Also added a resume round-trip test and a docstring caveat on
+  `regions_covered` ("not invented" vs "verified correct"). Second REVISE
+  (design panel): moved the document note out of `final_result.error`
+  (load-bearing — `cli.py`/GH-177 read it as confirmed-lost-content) into
   `final_result.audit_notes`. Recorded as an **interim observability
   patch, not fully resolved**: the signal is prevalence-only, no
   false-positive rate measured; named follow-up (deferred) is to demote
