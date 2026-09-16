@@ -60,6 +60,15 @@ dev = [
     # one place, not something that happens to `main` while nobody is looking.
     "ruff==0.16.0",
 ]
+# #658a: the classical-OCR witness `source_evidence.py` uses to verify a
+# scanned table's tokens against local, non-generative page evidence. Not a
+# core dependency: the tesseract BINARY it drives is a separate, OS-level
+# install (see WITNESS_BINARY_MISSING's message), so declaring the Python
+# package alone would still leave a default install unwitnessed on a host
+# without that binary -- but a default install should not carry a
+# transitive OCR dependency it may never need. `socr[scanned]` names the
+# actual install a scanned-table page needs.
+scanned = ["pytesseract>=0.3.10"]
 # OCR Engine CLIs — install individually based on needs
 # NOTE: marker-ocr-cli requires pillow<11 while deepseek-ocr-cli requires pillow>=11.
 # They cannot coexist. Install one or the other, not both.

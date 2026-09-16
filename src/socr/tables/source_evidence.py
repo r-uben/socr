@@ -145,6 +145,26 @@ _WITNESS_STATE_RANK: dict[str, int] = {
     WITNESS_NOT_ATTEMPTED: 4,
 }
 
+#: #658a: witness states already reported LOUDLY (``logger.warning``, not
+#: ``debug``) this process, keyed by ``witness_state`` so
+#: ``WITNESS_PACKAGE_MISSING`` and ``WITNESS_BINARY_MISSING`` each get their
+#: own first warning -- they name different fixes, and collapsing them under
+#: one key would silence whichever one occurs second. Module-level and
+#: process-lifetime by design: a 200-page scan with no tesseract install
+#: would otherwise log the same "go install this" sentence 200 times, which
+#: is its own defect (buries the one thing an operator needs to see).
+_WARNED_WITNESS_STATES: set[str] = set()
+
+
+def _warn_witness_state_once(state: str) -> None:
+    """Emit ``WITNESS_STATE_MESSAGES[state]`` at WARNING level, once per state per run."""
+    if state in _WARNED_WITNESS_STATES:
+        return
+    _WARNED_WITNESS_STATES.add(state)
+    message = WITNESS_STATE_MESSAGES.get(state, state)
+    logger.warning("scanned-table evidence unavailable: %s", message)
+
+
 #: Audit event kind for the ending above. A kind of its own rather than more
 #: prose inside ``source_evidence_table_reject`` so a consumer counting
 #: unwitnessed pages does not have to parse a sentence, and so an operator can
@@ -533,6 +553,9 @@ def verify_table_tokens(
         if bundle.no_reading:
             why = WITNESS_STATE_MESSAGES.get(bundle.witness_state, bundle.witness_state)
             detail = f" [{bundle.witness_detail}]" if bundle.witness_detail else ""
+            # #658a: loud and once, not once per page -- see
+            # ``_warn_witness_state_once``.
+            _warn_witness_state_once(bundle.witness_state)
             return SourceEvidenceResult(
                 verifiable=False,
                 passed=False,
