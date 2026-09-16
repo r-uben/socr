@@ -27,6 +27,7 @@ import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
+from socr.tables.label_canonical import decode_label_cell
 from socr.tables.native_verifier import (
     _numeric_multiset_from_tokens,
     is_numeric_token,
@@ -485,7 +486,15 @@ def _native_label_lane(grid: list[list[str]], label: str, words: list) -> int | 
     if len(lane_centers) != expected_lanes:
         return None
 
-    label_tokens = re.findall(r"[\w&]+", label.casefold())
+    # GH-778: the model-grid label may carry HTML entities (the model's own
+    # encoding of indentation/punctuation) that native PyMuPDF words never
+    # do. Decode through the same boundary ``binding`` uses for a row label
+    # (``decode_label_cell``) before tokenising, or an entity glued to a
+    # word -- ``'Net&nbsp;income'`` -- corrupts that word's own token and the
+    # lane never binds. ``&`` stays in the token class: after decoding, any
+    # ``&`` remaining is a literal ampersand in the label text itself (e.g.
+    # "Profit & Loss"), which native words tokenise as their own "&" word.
+    label_tokens = re.findall(r"[\w&]+", decode_label_cell(label).casefold())
     if not label_tokens:
         return None
 
