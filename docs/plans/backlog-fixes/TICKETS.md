@@ -119,3 +119,84 @@ Reuse that module rather than inventing a parallel one.
 - Every new test must be shown to FAIL without the change.
 - Pin a DIFFERENCE, not an absolute outcome measured locally: CI has no ollama and no provider.
 - Do not `Closes #140` unless criteria 1-4 all hold; say which remain otherwise.
+
+---
+
+## GH-658a — a default install has no scanned-table witness, silently
+
+**Status:** READY
+**Branch:** `fix/658-scanned-witness`
+**Write ownership:** `pyproject.toml`, `src/socr/tables/source_evidence.py` (warning only),
+`tests/`
+
+### Context — confirmed still real on `main@5478b42`
+`pytesseract` is declared **nowhere** in `pyproject.toml` — not a dependency, not an extra.
+So a fresh install always lands on `WITNESS_PACKAGE_MISSING` (`source_evidence.py:84-86`,
+whose own comment says exactly this), `classical_ocr_pixmap` returns `""`, and a scanned
+table page has no evidence source. The owner installed tesseract by hand on this Mac on
+2026-09-08; nobody else gets that.
+
+`source_evidence.py` has had **0 commits** since the triage baseline.
+
+### Plan
+1. Declare the witness as an optional extra (the issue suggests `socr[scanned]`).
+2. Emit a **loud, once-per-run** warning when a scanned table page is assessed and no
+   evidence source is available — naming the missing package and the extra that fixes it.
+
+### Acceptance Criteria
+1. `pyproject.toml` declares the extra; a plain install is unchanged in behaviour.
+2. A scanned table page with no witness emits the warning exactly once per run, not once
+   per page (log noise on a 200-page scan is its own defect).
+3. The warning names `WITNESS_PACKAGE_MISSING` vs `WITNESS_BINARY_MISSING` distinctly —
+   "install the extra" and "install the tesseract binary" are different user actions and
+   `source_evidence.py` already distinguishes them.
+4. **No behaviour change to fail-closed logic.** This ticket is packaging + visibility only.
+5. No new magic threshold.
+
+---
+
+---
+
+## GH-658b — a distrusted text layer is discarded instead of used as a witness
+
+**Status:** READY — **BEHAVIOUR CHANGE, reviewer must scrutinise**
+**Branch:** `fix/658-scanned-witness`
+**Write ownership:** `src/socr/tables/source_evidence.py`, `tests/`
+**Depends on:** GH-658a landing first is preferred but not required.
+
+### Context
+Measured (D3 re-measure, `docs/log/2026-09-07_D3-fed-table-lane-remeasure.md`): on Fed
+1977-11-15 p3, 1982-11-16 p3 and 1990-11-13 p3, cached candidates carry **62/62, 67/67,
+66/66** of the page's numbers with **0 extras**, and each is rejected
+`source_evidence_table_reject: no local content evidence available for scanned table` ->
+`table_ladder_unverified cause=no_witness` -> fail-closed marker. **Shipped 1-11% of the
+numbers; an older heuristic run shipped 100%.**
+
+Root cause: `build_scanned_evidence` excludes the page text layer when it is distrusted
+(GH-163), so `has_content_evidence` is False and A1b row corroboration (#640) never runs.
+
+### Plan
+When the text layer exists but is distrusted, use it as a **corroboration** witness via
+`corroborate_rows` — ordered row match tolerates the measured 6-7% corruption (the 1989
+fixture had 295 usable native words) — and ship **flagged** `header_binding_unverified`
+per the 2026-09-06 owner ruling, instead of shipping no witness at all.
+
+### Acceptance Criteria — read criterion 1 twice
+1. **This RELAXES a fail-closed path. It must not become a silent accept.** A page rescued
+   this way ships FLAGGED, and that flag must surface at every level the repo requires —
+   page status, document status, metadata, CLI — never as a clean SUCCESS. GH-249's
+   lesson, one week old: in this pipeline an absent refusal reads downstream as consent.
+2. A distrusted text layer is used only as *corroboration*, never promoted to trusted
+   content, and never merged into the shipped text.
+3. A page with **no** text layer at all still fails closed exactly as today. This ticket
+   rescues the distrusted-layer case only.
+4. A candidate that genuinely disagrees with the distrusted layer must still be rejected —
+   demonstrate with a fixture where corroboration fails.
+5. No new magic threshold: reuse `corroborate_rows`' existing tolerance, do not invent one.
+
+### Verification (both tickets)
+- FULL suite: `PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest -q`. Never a `-k` subset.
+- `uvx ruff@0.16.0 format --check .` (not the venv's older ruff).
+- Every new test demonstrated to FAIL without the change.
+- Pin a DIFFERENCE, not a locally-measured absolute — CI has no provider and no tesseract.
+- Do not `Closes #658` unless BOTH 658a and 658b are complete.
