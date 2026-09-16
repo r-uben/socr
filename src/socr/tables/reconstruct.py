@@ -2863,7 +2863,9 @@ def _rowize_segment(
             elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
-            elif is_data_row:
+            elif is_data_row and not _is_runhead(
+                [label, *row_cells, " ".join([*orphan_marginals, w[4]])]
+            ):
                 # GH-418 step 2: further than the snap radius from every lane,
                 # but the row already populates >= 2 numeric lanes -- the same
                 # predicate that makes this a "data row" -- so capture the
@@ -2873,6 +2875,22 @@ def _rowize_segment(
                 # same discipline GH-461's own capture above already follows.
                 # No event: this word is no longer dropped, so it must not be
                 # reported as one.
+                #
+                # The `_is_runhead` guard: `_clean_grid` peels a LEADING row
+                # off the finished grid when its joined text reads like a
+                # page running-head ("journal/volume/(year)"). That check
+                # runs over the WHOLE row, trailing column included -- so a
+                # captured word (e.g. "Journal", "Finance" off a reference
+                # citation) can flip an otherwise-genuine data row into
+                # matching the pattern and get the ENTIRE row deleted, not
+                # just the word. That is strictly worse than today's
+                # word-only drop, so this ticket must not ship it. Reusing
+                # `_is_runhead`/`_RUNHEAD_RE` here (not touching
+                # `_clean_grid`, which is shared with an unrelated caller)
+                # refuses the capture for exactly the word that would cause
+                # it, falling through to the drop+event branch below --
+                # the row survives, and the refusal is itself visible via
+                # `orphan_drops`.
                 orphan_marginals.append(w[4])
             elif orphan_drops is not None:
                 # GH-418 step 1: still further than the snap radius from every

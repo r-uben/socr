@@ -103,29 +103,36 @@ def test_promotion_touches_only_the_label_column(monkeypatch):
     )
     unpromoted = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
 
-    # What differs is not that labels MOVE -- without promotion they are lost
-    # outright: the row-label words fall outside every lane's snap radius once
-    # the stub lane is still in the list, so they are dropped from the grid
-    # entirely. That is GH-331's loss, and it is why both grids are the same
-    # WIDTH (#456 review): the stub stays in the label cell either way, so
-    # there is no extra data column to skip when comparing.
+    # GH-418 step 2 retarget: without promotion the row-label words ("Large
+    # T", "Small T") fall outside every lane's snap radius, and every row
+    # here populates all 3 numeric lanes -- so they are now CAPTURED into
+    # GH-461's trailing column instead of dropped outright. That makes the
+    # unpromoted grid one column WIDER than the promoted grid (the promoted
+    # grid never orphans a word, so its trailing column is empty and
+    # `_clean_grid` drops it). Restated against `data_width =
+    # len(promoted[0])`, which is what the "only the label column" claim
+    # actually needs: the label cell (index 0) and the DATA cells
+    # (`row[1:data_width]`) are compared, and the captured labels in
+    # unpromoted's trailing cell are checked separately.
+    data_width = len(promoted[0])
     labels_promoted = [row[0] for row in promoted]
     labels_unpromoted = [row[0] for row in unpromoted]
-    assert len(promoted[0]) == len(unpromoted[0]), (
-        f"the two grids are different widths ({len(promoted[0])} vs "
-        f"{len(unpromoted[0])}), so the column-wise comparison below is not "
-        "aligned and this test would be comparing different columns"
-    )
     assert labels_promoted != labels_unpromoted, (
         "promotion changed nothing, so this fixture cannot tell the two apart "
         f"and the assertion below is vacuous: {labels_promoted}"
     )
 
-    data_promoted = [row[1:] for row in promoted]
-    data_unpromoted = [row[1:] for row in unpromoted]
+    data_promoted = [row[1:data_width] for row in promoted]
+    data_unpromoted = [row[1:data_width] for row in unpromoted]
     assert data_promoted == data_unpromoted, (
         f"promotion moved a DATA cell, not just the label:\n"
         f"  promoted:   {data_promoted}\n  unpromoted: {data_unpromoted}"
+    )
+
+    # The label words are not lost -- captured in their own trailing column.
+    captured_labels = [row[data_width] for row in unpromoted if row[data_width]]
+    assert captured_labels == ["Large T", "Small T"] * 3, (
+        f"the unpromoted label words must be captured, not dropped: {unpromoted}"
     )
 
 
@@ -211,8 +218,16 @@ def test_a_single_stray_word_does_not_promote_a_data_column():
         return _cells(rowize_from_word_list(words)[0][1])
 
     with_stray, without = _plain(True), _plain(False)
-    widths_with = {len(r) for r in with_stray}
-    widths_without = {len(r) for r in without}
-    assert widths_with == widths_without, (
-        f"one stray word changed the column count: {widths_with} vs {widths_without}"
+    # GH-418 step 2 retarget: the stray word's own row populates all 3
+    # numeric lanes (>= 2), so "a" is now CAPTURED into a trailing column
+    # instead of dropped -- the with-stray grid is legitimately one column
+    # WIDER than the without-stray grid (whose trailing column is empty and
+    # dropped by `_clean_grid`). What this test actually protects -- the
+    # stray word does not move the boundary or swallow a data lane -- is
+    # restated against the data-lane cells only.
+    data_width = len(without[0])
+    data_with = [row[:data_width] for row in with_stray]
+    data_without = [row[:data_width] for row in without]
+    assert data_with == data_without, (
+        f"one stray word changed a data lane or the label boundary: {data_with} vs {data_without}"
     )

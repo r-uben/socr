@@ -169,6 +169,13 @@ def test_lane_aligned_reference_row_recovers_prose_not_corruption() -> None:
     the trailing column), not *silent deletion* or *value corruption*: no
     numeric cell is touched, and the verdict (this block ships as a table)
     is the SAME with and without the capture -- only the content differs.
+
+    Fama's row uses the actual word that surfaced the real regression this
+    ticket found (see ``test_a_word_that_would_look_like_a_running_head_is_
+    refused_not_the_whole_row`` below): "Journal" makes the row's joined
+    text match ``_RUNHEAD_RE``, so it is refused and recorded as a drop
+    instead of captured -- "Finance" alone does not, and is captured
+    normally. That refusal is exercised here inline rather than assumed.
     """
     words: list = []
     lanes = [130.0, 200.0, 240.0]
@@ -203,11 +210,86 @@ def test_lane_aligned_reference_row_recovers_prose_not_corruption() -> None:
     )
 
     grid, *_ = captured
+    assert len(grid) == len(refs), f"a row was lost: {grid}"
     for author, year, page_no, vol, w1, w2 in refs:
         row = [r for r in grid if r[0] == author][0]
         assert row[1:4] == [year, page_no, vol], f"a real value moved lanes: {row}"
-        assert row[4] == f"{w1} {w2}", f"prose not captured in its own column: {row}"
-    assert drops == [], "every orphan on these rows is captured, not dropped"
+        if author == "Fama":
+            assert row[4] == "Finance", f"Finance should still be captured: {row}"
+            assert {"word": "Journal", "x": 300.0, "y": 100.0} in drops, (
+                f"Journal must be refused and recorded, not silently lost: {drops}"
+            )
+        else:
+            assert row[4] == f"{w1} {w2}", f"prose not captured in its own column: {row}"
+    assert len(drops) == 1, f"only the runhead-colliding word should be refused: {drops}"
+
+
+def test_a_word_that_would_look_like_a_running_head_is_refused_not_the_whole_row() -> None:
+    """The regression this ticket found: capturing a word that makes the
+    row's joined text match ``_clean_grid``'s ``_RUNHEAD_RE`` used to get
+    the ENTIRE row deleted by ``_clean_grid``'s leading-runhead stripper --
+    not just the word, the row's real numeric values too. That is strictly
+    worse than the pre-ticket behaviour (word-only drop) and the exact
+    prose-page regression class #342's two prior attempts were rejected
+    for. Routed through the FULL pipeline (``rowize_from_word_list``, which
+    calls ``_clean_grid``), not ``_rowize_segment`` directly, because the
+    loss only happens after ``_clean_grid`` runs.
+
+    Five rows so the runhead-colliding row (Fama, row 0) is a LEADING row
+    once "Smith" et al are stripped of anything -- the exact shape
+    ``_clean_grid``'s ``while g and _is_runhead(g[0])`` peels.
+    """
+    words: list = []
+    lanes = [130.0, 200.0, 240.0]
+    y = 100.0
+    refs = [
+        ("Fama", "1992", "427", "12", "Journal", "Finance"),
+        ("Smith", "1998", "512", "5", "Rev", "Econ"),
+        ("Jones", "2001", "88", "9", "J", "Pol"),
+        ("Lucas", "1976", "19", "1", "CarnegieR", "Series"),
+        ("Sims", "1980", "1", "48", "Econometrica", "Vol"),
+    ]
+    for author, year, page_no, vol, w1, w2 in refs:
+        words.append(_w(60.0, y, author))
+        words.append(_w(lanes[0], y, year))
+        words.append(_w(lanes[1], y, page_no))
+        words.append(_w(lanes[2], y, vol))
+        words.append(_w(300.0, y, w1))
+        words.append(_w(340.0, y, w2))
+        y += 16.0
+
+    drops: list[dict] = []
+    full_grid = _grid(rowize_from_word_list(words, orphan_drops=drops))
+    # Drop the markdown header row (blank cells, emitted unconditionally by
+    # `_grid_to_markdown`) -- it is not one of the reference rows.
+    grid = [row for row in full_grid if row[0]]
+
+    assert len(grid) == len(refs), (
+        f"every reference row must survive -- a captured word must never "
+        f"delete the whole row: {grid}"
+    )
+    present_authors = {row[0] for row in grid}
+    assert present_authors == {a for a, *_ in refs}, f"a row was lost: {grid}"
+
+    fama = [row for row in grid if row[0] == "Fama"][0]
+    assert fama[1:4] == ["1992", "427", "12"], f"Fama's real values must survive intact: {fama}"
+    assert "Finance" in fama[-1], f"the non-colliding word must still be captured: {fama}"
+    assert "Journal" not in fama[-1], (
+        f"the runhead-colliding word must be refused, not captured: {fama}"
+    )
+
+    sims = [row for row in grid if row[0] == "Sims"][0]
+    assert sims[1:4] == ["1980", "1", "48"], f"Sims's real values must survive intact: {sims}"
+    assert "Vol" in sims[-1], f"the non-colliding word must still be captured: {sims}"
+    assert "Econometrica" not in sims[-1], (
+        f"the runhead-colliding word must be refused, not captured: {sims}"
+    )
+
+    refused_words = {d["word"] for d in drops}
+    assert refused_words == {"Journal", "Econometrica"}, (
+        f"exactly the runhead-colliding words must be recorded as drops, "
+        f"not silently disappear: {drops}"
+    )
 
 
 # ---------------------------------------------------------------------------
