@@ -24,7 +24,11 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from socr.tables.native_verifier import _numeric_multiset_from_tokens, is_numeric_token
+from socr.tables.native_verifier import (
+    _normalize_cell,
+    _numeric_multiset_from_tokens,
+    is_numeric_token,
+)
 from socr.tables.reconcile import find_table_blocks
 
 logger = logging.getLogger(__name__)
@@ -59,55 +63,10 @@ def _content_token(raw: str) -> str | None:
     return token if len(token) >= _MIN_CONTENT_TOKEN_LEN else None
 
 
-#: Every Unicode dash/hyphen glyph a trailing decoration strip must fold.
-#: ``&mdash;``/``&ndash;`` decode (via ``html.unescape``) to U+2014/U+2013,
-#: not ASCII ``-``, so a strip that only recognised ASCII leaves the decoded
-#: glyph trailing and still unmatched by ``is_numeric_token``'s anchored
-#: regex -- half-closing the exact decoration case this exists for. Spelled
-#: as explicit ``\N{...}`` code-point names, not bare literal glyphs or a
-#: hand-typed string, so each member is legible and auditable at the
-#: definition site.
-_TRAILING_DASH_CHARS: str = (
-    "\N{HYPHEN-MINUS}"  # U+002D, plain ASCII "-"
-    "\N{HYPHEN}"  # U+2010
-    "\N{NON-BREAKING HYPHEN}"  # U+2011
-    "\N{FIGURE DASH}"  # U+2012
-    "\N{EN DASH}"  # U+2013 -- what "&ndash;" decodes to
-    "\N{EM DASH}"  # U+2014 -- what "&mdash;" decodes to
-    "\N{HORIZONTAL BAR}"  # U+2015
-    "\N{MINUS SIGN}"  # U+2212, the true math/typeset minus, distinct from hyphen
-)
-
-
-def _normalize_cell(raw: str) -> str:
-    """Decode HTML entities and strip trailing dash-rule decoration.
-
-    #679: ``collect_table_tokens`` ran ``is_numeric_token`` on the RAW cell
-    and only decoded entities afterward, in the label branch -- so
-    ``&nbsp;62.5`` never entered the numeric multiset even though the same
-    row's label already got the #659 decode. A VLM's trailing rule
-    decoration (``62.5--``) had the identical gap: ``is_numeric_token``
-    anchors on ``_NUM_TOKEN_RE``, which does not accept a trailing ``-``, so
-    the decorated value fails the check on either side of a decode.
-
-    Called from BOTH ``collect_table_tokens`` (candidate) and
-    ``_tokens_from_plain_text`` (evidence) so the two stay symmetric. That
-    symmetry matters beyond tidiness: a scanned page's own printed
-    decoration can end up verbatim in the OCR/text-layer evidence too, and
-    normalizing only the candidate side would make a candidate that
-    genuinely AGREES with the evidence (both carry ``62.5--``) look
-    unsupported -- the candidate's dash-free ``62.5`` would no longer find a
-    match in an evidence multiset still keyed on the raw, un-normalized
-    ``62.5--`` token. Measured 2026-09-16 (docs/log/2026-09-16_679.md):
-    applying the strip candidate-only turns a page the two sides already
-    agree on into an active reject.
-
-    Only a TRAILING dash run is stripped. A LEADING dash (ASCII or the
-    Unicode minus/en/em-dash variants above) is a numeric sign (``-5.2``)
-    and must never be removed here -- only presentation (``62.5--``), never
-    value, is this function's job.
-    """
-    return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
+# #690: ``_normalize_cell`` moved to ``native_verifier`` (imported above) so
+# ``binding.py`` can share the identical normalizer instead of growing a
+# third copy. Its behaviour and docstring are unchanged; see
+# ``native_verifier._normalize_cell`` for both.
 
 
 OcrImageFn = Callable[[object], str]
