@@ -90,6 +90,7 @@ from socr.tables.native_verifier import (
     _WELL_SEPARATED_GAP_PT,
     _cluster_x_positions,
     _lane_count_from_words,
+    _normalize_cell,
     _normalize_numeric_token,
     _well_separated_lanes_in_row,
     is_numeric_token,
@@ -1200,9 +1201,19 @@ def build_column_header_paths(
 
 
 def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
+    """#690: value cells are decoded/dash-stripped (``_normalize_cell``)
+    before the numeric check, not just labels -- an unlabeled row whose
+    only value was ``&minus;1.5`` or ``&nbsp;62.5`` fails ``is_numeric_token``
+    on the RAW cell, so its multiset came back empty and ``_is_spacer_row``
+    (which calls this function) misclassified the row as a #601 layout
+    spacer, and ``bind()`` silently dropped it. This is the same real
+    filter used for the row-binding multiset compare (``_bind_rows``), so
+    fixing it here closes both the spacer-classification and the
+    value-comparison side of the hole in one place.
+    """
     c: Counter = Counter()
     for cell in row[1:]:
-        for tok in re.split(r"\s+", cell.strip()):
+        for tok in re.split(r"\s+", _normalize_cell(cell).strip()):
             if tok and is_numeric_token(tok):
                 c[_normalize_numeric_token(tok)] += 1
     return c

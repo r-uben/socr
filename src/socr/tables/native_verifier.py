@@ -58,6 +58,7 @@ Named tolerances (no magic literals):
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from collections import Counter
@@ -897,6 +898,65 @@ def strip_presentation(tok: str) -> str:
         tok = tok[1:]
     tok = _LEADING_DECIMAL_RE.sub(r"\g<1>0.", tok)
     return tok.strip()
+
+
+#: Every Unicode dash/hyphen glyph a trailing decoration strip must fold.
+#: ``&mdash;``/``&ndash;`` decode (via ``html.unescape``) to U+2014/U+2013,
+#: not ASCII ``-``, so a strip that only recognised ASCII leaves the decoded
+#: glyph trailing and still unmatched by ``is_numeric_token``'s anchored
+#: regex -- half-closing the exact decoration case this exists for. Spelled
+#: as explicit ``\N{...}`` code-point names, not bare literal glyphs or a
+#: hand-typed string, so each member is legible and auditable at the
+#: definition site.
+_TRAILING_DASH_CHARS: str = (
+    "\N{HYPHEN-MINUS}"  # U+002D, plain ASCII "-"
+    "\N{HYPHEN}"  # U+2010
+    "\N{NON-BREAKING HYPHEN}"  # U+2011
+    "\N{FIGURE DASH}"  # U+2012
+    "\N{EN DASH}"  # U+2013 -- what "&ndash;" decodes to
+    "\N{EM DASH}"  # U+2014 -- what "&mdash;" decodes to
+    "\N{HORIZONTAL BAR}"  # U+2015
+    "\N{MINUS SIGN}"  # U+2212, the true math/typeset minus, distinct from hyphen
+)
+
+
+def _normalize_cell(raw: str) -> str:
+    """Decode HTML entities and strip trailing dash-rule decoration.
+
+    #679: ``collect_table_tokens`` (``source_evidence.py``) ran
+    ``is_numeric_token`` on the RAW cell and only decoded entities
+    afterward, in the label branch -- so ``&nbsp;62.5`` never entered the
+    numeric multiset even though the same row's label already got the #659
+    decode. A VLM's trailing rule decoration (``62.5--``) had the identical
+    gap: ``is_numeric_token`` anchors on ``_NUM_TOKEN_RE``, which does not
+    accept a trailing ``-``, so the decorated value fails the check on
+    either side of a decode.
+
+    #690 found the same hole one gate over: ``binding._candidate_row_multiset``
+    (the #601 spacer classifier AND the row-binding multiset comparison) had
+    the identical raw-cell blind spot, so an unlabeled row whose only value
+    was ``&minus;1.5`` was counted as a spacer and ``bind()`` silently
+    dropped it. Promoted here (from ``source_evidence.py``, where #679
+    first defined it) so both gates share one normalizer instead of growing
+    a third divergent copy.
+
+    Called from BOTH sides of the #679 evidence comparison
+    (``collect_table_tokens`` / ``_tokens_from_plain_text``) so they stay
+    symmetric -- normalizing only the candidate side would make a candidate
+    that genuinely AGREES with an evidence text carrying the same raw
+    decoration look unsupported. Measured 2026-09-16
+    (docs/log/2026-09-16_679.md): applying the strip candidate-only turns a
+    page the two sides already agree on into an active reject. The #690
+    caller (``binding._candidate_row_multiset``) has no such symmetric
+    counterpart -- it normalizes the one candidate-row cell it reads -- so
+    that constraint does not apply there.
+
+    Only a TRAILING dash run is stripped. A LEADING dash (ASCII or the
+    Unicode minus/en/em-dash variants above) is a numeric sign (``-5.2``)
+    and must never be removed here -- only presentation (``62.5--``), never
+    value, is this function's job.
+    """
+    return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
 
 
 def is_numeric_token(tok: str) -> bool:
