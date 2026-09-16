@@ -35,15 +35,29 @@ from socr.tables.extract import probe_ollama_idle, resolve_ollama_host
 
 @pytest.fixture
 def recorded_urls(monkeypatch) -> list[str]:
-    """Capture the URL the probe asks for; never touch the network."""
+    """Capture the /api/tags or /models URL the probe asks for; never touch the network.
+
+    GH-221: ``probe_ollama_idle``/``probe_openai_server_idle`` now follow the
+    HTTP precondition with a functional generation canary (``httpx.post``).
+    This module's tests are about which HOST/endpoint the precondition asks —
+    the canary is #221's own concern, covered in ``test_gh221_generation_canary.py``
+    — so the stubbed POST always reports a healthy canary and is not recorded
+    in ``urls``, keeping every existing host-resolution assertion unchanged.
+    """
     urls: list[str] = []
 
     class _Resp:
         def raise_for_status(self) -> None:
             return None
 
+        def json(self) -> dict:
+            return {}
+
     def _fake_get(url, *args, **kwargs):
         urls.append(url)
+        return _Resp()
+
+    def _fake_post(url, *args, **kwargs):
         return _Resp()
 
     # Hermetic by default: a developer or runner with VLLM_BASE_URL exported
@@ -51,6 +65,7 @@ def recorded_urls(monkeypatch) -> list[str]:
     # Tests that want it set do so explicitly, after this fixture has run.
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
     monkeypatch.setattr(extract_mod.httpx, "get", _fake_get)
+    monkeypatch.setattr(extract_mod.httpx, "post", _fake_post)
     return urls
 
 

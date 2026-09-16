@@ -216,7 +216,7 @@ fails-without-fix demonstrations.
 
 ## GH-221 — cascade-halt cannot fire: the liveness probe is blind to a wedged GPU
 
-**Status:** READY
+**Status:** DONE — see `docs/log/2026-09-16_221.md`
 **Branch:** `fix/221-wedge-canary`
 **Write ownership:** `src/socr/tables/extract.py`, `tests/` (a new module for this ticket)
 

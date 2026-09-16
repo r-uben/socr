@@ -9,6 +9,15 @@
 > locate, 1 closure candidate).
 
 ## Live
+- **GH-221** — implemented on `fix/221-wedge-canary` (off `3e04f1c`). Replaced the
+  `/api/tags`-only liveness probe with a functional generation canary (minimal
+  `num_predict: 1` / `max_tokens: 1` request, run only after the existing precondition
+  passes) so a wedged GPU with a healthy HTTP layer now reads as "not idle" and the
+  cascade-halt guard actually arms. Timeout derived from the existing
+  `_CROP_DEADLINE_FLOOR_S` constant, not a new number. Full suite 5429 passed / 4
+  xfailed; `ruff format --check` clean; mutation-tested (neutering the canary fails
+  exactly the 6 tests that assert its behaviour, 44 others correctly unaffected). See
+  `docs/log/2026-09-16_221.md`. Not yet merged.
 - **GH-658a/658b** — implemented on `fix/658-scanned-witness`, reviewer verdict ACCEPT
   on the code. 658a: `scanned` extra + once-per-run witness warning. 658b:
   distrusted-layer row-corroboration rescue, ships **flagged** via the existing #659
