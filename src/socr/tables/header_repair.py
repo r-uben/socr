@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 from socr.tables.native_verifier import (
     _numeric_multiset_from_tokens,
+    is_numeric_token,
 )
 from socr.tables.reconcile import find_table_blocks
 from socr.tables.reconstruct import (
@@ -62,6 +63,13 @@ def detect_header_column_collapse(grid: list[list[str]]) -> tuple[bool, int, int
     Returns ``(collapsed, header_cols, expected_cols)``.  ``expected_cols`` is
     the modal width of "data" rows (rows with >= ``_MIN_DATA_NUMERIC_CELLS``
     numeric tokens anywhere in the row).
+
+    ``grid`` is always the model-emitted table grid, never native PyMuPDF
+    text, so each cell is tested with ``is_numeric_token`` (entity-decode +
+    presentation-strip) rather than the raw ``_NUM_TOKEN_RE``/``_NUMERIC_RE``
+    pair. An entity-encoded data row (``&minus;9.9``) previously counted as
+    zero numeric cells, so a genuinely collapsed header went undetected and
+    the repair below silently abstained (GH-773 S4).
     """
     if len(grid) < 2:
         return False, 0, 0
@@ -69,11 +77,7 @@ def detect_header_column_collapse(grid: list[list[str]]) -> tuple[bool, int, int
     header_cols = len(grid[0])
     data_widths: list[int] = []
     for row in grid[1:]:
-        numeric_count = sum(
-            1
-            for cell in row
-            if cell.strip() and _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
-        )
+        numeric_count = sum(1 for cell in row if cell.strip() and is_numeric_token(cell.strip()))
         if numeric_count >= _MIN_DATA_NUMERIC_CELLS:
             data_widths.append(len(row))
 
@@ -145,12 +149,18 @@ def _repair_too_narrow_spanning_header(
     ):
         return None
     if any(
-        _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
+        is_numeric_token(cell.strip())
         for row in grid[1:first_full_width]
         for cell in row
         if cell.strip()
     ):
-        # A short numeric row is body data, not evidence of a spanning header.
+        # A short numeric row is body data, not evidence of a spanning
+        # header. GH-773 S9: this guard must decode alongside
+        # ``_best_anchor_y``/``_first_data_row_idx`` (the ``:209``/``:896``
+        # sites this function shares its input with) -- fixing those without
+        # this guard would make an entity-encoded body-data row pass here
+        # unrecognised, and get restructured as a spanning header instead of
+        # aborting the repair.
         return None
 
     deficit = expected_cols - header_cols
@@ -888,13 +898,15 @@ def _merge_multiline_header_rows(header_rows: list[list[str]]) -> list[str]:
 
 
 def _first_data_row_idx(grid: list[list[str]], expected_cols: int) -> int:
-    """Index of the first body row that carries the modal data column count."""
+    """Index of the first body row that carries the modal data column count.
+
+    ``grid`` is model markdown; each cell is tested with ``is_numeric_token``
+    (entity-decode + presentation-strip) so an entity-encoded row is not
+    misclassified as non-data (GH-773 S5), which starves ``_best_anchor_y``
+    of an anchor row and makes the header-cut verdict abstain.
+    """
     for i, row in enumerate(grid[1:], start=1):
-        numeric_count = sum(
-            1
-            for cell in row
-            if cell.strip() and _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
-        )
+        numeric_count = sum(1 for cell in row if cell.strip() and is_numeric_token(cell.strip()))
         if numeric_count >= _MIN_DATA_NUMERIC_CELLS and len(row) >= expected_cols - 1:
             return i
     return len(grid)
