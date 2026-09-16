@@ -165,36 +165,163 @@ def resolve_ollama_host(host: str | None = None) -> str:
     return candidate
 
 
-def probe_openai_server_idle(base_url: str, timeout: float = 5.0) -> bool:
-    """Return True if an OpenAI-compatible VLM server (vLLM/SGLang) is responding.
+def _default_canary_model() -> str:
+    """The model a canary probes when the caller does not name one.
 
-    GH-222: the Ollama probe asks ``/api/tags``, an endpoint a vLLM server does
-    not serve, so pointing it at one reports a healthy machine dead. The
-    OpenAI-compatible equivalent is ``/models`` under the same ``/v1`` base URL
-    the crop reader already talks to.
+    ``probe_ollama_idle``/``probe_openai_server_idle`` are called from the
+    orchestrator's ``_probe_backend_idle`` with no ``model`` argument — that
+    call site has no reader instance to read ``.model`` off of, only a host.
+    Falling back to ``PROFILE_QWEN_LOCAL.model`` is not a guess: it is the
+    repo's one supported local VLM (CLAUDE.md), the same tag every other local
+    OCR call in this codebase already targets. A reader-driven caller
+    (``_probe_reader_idle``, below) always passes the reader's own model and
+    never hits this default.
+    """
+    from socr.core.providers import PROFILE_QWEN_LOCAL
 
-    Same shape and same caveat as ``probe_ollama_idle``: this is an HTTP-layer
-    liveness ping, NOT a check that the GPU is free. A server mid-generation
-    answers it. Detecting a wedged GPU needs a real generation call and is
-    #221/#227's problem, deliberately not this one's.
+    return PROFILE_QWEN_LOCAL.model
+
+
+# GH-221 review: every vision call in this codebase sends an ``images``/``image_url``
+# payload (judge/ollama_judge.py, judge/table_rung_ollama.py, math/equation_latex.py,
+# engines/gemini_api.py) -- and so does TableCropExtractor, the workload this canary
+# guards. A text-only probe exercises a different code path than the one that wedges,
+# so it must send an image too: a probe that answers healthy for the exact failure it
+# exists to detect is the same failure class GH-221 was filed to close. This is the
+# smallest legal PNG (1x1, transparent) -- a decoded, fixed image so the canary payload
+# never depends on disk state or an actual table crop.
+_CANARY_IMAGE_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
+    """GH-221: the only thing that tells "HTTP alive" from "GPU available".
+
+    ``/api/tags`` answers instantly regardless of what the model is doing —
+    the issue measured it returning 200 OK in 0.05-0.14s while the same model
+    was mid-generation at 100% GPU. Ollama serialises ``/api/generate`` calls
+    per model: a request sent while a prior one is still running QUEUES behind
+    it rather than returning, so a single-token request (``num_predict: 1``)
+    answers almost instantly on a genuinely idle backend and blocks for the
+    full *timeout* on a wedged one — which is exactly the distinction
+    ``/api/tags`` cannot make.
+
+    Carries ``images`` because the workload this guards (``TableCropExtractor``)
+    is a vision call, not a text one: a probe must exercise the code path it
+    guards, or a hang localised to image handling could pass a text-only canary
+    while the vision path stays wedged.
     """
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        resp = httpx.post(
+            f"{host.rstrip('/')}/api/generate",
+            json={
+                "model": model,
+                "prompt": "ok",
+                "images": [_CANARY_IMAGE_B64],
+                "stream": False,
+                "options": {"num_predict": 1},
+            },
+            timeout=timeout,
+        )
         resp.raise_for_status()
         return True
     except _PROBE_ERRORS:
         return False
 
 
-def probe_ollama_idle(host: str | None = None, timeout: float = 5.0) -> bool:
-    """Return True if the Ollama HTTP server is responding (idle/ready).
+def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool:
+    """The OpenAI-compatible (vLLM/SGLang) sibling of ``_ollama_generation_canary``.
 
-    Used as a cascade guard after a crop timeout: if the backend is unreachable,
-    the pipeline should not fire additional VLM calls into the wedged GPU.
+    Same reasoning: a chat-completion request with ``max_tokens: 1`` queues
+    behind an in-flight generation on the same server rather than returning,
+    so it distinguishes "the HTTP layer answers" from "the GPU can serve a new
+    request within *timeout*". Carries an ``image_url`` message part for the
+    same reason as the Ollama canary: the workload it guards is a vision call.
+    """
+    try:
+        resp = httpx.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            json={
+                "model": model,
+                "max_tokens": 1,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "ok"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{_CANARY_IMAGE_B64}"},
+                            },
+                        ],
+                    }
+                ],
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return True
+    except _PROBE_ERRORS:
+        return False
 
-    This is a lightweight /api/tags ping — it does NOT check whether a generation
-    is still running server-side (Ollama does not expose that). It only tells us
-    whether the HTTP layer is healthy.
+
+def probe_openai_server_idle(
+    base_url: str,
+    timeout: float = 5.0,
+    *,
+    model: str | None = None,
+    generation_timeout: float | None = None,
+) -> bool:
+    """Return True if an OpenAI-compatible VLM server (vLLM/SGLang) can serve now.
+
+    GH-222: the Ollama probe asks ``/api/tags``, an endpoint a vLLM server does
+    not serve, so pointing it at one reports a healthy machine dead. The
+    OpenAI-compatible equivalent precondition is ``/models`` under the same
+    ``/v1`` base URL the crop reader already talks to.
+
+    GH-221: ``/models`` is an HTTP-layer liveness ping, NOT a check that the
+    GPU is free — a server mid-generation answers it too. Once that
+    precondition passes, a minimal generation call (``_openai_generation_canary``)
+    is the only thing that tells the two apart. ``generation_timeout`` defaults
+    to ``_CROP_DEADLINE_FLOOR_S``, the wall-clock floor this pipeline already
+    budgets for a normal crop read — no new number invented for this probe.
+    """
+    try:
+        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        resp.raise_for_status()
+    except _PROBE_ERRORS:
+        return False
+    return _openai_generation_canary(
+        base_url,
+        model or _default_canary_model(),
+        generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
+    )
+
+
+def probe_ollama_idle(
+    host: str | None = None,
+    timeout: float = 5.0,
+    *,
+    model: str | None = None,
+    generation_timeout: float | None = None,
+) -> bool:
+    """Return True if the Ollama backend can actually serve a request now.
+
+    Used as a cascade guard after a crop timeout: if the backend is wedged or
+    unreachable, the pipeline should not fire additional VLM calls into it.
+
+    GH-221: an earlier version of this function was a lightweight ``/api/tags``
+    ping — it did NOT check whether a generation was still running
+    server-side, only that the HTTP layer answered. The issue measured that
+    ping returning 200 OK in 0.05-0.14s while the model was mid-generation at
+    100% GPU, so the cascade-halt guard never armed for the exact failure it
+    exists to catch. ``/api/tags`` is now only the cheap precondition — an
+    unreachable host still fails fast — and a minimal generation request
+    (``_ollama_generation_canary``) is the evidence that actually gates the
+    return value. ``generation_timeout`` defaults to ``_CROP_DEADLINE_FLOOR_S``,
+    the wall-clock floor this pipeline already budgets for a normal crop read;
+    no new threshold is invented for this probe.
 
     GH-222: ``host`` used to default to a hardcoded ``http://localhost:11434``,
     and the cascade call site passed nothing. On any deployment without a local
@@ -208,9 +335,13 @@ def probe_ollama_idle(host: str | None = None, timeout: float = 5.0) -> bool:
     try:
         resp = httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout)
         resp.raise_for_status()
-        return True
     except _PROBE_ERRORS:
         return False
+    return _ollama_generation_canary(
+        resolved,
+        model or _default_canary_model(),
+        generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
+    )
 
 
 def load_table_prompt() -> str:
@@ -335,16 +466,19 @@ def make_table_reader(
 
 
 def _probe_reader_idle(reader: object) -> bool:
-    """Liveness ping for whichever server *reader* talks to (GH-222).
+    """Liveness ping for whichever server *reader* talks to (GH-222/GH-221).
 
     ``VllmTableReader`` and ``OllamaTableReader`` both expose ``.host``, but the
     two servers answer different endpoints, so the endpoint has to follow the
-    reader type rather than the host string.
+    reader type rather than the host string. ``.model`` is passed through too
+    (GH-221) so the functional canary asks about the SAME model this reader
+    was reading crops with, rather than falling back to the generic default.
     """
     host = getattr(reader, "host", None) or DEFAULT_OLLAMA_HOST
+    model = getattr(reader, "model", None)
     if isinstance(reader, VllmTableReader):
-        return probe_openai_server_idle(host)
-    return probe_ollama_idle(host)
+        return probe_openai_server_idle(host, model=model)
+    return probe_ollama_idle(host, model=model)
 
 
 class TableCropExtractor:

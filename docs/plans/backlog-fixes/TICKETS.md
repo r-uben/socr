@@ -211,3 +211,81 @@ fails-without-fix demonstrations.
 - Every new test demonstrated to FAIL without the change.
 - Pin a DIFFERENCE, not a locally-measured absolute — CI has no provider and no tesseract.
 - Do not `Closes #658` unless BOTH 658a and 658b are complete.
+
+---
+
+## GH-221 — cascade-halt cannot fire: the liveness probe is blind to a wedged GPU
+
+**Status:** DONE — see `docs/log/2026-09-16_221.md`
+**Branch:** `fix/221-wedge-canary`
+**Write ownership:** `src/socr/tables/extract.py`, `tests/` (a new module for this ticket)
+
+### Context — confirmed still real on `main@3e04f1c`
+
+`probe_ollama_idle` (`src/socr/tables/extract.py:189`) is a `GET /api/tags`. **Its own
+docstring concedes the limitation:**
+
+> This is a lightweight /api/tags ping — it does NOT check whether a generation is still
+> running server-side (Ollama does not expose that). It only tells us whether the HTTP
+> layer is healthy.
+
+The PP-2 cascade-halt guard depends on it:
+
+```python
+_had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
+if _had_timeout and not probe_ollama_idle():
+    backend_degraded = True
+    halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
+```
+
+A wedged VLM leaves Ollama's HTTP layer perfectly healthy — the issue measured `/api/tags`
+returning **200 OK in 0.05-0.14s** with `qwen3-vl:30b-a3b-instruct` mid-generation at 100%
+GPU. So `probe_ollama_idle()` returns True, the guard never arms, and the loop keeps firing
+pages into a jammed GPU. **The safety mechanism cannot fire for the exact failure it was
+built to catch.**
+
+GH-222 fixed *which host* is probed, not the functional blindness. `extract.py` has had
+**0 commits** since the triage baseline.
+
+### Plan
+
+Replace the liveness ping with a **functional canary**: a minimal generation request
+against the *same model*, which is the only thing that distinguishes "HTTP alive" from
+"GPU available". A tiny `num_predict` request that returns promptly means the backend can
+actually serve; one that times out means it cannot.
+
+Keep `/api/tags` as a cheap precondition if useful — an unreachable host is still a halt —
+but it must no longer be the *sole* evidence.
+
+### Acceptance Criteria
+
+1. A backend whose HTTP layer answers but whose GPU is wedged is detected as **not idle**,
+   so the cascade-halt arms.
+2. A healthy backend is still detected as idle — no false halt. A false positive here stops
+   a legitimate run, so this is as important as criterion 1.
+3. **The canary runs only after a timeout has already been observed.** It must not add a
+   generation call to the happy path — cost and latency on every page would be a
+   regression, and the guard's call site already gates on `_had_timeout`.
+4. **No new magic threshold.** Derive the canary's timeout from an existing constant or
+   from the observed timeout that triggered the check. Do not invent a number.
+5. The probe must remain safe when the backend is unreachable entirely (connection refused,
+   DNS failure) — that is still "not idle", not an exception escaping into the pipeline.
+
+### Verification — read this before writing a single test
+
+**CI HAS NO OLLAMA AND NO PROVIDER.** This ticket is about a network service, so it is the
+most exposed change in the queue to the repo's most-documented trap. Every test must be
+**hermetic**: patch the HTTP/generation call, never contact a real endpoint. A test that
+passes here because Ollama is running locally and fails in CI is worse than no test.
+
+- Run the **FULL** suite: `PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest -q`. Never a `-k`
+  subset — that filter let a regression reach CI on GH-249.
+- **Pin a DIFFERENCE, not an absolute:** drive the same cascade-halt decision twice in one
+  process, changing only the canary's simulated response (wedged vs healthy), and assert
+  the halt decision differs exactly as intended.
+- **Prove the guard is load-bearing by MUTATION, not deletion:** neuter the canary so it
+  always reports idle, re-run, and show which tests fail and which correctly still pass. A
+  test that fails only with an ImportError proves a symbol is new, not that behaviour changed.
+- `uvx ruff@0.16.0 format --check .` — not the venv's older ruff.
+- Do not `Closes #221` unless criteria 1-5 all hold; say which remain otherwise.
+- Decision log at `docs/log/2026-09-16_221.md`.
