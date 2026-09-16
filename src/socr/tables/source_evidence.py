@@ -677,4 +677,77 @@ def verify_scanned_table(
         ocr_image_fn=ocr_image_fn,
         include_text_layer=native_trusted is not False,
     )
-    return verify_table_tokens(bundle, tokens)
+    result = verify_table_tokens(bundle, tokens)
+
+    # #658b: excluding the layer above is right for the "does this table
+    # AGREE with the layer" check -- a hallucination must not be allowed to
+    # corroborate itself against evidence nobody trusts. But when the pixel
+    # evidence has NOTHING to say either (``has_content_evidence`` is False:
+    # no crops, no page raster, no classical OCR reading), that same
+    # exclusion also throws away a distrusted layer that may genuinely
+    # REPRODUCE the model's rows. Measured (Fed swap-line pages,
+    # docs/log/2026-09-07_D3-fed-table-lane-remeasure.md): 62/62, 67/67,
+    # 66/66 of a page's numbers with zero extras, rejected outright.
+    #
+    # Row corroboration is a different, weaker check than merging the layer
+    # into the evidence bundle: it asks only whether each candidate numeric
+    # row appears, in order, as a contiguous run on ONE native printed line
+    # (``row_corroboration.corroborate_rows``) -- never whether an individual
+    # cell or column header is right. That tolerates the layer's own
+    # corruption without ever trusting its content, so it can rescue a page
+    # like this without promoting the layer to evidence.
+    if native_trusted is False and result.passed is False and not bundle.has_content_evidence:
+        rescued = _corroborate_via_distrusted_layer(page, output_text)
+        if rescued is not None:
+            return rescued
+
+    return result
+
+
+def _corroborate_via_distrusted_layer(page, output_text: str) -> SourceEvidenceResult | None:
+    """#658b rescue: corroborate a candidate's rows against a DISTRUSTED text
+    layer, for a page where pixel evidence produced nothing to judge by.
+
+    Returns ``None`` when there is nothing to corroborate with (no native
+    words at all -- criterion 3: a page with no text layer must still fail
+    closed exactly as before) or when corroboration abstains or fails
+    (criterion 4: a candidate that genuinely disagrees with the layer must
+    still be rejected). The caller keeps its own reject unchanged in either
+    case. Only ever returns a PASSED, flagged result -- this function never
+    strengthens a rejection.
+    """
+    try:
+        words = page.get_text("words") or []
+    except Exception:
+        words = []
+    if not words:
+        return None
+
+    from socr.tables.row_corroboration import corroborate_rows
+
+    # No detected table bbox is available at this layer (this gate runs
+    # before/independent of ``locate_tables`` scoping used elsewhere); score
+    # against the whole page, same abstention semantics as an empty region.
+    rc = corroborate_rows(words, output_text, None)
+    if rc.clears is not True:
+        return None
+
+    reason = (
+        f"header_binding_unverified: distrusted text layer corroborates "
+        f"{rc.bound}/{rc.total} candidate rows in order "
+        f"({len(rc.extra_numbers)} extra number(s) beyond the layer); "
+        "header binding was never independently verified"
+    )
+    return SourceEvidenceResult(
+        verifiable=True,
+        passed=True,
+        reason=reason,
+        # #658b criterion 1: this must read as a FLAG, never a clean SUCCESS.
+        # ``content_unverified`` is the one channel this module already has
+        # into the rest of the pipeline that is fully wired end to end
+        # (``pipeline/agentic.py``'s ``SourceEvidenceTableJudge`` -> WARNING
+        # status at finalization, ``table_label_unverified`` on the sidecar,
+        # ``TABLE_DISTRUST_KINDS``, and the document-metadata / CLI note) --
+        # reused here rather than inventing a second, unwired flag field.
+        content_unverified=reason,
+    )

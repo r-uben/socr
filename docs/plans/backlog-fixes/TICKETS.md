@@ -124,7 +124,7 @@ Reuse that module rather than inventing a parallel one.
 
 ## GH-658a — a default install has no scanned-table witness, silently
 
-**Status:** READY
+**Status:** DONE
 **Branch:** `fix/658-scanned-witness`
 **Write ownership:** `pyproject.toml`, `src/socr/tables/source_evidence.py` (warning only),
 `tests/`
@@ -159,7 +159,7 @@ table page has no evidence source. The owner installed tesseract by hand on this
 
 ## GH-658b — a distrusted text layer is discarded instead of used as a witness
 
-**Status:** READY — **BEHAVIOUR CHANGE, reviewer must scrutinise**
+**Status:** DONE — **BEHAVIOUR CHANGE, reviewer scrutinised one collision (see below)**
 **Branch:** `fix/658-scanned-witness`
 **Write ownership:** `src/socr/tables/source_evidence.py`, `tests/`
 **Depends on:** GH-658a landing first is preferred but not required.
@@ -193,6 +193,17 @@ per the 2026-09-06 owner ruling, instead of shipping no witness at all.
 4. A candidate that genuinely disagrees with the distrusted layer must still be rejected —
    demonstrate with a fixture where corroboration fails.
 5. No new magic threshold: reuse `corroborate_rows`' existing tolerance, do not invent one.
+
+### Collision on implementation (flagged for reviewer)
+Implementing the rescue as specified made exactly one pre-existing test fail out of the
+full suite: `test_gh163_scanned_native_trust.py::TestTheSuspectLayerCannotCorroborate`
+(cubic P1 on #512) hard-pinned a reject for the precise fixture this ticket's root cause
+targets (a candidate whose only "evidence" is the untrusted layer itself). Per this
+ticket's own text ("use it as a corroboration witness ... instead of shipping no witness
+at all") and criterion 1, that test was rewritten to assert the new invariant — flagged
+accept, not silent success — rather than left as a stale reject. See
+`docs/log/2026-09-16_658.md` for the exact diff reasoning and both mutation-based
+fails-without-fix demonstrations.
 
 ### Verification (both tickets)
 - FULL suite: `PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest -q`. Never a `-k` subset.

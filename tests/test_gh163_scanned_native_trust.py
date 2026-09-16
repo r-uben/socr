@@ -185,6 +185,18 @@ class TestTheSuspectLayerCannotCorroborate:
     table -- that fails on any evidence. It is one where the model reproduced
     the corrupt layer faithfully. Then output and evidence agree perfectly, and
     the check passes on a reading nobody trusts.
+
+    #658b superseded the plain reject the class originally pinned for exactly
+    this fixture: measured evidence (Fed swap-line pages, 62/62, 67/67, 66/66
+    numbers, zero extras) showed the pixel-only gate below was also throwing
+    away pages whose distrusted layer genuinely REPRODUCES the candidate, so
+    ``verify_scanned_table`` now runs row corroboration against that layer as
+    a second, independent, WEAKER gate. cubic P1's actual concern -- a
+    hallucination that merely reproduces an untrusted reading must never read
+    downstream as an ordinary SUCCESS -- still holds: the rescue ships
+    FLAGGED (``content_unverified`` / ``header_binding_unverified``) rather
+    than a clean, unflagged pass. ``test_a_table_matching_an_untrusted_layer_...``
+    below now pins THAT invariant instead of a bare reject.
     """
 
     TABLE = "\n".join(
@@ -219,17 +231,28 @@ class TestTheSuspectLayerCannotCorroborate:
             native_trusted=native_trusted,
         )
 
-    def test_a_table_matching_an_untrusted_layer_is_not_verified_by_it(
+    def test_a_table_matching_an_untrusted_layer_ships_flagged_not_a_clean_success(
         self, tmp_path: Path
     ) -> None:
+        """#658b: row corroboration now clears this fixture (its 2 candidate
+        rows are, in order, exactly the layer's 2 native lines), so it ships
+        -- but only as a FLAGGED outcome, never a clean SUCCESS. A pass with
+        no flag at all would be the silent accept #658b's own acceptance
+        criteria forbid."""
         doc = self._page_whose_layer_matches(tmp_path / "match")
         try:
             result = self._verify(doc, native_trusted=False)
             assert not result.deferred
-            assert not result.passed, (
-                "the model's table was verified against the very text layer the "
-                f"caller marked untrusted: {result.reason}"
+            assert result.passed, (
+                f"a candidate whose rows the distrusted layer itself "
+                f"corroborates was rejected outright: {result.reason}"
             )
+            assert result.content_unverified, (
+                "the candidate shipped with no flag at all -- verified only by "
+                f"a layer the caller marked untrusted, and that must be visible: "
+                f"{result.reason}"
+            )
+            assert "header_binding_unverified" in result.content_unverified
         finally:
             doc.close()
 
