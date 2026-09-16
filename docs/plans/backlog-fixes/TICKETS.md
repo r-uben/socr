@@ -289,3 +289,77 @@ passes here because Ollama is running locally and fails in CI is worse than no t
 - `uvx ruff@0.16.0 format --check .` — not the venv's older ruff.
 - Do not `Closes #221` unless criteria 1-5 all hold; say which remain otherwise.
 - Decision log at `docs/log/2026-09-16_221.md`.
+
+---
+
+## GH-64 — a tabular-looking page falls to native with no flag, silently
+
+**Status:** DONE
+**Branch:** `fix/64-tabular-native-flag`
+**Write ownership:** `src/socr/core/born_digital.py`, `tests/` (a new module for this ticket).
+**EXPANDED during implementation** to also include `src/socr/core/state.py` (one field on
+`PageState` + one propagation line in `apply_born_digital`) and
+`src/socr/pipeline/orchestrator.py` (one `AuditEvent` append in `_agentic_native_page`).
+Requested by the implementer before editing either file, verified against the #136/#217
+precedent (both span exactly these same three files) and the same-night GH-140 precedent
+(`has_math_font_typesetting`, identical three-file shape), and granted by the team lead —
+recorded here so the record shows it was not taken silently. See
+`docs/log/2026-09-16_64.md` for the full evidence trail.
+
+### Context — confirmed still real on `main@ba92c19`
+
+PP-6 narrowed the table routing gate to `has_numeric_columns` (lane REUSE across data
+rows — see the GH-248/GH-348 docstring at `born_digital.py:3215-3228`, and do not
+paraphrase it as mere co-occupancy). Correct change, but it has a side effect: a
+**2-column whitespace-aligned borderless table** (>=15 rows, label|value, one numeric
+lane per row) that the old `_detect_columnar_numbers` heuristic would have routed now
+falls to the native prose path.
+
+Values are char-exact; the row x column **grid structure** is not reconstructed — and it
+happens **silently**. No flag, no audit event. The triage confirms there is no
+`possible_table_structure_not_reconstructed` hook anywhere in `src/`.
+
+The corpus invariant is *no silent content loss*. This is structure loss, so it must be
+**visible**.
+
+### Hard scope limits — read both
+
+1. **Do NOT re-widen the routing gate.** The issue says so explicitly and PP-6 narrowed it
+   deliberately to stop over-routing born-digital pages. This ticket adds a SURFACE, it
+   does not change which lane a page takes.
+2. **Do NOT demote document status.** Emit the event, the page-level flag and the CLI
+   surface. GH-140 (merged tonight, `c61fd58`) added an audit flag and its demotion was
+   removed after review measured the trigger rate at 36.1% of the free lane versus 2.4%
+   for the precedent it copied. Nobody has measured this signal's rate either. If you
+   believe demotion is warranted, say so in the decision log and leave it unimplemented.
+
+### The threshold hazard — the main design risk here
+
+"Looks tabular" invites an invented number, and this repo forbids those. **Reuse the
+existing `_detect_columnar_numbers` heuristic as the predicate** — the issue names it,
+it already encodes what "would have been routed before PP-6" means, and reusing it makes
+the flag exactly "PP-6 changed this page's routing". Do not write a new ratio, a new
+row-count cut, or a new lane threshold. If reuse turns out to be impossible, STOP and
+report it as a design fork rather than inventing a cut.
+
+### Acceptance Criteria
+1. A born-digital page that the pre-PP-6 heuristic would have routed, and which now falls
+   to native with no table handling, emits a durable audit event naming the structural
+   loss. It reaches the page sidecar.
+2. A page that genuinely has no table structure does NOT emit it. Test this as hard as
+   criterion 1 — a flag that fires everywhere is noise, not a signal.
+3. A page that IS routed to table handling does not emit it (no double-reporting).
+4. **No new magic threshold.** Reuse the existing predicate.
+5. Routing behaviour is byte-identical to before this change. Demonstrate it.
+
+### Verification
+- FULL suite: `PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest -q`. Never a `-k` subset.
+- **Prove the guard by MUTATION, not deletion**: neuter the new detector so it never
+  fires, re-run, and report which tests fail and which correctly still pass. A test that
+  fails only with an ImportError proves a symbol is new, not that behaviour changed.
+- **Pin a DIFFERENCE**: same page, flag-on vs flag-off, outcomes differ exactly as intended.
+- `uvx ruff@0.16.0 format --check .` — not the venv's older ruff.
+- Quote only numbers you actually ran; every figure is verified independently.
+- COMMIT before reporting, staged by name, never `git add -A`.
+- Do not `Closes #64` unless criteria 1-5 all hold.
+- Decision log at `docs/log/2026-09-16_64.md`.

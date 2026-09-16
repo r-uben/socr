@@ -9,6 +9,38 @@
 > locate, 1 closure candidate).
 
 ## Live
+- **GH-64** — implemented on `fix/64-tabular-native-flag` (off `ba92c19`). Restored the
+  pre-PP-6 `_detect_columnar_numbers` heuristic in `born_digital.py` as a private,
+  audit-only predicate (never wired into routing), computing
+  `possible_table_structure_not_reconstructed` whenever a page falls to native
+  (`not has_tables`) but still has the pre-PP-6 borderless label|value shape.
+  Write-ownership expanded (requested, verified against #136/#217/#140, granted) to
+  `state.py` (field + propagation) and `orchestrator.py` (`_agentic_native_page`, one
+  `AuditEvent` append) — the same seam GH-140 used the same night — since
+  `PageAssessment.notes` alone reaches nothing the pipeline reads. Report-only, no status
+  demotion (ticket's hard scope limit 2; no trigger-rate measured for this signal yet).
+  Full suite 5444 passed / 4 xfailed (5431 main baseline + 13 new tests, exact) — this run
+  predates the disclosure widening below and was not rerun for it per the team lead's
+  instruction; `ruff format --check` clean; mutation-tested (neutering the predicate fails
+  exactly the tests that require it to fire, all others correctly unaffected, including both
+  `_agentic_native_page` orchestrator-seam tests). Inherits the pre-PP-6 heuristic's known
+  false-positive class by construction (ticket forbids a new threshold to narrow it) —
+  documented explicitly, not silently absorbed into criterion 2. **2026-09-16 review round:**
+  widened the disclosure after review found the class is broader than chart-axis alone
+  (also book-index pages — #213's shape — and numbered lists); no trigger rate is claimed
+  (two independent review probes disagreed with each other); test module grew from 13 to
+  15 tests (mutation rerun: 6 of 15 fail, exactly the ones requiring the predicate to fire).
+  **2026-09-16, second review round:** the original "byte-identical" test only recomputed
+  the formula on one fixture far from either threshold, so mutating `>= 15` to `>= 10` or
+  `> 0.50` to `> 0.30` still passed it — renamed to
+  `test_detect_columnar_numbers_matches_the_pre_pp6_thresholds` with a corrected docstring,
+  and added `TestPredicateThresholdsPinned` (4 boundary fixtures with an exact,
+  controllable single-token/padding-line count) to actually pin both constants; each
+  fixture verified empirically before the assertion, and each threshold mutation confirmed
+  to flip its corresponding boundary fixture. Module: 15 -> 19 tests; full-neuter mutation
+  rerun: 8 of 19 fail, exactly the ones requiring the predicate to fire, restore
+  byte-identical. Corpus trigger-rate measurement remains a deferred, unimplemented
+  follow-up. See `docs/log/2026-09-16_64.md`. Not yet merged.
 - **GH-221** — implemented on `fix/221-wedge-canary` (off `3e04f1c`). Replaced the
   `/api/tags`-only liveness probe with a functional generation canary (minimal
   `num_predict: 1` / `max_tokens: 1` request, run only after the existing precondition
