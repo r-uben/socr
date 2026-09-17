@@ -64,10 +64,22 @@ NUMERIC_CELL_RE = re.compile(r"[-+(]?\s*[$€£]?\s*\d[\d,]*(?:\.\d+)?\s*[)%*†
 # cells) is content, not a column separator.
 _CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
 
+# GH-339: a whole-token markdown link (a linked table cell -- e.g. a numeric
+# value carrying a citation URI, ``[1204](https://x/note)``). Unwrapped to its
+# anchor BEFORE the dash/pipe folding below so a GT-vs-model cell comparison
+# (``score_page``/``score_rows``) and ``is_numeric_cell`` see the value, not
+# the link wrapper. Re-defined here rather than imported from
+# ``socr.tables.native_verifier``'s ``_unwrap_markdown_link`` -- this module's
+# own docstring is explicit that ``core`` and ``socr.tables`` must not reach
+# through each other's private names (the #175 cycle).
+_MD_LINK_RE = re.compile(r"^\[(.*)\]\([^()\s]*\)$")
+
 
 def normalize_cell(cell: str) -> str:
-    """Dash and escaped-pipe folding used before cell comparison."""
-    return cell.replace("−", "-").replace("–", "-").replace("\\|", "|").strip()
+    """Markdown-link unwrap, dash and escaped-pipe folding before comparison."""
+    match = _MD_LINK_RE.match(cell.strip())
+    unwrapped = match.group(1) if match else cell
+    return unwrapped.replace("−", "-").replace("–", "-").replace("\\|", "|").strip()
 
 
 def markdown_table_cells(text: str) -> list[list[str]]:
@@ -86,8 +98,18 @@ def markdown_table_cells(text: str) -> list[list[str]]:
 
 
 def is_numeric_cell(cell: str) -> bool:
-    """True when *cell* is a markdown numeric value (after strip, not presentation)."""
-    return bool(NUMERIC_CELL_RE.fullmatch(cell.strip()))
+    """True when *cell* is a markdown numeric value (after strip, not presentation).
+
+    GH-339: unwrapped through the same whole-token markdown-link check as
+    ``normalize_cell`` -- a caller may hand this a raw cell that never passed
+    through ``markdown_table_cells`` (e.g. ``native_rows.py``), so the unwrap
+    cannot be left to that one call site.
+    """
+    stripped = cell.strip()
+    match = _MD_LINK_RE.match(stripped)
+    if match:
+        stripped = match.group(1)
+    return bool(NUMERIC_CELL_RE.fullmatch(stripped))
 
 
 # ---------------------------------------------------------------------------

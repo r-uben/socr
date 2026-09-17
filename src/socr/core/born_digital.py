@@ -2075,6 +2075,48 @@ def _apply_links_to_cell(text: str, cell_rect, links: list) -> str:
     return text
 
 
+def _assign_links_to_cells(
+    row_bboxes: list[list],
+    links: list,
+) -> dict[tuple[int, int], list]:
+    """Assign each link to AT MOST ONE cell: the one holding its majority area.
+
+    GH-339 review: applying every link to every cell independently (each cell
+    testing ``cell_rect.intersects(rect)`` on its own) let ONE link wrap into
+    TWO cells when its rectangle straddled a column rule -- a real shape, not
+    a fixture artifact: PDF authors routinely draw an oversized link box that
+    overruns its own text. One of the two wrapped cells is fabricated content,
+    which is worse than the drop this ticket exists to fix.
+
+    Uses the same rule ``_word_majority_overlaps_region``
+    (``socr/tables/binding.py``) already uses to bind a WORD to a table
+    region: majority of the link's OWN area (``_rect_coverage``), never a
+    bare intersection and never a centroid test. A link with no cell holding
+    a majority (a genuine near-50/50 straddle) is assigned to NONE -- dropped
+    rather than guessed at twice, or into the wrong one.
+
+    Returns ``{(row_idx, col_idx): [links assigned there]}``. A cell may
+    receive several links (a references-line cell citing more than one DOI);
+    one link is never split across cells.
+    """
+    assigned: dict[tuple[int, int], list] = {}
+    for link in links:
+        rect = link[0]
+        best_frac = 0.0
+        best_cell: tuple[int, int] | None = None
+        for ridx, bboxes in enumerate(row_bboxes):
+            for cidx, cell_rect in enumerate(bboxes):
+                if cell_rect is None or not cell_rect.intersects(rect):
+                    continue
+                frac = _rect_coverage(rect, cell_rect)
+                if frac > 0.5 and frac > best_frac:
+                    best_frac = frac
+                    best_cell = (ridx, cidx)
+        if best_cell is not None:
+            assigned.setdefault(best_cell, []).append(link)
+    return assigned
+
+
 # A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
 # "/55-84", "pp. /23". This is the eaten-leading-digit signature — a stroke glyph
 # decoded as '/' where a digit belongs, so "(1997)" ships as "(/997)".
@@ -4133,6 +4175,15 @@ class BornDigitalDetector:
             row_bboxes = []
 
         # Clean cell values: replace None with empty string, strip whitespace
+        #
+        # GH-339 review: a link is resolved to AT MOST ONE cell up front
+        # (`_assign_links_to_cells`), by majority overlap area -- never
+        # passed whole to every intersecting cell. An oversized link
+        # rectangle straddling a column rule used to satisfy `intersects()`
+        # on BOTH neighbours, and if both cells' text happened to contain the
+        # anchor substring, `_apply_links_to_cell` wrapped it in both --
+        # fabricating a duplicate value neither vendor emitted.
+        link_cells = _assign_links_to_cells(row_bboxes, links) if links else {}
         cleaned: list[list[str]] = []
         for ridx, row in enumerate(rows):
             bboxes = row_bboxes[ridx] if ridx < len(row_bboxes) else []
@@ -4140,8 +4191,9 @@ class BornDigitalDetector:
             for cidx, cell in enumerate(row):
                 text = cell.strip() if isinstance(cell, str) else ""
                 cell_bbox = bboxes[cidx] if cidx < len(bboxes) else None
-                if text and links and cell_bbox is not None:
-                    text = _apply_links_to_cell(text, cell_bbox, links)
+                cell_links = link_cells.get((ridx, cidx))
+                if text and cell_links and cell_bbox is not None:
+                    text = _apply_links_to_cell(text, cell_bbox, cell_links)
                 cleaned_row.append(text)
             cleaned.append(cleaned_row)
 

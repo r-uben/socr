@@ -157,3 +157,168 @@ def test_a_none_cell_does_not_cost_the_whole_table_its_links() -> None:
     assert f"[10.1111/jofi.12345]({DOI})" in out
     assert "10.2222/xyz.999" in out
     assert "DOI" in out  # the None-celled header survives as plain text
+
+
+def test_link_straddling_two_cells_binds_only_the_majority_cell() -> None:
+    """rev-339 review: an oversized link rect that overruns a column rule
+    must not fabricate a duplicate value by wrapping BOTH cells it touches.
+
+    Applying every link to every intersecting cell independently let a
+    straddling link satisfy `cell_rect.intersects(rect)` on two neighbours;
+    if both cells' text contained the anchor substring, the ANCHOR was
+    wrapped in both -- `| [2020](url) | [2020](url) |` where only one 2020
+    ever carried that citation. The fix assigns each link to the ONE cell
+    holding the MAJORITY of its own area (mirrors `_words_in_region`'s
+    majority-overlap rule in tables/binding.py), never a bare intersection.
+    """
+    rows = [["A", "B"], ["2020", "2020"]]
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), (190.0, 128.0, 320.0, 150.0)],
+        [(68.0, 150.0, 190.0, 172.0), (190.0, 150.0, 320.0, 172.0)],
+    ]
+    table = _StubTable(rows, row_cells)
+    uri = "https://example.com/2020"
+    # Straddles the x=190 column rule: 20/60 = 1/3 of its area in the LEFT
+    # cell, 40/60 = 2/3 in the RIGHT cell -- a clear majority, not a tie.
+    straddling = fitz.Rect(170.0, 150.0, 230.0, 172.0)
+    links = [(straddling, uri, "2020")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    data_line = out.splitlines()[-1]
+    assert data_line == f"| 2020 | [2020]({uri}) |", data_line
+    assert data_line.count(uri) == 1, "the link must not be duplicated into both cells"
+
+
+def test_ambiguous_50_50_straddling_link_is_dropped_not_duplicated() -> None:
+    """No cell holds a majority (an exact tie) -- the link is DROPPED, never
+    guessed into either cell and never duplicated into both."""
+    rows = [["A", "B"], ["2020", "2020"]]
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), (190.0, 128.0, 320.0, 150.0)],
+        [(68.0, 150.0, 190.0, 172.0), (190.0, 150.0, 320.0, 172.0)],
+    ]
+    table = _StubTable(rows, row_cells)
+    uri = "https://example.com/2020"
+    tied = fitz.Rect(160.0, 150.0, 220.0, 172.0)  # exactly 30/60 each side
+    links = [(tied, uri, "2020")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    assert out.splitlines()[-1] == "| 2020 | 2020 |"
+    assert uri not in out
+
+
+def test_a_well_contained_link_still_binds_under_the_majority_rule() -> None:
+    """Guard against over-correcting to strict containment: a normal link
+    that sits entirely inside its own cell -- the ordinary case this ticket
+    exists to recover -- must still bind. Prove both directions."""
+    rows = [["Year", "DOI"], ["2019", "10.1111/jofi.12345"]]
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), (190.0, 128.0, 320.0, 150.0)],
+        [(68.0, 150.0, 190.0, 172.0), (190.0, 150.0, 320.0, 172.0)],
+    ]
+    table = _StubTable(rows, row_cells)
+    links = [(fitz.Rect(200.0, 150.0, 300.0, 172.0), DOI, "10.1111/jofi.12345")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    assert f"[10.1111/jofi.12345]({DOI})" in out
+
+
+def test_bare_numeric_anchor_still_binds_and_stays_numeric() -> None:
+    """rev-339 review: a NUMBER carrying a citation link -- not just a DOI --
+    must (a) still be wrapped as a markdown link, and (b) still be seen as a
+    numeric token by the value guard downstream (`native_verifier`'s
+    NUMBER-COMPLETENESS multiset check), which anchors on `_NUM_TOKEN_RE`
+    and does not match `[1204](https://x/note)` unless unwrapped first.
+    """
+    from socr.tables.native_verifier import _numeric_tokens_from_text
+
+    rows = [["Year", "Value"], ["2019", "1204"]]
+    value_cell_rect = (190.0, 150.0, 320.0, 172.0)
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), (190.0, 128.0, 320.0, 150.0)],
+        [(68.0, 150.0, 190.0, 172.0), value_cell_rect],
+    ]
+    table = _StubTable(rows, row_cells)
+    uri = "https://x/note"
+    links = [(fitz.Rect(value_cell_rect), uri, "1204")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    data_line = out.splitlines()[-1]
+    assert data_line == f"| 2019 | [1204]({uri}) |", data_line
+    assert _numeric_tokens_from_text(data_line) == ["2019", "1204"], (
+        "the linked number must not drop out of the numeric-completeness check"
+    )
+
+
+def test_multiline_cell_link_recovery() -> None:
+    """A cell whose extracted text spans multiple lines (`table.extract()`
+    joins wrapped cell text with `\\n`) must still recover a link that sits
+    over one of those lines -- untested before rev-339 flagged it fragile
+    by construction, even though it could not break it."""
+    rows = [
+        ["Ref", "Note"],
+        ["Smith (2019);\n10.1111/jofi.12345", "see appendix"],
+    ]
+    note_cell_rect = (190.0, 150.0, 420.0, 194.0)
+    ref_cell_rect = (68.0, 150.0, 190.0, 194.0)
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), (190.0, 128.0, 420.0, 150.0)],
+        [ref_cell_rect, note_cell_rect],
+    ]
+    table = _StubTable(rows, row_cells)
+    links = [(fitz.Rect(ref_cell_rect), DOI, "10.1111/jofi.12345")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    assert "Smith (2019);" in out
+    assert f"[10.1111/jofi.12345]({DOI})" in out
+
+
+def test_markdown_linked_number_is_still_a_numeric_token() -> None:
+    """Direct-caller pin: `is_numeric_token`/`_numeric_tokens_from_text` must
+    unwrap a whole-token markdown link before the anchored `_NUM_TOKEN_RE`
+    test, the exact repro rev-339 gave: a linked numeric cell silently
+    dropped out of the NUMBER-COMPLETENESS multiset check.
+    """
+    from socr.tables.native_verifier import _numeric_tokens_from_text, is_numeric_token
+
+    assert is_numeric_token("[1204](https://x/note)") is True
+    assert is_numeric_token("[(1,204)](https://x/note)") is True
+    assert _numeric_tokens_from_text("| 2019 | 1204 |") == ["2019", "1204"]
+    assert _numeric_tokens_from_text("| 2019 | [1204](https://x/note) |") == ["2019", "1204"]
+
+
+def test_markdown_link_unwrap_does_not_swallow_non_numeric_prose() -> None:
+    """The unwrap is scoped to whole-token links; a link embedded in a prose
+    sentence (not a bare table-cell token) must not be misread as numeric,
+    and a token that merely contains brackets elsewhere is left alone."""
+    from socr.tables.native_verifier import is_numeric_token
+
+    assert is_numeric_token("[see note]") is False
+    assert is_numeric_token("Panel A.") is False
+
+
+def test_table_grid_normalize_and_is_numeric_cell_unwrap_markdown_links() -> None:
+    """GH-339 consumer sweep: `core/table_grid.py` runs the GH-96 GT-vs-model
+    exactness comparison (`score_page`/`score_rows`) and `is_numeric_cell`
+    (used by `native_rows.py`) on RAW markdown cells -- it does not go through
+    `native_verifier.is_numeric_token`, so it needed its own unwrap step
+    rather than inheriting this ticket's `native_verifier` fix for free.
+
+    Without it, a correctly-recovered linked cell (`[1204](url)`) would
+    compare unequal to its ground-truth value (`1204`) and would not be
+    seen as numeric by `native_rows.py`'s grid detector -- an accuracy
+    regression this ticket's own fix would otherwise have introduced.
+    """
+    from socr.core.table_grid import is_numeric_cell, normalize_cell
+
+    assert normalize_cell("[1204](https://x/note)") == "1204"
+    assert normalize_cell("1204") == "1204"
+    assert is_numeric_cell("[1204](https://x/note)") is True
+    assert is_numeric_cell("[(1,204)](https://x/note)") is True
+    # A link is not silently unwrapped when it is not the whole cell/token.
+    assert is_numeric_cell("see [1204](https://x/note) above") is False
