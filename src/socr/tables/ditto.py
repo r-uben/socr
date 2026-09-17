@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from socr.tables.reconcile import find_table_blocks
+from socr.tables.reconcile import _markdown_content_lines, find_table_blocks
 
 #: Audit-event kind naming one table/column pair carrying a detected ditto
 #: mark on a page's shipped table. One event per (page, table_id,
@@ -68,6 +68,24 @@ def detect_ditto_columns(markdown: str, page_num: int) -> list[DittoColumn]:
     same relationship ``_apply_unresolved_math_guard`` has to the corrupt-math
     lane's own region-keyed evidence).
 
+    ``markdown`` is provenance-stripped via ``_markdown_content_lines`` before
+    ``find_table_blocks`` ever sees it (GH-687). A ditto mark inside a fenced
+    code sample or an HTML comment is not a reading of the page -- it is the
+    model showing what a grid looks like, or echoing dead text -- and must not
+    manufacture the #625 distrust signal on an otherwise clean page. This
+    scan parses the actual grid via ``find_table_blocks`` rather than reading
+    raw rows for a formatting defect, so it follows the same provenance
+    contract as ``_has_table_grid`` (:580) -- NOT
+    ``_strip_emission_literal_blocks``, which its own docstring names
+    "emission-only" and which the three emission-defect predicates
+    (``table_emission_defect``, ``table_content_defect``,
+    ``raw_table_block_lines``) use to blank raw-HTML ``<pre>``/``<script>``/
+    ``<style>``/``<textarea>`` blocks before reading rows for a SHAPE defect
+    in the shipped text itself. Ditto detection asks a different question --
+    "does this parsed grid carry a distrust cell" -- the same question the
+    grid-existence predicates ask, and none of those apply the literal-block
+    strip either.
+
     The header row (grid row 0) is excluded: a ditto mark stands for "same as
     the row above", and a header has no row above it. A column is reported
     once, with the COUNT of ditto cells found in its body, if it carries at
@@ -76,8 +94,9 @@ def detect_ditto_columns(markdown: str, page_num: int) -> list[DittoColumn]:
     """
     if not markdown:
         return []
+    stripped = "\n".join(_markdown_content_lines(markdown))
     columns: list[DittoColumn] = []
-    for idx, block in enumerate(find_table_blocks(markdown)):
+    for idx, block in enumerate(find_table_blocks(stripped)):
         grid = block.grid
         if len(grid) < 2:
             continue

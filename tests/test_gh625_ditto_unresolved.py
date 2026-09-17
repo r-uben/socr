@@ -308,3 +308,58 @@ def test_changed_count_after_real_restore(tmp_path: Path) -> None:
     ditto_events = [e for e in state.events if e.kind == DITTO_UNRESOLVED_KIND]
     assert len(ditto_events) == 1
     assert ditto_events[0].data["ditto_cells"] == 1
+
+
+# --------------------------------------------------------------------------
+# 7. GH-687: a ditto-bearing table that is not a reading of the page (a code
+#    sample inside a fence, dead text inside an HTML comment) must not
+#    manufacture the #625 distrust signal. Both directions are pinned: a
+#    fenced/commented table detects nothing, and a real one on the same page
+#    keeps detecting -- a strip that is too wide is as wrong as no strip.
+# --------------------------------------------------------------------------
+
+FENCED_SWAP_TABLE = f"```\n{SWAP_TABLE}```\n"
+COMMENTED_SWAP_TABLE = f"<!--\n{SWAP_TABLE}-->\n"
+
+
+def test_fenced_ditto_table_is_not_a_page_reading() -> None:
+    assert detect_ditto_columns(FENCED_SWAP_TABLE, page_num=7) == []
+
+
+def test_html_commented_ditto_table_is_not_a_page_reading() -> None:
+    assert detect_ditto_columns(COMMENTED_SWAP_TABLE, page_num=7) == []
+
+
+def test_a_real_shipped_ditto_table_is_still_detected_alongside_a_fenced_one() -> None:
+    """The strip must not swallow a genuine table merely because the page also
+    carries a code sample -- only the fenced/commented text is provenance-
+    stripped, the real table beside it is untouched.
+    """
+    mixed = FENCED_SWAP_TABLE + "\n" + SWAP_TABLE
+    columns = detect_ditto_columns(mixed, page_num=7)
+    assert len(columns) == 1
+    assert columns[0].column_index == 2
+    assert columns[0].ditto_cells == 14
+
+
+def test_guard_leaves_a_fenced_ditto_table_page_success_and_byte_identical() -> None:
+    """The issue's own required evidence: SUCCESS stays SUCCESS, byte-for-byte,
+    and no artifact is recorded -- not merely that the column count is zero.
+    """
+    out = PageOutput(page_num=7, text=FENCED_SWAP_TABLE, status=PageStatus.SUCCESS, engine="qwen")
+    guarded = _apply_ditto_guard(out, page_num=7)
+    assert guarded is out  # identity: nothing rebuilt, same as any clean page
+    assert guarded.status is PageStatus.SUCCESS
+    assert guarded.text == FENCED_SWAP_TABLE
+    assert guarded.table_ditto_columns == []
+
+
+def test_guard_leaves_a_commented_ditto_table_page_success_and_byte_identical() -> None:
+    out = PageOutput(
+        page_num=7, text=COMMENTED_SWAP_TABLE, status=PageStatus.SUCCESS, engine="qwen"
+    )
+    guarded = _apply_ditto_guard(out, page_num=7)
+    assert guarded is out
+    assert guarded.status is PageStatus.SUCCESS
+    assert guarded.text == COMMENTED_SWAP_TABLE
+    assert guarded.table_ditto_columns == []
