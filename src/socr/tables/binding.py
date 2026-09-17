@@ -307,6 +307,16 @@ def _wrapped_label_merge_plan(
     ``bind()``). No spans, or disagreeing/ambiguous fonts, means no
     widened merge -- fail closed, matching every guard fixture, which
     supplies no font data at all.
+
+    GH-692: font equality alone is NOT sufficient either -- a genuine
+    section heading can reuse its child's exact typeface, and the joined-
+    ``row_path`` proof above is satisfied by every parent-heading-plus-
+    child pair, not only a wrapped label. The remaining discriminator is
+    indentation: a wrapped label's second baseline is the same stub cell
+    continuing onto a second printed line (same or shallower left edge as
+    the first line); a real child row nested under a heading starts
+    strictly to the right of it. See the ``label_bbox`` comparison guarding
+    ``font_widened`` below.
     """
     if not rows:
         return (), {}
@@ -371,6 +381,35 @@ def _wrapped_label_merge_plan(
                     font_a = native_rows[native_idx_this].label_font
                     font_b = native_rows[native_idx].label_font
                     font_widened = font_a is not None and font_a == font_b
+                    # GH-692: font equality is necessary but not sufficient --
+                    # a genuine section heading can reuse its child's exact
+                    # typeface, and this widened proof (the merged text
+                    # matching the native row's own joined ``row_path``) is
+                    # satisfied by EVERY parent-heading-plus-child pair, not
+                    # only by a genuinely wrapped label (``_native_rows``
+                    # hands a data row whatever is on the indent-prefix stack
+                    # regardless of the data row's own indent, so the joined
+                    # match alone proves nothing about which case this is).
+                    # The two cases still differ on indentation: a wrapped
+                    # label's second printed baseline is the SAME stub cell
+                    # continuing onto a second line, so it starts at the same
+                    # (or a shallower) left edge as the first line; a real
+                    # child row nested under a section heading starts
+                    # strictly to the right of it -- the same indent
+                    # relationship ``_native_rows`` itself requires before a
+                    # value-less row is ever treated as another row's
+                    # ancestor. Bbox evidence abstains (no widened merge) on
+                    # a missing bbox rather than guess, matching the
+                    # module's fail-closed rule for ambiguous geometry.
+                    if font_widened:
+                        heading_bbox = native_rows[native_idx_this].label_bbox
+                        child_bbox = native_rows[native_idx].label_bbox
+                        if (
+                            heading_bbox is None
+                            or child_bbox is None
+                            or child_bbox[0] > heading_bbox[0]
+                        ):
+                            font_widened = False
 
             if proven and not next_alone_already_matches:
                 merge_at.append(i)

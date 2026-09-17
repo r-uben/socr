@@ -2500,6 +2500,62 @@ def test_gh624b_two_baseline_label_does_not_merge_without_spans():
 
 
 # ---------------------------------------------------------------------------
+# GH-692: font equality alone is not sufficient for the widened merge -- a
+# genuine section heading can reuse its child's exact typeface. Same words
+# as ``_TWO_BASELINE_WORDS`` above (so the joined-``row_path`` proof still
+# holds and font agreement still holds), except the second baseline's own
+# label starts strictly to the right of the first -- a real child row
+# nested under a heading, not a wrapped continuation of the same cell.
+# ---------------------------------------------------------------------------
+
+_INDENTED_CHILD_WORDS = [
+    w(50, 60, 100, 70, "Other"),
+    w(105, 60, 165, 70, "authorized"),
+    w(80, 90, 140, 100, "European"),
+    w(145, 90, 205, 100, "currencies"),
+    w(300, 90, 340, 100, "1250.0"),
+]
+_INDENTED_CHILD_MARKDOWN = (
+    "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+)
+
+
+def test_gh692_same_font_heading_with_indented_child_does_not_merge():
+    """The production caller (``bind()``, with ``spans`` the way
+    ``flatten_page_spans`` always supplies them): a same-font, same-text-
+    shape pair that ``_wrapped_label_merge_plan``'s font-only proof would
+    have widened before GH-692 must NOT merge when the second row's own
+    label is indented deeper than the first -- that is a section heading
+    with a nested child, not a wrapped label re-using the same stub cell.
+    A dropped heading is silent native-row loss (this repo's cardinal
+    rule), so this must fail red if the indent guard reverts to bare font
+    equality."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized"),
+        span(80, 90, 205, 100, "European currencies"),
+    ]
+    result = bind(_INDENTED_CHILD_WORDS, _INDENTED_CHILD_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
+def test_gh692_same_font_wrapped_label_still_merges_when_not_indented():
+    """Control for the guard above, run through the same production caller:
+    when the second baseline's own label starts at the same (not deeper)
+    left edge as the first -- the genuinely wrapped-label shape -- font
+    agreement still proves the merge. Pins the OTHER direction: the GH-692
+    guard must not degrade into "never merge" and re-open #624b."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized"),
+        span(50, 90, 175, 100, "European currencies"),
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+    assert result.candidate_row_labels == ("Other authorized European currencies",)
+    assert result.row_label_contradictions == []
+
+
+# ---------------------------------------------------------------------------
 # GH-766: an entity-encoded candidate value must not read as a false
 # contradiction against a native number it actually agrees with.
 # ---------------------------------------------------------------------------
