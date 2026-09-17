@@ -975,6 +975,33 @@ def _normalize_cell(raw: str) -> str:
     return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
 
 
+# A whole-token markdown link: `[anchor](uri)` with no internal whitespace,
+# which is what a linked table cell (GH-339's _table_to_markdown wrapping)
+# always is -- a numeric cell is a single token to begin with, and the URI
+# in the parens never contains the pipe/whitespace that would split it into
+# more than one candidate in `_numeric_tokens_from_text`. Anchored full-match
+# (not `search`) so a token that merely CONTAINS brackets elsewhere is left
+# alone rather than partially unwrapped.
+_MD_LINK_RE = re.compile(r"^\[(.*)\]\([^()\s]*\)$")
+
+
+def _unwrap_markdown_link(tok: str) -> str:
+    """Strip a whole-token markdown link wrapper down to its anchor text.
+
+    GH-339 review: a numeric table cell that carries a citation URI now ships
+    as ``[1204](https://x/note)`` (GH-339's table-cell link recovery). Every
+    numeric-token predicate in this module anchors on ``_NUM_TOKEN_RE``,
+    which matches neither the brackets nor the parenthesised URL, so the
+    number silently dropped out of the NUMBER-COMPLETENESS multiset check --
+    the value guard this module exists to run. Unwrapped BEFORE
+    ``html.unescape`` so an anchor carrying its own entity
+    (``[&minus;1.5](...)``) still decodes normally afterward. A token that is
+    not a whole-token link (no match) is returned unchanged.
+    """
+    match = _MD_LINK_RE.match(tok.strip())
+    return match.group(1) if match else tok
+
+
 def _decoded_numeric_candidate(tok: str) -> str:
     """Decode HTML entities, then strip presentation decoration.
 
@@ -986,8 +1013,16 @@ def _decoded_numeric_candidate(tok: str) -> str:
     unmatched by the anchored ``_NUM_TOKEN_RE``. Provably inert on native
     PyMuPDF text, which never contains a literal HTML entity, so this is safe
     to apply uniformly rather than gating it by call-site provenance.
+
+    GH-339 review: a markdown-linked numeric cell (``[1204](https://x/note)``,
+    from GH-339's table-cell link recovery) is unwrapped to its anchor FIRST,
+    same decode-gap family as #766/#773/#690 -- a presentation wrapper sitting
+    in front of the value stops ``_NUM_TOKEN_RE`` from seeing it, so the
+    number drops silently out of the multiset-completeness check rather than
+    the check failing loudly. Every caller of this function (``is_numeric_token``,
+    ``_numeric_tokens_from_text``) gets the fix from this single point.
     """
-    return strip_presentation(html.unescape(tok))
+    return strip_presentation(html.unescape(_unwrap_markdown_link(tok)))
 
 
 def is_numeric_token(tok: str) -> bool:

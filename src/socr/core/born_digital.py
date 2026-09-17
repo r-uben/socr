@@ -2009,6 +2009,114 @@ def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
     return "".join(parts)
 
 
+def _cell_bbox(cell) -> "fitz.Rect | None":
+    """A table cell's bbox as a ``fitz.Rect``, or ``None`` when it has none.
+
+    GH-339 review. PyMuPDF ships ``None`` for a merged/absent cell (its own
+    ``table.py`` guards ``cell is None`` at several sites), and
+    ``fitz.Rect(None)`` raises. Converting per-cell -- with its own guard --
+    means a merged cell degrades to "no link recovery for this ONE cell",
+    never to "no link recovery for the whole table", which is what a bare
+    list comprehension over ``fitz.Rect(c)`` would do the moment it hit the
+    outer ``except`` in the caller.
+    """
+    if cell is None:
+        return None
+    try:
+        return fitz.Rect(cell)
+    except Exception:
+        return None
+
+
+def _apply_links_to_cell(text: str, cell_rect, links: list) -> str:
+    """Wrap link anchors whose rectangle sits inside a table CELL.
+
+    GH-339: table markdown is built from ``table.extract()``'s plain cell
+    strings, which never pass through ``_line_text`` or
+    ``_apply_links_to_flat_text`` -- so a URI whose rectangle sat over a data
+    cell was dropped entirely, not even surfacing as raw text. For a citation
+    corpus a dropped DOI is silent content loss.
+
+    ``cell_rect`` comes from ``table.rows[i].cells[j]``, which is aligned 1:1
+    with ``table.extract()``'s rows and columns. It stands in for the span
+    rect ``_line_text`` uses: a cell's own bbox is the only positional
+    information the markdown-table path has, exactly as a span's bbox is on a
+    prose line, so the same anchor-substring + ``_anchor_offset_under``
+    interpolation applies unchanged.
+    """
+    if not links or not text:
+        return text
+
+    hits: list[tuple[int, int, str, str]] = []
+    for link in links:
+        rect, uri, anchor = link[0], link[1], link[2]
+        if not cell_rect.intersects(rect):
+            continue
+        if not anchor or anchor not in text:
+            # No whole-cell fallback, same reasoning as `_line_text`: a phrase
+            # link would otherwise wrap the entire cell value.
+            continue
+        start_c = _anchor_offset_under(text, anchor, cell_rect, rect)
+        if start_c is None:
+            continue
+        hits.append((start_c, start_c + len(anchor), uri, anchor))
+
+    hits.sort(key=lambda h: (h[0], h[1]))
+    kept: list[tuple[int, int, str, str]] = []
+    last_end = -1
+    for start_c, end_c, uri, anchor in hits:
+        if start_c < last_end:
+            continue
+        kept.append((start_c, end_c, uri, anchor))
+        last_end = end_c
+
+    for start_c, end_c, uri, anchor in reversed(kept):
+        text = text[:start_c] + _emit_run(anchor, uri) + text[end_c:]
+    return text
+
+
+def _assign_links_to_cells(
+    row_bboxes: list[list],
+    links: list,
+) -> dict[tuple[int, int], list]:
+    """Assign each link to AT MOST ONE cell: the one holding its majority area.
+
+    GH-339 review: applying every link to every cell independently (each cell
+    testing ``cell_rect.intersects(rect)`` on its own) let ONE link wrap into
+    TWO cells when its rectangle straddled a column rule -- a real shape, not
+    a fixture artifact: PDF authors routinely draw an oversized link box that
+    overruns its own text. One of the two wrapped cells is fabricated content,
+    which is worse than the drop this ticket exists to fix.
+
+    Uses the same rule ``_word_majority_overlaps_region``
+    (``socr/tables/binding.py``) already uses to bind a WORD to a table
+    region: majority of the link's OWN area (``_rect_coverage``), never a
+    bare intersection and never a centroid test. A link with no cell holding
+    a majority (a genuine near-50/50 straddle) is assigned to NONE -- dropped
+    rather than guessed at twice, or into the wrong one.
+
+    Returns ``{(row_idx, col_idx): [links assigned there]}``. A cell may
+    receive several links (a references-line cell citing more than one DOI);
+    one link is never split across cells.
+    """
+    assigned: dict[tuple[int, int], list] = {}
+    for link in links:
+        rect = link[0]
+        best_frac = 0.0
+        best_cell: tuple[int, int] | None = None
+        for ridx, bboxes in enumerate(row_bboxes):
+            for cidx, cell_rect in enumerate(bboxes):
+                if cell_rect is None or not cell_rect.intersects(rect):
+                    continue
+                frac = _rect_coverage(rect, cell_rect)
+                if frac > 0.5 and frac > best_frac:
+                    best_frac = frac
+                    best_cell = (ridx, cidx)
+        if best_cell is not None:
+            assigned.setdefault(best_cell, []).append(link)
+    return assigned
+
+
 # A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
 # "/55-84", "pp. /23". This is the eaten-leading-digit signature — a stroke glyph
 # decoded as '/' where a digit belongs, so "(1997)" ships as "(/997)".
@@ -3548,8 +3656,12 @@ class BornDigitalDetector:
         an earlier note here saying those paths still dropped links; they no
         longer do.)
 
-        Still out of scope: a URI whose rect sits INSIDE a detected table cell
-        (GH-339), and routing prose pages onto the dict walk.
+        GH-339: a URI whose rect sits INSIDE a table cell produced directly by
+        ``find_tables()`` (the ``_table_to_markdown`` path) is now recovered
+        too, via `table.rows[i].cells[j]` bboxes aligned with `.extract()`.
+        Still out of scope: cells synthesised by the lane-stacked rowizer or
+        the text-strategy/word-geometry fallbacks (no per-cell bbox there),
+        and routing prose pages onto the dict walk.
         """
         # GH-127: resolved once, not per line -- get_links() parses the page's
         # link table on every call.
@@ -3599,7 +3711,7 @@ class BornDigitalDetector:
                 for rect, md in rowized:
                     lane_stacked_regions.append((rect, md))
             else:
-                md = self._table_to_markdown(table)
+                md = self._table_to_markdown(table, links=_links)
                 if md:
                     table_regions.append((fitz.Rect(table.bbox), md))
 
@@ -4022,12 +4134,15 @@ class BornDigitalDetector:
                 double_counted[:10],
             )
 
-    def _table_to_markdown(self, table: object) -> str:
+    def _table_to_markdown(self, table: object, links: list | None = None) -> str:
         """Convert a PyMuPDF Table object to a markdown table string.
 
         Args:
             table: A table object from page.find_tables() with an
                    extract() method returning a list of rows (lists of cells).
+            links: GH-339. Resolved page URI links (``_uri_links``' return
+                   shape). A link whose rectangle sits inside a cell is
+                   wrapped as ``[anchor](uri)`` in that cell's markdown.
 
         Returns:
             Markdown table string, or empty string if table is empty/invalid.
@@ -4040,10 +4155,47 @@ class BornDigitalDetector:
         if not rows:
             return ""
 
+        # GH-339: cell bboxes come from `table.rows`, aligned 1:1 with
+        # `table.extract()` (both walk header then data rows in the same
+        # order -- verified against a live find_tables() result, not assumed).
+        # Best-effort: a malformed table's `.rows` must not cost the page its
+        # markdown, only its cell-level links.
+        #
+        # GH-339 review: PyMuPDF itself ships `None` cells for merged/absent
+        # spans (its own table.py guards `cell is None` at several sites), and
+        # `fitz.Rect(None)` raises. A naive list comp over `r.cells` would let
+        # ONE bad cell blow the whole row-bboxes build via the outer `except`,
+        # silently losing every link in the WHOLE table, not just that cell's.
+        # Each cell is converted independently -- via `_cell_bbox`, which
+        # swallows its own conversion failure -- so a merged/malformed cell
+        # costs only itself.
+        try:
+            row_bboxes = [[_cell_bbox(c) for c in r.cells] for r in table.rows]
+        except Exception:
+            row_bboxes = []
+
         # Clean cell values: replace None with empty string, strip whitespace
+        #
+        # GH-339 review: a link is resolved to AT MOST ONE cell up front
+        # (`_assign_links_to_cells`), by majority overlap area -- never
+        # passed whole to every intersecting cell. An oversized link
+        # rectangle straddling a column rule used to satisfy `intersects()`
+        # on BOTH neighbours, and if both cells' text happened to contain the
+        # anchor substring, `_apply_links_to_cell` wrapped it in both --
+        # fabricating a duplicate value neither vendor emitted.
+        link_cells = _assign_links_to_cells(row_bboxes, links) if links else {}
         cleaned: list[list[str]] = []
-        for row in rows:
-            cleaned.append([(cell.strip() if isinstance(cell, str) else "") for cell in row])
+        for ridx, row in enumerate(rows):
+            bboxes = row_bboxes[ridx] if ridx < len(row_bboxes) else []
+            cleaned_row: list[str] = []
+            for cidx, cell in enumerate(row):
+                text = cell.strip() if isinstance(cell, str) else ""
+                cell_bbox = bboxes[cidx] if cidx < len(bboxes) else None
+                cell_links = link_cells.get((ridx, cidx))
+                if text and cell_links and cell_bbox is not None:
+                    text = _apply_links_to_cell(text, cell_bbox, cell_links)
+                cleaned_row.append(text)
+            cleaned.append(cleaned_row)
 
         if not cleaned:
             return ""

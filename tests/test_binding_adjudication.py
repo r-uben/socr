@@ -73,6 +73,18 @@ class TestTokensAgree:
         # must still disagree even once decoded.
         assert not tokens_agree("&minus;1.5", "-2.5", kind="cell")
 
+    def test_markdown_linked_cell_agrees_with_its_own_plain_value(self) -> None:
+        """GH-339 review: a numeric cell wrapped in a markdown link (GH-339's
+        table-cell link recovery) must not manufacture a FALSE contradiction
+        against an identical raster re-transcription -- `_normalize_cell`
+        does not unwrap the link, but `is_numeric_token`/
+        `_normalize_numeric_token` (called internally by this function) do,
+        so both sides still resolve to the same numeric value."""
+        assert tokens_agree("[1204](https://example.com/n)", "1204", kind="cell")
+        assert tokens_agree("1204", "[1204](https://example.com/n)", kind="cell")
+        # A genuinely different value stays a disagreement even wrapped.
+        assert not tokens_agree("[1204](https://example.com/n)", "1205", kind="cell")
+
     def test_inline_math_wrapped_cell_agrees_with_plain_value(self) -> None:
         """GH-582: a VLM cell typeset as inline math must be disprovable by
         the raster transcriber, not held forever because the wrap defeats
