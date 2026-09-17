@@ -109,7 +109,10 @@ _RUNHEAD_RE = re.compile(
 
 
 def reconstruct_table_regions(
-    page, *, rejections: list[dict] | None = None
+    page,
+    *,
+    rejections: list[dict] | None = None,
+    orphan_drops: list[dict] | None = None,
 ) -> list[tuple[object, str]]:
     """Return ``(rect, markdown)`` pairs for text-aligned tables on ``page``.
 
@@ -136,6 +139,13 @@ def reconstruct_table_regions(
     the unclipped full page merges the table with that same trailing text
     because the table-to-notes gap can be smaller than the rowizer's own
     y-gap split threshold. Scoping to the numeric rows' own union avoids both.
+
+    GH-789: pass a list as ``orphan_drops`` to receive the drop records from
+    the destroyed-token fallback's own call to ``rowize_from_word_list`` below
+    -- the one call site of that function which, before this, reported no
+    orphan-drop events at all. Threaded through unconditionally so the
+    destroyed-token path is instrumented the same as every other rowizer
+    entry point (GH-418 step 1).
 
     GH-195: pass a list as ``rejections`` to receive one record per rejected
     table (``{"bbox", "destroyed_count", "values"}``). The rejection was
@@ -210,12 +220,14 @@ def reconstruct_table_regions(
                     left_words,
                     clip=_clip_rect_for_words(left_words),
                     rejections=rejections,
+                    orphan_drops=orphan_drops,
                 )
                 right_out = _reconstruct_table_regions_for_words(
                     page,
                     right_words,
                     clip=_clip_rect_for_words(right_words),
                     rejections=rejections,
+                    orphan_drops=orphan_drops,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("band-scoped text-strategy reconstruct failed: %s", exc)
@@ -223,7 +235,9 @@ def reconstruct_table_regions(
             if left_out and right_out:
                 return left_out + right_out
 
-    return _reconstruct_table_regions_for_words(page, words, rejections=rejections)
+    return _reconstruct_table_regions_for_words(
+        page, words, rejections=rejections, orphan_drops=orphan_drops
+    )
 
 
 def _clip_rect_for_words(words: list):
@@ -247,6 +261,7 @@ def _reconstruct_table_regions_for_words(
     *,
     clip: object | None = None,
     rejections: list[dict] | None = None,
+    orphan_drops: list[dict] | None = None,
 ) -> list[tuple[object, str]]:
     """Text-strategy ``find_tables`` + destroyed-token fallback, scoped to ``words``.
 
@@ -368,7 +383,12 @@ def _reconstruct_table_regions_for_words(
             from socr.core.born_digital import upright_rotation_for
 
             rotation = upright_rotation_for(page, clip=tight)
-            rowized = rowize_from_word_list(scoped_words, rotation=rotation, page_rect=page.rect)
+            rowized = rowize_from_word_list(
+                scoped_words,
+                rotation=rotation,
+                page_rect=page.rect,
+                orphan_drops=orphan_drops,
+            )
             if rowized:
                 out.extend(rowized)
             # Whether or not the scoped fallback found anything usable, this

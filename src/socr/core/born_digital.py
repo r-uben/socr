@@ -2598,6 +2598,12 @@ class BornDigitalDetector:
         # runs -- gh351/gh372 hit exactly that path and raised AttributeError
         # without this line.
         self._last_extraction_orphan_drops: list[dict] = []
+        # GH-790: same gap, same fix, for the GH-195 grid-rejections list --
+        # it was reset only in _assess_page, so a standalone extract_structured()
+        # call (the identical harness shape that exposed the orphan-drops twin
+        # above) raised AttributeError the first time a text-strategy grid was
+        # rejected.
+        self._last_extraction_grid_rejections: list[dict] = []
 
     def detect(self, pdf_path: Path | str) -> DocumentAssessment:
         """Analyze all pages of a PDF for born-digital content.
@@ -3617,9 +3623,18 @@ class BornDigitalDetector:
             # rebuilt" is operationally different from "everything rendered
             # cleanly first time", and until now only a log line said so.
             _rejections: list[dict] = []
-            table_regions = reconstruct_table_regions(page, rejections=_rejections)
+            # GH-789: the destroyed-token fallback inside reconstruct_table_regions
+            # is the one rowize_from_word_list call site that shipped table
+            # regions (via out.extend(rowized) below) without reporting its own
+            # orphan-word drops -- wire it the same as every other call site.
+            _rtr_drops: list[dict] = []
+            table_regions = reconstruct_table_regions(
+                page, rejections=_rejections, orphan_drops=_rtr_drops
+            )
             if _rejections:
                 self._last_extraction_grid_rejections = list(_rejections)
+            if _rtr_drops:
+                self._last_extraction_orphan_drops.extend(_rtr_drops)
 
         # Word-geometry rowizer fallback (TR-1/TR-2): when find_tables() returns
         # nothing AND the text-strategy reconstruct also fails (e.g. a multi-region
