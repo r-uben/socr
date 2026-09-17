@@ -12549,8 +12549,35 @@ class UnifiedPipeline:
         if not self.config.quiet:
             from socr.figures.chart_data import SKELETON_SUPPRESSED
 
-            _skeletons = sum(
-                1 for e in state.events if getattr(e, "kind", "") == SKELETON_SUPPRESSED
+            # GH-731: counted by distinct GRID identity, not by raw event --
+            # one grid rebound under two panels files two SKELETON_SUPPRESSED
+            # events for the one table, and counting events reported 2 here
+            # against 1 on the page sidecar for the same document.
+            #
+            # The key here, ``(page_num, table_index, sha256)``, is
+            # DELIBERATELY WIDER than the page field's own dedup key,
+            # ``(table_index, sha256)`` (``ps.chart_table_skeletons_suppressed``
+            # above). They are not the same formula tidied two ways -- they
+            # are consistent with each other only BECAUSE the page field is
+            # already filtered to one ``page_num`` before its set is built.
+            # ``table_index`` is a per-PAGE ordinal (see ``Skeleton`` in
+            # chart_data.py), so a document-wide aggregate that dropped
+            # ``page_num`` would let two DIFFERENT pages' table 1 collide and
+            # UNDERCOUNT -- e.g. two pages that each withhold their own table
+            # 1 with byte-identical text report 1 here instead of 2. Making
+            # this key match the page field's literally would reintroduce
+            # that bug. Both directions are pinned together in
+            # ``tests/test_gh635_chart_table_skeletons.py``:
+            # ``test_a_rebound_grid_reports_the_same_count_on_the_cli_as_on_the_page``
+            # (one page, one grid, two panels -> 1) and
+            # ``test_two_pages_sharing_a_table_index_and_sha256_still_count_as_two``
+            # (two pages, two grids -> 2).
+            _skeletons = len(
+                {
+                    (e.page_num, (e.data or {}).get("table_index"), (e.data or {}).get("sha256"))
+                    for e in state.events
+                    if getattr(e, "kind", "") == SKELETON_SUPPRESSED
+                }
             )
             if _skeletons:
                 console.print(
