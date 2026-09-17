@@ -35,7 +35,11 @@ from pathlib import Path
 import pytest
 
 from socr.core.document import DocumentHandle
-from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
+from socr.core.manifest import (
+    SelectionProvenance,
+    _reaches_structure_class_branch,
+    _select_page_output_tagged,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
 
@@ -181,3 +185,27 @@ def test_untruncated_passing_best_output_still_takes_the_short_circuit(
     assert output is clean
     assert provenance == SelectionProvenance.PASSING_BEST_OUTPUT
     assert not [e for e in state.events if e.kind == "candidate_truncated"]
+
+
+def test_the_two_mirrored_gates_agree_on_the_truncated_case(tmp_path: Path) -> None:
+    """``_select_page_output_tagged``'s own short-circuit and
+    ``_reaches_structure_class_branch`` duplicate the SAME three-condition
+    gate (see both docstrings) and must never disagree on when the S1 branch
+    is reachable -- ``_reaches_structure_class_branch``'s own docstring
+    records what happened the one time they drifted (#269 BLOCKING 2): a
+    page's real winner shipped via one branch while a document-level bucket,
+    reading only the OTHER function, believed a different branch had fired.
+    Pins the agreement directly rather than trusting the two edits stayed in
+    sync by inspection.
+    """
+    truncated = _truncated_best_output()
+    complete = _complete_wide_pool_attempt()
+    p = _page(best_output=truncated, attempts=[truncated, complete])
+    state = _state_with_page(tmp_path, p)
+
+    # Selector side: does NOT take the short-circuit.
+    _output, provenance = _select_page_output_tagged(state, 1)
+    assert provenance != SelectionProvenance.PASSING_BEST_OUTPUT
+
+    # Bucket side: agrees the S1 branch IS reachable for this same page.
+    assert _reaches_structure_class_branch(p) is True
