@@ -394,7 +394,17 @@ wrong_bin, 293 unmatched — errors on two documents only.
   collision in the current 23-24 releases); would only ever raise a reported cell count
   if one exists. See `docs/log/2026-09-17_752-panel-key-collision.md`.
 
-Open: **#746**, **#742**, **#738**, **#737**.
+- **#746** (`fix/746-refuse-degenerate-curve`): a `'c'` (curve) item whose four control
+  points are themselves collinear and level produced a zero-height bbox indistinguishable
+  from an ordinary horizontal run, and was read as one, silently. `Mark` gains a `curve`
+  flag set at construction (kind is discarded before that point, so the fix has to sit at
+  the `Mark` boundary, not in the consumer); `Mark.horizontal`/`.vertical` both refuse
+  outright when it is set, regardless of bbox geometry. `_item_bbox`'s four-control-point
+  bound is untouched. No corpus page reaches this path (SEP census: `{'l': 1359}`, zero
+  curves) so the guard is pinned by a synthetic fixture only, mutation-demonstrated to
+  redden. See `docs/log/2026-09-17_746-refuse-degenerate-curve.md`.
+
+Open: **#742**, **#738**, **#737**.
 
 ## Owner decision — **ANSWERED (yes)**
 

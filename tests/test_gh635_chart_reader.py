@@ -63,6 +63,7 @@ def build_chart(
     extra_runs: list[tuple[float, float, int]] = (),
     dashed_compound_path: bool = False,
     dashed_curve_at: int | None = None,
+    dashed_curve_level: bool = False,
 ) -> tuple[fitz.Document, list]:
     """Draw a two-series histogram and return ``(doc, [full-page bbox])``.
 
@@ -74,7 +75,11 @@ def build_chart(
     it (#739) -- PyMuPDF then reports it as one drawing with several ``items``,
     never as several drawings each with one. ``dashed_curve_at`` inserts a
     curve ('c') item after that many runs, standing in for a genuinely
-    undecomposable piece the reader must still refuse.
+    undecomposable piece the reader must still refuse. ``dashed_curve_level``
+    puts that curve's two control points ON the segment's own level instead
+    of offset from it, so all four of the curve's points are collinear and
+    level -- the #746 case, whose bbox is indistinguishable from an ordinary
+    horizontal run by coordinates alone.
     """
     labels = bins or ["1.0", "2.0", "3.0", "4.0", "5.0"]
     n = len(labels)
@@ -173,7 +178,8 @@ def build_chart(
                 page.draw_line(p1, p2, **dash)
                 return
             if dashed_curve_at is not None and seg_count == dashed_curve_at:
-                mid = fitz.Point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 - 5 * scale)
+                offset = 0.0 if dashed_curve_level else 5 * scale
+                mid = fitz.Point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 - offset)
                 shape.draw_bezier(p1, mid, mid, p2)
             else:
                 shape.draw_line(p1, p2)
@@ -872,6 +878,43 @@ def test_a_curve_inside_a_compound_path_still_refuses(tmp_path: Path) -> None:
     assert set(got) == {"UNRESOLVED"}, got
     detail = next(s for s in reading.panels[1].series if s.name == DASHED).detail
     assert "cannot decompose" in detail
+
+
+def test_a_collinear_level_curve_still_refuses(tmp_path: Path) -> None:
+    """#746: a curve whose four control points are themselves level.
+
+    ``_item_bbox`` bounds a curve by all four control points, so an ordinary
+    curve -- endpoints level, control points off the level -- already yields a
+    bbox with real height and refuses. But nothing stopped a curve whose
+    control points are ALSO collinear and level from producing a zero-height
+    bbox indistinguishable from an ordinary horizontal run: the operator said
+    curve, and the reader must still refuse it, not read a run from geometry
+    the page never drew as one.
+    """
+    doc, bboxes = build_chart(
+        tmp_path / "curved-level.pdf",
+        WITNESS,
+        [4, 0, 4, 0, 0],
+        dashed_compound_path=True,
+        dashed_curve_at=1,
+        dashed_curve_level=True,
+    )
+    reading = read_chart_page(doc[0], bboxes, page_num=1)
+    got = counts(reading.panels[1], DASHED)
+    assert set(got) == {"UNRESOLVED"}, got
+    detail = next(s for s in reading.panels[1].series if s.name == DASHED).detail
+    assert "cannot decompose" in detail
+
+
+def test_a_plain_run_still_reads(tmp_path: Path) -> None:
+    """What must NOT change in the other direction: a plain 'l' run still reads.
+
+    A guard broad enough to refuse every curve must not become a guard that
+    refuses horizontals in general -- an ordinary dashed staircase, drawn with
+    no curve item at all, must still read its counts.
+    """
+    panel = read_one(tmp_path, WITNESS, [4, 0, 4, 0, 0], dashed_compound_path=True)
+    assert counts(panel, DASHED) == ["4", "0", "4", "0", "0"]
 
 
 def test_a_zero_length_path_stub_is_not_a_mark(tmp_path: Path) -> None:

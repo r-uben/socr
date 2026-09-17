@@ -134,6 +134,14 @@ class Mark:
     its centreline, and the painted edge lies half a stroke width either side
     of it. Nothing here is a tuned constant -- a page that strokes thinner
     measures more precisely, and says so.
+
+    ``curve`` marks an item drawn with a ``'c'`` operator. A curve is never a
+    run or a riser regardless of what its bbox happens to measure: four
+    control points that are themselves collinear and level yield a
+    zero-height bbox indistinguishable, by coordinates alone, from an
+    ordinary horizontal stroke (#746). The operator said curve, so
+    :attr:`horizontal` and :attr:`vertical` refuse it outright rather than
+    infer a run from geometry the page never drew as one.
     """
 
     filled: bool
@@ -143,13 +151,18 @@ class Mark:
     y0: float
     x1: float
     y1: float
+    curve: bool = False
 
     @property
     def horizontal(self) -> bool:
+        if self.curve:
+            return False
         return abs(self.y1 - self.y0) <= self.tolerance and self.x1 > self.x0
 
     @property
     def vertical(self) -> bool:
+        if self.curve:
+            return False
         return abs(self.x1 - self.x0) <= self.tolerance and self.y1 > self.y0
 
     @property
@@ -252,7 +265,16 @@ def page_marks(page) -> list[Mark]:
                     continue
                 x0, y0, x1, y1 = bbox
                 out.append(
-                    Mark(filled=filled, dashed=dashed, width=width, x0=x0, y0=y0, x1=x1, y1=y1)
+                    Mark(
+                        filled=filled,
+                        dashed=dashed,
+                        width=width,
+                        x0=x0,
+                        y0=y0,
+                        x1=x1,
+                        y1=y1,
+                        curve=item[0] == "c",
+                    )
                 )
             except Exception:  # pragma: no cover - defensive
                 continue
