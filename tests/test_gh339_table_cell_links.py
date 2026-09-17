@@ -102,3 +102,58 @@ def test_table_without_links_is_unchanged(tmp_path: Path) -> None:
     assert "0.31" in out
     assert "0.42" in out
     assert "[" not in out
+
+
+class _StubRow:
+    def __init__(self, cells: list) -> None:
+        self.cells = cells
+
+
+class _StubTable:
+    """Duck-types the bits of a PyMuPDF Table `_table_to_markdown` reads.
+
+    Lets the None-cell case be exercised directly and deterministically --
+    `find_tables()` does not offer a simple, portable recipe for forcing a
+    merged/absent cell out of a real ruled grid, and PyMuPDF's own source
+    (`table.py`, several `cell is None` guards) confirms a None cell is a
+    real return shape, not a hypothetical one.
+    """
+
+    def __init__(self, rows: list[list[str]], row_cells: list[list]) -> None:
+        self._rows = rows
+        self.rows = [_StubRow(cells) for cells in row_cells]
+
+    def extract(self) -> list[list[str]]:
+        return self._rows
+
+
+def test_a_none_cell_does_not_cost_the_whole_table_its_links() -> None:
+    """GH-339 review: one merged/absent cell must not zero every OTHER cell's
+    link recovery in the same table.
+
+    `table.rows[i].cells[j]` is `None` for a merged/absent span (PyMuPDF's own
+    `table.py` guards this at several call sites). `fitz.Rect(None)` raises --
+    without a per-cell guard, that single bad cell would blow the whole
+    row-bboxes build and silently drop every link in the table, not just the
+    one cell's.
+    """
+    rows = [
+        ["Year", "DOI"],
+        ["2019", "10.1111/jofi.12345"],
+        ["2020", "10.2222/xyz.999"],
+    ]
+    doi_cell_rect = (190.0, 150.0, 320.0, 172.0)
+    row_cells = [
+        [(68.0, 128.0, 190.0, 150.0), None],  # header's 2nd cell: merged/absent
+        [(68.0, 150.0, 190.0, 172.0), doi_cell_rect],
+        [(68.0, 172.0, 190.0, 194.0), (190.0, 172.0, 320.0, 194.0)],
+    ]
+    table = _StubTable(rows, row_cells)
+
+    links = [(fitz.Rect(doi_cell_rect), DOI, "10.1111/jofi.12345")]
+
+    out = BornDigitalDetector()._table_to_markdown(table, links=links)
+
+    assert f"[10.1111/jofi.12345]({DOI})" in out
+    assert "10.2222/xyz.999" in out
+    assert "DOI" in out  # the None-celled header survives as plain text

@@ -2009,6 +2009,25 @@ def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
     return "".join(parts)
 
 
+def _cell_bbox(cell) -> "fitz.Rect | None":
+    """A table cell's bbox as a ``fitz.Rect``, or ``None`` when it has none.
+
+    GH-339 review. PyMuPDF ships ``None`` for a merged/absent cell (its own
+    ``table.py`` guards ``cell is None`` at several sites), and
+    ``fitz.Rect(None)`` raises. Converting per-cell -- with its own guard --
+    means a merged cell degrades to "no link recovery for this ONE cell",
+    never to "no link recovery for the whole table", which is what a bare
+    list comprehension over ``fitz.Rect(c)`` would do the moment it hit the
+    outer ``except`` in the caller.
+    """
+    if cell is None:
+        return None
+    try:
+        return fitz.Rect(cell)
+    except Exception:
+        return None
+
+
 def _apply_links_to_cell(text: str, cell_rect, links: list) -> str:
     """Wrap link anchors whose rectangle sits inside a table CELL.
 
@@ -4099,8 +4118,17 @@ class BornDigitalDetector:
         # order -- verified against a live find_tables() result, not assumed).
         # Best-effort: a malformed table's `.rows` must not cost the page its
         # markdown, only its cell-level links.
+        #
+        # GH-339 review: PyMuPDF itself ships `None` cells for merged/absent
+        # spans (its own table.py guards `cell is None` at several sites), and
+        # `fitz.Rect(None)` raises. A naive list comp over `r.cells` would let
+        # ONE bad cell blow the whole row-bboxes build via the outer `except`,
+        # silently losing every link in the WHOLE table, not just that cell's.
+        # Each cell is converted independently -- via `_cell_bbox`, which
+        # swallows its own conversion failure -- so a merged/malformed cell
+        # costs only itself.
         try:
-            row_bboxes = [[fitz.Rect(c) for c in r.cells] for r in table.rows]
+            row_bboxes = [[_cell_bbox(c) for c in r.cells] for r in table.rows]
         except Exception:
             row_bboxes = []
 
@@ -4111,8 +4139,9 @@ class BornDigitalDetector:
             cleaned_row: list[str] = []
             for cidx, cell in enumerate(row):
                 text = cell.strip() if isinstance(cell, str) else ""
-                if text and links and cidx < len(bboxes):
-                    text = _apply_links_to_cell(text, bboxes[cidx], links)
+                cell_bbox = bboxes[cidx] if cidx < len(bboxes) else None
+                if text and links and cell_bbox is not None:
+                    text = _apply_links_to_cell(text, cell_bbox, links)
                 cleaned_row.append(text)
             cleaned.append(cleaned_row)
 
