@@ -322,3 +322,24 @@ def test_table_grid_normalize_and_is_numeric_cell_unwrap_markdown_links() -> Non
     assert is_numeric_cell("[(1,204)](https://x/note)") is True
     # A link is not silently unwrapped when it is not the whole cell/token.
     assert is_numeric_cell("see [1204](https://x/note) above") is False
+
+
+def test_is_numeric_token_chokepoint_ignores_the_link_wrapper() -> None:
+    """The required closing test (rev-339): one assertion at the shared
+    chokepoint would have caught the whole GH-339 numeric-decode-gap family
+    in one shot, instead of file-by-file. `is_numeric_token` is the shared
+    predicate imported (not reimplemented) by `tables/binding.py`,
+    `tables/row_corroboration.py`, `tables/adjudication.py`, and
+    `tables/header_repair.py` (which `tables/crop_repair.py` calls) --
+    fixing it here fixes all six affected call sites named in the review:
+    `adjudication.tokens_agree`, `native_verifier._parse_all_data_rows`,
+    `native_verifier._output_header_numeric_tokens`,
+    `binding._candidate_data_column_indices`,
+    `row_corroboration.numeric_body_rows`, and
+    `header_repair.detect_header_column_collapse` (+ its
+    `crop_repair._max_header_col_gap` caller).
+    """
+    from socr.tables.native_verifier import is_numeric_token
+
+    assert is_numeric_token("[1204](https://x)") == is_numeric_token("1204")
+    assert is_numeric_token("[1204](https://x)") is True
