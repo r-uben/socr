@@ -394,7 +394,29 @@ wrong_bin, 293 unmatched — errors on two documents only.
   collision in the current 23-24 releases); would only ever raise a reported cell count
   if one exists. See `docs/log/2026-09-17_752-panel-key-collision.md`.
 
-Open: **#746**, **#742**, **#738**, **#737**.
+- **#746** (`fix/746-refuse-degenerate-curve`): a `'c'` (curve) item whose four control
+  points are themselves collinear and level produced a zero-height bbox indistinguishable
+  from an ordinary horizontal run, and was read as one, silently. `Mark` gains a `curve`
+  flag set at construction (kind is discarded before that point, so the fix has to sit at
+  the `Mark` boundary, not in the consumer); `Mark.horizontal`/`.vertical` both refuse
+  outright when it is set, regardless of bbox geometry. `_item_bbox`'s four-control-point
+  bound is untouched. No corpus page reaches this path (SEP census: `{'l': 1359}`, zero
+  curves) so the guard is pinned by a synthetic fixture only, mutation-demonstrated to
+  redden. See `docs/log/2026-09-17_746-refuse-degenerate-curve.md`.
+  **#807 (found in review before merge):** the same guard, applied to a legend swatch's
+  own geometry, dropped a curve-shaped dashed swatch out of `read_legend` before it was
+  ever named — no `LegendEntry`, so no `SeriesReading` at all, worse than #746's original
+  defect (silent absence, not a wrong count). Fixed by letting an undecomposable-but-named
+  swatch through as an explicit `SeriesReading(presence=PRESENCE_UNRESOLVED)` instead of a
+  dropped `LegendEntry`; reuses `panel_block()`'s and `PanelReading.to_dict()`'s existing
+  generic handling of non-`PRESENT` series, so both the markdown and the metadata surface
+  it with no new rendering code. Pinned at both `read_chart_page`'s output and the
+  markdown/`to_dict()` boundary, mutation-demonstrated to redden. Same log file, appended
+  section. **Quad (`'qu'`) items are the same geometric shape, deliberately NOT extended
+  here** — measured 0 filled, 0 dashed, 0 near-degenerate across 195 real quads in both
+  corpora; filed separately as **#808** so the two stay independently provable.
+
+Open: **#742**, **#738**, **#737**, **#808**.
 
 ## Owner decision — **ANSWERED (yes)**
 
