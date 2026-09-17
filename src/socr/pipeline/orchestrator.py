@@ -5087,6 +5087,42 @@ class UnifiedPipeline:
         )
 
     @staticmethod
+    def _scanned_prose_recovered_pages(records: list) -> list[int]:
+        """#649/#697: pages whose FINAL winning output is a recovered-prose ending.
+
+        Read from ``rec.output.scanned_prose_recovered`` -- the TYPED field
+        ``manifest.py`` sets when it rebuilds a page's own trusted prose bands
+        around a withheld table -- same precedence principle as
+        ``_label_unverified_pages``: this reads the CANDIDATE that shipped,
+        not ``PageState`` or event history, so a page whose earlier attempt
+        was a recovery but whose later, fully-verified candidate won instead
+        reports nothing here.
+        """
+        return sorted(
+            {rec.output.page_num for rec in records if rec.output.scanned_prose_recovered}
+        )
+
+    @staticmethod
+    def _scanned_prose_recovered_note(records: list) -> str | None:
+        """Document-level one-liner naming pages whose text is a scan recovery.
+
+        Mirrors ``_no_witness_backend_note``: #649 already ships the prose --
+        losing it was the defect that closed -- but a consumer gating on
+        ``metadata.json`` must still be able to see that the words came from
+        the page's own UNVERIFIED text layer, spliced around a withheld
+        table, rather than from a corroborated OCR reading, without opening
+        the page sidecar. ``None`` on a clean run.
+        """
+        pages = UnifiedPipeline._scanned_prose_recovered_pages(records)
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: no OCR attempt could be spliced "
+            "around a withheld table, so the page's own unverified prose bands shipped "
+            "flagged instead -- see scanned_prose_recovered in the page sidecar"
+        )
+
+    @staticmethod
     def _chart_detection_failed_note(state) -> str | None:
         """Document-level one-liner naming pages whose chart routing never resolved.
 
@@ -12773,6 +12809,13 @@ class UnifiedPipeline:
         # #625: same hoisting reason as ``label_unverified_pages`` above.
         ditto_unresolved_columns = self._ditto_unresolved_columns(pre_records)
         ditto_unresolved_pages = sorted(ditto_unresolved_columns)
+        # #697: same hoisting reason as ``label_unverified_pages`` above -- the
+        # page keeps its ERROR status already (``PageState.needs_repair`` reads
+        # ``best_output.audit_passed``, False for this ending, so document
+        # status is already correctly non-SUCCESS), but the CLI line lives
+        # inside the shared defect-bucket ``if`` below and is otherwise
+        # unreached on a document whose ONLY signal is a recovered page.
+        scanned_prose_recovered_pages = self._scanned_prose_recovered_pages(pre_records)
 
         def _kept_defect(page_num: int) -> str:
             # ``best_output``, not the finalized record (cold review round 2,
@@ -13304,6 +13347,7 @@ class UnifiedPipeline:
             or table_withheld_pages
             or label_unverified_pages
             or ditto_unresolved_pages
+            or scanned_prose_recovered_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -13602,6 +13646,19 @@ class UnifiedPipeline:
                         f"  [yellow]{len(ditto_unresolved_pages)} table page(s) shipped with "
                         f"{_ditto_total} ditto-mark cell(s) kept verbatim (no fill-down): "
                         f"{ditto_unresolved_pages}[/yellow]"
+                    )
+                # #649/#697: the page's own prose shipped (not the bare
+                # marker), but it is UNVERIFIED -- no OCR attempt could be
+                # spliced around the withheld table -- so this is printed red
+                # alongside the other ERROR-status endings above, not yellow
+                # with the ship-with-doubt lines. ``scanned_prose_recovered_
+                # pages`` is computed once, above, so this line is reachable
+                # even when it is the document's ONLY signal.
+                if scanned_prose_recovered_pages:
+                    console.print(
+                        f"  [red]{len(scanned_prose_recovered_pages)} scanned page(s) shipped "
+                        "unverified recovered prose (no OCR attempt could be spliced around a "
+                        f"withheld table): {scanned_prose_recovered_pages}[/red]"
                     )
                 if native_fallback_pages:
                     console.print(
@@ -13990,6 +14047,16 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_ditto_note}"
             else:
                 final_result.error = _ditto_note
+        # #649/#697: surface a recovered-prose ending at document level, for
+        # the same no-silent-loss reason as the notes above. #649 already
+        # ships the prose -- this only makes the recovery's provenance
+        # visible without opening the page sidecar.
+        _prose_recovered_note = self._scanned_prose_recovered_note(pre_records)
+        if _prose_recovered_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_prose_recovered_note}"
+            else:
+                final_result.error = _prose_recovered_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:
