@@ -2696,6 +2696,22 @@ class UnifiedPipeline:
             # the flag and let a resumed run report a clean SUCCESS on a
             # table column it never re-examined.
             | {DITTO_UNRESOLVED_KIND}
+            # GH-819: all three emitted by ``_agentic_native_page``, which does
+            # NOT run for a page skipped as terminal on resume (unlike
+            # ``_phase_analyze``'s per-run kinds, e.g. ``orphan_word_dropped``,
+            # which is deliberately absent because it is RE-EMITTED every run
+            # and would double-count). Each is a standing property of the
+            # page's SOURCE (a suspect text layer, an unrecovered symbol
+            # glyph, an unreconstructed table shape), not of the run that
+            # noticed it, so a resumed run must still say it. Without this the
+            # sidecar keeps the record and ``audit_log.json`` / the CLI line
+            # silently lose it the moment the page resumes -- same #252 /
+            # GH-353 D1a shape the allowlist above already documents.
+            | {
+                "native_encoding_hygiene_suspect",
+                "native_unrecovered_symbol_glyphs",
+                "possible_table_structure_not_reconstructed",
+            }
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
