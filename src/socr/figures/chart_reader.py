@@ -998,7 +998,7 @@ class LegendEntry:
 
 
 def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list[Bin]):
-    """Legend entries in this panel: ``(entries, swatch marks)``.
+    """Legend entries in this panel: ``(entries, swatch marks, unresolved names)``.
 
     A legend swatch is a mark that does NOT rest on the axis, is not a data
     mark, and has a word-row drawn beside it naming it. The name is that row's
@@ -1031,11 +1031,23 @@ def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list
       outline or bin label can be. Without it a staircase run, which is a data
       mark the width test alone lets through, takes the y tick label standing
       far to its right on the same line for a series name.
+
+    A swatch drawn as a shape this reader cannot decompose into a run or a
+    riser -- a curve, most concretely -- is positionally and by naming a
+    legend candidate exactly like any other, but its style cannot be read off
+    a bbox that may not reflect what the operator drew (#746). Dropping it
+    the way a genuine data riser is dropped would make the series it names
+    vanish with nothing recording that it was ever drawn (#807: found after
+    #746 shipped, by a curved swatch specifically). So it is not entered as a
+    styled :class:`LegendEntry` -- its style is not established -- it is
+    named in ``unresolved`` instead, for the caller to surface as an
+    unresolved series rather than silence.
     """
     if not bins:
-        return [], []
+        return [], [], []
     entries: list[LegendEntry] = []
     swatches: list[Mark] = []
+    unresolved: list[tuple[str, str]] = []
     narrowest = min(b.hi - b.lo for b in bins)
     for m in marks:
         if abs(m.y1 - frame.baseline) <= max(m.tolerance, 1e-6):
@@ -1043,8 +1055,13 @@ def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list
         # A swatch is a horizontal sample of the series' ink: a filled rectangle
         # or a stroked run. The vertical risers of a staircase are neither, and
         # excluding them here is what stops a tick label standing to their right
-        # from being read as a series name.
-        if not (m.filled or m.horizontal):
+        # from being read as a series name. A mark that is none of filled,
+        # horizontal or vertical is not a riser -- it is a shape this reader
+        # cannot decompose (a curve, most concretely) -- so it is carried
+        # through, rather than dropped here, to be named ``unresolved`` below
+        # if it turns out to sit where a swatch does (#807).
+        shape_unreadable = not m.filled and not m.horizontal and not m.vertical
+        if not (m.filled or m.horizontal) and not shape_unreadable:
             continue
         if (m.x1 - m.x0) >= narrowest and any(m.x0 <= b.centre <= m.x1 for b in bins):
             continue
@@ -1087,14 +1104,25 @@ def read_legend(frame: Frame, marks: list[Mark], rows: list[WordRow], bins: list
         ).strip()
         if not name:
             continue
+        if shape_unreadable:
+            unresolved.append(
+                (
+                    name,
+                    "this series' legend swatch is drawn as a path this reader cannot "
+                    "decompose into a run or a riser (a curve, or another shape whose "
+                    "bounding box may not reflect what the operator drew), so its style "
+                    "and its data marks were not read",
+                )
+            )
+            continue
         entries.append(LegendEntry(name=name, style=style, swatch=(m.x0, m.y0, m.x1, m.y1)))
         swatches.append(m)
     # A style named twice in one legend names nothing.
     styles = [e.style for e in entries]
     if len(set(styles)) != len(styles):
         logger.debug("chart_reader: legend binds one style to two names; refusing")
-        return [], swatches
-    return entries, swatches
+        return [], swatches, unresolved
+    return entries, swatches, unresolved
 
 
 # ---------------------------------------------------------------------------
@@ -1843,6 +1871,7 @@ def read_chart_page(
     marks_by_region: dict[int, list[Mark]] = {}
     legends: dict[int, list[LegendEntry]] = {}
     swatches: dict[int, list[Mark]] = {}
+    unresolved_swatches: dict[int, list[tuple[str, str]]] = {}
 
     for idx, box in enumerate(bboxes, start=1):
         own = [m for m in marks if _in_box(m, box)]
@@ -1914,9 +1943,10 @@ def read_chart_page(
         frames[idx] = frame
         cals[idx] = cal
         bins_by_region[idx] = bins
-        entries, marks_used = read_legend(frame, own, rows, bins)
+        entries, marks_used, unresolved = read_legend(frame, own, rows, bins)
         legends[idx] = entries
         swatches[idx] = marks_used
+        unresolved_swatches[idx] = unresolved
 
     # Figure-level legend binding. Two regions belong to one FIGURE when they
     # print the same bin labels in the same order and calibrate against the
@@ -1979,6 +2009,21 @@ def read_chart_page(
                 series.append(read_solid_series(entry.name, frame, cal, bins, data_marks))
             elif entry.style == DASHED_STROKE:
                 series.append(read_dashed_series(entry.name, frame, cal, bins, data_marks))
+        # A swatch the legend could not classify names a series just as surely
+        # as one it could -- dropping it here would repeat #807 one level up,
+        # publishing fewer series than the legend drew with nothing recording
+        # the missing one. It is attached to the SAME region that donated the
+        # group's entries, since that is the drawing the name was read from.
+        named = {s.name for s in series}
+        for name, detail in unresolved_swatches.get(legend_region, []):
+            if name in named:
+                continue
+            series.append(
+                SeriesReading(
+                    name=name, style=DASHED_STROKE, presence=PRESENCE_UNRESOLVED, detail=detail
+                )
+            )
+            named.add(name)
         if not any(s.presence == PRESENT for s in series):
             reading.refusals[idx] = (
                 "the legend names series this panel draws no marks for, so nothing was read"

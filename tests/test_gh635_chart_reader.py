@@ -64,6 +64,7 @@ def build_chart(
     dashed_compound_path: bool = False,
     dashed_curve_at: int | None = None,
     dashed_curve_level: bool = False,
+    dashed_swatch_as_curve: bool = False,
 ) -> tuple[fitz.Document, list]:
     """Draw a two-series histogram and return ``(doc, [full-page bbox])``.
 
@@ -79,7 +80,10 @@ def build_chart(
     puts that curve's two control points ON the segment's own level instead
     of offset from it, so all four of the curve's points are collinear and
     level -- the #746 case, whose bbox is indistinguishable from an ordinary
-    horizontal run by coordinates alone.
+    horizontal run by coordinates alone. ``dashed_swatch_as_curve`` draws the
+    LEGEND's own dashed swatch (not a series outline) the same degenerate way
+    -- the #807 regression, where the swatch naming a whole series vanished
+    rather than the series being surfaced as unresolved.
     """
     labels = bins or ["1.0", "2.0", "3.0", "4.0", "5.0"]
     n = len(labels)
@@ -120,13 +124,23 @@ def build_chart(
     )
     page.insert_text(fitz.Point(sw_x1 + 4 * scale, sy + 1.5 * scale), SOLID, fontsize=5 * scale)
     dy = base - 90 * scale
-    page.draw_line(
-        fitz.Point(sw_x0, dy),
-        fitz.Point(sw_x1, dy),
-        width=3 * scale,
-        dashes="[2 2] 0",
-        color=(0, 0.4, 0.7),
-    )
+    if dashed_swatch_as_curve:
+        # Same swatch position and dash, but drawn as a 'c' item whose four
+        # control points are collinear and level -- the #746 defect applied
+        # to the LEGEND's own swatch rather than a series outline (#807).
+        shape = page.new_shape()
+        mid = fitz.Point((sw_x0 + sw_x1) / 2, dy)
+        shape.draw_bezier(fitz.Point(sw_x0, dy), mid, mid, fitz.Point(sw_x1, dy))
+        shape.finish(width=3 * scale, dashes="[2 2] 0", color=(0, 0.4, 0.7), closePath=False)
+        shape.commit()
+    else:
+        page.draw_line(
+            fitz.Point(sw_x0, dy),
+            fitz.Point(sw_x1, dy),
+            width=3 * scale,
+            dashes="[2 2] 0",
+            color=(0, 0.4, 0.7),
+        )
     page.insert_text(fitz.Point(sw_x1 + 4 * scale, dy + 1.5 * scale), DASHED, fontsize=5 * scale)
 
     if solid is not None:
@@ -915,6 +929,53 @@ def test_a_plain_run_still_reads(tmp_path: Path) -> None:
     """
     panel = read_one(tmp_path, WITNESS, [4, 0, 4, 0, 0], dashed_compound_path=True)
     assert counts(panel, DASHED) == ["4", "0", "4", "0", "0"]
+
+
+def test_an_unresolvable_legend_swatch_surfaces_instead_of_vanishing(tmp_path: Path) -> None:
+    """#807: refusing a curve swatch must not make its whole series vanish.
+
+    The #746 guard refuses a mark whose OWN geometry is a curve. Applied to
+    the legend, that includes the swatch itself: if the dashed series is
+    named by a swatch drawn as a collinear, level curve, ``read_legend`` can
+    no longer classify it as a dashed run and, before this fix, dropped it
+    outright -- no ``LegendEntry``, so ``read_dashed_series`` was never
+    called, so the panel published no row and no refusal for it at all. That
+    is worse than the original bug: it is silent content loss, not a wrong
+    count. The series must be SEEN as unresolved, in both the published
+    markdown and the JSON-serializable reading -- never simply absent.
+    """
+    doc, bboxes = build_chart(
+        tmp_path / "curved-swatch.pdf",
+        WITNESS,
+        [4, 0, 4, 0, 0],
+        dashed_swatch_as_curve=True,
+    )
+    reading = read_chart_page(doc[0], bboxes, page_num=1)
+    panel = reading.panels[1]
+
+    # The solid series still reads: refusing the dashed swatch must not sink
+    # the whole panel when other series remain confidently attributed.
+    solid = next(s for s in panel.series if s.name == SOLID)
+    assert solid.presence == PRESENT
+
+    # The dashed series is present in the reading, unresolved rather than
+    # absent -- this is the read_chart_page-level boundary.
+    dashed = next((s for s in panel.series if s.name == DASHED), None)
+    assert dashed is not None, "the dashed series vanished instead of being surfaced"
+    assert dashed.presence == PRESENCE_UNRESOLVED
+    assert dashed.detail
+
+    # And it is present in BOTH shipping representations: the JSON-
+    # serializable dict an audit or downstream consumer reads, and the
+    # markdown a human reads -- the bug was that it reached neither.
+    dumped = panel.to_dict()
+    dumped_names = {s["name"]: s for s in dumped["series"]}
+    assert DASHED in dumped_names, "unresolved series missing from to_dict() output"
+    assert dumped_names[DASHED]["presence"] == PRESENCE_UNRESOLVED
+
+    md = panel_block(panel)
+    assert DASHED in md
+    assert PRESENCE_UNRESOLVED in md
 
 
 def test_a_zero_length_path_stub_is_not_a_mark(tmp_path: Path) -> None:
