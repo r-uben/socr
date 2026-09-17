@@ -385,8 +385,16 @@ The residual 10 are `sep-20250917-p09`'s 2028 panel, a column the Fed's own tabl
 not carry. Model side, from a STALE run: 525 cells, 202 exact, 21 wrong_count, 9
 wrong_bin, 293 unmatched — errors on two documents only.
 
-Open: **#752** (the scorer keys panels by label, so same-label panels silently overwrite
-each other), **#746**, **#742**, **#738**, **#737**.
+- **#752** (`fix/752-panel-key-collision`): `_reader_readings` / `_model_readings` used to
+  key panels by label (`dict.setdefault`), so two panels sharing a label silently
+  overwrote each other on both sides of the comparison — measured on a real release,
+  three of four panels on one page vanished, 120 cells missing from the report with no
+  trace. Both return a `list[(panel_label, by_series)]` now; nothing is ever dropped for
+  sharing a label. Inert on every corpus page checked so far (no known same-label
+  collision in the current 23-24 releases); would only ever raise a reported cell count
+  if one exists. See `docs/log/2026-09-17_752-panel-key-collision.md`.
+
+Open: **#746**, **#742**, **#738**, **#737**.
 
 ## Owner decision — **ANSWERED (yes)**
 
