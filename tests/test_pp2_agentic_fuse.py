@@ -617,6 +617,143 @@ class TestCascadeHalt:
             "Should not halt when backend probe returns True"
         )
 
+    def _fake_recovered_decision(self, page_num: int, ladder, *, accepted: bool):
+        """Simulate a page whose FIRST rung timed out and whose LATER rung was
+        judged.  ``accepted`` controls only the outcome of that later rung —
+        everything else (the timed-out first attempt, the unhealthy probe used
+        by the caller) is held fixed, so a test toggling only this flag pins
+        GH-227's difference: a page that recovers must not arm the halt, and a
+        page that still fails must arm it exactly as before.
+        """
+        from socr.pipeline.agentic import PageDecision, ProviderAttempt
+
+        prof = ladder[0]
+        timeout_out = PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine="qwen",
+            audit_passed=False,
+        )
+        timeout_att = ProviderAttempt(
+            engine=prof.engine,
+            output=timeout_out,
+            cost_usd=0.0,
+            accepted=False,
+            reason="provider timeout",
+            provider_id=prof.id,
+            model=prof.model,
+            backend=prof.backend,
+        )
+        final_out = PageOutput(
+            page_num=page_num,
+            text=_OCR_TEXT,
+            status=PageStatus.SUCCESS if accepted else PageStatus.ERROR,
+            engine="qwen",
+            audit_passed=accepted,
+        )
+        final_att = ProviderAttempt(
+            engine=prof.engine,
+            output=final_out,
+            cost_usd=0.0,
+            accepted=accepted,
+            reason="ok" if accepted else "still failing",
+            provider_id=prof.id,
+            model=prof.model,
+            backend=prof.backend,
+        )
+        return PageDecision(
+            page_num=page_num,
+            final_output=final_out,
+            attempts=[timeout_att, final_att],
+            accepted=accepted,
+        )
+
+    def test_recovered_page_after_timeout_does_not_halt(self, tmp_path: Path) -> None:
+        """p1's first attempt times out but a LATER attempt is accepted -> no halt, p2 IS routed.
+
+        The probe reports the backend as unhealthy (``probe_ollama_idle`` ->
+        False), which is exactly the condition that used to arm the halt for
+        ANY timed-out attempt regardless of the page's own outcome (GH-227).
+        Gating on ``decision.accepted`` must suppress the halt here even
+        though ``_attempts_show_timeout`` is still True for this page.
+        """
+        pdf_path = _real_pdf(tmp_path, page_count=2)
+        config = _make_config(agentic=True, enabled_engines=[EngineType.QWEN])
+        pipeline = _make_pipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(2, born_digital_pages=set())
+
+        route_calls: list[int] = []
+
+        def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
+            route_calls.append(page_num)
+            return self._fake_recovered_decision(page_num, ladder, accepted=True)
+
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route),
+            patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=False),
+        ):
+            result = pipeline.process(pdf_path, tmp_path)
+
+        assert sorted(route_calls) == [1, 2], (
+            f"p1 recovered after timeout; p2 must still be routed. got: {route_calls}"
+        )
+        assert result.error is None or "PARTIAL_SAVE_VLM_TIMEOUT" not in (result.error or ""), (
+            f"A page that timed out then succeeded must not arm the halt; got: {result.error!r}"
+        )
+
+    def test_same_process_pins_the_recovery_difference(self, tmp_path: Path) -> None:
+        """Same input, same unhealthy probe -- only the LATER attempt's outcome
+        changes between the two runs.  Halt must fire iff the page did not
+        recover (pin a difference, not an absolute status tuple)."""
+        pdf_path = _real_pdf(tmp_path, page_count=2)
+        config = _make_config(agentic=True, enabled_engines=[EngineType.QWEN])
+
+        def _run(accepted: bool):
+            pipeline = _make_pipeline(config)
+            pipeline.bd_detector = MagicMock()
+            pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+                2, born_digital_pages=set()
+            )
+            route_calls: list[int] = []
+
+            def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
+                route_calls.append(page_num)
+                return self._fake_recovered_decision(page_num, ladder, accepted=accepted)
+
+            with (
+                patch.object(
+                    pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+                ),
+                patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route),
+                patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=False),
+            ):
+                result = pipeline.process(pdf_path, tmp_path / f"run_{accepted}")
+            return route_calls, result
+
+        recovered_calls, recovered_result = _run(accepted=True)
+        failed_calls, failed_result = _run(accepted=False)
+
+        recovered_halted = bool(
+            recovered_result.error and "PARTIAL_SAVE_VLM_TIMEOUT" in recovered_result.error
+        )
+        failed_halted = bool(
+            failed_result.error and "PARTIAL_SAVE_VLM_TIMEOUT" in failed_result.error
+        )
+        assert recovered_halted is False, (
+            f"Recovered page must not halt; error={recovered_result.error!r}"
+        )
+        assert failed_halted is True, (
+            f"Page that timed out and never recovered must still halt; "
+            f"error={failed_result.error!r}"
+        )
+        assert recovered_calls == [1, 2], recovered_calls
+        assert failed_calls == [1], failed_calls
+
 
 # ---------------------------------------------------------------------------
 # AC: Equations flags OFF → _detect_and_crop_equations never called
