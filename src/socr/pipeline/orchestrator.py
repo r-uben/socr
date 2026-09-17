@@ -11161,6 +11161,20 @@ class UnifiedPipeline:
             "chart_asset_detection_failed": (
                 bool(getattr(ps, "chart_asset_detection_failed", False)) if ps else False
             ),
+            # GH-682: siblings of chart_asset_render_failed/chart_asset_detection_failed
+            # above, persisted the same way. Without this a resume that restores
+            # terminal pages without re-running _preserve_chart_regions loses the
+            # demotion silently -- the page reports a clean SUCCESS even though a
+            # chart region on it was lost, unplaceable, or never checked.
+            "chart_region_render_failed": (
+                bool(getattr(ps, "chart_region_render_failed", False)) if ps else False
+            ),
+            "chart_region_placement_unresolved": (
+                bool(getattr(ps, "chart_region_placement_unresolved", False)) if ps else False
+            ),
+            "chart_region_inventory_failed": (
+                bool(getattr(ps, "chart_region_inventory_failed", False)) if ps else False
+            ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
             "structure_class_model_kept": structure_class_model_kept,
@@ -12070,6 +12084,21 @@ class UnifiedPipeline:
             ps.chart_asset_detection_failed = bool(
                 getattr(ps, "chart_asset_detection_failed", False)
             ) or bool(meta.get("chart_asset_detection_failed", False))
+            # GH-682: OR-restore the three chart-region flags too, mirroring
+            # chart_asset_detection_failed above -- and for the same reason: a
+            # flag this run already set must survive a sidecar written before
+            # the flag existed (or one from a run that never set it), or the
+            # demotion these flags drive at the document buckets silently
+            # disappears on resume.
+            ps.chart_region_render_failed = bool(
+                getattr(ps, "chart_region_render_failed", False)
+            ) or bool(meta.get("chart_region_render_failed", False))
+            ps.chart_region_placement_unresolved = bool(
+                getattr(ps, "chart_region_placement_unresolved", False)
+            ) or bool(meta.get("chart_region_placement_unresolved", False))
+            ps.chart_region_inventory_failed = bool(
+                getattr(ps, "chart_region_inventory_failed", False)
+            ) or bool(meta.get("chart_region_inventory_failed", False))
             # P4-R: carry the unread-equation latch forward, so a page resumed
             # while STILL offline keeps saying so and is re-read on the first
             # run that has a provider.

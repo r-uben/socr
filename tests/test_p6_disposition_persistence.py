@@ -295,6 +295,10 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "chart_asset_render_failed",
         "equation_lane_retry_pending",
         "chart_asset_detection_failed",
+        # GH-682: persisted alongside the chart_asset_* siblings above.
+        "chart_region_render_failed",
+        "chart_region_placement_unresolved",
+        "chart_region_inventory_failed",
         "judge_rejected",
         "structure_class_model_kept",
         "table_ladder_disposition",

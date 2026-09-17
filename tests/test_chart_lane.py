@@ -836,6 +836,147 @@ def test_gh318_detection_flag_survives_resume_restore(tmp_path: Path) -> None:
     )
 
 
+_GH189_CHART_REGION_FLAGS = [
+    "chart_region_render_failed",
+    "chart_region_placement_unresolved",
+    "chart_region_inventory_failed",
+]
+
+
+@pytest.mark.parametrize("flag_name", _GH189_CHART_REGION_FLAGS)
+def test_gh682_chart_region_flag_persisted_in_sidecar_write(tmp_path: Path, flag_name: str) -> None:
+    """GH-682: the write side, isolated from restore.
+
+    ``_flush_page_sidecar`` is the sole writer of ``pages/NNN.json``. A test
+    that only hand-writes JSON (as the restore/OR tests below do) can pass even
+    if this function never persists the key at all -- this test exercises the
+    real writer and reads the key back off disk.
+    """
+    import json as _json
+
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    out_dir = tmp_path / "out"
+    pipeline._scan_root = pdf.parent
+
+    from socr.core.result import PageOutput, PageStatus
+
+    setattr(state.pages[1], flag_name, True)
+    state.pages[1].best_output = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+
+    pipeline._flush_page_sidecar(state, 1, out_dir)
+
+    doc_dir = doc_dir_for(out_dir, relative_key(pdf, pdf.parent))
+    sidecar_path = doc_dir / "pages" / "00001.json"
+    meta = _json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert meta.get(flag_name) is True, (
+        f"{flag_name} must be persisted in the sidecar meta block; got {meta.get(flag_name)!r}"
+    )
+
+
+@pytest.mark.parametrize("flag_name", _GH189_CHART_REGION_FLAGS)
+def test_gh682_chart_region_flag_or_restores_and_demotion_survives(
+    tmp_path: Path, flag_name: str
+) -> None:
+    """GH-682: the three GH-189 chart-region flags must survive resume, AND the
+    demotion they drive at the document buckets must survive with them.
+
+    Before this fix, ``chart_asset_render_failed``/``chart_asset_detection_failed``
+    were persisted and OR-restored (four lines away in the same two blocks) while
+    these three siblings were not -- so a resumed run defaulted them False, the
+    document-status guard became a no-op, and a page that lost a chart region
+    reported a clean SUCCESS. The field round-tripping is not the point: what the
+    user sees is the page/document status, so this pins the STATUS, not the
+    attribute (per the issue).
+    """
+    import json as _json
+
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    from socr.core.result import DocumentStatus, PageOutput, PageStatus
+
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    out_dir = tmp_path / "out"
+
+    # A terminal sidecar from an EARLIER, clean run.
+    doc_dir = doc_dir_for(out_dir, relative_key(pdf, pdf.parent))
+    pages_dir = doc_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / "00001.json").write_text(_json.dumps({flag_name: False}), encoding="utf-8")
+
+    # THIS run has already recorded the failure for the same page (mirrors how a
+    # native page's chart-region pass runs before the sidecar restore).
+    setattr(state.pages[1], flag_name, True)
+    pipeline._scan_root = pdf.parent
+
+    resumed = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+    pipeline._restore_terminal_page_state(state, 1, resumed, out_dir)
+
+    # 1. The OR survives: a stale clean sidecar must not clear a failure this
+    #    run already recorded.
+    assert getattr(state.pages[1], flag_name) is True, (
+        "a clean sidecar from an earlier run must not clear a failure recorded this run"
+    )
+
+    # 2. The demotion survives: assemble must see the same restored flag and
+    #    still refuse a clean SUCCESS, exactly as it would for a page that set
+    #    the flag within a single non-resumed run.
+    final_result = pipeline._phase_assemble(state, out_dir)
+    assert final_result.status == DocumentStatus.AUDIT_FAILED, (
+        f"restored {flag_name}=True must still demote the document to AUDIT_FAILED; "
+        f"got {final_result.status!r}"
+    )
+
+
+def test_gh682_clean_page_resumes_clean_no_chart_region_flags(tmp_path: Path) -> None:
+    """GH-682, both directions: a page with no chart-region problem must still
+    resume clean through the real restore + assemble path. A fix that makes
+    every resumed page WARNING/AUDIT_FAILED is a different defect."""
+    import json as _json
+
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    from socr.core.result import DocumentStatus, PageOutput, PageStatus
+
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    out_dir = tmp_path / "out"
+
+    # A terminal sidecar from an earlier, clean run: none of the three keys
+    # were ever written (also covers a pre-ticket sidecar with no such keys).
+    doc_dir = doc_dir_for(out_dir, relative_key(pdf, pdf.parent))
+    pages_dir = doc_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / "00001.json").write_text(_json.dumps({}), encoding="utf-8")
+
+    # THIS run never recorded a chart-region problem either.
+    pipeline._scan_root = pdf.parent
+    resumed = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+    pipeline._restore_terminal_page_state(state, 1, resumed, out_dir)
+
+    for flag_name in _GH189_CHART_REGION_FLAGS:
+        assert getattr(state.pages[1], flag_name) is False, (
+            f"a clean resume must not fabricate {flag_name}"
+        )
+
+    final_result = pipeline._phase_assemble(state, out_dir)
+    assert final_result.status == DocumentStatus.SUCCESS, (
+        f"a clean resumed page must not be demoted; got {final_result.status!r}"
+    )
+
+
 class TestAgenticChartLaneRouting:
     """Integration tests for chart lane in the PP-2 fused agentic loop."""
 
