@@ -1016,6 +1016,16 @@ def _is_data_row(row: list[str]) -> bool:
     ``_NUM_TOKEN_RE`` rejects all of those, which would let a starred coefficient
     row — the common case in an econometrics table — become the header again.
 
+    GH-818: cells are normalized through ``_normalize_cell`` first, the same
+    decode/dash-strip step already applied on the sibling markdown-table paths
+    (``collect_table_tokens`` #679, ``binding._candidate_row_multiset`` #690).
+    Without it, a cell carrying a trailing dash-rule run (``41.3--``) or an
+    HTML dash entity (``41.3&mdash;``) fails ``is_numeric_token`` on the raw
+    text even though it is plainly a decorated ``41.3``, so the row is missed
+    as data and ``_grid_to_markdown`` emits a different table shape than for
+    the plain value. Only the TRAILING decoration is stripped — a LEADING sign
+    (``-1.5``) is preserved by ``_normalize_cell`` and stays numeric.
+
     Deliberately narrower than the negation of ``_is_header_row``. A header may
     well name its label column (``['Firm', 'Nominal', 'Real']``) — that row is
     not data because its cells are words, not values. The residual ambiguity is
@@ -1028,11 +1038,11 @@ def _is_data_row(row: list[str]) -> bool:
     ``_collapse_header_prefix`` merges them before this check runs.
     """
     # Imported lazily: native_verifier imports _NUM_TOKEN_RE from this module.
-    from socr.tables.native_verifier import is_numeric_token
+    from socr.tables.native_verifier import _normalize_cell, is_numeric_token
 
     if _is_header_row(row):
         return False
-    return any(is_numeric_token(c) for c in row[1:] if c.strip())
+    return any(is_numeric_token(_normalize_cell(c)) for c in row[1:] if c.strip())
 
 
 def _grid_to_markdown(grid: list[list[str]], *, assume_header: bool = False) -> str:
