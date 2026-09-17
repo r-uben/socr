@@ -16,10 +16,38 @@ from pathlib import Path
 
 import httpx
 
+from socr.core.killable import CallSpec, run_killable
 from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
 
 DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
+
+
+def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: float) -> str:
+    """The ONLY part of ``judge()`` that crosses the killable boundary (GH-172).
+
+    Deliberately a top-level function taking plain picklable args -- never a
+    bound method -- so it can be run inside a fresh ``spawn``-ed child via
+    ``CallSpec``. The ``httpx`` client timeout below is kept as
+    defence-in-depth (panel ruling: legal, never the close); the caller's
+    ``run_killable`` wall-clock deadline is what actually bounds a peer that
+    keeps the response stream open and trickles bytes, which defeats this
+    per-chunk read timeout (measured in ``docs/log/2026-09-17_172-design.md``).
+    """
+    resp = httpx.post(
+        f"{host}/api/generate",
+        json={
+            "model": model,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "options": {"temperature": 0},  # judging should be as stable as we can make it
+            "format": "json",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json().get("response", "")
 
 
 def _with_implicit_tag(name: str) -> str:
@@ -59,19 +87,25 @@ class OllamaVisionJudge:
             return False
 
     def judge(self, image_path: Path, ocr_text: str) -> JudgeVerdict:
+        """Judge one page. The model call runs behind a killable process boundary.
+
+        GH-172: a wedged Ollama connection used to block this thread's HTTP
+        call indefinitely -- ``httpx``'s read timeout is per-chunk, not
+        per-request, so a peer that keeps trickling bytes into an open
+        response never trips it, and the ``ThreadPoolExecutor`` deadline that
+        used to wrap ``assess()`` (``_TimeoutJudge`` in the orchestrator)
+        could only ABANDON that thread, not stop it -- the interpreter still
+        joined it at exit. ``run_killable`` runs ``_post_generate`` in its own
+        killable child process instead, so this call now returns (with
+        ``KillableTimeoutError``, a ``TimeoutError`` subclass the existing
+        ``is_page_judge_timeout``/``judge_outcome`` machinery already
+        classifies) within ``self.timeout`` regardless of what the peer does.
+        """
         image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
         prompt = f"{self._prompt}\n\n---\nCANDIDATE TRANSCRIPTION:\n\n{ocr_text}"
-        resp = httpx.post(
-            f"{self.host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "images": [image_b64],
-                "stream": False,
-                "options": {"temperature": 0},  # judging should be as stable as we can make it
-                "format": "json",
-            },
-            timeout=self.timeout,
+        spec = CallSpec(
+            func="socr.judge.ollama_judge:_post_generate",
+            args=(self.host, self.model, prompt, image_b64, self.timeout),
         )
-        resp.raise_for_status()
-        return parse_verdict(resp.json().get("response", ""))
+        raw = run_killable(spec, timeout=self.timeout)
+        return parse_verdict(raw)

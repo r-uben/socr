@@ -118,7 +118,7 @@ def _gemini_engine_mock(text: str = _OCR_TEXT) -> MagicMock:
     m.is_available.return_value = True
     m.model_version = ""
 
-    def _pp(pdf_path, page_nums, config, dpi=200):
+    def _pp(pdf_path, page_nums, config, dpi=200, **_kwargs):
         return [
             PageOutput(
                 page_num=pn,
