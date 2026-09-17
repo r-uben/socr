@@ -2009,6 +2009,53 @@ def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
     return "".join(parts)
 
 
+def _apply_links_to_cell(text: str, cell_rect, links: list) -> str:
+    """Wrap link anchors whose rectangle sits inside a table CELL.
+
+    GH-339: table markdown is built from ``table.extract()``'s plain cell
+    strings, which never pass through ``_line_text`` or
+    ``_apply_links_to_flat_text`` -- so a URI whose rectangle sat over a data
+    cell was dropped entirely, not even surfacing as raw text. For a citation
+    corpus a dropped DOI is silent content loss.
+
+    ``cell_rect`` comes from ``table.rows[i].cells[j]``, which is aligned 1:1
+    with ``table.extract()``'s rows and columns. It stands in for the span
+    rect ``_line_text`` uses: a cell's own bbox is the only positional
+    information the markdown-table path has, exactly as a span's bbox is on a
+    prose line, so the same anchor-substring + ``_anchor_offset_under``
+    interpolation applies unchanged.
+    """
+    if not links or not text:
+        return text
+
+    hits: list[tuple[int, int, str, str]] = []
+    for link in links:
+        rect, uri, anchor = link[0], link[1], link[2]
+        if not cell_rect.intersects(rect):
+            continue
+        if not anchor or anchor not in text:
+            # No whole-cell fallback, same reasoning as `_line_text`: a phrase
+            # link would otherwise wrap the entire cell value.
+            continue
+        start_c = _anchor_offset_under(text, anchor, cell_rect, rect)
+        if start_c is None:
+            continue
+        hits.append((start_c, start_c + len(anchor), uri, anchor))
+
+    hits.sort(key=lambda h: (h[0], h[1]))
+    kept: list[tuple[int, int, str, str]] = []
+    last_end = -1
+    for start_c, end_c, uri, anchor in hits:
+        if start_c < last_end:
+            continue
+        kept.append((start_c, end_c, uri, anchor))
+        last_end = end_c
+
+    for start_c, end_c, uri, anchor in reversed(kept):
+        text = text[:start_c] + _emit_run(anchor, uri) + text[end_c:]
+    return text
+
+
 # A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
 # "/55-84", "pp. /23". This is the eaten-leading-digit signature — a stroke glyph
 # decoded as '/' where a digit belongs, so "(1997)" ships as "(/997)".
@@ -3548,8 +3595,12 @@ class BornDigitalDetector:
         an earlier note here saying those paths still dropped links; they no
         longer do.)
 
-        Still out of scope: a URI whose rect sits INSIDE a detected table cell
-        (GH-339), and routing prose pages onto the dict walk.
+        GH-339: a URI whose rect sits INSIDE a table cell produced directly by
+        ``find_tables()`` (the ``_table_to_markdown`` path) is now recovered
+        too, via `table.rows[i].cells[j]` bboxes aligned with `.extract()`.
+        Still out of scope: cells synthesised by the lane-stacked rowizer or
+        the text-strategy/word-geometry fallbacks (no per-cell bbox there),
+        and routing prose pages onto the dict walk.
         """
         # GH-127: resolved once, not per line -- get_links() parses the page's
         # link table on every call.
@@ -3599,7 +3650,7 @@ class BornDigitalDetector:
                 for rect, md in rowized:
                     lane_stacked_regions.append((rect, md))
             else:
-                md = self._table_to_markdown(table)
+                md = self._table_to_markdown(table, links=_links)
                 if md:
                     table_regions.append((fitz.Rect(table.bbox), md))
 
@@ -4022,12 +4073,15 @@ class BornDigitalDetector:
                 double_counted[:10],
             )
 
-    def _table_to_markdown(self, table: object) -> str:
+    def _table_to_markdown(self, table: object, links: list | None = None) -> str:
         """Convert a PyMuPDF Table object to a markdown table string.
 
         Args:
             table: A table object from page.find_tables() with an
                    extract() method returning a list of rows (lists of cells).
+            links: GH-339. Resolved page URI links (``_uri_links``' return
+                   shape). A link whose rectangle sits inside a cell is
+                   wrapped as ``[anchor](uri)`` in that cell's markdown.
 
         Returns:
             Markdown table string, or empty string if table is empty/invalid.
@@ -4040,10 +4094,27 @@ class BornDigitalDetector:
         if not rows:
             return ""
 
+        # GH-339: cell bboxes come from `table.rows`, aligned 1:1 with
+        # `table.extract()` (both walk header then data rows in the same
+        # order -- verified against a live find_tables() result, not assumed).
+        # Best-effort: a malformed table's `.rows` must not cost the page its
+        # markdown, only its cell-level links.
+        try:
+            row_bboxes = [[fitz.Rect(c) for c in r.cells] for r in table.rows]
+        except Exception:
+            row_bboxes = []
+
         # Clean cell values: replace None with empty string, strip whitespace
         cleaned: list[list[str]] = []
-        for row in rows:
-            cleaned.append([(cell.strip() if isinstance(cell, str) else "") for cell in row])
+        for ridx, row in enumerate(rows):
+            bboxes = row_bboxes[ridx] if ridx < len(row_bboxes) else []
+            cleaned_row: list[str] = []
+            for cidx, cell in enumerate(row):
+                text = cell.strip() if isinstance(cell, str) else ""
+                if text and links and cidx < len(bboxes):
+                    text = _apply_links_to_cell(text, bboxes[cidx], links)
+                cleaned_row.append(text)
+            cleaned.append(cleaned_row)
 
         if not cleaned:
             return ""
