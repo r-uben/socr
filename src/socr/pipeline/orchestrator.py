@@ -8902,8 +8902,25 @@ class UnifiedPipeline:
                         # The substring scan stays for the PROVIDER half: a
                         # provider timeout is recorded on the attempt's reason
                         # and has no typed field of its own.
+                        #
+                        # #227: ``_attempts_show_timeout`` answers "did anything
+                        # on this page time out", not "did this page fail" --
+                        # its own docstring says so. A page whose first rung
+                        # timed out and whose later rung was ACCEPTED must not
+                        # arm the halt: ``decision.accepted`` is the ladder's
+                        # own verdict on this exact page (agentic.py's
+                        # ``PageDecision(..., accepted=True)`` is only returned
+                        # once a rung's ``decision.accept`` fires), so gating on
+                        # it here reuses the outcome the ladder already computed
+                        # rather than re-deriving it from the attempt list. A
+                        # page that timed out and was never accepted still arms
+                        # the halt exactly as before.
                         _had_timeout = self._attempts_show_timeout(decision.attempts)
-                        if _had_timeout and not self._probe_backend_idle():
+                        if (
+                            _had_timeout
+                            and not decision.accepted
+                            and not self._probe_backend_idle()
+                        ):
                             backend_degraded = True
                             halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
                             from socr.core.audit_log import AuditEvent
