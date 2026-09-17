@@ -217,6 +217,7 @@ class BaseEngine(ABC):
         page_nums: list[int],
         config: PipelineConfig,
         dpi: int = 200,
+        subprocess_timeout: float | None = None,
     ) -> list[PageOutput]:
         """Process specific pages by rendering to images and calling the CLI.
 
@@ -229,6 +230,19 @@ class BaseEngine(ABC):
             page_nums: 1-indexed page numbers to process.
             config: Pipeline configuration.
             dpi: Render DPI for page images.
+            subprocess_timeout: wall-clock bound for THIS CLI call, in
+                seconds. ``None`` (the default) falls back to
+                ``config.timeout`` -- the whole-document bound, unchanged
+                behaviour for every non-agentic caller. GH-172: the agentic
+                per-page loop passes its own soft per-provider deadline here
+                instead, so a wedged CLI subprocess is killed at the SAME
+                bound the loop already reports as its timeout, rather than
+                surviving up to ``config.timeout`` (1800s) after the caller
+                has moved on. ``subprocess.run(..., timeout=...)`` already
+                kills the process on expiry -- this only tightens the bound,
+                it does not change the kill mechanism, which was already
+                real (unlike the ``ThreadPoolExecutor`` abandonment this
+                ticket exists to fix elsewhere).
 
         Returns:
             List of PageOutput, one per page_num, in the same order.
@@ -268,12 +282,15 @@ class BaseEngine(ABC):
             cmd = self._build_command(images_dir, cli_out, config)
             logger.info(f"[{self.name}] Processing {len(page_nums)} pages: {' '.join(cmd)}")
 
+            effective_timeout = (
+                subprocess_timeout if subprocess_timeout is not None else config.timeout
+            )
             try:
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=config.timeout,
+                    timeout=effective_timeout,
                 )
             except subprocess.TimeoutExpired:
                 return [
@@ -283,7 +300,7 @@ class BaseEngine(ABC):
                         engine=self.name,
                         failure_mode=FailureMode.TIMEOUT,
                         audit_passed=False,
-                        error=f"Timeout after {config.timeout}s",
+                        error=f"Timeout after {effective_timeout}s",
                     )
                     for pn in page_nums
                 ]

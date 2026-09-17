@@ -129,7 +129,13 @@ def _run_pipeline(
     pipeline = UnifiedPipeline(config)
 
     def _stub_run_engine_on_pages(
-        state, page_nums, enhancement_pages, engine_type, label, profile=None
+        state,
+        page_nums,
+        enhancement_pages,
+        engine_type,
+        label,
+        profile=None,
+        **_kwargs,
     ):
         return [
             PageOutput(

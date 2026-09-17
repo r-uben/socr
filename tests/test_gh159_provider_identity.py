@@ -145,7 +145,7 @@ class _SpyEngine:
     def is_available(self):
         return True
 
-    def process_pages(self, pdf_path, page_nums, config, dpi):
+    def process_pages(self, pdf_path, page_nums, config, dpi, **_kwargs):
         self.configs.append(config)
         return [
             PageOutput(page_num=n, text="ocr", status=PageStatus.SUCCESS, engine="qwen")
@@ -318,7 +318,7 @@ def test_the_agentic_loop_hands_the_profile_down_to_the_engine_runner(tmp_path):
     pipe._resolve_crop_vlm_model = lambda: None
     pipe._resolve_judge_model = lambda *a, **k: ""
 
-    def spy(state, nums, nat, eng, phase, profile=None):
+    def spy(state, nums, nat, eng, phase, profile=None, **_kwargs):
         seen.append(profile)
         return [
             PageOutput(page_num=p, text=f"text {p}", status=PageStatus.SUCCESS, engine="qwen")

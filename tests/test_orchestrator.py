@@ -101,7 +101,7 @@ def _setup_mock_engine(
     page_status = PageStatus.SUCCESS if result.success else PageStatus.ERROR
     audit = result.audit_passed if result.success else False
 
-    def _mock_process_pages(pdf_path, page_nums, config, dpi=200):
+    def _mock_process_pages(pdf_path, page_nums, config, dpi=200, **_kwargs):
         return [
             PageOutput(
                 page_num=pn,
@@ -1309,7 +1309,7 @@ def _mock_engine_named(name: str, text: str, ok: bool = True) -> MagicMock:
     m.is_available.return_value = True
     m.model_version = ""
 
-    def _pp(pdf_path, page_nums, config, dpi=200):
+    def _pp(pdf_path, page_nums, config, dpi=200, **_kwargs):
         status = PageStatus.SUCCESS if ok else PageStatus.ERROR
         return [
             PageOutput(page_num=pn, text=text, status=status, engine=name, audit_passed=ok)

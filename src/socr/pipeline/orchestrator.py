@@ -1916,6 +1916,7 @@ class UnifiedPipeline:
         engine_type: EngineType,
         label: str,
         profile: ProviderProfile | None = None,
+        subprocess_timeout_sec: float | None = None,
     ) -> list[PageOutput]:
         """Render pages to images and run a CLI engine per-page.
 
@@ -1934,6 +1935,12 @@ class UnifiedPipeline:
                 the rung declares (GH-159) — without it, the cloud Qwen rung
                 silently executed the local build. ``None`` keeps the pure
                 config-derived behaviour used by the non-agentic phases.
+            subprocess_timeout_sec: GH-172 — bound for the underlying CLI
+                subprocess call, in seconds. ``None`` keeps the existing
+                whole-document ``config.timeout`` bound; the agentic per-page
+                loop passes its own soft per-provider deadline so a wedged CLI
+                is killed at the SAME bound the loop reports as its timeout,
+                instead of surviving up to the document timeout unattended.
 
         Returns:
             List of PageOutput, one per page_num, with per-page text.
@@ -2029,6 +2036,7 @@ class UnifiedPipeline:
             page_nums=page_nums,
             config=run_config,
             dpi=run_config.render_dpi,
+            subprocess_timeout=subprocess_timeout_sec,
         )
 
         # For enhancement pages where OCR failed, fall back to native text
@@ -8437,6 +8445,12 @@ class UnifiedPipeline:
             console.print(f"  ladder: {ladder_str}")
 
         def run_provider(profile: ProviderProfile, page_num: int) -> PageOutput:
+            # GH-172: bound the underlying CLI subprocess by the SAME soft
+            # deadline route_page's own ThreadPoolExecutor timeout uses for
+            # this engine, instead of leaving it at the whole-document
+            # config.timeout. A wedged CLI used to survive up to 1800s after
+            # route_page had already abandoned its wrapper thread and moved
+            # on; now the subprocess itself is killed at the reported bound.
             outs = self._run_engine_on_pages(
                 state,
                 [page_num],
@@ -8444,6 +8458,9 @@ class UnifiedPipeline:
                 profile.engine,
                 "agentic",
                 profile=profile,
+                subprocess_timeout_sec=(
+                    provider_timeout.get(profile.engine) if provider_timeout else None
+                ),
             )
             return outs[0]
 
