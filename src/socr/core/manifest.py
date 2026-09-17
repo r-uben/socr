@@ -948,6 +948,15 @@ def _reaches_structure_class_branch(p) -> bool:
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
+        # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission,
+        # per ``_truncated_grid_reading_ids``) is a non-native distrust case
+        # this predicate's original three conditions never covered -- it is
+        # not native, so ``native_distrusted``/``native_text_shredded`` cannot
+        # fire, and the resume flag is unrelated. Mirrors
+        # ``_select_page_output_tagged``'s own gate exactly so the two never
+        # disagree on when this branch is reachable (see this function's own
+        # docstring).
+        best_output_truncated = id(p.best_output) in _truncated_grid_reading_ids(p)
         # MAJOR 7(b): resume collapses ``p.attempts`` to the single frozen
         # winner (``_restore_terminal_page_state``), so a resumed run's own
         # attempt list can no longer prove a non-native rung authored a grid
@@ -958,6 +967,7 @@ def _reaches_structure_class_branch(p) -> bool:
         if not (
             native_distrusted
             or native_text_shredded
+            or best_output_truncated
             or getattr(p, "structure_class_model_kept_on_resume", False)
         ):
             return False
@@ -3077,7 +3087,16 @@ def _select_page_output_tagged(
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
-        if not (native_distrusted or native_text_shredded):
+        # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission)
+        # must not win by this short-circuit either -- it is a non-native
+        # distrust case neither flag above catches, and the S1 branch below
+        # (reached only when this short-circuit does NOT fire) is exactly
+        # where ``_strict_grid_authored_pool`` already drops a truncated
+        # candidate in favour of a complete one from the wider pool. Mirrors
+        # ``_reaches_structure_class_branch``'s own gate so the two agree on
+        # reachability (see that function's docstring).
+        best_output_truncated = id(p.best_output) in _truncated_grid_reading_ids(p)
+        if not (native_distrusted or native_text_shredded or best_output_truncated):
             return p.best_output, SelectionProvenance.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
