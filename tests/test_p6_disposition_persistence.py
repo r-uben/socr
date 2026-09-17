@@ -299,6 +299,9 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "chart_region_render_failed",
         "chart_region_placement_unresolved",
         "chart_region_inventory_failed",
+        # GH-674: persisted so the demotion survives resume -- see
+        # test_gh674_equation_skip_demotion.py.
+        "equation_sidecar_skipped",
         "judge_rejected",
         "structure_class_model_kept",
         "table_ladder_disposition",
