@@ -194,3 +194,28 @@ own two pinning tests are what catch its removal — nothing else does.
 Lint (`uvx ruff@0.16.0 format --check .`): clean, "732 files already
 formatted".
 
+## Parked for the owner — the one-em cutoff itself is an open fork
+
+The owner measured both failure directions of this guard and found the
+cardinal "a dropped row is worse than a missing one" rule does not
+adjudicate between them: an over-merge consumes a heading (a row
+disappears), an under-merge splits a wrapped label across two rows (the
+value binds to the trailing half of the label instead of the whole).
+Neither loses content outright — `row_label_contradictions` stays empty
+either way — so which is worse is a corpus fact (do this corpus's tables
+use hanging indents past one em, or nesting levels at or under one em?)
+that is not obtainable from this worktree. Decision parked for the owner
+with both measurements and two candidate next steps: (1) derive the
+nesting quantum from another genuine parent->child indent step observed
+elsewhere in the SAME table, falling back to today's one-em constant only
+when no such reference exists in a single-section document; (2) find an
+orthogonal second signal instead of tightening indent further.
+
+Per the team lead's request, added
+`test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fact`
+(delta = 2 × one em) as a plain (non-xfail) test pinning TODAY's actual
+behaviour, with the fork spelled out in its docstring, so the next person
+inherits the measurement instead of rediscovering it. It is explicitly not
+a claim that today's behaviour is the correct final answer.
+
+

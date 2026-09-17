@@ -2620,6 +2620,41 @@ def test_gh692_heading_indent_just_over_one_em_does_not_merge():
     assert result.candidate_wrapped_label_merges == ()
 
 
+def test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fact():
+    """GH-692, OPEN FORK -- not resolved, pinned so the next person inherits
+    the measurement instead of rediscovering it.
+
+    One em is this guard's own choice of cutoff between "hanging indent /
+    extraction jitter" (tolerated) and "genuine nested child" (refused).
+    Whether one em is the RIGHT cutoff for this corpus is unknown: it is
+    possible for a real hanging-indent convention to exceed one em, and
+    possible for a real nesting level to be one em or less. Neither
+    direction is corpus-verifiable from this worktree (no access to
+    `fed-01` or any other document). At a delta of two ems -- comfortably
+    past today's cutoff -- the guard currently refuses the merge:
+
+        merged (flush)             row_labels: ('Other authorized European currencies',)
+        NOT merged (this fixture)  row_labels: ('Other authorized', 'European currencies')
+
+    Both outcomes are attribution errors, not content loss (contradictions
+    stay empty either way), so the module's own "a dropped row is worse
+    than a missing one" rule does not settle which is correct here -- see
+    docs/log/2026-09-17_692-same-font-heading-merge.md for the full
+    write-up and the two candidate fixes (a same-table nesting-step
+    yardstick, or a different discriminator entirely) left for the owner.
+    This test pins TODAY's behaviour; it is not a claim that today's
+    behaviour is the intended final answer."""
+    delta = 2 * _INDENTED_LABEL_FONT_SIZE
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+    assert result.row_label_contradictions == []
+
+
 # ---------------------------------------------------------------------------
 # GH-766: an entity-encoded candidate value must not read as a false
 # contradiction against a native number it actually agrees with.
