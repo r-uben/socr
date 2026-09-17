@@ -2528,16 +2528,16 @@ _INDENTED_MARKDOWN = (
 )
 
 
-def _indented_second_line_spans(delta: float) -> list:
+def _indented_second_line_spans(delta: float, size: float = _INDENTED_LABEL_FONT_SIZE) -> list:
     return [
-        span(50, 60, 165, 70, "Other authorized", size=_INDENTED_LABEL_FONT_SIZE),
+        span(50, 60, 165, 70, "Other authorized", size=size),
         span(
             50 + delta,
             90,
             175 + delta,
             100,
             "European currencies",
-            size=_INDENTED_LABEL_FONT_SIZE,
+            size=size,
         ),
     ]
 
@@ -2620,6 +2620,43 @@ def test_gh692_heading_indent_just_over_one_em_does_not_merge():
     assert result.candidate_wrapped_label_merges == ()
 
 
+def test_gh692_p2_unrounded_size_used_for_tolerance_merges_below_true_size():
+    """GH-692 P2 (Astra, source-trace; owner confirmed by execution). The
+    tolerance must measure against the label's UNROUNDED font size, not
+    ``_label_font_signature``'s ``round(size)`` bucket -- reusing that
+    bucket is correct for font EQUALITY but wrong for a GEOMETRIC distance.
+    At size=6.49 (which rounds to 6), a delta of 6.25 is a legitimate
+    hanging indent strictly inside one true em (6.25 < 6.49) but strictly
+    outside the rounded bucket (6.25 > 6) -- a tolerance built on the
+    rounded value refuses this merge; the fix must not."""
+    delta = 6.25
+    size = 6.49
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta, size=size),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_p2_unrounded_size_used_for_tolerance_refuses_above_true_size():
+    """GH-692 P2, other direction: at size=6.51 (which rounds to 7), a delta
+    of 6.75 is a genuine nested child strictly outside one true em
+    (6.75 > 6.51) but strictly inside the rounded bucket (6.75 < 7) -- a
+    tolerance built on the rounded value would wrongly widen this merge and
+    silently drop the heading row (this repo's cardinal rule); the fix must
+    refuse it."""
+    delta = 6.75
+    size = 6.51
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta, size=size),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
 def test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fact():
     """GH-692, OPEN FORK -- not resolved, pinned so the next person inherits
     the measurement instead of rediscovering it.
@@ -2643,7 +2680,15 @@ def test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fac
     write-up and the two candidate fixes (a same-table nesting-step
     yardstick, or a different discriminator entirely) left for the owner.
     This test pins TODAY's behaviour; it is not a claim that today's
-    behaviour is the intended final answer."""
+    behaviour is the intended final answer.
+
+    The fork is not just about small deltas: the tolerance is proportional
+    to the label's OWN font size with no ceiling, so a 24pt heading gets a
+    24pt tolerance and MERGES through a 12pt indent step that would read as
+    an obvious nested child at body-text sizes -- see the second case below.
+    That is the same open fork, not a new regression: nothing in this guard
+    (or the module) currently establishes what a "genuine nesting step"
+    should be relative to a large font, only relative to one em of it."""
     delta = 2 * _INDENTED_LABEL_FONT_SIZE
     result = bind(
         _indented_second_line_words(delta),
@@ -2653,6 +2698,21 @@ def test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fac
     assert result.candidate_wrapped_label_merges == ()
     assert result.candidate_row_labels == ("Other authorized", "European currencies")
     assert result.row_label_contradictions == []
+
+    # Large-font case named in the docstring above: a 24pt heading's own
+    # one-em tolerance is 24pt, so a 12pt nesting step -- unambiguous at
+    # body-text sizes -- merges instead of refusing. Same open fork, pinned
+    # at the opposite end of the font-size axis.
+    large_font_delta = 12.0
+    large_font_size = 24.0
+    large_font_result = bind(
+        _indented_second_line_words(large_font_delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(large_font_delta, size=large_font_size),
+    )
+    assert large_font_result.candidate_wrapped_label_merges == (
+        "Other authorized European currencies",
+    )
 
 
 # ---------------------------------------------------------------------------

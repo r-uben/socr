@@ -218,4 +218,107 @@ behaviour, with the fork spelled out in its docstring, so the next person
 inherits the measurement instead of rediscovering it. It is explicitly not
 a claim that today's behaviour is the correct final answer.
 
+## Round 3 — P2: the tolerance used a rounded font bucket, not a true em
+
+Astra (source-trace) found, and the owner confirmed by execution, that
+`one_em = font_a[1]` in round 2's fix reused `_label_font_signature`'s
+`round(size)` bucket — correct for FONT EQUALITY, wrong for a GEOMETRIC
+distance. Two concrete failures: a 6.49pt label rounds to 6, so a genuinely
+merging 6.25pt continuation (6.25 < 6.49) read as exceeding a 6pt tolerance
+and wrongly refused; a 6.51pt label rounds to 7, so a genuine 6.75pt nested
+child (6.75 > 6.51) read as fitting inside a 7pt tolerance and wrongly
+merged — the exact silent-heading-loss shape this ticket exists to close,
+surviving in a band at most 0.5pt wide.
+
+### Fix: carry the unrounded size alongside the rounded bucket
+
+Added `_label_font_size(spans, label_bbox) -> float | None`, a sibling to
+`_label_font_signature` with the identical overlap/abstain contract (same
+spans, same bbox, abstain on missing/ambiguous evidence) but returning the
+raw `size` instead of `round(size)`. Both now share a `_overlapping_label_spans`
+helper so the two functions read exactly the same evidence for the same row
+and cannot drift apart. Added `_NativeRow.label_font_size: float | None`,
+populated at both construction sites the same way `label_font` already is.
+The widened-merge guard now reads `one_em = native_rows[native_idx_this].label_font_size`
+instead of `font_a[1]`.
+
+Chose "carry the true size alongside" over "derive the em from span geometry
+directly at the guard site" because the guard already reads `_NativeRow`
+fields for both bbox and font — adding one more field keeps all per-row
+font evidence assembled in one place (`_native_rows`) instead of splitting
+it between construction time and use time. Did NOT touch `label_font`'s own
+`round(size)` bucket or `_label_font_signature` — that rounding is correct
+for font-equality comparison, and changing it would alter which labels
+count as "same font", a different decision with its own blast radius, per
+the owner's explicit instruction.
+
+### Evidence — the two reproduction cases, pinned
+
+`tests/test_binding.py`:
+
+- `test_gh692_p2_unrounded_size_used_for_tolerance_merges_below_true_size` —
+  size=6.49, delta=6.25: must merge (6.25 < 6.49, the true size).
+- `test_gh692_p2_unrounded_size_used_for_tolerance_refuses_above_true_size` —
+  size=6.51, delta=6.75: must not merge (6.75 > 6.51, the true size).
+
+Both run through `bind()` with `spans=`, the production caller, using the
+existing `_indented_second_line_words/_spans(delta, size=...)` factory
+(extended with an optional `size` parameter, defaulting to the existing
+`_INDENTED_LABEL_FONT_SIZE` so every prior GH-692 test is unaffected).
+
+### Baseline / after, measured in this worktree (round 3)
+
+- `tests/test_binding.py` alone: 102 passed, 1 xfailed (round-2 after,
+  re-measured post-refactor) -> 104 passed, 1 xfailed (round-3 after; +2
+  new tests).
+- Full suite, measured ONCE
+  (`PYTHONPATH=/tmp/wt-692/src ~/venvs/socr/bin/pytest -q`): 5618 passed,
+  4 xfailed (round-2 after) -> **5620 passed, 4 xfailed** (round-3 after;
+  +2, no regressions, no new xfails).
+
+### Mutation round (round 3)
+
+Copied `src`, `tests`, `pyproject.toml` to a third scratch dir outside the
+repo (same reason as rounds 1-2). Confirmed the anchor line
+(`one_em = native_rows[native_idx_this].label_font_size`) appears exactly
+once before mutating. Mutated it to round the size before use (reproducing
+round 2's own bug: a rounded value doing geometric-distance duty). Canary
+confirmed the mutant pytest process resolved `socr.__file__` inside the
+mutant tree via `os.path.realpath` (needed for the same `/tmp` ->
+`/private/tmp` symlink reason as before).
+
+Result: exactly
+`test_gh692_p2_unrounded_size_used_for_tolerance_merges_below_true_size` and
+`test_gh692_p2_unrounded_size_used_for_tolerance_refuses_above_true_size`
+FAILED; the rest of `test_binding.py` (102 passed, 1 xfailed besides the 2
+deliberate failures) was unaffected. The unrounded-size carry is load-bearing
+and its own two pinning tests are what catch its removal — nothing else
+does.
+
+Lint (`uvx ruff@0.16.0 format --check .`): clean after reformatting
+`tests/test_binding.py` (the new `_indented_second_line_spans` signature
+needed wrapping).
+
+### Two non-blocking gaps recorded, not fixed
+
+1. **Negative delta is unrestricted.** The guard only refuses when
+   `indent_delta = child_bbox.x0 - heading_bbox.x0` exceeds `one_em`; it
+   never refuses when `indent_delta` is negative or zero. A centred or
+   left-shifted heading over a shallower-but-still-nested child produces a
+   negative delta and is not protected by this guard — and the prefix
+   stack in `_native_rows` gives no independent protection either, since a
+   data row inherits whatever `is_parent` context is on the stack
+   regardless of its own x0. Not known to occur in any measured corpus
+   (no corpus access in this worktree); recorded as a comment at the guard
+   site (`binding.py`, "Known gap") rather than guessed at.
+2. **The one-em tolerance scales with font size, with no ceiling.** At
+   24pt, the tolerance is 24pt, so a 12pt nesting step — unambiguous at
+   body-text sizes — merges instead of refusing. This is the SAME open
+   fork already parked above (one em is this guard's own cutoff choice,
+   not a corpus-verified one), not a new regression; added a second,
+   large-font case to
+   `test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fact`'s
+   docstring and body (24pt font, 12pt delta -> merges) so the fork's
+   write-up covers both ends of the font-size axis, not only the small-font
+   case it previously described.
 
