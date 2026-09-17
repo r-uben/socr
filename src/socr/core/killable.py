@@ -219,6 +219,19 @@ def run_killable(
     ``RuntimeError`` carrying the child's exception type and message. On the
     deadline expiring with no answer, kills the child's process group and
     raises ``KillableTimeoutError`` -- the case #172 exists for.
+
+    The answered path escalates too, not just the deadline path: the resolved
+    callable sending its answer over the pipe does not mean the CHILD PROCESS
+    has exited -- it can leave a non-daemon thread running (its own connection
+    pool, a lingering background task) after returning. ``multiprocessing``'s
+    own ``atexit`` handler (``util._exit_function``) unconditionally,
+    UNBOUNDEDLY joins any ``daemon=False`` child still alive at interpreter
+    teardown, regardless of this module's own reaper -- so an answered-but-
+    still-alive child reproduces the exact defect #172 exists to close, one
+    layer down. ``term_grace`` bounds how long a normally-exiting child is
+    given to finish; past that, it gets the identical terminate-then-kill
+    escalation the deadline path uses. One escalation, both paths -- the
+    result is already captured, so returning it costs nothing.
     """
     ctx = multiprocessing.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=False)
@@ -231,6 +244,14 @@ def run_killable(
         if parent_conn.poll(timeout):
             outcome = parent_conn.recv()
             proc.join(term_grace)
+            if proc.is_alive():
+                logger.warning(
+                    "killable call %r answered but its process is still alive "
+                    "after %.1fs — killing child process group",
+                    spec.func,
+                    term_grace,
+                )
+                _terminate_then_kill(proc, term_grace, kill_grace)
             if outcome[0] == "ok":
                 return outcome[1]
             _, type_name, message = outcome

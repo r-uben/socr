@@ -25,6 +25,7 @@ import sys
 import textwrap
 import threading
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -112,6 +113,19 @@ def _get(url: str, timeout: float) -> str:
 
 def _sleep_forever(seconds: float) -> str:
     time.sleep(seconds)
+    return "done"
+
+
+def _answer_then_leave_a_thread_running(hold_seconds: float) -> str:
+    """Returns immediately but leaves a non-daemon THREAD alive in the child.
+
+    Reproduces the answered-but-still-alive case (rev-172): the resolved
+    callable sending its result over the pipe does not mean the CHILD
+    PROCESS has exited -- a lingering non-daemon thread (its own connection
+    pool, a background task) holds the interpreter open well past that.
+    """
+    thread = threading.Thread(target=time.sleep, args=(hold_seconds,), daemon=False)
+    thread.start()
     return "done"
 
 
@@ -212,4 +226,70 @@ def test_kill_is_process_group_wide(trickle_server, tmp_path, monkeypatch) -> No
     assert not alive, (
         f"grandchild pid {grandchild_pid} was still alive after the killable "
         "boundary's deadline + grace — the kill did not reach the process group"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The ANSWERED path escalates too (rev-172, PR #796 review): a child that
+# sends its result but leaves a non-daemon thread running is not gone. This
+# must be observed as PROCESS wall-clock from OUTSIDE the driving process --
+# a test asserting only the return value passes even while the process hangs
+# at exit, because that hang happens in `multiprocessing.util._exit_function`
+# (an unconditional, unbounded join of any daemon=False child still alive at
+# interpreter teardown), a path `run_killable`'s own deadline logic never
+# inspects.
+# ---------------------------------------------------------------------------
+
+# Long enough that "the driving process happened to exit before the leaked
+# thread finished" cannot be mistaken for the fix working.
+_LEAKED_THREAD_HOLD_SEC = 30.0
+# Generous bound on how long the FIX should take to notice and reap the
+# still-alive child: term_grace (this test's own) + the escalation's own
+# kill_grace, with margin.
+_ANSWERED_PATH_OUTER_BOUND_SEC = 10.0
+
+
+def test_run_killable_reaps_an_answered_but_still_alive_child() -> None:
+    """The fix: `run_killable` must not let an answered child outlive it.
+
+    Driven as a CHILD-of-the-test process (mirrors
+    `test_judge_call_exits_in_a_child_process`) because the defect is that
+    process's own exit that hangs, not anything observable by inspecting a
+    return value from inside pytest.
+    """
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([src_dir, tests_dir, env.get("PYTHONPATH", "")])
+
+    driver_src = textwrap.dedent(
+        f"""
+        from socr.core.killable import CallSpec, run_killable
+        spec = CallSpec(
+            func="test_gh172_killable_boundary:_answer_then_leave_a_thread_running",
+            args=({_LEAKED_THREAD_HOLD_SEC},),
+        )
+        result = run_killable(spec, timeout=5.0, term_grace=0.5, kill_grace=2.0)
+        assert result == "done", result
+        """
+    )
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", driver_src],
+        env=env,
+        capture_output=True,
+        timeout=_ANSWERED_PATH_OUTER_BOUND_SEC + 5.0,  # outer safety net only
+        text=True,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0, (
+        f"driver exited {result.returncode}, stderr={result.stderr[-2000:]}"
+    )
+    assert elapsed < _ANSWERED_PATH_OUTER_BOUND_SEC, (
+        f"driving process lived {elapsed:.2f}s; expected the answered-but-"
+        f"still-alive child to be reaped well under the "
+        f"{_LEAKED_THREAD_HOLD_SEC}s its leaked thread would otherwise hold "
+        "the interpreter open for -- run_killable's answered path must "
+        "escalate a still-alive child the same as its deadline path does"
     )
