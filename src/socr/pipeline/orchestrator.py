@@ -258,6 +258,14 @@ console = Console()
 # metadata.json and the run fingerprint (#133).
 JUDGE_IDENTITY_HEURISTIC = "heuristic"
 
+# Provenance value recorded when ``describe_figures`` is on but no caption
+# engine (Ollama nor Gemini) is reachable. A literal sentinel (not "" or
+# None) so "captions were attempted and produced none" survives into the run
+# fingerprint distinguishably from the field's own None, which means
+# "``describe_figures`` was off -- captions were never attempted" (#238).
+# Same shape as ``JUDGE_IDENTITY_HEURISTIC``.
+CAPTION_IDENTITY_NONE = "no-caption-engine"
+
 
 #: Baseline for the "you set something I ignore" warning (GH-525) -- and ONLY
 #: that. These fields gate nothing (GH-142 rejected their CLI flags for it) and
@@ -775,6 +783,16 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
+
+    # Memoized caption-engine identity (#238), same shape and reasoning as
+    # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
+    # probes Ollama over HTTP, and ``_run_fingerprint`` (which consults it) runs
+    # ONCE PER PAGE -- resolving eagerly each time would cost an HTTP round-trip
+    # per page. Sentinel ``False`` = not yet resolved (a resolved identity string
+    # is always truthy, so this is unambiguous). Declared at CLASS level for the
+    # same reason: tests build pipelines via ``object.__new__`` to skip the
+    # constructor, and a fingerprint call must not explode on a missing attribute.
+    _caption_engine_identity_cache: str | bool = False
     _final_records: dict[int, FinalizedPageRecord] | None = None
 
     def __init__(self, config: PipelineConfig) -> None:
@@ -1303,17 +1321,25 @@ class UnifiedPipeline:
                 else None
             ),
             "figures_engine": cfg.figures_engine.value,
-            # #232: the caption model was invisible to the fingerprint. Note the
-            # trap: ``figures_engine`` above is NOT the caption engine -- nothing
-            # in src/ reads that field. Captions come from ``_get_vision_engine``
-            # (:5934), which builds a local Ollama figure engine with a per-call
-            # Gemini fallback constructed from ``gemini_model``. The Ollama model
-            # is a source-level default, already covered by ``socr_source_digest``;
-            # ``gemini_model`` is config, and under a custom ``enabled_engines``
-            # excluding GEMINI it reached the fingerprint through no other route,
-            # so a swap left stale captions resumable. Recorded only while
-            # captions are produced, so the default never forces a reprocess.
-            "figure_caption_fallback_model": (cfg.gemini_model if cfg.describe_figures else None),
+            # #232 / #238: the caption model was invisible to the fingerprint,
+            # then wrongly recorded as ``gemini_model`` -- pure config -- even
+            # though ``_get_vision_engine`` (:5934) returns three observably
+            # different caption producers depending on runtime reachability
+            # (LocalFirst+Ollama, GeminiAPIEngine alone, or None), so a document
+            # OCR'd with Ollama and resumed without it silently reused sidecars
+            # whose captions came from a different model. The RESOLVED engine
+            # identity, not the config field -- same distinction ``judge_model``
+            # above makes, and for the same reason: availability-dependent BY
+            # DESIGN. ``CAPTION_IDENTITY_NONE`` when neither engine is reachable,
+            # so "captions attempted, produced none" cannot share a fingerprint
+            # with "captions never attempted". Recorded (and probed) only while
+            # captions are produced -- ``describe_figures=False`` short-circuits
+            # before the resolver is even called, exactly like the judge's
+            # ``--judge-backend heuristic`` short-circuit above, because probing
+            # Ollama would cost a round-trip to record a model that never runs.
+            "figure_caption_fallback_model": (
+                self._resolve_caption_engine_identity() if cfg.describe_figures else None
+            ),
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
             # --- output-semantics code versions (issue #38) ---
@@ -9892,6 +9918,52 @@ class UnifiedPipeline:
                 continue
         self._judge_model_cache = resolved
         return resolved
+
+    def _resolve_caption_engine_identity(self) -> str:
+        """Identity of whichever caption engine ``_get_vision_engine`` would build.
+
+        #238: ``_get_vision_engine`` returns three observably different caption
+        producers depending on runtime reachability -- ``LocalFirstFigureEngine``
+        (Ollama up), ``GeminiAPIEngine`` alone (Ollama down, an API key present),
+        or ``None`` (neither reachable) -- and caption bytes differ across all
+        three. This mirrors that same reachability check so ``_run_fingerprint``
+        can tell them apart, without constructing engines or printing: it runs on
+        every fingerprint call, not just when a figure is actually described.
+
+        Memoized for the lifetime of the pipeline, same reasoning as
+        ``_resolve_judge_model``/``_judge_model_cache``: ``_run_fingerprint`` is
+        called once per page, and probing Ollama that often would add an HTTP
+        round-trip per page for an identity that cannot change mid-run.
+
+        Returns ``CAPTION_IDENTITY_NONE`` when neither engine is reachable --
+        distinguishable from the field's own ``None``, which
+        ``_run_fingerprint`` records when ``describe_figures`` is off and this
+        resolver is never called at all (no probe in that case).
+        """
+        if self._caption_engine_identity_cache is not False:
+            return self._caption_engine_identity_cache  # type: ignore[return-value]
+
+        import os
+
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+        from socr.engines.gemini_api import OllamaFigureEngine
+
+        ollama = OllamaFigureEngine()
+        if ollama.is_available():
+            identity = f"ollama:{ollama.model}"
+        else:
+            cloud_forbidden = getattr(
+                self.config, "strict_local", False
+            ) or zero_cap_pinned_forbids_cloud(self.config)
+            api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+            identity = (
+                f"gemini:{self.config.gemini_model}"
+                if (not cloud_forbidden and api_key)
+                else CAPTION_IDENTITY_NONE
+            )
+
+        self._caption_engine_identity_cache = identity
+        return identity
 
     def _resolve_crop_vlm_model(self) -> str | None:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).

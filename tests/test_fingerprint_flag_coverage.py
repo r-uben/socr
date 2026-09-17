@@ -172,8 +172,8 @@ def test_clean_equation_model_is_ignored_without_detection() -> None:
     )
 
 
-def test_caption_fallback_model_invalidates_outside_enabled_engines() -> None:
-    """#232: the caption engine's model must invalidate, whatever the engine lists say.
+def test_caption_fallback_model_invalidates_outside_enabled_engines(monkeypatch) -> None:
+    """#232 / #238: the caption engine's model must invalidate, whatever the engine lists say.
 
     ``figures_engine`` is a decoy: nothing in ``src/`` reads it. Captions come from
     ``_get_vision_engine``, which falls back to a Gemini engine built from
@@ -185,7 +185,18 @@ def test_caption_fallback_model_invalidates_outside_enabled_engines() -> None:
     ``fallback_chain`` defaults to ``[GEMINI]``, and ``primary_engine`` /
     ``local_engine`` default to AUTO, which resolves to GEMINI on a machine with no
     local provider -- i.e. exactly CI.
+
+    #238: the fingerprint now records the RESOLVED caption engine identity, not
+    the raw ``gemini_model`` field -- so this must pin the reachability that
+    makes Gemini the resolved engine (Ollama unreachable, an API key present),
+    or it exercises a code path this test does not claim to cover. See
+    ``test_gh238_caption_engine_identity.py`` for the reachability resolution
+    itself.
     """
+    monkeypatch.setattr(
+        "socr.engines.gemini_api.OllamaFigureEngine.is_available", lambda self: False
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
     common = {
         "describe_figures": True,
         "enabled_engines": [EngineType.QWEN],
