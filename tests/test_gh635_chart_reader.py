@@ -978,6 +978,78 @@ def test_an_unresolvable_legend_swatch_surfaces_instead_of_vanishing(tmp_path: P
     assert PRESENCE_UNRESOLVED in md
 
 
+def test_a_degenerate_quad_does_not_assert_a_segment(tmp_path: Path) -> None:
+    """#808: the same geometric hole #746 fixed for curves, for a ``'qu'`` item.
+
+    PyMuPDF reports an UNFILLED quad -- one that is stroked, not painted --
+    as a single ``'qu'`` item whose bbox is the four corners' own extent
+    (``_item_bbox``, untouched, same as it bounds a curve by all four
+    control points). Four corners that are themselves collinear and level
+    yield a zero-height bbox indistinguishable, by coordinates alone, from
+    an ordinary horizontal run -- the #746 case, one operator over. A quad
+    whose corners are NOT collinear collapses first, at draw time, into
+    ``'l'`` items (measured directly: PyMuPDF only keeps a filled OR a
+    non-degenerate stroked quad as ``'qu'`` when nothing simpler describes
+    it), so the corpus census finding zero filled and zero dashed quads
+    across 195 real ``'qu'`` items is not a coincidence this reader created --
+    it is upstream of it.
+    """
+    from socr.figures.chart_reader import page_marks
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    # Four DISTINCT points, collinear and level -- collapsing two corners to
+    # the same point lets PyMuPDF simplify the whole thing to 'l' items
+    # before it ever reaches this reader (measured), which would test
+    # PyMuPDF's own upstream simplification, not this reader's guard.
+    quad = fitz.Quad(fitz.Point(10, 50), fitz.Point(25, 50), fitz.Point(15, 50), fitz.Point(40, 50))
+    shape.draw_quad(quad)
+    shape.finish(width=2.0, dashes="[2 2] 0", color=(0, 0.4, 0.7), closePath=True)
+    shape.commit()
+    doc.save(str(tmp_path / "degenerate-quad.pdf"))
+    reopened = fitz.open(str(tmp_path / "degenerate-quad.pdf"))
+    marks = page_marks(reopened[0])
+    quads = [m for m in marks if not m.asserts_segment]
+    assert len(quads) == 1, marks
+    m = quads[0]
+    assert (m.x0, m.y0, m.x1, m.y1) == (10.0, 50.0, 40.0, 50.0)
+    assert not m.horizontal
+    assert not m.vertical
+
+
+def test_a_filled_non_segment_mark_still_rests_as_a_bar() -> None:
+    """What must NOT change: a filled mark that asserts no segment still reads.
+
+    PyMuPDF never actually keeps a FILLED quad as a ``'qu'`` item -- measured
+    directly, it always decomposes a filled quad into its four ``'l'`` edges
+    at draw time, which is consistent with the corpus census (0 filled quads
+    across 195 real ones) being upstream of this reader, not a gap in it.
+    There is therefore no PDF fixture that reaches this reader with
+    ``filled=True, asserts_segment=False`` today -- but ``_resting_bars`` is
+    the contract that must hold regardless: it selects a filled mark by its
+    bbox resting on the axis and nothing else, so forcing ``.horizontal``/
+    ``.vertical`` False for every non-segment-asserting item cannot cost a
+    filled bar its count if PyMuPDF, or a future operator, ever did emit one.
+    """
+    from socr.figures.chart_reader import Frame, Mark, _resting_bars
+
+    frame = Frame(baseline=100.0, x0=0.0, x1=200.0, tick_ys=(80.0, 60.0))
+    bar = Mark(
+        filled=True,
+        dashed=False,
+        width=1.0,
+        x0=10.0,
+        y0=70.0,
+        x1=40.0,
+        y1=100.0,
+        asserts_segment=False,
+    )
+    assert not bar.horizontal
+    assert not bar.vertical
+    assert _resting_bars(frame, residual=0.0, marks=[bar]) == [bar]
+
+
 def test_a_zero_length_path_stub_is_not_a_mark(tmp_path: Path) -> None:
     """A PDF path's opening moveto, restated as a zero-length line to itself.
 

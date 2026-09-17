@@ -396,13 +396,14 @@ wrong_bin, 293 unmatched — errors on two documents only.
 
 - **#746** (`fix/746-refuse-degenerate-curve`): a `'c'` (curve) item whose four control
   points are themselves collinear and level produced a zero-height bbox indistinguishable
-  from an ordinary horizontal run, and was read as one, silently. `Mark` gains a `curve`
-  flag set at construction (kind is discarded before that point, so the fix has to sit at
-  the `Mark` boundary, not in the consumer); `Mark.horizontal`/`.vertical` both refuse
-  outright when it is set, regardless of bbox geometry. `_item_bbox`'s four-control-point
-  bound is untouched. No corpus page reaches this path (SEP census: `{'l': 1359}`, zero
-  curves) so the guard is pinned by a synthetic fixture only, mutation-demonstrated to
-  redden. See `docs/log/2026-09-17_746-refuse-degenerate-curve.md`.
+  from an ordinary horizontal run, and was read as one, silently. `Mark` gains an
+  `asserts_segment` flag (see #808 below for the rename) set at construction (kind is
+  discarded before that point, so the fix has to sit at the `Mark` boundary, not in the
+  consumer); `Mark.horizontal`/`.vertical` both refuse outright when it is unset,
+  regardless of bbox geometry. `_item_bbox`'s four-control-point bound is untouched. No
+  corpus page reaches this path (SEP census: `{'l': 1359}`, zero curves) so the guard is
+  pinned by a synthetic fixture only, mutation-demonstrated to redden. See
+  `docs/log/2026-09-17_746-refuse-degenerate-curve.md`.
   **#807 (found in review before merge):** the same guard, applied to a legend swatch's
   own geometry, dropped a curve-shaped dashed swatch out of `read_legend` before it was
   ever named — no `LegendEntry`, so no `SeriesReading` at all, worse than #746's original
@@ -412,11 +413,27 @@ wrong_bin, 293 unmatched — errors on two documents only.
   generic handling of non-`PRESENT` series, so both the markdown and the metadata surface
   it with no new rendering code. Pinned at both `read_chart_page`'s output and the
   markdown/`to_dict()` boundary, mutation-demonstrated to redden. Same log file, appended
-  section. **Quad (`'qu'`) items are the same geometric shape, deliberately NOT extended
-  here** — measured 0 filled, 0 dashed, 0 near-degenerate across 195 real quads in both
-  corpora; filed separately as **#808** so the two stay independently provable.
+  section.
 
-Open: **#742**, **#738**, **#737**, **#808**.
+- **#808** (`fix/746-refuse-degenerate-curve`, same branch): extended the #746/#807 guard
+  to `'qu'` (quad) items — the same geometric hole, one operator over: `_item_bbox` bounds
+  a quad by all four corners exactly as it bounds a curve by its four control points, so
+  four collinear, level corners produce the same indistinguishable zero-height bbox.
+  `Mark.curve` renamed `Mark.asserts_segment` (a property of the operator, not an operator
+  name, so a future multi-point operator needs no third flag); set at construction as
+  `item[0] not in ("c", "qu")`. Measured, not assumed, that extending is safe: the census
+  (195 real quads across both corpora, 0 filled, 0 dashed, 0 near-degenerate) plus tracing
+  every `.horizontal`/`.vertical` consumer (`_resting_bars`/`read_solid_series`, the actual
+  bar reader, never consult either — they key on `.filled` and bbox alone) plus a direct
+  measurement that PyMuPDF itself never emits a FILLED quad as `'qu'` (always decomposed to
+  `'l'` edges at draw time; only an unfilled/stroke-only quad survives as `'qu'`) — so a
+  legitimately-read filled bar was never at risk. Pinned both directions: a synthetic
+  degenerate quad refuses (`asserts_segment=False`, both `.horizontal`/`.vertical` False),
+  and a filled non-segment-asserting `Mark` (constructed directly — no PDF fixture reaches
+  this reader that way) still rests as a bar via `_resting_bars`. Mutation-demonstrated to
+  redden. See `docs/log/2026-09-17_808-quad-asserts-segment.md`.
+
+Open: **#742**, **#738**, **#737**.
 
 ## Owner decision — **ANSWERED (yes)**
 
