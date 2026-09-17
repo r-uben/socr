@@ -19,6 +19,7 @@ freshly spawned child can resolve ``tests.test_gh172_killable_boundary:name``.
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -292,4 +293,39 @@ def test_run_killable_reaps_an_answered_but_still_alive_child() -> None:
         f"{_LEAKED_THREAD_HOLD_SEC}s its leaked thread would otherwise hold "
         "the interpreter open for -- run_killable's answered path must "
         "escalate a still-alive child the same as its deadline path does"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The SIGKILL escalation is group-scoped and unconditional (PR #796 review,
+# Astra): a direct child dying from SIGTERM does not mean every process in
+# its GROUP did -- a descendant that ignores SIGTERM can still be alive even
+# though `proc.is_alive()` is already False. This pins the deterministic
+# SHAPE of the fix (unconditional SIGKILL on a pgid captured at spawn, not
+# re-derived from a possibly-already-reaped pid) -- not the timing-dependent
+# survival case itself, which Astra could not reliably reproduce and which
+# this ticket does not claim to pin.
+# ---------------------------------------------------------------------------
+
+
+def test_terminate_then_kill_escalates_to_sigkill_even_if_the_direct_child_already_exited(
+    monkeypatch,
+) -> None:
+    from socr.core import killable
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(killable.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+
+    class _AlreadyExitedProc:
+        def is_alive(self) -> bool:
+            return False  # the direct child died from SIGTERM
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+    killable._terminate_then_kill(_AlreadyExitedProc(), pgid=4242, term_grace=0.01, kill_grace=0.01)
+
+    assert calls == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)], (
+        "SIGKILL must fire on the captured pgid regardless of the direct "
+        f"child's own liveness (a group descendant can outlive it); got {calls}"
     )

@@ -159,45 +159,51 @@ def _child_main(spec: CallSpec, conn) -> None:
 
 
 _live_lock = threading.Lock()
-_live_processes: set[Any] = set()
+# proc -> pgid, captured once at spawn (see `run_killable`) rather than
+# re-derived from `os.getpgid(proc.pid)` at escalation time -- see
+# `_terminate_then_kill` for why that re-derivation is unsafe.
+_live_processes: dict[Any, int] = {}
 
 
-def _pgid_of(proc: Any) -> int | None:
-    if proc.pid is None:
-        return None
-    try:
-        return os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        return None
+def _terminate_then_kill(proc: Any, pgid: int | None, term_grace: float, kill_grace: float) -> None:
+    """SIGTERM the process GROUP, bounded join, escalate SIGKILL to the SAME group. Best-effort.
 
+    ``pgid`` must be captured by the caller at spawn time, not re-derived here
+    via ``os.getpgid(proc.pid)``: once ``proc`` has been reaped that call
+    raises ``ProcessLookupError``, so a lookup done only after
+    ``proc.is_alive()`` is already False can silently return no pgid at
+    exactly the moment escalation needs one (PR #796 review, Astra).
 
-def _terminate_then_kill(proc: Any, term_grace: float, kill_grace: float) -> None:
-    """SIGTERM the process GROUP, bounded join, escalate to SIGKILL. Best-effort."""
-    pgid = _pgid_of(proc)
+    The SIGKILL step is unconditional on ``pgid`` -- NOT gated on
+    ``proc.is_alive()``. The direct child dying from SIGTERM does not mean
+    every process in its GROUP did: a descendant that ignores SIGTERM can
+    still be alive even though the child socr spawned is gone, and checking
+    only the direct child's liveness would leave that descendant running.
+    ``killpg`` on an already-empty group is a harmless ``ProcessLookupError``,
+    swallowed the same as every other best-effort signal here.
+    """
     if pgid is not None:
         try:
             os.killpg(pgid, signal.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
     proc.join(timeout=term_grace)
-    if proc.is_alive():
-        pgid = _pgid_of(proc)
-        if pgid is not None:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-        proc.join(timeout=kill_grace)
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+    proc.join(timeout=kill_grace)
 
 
 def _reap_stragglers() -> None:
     """Unconditional process-teardown reaper. See module docstring."""
     with _live_lock:
-        stragglers = list(_live_processes)
+        stragglers = list(_live_processes.items())
         _live_processes.clear()
-    for proc in stragglers:
+    for proc, pgid in stragglers:
         if proc.is_alive():
-            _terminate_then_kill(proc, DEFAULT_TERM_GRACE_SEC, DEFAULT_KILL_GRACE_SEC)
+            _terminate_then_kill(proc, pgid, DEFAULT_TERM_GRACE_SEC, DEFAULT_KILL_GRACE_SEC)
 
 
 atexit.register(_reap_stragglers)
@@ -238,8 +244,15 @@ def run_killable(
     proc = ctx.Process(target=_child_main, args=(spec, child_conn), daemon=False)
     proc.start()
     child_conn.close()  # the child owns the writable end now
+    # `_child_main` calls `os.setsid()` as its first action, making itself a
+    # new session AND process-group leader -- so its pgid equals its own pid,
+    # captured HERE, once, while the process is known to exist. Escalation
+    # code must use this captured value, not re-derive it later via
+    # `os.getpgid(proc.pid)`, which raises once the process has been reaped
+    # (see `_terminate_then_kill`).
+    pgid = proc.pid
     with _live_lock:
-        _live_processes.add(proc)
+        _live_processes[proc] = pgid
     try:
         if parent_conn.poll(timeout):
             outcome = parent_conn.recv()
@@ -251,7 +264,7 @@ def run_killable(
                     spec.func,
                     term_grace,
                 )
-                _terminate_then_kill(proc, term_grace, kill_grace)
+                _terminate_then_kill(proc, pgid, term_grace, kill_grace)
             if outcome[0] == "ok":
                 return outcome[1]
             _, type_name, message = outcome
@@ -263,9 +276,9 @@ def run_killable(
         logger.warning(
             "killable call %r exceeded %.1fs — killing child process group", spec.func, timeout
         )
-        _terminate_then_kill(proc, term_grace, kill_grace)
+        _terminate_then_kill(proc, pgid, term_grace, kill_grace)
         raise KillableTimeoutError(spec.func, timeout)
     finally:
         parent_conn.close()
         with _live_lock:
-            _live_processes.discard(proc)
+            _live_processes.pop(proc, None)
