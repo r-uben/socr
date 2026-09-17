@@ -227,8 +227,10 @@ def test_model_readings_understands_a_bold_only_panel_heading(tmp_path) -> None:
     doc_dir = tmp_path
     (doc_dir / "doc.md").write_text(_BOLD_HEADING_MD)
     readings = _model_readings(doc_dir, "doc")
-    assert readings["2020"]["December projections"]["0.13|0.37"] == 17
-    assert "Page 1" not in readings
+    labels = [label for label, _by_series in readings]
+    assert labels == ["2020"]
+    (_label, by_series) = readings[0]
+    assert by_series["December projections"]["0.13|0.37"] == 17
 
 
 _TRANSPOSED_MD = """### 2028
@@ -247,4 +249,4 @@ def test_model_readings_skips_a_transposed_grid(tmp_path) -> None:
     doc_dir = tmp_path
     (doc_dir / "doc.md").write_text(_TRANSPOSED_MD)
     readings = _model_readings(doc_dir, "doc")
-    assert readings == {}
+    assert readings == []

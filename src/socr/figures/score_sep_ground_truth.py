@@ -143,10 +143,27 @@ def _classify_series(
     return out
 
 
-def _reader_readings(pdf_path: Path) -> dict[str, dict[str, dict[str, int]]]:
-    """``{panel_label: {series_label: {bin_key: count}}}`` for one corpus page,
-    read fresh -- never from a prior run's on-disk output. See the module
-    docstring for why a stale run is not an acceptable substitute here."""
+#: One panel's readings, keyed by series/header then bin. Kept as a list of
+#: ``(panel_label, by_series)`` pairs rather than a ``dict[str, ...]`` keyed by
+#: label: `PanelReading.label` and a model grid's heading text are corpus
+#: content, not an identity guarantee -- two panels can genuinely share a
+#: label (a layout change, a new corpus with repeated years, a duplicated
+#: heading). A dict keyed by label silently collapses that collision, the
+#: later panel overwriting the earlier one with no trace it happened (#752:
+#: measured on a real release, three of four panels on one page vanished this
+#: way -- 120 cells missing from the report, not even as `no_ground_truth`).
+#: A list preserves every panel this function found, in the order it found
+#: them, so nothing a caller iterates over is ever discarded for sharing a
+#: label with something else on the same page.
+PanelReadings = list[tuple[str, dict[str, dict[str, int]]]]
+
+
+def _reader_readings(pdf_path: Path) -> PanelReadings:
+    """A ``(panel_label, {series_label: {bin_key: count}})`` pair per panel on
+    one corpus page, read fresh -- never from a prior run's on-disk output.
+    See the module docstring for why a stale run is not an acceptable
+    substitute here, and :data:`PanelReadings` for why this is a list rather
+    than a dict keyed by label."""
     doc = open_pdf(pdf_path)
     try:
         page = doc[0]
@@ -154,8 +171,9 @@ def _reader_readings(pdf_path: Path) -> dict[str, dict[str, dict[str, int]]]:
         reading = read_chart_page(page, boxes, page_num=1, source_checksum=pdf_path.name)
     finally:
         doc.close()
-    out: dict[str, dict[str, dict[str, int]]] = {}
+    out: PanelReadings = []
     for panel in reading.panels.values():
+        by_series: dict[str, dict[str, int]] = {}
         for series in panel.series:
             if series.presence != PRESENT:
                 continue
@@ -164,15 +182,16 @@ def _reader_readings(pdf_path: Path) -> dict[str, dict[str, dict[str, int]]]:
                 for c in series.cells
                 if c.status == INTEGER and c.count is not None
             }
-            out.setdefault(panel.label, {})[series.name] = counts
+            by_series[series.name] = counts
+        out.append((panel.label, by_series))
     return out
 
 
-def _model_readings(model_doc_dir: Path, doc_stem: str) -> dict[str, dict[str, dict[str, int]]]:
+def _model_readings(model_doc_dir: Path, doc_stem: str) -> PanelReadings:
     """Same shape as :func:`_reader_readings`, from a prior run's model grids."""
     md_path = model_doc_dir / f"{doc_stem}.md"
     if not md_path.exists():
-        return {}
+        return []
     text = md_path.read_text(encoding="utf-8", errors="replace")
     # `chart_data._parse_grids` indexes ``start``/``end`` into `text.split("\n")`,
     # not `text.splitlines()` -- the two differ on `\r\n` input, and matching a
@@ -185,7 +204,7 @@ def _model_readings(model_doc_dir: Path, doc_stem: str) -> dict[str, dict[str, d
         if m:
             current = m.group(1)
         heading_at[i] = current
-    out: dict[str, dict[str, dict[str, int]]] = {}
+    out: PanelReadings = []
     for grid in find_filled_grids(text):
         panel_label = heading_at.get(grid.start, "")
         if not panel_label:
@@ -201,13 +220,18 @@ def _model_readings(model_doc_dir: Path, doc_stem: str) -> dict[str, dict[str, d
             # for the wrong reason (an unmatched series, not a genuinely
             # absent one).
             continue
+        by_series: dict[str, dict[str, int]] = {}
         for row_label, cells in grid.rows:
             bin_key = "|".join(_bin_key(row_label))
             for header, raw in zip(grid.data_headers, cells):
                 value = _as_int(raw)
                 if value is None:
                     continue
-                out.setdefault(panel_label, {}).setdefault(header, {})[bin_key] = value
+                by_series.setdefault(header, {})[bin_key] = value
+        # One entry per grid, even when `panel_label` repeats a label already
+        # appended above -- see `PanelReadings`. Two grids under the same
+        # heading are two distinct series dicts here, never merged into one.
+        out.append((panel_label, by_series))
     return out
 
 
@@ -243,11 +267,11 @@ def _truth_for_panel(rt: ReleaseTable, panel_label: str) -> dict[str, dict[str, 
 
 def _score_side(
     doc: str,
-    side_readings: dict[str, dict[str, dict[str, int]]],
+    side_readings: PanelReadings,
     rt: ReleaseTable,
 ) -> list[CellScore]:
     out: list[CellScore] = []
-    for panel_label, by_series in side_readings.items():
+    for panel_label, by_series in side_readings:
         truth_by_series = _truth_for_panel(rt, panel_label)
         if truth_by_series is None:
             for series_label, values in by_series.items():
