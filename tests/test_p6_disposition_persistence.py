@@ -302,6 +302,9 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         # GH-674: persisted so the demotion survives resume -- see
         # test_gh674_equation_skip_demotion.py.
         "equation_sidecar_skipped",
+        # GH-817: persisted so the fabricated-image-refs demotion survives
+        # resume -- see test_gh817_fabricated_refs_resume.py.
+        "fabricated_image_refs",
         "judge_rejected",
         "structure_class_model_kept",
         "table_ladder_disposition",

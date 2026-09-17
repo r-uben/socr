@@ -11200,6 +11200,13 @@ class UnifiedPipeline:
             "equation_sidecar_skipped": (
                 bool(getattr(ps, "equation_sidecar_skipped", False)) if ps else False
             ),
+            # GH-817: fabricated_image_refs (GH-225) demotes the document at
+            # the ``fabricated_ref_pages`` bucket below, but was never
+            # persisted -- a resumed terminal page came back with the counter
+            # at 0 and the demotion silently disappeared while the cleaned
+            # (redacted) text still shipped. Persisted the same way as the
+            # chart-region/equation-sidecar flags immediately above.
+            "fabricated_image_refs": (int(getattr(ps, "fabricated_image_refs", 0)) if ps else 0),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
             "structure_class_model_kept": structure_class_model_kept,
@@ -12131,6 +12138,19 @@ class UnifiedPipeline:
             ps.equation_sidecar_skipped = bool(
                 getattr(ps, "equation_sidecar_skipped", False)
             ) or bool(meta.get("equation_sidecar_skipped", False))
+            # GH-817: max-restore, not OR, because this is a COUNT (how many
+            # fabricated refs were redacted from this page), not a disposition
+            # flag -- a plain OR would boolean-ise it and silently change the
+            # number reported on resume. max() keeps the demotion this run
+            # already recorded (any nonzero count still demotes at the
+            # ``fabricated_ref_pages`` bucket) while never letting an older
+            # sidecar's lower count erase a higher one set this run, and
+            # never letting a stale sidecar's count silently grow past what
+            # this run actually found either.
+            ps.fabricated_image_refs = max(
+                int(getattr(ps, "fabricated_image_refs", 0)),
+                int(meta.get("fabricated_image_refs", 0)),
+            )
             # P4-R: carry the unread-equation latch forward, so a page resumed
             # while STILL offline keeps saying so and is re-read on the first
             # run that has a provider.
