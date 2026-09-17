@@ -265,6 +265,14 @@ class PageState:
     #: placement-unresolved flag above would report "the crop is preserved but
     #: unplaced" for a page from which no crop was ever retained.
     chart_region_inventory_failed: bool = False
+    #: GH-674: this page had a detected equation region in scope for
+    #: ``_attach_equation_latex_sidecars`` but never got a ``PageOutput``, so
+    #: the region's crop PNG was left on disk with no sidecar attached
+    #: (``equation_sidecar_skipped_no_page_output``, GH-157/#664). That event
+    #: is audited but has no consumer on its own; this flag is what demotes
+    #: the document so the run cannot ship a clean SUCCESS over an orphaned
+    #: crop. Mirrors the three ``chart_region_*`` flags immediately above.
+    equation_sidecar_skipped: bool = False
     #: #635 Stage 0: how many EMPTY markdown grids on this page were proven to
     #: be derivations of one of its charts and withheld from the published body.
     #: A count, not a flag, because the page note and the CLI line both report

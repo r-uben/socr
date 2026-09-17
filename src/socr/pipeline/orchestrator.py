@@ -4430,6 +4430,25 @@ class UnifiedPipeline:
             )
         return "; ".join(parts) or None
 
+    @staticmethod
+    def _equation_sidecar_skipped_note(state) -> str | None:
+        """GH-674: name the pages whose equation crop was orphaned.
+
+        Mirrors ``_chart_region_note`` immediately above: a consumer reading
+        ``metadata.json`` (and the CLI, which prints ``result.error``) must see
+        the debt without opening ``audit_log.json``. ``None`` on a clean run.
+        """
+        skipped = sorted(
+            n for n, p in state.pages.items() if getattr(p, "equation_sidecar_skipped", False)
+        )
+        if not skipped:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in skipped)}: a detected equation region's crop "
+            "was never attached to a page output (GH-157); the crop remains on disk but is "
+            "not reachable from this document"
+        )
+
     def _render_chart_region_crops(
         self,
         pdf_path: Path,
@@ -11175,6 +11194,12 @@ class UnifiedPipeline:
             "chart_region_inventory_failed": (
                 bool(getattr(ps, "chart_region_inventory_failed", False)) if ps else False
             ),
+            # GH-674: an in-scope equation-region miss (crop with no attached
+            # sidecar) demotes the document; persisted so a resumed page that
+            # skips re-running the equation lane does not lose the demotion.
+            "equation_sidecar_skipped": (
+                bool(getattr(ps, "equation_sidecar_skipped", False)) if ps else False
+            ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
             "structure_class_model_kept": structure_class_model_kept,
@@ -12099,6 +12124,13 @@ class UnifiedPipeline:
             ps.chart_region_inventory_failed = bool(
                 getattr(ps, "chart_region_inventory_failed", False)
             ) or bool(meta.get("chart_region_inventory_failed", False))
+            # GH-674: OR-restore, same reasoning as the three chart-region
+            # flags above -- a flag this run already set (e.g. a per-page call
+            # that ran before the sidecar existed) must not be cleared by an
+            # older sidecar that predates this fix or never hit the miss.
+            ps.equation_sidecar_skipped = bool(
+                getattr(ps, "equation_sidecar_skipped", False)
+            ) or bool(meta.get("equation_sidecar_skipped", False))
             # P4-R: carry the unread-equation latch forward, so a page resumed
             # while STILL offline keeps saying so and is re-read on the first
             # run that has a provider.
@@ -13261,6 +13293,18 @@ class UnifiedPipeline:
             or getattr(pg, "chart_region_inventory_failed", False)
         )
         pages_ok = pages_ok and not chart_region_unresolved_pages
+        # GH-674: an in-scope equation region whose crop was never attached to
+        # a PageOutput (GH-157/#664's ``equation_sidecar_skipped_no_page_
+        # output`` event). That event is audited but had no consumer; the run
+        # was shipping a clean SUCCESS with the crop orphaned on disk. Same
+        # AUDIT_FAILED path as the chart-region buckets above: not a page
+        # failure by itself (nothing here claims the page's OWN text is
+        # wrong), but lost/unattached content cannot leave the run reporting
+        # a clean SUCCESS.
+        equation_sidecar_skipped_pages = sorted(
+            n for n, pg in state.pages.items() if getattr(pg, "equation_sidecar_skipped", False)
+        )
+        pages_ok = pages_ok and not equation_sidecar_skipped_pages
 
         # GH-353: table judge ladder terminals (C2). Keyed off
         # ``PageState.table_ladder_disposition`` FIRST -- the durable field
@@ -14199,6 +14243,14 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_chart_region_note}"
             else:
                 final_result.error = _chart_region_note
+        # GH-674: surface an orphaned equation-region crop at document level,
+        # for the same no-silent-loss reason GH-189 does above.
+        _equation_sidecar_note = self._equation_sidecar_skipped_note(state)
+        if _equation_sidecar_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_equation_sidecar_note}"
+            else:
+                final_result.error = _equation_sidecar_note
         _trust_note = self._tables_trust_note(state, pre_records)
         if _trust_note:
             if final_result.error:
@@ -15609,6 +15661,17 @@ class UnifiedPipeline:
                             },
                         )
                     )
+                # GH-674: the event above is audited but had no consumer -- an
+                # in-scope miss shipped SUCCESS with the crop orphaned on disk.
+                # #664 already ruled out fabricating a PageOutput here ("a
+                # back-door SUCCESS path"), so this flag is what the document
+                # buckets in ``_phase_assemble`` demote on instead, the same
+                # idiom #682 used for the chart-region flags. Set once per page
+                # regardless of how many regions were skipped or already
+                # recorded -- it is a disposition, not a count.
+                ps = state.pages.get(page_num)
+                if ps is not None:
+                    ps.equation_sidecar_skipped = True
                 continue
 
             # GH-164: this is the FULL PAGE text. Kept only for the guard's
