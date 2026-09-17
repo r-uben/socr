@@ -2500,6 +2500,222 @@ def test_gh624b_two_baseline_label_does_not_merge_without_spans():
 
 
 # ---------------------------------------------------------------------------
+# GH-692: font equality alone is not sufficient for the widened merge -- a
+# genuine section heading can reuse its child's exact typeface. Same words
+# as ``_TWO_BASELINE_WORDS`` above (so the joined-``row_path`` proof still
+# holds and font agreement still holds), except the second baseline's own
+# label starts to the right of the first by a variable amount -- the
+# discriminator is indentation, tolerant of a one-em (font point size) step
+# to cover extraction jitter and an ordinary hanging indent without also
+# tolerating a genuine nested child.
+# ---------------------------------------------------------------------------
+
+_INDENTED_LABEL_FONT_SIZE = 10.0  # matches ``span()``'s own default size
+
+
+def _indented_second_line_words(delta: float) -> list:
+    return [
+        w(50, 60, 100, 70, "Other"),
+        w(105, 60, 165, 70, "authorized"),
+        w(50 + delta, 90, 110 + delta, 100, "European"),
+        w(115 + delta, 90, 175 + delta, 100, "currencies"),
+        w(300, 90, 340, 100, "1250.0"),
+    ]
+
+
+_INDENTED_MARKDOWN = (
+    "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+)
+
+
+def _indented_second_line_spans(delta: float, size: float = _INDENTED_LABEL_FONT_SIZE) -> list:
+    return [
+        span(50, 60, 165, 70, "Other authorized", size=size),
+        span(
+            50 + delta,
+            90,
+            175 + delta,
+            100,
+            "European currencies",
+            size=size,
+        ),
+    ]
+
+
+def test_gh692_same_font_heading_with_indented_child_does_not_merge():
+    """The production caller (``bind()``, with ``spans`` the way
+    ``flatten_page_spans`` always supplies them): a same-font, same-text-
+    shape pair that ``_wrapped_label_merge_plan``'s font-only proof would
+    have widened before GH-692 must NOT merge when the second row's own
+    label is indented well beyond one em -- that is a section heading with
+    a nested child, not a wrapped label re-using the same stub cell. A
+    dropped heading is silent native-row loss (this repo's cardinal rule),
+    so this must fail red if the indent guard reverts to bare font
+    equality."""
+    delta = 3 * _INDENTED_LABEL_FONT_SIZE  # a full indentation column, not a hanging indent
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
+def test_gh692_same_font_wrapped_label_still_merges_when_not_indented():
+    """Control for the guard above, run through the same production caller:
+    when the second baseline's own label starts at the same (not deeper)
+    left edge as the first -- the genuinely wrapped-label shape -- font
+    agreement still proves the merge. Pins the OTHER direction: the GH-692
+    guard must not degrade into "never merge" and re-open #624b."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized"),
+        span(50, 90, 175, 100, "European currencies"),
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+    assert result.candidate_row_labels == ("Other authorized European currencies",)
+    assert result.row_label_contradictions == []
+
+
+def test_gh692_wrapped_label_merges_despite_subpoint_extraction_jitter():
+    """Round 2 (owner measured): real extracted continuation lines of the
+    SAME cell routinely differ in x0 by a fraction of a point (glyph left
+    side bearing, kerning, float rounding through the extraction path). An
+    exact-equality guard would refuse this legitimate merge; the one-em
+    tolerance must not."""
+    delta = 0.01
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_wrapped_label_merges_with_hanging_indent_at_exactly_one_em():
+    """Boundary, inside edge: a hanging indent of exactly one em (the
+    label's own font point size) -- a standard continuation-line
+    convention -- still merges. Pins the tolerance's own value, not just
+    its existence."""
+    delta = _INDENTED_LABEL_FONT_SIZE
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_heading_indent_just_over_one_em_does_not_merge():
+    """Boundary, outside edge: one hundredth of a point past the one-em
+    tolerance must NOT merge -- pins the tolerance is a real boundary, not
+    a guard that always widens once fonts agree."""
+    delta = _INDENTED_LABEL_FONT_SIZE + 0.01
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+
+
+def test_gh692_p2_unrounded_size_used_for_tolerance_merges_below_true_size():
+    """GH-692 P2 (Astra, source-trace; owner confirmed by execution). The
+    tolerance must measure against the label's UNROUNDED font size, not
+    ``_label_font_signature``'s ``round(size)`` bucket -- reusing that
+    bucket is correct for font EQUALITY but wrong for a GEOMETRIC distance.
+    At size=6.49 (which rounds to 6), a delta of 6.25 is a legitimate
+    hanging indent strictly inside one true em (6.25 < 6.49) but strictly
+    outside the rounded bucket (6.25 > 6) -- a tolerance built on the
+    rounded value refuses this merge; the fix must not."""
+    delta = 6.25
+    size = 6.49
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta, size=size),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_p2_unrounded_size_used_for_tolerance_refuses_above_true_size():
+    """GH-692 P2, other direction: at size=6.51 (which rounds to 7), a delta
+    of 6.75 is a genuine nested child strictly outside one true em
+    (6.75 > 6.51) but strictly inside the rounded bucket (6.75 < 7) -- a
+    tolerance built on the rounded value would wrongly widen this merge and
+    silently drop the heading row (this repo's cardinal rule); the fix must
+    refuse it."""
+    delta = 6.75
+    size = 6.51
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta, size=size),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
+def test_gh692_open_fork_larger_hanging_indent_does_not_merge_pending_corpus_fact():
+    """GH-692, OPEN FORK -- not resolved, pinned so the next person inherits
+    the measurement instead of rediscovering it.
+
+    One em is this guard's own choice of cutoff between "hanging indent /
+    extraction jitter" (tolerated) and "genuine nested child" (refused).
+    Whether one em is the RIGHT cutoff for this corpus is unknown: it is
+    possible for a real hanging-indent convention to exceed one em, and
+    possible for a real nesting level to be one em or less. Neither
+    direction is corpus-verifiable from this worktree (no access to
+    `fed-01` or any other document). At a delta of two ems -- comfortably
+    past today's cutoff -- the guard currently refuses the merge:
+
+        merged (flush)             row_labels: ('Other authorized European currencies',)
+        NOT merged (this fixture)  row_labels: ('Other authorized', 'European currencies')
+
+    Both outcomes are attribution errors, not content loss (contradictions
+    stay empty either way), so the module's own "a dropped row is worse
+    than a missing one" rule does not settle which is correct here -- see
+    docs/log/2026-09-17_692-same-font-heading-merge.md for the full
+    write-up and the two candidate fixes (a same-table nesting-step
+    yardstick, or a different discriminator entirely) left for the owner.
+    This test pins TODAY's behaviour; it is not a claim that today's
+    behaviour is the intended final answer.
+
+    The fork is not just about small deltas: the tolerance is proportional
+    to the label's OWN font size with no ceiling, so a 24pt heading gets a
+    24pt tolerance and MERGES through a 12pt indent step that would read as
+    an obvious nested child at body-text sizes -- see the second case below.
+    That is the same open fork, not a new regression: nothing in this guard
+    (or the module) currently establishes what a "genuine nesting step"
+    should be relative to a large font, only relative to one em of it."""
+    delta = 2 * _INDENTED_LABEL_FONT_SIZE
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+    assert result.row_label_contradictions == []
+
+    # Large-font case named in the docstring above: a 24pt heading's own
+    # one-em tolerance is 24pt, so a 12pt nesting step -- unambiguous at
+    # body-text sizes -- merges instead of refusing. Same open fork, pinned
+    # at the opposite end of the font-size axis.
+    large_font_delta = 12.0
+    large_font_size = 24.0
+    large_font_result = bind(
+        _indented_second_line_words(large_font_delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(large_font_delta, size=large_font_size),
+    )
+    assert large_font_result.candidate_wrapped_label_merges == (
+        "Other authorized European currencies",
+    )
+
+
+# ---------------------------------------------------------------------------
 # GH-766: an entity-encoded candidate value must not read as a false
 # contradiction against a native number it actually agrees with.
 # ---------------------------------------------------------------------------

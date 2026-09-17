@@ -307,6 +307,18 @@ def _wrapped_label_merge_plan(
     ``bind()``). No spans, or disagreeing/ambiguous fonts, means no
     widened merge -- fail closed, matching every guard fixture, which
     supplies no font data at all.
+
+    GH-692: font equality alone is NOT sufficient either -- a genuine
+    section heading can reuse its child's exact typeface, and the joined-
+    ``row_path`` proof above is satisfied by every parent-heading-plus-
+    child pair, not only a wrapped label. The remaining discriminator is
+    indentation: a wrapped label's second baseline is the same stub cell
+    continuing onto a second printed line (same, shallower, or only
+    slightly deeper left edge than the first line -- within one em of the
+    label's own font size, tolerating extraction jitter and an ordinary
+    hanging indent); a real child row nested under a heading starts a full
+    indentation step (more than one em) to the right of it. See the
+    ``label_bbox`` comparison guarding ``font_widened`` below.
     """
     if not rows:
         return (), {}
@@ -371,6 +383,79 @@ def _wrapped_label_merge_plan(
                     font_a = native_rows[native_idx_this].label_font
                     font_b = native_rows[native_idx].label_font
                     font_widened = font_a is not None and font_a == font_b
+                    # GH-692: font equality is necessary but not sufficient --
+                    # a genuine section heading can reuse its child's exact
+                    # typeface, and this widened proof (the merged text
+                    # matching the native row's own joined ``row_path``) is
+                    # satisfied by EVERY parent-heading-plus-child pair, not
+                    # only by a genuinely wrapped label (``_native_rows``
+                    # hands a data row whatever is on the indent-prefix stack
+                    # regardless of the data row's own indent, so the joined
+                    # match alone proves nothing about which case this is).
+                    # The two cases still differ on indentation: a wrapped
+                    # label's second printed baseline is the SAME stub cell
+                    # continuing onto a second line, so it starts at the same
+                    # (or a shallower) left edge as the first line; a real
+                    # child row nested under a section heading starts to the
+                    # right of it -- the same indent relationship
+                    # ``_native_rows`` itself requires before a value-less
+                    # row is ever treated as another row's ancestor. Bbox
+                    # evidence abstains (no widened merge) on a missing
+                    # bbox rather than guess, matching the module's
+                    # fail-closed rule for ambiguous geometry.
+                    #
+                    # GH-692 round 2 (Astra/owner measured): exact x0
+                    # equality is too strict -- real extracted continuation
+                    # lines carry sub-point jitter (glyph left side
+                    # bearing, kerning, float rounding through the
+                    # extraction path), and a small hanging indent is a
+                    # standard continuation-line convention; neither should
+                    # refuse a genuinely wrapped label. A one-EM tolerance
+                    # (the label's own font point size) is the data-derived
+                    # answer: one em is the standard typographic unit for
+                    # an indentation step, comfortably larger than
+                    # jitter/hanging-indent offsets and comfortably smaller
+                    # than a genuine nesting level (a distinct indentation
+                    # column, not a sub-character shift). Only an indent
+                    # step LARGER than one em is treated as a real nested
+                    # child; this does not claim to bound a nesting level
+                    # that is itself smaller than one em, which this
+                    # module has no way to observe.
+                    #
+                    # GH-692 P2 (Astra, confirmed by execution): this MUST
+                    # be the row's unrounded ``label_font_size``, never
+                    # ``label_font``'s ``round(size)`` bucket -- that
+                    # rounding is correct for FONT EQUALITY (bucketing
+                    # near-identical sizes together is the point) but wrong
+                    # for a GEOMETRIC distance: a 6.49pt label rounds to
+                    # 6 (a genuinely merging 6.25pt continuation would then
+                    # read as exceeding tolerance) and a 6.51pt label
+                    # rounds to 7 (a genuine 6.75pt nested child would then
+                    # read as fitting inside it). Missing/ambiguous raw
+                    # size abstains (no widened merge), same fail-closed
+                    # posture as a missing bbox.
+                    #
+                    # Known gap (owner review, not fixed here): this only
+                    # refuses when the child sits to the RIGHT of the
+                    # heading. A centred or left-shifted heading over a
+                    # shallower child produces a negative ``indent_delta``,
+                    # which never exceeds ``one_em`` and so never refuses --
+                    # the prefix stack in ``_native_rows`` gives no
+                    # independent protection here, since a data row inherits
+                    # whatever ``is_parent`` context is on the stack
+                    # regardless of its own x0. Not known to occur in any
+                    # measured corpus; see
+                    # docs/log/2026-09-17_692-same-font-heading-merge.md.
+                    if font_widened:
+                        heading_bbox = native_rows[native_idx_this].label_bbox
+                        child_bbox = native_rows[native_idx].label_bbox
+                        if heading_bbox is None or child_bbox is None:
+                            font_widened = False
+                        else:
+                            indent_delta = child_bbox[0] - heading_bbox[0]
+                            one_em = native_rows[native_idx_this].label_font_size
+                            if one_em is None or indent_delta > one_em:
+                                font_widened = False
 
             if proven and not next_alone_already_matches:
                 merge_at.append(i)
@@ -597,6 +682,13 @@ class _NativeRow:
     # supplied, or when the label's own spans disagree on font -- either way
     # font evidence abstains rather than guesses (see ``_label_font_signature``).
     label_font: tuple[str, int, bool] | None = None
+    # GH-692 P2: the UNROUNDED companion to ``label_font``'s size bucket.
+    # ``label_font``'s ``round(size)`` is correct for font EQUALITY (bucketing
+    # near-identical sizes as "the same font" is the point), but the widened
+    # merge's one-em indent tolerance is a GEOMETRIC distance, and a rounded
+    # value is the wrong thing to measure a distance with -- see
+    # ``_label_font_size``. Same abstain policy as ``label_font``.
+    label_font_size: float | None = None
 
 
 # PyMuPDF span ``flags`` bit for bold (see ``get_text("dict")`` docs): bit 4.
@@ -619,6 +711,30 @@ def _bbox_overlaps(
     return min(ax1, bx1) > max(ax0, bx0) and min(ay1, by1) > max(ay0, by0)
 
 
+def _overlapping_label_spans(
+    spans: list[dict], label_bbox: tuple[float, float, float, float] | None
+) -> list[dict]:
+    """Spans from *spans* that carry text/bbox and overlap *label_bbox*.
+
+    Shared by ``_label_font_signature`` (font/rounded-size/bold bucket, for
+    equality) and ``_label_font_size`` (the unrounded size, for geometric
+    distance) so both read exactly the same evidence for the same row --
+    only what each does with a span's ``size`` field differs.
+    """
+    if not spans or label_bbox is None:
+        return []
+    overlapping = []
+    for span in spans:
+        bbox = span.get("bbox")
+        text = (span.get("text") or "").strip()
+        if not bbox or not text:
+            continue
+        if not _bbox_overlaps(tuple(bbox), label_bbox):
+            continue
+        overlapping.append(span)
+    return overlapping
+
+
 def _label_font_signature(
     spans: list[dict], label_bbox: tuple[float, float, float, float] | None
 ) -> tuple[str, int, bool] | None:
@@ -633,16 +749,11 @@ def _label_font_signature(
     incomplete span could then spuriously "agree" with -- Astra P1's
     round-4 finding: absence of evidence is not evidence of sameness.
     """
-    if not spans or label_bbox is None:
+    overlapping = _overlapping_label_spans(spans, label_bbox)
+    if not overlapping:
         return None
     signatures: set[tuple[str, int, bool]] = set()
-    for span in spans:
-        bbox = span.get("bbox")
-        text = (span.get("text") or "").strip()
-        if not bbox or not text:
-            continue
-        if not _bbox_overlaps(tuple(bbox), label_bbox):
-            continue
+    for span in overlapping:
         font = span.get("font")
         size = span.get("size")
         flags = span.get("flags")
@@ -652,6 +763,37 @@ def _label_font_signature(
     if len(signatures) != 1:
         return None
     return next(iter(signatures))
+
+
+def _label_font_size(
+    spans: list[dict], label_bbox: tuple[float, float, float, float] | None
+) -> float | None:
+    """The UNROUNDED font point size for the spans overlapping *label_bbox*.
+
+    GH-692 P2 (Astra, confirmed by execution): ``_label_font_signature``'s
+    ``round(size)`` bucket is correct for font EQUALITY, but reusing that
+    same rounded value as a GEOMETRIC one-em distance is wrong -- a label at
+    size 6.49 rounds to 6 (a genuinely merging 6.25pt continuation then
+    reads as exceeding a 6pt tolerance) and a label at 6.51 rounds to 7 (a
+    genuine 6.75pt nested child then reads as fitting inside a 7pt
+    tolerance). This mirrors ``_label_font_signature``'s own overlap and
+    abstain-on-disagreement logic exactly (same spans, same bbox, same
+    "ambiguous or absent evidence is not evidence of sameness" posture) so
+    the two never see different evidence for the same row -- it just keeps
+    the size unrounded for callers that need a distance, not a bucket.
+    """
+    overlapping = _overlapping_label_spans(spans, label_bbox)
+    if not overlapping:
+        return None
+    sizes: set[float] = set()
+    for span in overlapping:
+        size = span.get("size")
+        if size is None:
+            return None
+        sizes.add(size)
+    if len(sizes) != 1:
+        return None
+    return next(iter(sizes))
 
 
 def _union_word_bbox(words: list) -> tuple[float, float, float, float] | None:
@@ -1012,6 +1154,7 @@ def _native_rows(
                     lane_bboxes={},
                     label_bbox=label_bbox,
                     label_font=_label_font_signature(spans, label_bbox),
+                    label_font_size=_label_font_size(spans, label_bbox),
                 )
             )
             continue
@@ -1059,6 +1202,7 @@ def _native_rows(
                 lane_bboxes=lane_bboxes,
                 label_bbox=label_bbox,
                 label_font=_label_font_signature(spans, label_bbox),
+                label_font_size=_label_font_size(spans, label_bbox),
             )
         )
 
