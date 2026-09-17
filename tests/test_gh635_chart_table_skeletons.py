@@ -366,6 +366,205 @@ def test_the_cli_reports_the_count_and_says_the_crops_were_kept(tmp_path: Path) 
     assert "crops kept" in said[0]
 
 
+def test_a_rebound_grid_reports_the_same_count_on_the_cli_as_on_the_page(
+    tmp_path: Path,
+) -> None:
+    """GH-731: a grid rebound under two panels used to say "2" on the CLI and
+    "1" on the page sidecar for the identical event set.
+
+    Two candidate crossings of the SAME empty grid, each binding it under a
+    DIFFERENT panel (exactly what an ingestion candidate followed by an
+    escalation candidate does in production -- see
+    ``_suppress_chart_table_skeletons``'s own docstring), file two
+    ``SKELETON_SUPPRESSED`` records for the one table by design (the dedup
+    key there is ``(kind, table_index, sha256, region_index)``, and the
+    region differs). Both the page field and the CLI line must count that as
+    ONE withheld grid, not two -- this pins the pair against the SAME event
+    set rather than pinning either number alone.
+    """
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = _make_two_panel_pdf(tmp_path)
+    pipeline = _make_pipeline()
+    state = _make_state(pdf, "Preamble sentence unique alpha")
+
+    # Candidate 1: only ALPHA's heading is present, so only region 1 resolves
+    # an anchor and the grid binds there.
+    bo1 = PageOutput(
+        page_num=1,
+        text=f"### ALPHA\n\n{EMPTY_GRID}\n\nFinal line unique delta",
+        status=PageStatus.SUCCESS,
+        engine="deepseek",
+        audit_passed=True,
+    )
+    # Candidate 2: only BRAVO's heading is present -- same table ordinal (1st
+    # and only grid), same bytes, same sha256, but region 2 this time. This
+    # is the rebind: one grid, two panels, two records.
+    bo2 = PageOutput(
+        page_num=1,
+        text=f"### BRAVO\n\n{EMPTY_GRID}\n\nFinal line unique delta",
+        status=PageStatus.SUCCESS,
+        engine="deepseek",
+        audit_passed=True,
+    )
+    pipeline._suppress_chart_table_skeletons(state, 1, bo1)
+    pipeline._suppress_chart_table_skeletons(state, 1, bo2)
+
+    sup_events = _events(state, SKELETON_SUPPRESSED)
+    assert len(sup_events) == 2, sup_events
+    grid_identities = {(e.data.get("table_index"), e.data.get("sha256")) for e in sup_events}
+    assert len(grid_identities) == 1, "candidates disagree about the grid; not a rebind case"
+    regions = {e.data.get("region_index") for e in sup_events}
+    assert regions == {1, 2}, "both records must bind the SAME grid under DIFFERENT panels"
+
+    # The page field: distinct-grid dedup, computed live by the method above.
+    assert state.pages[1].chart_table_skeletons_suppressed == 1
+
+    # The CLI: same event set, run through the real assemble phase. bo2's text
+    # already carries the note in place of the grid, so route_page's mocked
+    # decision hands the backstop crossing nothing left to suppress -- the
+    # event set going into the CLI line is exactly the two records above.
+    pipeline.config.quiet = False
+    pipeline._last_assessment = state._last_assessment
+    printed = MagicMock()
+    with (
+        patch.object(orch, "console", printed),
+        patch("socr.pipeline.orchestrator.route_page", return_value=_accepted_decision(bo2.text)),
+        patch.object(
+            UnifiedPipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+        ),
+        patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(state, tmp_path / "out")
+        pipeline._phase_assemble(state, tmp_path / "out")
+
+    # The backstop crossing must not have filed a third record.
+    assert len(_events(state, SKELETON_SUPPRESSED)) == 2, _events(state, SKELETON_SUPPRESSED)
+    said = [line for line in _cli_lines(printed) if "skeleton" in line]
+    assert said, _cli_lines(printed)
+    assert "1 chart-table skeleton(s) suppressed" in said[0], said[0]
+
+    # Resume: the dedup key ``(table_index, sha256)`` exists precisely so a
+    # resumed page reports the same number as the run that withheld it. Both
+    # the page field and the CLI line, read off the REPLAYED events, must
+    # still agree with each other -- and with the original run above.
+    from socr.core.result import PageOutput as _PageOutput
+
+    meta = json.loads(next((tmp_path / "out").rglob("pages/00001.json")).read_text())
+    restored_state = _make_state(pdf, "Preamble sentence unique alpha")
+    page_out = _PageOutput.from_dict(meta["winning_output"])
+    pipeline._restore_terminal_page_state(restored_state, 1, page_out, tmp_path / "out")
+
+    assert len(_events(restored_state, SKELETON_SUPPRESSED)) == 2
+    assert restored_state.pages[1].chart_table_skeletons_suppressed == 1
+
+    restored_printed = MagicMock()
+    with (
+        patch.object(orch, "console", restored_printed),
+        patch(
+            "socr.pipeline.orchestrator.route_page",
+            return_value=_accepted_decision(bo2.text),
+        ),
+        patch.object(
+            UnifiedPipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+        ),
+        patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(restored_state, tmp_path / "out2")
+        pipeline._phase_assemble(restored_state, tmp_path / "out2")
+
+    resumed_said = [line for line in _cli_lines(restored_printed) if "skeleton" in line]
+    assert resumed_said, _cli_lines(restored_printed)
+    assert "1 chart-table skeleton(s) suppressed" in resumed_said[0], resumed_said[0]
+
+
+def test_two_pages_sharing_a_table_index_and_sha256_still_count_as_two(
+    tmp_path: Path,
+) -> None:
+    """GH-731 desk follow-up: the two dedup keys LOOK the same but are not, on
+    purpose, and pinning only the rebind case above would not have caught it.
+
+    The page field dedups on ``(table_index, sha256)`` alone and gets its
+    page-scoping for free -- it is filtered to one ``page_num`` before the set
+    is ever built. The CLI line aggregates across the WHOLE document, so it
+    must carry ``page_num`` in its own key or two unrelated pages whose own
+    "table 1" happens to be byte-identical (``table_index`` is a per-PAGE
+    ordinal, not a document-wide one) collide and undercount -- exactly the
+    outcome "match the page field's key" would have produced if taken
+    literally. Two distinct pages, two distinct grids, must report 2.
+    """
+    from socr.core.audit_log import AuditEvent
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = _make_two_panel_pdf(tmp_path)
+    pipeline = _make_pipeline()
+    state = _make_state(pdf, "Preamble sentence unique alpha")
+
+    bo1 = PageOutput(
+        page_num=1,
+        text=f"### ALPHA\n\n{EMPTY_GRID}\n\nFinal line unique delta",
+        status=PageStatus.SUCCESS,
+        engine="deepseek",
+        audit_passed=True,
+    )
+    pipeline._suppress_chart_table_skeletons(state, 1, bo1)
+    page1_events = _events(state, SKELETON_SUPPRESSED)
+    assert len(page1_events) == 1
+    page1_data = page1_events[0].data
+
+    # Page 2's own table 1: same ordinal, same bytes, a genuinely SEPARATE
+    # grid on a different page of the same document (a repeated chart
+    # template later in the same release, say). No binding machinery is
+    # exercised here on purpose -- this pins the aggregation formula itself,
+    # not the binding proof, which #635/#734's other tests already own.
+    state.events.append(
+        AuditEvent(
+            page_num=2,
+            kind=SKELETON_SUPPRESSED,
+            engine="chart_data",
+            detail="table 1 was an empty derivation of chart region 1; withheld",
+            data={
+                "table_index": page1_data["table_index"],
+                "sha256": page1_data["sha256"],
+                "region_index": 1,
+                "crop": "chart_region_p2_1.png",
+                "original_text": EMPTY_GRID,
+            },
+        )
+    )
+
+    sup_events = _events(state, SKELETON_SUPPRESSED)
+    assert len(sup_events) == 2
+    assert {(e.data["table_index"], e.data["sha256"]) for e in sup_events} == {
+        (page1_data["table_index"], page1_data["sha256"])
+    }, "the two pages must share the (table_index, sha256) pair or this proves nothing"
+    assert {e.page_num for e in sup_events} == {1, 2}
+
+    pipeline.config.quiet = False
+    pipeline._last_assessment = state._last_assessment
+    printed = MagicMock()
+    with (
+        patch.object(orch, "console", printed),
+        patch("socr.pipeline.orchestrator.route_page", return_value=_accepted_decision(bo1.text)),
+        patch.object(
+            UnifiedPipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+        ),
+        patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(state, tmp_path / "out")
+        pipeline._phase_assemble(state, tmp_path / "out")
+
+    said = [line for line in _cli_lines(printed) if "skeleton" in line]
+    assert said, _cli_lines(printed)
+    assert "2 chart-table skeleton(s) suppressed" in said[0], said[0]
+
+
 def test_a_grid_carrying_a_literal_zero_is_left_alone(tmp_path: Path) -> None:
     pdf = _make_two_panel_pdf(tmp_path)
     winner = _winner(first=ZERO_GRID, second=ZERO_GRID)
