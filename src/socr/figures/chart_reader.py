@@ -135,11 +135,17 @@ class Mark:
     of it. Nothing here is a tuned constant -- a page that strokes thinner
     measures more precisely, and says so.
 
-    ``curve`` marks an item drawn with a ``'c'`` operator. A curve is never a
-    run or a riser regardless of what its bbox happens to measure: four
-    control points that are themselves collinear and level yield a
-    zero-height bbox indistinguishable, by coordinates alone, from an
-    ordinary horizontal stroke (#746). The operator said curve, so
+    ``asserts_segment`` is ``False`` for an item drawn with an operator that
+    does not paint a single straight run between two points -- a ``'c'``
+    curve or a ``'qu'`` quad, currently; a future multi-point operator would
+    join them, not need a flag of its own. Such an item is never a run or a
+    riser regardless of what its bbox happens to measure: four points that
+    are themselves collinear and level (a curve's control points, or a
+    quad's corners) yield a zero-height bbox indistinguishable, by
+    coordinates alone, from an ordinary horizontal stroke (#746, extended to
+    quads by #808 once the corpus census showed no consumer relies on a
+    quad's ``.horizontal``/``.vertical`` -- filled data is read off bbox and
+    ``.filled`` alone). The operator did not assert a straight segment, so
     :attr:`horizontal` and :attr:`vertical` refuse it outright rather than
     infer a run from geometry the page never drew as one.
     """
@@ -151,17 +157,17 @@ class Mark:
     y0: float
     x1: float
     y1: float
-    curve: bool = False
+    asserts_segment: bool = True
 
     @property
     def horizontal(self) -> bool:
-        if self.curve:
+        if not self.asserts_segment:
             return False
         return abs(self.y1 - self.y0) <= self.tolerance and self.x1 > self.x0
 
     @property
     def vertical(self) -> bool:
-        if self.curve:
+        if not self.asserts_segment:
             return False
         return abs(self.x1 - self.x0) <= self.tolerance and self.y1 > self.y0
 
@@ -273,7 +279,7 @@ def page_marks(page) -> list[Mark]:
                         y0=y0,
                         x1=x1,
                         y1=y1,
-                        curve=item[0] == "c",
+                        asserts_segment=item[0] not in ("c", "qu"),
                     )
                 )
             except Exception:  # pragma: no cover - defensive
