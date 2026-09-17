@@ -1,5 +1,9 @@
 # 2026-09-17 — GH-692: font equality alone must not merge a section heading
 
+**Round 2 correction below supersedes the strict `child_bbox.x0 <= heading_bbox.x0`
+comparison this log originally described — see "Round 2" for why and what
+replaced it.**
+
 ## The defect
 
 `_wrapped_label_merge_plan`'s widened GH-624b branch (`binding.py`) merged a
@@ -102,3 +106,91 @@ and does not mask the wrapped-label direction.
 No plan folder (`docs/plans/*/STATUS.md` / `TICKETS.md`) references GH-692,
 so none was updated — this ticket was dispatched standalone via
 `TICKET-692.md`, not through a tracked initiative plan.
+
+## Round 2 — the strict comparison was itself a regression
+
+The owner measured what round 1 did not construct: varying the SECOND
+LINE'S NATIVE WORDS (not `spans` — an earlier attempt on their side varied
+only `spans` and merged every time, proving nothing, since `label_bbox`
+comes from `words`/`lane_of`, not from `spans`). Result, on the round-1
+strict `child_bbox[0] > heading_bbox[0]` comparison:
+
+    delta=0      -> merges
+    delta=0.01   -> does NOT merge
+    delta=0.1    -> does NOT merge
+    delta=2.0    -> does NOT merge   (ordinary hanging indent)
+    delta=30     -> does NOT merge   (real nested child)
+
+Exact x0 equality is far too strict. Real extracted continuation lines of
+the same cell carry sub-point jitter (glyph left side bearing, kerning,
+float rounding through the extraction path), and a small hanging indent is
+a standard, common continuation-line convention — round 1's guard refused
+both, which would have re-opened #624b far more broadly than the heading
+case it closed. I could not show from the code that hanging indents cannot
+occur here (`_native_rows`'s prefix-stack push/pop only constrains
+relationships between successive `is_parent` rows, never a continuation
+line's own offset), and I do not have corpus access to check whether this
+specific corpus's tables use hanging indents. Reported this measurement
+before changing anything, per instruction not to pick a fix silently.
+
+### Fix: one-em tolerance, derived from the row's own font size
+
+Replaced the strict inequality with a tolerance: the widened merge still
+refuses only when `child_bbox.x0 - heading_bbox.x0` exceeds **one em** —
+the label's own font point size (`font_a[1]`, the rounded size already
+carried on `label_font`; guaranteed available here since `font_widened`
+cannot be `True` without both fonts having resolved). One em is the
+standard typographic unit for an indentation step: comfortably larger than
+jitter/hanging-indent offsets, comfortably smaller than a genuine nesting
+level (a distinct indentation column, not a sub-character shift). This is
+page-derived data, not a picked constant — it varies with the document's
+own label font size rather than a fixed point value. It explicitly does
+NOT claim to bound a real nesting level that happens to be smaller than one
+em; this module has no way to observe that from the data available to it.
+
+### Evidence — boundary pinned both sides, plus the jitter case named up front
+
+`tests/test_binding.py` (GH-692 section rewritten around a
+`_indented_second_line_words/_spans(delta)` factory so every case shares
+the same font/text shape and only the second line's indent varies):
+
+- `test_gh692_same_font_heading_with_indented_child_does_not_merge` —
+  `delta = 3 * one_em` (a full indentation column): still refuses.
+- `test_gh692_same_font_wrapped_label_still_merges_when_not_indented` —
+  `delta = 0`: still merges (unchanged from round 1).
+- `test_gh692_wrapped_label_merges_despite_subpoint_extraction_jitter` —
+  `delta = 0.01`: the exact case that would have bitten silently in
+  production; now merges.
+- `test_gh692_wrapped_label_merges_with_hanging_indent_at_exactly_one_em` —
+  `delta = one_em` exactly: merges (inside-boundary pin).
+- `test_gh692_heading_indent_just_over_one_em_does_not_merge` —
+  `delta = one_em + 0.01`: does not merge (outside-boundary pin).
+
+### Baseline / after, measured in this worktree (round 2)
+
+- `tests/test_binding.py` alone: 98 passed, 1 xfailed (round-1 after) ->
+  101 passed, 1 xfailed (round-2 after; +3 new tests, net of the 2 rewritten
+  round-1 tests kept and 3 new ones added).
+- Full suite: 5614 passed, 4 xfailed (round-1 after) -> 5617 passed,
+  4 xfailed (round-2 after; +3, no regressions, no new xfails).
+
+### Mutation round (round 2)
+
+Copied `src`, `tests`, `pyproject.toml` to a second scratch dir outside the
+repo (same reason as round 1). Confirmed the anchor line
+(`if indent_delta > one_em:`) appears exactly once before mutating.
+Mutated it to `if indent_delta > 0:` — i.e. reintroduced round 1's own bug
+(effectively zero tolerance). Canary confirmed the mutant pytest process
+resolved `socr.__file__` inside the mutant tree via `os.path.realpath`.
+
+Result: exactly
+`test_gh692_wrapped_label_merges_despite_subpoint_extraction_jitter` and
+`test_gh692_wrapped_label_merges_with_hanging_indent_at_exactly_one_em`
+FAILED (the two cases the tolerance exists for); the other 3 GH-692 tests
+and the rest of `test_binding.py` (99 passed, 1 xfailed besides the 2
+deliberate failures) were unaffected. The tolerance is load-bearing and its
+own two pinning tests are what catch its removal — nothing else does.
+
+Lint (`uvx ruff@0.16.0 format --check .`): clean, "732 files already
+formatted".
+

@@ -313,10 +313,12 @@ def _wrapped_label_merge_plan(
     ``row_path`` proof above is satisfied by every parent-heading-plus-
     child pair, not only a wrapped label. The remaining discriminator is
     indentation: a wrapped label's second baseline is the same stub cell
-    continuing onto a second printed line (same or shallower left edge as
-    the first line); a real child row nested under a heading starts
-    strictly to the right of it. See the ``label_bbox`` comparison guarding
-    ``font_widened`` below.
+    continuing onto a second printed line (same, shallower, or only
+    slightly deeper left edge than the first line -- within one em of the
+    label's own font size, tolerating extraction jitter and an ordinary
+    hanging indent); a real child row nested under a heading starts a full
+    indentation step (more than one em) to the right of it. See the
+    ``label_bbox`` comparison guarding ``font_widened`` below.
     """
     if not rows:
         return (), {}
@@ -394,22 +396,43 @@ def _wrapped_label_merge_plan(
                     # label's second printed baseline is the SAME stub cell
                     # continuing onto a second line, so it starts at the same
                     # (or a shallower) left edge as the first line; a real
-                    # child row nested under a section heading starts
-                    # strictly to the right of it -- the same indent
-                    # relationship ``_native_rows`` itself requires before a
-                    # value-less row is ever treated as another row's
-                    # ancestor. Bbox evidence abstains (no widened merge) on
-                    # a missing bbox rather than guess, matching the
-                    # module's fail-closed rule for ambiguous geometry.
+                    # child row nested under a section heading starts to the
+                    # right of it -- the same indent relationship
+                    # ``_native_rows`` itself requires before a value-less
+                    # row is ever treated as another row's ancestor. Bbox
+                    # evidence abstains (no widened merge) on a missing
+                    # bbox rather than guess, matching the module's
+                    # fail-closed rule for ambiguous geometry.
+                    #
+                    # GH-692 round 2 (Astra/owner measured): exact x0
+                    # equality is too strict -- real extracted continuation
+                    # lines carry sub-point jitter (glyph left side
+                    # bearing, kerning, float rounding through the
+                    # extraction path), and a small hanging indent is a
+                    # standard continuation-line convention; neither should
+                    # refuse a genuinely wrapped label. A one-EM tolerance
+                    # (the label's own font point size -- ``font_a[1]``,
+                    # available here unconditionally since ``font_widened``
+                    # cannot be True without both fonts resolving) is the
+                    # data-derived answer: one em is the standard
+                    # typographic unit for an indentation step, comfortably
+                    # larger than jitter/hanging-indent offsets and
+                    # comfortably smaller than a genuine nesting level
+                    # (a distinct indentation column, not a sub-character
+                    # shift). Only an indent step LARGER than one em is
+                    # treated as a real nested child; this does not claim
+                    # to bound a nesting level that is itself smaller than
+                    # one em, which this module has no way to observe.
                     if font_widened:
                         heading_bbox = native_rows[native_idx_this].label_bbox
                         child_bbox = native_rows[native_idx].label_bbox
-                        if (
-                            heading_bbox is None
-                            or child_bbox is None
-                            or child_bbox[0] > heading_bbox[0]
-                        ):
+                        if heading_bbox is None or child_bbox is None:
                             font_widened = False
+                        else:
+                            indent_delta = child_bbox[0] - heading_bbox[0]
+                            one_em = font_a[1]
+                            if indent_delta > one_em:
+                                font_widened = False
 
             if proven and not next_alone_already_matches:
                 merge_at.append(i)

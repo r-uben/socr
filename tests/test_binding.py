@@ -2504,20 +2504,42 @@ def test_gh624b_two_baseline_label_does_not_merge_without_spans():
 # genuine section heading can reuse its child's exact typeface. Same words
 # as ``_TWO_BASELINE_WORDS`` above (so the joined-``row_path`` proof still
 # holds and font agreement still holds), except the second baseline's own
-# label starts strictly to the right of the first -- a real child row
-# nested under a heading, not a wrapped continuation of the same cell.
+# label starts to the right of the first by a variable amount -- the
+# discriminator is indentation, tolerant of a one-em (font point size) step
+# to cover extraction jitter and an ordinary hanging indent without also
+# tolerating a genuine nested child.
 # ---------------------------------------------------------------------------
 
-_INDENTED_CHILD_WORDS = [
-    w(50, 60, 100, 70, "Other"),
-    w(105, 60, 165, 70, "authorized"),
-    w(80, 90, 140, 100, "European"),
-    w(145, 90, 205, 100, "currencies"),
-    w(300, 90, 340, 100, "1250.0"),
-]
-_INDENTED_CHILD_MARKDOWN = (
+_INDENTED_LABEL_FONT_SIZE = 10.0  # matches ``span()``'s own default size
+
+
+def _indented_second_line_words(delta: float) -> list:
+    return [
+        w(50, 60, 100, 70, "Other"),
+        w(105, 60, 165, 70, "authorized"),
+        w(50 + delta, 90, 110 + delta, 100, "European"),
+        w(115 + delta, 90, 175 + delta, 100, "currencies"),
+        w(300, 90, 340, 100, "1250.0"),
+    ]
+
+
+_INDENTED_MARKDOWN = (
     "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
 )
+
+
+def _indented_second_line_spans(delta: float) -> list:
+    return [
+        span(50, 60, 165, 70, "Other authorized", size=_INDENTED_LABEL_FONT_SIZE),
+        span(
+            50 + delta,
+            90,
+            175 + delta,
+            100,
+            "European currencies",
+            size=_INDENTED_LABEL_FONT_SIZE,
+        ),
+    ]
 
 
 def test_gh692_same_font_heading_with_indented_child_does_not_merge():
@@ -2525,16 +2547,17 @@ def test_gh692_same_font_heading_with_indented_child_does_not_merge():
     ``flatten_page_spans`` always supplies them): a same-font, same-text-
     shape pair that ``_wrapped_label_merge_plan``'s font-only proof would
     have widened before GH-692 must NOT merge when the second row's own
-    label is indented deeper than the first -- that is a section heading
-    with a nested child, not a wrapped label re-using the same stub cell.
-    A dropped heading is silent native-row loss (this repo's cardinal
-    rule), so this must fail red if the indent guard reverts to bare font
+    label is indented well beyond one em -- that is a section heading with
+    a nested child, not a wrapped label re-using the same stub cell. A
+    dropped heading is silent native-row loss (this repo's cardinal rule),
+    so this must fail red if the indent guard reverts to bare font
     equality."""
-    spans = [
-        span(50, 60, 165, 70, "Other authorized"),
-        span(80, 90, 205, 100, "European currencies"),
-    ]
-    result = bind(_INDENTED_CHILD_WORDS, _INDENTED_CHILD_MARKDOWN, spans=spans)
+    delta = 3 * _INDENTED_LABEL_FONT_SIZE  # a full indentation column, not a hanging indent
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
     assert result.candidate_wrapped_label_merges == ()
     assert result.candidate_row_labels == ("Other authorized", "European currencies")
 
@@ -2553,6 +2576,48 @@ def test_gh692_same_font_wrapped_label_still_merges_when_not_indented():
     assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
     assert result.candidate_row_labels == ("Other authorized European currencies",)
     assert result.row_label_contradictions == []
+
+
+def test_gh692_wrapped_label_merges_despite_subpoint_extraction_jitter():
+    """Round 2 (owner measured): real extracted continuation lines of the
+    SAME cell routinely differ in x0 by a fraction of a point (glyph left
+    side bearing, kerning, float rounding through the extraction path). An
+    exact-equality guard would refuse this legitimate merge; the one-em
+    tolerance must not."""
+    delta = 0.01
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_wrapped_label_merges_with_hanging_indent_at_exactly_one_em():
+    """Boundary, inside edge: a hanging indent of exactly one em (the
+    label's own font point size) -- a standard continuation-line
+    convention -- still merges. Pins the tolerance's own value, not just
+    its existence."""
+    delta = _INDENTED_LABEL_FONT_SIZE
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+
+
+def test_gh692_heading_indent_just_over_one_em_does_not_merge():
+    """Boundary, outside edge: one hundredth of a point past the one-em
+    tolerance must NOT merge -- pins the tolerance is a real boundary, not
+    a guard that always widens once fonts agree."""
+    delta = _INDENTED_LABEL_FONT_SIZE + 0.01
+    result = bind(
+        _indented_second_line_words(delta),
+        _INDENTED_MARKDOWN,
+        spans=_indented_second_line_spans(delta),
+    )
+    assert result.candidate_wrapped_label_merges == ()
 
 
 # ---------------------------------------------------------------------------
