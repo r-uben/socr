@@ -541,6 +541,40 @@ class PipelineConfig:
             )
         self.table_judge_adjudicator_cost_per_call_usd = rate
 
+        # GH-678 round 2: the per-page cap needs the same treatment, and now
+        # NEEDS it. Before this ticket, a YAML config never set
+        # ``max_cost_per_page_pinned``, so ``zero_cap_pinned_forbids_cloud``'s
+        # ``bool(pinned) and (value <= 0.0)`` short-circuited on the first
+        # operand and the comparison never ran -- a malformed YAML value was
+        # inert. Pinning on key presence removes that short-circuit, so
+        # ``max_cost_per_page:`` with no value (YAML null) or a quoted ``"0"``
+        # would reach the comparison and raise TypeError three frames deep in
+        # provider routing, on a function called on essentially every run.
+        # Fail at config load with a message naming the key instead.
+        cap = self.max_cost_per_page
+        if isinstance(cap, bool):
+            # YAML reads a bare ``false`` as a bool, which compares equal to 0
+            # and would silently forbid ALL cloud egress. That is a policy the
+            # user never wrote; refuse rather than infer it.
+            raise ValueError(
+                f"max_cost_per_page must be a number of USD, got the boolean {cap!r}. "
+                "Write 0 to forbid paid cloud calls."
+            )
+        try:
+            cap = float(cap)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_cost_per_page must be a number of USD, got {self.max_cost_per_page!r}"
+            ) from exc
+        if not math.isfinite(cap):
+            # A NaN cap disables itself silently: every comparison against NaN
+            # is False, so no page ever exceeds it.
+            raise ValueError(
+                f"max_cost_per_page must be a finite number of USD; got {cap!r}. "
+                "A non-finite cap silently stops capping."
+            )
+        self.max_cost_per_page = cap
+
     def get_engines_by_priority(self) -> list[EngineType]:
         """Get enabled engines sorted by priority."""
         return sorted(self.enabled_engines, key=lambda e: ENGINE_PRIORITY.get(e, 99))
@@ -576,6 +610,18 @@ class PipelineConfig:
         for f in dataclasses.fields(cls):
             if f.name not in _FROM_FILE_EXPLICIT_FIELDS and f.name in data:
                 setattr(config, f.name, data[f.name])
+
+        # GH-678: mirror the CLI (cli.py's ``_explicitly_given("max_cost_per_page")``
+        # block). A YAML ``max_cost_per_page`` key is present -> the user stated a
+        # cap, exactly like passing --max-cost-per-page -- so it pins the same way,
+        # regardless of the value. Pinning on key-PRESENCE (not on value-is-zero) is
+        # what keeps a nonzero YAML cap (e.g. 5) behaving identically to a nonzero
+        # CLI cap; only ``zero_cap_pinned_forbids_cloud`` (providers.py) then decides
+        # whether a pinned cap of <= 0.0 forbids cloud. Before this, a config-file
+        # user writing ``max_cost_per_page: 0`` expecting no cloud egress still got
+        # cloud calls, because only the CLI flag ever set the pin.
+        if "max_cost_per_page" in data:
+            config.max_cost_per_page_pinned = True
 
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])

@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from socr.core.config import EngineType, HPCConfig, PipelineConfig
+from socr.core.providers import zero_cap_pinned_forbids_cloud
 
 # Fields that cannot be probed by the generic scalar round-trip below, each for a
 # stated structural reason -- NOT because they are allowed to be unrestorable.
@@ -248,3 +249,118 @@ class TestUnknownKeys:
         path.write_text("")
 
         assert PipelineConfig.from_file(path).agentic is PipelineConfig().agentic
+
+
+class TestGH678YamlCapPinsLikeCli:
+    """GH-678: a YAML ``max_cost_per_page`` must pin the same way the CLI flag
+    does, so the two channels agree on the resulting cloud-egress policy.
+
+    The CLI side is driven through the REAL Click command (``test_gh168_config_
+    precedence.py``'s ``_run_with`` helper -- monkeypatch ``UnifiedPipeline``
+    with a config-capturing stub, invoke ``socr process``, read back the config
+    it built), not a hand-written model of ``cli.py``'s
+    ``_explicitly_given("max_cost_per_page")`` block. A hand-copied mirror of
+    that block would keep passing if the block itself changed -- the two sides
+    drifting apart unnoticed is this ticket's own failure mode one layer up.
+    """
+
+    @staticmethod
+    def _cli_config(tmp_path, monkeypatch, value):
+        from test_gh168_config_precedence import _run_with
+
+        return _run_with(tmp_path, "", ["--max-cost-per-page", str(value)], monkeypatch)
+
+    def test_zero_cap_parity_forbids_cloud_on_both_channels(self, tmp_path, monkeypatch):
+        yaml_dir = tmp_path / "yaml"
+        yaml_dir.mkdir()
+        yaml_config = PipelineConfig.from_file(_write(yaml_dir, {"max_cost_per_page": 0}))
+        cli_config = self._cli_config(tmp_path / "cli", monkeypatch, 0)
+
+        assert yaml_config.max_cost_per_page_pinned is True
+        assert cli_config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is zero_cap_pinned_forbids_cloud(
+            cli_config
+        )
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is True
+
+    def test_nonzero_cap_parity_does_not_forbid_cloud_on_either_channel(
+        self, tmp_path, monkeypatch
+    ):
+        yaml_dir = tmp_path / "yaml"
+        yaml_dir.mkdir()
+        yaml_config = PipelineConfig.from_file(_write(yaml_dir, {"max_cost_per_page": 5}))
+        cli_config = self._cli_config(tmp_path / "cli", monkeypatch, 5)
+
+        assert yaml_config.max_cost_per_page_pinned is True
+        assert cli_config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is zero_cap_pinned_forbids_cloud(
+            cli_config
+        )
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is False
+
+    def test_absent_key_leaves_unpinned(self, tmp_path):
+        """A fix that pins unconditionally would forbid cloud for every
+        config-file user -- far worse than the bug this ticket fixes."""
+        config = PipelineConfig.from_file(_write(tmp_path, {"agentic": False}))
+
+        assert config.max_cost_per_page_pinned is False
+        assert zero_cap_pinned_forbids_cloud(config) is False
+
+
+class TestGH678MalformedCapFailsAtLoad:
+    """GH-678 round 2: pinning on key presence made a malformed cap reachable.
+
+    ``zero_cap_pinned_forbids_cloud`` is ``bool(pinned) and (value <= 0.0)``.
+    Before this ticket a YAML config never set the pin, so the first operand
+    short-circuited and the comparison never ran — a null or quoted cap was
+    inert. Pinning on presence removes the short-circuit, and that function is
+    called on essentially every run (orchestrator, hpc_pipeline,
+    table_cell_guard), so a malformed value would surface as a TypeError three
+    frames deep in provider routing rather than as a config error.
+
+    These pin that the failure is a ``ValueError`` naming the key, raised while
+    the config is being loaded.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(None, id="yaml-null"),
+            pytest.param("abc", id="non-numeric-string"),
+            pytest.param(float("nan"), id="nan-disables-the-cap-silently"),
+        ],
+    )
+    def test_malformed_cap_raises_at_load(self, tmp_path, value):
+        path = _write(tmp_path, {"max_cost_per_page": value})
+
+        with pytest.raises(ValueError, match="max_cost_per_page"):
+            PipelineConfig.from_file(path)
+
+    def test_boolean_cap_is_refused_rather_than_read_as_zero(self, tmp_path):
+        """``false`` compares equal to 0 and would forbid ALL cloud egress.
+
+        Silently inferring a no-cloud policy from a boolean is worse than
+        refusing it: the user never wrote that policy.
+        """
+        path = _write(tmp_path, {"max_cost_per_page": False})
+
+        with pytest.raises(ValueError, match="boolean"):
+            PipelineConfig.from_file(path)
+
+    @pytest.mark.parametrize("value", [0, 5, -1, 0.25, "0", "5.5"])
+    def test_wellformed_caps_still_load_and_pin(self, tmp_path, value):
+        """The validation must not reject the values the fix exists to support.
+
+        A negative cap is deliberately allowed: ``zero_cap_pinned_forbids_cloud``
+        treats anything ``<= 0.0`` as "no paid calls", so ``-1`` is a stated
+        policy, not a malformed one. A quoted number (``max_cost_per_page: "0"``,
+        which YAML reads as a string) is accepted and coerced rather than
+        refused — the user wrote a number, and the resulting policy is the one
+        they wrote. It crashed before this validation existed, which is what
+        made the quoting matter at all.
+        """
+        config = PipelineConfig.from_file(_write(tmp_path, {"max_cost_per_page": value}))
+
+        assert config.max_cost_per_page == float(value)
+        assert config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(config) is (float(value) <= 0.0)
