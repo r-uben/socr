@@ -577,6 +577,18 @@ class PipelineConfig:
             if f.name not in _FROM_FILE_EXPLICIT_FIELDS and f.name in data:
                 setattr(config, f.name, data[f.name])
 
+        # GH-678: mirror the CLI (cli.py's ``_explicitly_given("max_cost_per_page")``
+        # block). A YAML ``max_cost_per_page`` key is present -> the user stated a
+        # cap, exactly like passing --max-cost-per-page -- so it pins the same way,
+        # regardless of the value. Pinning on key-PRESENCE (not on value-is-zero) is
+        # what keeps a nonzero YAML cap (e.g. 5) behaving identically to a nonzero
+        # CLI cap; only ``zero_cap_pinned_forbids_cloud`` (providers.py) then decides
+        # whether a pinned cap of <= 0.0 forbids cloud. Before this, a config-file
+        # user writing ``max_cost_per_page: 0`` expecting no cloud egress still got
+        # cloud calls, because only the CLI flag ever set the pin.
+        if "max_cost_per_page" in data:
+            config.max_cost_per_page_pinned = True
+
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])
 

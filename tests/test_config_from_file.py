@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from socr.core.config import EngineType, HPCConfig, PipelineConfig
+from socr.core.providers import zero_cap_pinned_forbids_cloud
 
 # Fields that cannot be probed by the generic scalar round-trip below, each for a
 # stated structural reason -- NOT because they are allowed to be unrestorable.
@@ -248,3 +249,59 @@ class TestUnknownKeys:
         path.write_text("")
 
         assert PipelineConfig.from_file(path).agentic is PipelineConfig().agentic
+
+
+class TestGH678YamlCapPinsLikeCli:
+    """GH-678: a YAML ``max_cost_per_page`` must pin the same way the CLI flag
+    does, so the two channels agree on the resulting cloud-egress policy.
+
+    The CLI side is driven through the REAL Click command (``test_gh168_config_
+    precedence.py``'s ``_run_with`` helper -- monkeypatch ``UnifiedPipeline``
+    with a config-capturing stub, invoke ``socr process``, read back the config
+    it built), not a hand-written model of ``cli.py``'s
+    ``_explicitly_given("max_cost_per_page")`` block. A hand-copied mirror of
+    that block would keep passing if the block itself changed -- the two sides
+    drifting apart unnoticed is this ticket's own failure mode one layer up.
+    """
+
+    @staticmethod
+    def _cli_config(tmp_path, monkeypatch, value):
+        from test_gh168_config_precedence import _run_with
+
+        return _run_with(tmp_path, "", ["--max-cost-per-page", str(value)], monkeypatch)
+
+    def test_zero_cap_parity_forbids_cloud_on_both_channels(self, tmp_path, monkeypatch):
+        yaml_dir = tmp_path / "yaml"
+        yaml_dir.mkdir()
+        yaml_config = PipelineConfig.from_file(_write(yaml_dir, {"max_cost_per_page": 0}))
+        cli_config = self._cli_config(tmp_path / "cli", monkeypatch, 0)
+
+        assert yaml_config.max_cost_per_page_pinned is True
+        assert cli_config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is zero_cap_pinned_forbids_cloud(
+            cli_config
+        )
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is True
+
+    def test_nonzero_cap_parity_does_not_forbid_cloud_on_either_channel(
+        self, tmp_path, monkeypatch
+    ):
+        yaml_dir = tmp_path / "yaml"
+        yaml_dir.mkdir()
+        yaml_config = PipelineConfig.from_file(_write(yaml_dir, {"max_cost_per_page": 5}))
+        cli_config = self._cli_config(tmp_path / "cli", monkeypatch, 5)
+
+        assert yaml_config.max_cost_per_page_pinned is True
+        assert cli_config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is zero_cap_pinned_forbids_cloud(
+            cli_config
+        )
+        assert zero_cap_pinned_forbids_cloud(yaml_config) is False
+
+    def test_absent_key_leaves_unpinned(self, tmp_path):
+        """A fix that pins unconditionally would forbid cloud for every
+        config-file user -- far worse than the bug this ticket fixes."""
+        config = PipelineConfig.from_file(_write(tmp_path, {"agentic": False}))
+
+        assert config.max_cost_per_page_pinned is False
+        assert zero_cap_pinned_forbids_cloud(config) is False
