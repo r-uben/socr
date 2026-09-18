@@ -305,3 +305,62 @@ class TestGH678YamlCapPinsLikeCli:
 
         assert config.max_cost_per_page_pinned is False
         assert zero_cap_pinned_forbids_cloud(config) is False
+
+
+class TestGH678MalformedCapFailsAtLoad:
+    """GH-678 round 2: pinning on key presence made a malformed cap reachable.
+
+    ``zero_cap_pinned_forbids_cloud`` is ``bool(pinned) and (value <= 0.0)``.
+    Before this ticket a YAML config never set the pin, so the first operand
+    short-circuited and the comparison never ran — a null or quoted cap was
+    inert. Pinning on presence removes the short-circuit, and that function is
+    called on essentially every run (orchestrator, hpc_pipeline,
+    table_cell_guard), so a malformed value would surface as a TypeError three
+    frames deep in provider routing rather than as a config error.
+
+    These pin that the failure is a ``ValueError`` naming the key, raised while
+    the config is being loaded.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(None, id="yaml-null"),
+            pytest.param("abc", id="non-numeric-string"),
+            pytest.param(float("nan"), id="nan-disables-the-cap-silently"),
+        ],
+    )
+    def test_malformed_cap_raises_at_load(self, tmp_path, value):
+        path = _write(tmp_path, {"max_cost_per_page": value})
+
+        with pytest.raises(ValueError, match="max_cost_per_page"):
+            PipelineConfig.from_file(path)
+
+    def test_boolean_cap_is_refused_rather_than_read_as_zero(self, tmp_path):
+        """``false`` compares equal to 0 and would forbid ALL cloud egress.
+
+        Silently inferring a no-cloud policy from a boolean is worse than
+        refusing it: the user never wrote that policy.
+        """
+        path = _write(tmp_path, {"max_cost_per_page": False})
+
+        with pytest.raises(ValueError, match="boolean"):
+            PipelineConfig.from_file(path)
+
+    @pytest.mark.parametrize("value", [0, 5, -1, 0.25, "0", "5.5"])
+    def test_wellformed_caps_still_load_and_pin(self, tmp_path, value):
+        """The validation must not reject the values the fix exists to support.
+
+        A negative cap is deliberately allowed: ``zero_cap_pinned_forbids_cloud``
+        treats anything ``<= 0.0`` as "no paid calls", so ``-1`` is a stated
+        policy, not a malformed one. A quoted number (``max_cost_per_page: "0"``,
+        which YAML reads as a string) is accepted and coerced rather than
+        refused — the user wrote a number, and the resulting policy is the one
+        they wrote. It crashed before this validation existed, which is what
+        made the quoting matter at all.
+        """
+        config = PipelineConfig.from_file(_write(tmp_path, {"max_cost_per_page": value}))
+
+        assert config.max_cost_per_page == float(value)
+        assert config.max_cost_per_page_pinned is True
+        assert zero_cap_pinned_forbids_cloud(config) is (float(value) <= 0.0)

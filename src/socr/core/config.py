@@ -541,6 +541,40 @@ class PipelineConfig:
             )
         self.table_judge_adjudicator_cost_per_call_usd = rate
 
+        # GH-678 round 2: the per-page cap needs the same treatment, and now
+        # NEEDS it. Before this ticket, a YAML config never set
+        # ``max_cost_per_page_pinned``, so ``zero_cap_pinned_forbids_cloud``'s
+        # ``bool(pinned) and (value <= 0.0)`` short-circuited on the first
+        # operand and the comparison never ran -- a malformed YAML value was
+        # inert. Pinning on key presence removes that short-circuit, so
+        # ``max_cost_per_page:`` with no value (YAML null) or a quoted ``"0"``
+        # would reach the comparison and raise TypeError three frames deep in
+        # provider routing, on a function called on essentially every run.
+        # Fail at config load with a message naming the key instead.
+        cap = self.max_cost_per_page
+        if isinstance(cap, bool):
+            # YAML reads a bare ``false`` as a bool, which compares equal to 0
+            # and would silently forbid ALL cloud egress. That is a policy the
+            # user never wrote; refuse rather than infer it.
+            raise ValueError(
+                f"max_cost_per_page must be a number of USD, got the boolean {cap!r}. "
+                "Write 0 to forbid paid cloud calls."
+            )
+        try:
+            cap = float(cap)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_cost_per_page must be a number of USD, got {self.max_cost_per_page!r}"
+            ) from exc
+        if not math.isfinite(cap):
+            # A NaN cap disables itself silently: every comparison against NaN
+            # is False, so no page ever exceeds it.
+            raise ValueError(
+                f"max_cost_per_page must be a finite number of USD; got {cap!r}. "
+                "A non-finite cap silently stops capping."
+            )
+        self.max_cost_per_page = cap
+
     def get_engines_by_priority(self) -> list[EngineType]:
         """Get enabled engines sorted by priority."""
         return sorted(self.enabled_engines, key=lambda e: ENGINE_PRIORITY.get(e, 99))
