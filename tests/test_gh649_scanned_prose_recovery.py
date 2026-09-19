@@ -473,17 +473,19 @@ class TestNativeTableSyntaxNeverShipsAsProse:
 
 
 class TestTwoColumnPagesFailSafe:
-    """Bands are clustered by y across the full page width, so on a two-column
-    page a left-column prose line and a right-column table row share a band.
+    """GH-700 (resolved): the left-column prose limitation this class used to
+    document is fixed. Bands were clustered by y across the full page width,
+    so on a two-column page a left-column prose line and a right-column table
+    row shared a band; the shared band carried the right column's digits, so
+    it was withheld and marked, taking the left column's prose with it.
 
-    Raised as an open question in review rather than a finding, and measured
-    here rather than argued: the failure is entirely in the safe direction. The
-    shared band carries the right column's digits, so it is withheld and
-    marked; no printed value reaches the page, and the witness treats the same
-    band as table-attributed so it cannot vouch for a fabrication either. What
-    it costs is the left column's prose, withheld behind the marker instead of
-    shipped. Column-aware banding would recover that text; nothing here leaks
-    without it, which is why this is a limitation and not a hole.
+    ``partition_prose_bands`` now splits a shared band at its own genuine
+    column gutter (``_prose_bands_with_columns``, row_corroboration.py)
+    before counting digits, so the left column's prose ships and only the
+    right column's numeric row is withheld -- see
+    docs/log/2026-09-18_700-two-column-bands.md. The class name and fixture
+    are kept: they are still the two-column layout, only the failure mode
+    they exercise has changed from a documented cost to a passing case.
     """
 
     _LEFT = [
@@ -516,6 +518,17 @@ class TestTwoColumnPagesFailSafe:
         for value in ("250.0", "3000.0", "2000.0"):
             assert value not in recovered, value
         assert MARKER in recovered
+
+    def test_left_column_prose_now_ships(self) -> None:
+        """GH-700: the left column's own words are no longer collateral of the
+        right column's withheld digits."""
+        recovered = _ship(self._page()).text
+        for phrase in (
+            "The committee reviewed the swap arrangements at length",
+            "and authorized their renewal for a further twelve months",
+            "with no dissenting votes recorded in the minutes today",
+        ):
+            assert phrase in recovered, phrase
 
     def test_a_shared_band_cannot_vouch_for_a_fabrication(self) -> None:
         """Re-scoped in #652 round 10 to what ships. The corroboration guard

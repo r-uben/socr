@@ -79,6 +79,7 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
+from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
 from socr.tables.native_verifier import (
     _normalize_cell,
     is_numeric_token,
@@ -373,6 +374,91 @@ def bears_printed_numeral(text: str) -> bool:
     return bool(_DIGIT_RE.search(text or ""))
 
 
+def _median_adjacent_word_gap(bands: list[list[tuple]]) -> float | None:
+    """Median horizontal gap between words *cluster_band_words* already put
+    on the same visual line.
+
+    #700's own yardstick for "ordinary spacing between words on one line",
+    derived from these words' own already-y-clustered bands rather than a
+    page-independent pixel constant (repo rule: no magic thresholds).
+    ``None`` when there is no measurable gap at all (fewer than one pair of
+    same-band words) -- callers must then skip column splitting rather than
+    guess a default, which is also what keeps a page too sparse to measure
+    byte-identical to :func:`cluster_band_words`.
+    """
+    gaps: list[float] = []
+    for band in bands:
+        ordered = sorted(band, key=lambda word: word[0])
+        for left, right in zip(ordered, ordered[1:]):
+            gap = right[0] - left[2]
+            if gap > 0:
+                gaps.append(gap)
+    if not gaps:
+        return None
+    gaps.sort()
+    mid = len(gaps) // 2
+    if len(gaps) % 2:
+        return gaps[mid]
+    return (gaps[mid - 1] + gaps[mid]) / 2.0
+
+
+def _split_band_by_column_gap(band: list[tuple], gap_threshold: float) -> list[list[tuple]]:
+    """Split one y-clustered *band* wherever a horizontal gap exceeds *gap_threshold*.
+
+    Words stay left-to-right within each resulting piece, and the pieces are
+    returned in the same left-to-right order, so splitting a line preserves
+    reading order across the split.
+    """
+    ordered = sorted(band, key=lambda word: word[0])
+    pieces: list[list[tuple]] = [[ordered[0]]]
+    for left, right in zip(ordered, ordered[1:]):
+        gap = right[0] - left[2]
+        if gap > gap_threshold:
+            pieces.append([])
+        pieces[-1].append(right)
+    return pieces
+
+
+def _prose_bands_with_columns(words: list) -> list[list[tuple]]:
+    """:func:`cluster_band_words`'s bands, further split at genuine column gutters.
+
+    GH-700: on a two-column page, a left-column prose line and a right-column
+    table row that share a baseline land in ONE band under plain y-centre
+    clustering -- the band's digit count comes from the right column, the
+    whole band is withheld, and the left column's prose is lost with it (see
+    docs/log/2026-09-18_700-two-column-bands.md). This is
+    :func:`partition_prose_bands`'s OWN construction step, not a change to
+    :func:`cluster_band_words` itself.
+
+    Measured before choosing (see the decision log): patching the SHARED
+    clusterer with the identical column-gap split breaks
+    :func:`corroborate_rows` on an ordinary table row whose label has tight
+    inline word spacing but a wide gutter before its first numeric column --
+    a realistic econ-table shape, not a contrived one. The row's numeric
+    tokens are no longer a contiguous run on one native band, so a
+    previously-corroborating candidate stops clearing. There is no way to
+    tell a table's own wide column gutter from a page-column gutter from
+    geometry alone, so the split stays scoped to the withholding path, where
+    the cost of a false split is cheap (an extra withheld-run marker, never a
+    lost or misbound row) -- unlike :func:`baseline_bands`, whose row
+    matching needs a candidate's entire ordered token run intact on ONE band.
+
+    A page with no gap wide enough to cross the threshold -- including any
+    page with too little evidence to measure one at all -- returns
+    :func:`cluster_band_words`'s own bands, unchanged (the single-column
+    case is provably untouched).
+    """
+    raw_bands = cluster_band_words(words)
+    median_gap = _median_adjacent_word_gap(raw_bands)
+    if median_gap is None:
+        return raw_bands
+    gap_threshold = median_gap * ALIGNED_RUN_GAP_MAX_WORD_SPACES
+    split_bands: list[list[tuple]] = []
+    for band in raw_bands:
+        split_bands.extend(_split_band_by_column_gap(band, gap_threshold))
+    return split_bands
+
+
 def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
 
@@ -380,6 +466,12 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     page reading order, not the input order of *words*. #649's caller ships
     these bands as text and has to put the fail-closed marker where each
     withheld run actually sits, so the interleaving is the point.
+
+    GH-700: bands are built by :func:`_prose_bands_with_columns`, not the raw
+    :func:`cluster_band_words`, so a genuine column gutter splits a shared
+    baseline into its own left/right pieces before the numeral count below
+    decides prose vs. withhold -- see that function's docstring for why this
+    split is scoped to this caller alone.
 
     #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
     table geometry there is no bbox to scope prose with, so the prose region is
@@ -431,7 +523,7 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     if row_shape_min is None:
         row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
     bands: list[tuple[bool, list]] = []
-    for band in cluster_band_words(words):
+    for band in _prose_bands_with_columns(words):
         numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
         ordered = sorted(band, key=lambda w: w[0])
         bands.append((numeral_count < row_shape_min, ordered))
