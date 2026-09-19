@@ -527,3 +527,34 @@ not primary-source minutes/SEP documents) and other agents' unrelated
 `/tmp/astra735*-corpus` directories (not touched, not part of this ticket).
 This question is left open, pending either access to the real corpus or
 folding-in of the second-model consult's own measurement.
+
+## Correction (2026-09-19): "reverted to HEAD" left the split shipping
+
+My first revert (this log's "Ruling" section above) restored the working
+tree to `HEAD` (`8b3311c`), which IS the split approach — 93 lines of it,
+relative to the merge base. I assessed v1 as non-corrupting from the real
+PDF fixture (`binding_shift_doc.pdf`) alone: it doesn't split on that
+fixture (`raw_bands == post_bands` on both pages), so I concluded it
+doesn't reproduce the mid-row false-split defect. That inference was wrong
+— team-lead measured v1 against the same synthetic ncols=1/2/3/5
+label/value fixtures used earlier in this log and got false splits at
+every ncols:
+
+```
+real p1 (binding_shift_doc.pdf):  raw=5  post=5   (no split)
+real p2 (binding_shift_doc.pdf):  raw=6  post=6   (no split)
+synthetic ncols=1:                raw=4  post=8   prose=4   FALSE SPLIT
+synthetic ncols=2:                raw=4  post=8   prose=4   FALSE SPLIT
+synthetic ncols=3:                raw=4  post=8   prose=4   FALSE SPLIT
+synthetic ncols=5:                raw=4  post=8   prose=4   FALSE SPLIT
+```
+
+The real PDF is quiet on v1 only because that fixture's local word spacing
+doesn't happen to cross v1's per-band threshold — not because v1 is safe.
+One fixture where a bug does not fire is not evidence the bug is absent;
+this is the identical inference error I was correctly held to on
+`ce_like_p4.pdf` earlier in this same session, in the opposite direction.
+Source has since been restored to the merge base (`f8949f1`) exactly, not
+to `HEAD` — see the revert commit on top of this log. `8b3311c` remains in
+branch history unamended; both the attempt and its rejection are part of
+the record.
