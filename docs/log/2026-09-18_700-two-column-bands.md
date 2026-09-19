@@ -369,20 +369,21 @@ width-share gate's behaviour.
    round 2), a missed split reproduces GH-700's pre-fix, disclosed,
    fail-closed behaviour — acceptable, not corruption.
 
-**Real-fixture data point, not corpus-representative:** measured
-`_detect_column_gutter` against `tests/fixtures/table_repair/ce_like_p4.pdf`
-(a synthetic-but-realistic single page combining two distinct tables of
+**Real-fixture data point — one more instance of the abstention mechanism,
+does not touch the corrupting direction:** measured `_detect_column_gutter`
+against `tests/fixtures/table_repair/ce_like_p4.pdf` (a
+synthetic-but-realistic single page combining two distinct tables of
 different column counts/positions plus a four-line prose paragraph at the
 bottom, 25 native y-bands via `cluster_band_words`). Result: `gutter=None`
-already, with no crossing-line fixture needed — the page's own heterogeneity
-(two tables at different x-offsets, one narrower than the other, plus prose)
-is enough on its own to defeat "one x-interval no word anywhere on the page
-crosses." This is one fixture, not a corpus measurement, and does not by
-itself answer the reviewer's open frequency question (how often a real page
-is nothing but an aligned table with no full-width line anywhere on it) —
-but it is a directional data point that pages combining multiple tables
-and/or any prose tend not to produce a clean page-wide gutter at all,
-independent of the crossing-line mechanism specifically.
+already, with no crossing-line fixture needed — page heterogeneity alone
+defeats "one x-interval no word anywhere on the page crosses." This shows
+the detector abstaining (the fix not firing) on one more shape; it says
+nothing about the corrupting direction, which is already settled by
+`table_ladder/binding_shift_doc.pdf` below (a real PDF, demonstrated
+corruption). **Frequency claim: unmeasured, no corpus access on this
+machine.** One synthetic fixture is not evidence that real corruption is
+rare — there is no corpus here to count against, and this data point must
+not be read as softening the ruling below.
 
 ## Ruling (2026-09-19): the split approach does not ship — reverted to HEAD
 
