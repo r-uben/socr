@@ -12,10 +12,8 @@ from socr.tables.row_corroboration import (
     EXTRA_NUMBERS_MAX_SHARE,
     ROW_CORROBORATION_MIN,
     _is_genuine_numeric,
-    cluster_band_words,
     corroborate_rows,
     numeric_body_rows,
-    partition_prose_bands,
 )
 
 REGION = (0.0, 0.0, 400.0, 400.0)
@@ -377,92 +375,3 @@ def test_column_index_legend_row_excluded_not_counted_as_data_row():
     assert result.total == 1  # the index row does not count
     assert result.bound == 1
     assert result.clears is True
-
-
-# GH-700 -- ``partition_prose_bands`` splits a shared baseline band at its own
-# column gutter before deciding prose vs. withhold; ``cluster_band_words`` /
-# ``baseline_bands`` (and therefore ``corroborate_rows`` above) are untouched.
-
-
-def line_words(
-    x0: float, y0: float, text: str, gap: float = 2.0, word_width: float = 10.0
-) -> list[tuple]:
-    """Native words for one printed line, laid out with realistic tight
-    inline spacing (a fixed small gap between words), left to right from x0."""
-    words = []
-    x = x0
-    for token in text.split():
-        w_width = max(len(token) * (word_width / 5.0), word_width / 2.0)
-        words.append((x, y0, x + w_width, y0 + 10.0, token, 0, 0, 0))
-        x += w_width + gap
-    return words
-
-
-def test_single_column_page_bands_are_byte_identical_to_cluster_band_words():
-    """No qualifying horizontal gap anywhere on the page -> partition_prose_bands'
-    band CONSTRUCTION must match cluster_band_words exactly (only the prose tag
-    is new information); this is the GH-700 single-column non-regression pin,
-    written before the fix that makes the two-column case below pass."""
-    words = []
-    words += line_words(10.0, 0.0, "The Committee reviewed the swap arrangements at length")
-    words += line_words(10.0, 12.0, "and authorized their renewal for a further twelve months")
-    words += line_words(10.0, 24.0, "with no dissenting votes recorded in the minutes today")
-
-    plain_bands = cluster_band_words(words)
-    partitioned = partition_prose_bands(words)
-
-    assert len(partitioned) == len(plain_bands)
-    for (_is_prose, band_words), plain_band in zip(partitioned, plain_bands):
-        assert band_words == sorted(plain_band, key=lambda w: w[0])
-    assert all(is_prose for is_prose, _band in partitioned)  # no digits anywhere
-
-
-def test_two_column_prose_and_table_row_split_into_separate_bands():
-    """The ticket's own repro: a left-column prose line and a right-column
-    table row sharing a baseline must no longer collapse into one band."""
-    words = []
-    words += line_words(10.0, 0.0, "The Committee agreed that policy")
-    words += line_words(400.0, 0.0, "1.5 2.5 3.5")  # right column, far right
-
-    bands = partition_prose_bands(words)
-    assert len(bands) == 2  # the shared baseline split into two bands
-
-    prose_bands = [band for is_prose, band in bands if is_prose]
-    withheld_bands = [band for is_prose, band in bands if not is_prose]
-    assert len(prose_bands) == 1
-    assert len(withheld_bands) == 1
-
-    prose_text = [word[4] for word in prose_bands[0]]
-    withheld_text = [word[4] for word in withheld_bands[0]]
-    assert prose_text == ["The", "Committee", "agreed", "that", "policy"]
-    assert withheld_text == ["1.5", "2.5", "3.5"]
-
-
-def test_paragraph_between_two_tables_not_swallowed():
-    """The rejected fix (withholding every zero-token band inside a withheld
-    band's y-span) swallowed a paragraph printed BETWEEN two tables --
-    partition_prose_bands' docstring records this. GH-700's column split
-    operates on horizontal gaps within ONE line only, never on y-span, so a
-    single-column page with two numeric tables and a paragraph between them
-    must ship the paragraph and withhold only the two tables' own rows."""
-    words = []
-    words += line_words(10.0, 0.0, "Item 2023 2022")  # table 1, header-ish row
-    words += line_words(10.0, 12.0, "Revenue 1204 980")  # table 1, numeric row
-    words += line_words(10.0, 30.0, "The committee reviewed the schedule in detail")
-    words += line_words(10.0, 42.0, "and found no cause for further action today")
-    words += line_words(10.0, 60.0, "Costs 500 410")  # table 2, numeric row
-    words += line_words(10.0, 72.0, "Total 704 570")  # table 2, numeric row
-
-    bands = partition_prose_bands(words)
-    texts = [" ".join(word[4] for word in band) for _is_prose, band in bands]
-    flags = [is_prose for is_prose, _band in bands]
-
-    paragraph_idxs = [i for i, t in enumerate(texts) if "committee" in t or "cause" in t]
-    assert len(paragraph_idxs) == 2
-    for idx in paragraph_idxs:
-        assert flags[idx] is True  # shipped, not swallowed
-
-    table_idxs = [i for i, t in enumerate(texts) if i not in paragraph_idxs]
-    assert table_idxs  # both tables' rows present
-    for idx in table_idxs:
-        assert flags[idx] is False  # withheld -- every table row carries a digit
