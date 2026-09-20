@@ -364,3 +364,86 @@ class TestGH678MalformedCapFailsAtLoad:
         assert config.max_cost_per_page == float(value)
         assert config.max_cost_per_page_pinned is True
         assert zero_cap_pinned_forbids_cloud(config) is (float(value) <= 0.0)
+
+
+class TestGH825YamlQwenModelPinsLikeCli:
+    """GH-825: the GH-678 shape, one field over.
+
+    ``cli.py``'s ``--qwen-model`` block sets ``qwen_model`` AND
+    ``qwen_model_pinned`` together. ``from_file``'s generic restore loop set the
+    value and never touched the pin, so rule 1 of ``resolve_qwen_intent``
+    ("explicit pin -> pass the model through unchanged") never fired for a
+    YAML-set model: the same model was honoured from the flag and silently
+    replaced by the local instruct model from the file.
+
+    The assertions pin a DIFFERENCE between the two channels rather than an
+    absolute resolved model, so they do not encode whatever ``OLLAMA_MODEL``
+    happens to be.
+    """
+
+    CLOUD_MODEL = "qwen3.5:cloud"
+
+    @staticmethod
+    def _cli_config(tmp_path, monkeypatch, value):
+        from test_gh168_config_precedence import _run_with
+
+        return _run_with(tmp_path, "", ["--qwen-model", value], monkeypatch)
+
+    @pytest.fixture(autouse=True)
+    def _no_vllm_env(self, monkeypatch):
+        # ``auto`` + VLLM_BASE_URL resolves to the vllm rung, which takes a
+        # different branch of ``resolve_qwen_intent``. Unset it so the test
+        # measures the local/auto branch this ticket is about.
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    def test_yaml_model_pins_and_resolves_exactly_as_the_flag_does(self, tmp_path, monkeypatch):
+        from socr.engines.qwen import resolve_qwen_intent
+
+        yaml_dir = tmp_path / "yaml"
+        yaml_dir.mkdir()
+        yaml_config = PipelineConfig.from_file(
+            _write(yaml_dir, {"qwen_model": self.CLOUD_MODEL, "qwen_backend": "auto"})
+        )
+        cli_config = self._cli_config(tmp_path / "cli", monkeypatch, self.CLOUD_MODEL)
+
+        assert yaml_config.qwen_model_pinned is True
+        assert cli_config.qwen_model_pinned is True
+        assert resolve_qwen_intent(yaml_config) == resolve_qwen_intent(cli_config)
+        assert resolve_qwen_intent(yaml_config)[1] == self.CLOUD_MODEL
+
+    def test_absent_key_leaves_unpinned_and_resolves_to_the_local_default(self, tmp_path):
+        """The negative control.
+
+        A fix that pinned unconditionally would let a stale ``qwen_model``
+        default reach a local backend for every config-file user -- the exact
+        accident rule 3 exists to prevent. With no ``qwen_model`` key the pin
+        must stay False and the resolved model must be the local instruct MoE,
+        NOT whatever the dataclass default string happens to be.
+        """
+        from socr.engines.qwen import OLLAMA_MODEL, resolve_qwen_intent
+
+        config = PipelineConfig.from_file(
+            _write(tmp_path, {"agentic": False, "qwen_backend": "auto"})
+        )
+
+        assert config.qwen_model_pinned is False
+        assert resolve_qwen_intent(config) == ("auto", OLLAMA_MODEL)
+
+    def test_the_key_is_what_makes_the_difference(self, tmp_path):
+        """Pin the DIFFERENCE, not the value: the same loader, the same backend,
+        one key added, and only the resolved model changes."""
+        from socr.engines.qwen import resolve_qwen_intent
+
+        without_dir = tmp_path / "without"
+        without_dir.mkdir()
+        with_dir = tmp_path / "with"
+        with_dir.mkdir()
+
+        without = PipelineConfig.from_file(_write(without_dir, {"qwen_backend": "auto"}))
+        with_key = PipelineConfig.from_file(
+            _write(with_dir, {"qwen_backend": "auto", "qwen_model": self.CLOUD_MODEL})
+        )
+
+        assert resolve_qwen_intent(without)[0] == resolve_qwen_intent(with_key)[0]
+        assert resolve_qwen_intent(without)[1] != resolve_qwen_intent(with_key)[1]
+        assert resolve_qwen_intent(with_key)[1] == self.CLOUD_MODEL

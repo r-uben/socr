@@ -623,6 +623,21 @@ class PipelineConfig:
         if "max_cost_per_page" in data:
             config.max_cost_per_page_pinned = True
 
+        # GH-825: the same shape, one field over. ``cli.py``'s ``--qwen-model``
+        # block sets ``qwen_model`` AND ``qwen_model_pinned`` together, but
+        # ``qwen_model`` is not in ``_FROM_FILE_EXPLICIT_FIELDS``, so the generic
+        # ``setattr`` loop above sets the value and never touches the pin. Rule 1
+        # of ``resolve_qwen_intent`` ("explicit pin -> pass the model through
+        # unchanged") therefore never fired for a YAML-set model: a config file
+        # naming ``qwen_model: qwen3.5:cloud`` on a local or ``auto`` backend was
+        # silently resolved to the local instruct model instead, while the SAME
+        # model given as ``--qwen-model`` was honoured. Pin on key PRESENCE, as
+        # GH-678 does directly above: a present key is a stated choice whatever
+        # its value, so a YAML model that happens to equal the default still
+        # counts as stated.
+        if "qwen_model" in data:
+            config.qwen_model_pinned = True
+
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])
 
