@@ -22,6 +22,7 @@ from typing import Protocol
 
 import httpx
 
+from socr.core.killable import CallSpec, run_killable
 from socr.tables.locate import TableBox
 
 logger = logging.getLogger(__name__)
@@ -363,6 +364,69 @@ class CropTable:
     bbox: tuple[float, float, float, float]
 
 
+def _ollama_read_crop(host: str, model: str, prompt: str, image_b64: str, timeout: float) -> str:
+    """The ONLY part of ``OllamaTableReader.read`` that crosses the killable
+    boundary (GH-798).
+
+    Top-level and picklable (plain str/float args, never a bound method or
+    closure) so a fresh ``spawn``-ed child can resolve it via ``CallSpec`` --
+    mirrors ``judge/ollama_judge.py:_post_generate`` (GH-172 site 1), the same
+    pattern applied to the crop-reread caller ``_read_with_deadline``
+    (``TableCropExtractor``) already wraps in its own wall-clock
+    ``ThreadPoolExecutor`` deadline. That outer wrapper only ABANDONS a
+    wedged thread (GH-172), so it cannot stop a peer that trickles bytes
+    faster than ``httpx``'s per-chunk read timeout
+    (``docs/log/2026-09-17_172-design.md``) -- the ``httpx`` timeout below is
+    defence-in-depth only; the caller's ``run_killable`` deadline is what
+    actually bounds that case, by killing the process making the call.
+    """
+    resp = httpx.post(
+        f"{host}/api/generate",
+        json={
+            "model": model,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "options": {"temperature": 0},  # transcription must be deterministic
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return _clean_markdown(resp.json().get("response", ""))
+
+
+def _vllm_read_crop(
+    base_url: str, model: str, api_key: str, prompt: str, image_b64: str, timeout: float
+) -> str:
+    """The killable-boundary counterpart of ``_ollama_read_crop``, for
+    ``VllmTableReader.read`` (GH-798). Same reasoning; see that function's
+    docstring."""
+    resp = httpx.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model,
+            "temperature": 0,  # transcription must be deterministic
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                        },
+                    ],
+                }
+            ],
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    choices = resp.json().get("choices") or [{}]
+    return _clean_markdown(choices[0].get("message", {}).get("content", ""))
+
+
 class OllamaTableReader:
     """Default crop reader: a local/cloud Ollama vision model via /api/generate."""
 
@@ -379,19 +443,11 @@ class OllamaTableReader:
 
     def read(self, image_path: Path) -> str:
         image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-        resp = httpx.post(
-            f"{self.host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": self._prompt,
-                "images": [image_b64],
-                "stream": False,
-                "options": {"temperature": 0},  # transcription must be deterministic
-            },
-            timeout=self.timeout,
+        spec = CallSpec(
+            func="socr.tables.extract:_ollama_read_crop",
+            args=(self.host, self.model, self._prompt, image_b64, self.timeout),
         )
-        resp.raise_for_status()
-        return _clean_markdown(resp.json().get("response", ""))
+        return run_killable(spec, timeout=self.timeout)
 
 
 class VllmTableReader:
@@ -420,30 +476,11 @@ class VllmTableReader:
 
     def read(self, image_path: Path) -> str:
         image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-        resp = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            json={
-                "model": self.model,
-                "temperature": 0,  # transcription must be deterministic
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": self._prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
-                            },
-                        ],
-                    }
-                ],
-            },
-            timeout=self.timeout,
+        spec = CallSpec(
+            func="socr.tables.extract:_vllm_read_crop",
+            args=(self.base_url, self.model, self._api_key, self._prompt, image_b64, self.timeout),
         )
-        resp.raise_for_status()
-        choices = resp.json().get("choices") or [{}]
-        return _clean_markdown(choices[0].get("message", {}).get("content", ""))
+        return run_killable(spec, timeout=self.timeout)
 
 
 def make_table_reader(

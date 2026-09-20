@@ -5,13 +5,13 @@ Hermetic: mocks the HTTP layer; no vLLM/Ollama/GPU.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from socr.engines.qwen import QwenEngine
 from socr.tables.extract import (
     OllamaTableReader,
     VllmTableReader,
+    _vllm_read_crop,
     make_table_reader,
 )
 
@@ -31,12 +31,6 @@ class TestQwenAvailabilityVllm:
         monkeypatch.setattr("socr.engines.qwen._check_ollama_model", lambda m: "not pulled")
         monkeypatch.delenv("VLLM_BASE_URL", raising=False)
         assert QwenEngine().is_available() is False
-
-
-def _png(tmp_path: Path) -> Path:
-    p = tmp_path / "crop.png"
-    p.write_bytes(b"\x89PNG\r\n\x1a\n")
-    return p
 
 
 class TestMakeTableReader:
@@ -62,10 +56,18 @@ class TestMakeTableReader:
 
 
 class TestVllmTableReaderRead:
-    def test_posts_openai_multimodal_and_parses_choice(self, tmp_path):
-        reader = VllmTableReader(
-            model="Qwen/Qwen3-VL-30B-A3B-Instruct", base_url="http://h:8000/v1"
-        )
+    """GH-798: ``VllmTableReader.read`` now crosses a ``run_killable`` process
+    boundary, so a patch on this process's ``httpx.post`` cannot reach the
+    spawned child that actually makes the call (the same reason
+    ``judge/ollama_judge.py``'s ``_post_generate`` is tested directly rather
+    than through ``OllamaVisionJudge.judge()``). These tests exercise
+    ``_vllm_read_crop`` -- the one function that crosses the boundary -- in
+    process instead; the boundary itself is proven generically by
+    ``run_killable``'s own tests and by the trickle test in
+    ``test_gh798_crop_reader_killable.py``.
+    """
+
+    def test_posts_openai_multimodal_and_parses_choice(self):
         captured = {}
 
         def fake_post(url, headers=None, json=None, timeout=None):
@@ -79,7 +81,14 @@ class TestVllmTableReaderRead:
             return resp
 
         with patch("socr.tables.extract.httpx.post", side_effect=fake_post):
-            out = reader.read(_png(tmp_path))
+            out = _vllm_read_crop(
+                "http://h:8000/v1",
+                "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "EMPTY",
+                "prompt",
+                "aGk=",
+                120.0,
+            )
 
         assert out.strip().startswith("| a | b |")
         # Hits the OpenAI chat endpoint, not Ollama's /api/generate.
@@ -91,10 +100,9 @@ class TestVllmTableReaderRead:
         assert img["image_url"]["url"].startswith("data:image/png;base64,")
         assert captured["json"]["temperature"] == 0
 
-    def test_empty_choices_does_not_crash(self, tmp_path):
-        reader = VllmTableReader(model="m")
+    def test_empty_choices_does_not_crash(self):
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.json = lambda: {"choices": []}
         with patch("socr.tables.extract.httpx.post", return_value=resp):
-            assert reader.read(_png(tmp_path)) == ""
+            assert _vllm_read_crop("http://h:8000/v1", "m", "EMPTY", "prompt", "aGk=", 120.0) == ""
