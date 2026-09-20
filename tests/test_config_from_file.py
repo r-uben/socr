@@ -490,6 +490,46 @@ class TestGH834NonStringQwenModelIsRejectedAtLoad:
         assert config.qwen_model == "qwen3.5:cloud"
         assert config.qwen_model_pinned is True
 
+    def test_an_empty_model_name_still_loads_and_still_pins(self, tmp_path):
+        """GH-837: the empty string is an exemption, and exemptions need a test.
+
+        ``from_file`` rejects a non-string ``qwen_model`` (GH-834) but
+        deliberately lets ``""`` through, because ``--qwen-model ""`` pins an
+        empty name on the command line too and GH-825 removed exactly this kind
+        of channel-dependent behaviour. The production comment states that
+        decision; without this control a later tightening to
+        ``not isinstance(...) or config.qwen_model == ""`` would load-reject the
+        empty string with nothing going red.
+        """
+        config = PipelineConfig.from_file(
+            _write(tmp_path, {"qwen_backend": "auto", "qwen_model": ""})
+        )
+
+        assert config.qwen_model == ""
+        assert config.qwen_model_pinned is True
+
+    def test_empty_and_non_string_are_treated_differently(self, tmp_path):
+        """Pin the DIFFERENCE between the exemption and the rejection.
+
+        Same loader, same key, two falsy values: ``""`` is a string and loads;
+        ``None`` is not and does not. A guard written as a plain truthiness test
+        (``if not config.qwen_model: raise``) would pass the rejection tests and
+        fail here.
+        """
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        null_dir = tmp_path / "null"
+        null_dir.mkdir()
+
+        config = PipelineConfig.from_file(
+            _write(empty_dir, {"qwen_backend": "auto", "qwen_model": ""})
+        )
+        assert config.qwen_model == ""
+        assert config.qwen_model_pinned is True
+
+        with pytest.raises(ValueError, match="qwen_model"):
+            PipelineConfig.from_file(_write(null_dir, {"qwen_backend": "auto", "qwen_model": None}))
+
     def test_the_value_type_is_what_makes_the_difference(self, tmp_path):
         """Pin the DIFFERENCE: identical file, identical key, one value retyped.
 
