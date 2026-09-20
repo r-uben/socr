@@ -22,7 +22,7 @@ from typing import Protocol
 
 import httpx
 
-from socr.core.killable import CallSpec, run_killable
+from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
 
 logger = logging.getLogger(__name__)
@@ -598,9 +598,10 @@ class TableCropExtractor:
                     continue
                 try:
                     md = self._read_with_deadline(img_path, deadline, page_num)
-                except _CropTimeoutError:
+                except _CropTimeoutError as exc:
                     # Timeout: emit a sentinel so the orchestrator can log an audit
-                    # event and apply the cascade guard.
+                    # event regardless of which case this is (no silent loss in
+                    # either direction) -- see `_timed_out` below.
                     out.append(
                         CropTable(
                             markdown="",
@@ -609,26 +610,41 @@ class TableCropExtractor:
                         )
                     )
                     out[-1]._timed_out = True  # type: ignore[attr-defined]
-                    # Mark backend degraded UNCONDITIONALLY after any crop timeout.
-                    # /api/tags may answer while /api/generate is still running on
-                    # the GPU, so using the probe as the degradation condition is
-                    # unsound. We degrade first, then probe only to enrich the log.
-                    self._backend_degraded = True
-                    if cascade_probe:
-                        # GH-222: ask the reader's OWN server, with the endpoint
-                        # that server actually serves. ``VllmTableReader.host``
-                        # is its ``/v1`` base URL, and /api/tags is not there —
-                        # probing it reported "backend down" on every healthy
-                        # HPC run. The result only enriches this log line
-                        # (degradation above is unconditional), but a log line
-                        # that names a hardware failure that never happened is
-                        # exactly what #222 was filed about.
-                        idle = _probe_reader_idle(self._reader)
+                    # GH-849: cascade only on a REAL kill (`exc.killed`), not on
+                    # a merely slow peer that answered its own timeout normally.
+                    # A killed child leaves the backend's state genuinely
+                    # unknown; a peer timeout leaves the backend (and this
+                    # process) untouched -- remaining crops are still attempted.
+                    if exc.killed:
+                        # Mark backend degraded UNCONDITIONALLY after a killed-
+                        # process timeout. /api/tags may answer while
+                        # /api/generate is still running on the GPU, so using the
+                        # probe as the degradation condition is unsound. We
+                        # degrade first, then probe only to enrich the log.
+                        self._backend_degraded = True
+                        if cascade_probe:
+                            # GH-222: ask the reader's OWN server, with the endpoint
+                            # that server actually serves. ``VllmTableReader.host``
+                            # is its ``/v1`` base URL, and /api/tags is not there —
+                            # probing it reported "backend down" on every healthy
+                            # HPC run. The result only enriches this log line
+                            # (degradation above is unconditional), but a log line
+                            # that names a hardware failure that never happened is
+                            # exactly what #222 was filed about.
+                            idle = _probe_reader_idle(self._reader)
+                            logger.warning(
+                                "dual-pass: crop timeout on p%d — backend marked degraded "
+                                "(probe idle=%s)",
+                                page_num,
+                                idle,
+                            )
+                    else:
+                        out[-1]._peer_timeout = True  # type: ignore[attr-defined]
                         logger.warning(
-                            "dual-pass: crop timeout on p%d — backend marked degraded "
-                            "(probe idle=%s)",
+                            "dual-pass: crop VLM call on p%d timed out on the peer's "
+                            "own request (child answered, not killed) — backend not "
+                            "marked degraded, remaining crops still attempted",
                             page_num,
-                            idle,
                         )
                     img_path.unlink(missing_ok=True)
                     continue
@@ -663,14 +679,19 @@ class TableCropExtractor:
         future = ex.submit(self._reader.read, img_path)
         try:
             return future.result(timeout=deadline)
-        except concurrent.futures.TimeoutError:
+        except concurrent.futures.TimeoutError as exc:
             future.cancel()
             logger.warning(
                 "dual-pass: crop VLM call timed out after %.1f s on p%d — releasing",
                 deadline,
                 page_num,
             )
-            raise _CropTimeoutError(deadline, page_num)
+            # GH-849: `KillableTimeoutError` IS a `concurrent.futures.TimeoutError`
+            # (they are the same type on py3.11+), so a peer-side timeout raised
+            # by `self._reader.read()` lands here too, not just this wrapper's
+            # own wall-clock deadline. Only cascade on a real kill.
+            killed = exc.killed if isinstance(exc, KillableTimeoutError) else True
+            raise _CropTimeoutError(deadline, page_num, killed=killed) from exc
         finally:
             # wait=False: release the executor without blocking. On the success
             # path this reclaims the idle worker immediately; on timeout the
@@ -755,12 +776,23 @@ class TableCropExtractor:
 
 
 class _CropTimeoutError(Exception):
-    """Internal sentinel: a single crop VLM call exceeded its wall-clock deadline."""
+    """Internal sentinel: a single crop VLM call exceeded its wall-clock deadline.
 
-    def __init__(self, deadline: float, page_num: int) -> None:
+    ``killed`` (GH-849) carries whether the underlying timeout represents a
+    killed child process (cascade-worthy -- the backend's state is unknown)
+    or a merely slow peer that answered normally (not cascade-worthy). It
+    defaults True: a bare ``concurrent.futures.TimeoutError`` raised by
+    ``future.result()`` itself -- as opposed to one propagated from
+    ``KillableTimeoutError`` -- means the deadline fired with the reader
+    still running, which is exactly the "unknown backend state" case #172
+    exists to guard.
+    """
+
+    def __init__(self, deadline: float, page_num: int, *, killed: bool = True) -> None:
         super().__init__(f"crop reread timed out after {deadline:.1f}s on p{page_num}")
         self.deadline = deadline
         self.page_num = page_num
+        self.killed = killed
 
 
 def _clean_markdown(text: str) -> str:

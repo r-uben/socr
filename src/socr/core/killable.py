@@ -92,19 +92,31 @@ _TIMEOUT_TYPE_NAMES = frozenset(
 
 
 class KillableTimeoutError(TimeoutError):
-    """A killable-process call did not complete before its deadline (and was killed).
+    """A killable-process call raised a timeout -- either the child itself was
+    killed, or it merely reported its OWN timeout while still answering.
 
     Subclasses ``TimeoutError`` deliberately: ``is_page_judge_timeout``
     already classifies by exception TYPE against a tuple that includes
     ``TimeoutError``, so this slots into the existing typed-timeout surfacing
     (page ``judge_outcome``, document status, metadata) with no new special
     case anywhere that already handles a judge or provider timeout.
+
+    ``killed`` distinguishes the two raise sites below (GH-849): True when
+    the deadline expired with no answer and this module killed the child's
+    process group (#172's case -- the backend's state is genuinely unknown).
+    False when the child answered with its own timeout exception (a merely
+    slow peer, e.g. ``httpx.ReadTimeout``) -- the child process is healthy
+    and exited normally; only the one call it was making was slow. Callers
+    that cascade-degrade a whole page/backend on a timeout must gate that on
+    ``killed`` -- a peer-side timeout must not cascade.
     """
 
-    def __init__(self, spec: str, timeout: float) -> None:
-        super().__init__(f"{spec!r} did not complete within {timeout:g}s (killed)")
+    def __init__(self, spec: str, timeout: float, *, killed: bool) -> None:
+        state = "killed" if killed else "peer-timeout, not killed"
+        super().__init__(f"{spec!r} did not complete within {timeout:g}s ({state})")
         self.spec = spec
         self.timeout = timeout
+        self.killed = killed
 
 
 @dataclass(frozen=True)
@@ -269,7 +281,7 @@ def run_killable(
                 return outcome[1]
             _, type_name, message = outcome
             if type_name in _TIMEOUT_TYPE_NAMES:
-                raise KillableTimeoutError(spec.func, timeout)
+                raise KillableTimeoutError(spec.func, timeout, killed=False)
             raise RuntimeError(f"{spec.func} failed in killable child: {type_name}: {message}")
         # Deadline hit with no answer: presumed wedged. Kill the whole group
         # so a grandchild the call spawned (or left running) dies with it.
@@ -277,7 +289,7 @@ def run_killable(
             "killable call %r exceeded %.1fs — killing child process group", spec.func, timeout
         )
         _terminate_then_kill(proc, pgid, term_grace, kill_grace)
-        raise KillableTimeoutError(spec.func, timeout)
+        raise KillableTimeoutError(spec.func, timeout, killed=True)
     finally:
         parent_conn.close()
         with _live_lock:
