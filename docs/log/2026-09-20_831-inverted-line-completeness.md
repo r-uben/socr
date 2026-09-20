@@ -1,7 +1,10 @@
 # 2026-09-20 — GH-831: measuring the inverted-line-completeness check
 
-READ-ONLY measurement. No `src/` change. Worktree `/tmp/wt-831m`, detached at
-`fc33c92` (= `origin/main` at dispatch time). Corpus: the 380 PDFs listed in
+READ-ONLY measurement. No `src/` change. Worktree `/tmp/wt-831m`.
+The counts in this file (funnel, INSIDE/OUTSIDE split, 15 per-page verdicts) were
+measured at `7cd3752` (`origin/main` after PR #856, before #859/#860 merged;
+re-confirmed unchanged from the original `fc33c92` measurement after a clean
+rebase — see "Re-run on current main" below). Corpus: the 380 PDFs listed in
 `/tmp/gh64_pdfs.txt` (local-only file, not part of this repo — copyrighted,
 not committed; only counts and basenames are recorded here).
 
@@ -264,10 +267,13 @@ row its band was bound to?):
   value" class the other 12 pages show. **This is the one finding that must be surfaced
   to the two review seats before shipping**: 2 of the 15 fixture pages are chart pages,
   not statistical tables.
+  **FIXTURE LABEL: `mpr-2008-07.pdf:p46` and `mpr-2022-06.pdf:p69` must be labelled
+  "chart axis mistaken for a table row" wherever they ship as a fixture — not "dropped
+  table cell value".**
 - 1 page (`mpr-2021-02.pdf:p18`): genuine by the check's strict definition, lower
   severity — all 8 evicted tokens are ordinal row-numbering markers ("1.", "2." ...
   "12."), a decoration format `_SPEC_NUMBER_RE` (which only matches the parenthesised
-  `(1)` form) does not exclude. They are real printed characters on that row's own
+  `(1)` form, see #858) does not exclude. They are real printed characters on that row's own
   baseline, genuinely absent from the candidate's row text, so they satisfy the
   invariant — but they are structural numbering, not a data value.
 
@@ -301,11 +307,72 @@ seats, not blockers:
 
 1. `region_inside` is tautological — do not cite it as evidence either way.
 2. 2 of the 15 fixture pages (`mpr-2008-07.pdf:p46`, `mpr-2022-06.pdf:p69`) are chart
-   pages, not statistical tables; keep them as fixtures for "chart axis mistaken for a
-   table row" specifically, not as generic "dropped table cell" exemplars.
+   pages, not statistical tables; **fixture label: "chart axis mistaken for a table
+   row"** specifically, not "dropped table cell value" and not a generic exemplar of the
+   other 13 pages' defect class.
 3. `mpr-2021-02.pdf:p18`'s fire is ordinal-marker decoration, not a data value — lowest
    severity of the 15.
 4. The false-positive rate is still not rigorously bounded (the corpus supplied zero
    spurious fires among 159 evicted tokens across 15 pages, but 15 pages is a small
    sample and the original 3 synthetic controls remain uninformative per the prior log's
    own caveat) — this audit narrows but does not close that question either.
+5. `_SPEC_NUMBER_RE`'s footnote-marker gap (the `5)`-shaped token on
+   `ecb-reports-2003-report-p80-82.pdf:p1`, see above) is filed as
+   github.com/r-uben/socr/issues/858 — independent of #831, not fixed on this branch.
+
+## Re-run on current main (2026-09-20, follow-up)
+
+Two more PRs landed after `7cd3752`: #859 (issue #855, escalation-latch
+change, orchestrator table-scoring path only) and #860 (issue #600,
+`binding._assign_bands` in `src/socr/tables/binding.py` gained a fold that
+heals printed-line tears plus an x-overlap guard — corpus-wide it refuses
+1,023 folds concentrated in ~92 documents, almost entirely
+`fomcprojtabl*`/`fomcminutes*`).
+
+**Question:** does the candidate-row path this probe measures
+(`get_table_regions` → `extract_structured` → `find_tables` /
+`reconstruct_table_regions` / `rowize_from_words_chart_aware` → the patched
+`_verify_regions` capture point) ever call `binding.bind()` /
+`binding._assign_bands`, such that #860 could move the 15 affected pages'
+leftover-token counts?
+
+**Answer: no traversal found.** Checked by grep for
+`_assign_bands|binding\.bind|import.*binding` across every module on this
+probe's control-flow path:
+
+- `src/socr/tables/reconstruct.py` — no match (does not import `binding`).
+- `src/socr/tables/native_verifier.py` — no match.
+- `src/socr/tables/label_canonical.py` — no match.
+- `src/socr/tables/reconcile.py` — no match.
+- `src/socr/core/born_digital.py` — no executable match; `binding.bind()`
+  appears only inside doc-comments, not called.
+- `src/socr/tables/row_corroboration.py` (the module this probe's own
+  metrics are built from: `baseline_bands`/`cluster_band_words`,
+  `table_blocks`, `numeric_body_rows`, `match_rows_monotonic`) — no match;
+  its only reference to `binding` is a docstring warning about
+  `_assign_bands`'s `round(word_y0)` bucketing bug, i.e. this module
+  deliberately does NOT reuse `_assign_bands`.
+- The only module in `src/socr/tables/` that imports from `binding` at all
+  is `adjudication.py` (`BindingResult, ContradictedCell,
+  RowLabelContradiction` — types, not `bind()`/`_assign_bands` calls), which
+  is not on this probe's capture path (the probe raises out of
+  `_verify_regions` before any adjudication step runs).
+
+`binding._assign_bands` is only called from `binding.bind()`
+(`binding.py:1089`, `:1165`), and nothing this probe exercises calls
+`binding.bind()`. #860 therefore cannot have moved the candidate-row token
+counts for these 15 pages (or any page) through this path.
+
+**Conclusion: no re-run against `d07d6e2` is needed.** The funnel and the
+15 per-page counts reported above (measured at `7cd3752`, matching the
+original `fc33c92` measurement) stand.
+
+Housekeeping fixed in this pass:
+- Decision-log header above now states the exact SHA the numbers were
+  measured on instead of the stale dispatch-time SHA.
+- `mpr-2008-07.pdf:p46` / `mpr-2022-06.pdf:p69` fixture label ("chart axis
+  mistaken for a table row") and the `_SPEC_NUMBER_RE` gap
+  (github.com/r-uben/socr/issues/858, filed independently, not fixed on
+  this branch) were already applied above in the original findings section.
+
+**Overall: PASS stands, unchanged.**
