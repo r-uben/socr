@@ -3240,3 +3240,131 @@ def test_gh768_empty_case_fallback_still_reachable_after_the_fix():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_gh862_rounding_tear_across_adjacent_keys_still_heals():
+    """GH-862 control: the GH-600 fold must still DO something.
+
+    Both guards added for GH-862 are refusals, so a test suite made only of
+    refusals is satisfied by deleting the fold outright. This fixture is the
+    shape the fold exists for -- a printed line whose trailing word was torn
+    into the next integer band key by ``round(y0)``, x-disjoint from the
+    rest of the line, and a strict minority of the line's words. It must end
+    up in ONE band. Every refusal test below is only meaningful while this
+    one passes.
+    """
+    from socr.tables.binding import _assign_bands
+
+    line = [
+        (50, 100, 90, 112, "Label", 0, 0, 0),
+        (95, 100, 130, 112, "1.0", 0, 0, 1),
+        (135, 100, 170, 112, "2.0", 0, 0, 2),
+    ]
+    torn_half = [(175, 101, 210, 113, "3.0", 0, 0, 3)]
+    centers, y_to_band = _assign_bands(line + torn_half)
+    assert len(centers) == 1
+    assert y_to_band[100] == y_to_band[101]
+
+
+@pytest.mark.parametrize("emission", ["tear-first", "row-first", "by-x"])
+def test_gh862_union_composition_does_not_bridge_two_rows(emission):
+    """GH-862 (1): the fold's x-guard was evaluated against the destination
+    group as it STARTED, not as it had BECOME, so a third group could bridge
+    two rows the pairwise guard refuses.
+
+    RowA is three words in x [50, 170]. The torn half T is one word in
+    x [175, 210] -- x-disjoint from RowA, so it folds in legitimately. RowB
+    is two words in x [175, 250]: it x-OVERLAPS T but not RowA, and it is a
+    strict minority against RowA's three words. Under the pre-GH-862 guard
+    RowB was compared only against RowA's own three words, found disjoint,
+    and unioned -- collapsing two numeric rows into one band through T.
+
+    Three emission orders are exercised because the unions accumulate while
+    the loop iterates: a guard that only inspects the destination's original
+    words refuses whichever fold happens to come SECOND, which means the
+    same page collapses either RowB or the tear depending on word order.
+    Order must not decide which rows survive, so the partition has to come
+    out the same however the extractor happened to emit the words.
+    """
+    from socr.tables.binding import _assign_bands
+
+    row_a = [
+        (50, 100, 90, 112, "RowA", 0, 0, 0),
+        (95, 100, 130, 112, "1.0", 0, 0, 1),
+        (135, 100, 170, 112, "2.0", 0, 0, 2),
+    ]
+    torn_half = [(175, 101, 210, 113, "3.0", 0, 0, 3)]
+    row_b = [
+        (175, 108, 210, 120, "4.0", 0, 0, 4),
+        (215, 108, 250, 120, "5.0", 0, 0, 5),
+    ]
+    if emission == "tear-first":
+        words = row_a + torn_half + row_b
+    elif emission == "row-first":
+        words = row_a + row_b + torn_half
+    else:
+        # Extraction order is not guaranteed to be either of the above;
+        # sorting by x mixes the three groups together.
+        words = sorted(row_a + torn_half + row_b, key=lambda w: w[0])
+
+    centers, y_to_band = _assign_bands(words)
+
+    # RowA and RowB are different printed rows and must stay apart ...
+    assert y_to_band[100] != y_to_band[108]
+    # ... while the torn half stays with the line it was torn from.
+    assert y_to_band[101] == y_to_band[100]
+    assert len(centers) == 2
+
+
+def test_gh862_x_disjoint_unequal_stacked_rows_do_not_merge():
+    """GH-862 (2): two stacked rows that happen NOT to overlap in x.
+
+    The GH-600 guard rested on "two stacked table rows each have their own
+    label lane and value lane and so overlap in x". That is an observation
+    about the corpus, not an invariant: a row whose only content sits on the
+    left and a row whose only content sits on the right are stacked rows
+    that are x-disjoint. With shared line identity, a y-overlap and a word
+    count of 3 against 2, every other guard passes and the two rows merge --
+    a row collapse with no tear anywhere in the fixture.
+
+    What refuses it is the band keys being 8 apart. ``round(y0)`` can only
+    tear one printed line into ADJACENT integer keys, so a wider gap is two
+    lines by construction.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 112, "RowA", 0, 0, 0),
+        (95, 100, 130, 112, "1.0", 0, 0, 1),
+        (135, 100, 170, 112, "2.0", 0, 0, 2),
+        (175, 108, 210, 120, "3.0", 0, 0, 3),
+        (215, 108, 250, 120, "4.0", 0, 0, 4),
+    ]
+    centers, y_to_band = _assign_bands(words)
+    assert len(centers) == 2
+    assert y_to_band[100] != y_to_band[108]
+
+
+def test_gh862_equal_size_single_word_groups_x_disjoint_do_not_merge():
+    """GH-862 soft: pin the word-count majority rule on its own.
+
+    ``test_gh600_equal_size_groups_sharing_line_identity_do_not_merge`` uses
+    a fixture whose groups x-OVERLAP, so the x-guard alone keeps them apart
+    and the majority rule is never the thing being tested. Here the two
+    groups are one word each and x-DISJOINT -- every other guard passes, and
+    only "fold into a STRICTLY larger group" refuses the merge.
+
+    Refusing is the intended behaviour even though a two-word line torn in
+    half looks exactly like this: with neither side in the majority there is
+    no evidence which group is the line and which is the fragment, and a
+    wrong merge outranks a missed heal in this corpus.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 112, "Label", 0, 0, 0),
+        (175, 108, 210, 120, "1.0", 0, 0, 1),
+    ]
+    centers, y_to_band = _assign_bands(words)
+    assert len(centers) == 2
+    assert y_to_band[100] != y_to_band[108]

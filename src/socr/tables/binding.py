@@ -842,10 +842,17 @@ def _boxes_horizontally_overlap(left: tuple, right: tuple) -> bool:
     Strict, same convention as :func:`_boxes_vertically_overlap`. Used by
     the line-identity fold below to refuse merging two GROUPS whose words
     occupy the same x-range: a torn printed line's two halves are disjoint
-    in x by construction (one half ends where the other begins), while two
-    stacked table rows sharing spurious line-identity metadata each have
-    their own label lane and value lane and so overlap in x. No tolerance
-    or threshold — the x-ranges themselves are the evidence.
+    in x (one half ends where the other begins), while two stacked table
+    rows sharing spurious line-identity metadata typically each have their
+    own label lane and value lane and so overlap in x. No tolerance or
+    threshold — the x-ranges themselves are the evidence.
+
+    This is necessary but NOT sufficient, and GH-600 overstated it as
+    holding "by construction". Two stacked rows can be x-disjoint — one row
+    carrying content only on the left, the next only on the right — and
+    such a pair passes this check while being a row collapse. What refuses
+    that shape is the single-word restriction documented in
+    :func:`_assign_bands` (GH-862), not this function.
     """
     return min(left[2], right[2]) > max(left[0], right[0])
 
@@ -902,8 +909,20 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     ``1t`` with an on-line ``∗``, so the line-identity destination set has
     more than one member and the fold abstains rather than guess.
 
+    A group is folded only when it is a SINGLE word (GH-862). Two or more
+    words already form their own horizontal run, and a horizontal run of
+    words at a shared top IS what a table row is; re-attaching one run to
+    another is a row collapse, not the repair of a torn line. This is a
+    categorical distinction — fragment versus run — not a tuned size. It is
+    what refuses the two shapes GH-600's x-guard let through: a third group
+    bridging two rows that the x-guard refuses pairwise, and two stacked
+    rows that happen to be x-disjoint because one carries content only on
+    the left and the next only on the right. The cost is that a line torn
+    into two multi-word halves is left torn; in this corpus a wrong merge
+    outranks a missed heal.
+
     Measured residual (GH-600 corpus scan, table-region words only): this
-    fold resolves the large majority of torn printed lines found; the
+    fold resolves part of the torn printed lines found; the
     residual is concentrated in rotated text (a word run where consecutive
     words share x0 and vary in y0 instead of the reverse) -- there the "same
     printed line" words do not vertically overlap by construction, so this
@@ -944,6 +963,12 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
             parent[root_a] = root_b
 
     for y_key, row_words in rows_by_y.items():
+        # GH-862: only a SINGLE displaced word may be re-attached. Two or
+        # more words already form their own horizontal run, which is what a
+        # table row IS; re-attaching a run to another run is a row collapse,
+        # not the repair of a torn line.
+        if len(row_words) > 1:
+            continue
         candidates = set()
         for word in row_words:
             for other_key in line_to_groups.get((word[5], word[6]), ()):
