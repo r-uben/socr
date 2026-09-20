@@ -63,9 +63,11 @@ unkillable:
 
 ## Deferred: `_escalate_table_page`'s deadline mismatch — explicitly out of scope
 
-Filed by the team lead as **#843** ("`_escalate_table_page`'s 120s deadline
-i[s...]"). Not touched here, per instruction. What I found, and how I found
-it (stated plainly — this was **read from source, not reproduced live**):
+Filed by the team lead as **#843** ("`_escalate_table_page`'s 120s deadline is
+shorter than the subprocess bound it abandons the thread to, so the reported
+timeout understates the real one"). Not touched here, per instruction. What I
+found, and how I found it (stated plainly — this was **read from source, not
+reproduced live**):
 
 - `_escalate_table_page`'s own `ThreadPoolExecutor` wrapper waits up to
   `self.config.escalation_timeout_sec` (`core/config.py:321`, default
