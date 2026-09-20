@@ -17,8 +17,11 @@ load-rejected the empty string with the whole suite still green.
 
 ## What
 
-Two controls in `TestGH834NonStringQwenModelIsRejectedAtLoad`, both pinning a difference
-rather than an outcome:
+Two controls in `TestGH834NonStringQwenModelIsRejectedAtLoad`. Only the second pins a
+difference; the first pins absolute values, which is correct here because the loader is
+hermetic -- no provider, no network, no engine -- so the outcome cannot legitimately differ
+between this machine and CI. The repo's "pin a difference" rule exists for
+provider-dependent machinery, and this is not that:
 
 - `test_an_empty_model_name_still_loads_and_still_pins` — `""` loads and
   `qwen_model_pinned` is `True`.
