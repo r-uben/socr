@@ -151,3 +151,161 @@ policy call, not a mechanical one — this log stops at the measurement.
   defect rate.
 - No claim about which grid builder is responsible.
 - No claim about `_run_column_lanes` or any other mechanism — untested here.
+
+## 2026-09-20 — GH-831-AUDIT: gating the 15 fires (independent re-measure + geometry + eyes-on)
+
+Independent audit, per `/tmp/ticket_831audit.md`, run against the SAME worktree/branch
+(`fix/831-measure`, `/tmp/wt-831m`) and the SAME corpus list (`/tmp/gh64_pdfs.txt`, 380
+PDFs, local-only, not committed). READ-ONLY: no `src/` change. New scripts (not
+committed, `/tmp`-only): `/tmp/probe_831_geometry.py`, reusing `/tmp/probe_831_lib.py`
+and `socr.tables.row_corroboration` helpers unchanged.
+
+Both scripts assert `os.path.realpath(socr.__file__).startswith("/private/tmp/wt-831m")`
+before doing anything else.
+
+### Step 1 — funnel reconfirmed
+
+```
+PYTHONPATH=/tmp/wt-831m/src ~/venvs/socr/bin/python /tmp/probe_831_geometry.py \
+    /tmp/gh64_pdfs.txt > /tmp/probe_831_geometry_out.json 2> /tmp/probe_831_geometry_err.log
+```
+
+| Step | Count |
+| --- | --- |
+| Documents listed / opened / failed | 380 / 380 / 0 |
+| Pages total | 4,419 |
+| Pages born-digital | 4,121 |
+| (a) pages with >= 1 native table region | 2,756 |
+| (b) pages the inverted check would newly demote | 15 |
+| (c) pages the existing presence oracle already fires on | 99 |
+| (d) overlap of (b) and (c) | 1 |
+
+Exact match to the prior measurement's `(380, 4419, 4121, 2756, 15, 99, 1)`. No
+discrepancy to report. (Run took 2,356s; stderr contained real corpus numeric values
+from the pipeline's own `reconstruct_table_regions`/verifier debug logs — same leak
+class the prior log flagged — and was deleted immediately after this section was
+written; nothing from it appears here.)
+
+### Step 2 — the mechanical separator
+
+Three x-extent comparisons were computed per evicted token, all derived from geometry
+`row_corroboration.py` already produces (`cluster_band_words`, the matched row's own
+span, the table region rect) — no new margin/tolerance/constant:
+
+1. **`region_inside`** — evicted token vs. the table region's own rect (the `(rect,
+   markdown)` bbox `extract_structured` ships). **159/159 (100%) INSIDE.** This is
+   tautological by construction: `words_in_region(words, region)` is what selects the
+   words a band can even be built from, so every evicted token was already inside this
+   exact rect before the check ever ran. Reported for completeness; not a usable
+   separator, and the ticket's Step 2 instruction to derive an x-extent "from the table
+   block geometry the pipeline itself already has" resolves to this rect — which is why
+   it does not discriminate.
+2. **`row_span_inside`** — evicted token vs. the union bbox of the SAME row's own bound
+   native words (the span `match_rows_monotonic` actually matched). **0/159 (0%)
+   INSIDE** — every evicted token sits at the extreme left or right of its own row's
+   captured span, never interleaved between two of the row's own matched tokens, across
+   all 159. Not a logical guarantee (an interleaved eviction would score INSIDE by this
+   metric) — an empirical property of this corpus, not the check.
+3. **`table_span_inside`** — evicted token vs. the union bbox of EVERY row's matched
+   tokens across the WHOLE table block (not just the evicting row) — the columns the
+   candidate genuinely populates elsewhere in the same table. This is the one
+   informative separator: **126/159 (79.2%) INSIDE, 33/159 (20.8%) OUTSIDE.**
+   Per-page: 7 of 15 pages are unanimously INSIDE, 3 of 15 are unanimously OUTSIDE, 5 of
+   15 are mixed.
+
+Full per-page counts (basenames and counts only):
+
+| Basename : page | evicted | table_span INSIDE | OUTSIDE |
+| --- | --- | --- | --- |
+| ecb-meetings-2021-economic_bulletin-p127-129.pdf : p1 | 13 | 13 | 0 |
+| ecb-meetings-2021-economic_bulletin-p127-129.pdf : p2 | 13 | 13 | 0 |
+| ecb-meetings-2021-economic_bulletin-p127-129.pdf : p3 | 12 | 12 | 0 |
+| ecb-reports-2003-report-p80-82.pdf : p1 | 3 | 0 | 3 |
+| ecb-reports-2003-report-p80-82.pdf : p2 | 6 | 6 | 0 |
+| ecb-reports-2003-report-p80-82.pdf : p3 | 6 | 2 | 4 |
+| mpr-2008-07.pdf : p46 | 32 | 32 | 0 |
+| mpr-2019-07.pdf : p52 | 13 | 12 | 1 |
+| mpr-2020-06.pdf : p60 | 10 | 8 | 2 |
+| mpr-2021-02.pdf : p18 | 8 | 0 | 8 |
+| mpr-2021-02.pdf : p55 | 15 | 10 | 5 |
+| mpr-2022-06.pdf : p69 | 15 | 15 | 0 |
+| doc01.pdf : p1 | 3 | 0 | 3 |
+| doc01.pdf : p2 | 9 | 2 | 7 |
+| doc02.pdf : p3 | 1 | 1 | 0 |
+
+### Step 3 — eyes on
+
+Rendered (pdftoppm, 200dpi) and visually inspected 13 of the 15 pages: all 3
+unanimous-OUTSIDE pages, all 5 mixed ("ambiguous") pages, and 5 of the 7 unanimous-INSIDE
+pages (exceeding the >= 3 minimum). The 2 not independently rendered
+(`ecb-meetings-...-p127-129.pdf:p3`, `ecb-reports-...-p80-82.pdf:p2`) are continuation
+pages of the same multi-page table already inspected on that document's other pages,
+with the same evicted-token profile — verdict below is by structural analogy, flagged
+as such, not independent inspection.
+
+**Per-page verdict** (does at least one evicted token genuinely belong to the native
+row its band was bound to?):
+
+- 12 pages: **genuine** — real statistical tables (ECB economic-bulletin balance-sheet
+  tables, Fed MPR SEP median/central-tendency/range tables, two OLS-regression tables)
+  where the evicted tokens are either (i) a period/year row-group label dropped from its
+  own data row (e.g. "2020", "2021 Q1" printed beside the row's numbers but absent from
+  the candidate's row-stub cell), or (ii) an actual numeric cell value dropped from a row
+  that otherwise matched (e.g. a SEP "2019"/"2020" Median column, or a regression
+  coefficient in a trailing column). Both are real content loss under the check's stated
+  invariant.
+- 2 pages (`mpr-2008-07.pdf:p46`, `mpr-2022-06.pdf:p69`): **genuine by the check's own
+  strict definition, but NOT a table-cell drop** — both pages are Figure panels (a
+  histogram of SEP participant projections and a diffusion-index line chart), and the
+  "table" the pipeline's rowizer detected is the chart's OWN x-axis tick-label text
+  (percent-range bins / year ticks) misread as tabular rows. The evicted tokens are
+  printed axis labels absent from the candidate's misparsed "row" — a real absence, but
+  a different defect (chart-as-table misclassification), not the "dropped SEP median
+  value" class the other 12 pages show. **This is the one finding that must be surfaced
+  to the two review seats before shipping**: 2 of the 15 fixture pages are chart pages,
+  not statistical tables.
+- 1 page (`mpr-2021-02.pdf:p18`): genuine by the check's strict definition, lower
+  severity — all 8 evicted tokens are ordinal row-numbering markers ("1.", "2." ...
+  "12."), a decoration format `_SPEC_NUMBER_RE` (which only matches the parenthesised
+  `(1)` form) does not exclude. They are real printed characters on that row's own
+  baseline, genuinely absent from the candidate's row text, so they satisfy the
+  invariant — but they are structural numbering, not a data value.
+
+No page's fire was spurious: every one of the 15 carries at least one evicted token
+that is a real printed character on the row's own native line, absent from the
+candidate text bound to that line. One individual token (not a whole page) is itself a
+likely false read: `ecb-reports-2003-report-p80-82.pdf:p1` has a "5)" footnote-marker
+glyph (missing its opening paren, so it isn't excluded by `_SPEC_NUMBER_RE`) counted
+among its 3 evicted tokens — harmless, since the page's other 2 evictions (dropped
+period labels) are genuine.
+
+### Correcting the OUTSIDE-as-false-positive prior
+
+The ticket's Step 2 framed OUTSIDE as "strong prior for a false positive." Measured
+against `table_span_inside`, that prior does not hold on this corpus: all 3
+unanimous-OUTSIDE pages are genuine (dropped row-group date labels on
+`ecb-reports-...:p1`, dropped row-numbering ordinals on `mpr-2021-02.pdf:p18`, and a
+dropped row-distinguishing leading digit — "1 YR" vs "2 YR" — on `doc01.pdf:p1`).
+OUTSIDE-by-`table_span` more often means "a column position NO row in this table ever
+successfully captures" (a systematic drop, still real) than "an unrelated marginal note
+sharing a baseline." The distinction the ticket wanted (real cell vs. marginal noise)
+is not cleanly recoverable from x-extent geometry alone here; it required the visual
+read every time.
+
+### Overall
+
+**PASS.** Every one of the 15 pages carries at least one token genuinely evicted from
+its bound row, confirmed by direct visual inspection for 13/15 and structural analogy
+(same table, same document) for the remaining 2. Ship-relevant caveats for the review
+seats, not blockers:
+
+1. `region_inside` is tautological — do not cite it as evidence either way.
+2. 2 of the 15 fixture pages (`mpr-2008-07.pdf:p46`, `mpr-2022-06.pdf:p69`) are chart
+   pages, not statistical tables; keep them as fixtures for "chart axis mistaken for a
+   table row" specifically, not as generic "dropped table cell" exemplars.
+3. `mpr-2021-02.pdf:p18`'s fire is ordinal-marker decoration, not a data value — lowest
+   severity of the 15.
+4. The false-positive rate is still not rigorously bounded (the corpus supplied zero
+   spurious fires among 159 evicted tokens across 15 pages, but 15 pages is a small
+   sample and the original 3 synthetic controls remain uninformative per the prior log's
+   own caveat) — this audit narrows but does not close that question either.
