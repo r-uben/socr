@@ -47,6 +47,7 @@ fitz = pytest.importorskip("fitz", reason="PyMuPDF not installed")
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.providers import PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import PageOutput, PageStatus  # noqa: E402
+from socr.pipeline import agentic as agentic_module  # noqa: E402
 from socr.pipeline.agentic import AcceptDecision, DEFAULT_PROVIDER_TIMEOUTS  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
@@ -198,19 +199,22 @@ def _deadlines_reaching_the_engine(
 ) -> list[float | None]:
     """Run the real agentic loop once and report what the engine seam was handed.
 
-    ``provider_timeout=None`` leaves ``agentic_provider_timeout`` unset, which is the
-    shipping default: ``_phase_agentic`` then falls back to
-    ``DEFAULT_PROVIDER_TIMEOUTS``.
+    ``provider_timeout=None`` runs against the real, unpatched
+    ``DEFAULT_PROVIDER_TIMEOUTS`` -- the shipping default (#840: there is no
+    override arm on ``PipelineConfig``, so this is the only value ``_phase_agentic``
+    can ever use). The other legs patch the calibrated-default table itself, scoped
+    to this one call, to observe that the value still tracks through to the engine.
     """
     spy = _SpyEngine()
     pipe = _hermetic_pipeline(spy, monkeypatch)
-    if provider_timeout is not None:
-        # Not a declared ``PipelineConfig`` field -- the orchestrator reads it with
-        # ``getattr(self.config, "agentic_provider_timeout", None)``, so this is the
-        # only way to exercise the override arm (see the module note in the test).
-        pipe.config.agentic_provider_timeout = provider_timeout
 
-    pipe.process(_fixture_pdf(tmp_path, leg), output_dir=tmp_path / f"out-{leg}")
+    with monkeypatch.context() as m:
+        if provider_timeout is not None:
+            # ``_phase_agentic`` does ``from socr.pipeline.agentic import
+            # DEFAULT_PROVIDER_TIMEOUTS`` fresh on every call, so patching the
+            # module attribute is visible to it without touching PipelineConfig.
+            m.setattr(agentic_module, "DEFAULT_PROVIDER_TIMEOUTS", provider_timeout)
+        pipe.process(_fixture_pdf(tmp_path, leg), output_dir=tmp_path / f"out-{leg}")
 
     assert spy.timeouts, f"leg {leg}: the agentic loop never reached the engine"
     return spy.timeouts
@@ -228,8 +232,12 @@ def test_the_configured_soft_deadline_tracks_through_to_the_engine(
     """
     _setup_sentinels()
 
-    seen_a = _deadlines_reaching_the_engine(tmp_path, monkeypatch, "a", {_ENGINE: _SOFT_DEADLINE_A})
-    seen_b = _deadlines_reaching_the_engine(tmp_path, monkeypatch, "b", {_ENGINE: _SOFT_DEADLINE_B})
+    seen_a = _deadlines_reaching_the_engine(
+        tmp_path, monkeypatch, "a", {**DEFAULT_PROVIDER_TIMEOUTS, _ENGINE: _SOFT_DEADLINE_A}
+    )
+    seen_b = _deadlines_reaching_the_engine(
+        tmp_path, monkeypatch, "b", {**DEFAULT_PROVIDER_TIMEOUTS, _ENGINE: _SOFT_DEADLINE_B}
+    )
     seen_default = _deadlines_reaching_the_engine(tmp_path, monkeypatch, "default", None)
 
     # The DIFFERENCE, stated without pinning any absolute outcome of the run: change
@@ -266,8 +274,6 @@ def test_the_agentic_loop_passes_the_deadline_into_the_engine_runner(
         seen: list[Any] = []
         spy = _SpyEngine()
         pipe = _hermetic_pipeline(spy, monkeypatch)
-        if provider_timeout is not None:
-            pipe.config.agentic_provider_timeout = provider_timeout
 
         def _spy_runner(state, nums, nat, eng, phase, profile=None, **kwargs):
             seen.append(kwargs.get("subprocess_timeout_sec"))
@@ -277,12 +283,17 @@ def test_the_agentic_loop_passes_the_deadline_into_the_engine_runner(
             ]
 
         pipe._run_engine_on_pages = _spy_runner
-        pipe.process(_fixture_pdf(tmp_path, leg), output_dir=tmp_path / f"out-{leg}")
+        with monkeypatch.context() as m:
+            if provider_timeout is not None:
+                # Same lever as the end-to-end test above: patch the calibrated-
+                # default table ``_phase_agentic`` imports fresh, scoped to this call.
+                m.setattr(agentic_module, "DEFAULT_PROVIDER_TIMEOUTS", provider_timeout)
+            pipe.process(_fixture_pdf(tmp_path, leg), output_dir=tmp_path / f"out-{leg}")
         assert seen, f"leg {leg}: the agentic loop never called the engine runner"
         return seen
 
-    seen_a = _observe("runner-a", {_ENGINE: _SOFT_DEADLINE_A})
-    seen_b = _observe("runner-b", {_ENGINE: _SOFT_DEADLINE_B})
+    seen_a = _observe("runner-a", {**DEFAULT_PROVIDER_TIMEOUTS, _ENGINE: _SOFT_DEADLINE_A})
+    seen_b = _observe("runner-b", {**DEFAULT_PROVIDER_TIMEOUTS, _ENGINE: _SOFT_DEADLINE_B})
     seen_default = _observe("runner-default", None)
 
     observed = {seen_a[0], seen_b[0], seen_default[0]}
