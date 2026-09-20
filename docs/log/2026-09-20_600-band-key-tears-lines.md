@@ -265,8 +265,34 @@ down from the pre-guard commit's `139`). **The true, guard-corrected recovery on
 numeric-both-sides content-loss metric is 5 lines corpus-wide, not 139** — coincidentally the same
 order of magnitude as pure `cluster_band_words` delegation measured and rejected in Addendum 1 (5
 of 2,958 there too). Reported to team-lead as-is rather than reframed: the fold's residual
-genuine value on this specific metric is small; its larger, real contribution is eliminating the
-1,023 corpus-wide row-corrupting merges the pre-guard version was silently committing.
+genuine value on this specific metric is small.
+
+> **Correction (GH-862, 2026-09-20).** Two claims in this section were overstated and are
+> withdrawn.
+>
+> **1. "1,023 corpus-wide row-corrupting merges" is not what was measured.** The script
+> counts folds the guard REFUSES. Nothing in it establishes that a refused fold would have
+> been a wrong merge — a guard that refused everything would score 1,633. `62.65%` is a
+> refusal RATE, not a precision figure, and it must not be cited as a safety yield.
+> Separating the two needs a labelled sample that has not been taken. Two mechanical
+> measurements would bracket it without any labelling: partition the refusals by whether the
+> minimum pairwise `|y0|` gap between the two groups is below `1.0` (`round()` cannot tear one
+> printed line across a wider gap, so the `>= 1` bucket upper-bounds the real merges and the
+> `< 1` bucket upper-bounds the missed heals); and re-run with the guard disabled looking for
+> a merged band whose numeric multiset equals the union of two DISTINCT candidate rows'
+> multisets, which is a wrong merge by construction. Neither has been run.
+>
+> **2. The two figure sets have different UNITS and were presented as if comparable.**
+> `1,633` and `1,023` count FOLDS (group-to-group merge operations). `974`, `739`, `139` and
+> `5` count LINES. `1,633 − 1,023 = 610` surviving folds against `739` healed lines only
+> reconciles if a single fold can resolve more than one torn line at once, which is possible
+> when the folded group carries words from several line identities — but that was never
+> checked, and neither script reports it. Until it is, do not subtract one set from the other,
+> and do not read "5 numeric heals" as being on the same denominator as "1,023 refusals".
+>
+> Found by adversarial review during GH-862. The GH-600 guard is still correct — GH-862 is
+> independent evidence that this code needed guarding — but the argument used to justify
+> shipping it was weaker than stated here.
 
 ## What changed (this addendum)
 
