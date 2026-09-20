@@ -67,6 +67,16 @@ fixed: adding the field is a source change and this ticket is test-only.
 ## Tests
 
 - `pytest tests/test_gh797_agentic_soft_deadline_wiring.py -q` → 3 passed
-- `+ tests/test_gh172_cli_subprocess_timeout.py` → 5 passed
+- `pytest tests/test_gh172_cli_subprocess_timeout.py -q` → 5 passed
 - 10-file orchestrator/agentic selection → 156 passed
-- `uvx ruff@0.16.0 format --check .` → 749 files already formatted
+- `uvx ruff@0.16.0 format --check .` → 750 files already formatted
+
+Independently re-run by the orchestrator before the push, rather than relayed:
+
+- Both mutants reproduced in `/tmp/mut797c` (a copy outside the repo, with a source canary
+  asserting `socr.__file__` resolves inside that copy and an uncapped `count(anchor) == 1`
+  assertion before each edit). Mutant A fails tests 1 and 2; mutant B fails tests 1 and 3;
+  the canary stays green in both.
+- Ten-file agentic/timeout selection → 80 passed, 1 xfailed.
+- Whole suite → 5719 passed, 4 xfailed.
+- `uvx ruff@0.16.0 format --check .` → 750 files already formatted.
