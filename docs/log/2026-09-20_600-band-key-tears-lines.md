@@ -133,6 +133,91 @@ tests. With the fix:
 - Full suite (`tests/`): **5,723 passed, 4 xfailed**, 0 failed.
 - `uvx ruff@0.16.0 format --check .`: `751 files already formatted` — clean.
 
+## Addendum — delegation to `cluster_band_words` investigated and rejected (MEASURED)
+
+After the above was committed, a course-correction narrowed the "no distance tolerance" ban:
+it was aimed at inventing a NEW magic number, not at reusing `row_corroboration.cluster_band_words`
+— an already-shipped, GH-600-aware, data-derived (median word height × the named
+`_ROW_BAND_TOLERANCE_FRACTION`) y-centre clusterer, factored out in #652. The preferred shape, if
+it could be made to work, was `_assign_bands` delegating its row partition to it instead of
+`round(word[1])`. This was investigated and MEASURED, not assumed:
+
+**Re-measured Step 0 in this session** (`/tmp/zz600_fold_redundancy.py`, a single paired pass over
+the same 380-doc corpus, computing all three arms from the same in-region word list per printed
+line — not independent marginal totals): `70,278` in-region multi-word printed lines,
+`5,376` torn under naive `round(y0)` (`2,958` numeric-both-sides). This total-torn count differs
+from the number recorded above (`5,374`/`4,740`) — table-region membership shifted slightly as
+`origin/main` moved from `205eeb4` to `e207a8a` during this ticket (unrelated merges landed) — but
+the numeric-both-sides figure, the ticket's actual content-loss concern, is IDENTICAL (`2,958`
+both times), so the acceptance bar and the measured gain below are unaffected.
+
+**No import-cycle risk.** `row_corroboration.py` imports only from `native_verifier`; nothing in
+`socr/tables/` imports `binding` from `row_corroboration`, so `binding.py` importing
+`cluster_band_words` would be safe.
+
+**Delegation tried three ways, all measured against the same corpus:**
+
+1. **Pure `cluster_band_words` in place of `round(y0)`, no fold at all.** Recovers almost none of
+   the ticket's target defect: `4,555` torn (`2,953` numeric-both-sides) — a reduction of only
+   `5` numeric-both-sides lines out of `2,958` (0.17%), versus `139` (4.7%) from the committed
+   fold. The GH-600 half-point tear is not, in practice, what this clusterer's tolerance mostly
+   catches.
+
+2. **`cluster_band_words`'s bands used as the base partition, with the existing metadata+bbox+
+   word-count-majority fold layered on top** (same guards as the committed fix, operating on
+   cluster indices instead of `round(y0)` keys): `2,327` torn (`947` numeric-both-sides) — looks
+   like the best number of any arm measured, but is an artifact, not a fix (see below).
+
+3. **Whether `cluster_band_words` ever chains adjacent, genuinely distinct printed rows into one
+   band** (`/tmp/zz600_chain_check.py`): measured directly on the same corpus by checking, per
+   returned band, whether it contains words from more than one `(block_no, line_no)` identity with
+   NO vertical bbox overlap between them — i.e., the band spans a real y-gap. **211 such events
+   across 4,630 in-region table boxes.** Inspected six concrete instances
+   (`/tmp/zz600_chain_inspect.py`); all are genuine content collapse, not benign:
+   `mpr-2007-02.pdf` p7 merges a 6-row table legend/header block ("MEMO" / "Indicator" / "2006
+   actual" / "Central" / "Central" / "Range", `y0` 634.6→645.6, each its own printed row) into ONE
+   band; `mpr-2007-07.pdf` p29 merges three ordinary PROSE paragraph lines the located table's
+   bbox happens to catch at its edge into one band. This is exactly the failure mode
+   `_assign_bands`'s docstring says `round(y0)` cannot produce ("it cannot make a run of nearby
+   printed rows collapse into one band") — `cluster_band_words`'s tolerance is derived from the
+   REGION's overall median word height, which is a single constant across a region that can mix
+   dense multi-row headers/legends (narrow true line pitch) with ordinary body-pitch table rows;
+   on the dense sub-area the tolerance exceeds the true pitch and multiple distinct rows fall
+   inside one clustering window.
+
+   Arm 2's apparently-best "torn" number is this same defect showing up as a false improvement:
+   once `cluster_band_words` has already merged several distinct printed lines into one
+   mega-band, no single line's own words can ever land in TWO different bands, so the "torn"
+   metric trivially collapses — not because the rounding tear is healed, but because the
+   partition has stopped distinguishing rows at all in the affected region. A metric that
+   improves by discarding the row structure it is meant to protect is not a fix.
+
+**Conclusion: delegation rejected, committed fix (`cd0caf1`) kept unchanged.** `round(word[1])`
+stays the base partition specifically because it is provably incapable of ever merging two
+distinct printed rows (a rounded-integer bucket collision requires two rows within 1pt of each
+other's y0, i.e., visually the same line); `cluster_band_words`'s median-height tolerance carries
+no such guarantee and is measured, not assumed, to violate it on real corpus pages. This is not a
+rejection of "reuse what exists" — the committed fold already reuses only pre-existing evidence
+(`_boxes_vertically_overlap`, PyMuPDF's own `(block_no, line_no)`, a word count) and introduces no
+new constant; `cluster_band_words` was evaluated in good faith as the preferred shape and
+measured unsafe for this specific call site's invariant, which a different call site
+(`row_corroboration`'s own row-corroboration matching) can tolerate but `_assign_bands` cannot.
+
+**The pre-existing metadata/bbox/word-count fold is therefore NOT redundant — it is the only
+arm measured to recover the numeric-both-sides defect without introducing new content loss.**
+It does not double-count with anything, since no clusterer delegation is in the shipped code to
+double-count against.
+
+All corpus-wide numbers in this addendum are freshly measured in this session
+(`/tmp/zz600_fold_redundancy.py`, `/tmp/zz600_chain_check.py`, `/tmp/zz600_chain_inspect.py`,
+`/tmp/zz600_combined.py`, `/tmp/zz600_adversarial.py`, `/tmp/zz600_doc04_detail.py`), all scratch,
+deleted after use — none are quoted from memory. The 29-dash (`mpr-2011-03.pdf` p50) and doc04
+rotated-PCs adversarial fixtures were also re-run directly against `cluster_band_words` for
+completeness: both happen to band identically to the committed fix on those two fixtures (58/58
+bands and 13/13 bands respectively, word-for-word identical content on doc04) — `cluster_band_words`
+is not unsafe on every input, only on the header/legend-density pattern above, which is why the
+211-event corpus scan (not just these two known fixtures) is the evidence that matters.
+
 ## Explicitly inferred, not measured
 
 - That real PyMuPDF extraction "virtually always" gives distinct visual lines distinct
