@@ -84,6 +84,7 @@ from socr.tables.native_verifier import (
     is_numeric_token,
     strip_presentation,
 )
+from socr.tables.reconstruct import _detect_column_gutter
 
 #: A spec-number decoration token, e.g. "(1)", "(12)" — numeric by
 #: ``is_numeric_token`` but header/footnote decoration, not a data value.
@@ -283,7 +284,47 @@ def cluster_band_words(words: list) -> list[list[tuple]]:
     band is made of rather than only its numeric tokens. ``baseline_bands``
     calls this and then reduces each band to its tokens, so the two can never
     disagree about where a printed line begins.
+
+    #700: bands were clustered by y across the FULL page width, so on a
+    two-column page a left-column prose line and a right-column table row --
+    same y, disjoint x -- landed in one band. That band's numeric tokens made
+    the whole thing table-shaped, so the left column's prose was withheld
+    behind the right column's marker along with the table (content loss, not
+    a leak -- the shared band still carried a printed numeral and was
+    correctly withheld). Column geometry is detected first with
+    ``_detect_column_gutter`` (GH-152's own detector, reused rather than a
+    second one invented for this call site: same
+    ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` yardstick, same "a spanning word
+    rules it out" fail-closed behaviour). When a single gutter is found, each
+    side is clustered independently and returned left-column bands first,
+    top to bottom, then right-column bands, top to bottom -- the same
+    left-band-then-right-band convention ``reconstruct.py``'s own two-table
+    split already returns (see that function's docstring: true left-to-right
+    interleaving is a known, separately-scoped remainder there too). No
+    gutter, or any doubt raised while detecting one, falls through to the
+    original single full-width clustering, unchanged.
     """
+    if not words:
+        return []
+    try:
+        gutter_x = _detect_column_gutter(words)
+    except Exception:  # pragma: no cover - defensive, mirrors reconstruct.py's own guard
+        gutter_x = None
+    if gutter_x is not None:
+        left_words = [w for w in words if w[2] <= gutter_x]
+        right_words = [w for w in words if w[0] >= gutter_x]
+        if left_words and right_words:
+            return _cluster_band_words_single_column(
+                left_words
+            ) + _cluster_band_words_single_column(right_words)
+    return _cluster_band_words_single_column(words)
+
+
+def _cluster_band_words_single_column(words: list) -> list[list[tuple]]:
+    """``cluster_band_words``' original full-width clustering, factored out
+    so #700's column split can call it once per side without recursing back
+    through the gutter detector (a column's own words never contain a second
+    gutter once split, but re-detecting would cost a pass for nothing)."""
     if not words:
         return []
     heights = [w[3] - w[1] for w in words if w[3] > w[1]]

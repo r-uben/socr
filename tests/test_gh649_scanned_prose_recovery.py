@@ -473,17 +473,18 @@ class TestNativeTableSyntaxNeverShipsAsProse:
 
 
 class TestTwoColumnPagesFailSafe:
-    """Bands are clustered by y across the full page width, so on a two-column
-    page a left-column prose line and a right-column table row share a band.
+    """#700: bands are now split by column before the prose/table partition
+    (``row_corroboration.cluster_band_words``, reusing GH-152's own
+    ``_detect_column_gutter``), so a left-column prose line and a
+    right-column table row on the same y no longer share one band.
 
-    Raised as an open question in review rather than a finding, and measured
-    here rather than argued: the failure is entirely in the safe direction. The
-    shared band carries the right column's digits, so it is withheld and
-    marked; no printed value reaches the page, and the witness treats the same
-    band as table-attributed so it cannot vouch for a fabrication either. What
-    it costs is the left column's prose, withheld behind the marker instead of
-    shipped. Column-aware banding would recover that text; nothing here leaks
-    without it, which is why this is a limitation and not a hole.
+    Filed originally as a measured limitation (#652 round; every band at or
+    above the numeric floor was withheld, and a shared band's own left-column
+    prose went behind the marker with it -- safe direction, but lost content).
+    #700 closes it: the left column ships its own prose, and the right
+    column's numeric bands are withheld behind their own marker, unchanged
+    from before. No printed value has ever reached the page in this fixture;
+    that guarantee is re-pinned below, unchanged.
     """
 
     _LEFT = [
@@ -517,7 +518,19 @@ class TestTwoColumnPagesFailSafe:
             assert value not in recovered, value
         assert MARKER in recovered
 
-    def test_a_shared_band_cannot_vouch_for_a_fabrication(self) -> None:
+    def test_the_left_columns_prose_ships_instead_of_hiding_behind_the_marker(self) -> None:
+        """#700's own difference: before the fix, every line of ``_LEFT`` was
+        withheld along with ``_RIGHT``'s digits because all six lines shared
+        one full-width band per row. Now the columns are split before
+        banding, so the left column's own three lines -- none of them
+        numeric -- ship, and exactly one marker stands in for the right
+        column's three withheld rows."""
+        recovered = _ship(self._page()).text
+        for line in self._LEFT:
+            assert line in recovered, line
+        assert recovered.count(MARKER) == 1
+
+    def test_a_fabricated_attempt_cannot_vouch_for_the_withheld_column(self) -> None:
         """Re-scoped in #652 round 10 to what ships. The corroboration guard
         this used to call is gone -- no attempt's prose leaves this branch at
         all -- so the pin is on the bytes, where it was always the point."""
