@@ -45,7 +45,11 @@ bounded time on its own.
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -183,14 +187,48 @@ def test_legacy_thread_wedges_new_reader_raises_typed_timeout(trickle_server, cr
     # _CropTimeoutError on ANY timeout regardless of this fix, so it cannot
     # discriminate old from new; see the module docstring). This now crosses
     # run_killable, which kills the process actually making the call. ---
-    reader = OllamaTableReader(model="m", host=trickle_server.url, timeout=_READER_TIMEOUT_SEC)
+    # Run as a CHILD process with its own hard `subprocess.run(timeout=...)`
+    # ceiling -- matching the shape `test_gh172_killable_boundary.py` already
+    # uses for its expected-to-hang plain-httpx arm
+    # (`test_plain_httpx_trickle_defeat_measured_in_a_child`). If `read()`'s
+    # body is ever reverted to a direct in-process `httpx.post` (no
+    # `run_killable` boundary), calling it in-process here would wedge on the
+    # trickling peer forever: CI would hang instead of failing, which is the
+    # worst failure shape. The outer ceiling below turns that into a prompt
+    # test FAILURE (`subprocess.TimeoutExpired`) instead.
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([src_dir, env.get("PYTHONPATH", "")])
 
+    driver_src = textwrap.dedent(
+        f"""
+        import time
+        from socr.tables.extract import OllamaTableReader
+        reader = OllamaTableReader(
+            model="m", host={trickle_server.url!r}, timeout={_READER_TIMEOUT_SEC}
+        )
+        start = time.monotonic()
+        try:
+            reader.read({str(crop_image)!r})
+        except TimeoutError:
+            elapsed = time.monotonic() - start
+            raise SystemExit(0 if elapsed < {_READER_TIMEOUT_SEC} + {_KILLABLE_GRACE_SEC} else 1)
+        raise SystemExit(2)  # did not raise at all -- also a failure
+        """
+    )
     start = time.monotonic()
-    with pytest.raises(TimeoutError):
-        reader.read(crop_image)
+    result = subprocess.run(
+        [sys.executable, "-c", driver_src],
+        env=env,
+        capture_output=True,
+        # Outer safety net: the hard ceiling itself. `_KILLABLE_GRACE_SEC`
+        # already covers run_killable's own term/kill grace; the extra 5.0s
+        # is headroom for child interpreter startup on a loaded machine.
+        timeout=_READER_TIMEOUT_SEC + _KILLABLE_GRACE_SEC + 5.0,
+        text=True,
+    )
     elapsed = time.monotonic() - start
 
-    assert elapsed < _READER_TIMEOUT_SEC + _KILLABLE_GRACE_SEC, (
-        f"OllamaTableReader.read took {elapsed:.2f}s against a trickling peer; "
-        f"expected it bounded by ~{_READER_TIMEOUT_SEC}s + run_killable's own grace"
+    assert result.returncode == 0, (
+        f"child exited {result.returncode} after {elapsed:.2f}s, stderr={result.stderr[-2000:]}"
     )

@@ -5,6 +5,7 @@ Hermetic: mocks the HTTP layer; no vLLM/Ollama/GPU.
 
 from __future__ import annotations
 
+import base64
 from unittest.mock import MagicMock, patch
 
 from socr.engines.qwen import QwenEngine
@@ -106,3 +107,46 @@ class TestVllmTableReaderRead:
         resp.json = lambda: {"choices": []}
         with patch("socr.tables.extract.httpx.post", return_value=resp):
             assert _vllm_read_crop("http://h:8000/v1", "m", "EMPTY", "prompt", "aGk=", 120.0) == ""
+
+
+class TestVllmTableReaderReadWiring:
+    """GH-848: ``VllmTableReader.read``'s OWN body is otherwise unexercised --
+    the tests above call ``_vllm_read_crop`` directly, so a revert to an
+    in-process ``httpx.post``, a scrambled arg order, or a wrong ``CallSpec``
+    func string all stay green. Patches ``run_killable`` itself and pins the
+    ``CallSpec`` it is handed.
+    """
+
+    def test_read_wires_call_spec_to_vllm_read_crop(self, tmp_path, monkeypatch):
+        png_bytes = b"\x89PNG\r\n\x1a\nfake-but-distinct-bytes-848"
+        crop = tmp_path / "crop.png"
+        crop.write_bytes(png_bytes)
+
+        captured = {}
+
+        def fake_run_killable(spec, timeout):
+            captured["spec"] = spec
+            captured["timeout"] = timeout
+            return "| stub |"
+
+        monkeypatch.setattr("socr.tables.extract.run_killable", fake_run_killable)
+
+        reader = VllmTableReader(
+            model="Qwen/Qwen3-VL-30B-A3B-Instruct",
+            base_url="http://h:8000/v1",
+            timeout=45.0,
+            api_key="sk-test",
+        )
+        out = reader.read(crop)
+
+        assert out == "| stub |"
+        spec = captured["spec"]
+        assert spec.func == "socr.tables.extract:_vllm_read_crop"
+        assert len(spec.args) == 6
+        base_url, model, api_key, prompt, image_b64, timeout = spec.args
+        assert base_url == "http://h:8000/v1"
+        assert model == "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        assert api_key == "sk-test"
+        assert isinstance(prompt, str) and prompt  # the loaded table prompt
+        assert timeout == 45.0
+        assert base64.b64decode(image_b64) == png_bytes
