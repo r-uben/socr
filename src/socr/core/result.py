@@ -105,9 +105,15 @@ class FailureMode(str, Enum):
     #: but nothing could confirm it either.
     TABLE_UNVERIFIED = "table_unverified"
     #: P1 (owner ruling Q2, 2026-09-03): the readers rejected the table AND
-    #: neither ruled guard could clear it -- native geometry did not overrule
-    #: them, and a blind third-vendor transcription of the exact cells they
-    #: flagged either disagreed, could not be resolved, or could not be made.
+    #: a blind third-vendor transcription of the exact cells they flagged read
+    #: DIFFERENT tokens out of the crop. GH-575 narrowed this to a positive
+    #: mismatch: the sole route is ``rejected and disposition is MISMATCHED``
+    #: (``orchestrator.py``). A guard that merely failed to clear the table --
+    #: adjudicator outage, refusal, typed null, budget exhaustion, empty doubt
+    #: set, or a CONTRADICTED binding -- is NOT evidence against it and leaves
+    #: the page ``TABLE_UNVERIFIED``, keeping the bytes. GH-579: this comment
+    #: used to say "neither ruled guard could clear it", which described the
+    #: pre-GH-575 formula and read as though any non-clearing withheld content.
     #:
     #: NOT a reuse of ``TABLE_REJECTED``, and the difference is the shipped
     #: bytes, not the wording. A REJECTED page ships its table text demoted

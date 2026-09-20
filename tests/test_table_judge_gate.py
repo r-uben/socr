@@ -537,7 +537,8 @@ class TestLadderOutcomes:
 
         # P1 (owner ruling Q2, 2026-09-03,
         # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
-        # rejection that neither ruled guard clears is WITHHELD, not
+        # rejection that a blind cell transcription then MISMATCHES is
+        # WITHHELD (GH-575 narrowed it to that positive mismatch), not
         # REJECTED. The table's bytes no longer ship, so the terminal, the
         # audit kind and the document surfaces all change with it.
         from socr.judge.table_verdict import TABLE_LADDER_WITHHELD_KIND
@@ -560,6 +561,37 @@ class TestLadderOutcomes:
             ],
             "witness_scope": "located",
         }
+
+    def test_no_adjudicator_leaves_the_same_rejection_unverified(self, tmp_path: Path) -> None:
+        """GH-579: the control for the test directly above.
+
+        That test shows a reader rejection reaching WITHHELD. On its own that
+        does not establish WHAT caused the withhold -- the rejection alone
+        would explain it equally well. This runs the identical fixture and the
+        identical rejecting rung, changing exactly one thing: no blind cell
+        adjudicator is configured, so the guard chain cannot produce a positive
+        MISMATCH.
+
+        GH-575's rule is that a guard which merely fails to clear a table is
+        not evidence against it. So the bytes must survive: UNVERIFIED, not
+        WITHHELD. The stale comments this ticket fixes ("neither ruled guard
+        clears it is WITHHELD") described the opposite, and nothing failed --
+        because the only path exercised was the one where the adjudicator DID
+        mismatch.
+        """
+        pipeline = _make_pipeline(adjudicator=None)
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rung = _reject_rung()
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        from socr.judge.table_verdict import TABLE_LADDER_WITHHELD_KIND
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert _events_of_kind(state, TABLE_LADDER_WITHHELD_KIND) == []
 
     def test_reduce_page_ladder_rejected_wins_over_unverified(self, tmp_path: Path) -> None:
         """Two tables, one REJECTED one UNVERIFIED: page disposition is REJECTED
@@ -680,7 +712,8 @@ class TestRetryLatchCausalClassification:
 
         # P1 (owner ruling Q2, 2026-09-03,
         # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
-        # rejection that neither ruled guard clears is WITHHELD, not
+        # rejection that a blind cell transcription then MISMATCHES is
+        # WITHHELD (GH-575 narrowed it to that positive mismatch), not
         # REJECTED. The table's bytes no longer ship, so the terminal, the
         # audit kind and the document surfaces all change with it.
         assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
@@ -891,7 +924,8 @@ class TestRetryLatchNonLatchingControls:
 
         # P1 (owner ruling Q2, 2026-09-03,
         # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
-        # rejection that neither ruled guard clears is WITHHELD, not
+        # rejection that a blind cell transcription then MISMATCHES is
+        # WITHHELD (GH-575 narrowed it to that positive mismatch), not
         # REJECTED. The table's bytes no longer ship, so the terminal, the
         # audit kind and the document surfaces all change with it.
         assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
