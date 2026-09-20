@@ -447,3 +447,80 @@ class TestGH825YamlQwenModelPinsLikeCli:
         assert resolve_qwen_intent(without)[0] == resolve_qwen_intent(with_key)[0]
         assert resolve_qwen_intent(without)[1] != resolve_qwen_intent(with_key)[1]
         assert resolve_qwen_intent(with_key)[1] == self.CLOUD_MODEL
+
+
+class TestGH834NonStringQwenModelIsRejectedAtLoad:
+    """A YAML ``qwen_model`` that is not a string must fail the load (#834).
+
+    GH-825 made a config-file model authoritative. That removed the path which
+    used to launder a malformed value: on a local or ``auto`` backend an
+    unpinned model was discarded by rule 3 of ``resolve_qwen_intent`` and
+    replaced with the known-good local model, so ``qwen_model: 3`` could never
+    reach an engine. Once pinned it is passed through rule 1 verbatim and
+    becomes a subprocess argument, failing far from the file that caused it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_vllm_env(self, monkeypatch):
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [3, 3.5, True, None, ["qwen3.5:cloud"], {"name": "qwen3.5:cloud"}],
+        ids=["int", "float", "bool", "null", "list", "mapping"],
+    )
+    def test_a_non_string_model_fails_the_load(self, tmp_path, bad_value):
+        path = _write(tmp_path, {"qwen_backend": "auto", "qwen_model": bad_value})
+
+        with pytest.raises(ValueError, match="qwen_model"):
+            PipelineConfig.from_file(path)
+
+    def test_a_string_model_still_loads_and_still_pins(self, tmp_path):
+        """The control.
+
+        A check that rejected everything, or that ran before the value was
+        restored, would also make the test above pass. The same loader, one
+        value changed from a non-string to a string, must load cleanly and keep
+        the GH-825 pin.
+        """
+        config = PipelineConfig.from_file(
+            _write(tmp_path, {"qwen_backend": "auto", "qwen_model": "qwen3.5:cloud"})
+        )
+
+        assert config.qwen_model == "qwen3.5:cloud"
+        assert config.qwen_model_pinned is True
+
+    def test_the_value_type_is_what_makes_the_difference(self, tmp_path):
+        """Pin the DIFFERENCE: identical file, identical key, one value retyped.
+
+        The string loads; the integer spelling of that same model name does not.
+        """
+        ok_dir = tmp_path / "ok"
+        ok_dir.mkdir()
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+
+        ok = PipelineConfig.from_file(_write(ok_dir, {"qwen_backend": "auto", "qwen_model": "30"}))
+        assert ok.qwen_model == "30"
+
+        with pytest.raises(ValueError, match="qwen_model"):
+            PipelineConfig.from_file(_write(bad_dir, {"qwen_backend": "auto", "qwen_model": 30}))
+
+    def test_the_rejection_reaches_the_engine_resolver_from_nowhere_else(self, tmp_path):
+        """No other loader path lets a non-string through.
+
+        ``from_file`` is the only channel GH-825 opened, so the guard belongs
+        there -- but the point of the guard is that
+        ``resolve_qwen_intent`` never sees a non-string. Build the config the
+        only other way (in memory, as the CLI does) and confirm that a pinned
+        non-string WOULD reach the resolver verbatim; that is the failure the
+        loader now prevents rather than one it merely renames.
+        """
+        from socr.engines.qwen import resolve_qwen_intent
+
+        config = PipelineConfig()
+        config.qwen_backend = "auto"
+        config.qwen_model = 3  # type: ignore[assignment]
+        config.qwen_model_pinned = True
+
+        assert resolve_qwen_intent(config)[1] == 3

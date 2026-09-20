@@ -635,7 +635,27 @@ class PipelineConfig:
         # GH-678 does directly above: a present key is a stated choice whatever
         # its value, so a YAML model that happens to equal the default still
         # counts as stated.
+        # GH-834: validate BEFORE pinning. The pin above removed the path that
+        # used to launder a malformed value: on a local or ``auto`` backend an
+        # unpinned ``qwen_model`` was discarded by rule 3 of
+        # ``resolve_qwen_intent`` and replaced with the known-good local model,
+        # so ``qwen_model: 3`` never reached an engine. Honouring the pin makes
+        # that value newly reachable -- it is now passed through rule 1 verbatim
+        # and surfaces as a subprocess failure far from the config file that
+        # caused it. Fail at load with the key's name instead, the same shape as
+        # the unknown-key and removed-key errors below. An EMPTY string is
+        # deliberately NOT rejected here: ``--qwen-model ""`` pins an empty name
+        # too, and diverging from the CLI would reintroduce exactly the
+        # channel-dependent behaviour GH-825 removed.
         if "qwen_model" in data:
+            if not isinstance(config.qwen_model, str):
+                raise ValueError(
+                    f"'qwen_model' must be a string in config file {path}; got "
+                    f"{config.qwen_model!r}. It is passed to the engine as a model "
+                    "name once a config file states it (GH-825), so a non-string "
+                    "value is rejected at load rather than failing later in the "
+                    "engine subprocess."
+                )
             config.qwen_model_pinned = True
 
         if "output_dir" in data:
