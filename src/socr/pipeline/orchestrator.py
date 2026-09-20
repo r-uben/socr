@@ -9113,12 +9113,23 @@ class UnifiedPipeline:
                 # page the GH-96 lane would have scored itself" (the old escalation
                 # arm, which never gated on has_tables) -- native-bypass and
                 # chart-asset table pages included.
+                # GH-855: this UNION is deliberately gated on the lane being
+                # CONFIGURED (``_escalation_profile is not None``), not on it being
+                # HEALTHY. ``_escalation_degraded`` is a document-scoped latch (set
+                # once, never cleared, see below) -- coupling scoring to it means
+                # the moment recovery gives up on a document, reporting goes dark
+                # for the rest of it too. Scoring is observation-only (state.events
+                # only; see ``_surface_table_scoring``), so this is safe to run on
+                # every page the lane would have covered regardless of latch state.
+                # The latch keeps gating the recovery attempt itself, unchanged,
+                # at ``_lane_live`` below.
                 _lane_live = _escalation_profile is not None and not _escalation_degraded
+                _lane_configured = _escalation_profile is not None
                 _score_table_signal = False
                 with clock.span("tables"):
                     if bo.text and (
                         self._page_has_tables(page_num, ps)
-                        or (_lane_live and bo.engine != "chart_asset")
+                        or (_lane_configured and bo.engine != "chart_asset")
                     ):
                         _score_table_signal = bool(
                             self._surface_table_scoring(state, page_num, ps, bo)
