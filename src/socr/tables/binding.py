@@ -836,6 +836,20 @@ def _boxes_vertically_overlap(left: tuple, right: tuple) -> bool:
     return min(left[3], right[3]) > max(left[1], right[1])
 
 
+def _boxes_horizontally_overlap(left: tuple, right: tuple) -> bool:
+    """True when two ``(x0, y0, x1, y1, ...)`` word boxes overlap in x.
+
+    Strict, same convention as :func:`_boxes_vertically_overlap`. Used by
+    the line-identity fold below to refuse merging two GROUPS whose words
+    occupy the same x-range: a torn printed line's two halves are disjoint
+    in x by construction (one half ends where the other begins), while two
+    stacked table rows sharing spurious line-identity metadata each have
+    their own label lane and value lane and so overlap in x. No tolerance
+    or threshold — the x-ranges themselves are the evidence.
+    """
+    return min(left[2], right[2]) > max(left[0], right[0])
+
+
 def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     """Assign rowizer-compatible y groups without chaining adjacent rows.
 
@@ -930,7 +944,7 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
             parent[root_a] = root_b
 
     for y_key, row_words in rows_by_y.items():
-        destinations = set()
+        candidates = set()
         for word in row_words:
             for other_key in line_to_groups.get((word[5], word[6]), ()):
                 if other_key == y_key:
@@ -947,7 +961,22 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
                     _boxes_vertically_overlap(word, other_word)
                     for other_word in rows_by_y[other_key]
                 ):
-                    destinations.add(other_key)
+                    candidates.add(other_key)
+        # A torn printed line's two halves are disjoint in x by
+        # construction; two stacked table rows sharing spurious line
+        # identity each have their own label/value lanes and so overlap in
+        # x. Refuse any candidate whose words x-overlap the source group's
+        # words -- that shape is two rows, not one torn line, regardless of
+        # what the line-identity metadata and word count say.
+        destinations = {
+            other_key
+            for other_key in candidates
+            if not any(
+                _boxes_horizontally_overlap(word, other_word)
+                for word in row_words
+                for other_word in rows_by_y[other_key]
+            )
+        }
         if len(destinations) == 1:
             _union(y_key, destinations.pop())
 

@@ -229,3 +229,67 @@ is not unsafe on every input, only on the header/legend-density pattern above, w
   was NOT re-verified end-to-end here (would require driving the routing/witness pipeline); the
   claim is limited to what was measured: the residual's page set is exclusively
   `fomcminutes*`/`fomcprojtabl*`, which is the corpus those tickets already target.
+
+## Addendum 2 — reviewer found a real wrong-merge; x-overlap guard added (MEASURED)
+
+Team-lead's review reproduced a genuine false merge the corpus scan above never counted: two
+DISTINCT, unequal-size, numeric-bearing table rows sharing one `(block_no, line_no)` and
+overlapping in y (`RowA`: 3 words at y=[100,112]; `RowB`: 2 words at y=[108,120]) folded into ONE
+band. Neither existing guard catches it — both groups are numeric-bearing (the old numeric-free
+restriction never applied) and 3 > 2 satisfies the strictly-more-words direction.
+
+**Guard added: refuse the fold when any source word's x-range overlaps any destination word's
+x-range**, using the same strict-overlap convention as the existing `_boxes_vertically_overlap`
+(new `_boxes_horizontally_overlap`, no tolerance). Rationale, matching the reviewer's framing: a
+torn printed line's two halves are disjoint in x by construction (one half ends where the other
+begins — the matched control pair's `"by"` ends at x=162, `"2012"` starts at x=164); two stacked
+table rows each carry their own label lane and value lane and so overlap in x (`RowA`'s label
+`[50,90]` and `RowB`'s label `[50,90]` occupy the same range). Verified directly against the
+reviewer's exact fixture: two bands, not one, after the guard.
+
+**Corpus-wide defect-rate measurement, as requested** (`/tmp/zz600_fold_defect_rate.py`, replaying
+`_assign_bands`'s pre-guard candidate selection and counting how many of the folds it WOULD have
+performed the guard refuses): **1,633 folds performed pre-guard corpus-wide; 1,023 (62.65%) would
+be refused by the x-overlap guard.** That is the true scale of the wrong-merge defect the reviewer
+found — the vast majority of what the earlier (un-reviewed) commit counted as "healed" tears were
+actually two distinct rows being corrupted into one. Concentrated in 92 of 380 documents, almost
+entirely `fomcprojtabl*` (SEP dot-plot/projection tables — densely repeated row structure, the
+same corpus class already flagged for rotated-text residual) and `fomcminutes*`, plus `doc00`,
+`doc01`, `doc04`, and a handful of `mpr-*` issues. Counts and basenames only, as asked.
+
+**Re-measured the corpus-wide gain WITH the guard** (`/tmp/zz600_gain_with_guard.py`, same paired
+per-line methodology as Addendum 1): `70,278` in-region multi-word lines, naive `round(y0)`:
+`5,376` torn / `2,958` numeric-both-sides (unchanged). WITH the x-overlap guard: `4,637` torn
+(`739` healed, down from the pre-guard commit's `974`) / `2,953` numeric-both-sides (`5` healed,
+down from the pre-guard commit's `139`). **The true, guard-corrected recovery on the ticket's own
+numeric-both-sides content-loss metric is 5 lines corpus-wide, not 139** — coincidentally the same
+order of magnitude as pure `cluster_band_words` delegation measured and rejected in Addendum 1 (5
+of 2,958 there too). Reported to team-lead as-is rather than reframed: the fold's residual
+genuine value on this specific metric is small; its larger, real contribution is eliminating the
+1,023 corpus-wide row-corrupting merges the pre-guard version was silently committing.
+
+## What changed (this addendum)
+
+`src/socr/tables/binding.py`: added `_boxes_horizontally_overlap` (strict x-overlap, same
+convention as `_boxes_vertically_overlap`, no new tolerance) and applied it as a group-level
+guard — `candidates` (vertical-overlap-corroborated, unique, strictly-larger) are filtered to
+`destinations` by excluding any candidate that x-overlaps the source group, THEN the
+`len(destinations) == 1` uniqueness check runs on the filtered set.
+
+`tests/test_binding.py`: added
+`test_gh600_unequal_size_stacked_rows_sharing_line_identity_do_not_merge` — the reviewer's exact
+fixture, pinned directly (`len(centers) == 2`, `y_to_band[100] != y_to_band[108]`). Re-ran the two
+existing GH-600 tests unchanged: both still pass (the torn-line control pair's tear is genuinely
+x-disjoint; the equal-size safety test never reaches the x-overlap guard since the word-count
+guard already refuses it).
+
+## Mutation guard (this addendum)
+
+Copied `src`, `tests`, `pyproject.toml` to `/tmp/socr-600-mutant` (outside the repo, no
+`socr.__file__` canary committed anywhere in this repo — the canary assertion is a throwaway
+Python one-liner run against the copy, not shipped code). Anchor (the `destinations = {...}`
+x-overlap-filtering block) asserted `src.count(anchor) == 1` before reverting — passed. Reverted
+to `destinations = candidates` (the pre-guard behaviour) in the mutant copy only and re-ran the
+GH-600 tests: `test_gh600_unequal_size_stacked_rows_sharing_line_identity_do_not_merge` FAILED (1
+band instead of 2 — the mutant is killed); the other two GH-600 tests still passed (expected —
+they don't exercise this shape). Deleted `/tmp/socr-600-mutant` afterward.

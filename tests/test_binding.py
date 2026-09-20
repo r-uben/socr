@@ -1501,6 +1501,38 @@ def test_gh600_equal_size_groups_sharing_line_identity_do_not_merge():
     assert len(centers) == 2
 
 
+def test_gh600_unequal_size_stacked_rows_sharing_line_identity_do_not_merge():
+    """GH-600 regression (found in review): two DISTINCT, unequal-size table
+    rows sharing one (block_no, line_no) must not merge just because one
+    group is strictly larger and both groups vertically overlap.
+
+    RowA (3 words: label + two numeric lanes) and RowB (2 words: label + one
+    numeric lane) share ``(block_no, line_no) = (0, 0)`` and their boxes
+    overlap in y -- exactly the shape the word-count-majority guard alone
+    lets through, since 3 > 2 satisfies "strictly more words" and both
+    groups are numeric-bearing so the old numeric-free-only restriction
+    never applied here either.
+
+    The discriminator: RowA's label ("RowA", x in [50, 90]) and RowB's label
+    ("RowB", x in [50, 90]) occupy the SAME x-range -- two stacked rows each
+    with their own label/value lanes overlap in x. A torn printed line's two
+    halves are disjoint in x by construction (see the matched control pair
+    above). The x-overlap guard must refuse this fold.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 112, "RowA", 0, 0, 0),
+        (95, 100, 130, 112, "1.0", 0, 0, 1),
+        (135, 100, 170, 112, "2.0", 0, 0, 2),
+        (50, 108, 90, 120, "RowB", 0, 0, 3),
+        (95, 108, 130, 120, "3.0", 0, 0, 4),
+    ]
+    centers, y_to_band = _assign_bands(words)
+    assert len(centers) == 2
+    assert y_to_band[100] != y_to_band[108]
+
+
 # ---------------------------------------------------------------------------
 # 10. GH-330 Task 3: Vertical band ambiguity from word extents
 # ---------------------------------------------------------------------------
