@@ -336,32 +336,44 @@ heals printed-line tears plus an x-overlap guard — corpus-wide it refuses
 `binding._assign_bands`, such that #860 could move the 15 affected pages'
 leftover-token counts?
 
-**Answer: no traversal found.** Checked by grep for
-`_assign_bands|binding\.bind|import.*binding` across every module on this
-probe's control-flow path:
+**Answer: no traversal found on this probe's capture path** (checked by
+grep for `_assign_bands|binding\.bind|import.*binding` across every module
+on it: `reconstruct.py`, `native_verifier.py`, `label_canonical.py`,
+`reconcile.py`, `born_digital.py`, `row_corroboration.py` — none call
+`bind()`/`_assign_bands`; `row_corroboration.py`'s only reference is a
+docstring warning that `_assign_bands` has a `round(word_y0)` bucketing bug,
+i.e. it deliberately does not reuse it).
 
-- `src/socr/tables/reconstruct.py` — no match (does not import `binding`).
-- `src/socr/tables/native_verifier.py` — no match.
-- `src/socr/tables/label_canonical.py` — no match.
-- `src/socr/tables/reconcile.py` — no match.
-- `src/socr/core/born_digital.py` — no executable match; `binding.bind()`
-  appears only inside doc-comments, not called.
-- `src/socr/tables/row_corroboration.py` (the module this probe's own
-  metrics are built from: `baseline_bands`/`cluster_band_words`,
-  `table_blocks`, `numeric_body_rows`, `match_rows_monotonic`) — no match;
-  its only reference to `binding` is a docstring warning about
-  `_assign_bands`'s `round(word_y0)` bucketing bug, i.e. this module
-  deliberately does NOT reuse `_assign_bands`.
-- The only module in `src/socr/tables/` that imports from `binding` at all
-  is `adjudication.py` (`BindingResult, ContradictedCell,
-  RowLabelContradiction` — types, not `bind()`/`_assign_bands` calls), which
-  is not on this probe's capture path (the probe raises out of
-  `_verify_regions` before any adjudication step runs).
+**Correction:** an earlier draft of this section additionally claimed
+"only `adjudication.py` imports from `binding` at all" — that is false and
+was found false by grepping the wrong scope (only `src/socr/tables/`, not
+the whole tree). On `origin/main`, `src/socr/pipeline/orchestrator.py:6468`
+does `from socr.tables.binding import bind` and calls it inside
+`_binding_evidence_for_witness` (`orchestrator.py:6444`); `bind()` is also
+imported at four more orchestrator sites and in
+`judge/table_cell_guard.py:73` and `judge/table_verdict.py:139`. The
+conclusion below still holds despite this correction, for a narrower
+reason: `_binding_evidence_for_witness` is a verification step that runs on
+a witness AFTER the candidate table markdown already exists — it is
+downstream of `_verify_regions`, the point this probe raises out of before
+any of that code executes. So this call site exists in production and is
+real, but it is off this probe's capture path, not absent from the
+codebase.
 
 `binding._assign_bands` is only called from `binding.bind()`
-(`binding.py:1089`, `:1165`), and nothing this probe exercises calls
-`binding.bind()`. #860 therefore cannot have moved the candidate-row token
-counts for these 15 pages (or any page) through this path.
+(`binding.py:1089`, `:1165`). Nothing upstream of this probe's capture
+point (i.e. nothing between `find_tables`/`reconstruct_table_regions` and
+`_verify_regions`) calls `bind()`. #860 therefore cannot have moved the
+candidate-row token counts for these 15 pages (or any page) through the
+path this probe measures.
+
+**Separately, and outside this probe's scope:** `bind()`/`_assign_bands`
+IS reached in production downstream, at `_binding_evidence_for_witness`,
+feeding `classify_binding_evidence` and the guard/winner-selection chain.
+#600's banding change can therefore move binding-evidence verdicts
+(PASS/ABSTAIN/CONTRADICT) on real pages, independent of and un-measured by
+this probe. That is a separate, queued measurement (see team-lead
+follow-up), not part of the #831 check this file is about.
 
 **Conclusion: no re-run against `d07d6e2` is needed.** The funnel and the
 15 per-page counts reported above (measured at `7cd3752`, matching the
