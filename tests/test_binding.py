@@ -1385,6 +1385,154 @@ def test_marker_with_distinct_line_identity_remains_separate_row():
     assert len(centers) == 3
 
 
+def _pre_gh600_assign_bands(words: list) -> dict:
+    """The ``_assign_bands`` fold exactly as it existed before GH-600: only a
+    NUMERIC-FREE group may fold, and only into a numeric-bearing group. Kept
+    here as the control for ``test_gh600_...`` below -- the pre-fix behaviour
+    this ticket measured and changed, not a guess at it.
+    """
+    from socr.tables.binding import _boxes_vertically_overlap, is_numeric_token
+
+    rows_by_y: dict = {}
+    for word in words:
+        rows_by_y.setdefault(round(word[1]), []).append(word)
+    if not rows_by_y:
+        return {}
+    numeric_y_keys = {
+        y for y, rw in rows_by_y.items() if any(is_numeric_token(word[4]) for word in rw)
+    }
+    numeric_words_by_y = {
+        y: [word for word in rows_by_y[y] if is_numeric_token(word[4])] for y in numeric_y_keys
+    }
+    line_to_numeric_groups: dict = {}
+    for y in numeric_y_keys:
+        for word in rows_by_y[y]:
+            line_to_numeric_groups.setdefault((word[5], word[6]), set()).add(y)
+    y_to_group = {y: y for y in rows_by_y}
+    for y, row_words in rows_by_y.items():
+        if y in numeric_y_keys:
+            continue
+        destinations = set()
+        for word in row_words:
+            for dest in line_to_numeric_groups.get((word[5], word[6]), ()):
+                if any(
+                    _boxes_vertically_overlap(word, numeric_word)
+                    for numeric_word in numeric_words_by_y[dest]
+                ):
+                    destinations.add(dest)
+        if len(destinations) == 1:
+            y_to_group[y] = destinations.pop()
+    return y_to_group
+
+
+def test_gh600_line_key_split_torn_by_rounding_boundary_is_healed():
+    """GH-600: a single printed line with a number on BOTH sides of the tear.
+
+    Matched control pair, same content and PyMuPDF ``(block_no, line_no)``
+    identity throughout: one copy has every word top EXACTLY aligned (no
+    tear possible), the other has the SAME words with realistic sub-point
+    jitter whose tops straddle a ``round()`` ``.5`` boundary (100.46 -> 100,
+    100.54 -> 101). ``is_numeric_token`` is true on both sides of the tear
+    ("3" in the 6-word majority clause, "2012" alone) -- the clean subset the
+    old fold refused to touch (both groups numeric-bearing).
+
+    The signal is only "about the defect" once it is shown NOT to fire on
+    the aligned input too: the PRE-GH-600 fold (``_pre_gh600_assign_bands``)
+    must AGREE (one band) on the aligned line and DISAGREE (two bands, torn)
+    on the jittered one; the CURRENT ``_assign_bands`` must produce one band
+    for both.
+    """
+    from socr.tables.binding import _assign_bands
+
+    block, line = 4, 7
+    aligned = [
+        (50.0, 100.45, 68.0, 110.2, "rate", block, line, 0),
+        (70.0, 100.45, 88.0, 110.2, "rose", block, line, 1),
+        (90.0, 100.45, 100.0, 110.2, "to", block, line, 2),
+        (102.0, 100.45, 108.0, 110.2, "3", block, line, 3),
+        (110.0, 100.45, 148.0, 110.2, "percent", block, line, 4),
+        (150.0, 100.45, 162.0, 110.2, "by", block, line, 5),
+        (164.0, 100.45, 190.0, 110.2, "2012", block, line, 6),
+    ]
+    jittered = [
+        (50.0, 100.46, 68.0, 110.21, "rate", block, line, 0),
+        (70.0, 100.46, 88.0, 110.21, "rose", block, line, 1),
+        (90.0, 100.46, 100.0, 110.21, "to", block, line, 2),
+        (102.0, 100.46, 108.0, 110.21, "3", block, line, 3),
+        (110.0, 100.46, 148.0, 110.21, "percent", block, line, 4),
+        (150.0, 100.46, 162.0, 110.21, "by", block, line, 5),
+        (164.0, 100.54, 190.0, 110.29, "2012", block, line, 6),  # straddles the .5 boundary
+    ]
+
+    pre_aligned = _pre_gh600_assign_bands(aligned)
+    pre_jittered = _pre_gh600_assign_bands(jittered)
+    assert len(set(pre_aligned.values())) == 1, "pre-fix must agree on the aligned control"
+    assert len(set(pre_jittered.values())) == 2, (
+        "pre-fix must actually tear the jittered line -- else this is not a control"
+    )
+
+    _centers_aligned, y_to_band_aligned = _assign_bands(aligned)
+    _centers_jittered, y_to_band_jittered = _assign_bands(jittered)
+    aligned_bands = {y_to_band_aligned[round(w[1])] for w in aligned}
+    jittered_bands = {y_to_band_jittered[round(w[1])] for w in jittered}
+    assert len(aligned_bands) == 1
+    assert len(jittered_bands) == 1, "GH-600: the tear must be healed on the jittered line"
+
+
+def test_gh600_equal_size_groups_sharing_line_identity_do_not_merge():
+    """GH-600 safety: two round(y0) groups of EQUAL word count that share a
+    (block_no, line_no) never fold into each other, even when uniqueness and
+    bbox-overlap both hold -- this is the shape
+    ``test_vertical_band_ambiguity_from_word_extents_not_lane_gap_constant``
+    exercises: two real, differently-valued table rows that happen to carry
+    identical metadata and whose boxes physically overlap in y. Requiring the
+    destination to hold STRICTLY more words than the source is what keeps
+    this tied case from merging.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 112, "RowA", 0, 0, 0),
+        (150, 100, 180, 112, "1.0", 0, 0, 1),
+        (50, 108, 90, 120, "RowB", 0, 0, 2),
+        (150, 108, 180, 120, "2.0", 0, 0, 3),
+    ]
+    centers, _ = _assign_bands(words)
+    assert len(centers) == 2
+
+
+def test_gh600_unequal_size_stacked_rows_sharing_line_identity_do_not_merge():
+    """GH-600 regression (found in review): two DISTINCT, unequal-size table
+    rows sharing one (block_no, line_no) must not merge just because one
+    group is strictly larger and both groups vertically overlap.
+
+    RowA (3 words: label + two numeric lanes) and RowB (2 words: label + one
+    numeric lane) share ``(block_no, line_no) = (0, 0)`` and their boxes
+    overlap in y -- exactly the shape the word-count-majority guard alone
+    lets through, since 3 > 2 satisfies "strictly more words" and both
+    groups are numeric-bearing so the old numeric-free-only restriction
+    never applied here either.
+
+    The discriminator: RowA's label ("RowA", x in [50, 90]) and RowB's label
+    ("RowB", x in [50, 90]) occupy the SAME x-range -- two stacked rows each
+    with their own label/value lanes overlap in x. A torn printed line's two
+    halves are disjoint in x by construction (see the matched control pair
+    above). The x-overlap guard must refuse this fold.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 112, "RowA", 0, 0, 0),
+        (95, 100, 130, 112, "1.0", 0, 0, 1),
+        (135, 100, 170, 112, "2.0", 0, 0, 2),
+        (50, 108, 90, 120, "RowB", 0, 0, 3),
+        (95, 108, 130, 120, "3.0", 0, 0, 4),
+    ]
+    centers, y_to_band = _assign_bands(words)
+    assert len(centers) == 2
+    assert y_to_band[100] != y_to_band[108]
+
+
 # ---------------------------------------------------------------------------
 # 10. GH-330 Task 3: Vertical band ambiguity from word extents
 # ---------------------------------------------------------------------------
