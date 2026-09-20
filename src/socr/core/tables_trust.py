@@ -357,9 +357,11 @@ def _boundary_fully_resolved_tables(events: list) -> set[tuple[str, int, str]]:
 LADDER_TERMINAL_NOTES: dict[str, str] = {
     "table_ladder_rejected": ("judge ladder rejected this table: content problem, not retryable"),
     "table_ladder_withheld": (
-        "judge ladder rejected this table and neither the native-geometry guard nor a "
-        "blind cell transcription cleared it: the table's content was WITHHELD "
-        "(marker plus page image), not shipped"
+        "judge ladder rejected this table and a blind cell transcription read "
+        "different tokens out of the same cells: the table's content was WITHHELD "
+        "(marker plus page image), not shipped. A guard that merely could not "
+        "clear the table -- outage, refusal, contradicted binding -- leaves the "
+        "page UNVERIFIED with its bytes intact, not WITHHELD"
     ),
 }
 

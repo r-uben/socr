@@ -84,8 +84,11 @@ class TableLadderOutcome(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     UNVERIFIED = "unverified"
-    #: P1 (owner ruling Q2): the readers rejected the table and neither ruled
-    #: guard cleared it, so its bytes do not ship. Produced by the GATE, never
+    #: P1 (owner ruling Q2): the readers rejected the table AND a blind cell
+    #: transcription positively MISMATCHED it, so its bytes do not ship. Per
+    #: GH-575 a guard that merely failed to clear the table (outage, refusal,
+    #: CONTRADICTED binding, internal error) yields UNVERIFIED instead and the
+    #: bytes survive. Produced by the GATE, never
     #: by ``run_table_ladder`` itself -- this module has no geometry oracle and
     #: no adjudicator, so it can only hand a REJECTED to the caller.
     WITHHELD = "withheld"
