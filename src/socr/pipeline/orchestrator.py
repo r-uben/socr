@@ -8524,10 +8524,11 @@ class UnifiedPipeline:
         # what was wanted rather than what ran (#133).
         _inner_judge = self._build_page_judge(state)
 
-        # Use calibrated defaults when no explicit override is configured.
-        provider_timeout = (
-            getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
-        )
+        # No override arm here: PipelineConfig never declared
+        # `agentic_provider_timeout`, so this always resolved to the
+        # calibrated defaults on every shipped run (#840). Do not re-add a
+        # getattr override without a field on PipelineConfig backing it.
+        provider_timeout = DEFAULT_PROVIDER_TIMEOUTS
 
         # Wrap the judge in a deadline adapter so a wedged VLM judge cannot
         # block the orchestrator thread (fork B: orchestrator-side adapter).
