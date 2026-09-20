@@ -94,14 +94,17 @@ def _grid_pdf(path: Path, pages: int) -> Path:
 
 def _route_fn(page_num, ladder, run_provider, judge, **kwargs):
     """Every page routes to a fixed candidate missing two native columns."""
+    prof = ladder[0]
     out = PageOutput(
         page_num=page_num,
         text=_MISSING_COLUMNS_CANDIDATE,
         status=PageStatus.SUCCESS,
-        engine="gemini",
+        # Label the output with the profile it is actually packaged under.
+        # A hardcoded name here can disagree with `ladder[0]` and make the
+        # fixture describe a route the run never took (GH-861).
+        engine=getattr(prof.engine, "value", str(prof.engine)),
         audit_passed=True,
     )
-    prof = ladder[0]
     decision = judge.assess(out, prof)
     att = ProviderAttempt(
         engine=prof.engine,
@@ -134,8 +137,15 @@ def _config() -> PipelineConfig:
     )
 
 
-def _run(tmp_path: Path, *, page_one_degrades: bool) -> Path:
-    """Run the fused agentic loop over a 2-page grid document; return output_dir.
+def _run(tmp_path: Path, *, page_one_degrades: bool) -> tuple[Path, list[int]]:
+    """Run the fused agentic loop over a 2-page grid document.
+
+    Returns ``(output_dir, escalated_pages)``, the second being the page
+    numbers ``_escalate_table_page`` was actually called for, in order. The
+    call record is what lets a test tell "escalation was skipped because the
+    lane is latched" from "escalation ran and declined" -- the two are
+    indistinguishable from the sidecar, because this double always returns
+    the incumbent unchanged (GH-861).
 
     `_page_has_tables` is forced False so every page is in the AFFECTED
     population this ticket's expression change covers -- isolated from the
@@ -148,7 +158,10 @@ def _run(tmp_path: Path, *, page_one_degrades: bool) -> Path:
     output_dir = tmp_path / "out"
     pipeline = UnifiedPipeline(_config())
 
+    escalated_pages: list[int] = []
+
     def _stub_escalate(state, page_num, ps, bo, profile, run_provider, pdf_path, **kwargs):
+        escalated_pages.append(page_num)
         degraded = page_one_degrades and page_num == 1
         return degraded, bo
 
@@ -169,7 +182,7 @@ def _run(tmp_path: Path, *, page_one_degrades: bool) -> Path:
     ):
         pipeline.process(pdf, output_dir)
 
-    return output_dir
+    return output_dir, escalated_pages
 
 
 def _audit_events(output_dir: Path) -> list[dict]:
@@ -197,7 +210,7 @@ def test_a_latched_page_the_detector_missed_now_gets_scored(tmp_path: Path) -> N
     assertion is exactly what the mutation guard (see decision log) shows
     fails when that coupling is restored.
     """
-    output_dir = _run(tmp_path, page_one_degrades=True)
+    output_dir, _escalated = _run(tmp_path, page_one_degrades=True)
 
     events = _audit_events(output_dir)
     page_two_kinds = [e["kind"] for e in events if e.get("page_num") == 2]
@@ -221,8 +234,8 @@ def test_the_latch_does_not_move_text_audit_passed_or_status(tmp_path: Path) -> 
     so scoring must stay observation-only regardless of whether the latch is
     set. `page_one_degrades` is the only variable between the two runs.
     """
-    clear_dir = _run(tmp_path / "clear", page_one_degrades=False)
-    set_dir = _run(tmp_path / "set", page_one_degrades=True)
+    clear_dir, clear_escalated = _run(tmp_path / "clear", page_one_degrades=False)
+    set_dir, set_escalated = _run(tmp_path / "set", page_one_degrades=True)
 
     clear_page_two = _page_sidecar(clear_dir, 2)
     set_page_two = _page_sidecar(set_dir, 2)
@@ -239,9 +252,18 @@ def test_the_latch_does_not_move_text_audit_passed_or_status(tmp_path: Path) -> 
         f"clear={clear_page_two['status']!r} set={set_page_two['status']!r}"
     )
 
-    # Escalation itself must still respect the latch: attempted on page 1 in
-    # both runs (the lane is live going in); page 2 is where the two runs'
-    # latch states diverge, so it is the only page a wedge could have skipped.
+    # Escalation itself must still respect the latch, and only the call
+    # record can show it: the double returns the incumbent unchanged, so a
+    # page that was never escalated and a page that was escalated and
+    # declined produce identical sidecars. Page 1 is escalated in both runs
+    # (the lane is live going in); page 2 is where the runs diverge, and it
+    # must be skipped in the SET run and attempted in the CLEAR one.
+    assert clear_escalated == [1, 2], clear_escalated
+    assert set_escalated == [1], set_escalated
+
+    # ... while the scoring event is emitted for page 2 in BOTH runs. That is
+    # the GH-855 separation: the latch stops the recovery attempt without
+    # stopping the report.
     clear_events_p2 = [e["kind"] for e in _audit_events(clear_dir) if e.get("page_num") == 2]
     set_events_p2 = [e["kind"] for e in _audit_events(set_dir) if e.get("page_num") == 2]
     assert "table_unexplained_lanes" in clear_events_p2

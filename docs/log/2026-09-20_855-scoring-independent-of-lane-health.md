@@ -53,7 +53,8 @@ above). No discrepancy found; nothing to report back.
   provably observation-only — confirmed empirically in
   `test_the_latch_does_not_move_text_audit_passed_or_status`, not just argued.
 - Separately traced `audit_passed` writers near this code (`_agentic_native_page`
-  at line 9755, `native_table_distrusted`): that predicate reads
+  at line 9727, which computes `native_table_distrusted` at line 9755): that
+  predicate reads
   `ps.native_table_unverifiable` / `native_table_structure_defective` /
   `native_table_emission_defect` / `native_table_header_unattributed` — none
   of which `_table_page_needs_escalation` touches. The two surfaces are
