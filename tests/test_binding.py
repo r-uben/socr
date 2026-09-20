@@ -3368,3 +3368,42 @@ def test_gh862_equal_size_single_word_groups_x_disjoint_do_not_merge():
     centers, y_to_band = _assign_bands(words)
     assert len(centers) == 2
     assert y_to_band[100] != y_to_band[108]
+
+
+def test_gh862_multi_word_span_tear_across_adjacent_keys_still_heals() -> None:
+    """A styled run torn by round() heals even though the fragment is MULTI-word.
+
+    PyMuPDF jitters tops per SPAN, not per word, so a rounding tear does not
+    always leave a single stray word behind: a styled run straddling the ``.5``
+    boundary tears whole. Restricting the fold to lone words (the first GH-862
+    attempt) refused exactly this shape, losing a genuine GH-600 heal. The
+    shipped rule lets a multi-word group fold across an ADJACENT key -- 1 being
+    the quantum of ``round(y0)`` -- which is the widest span a rounding tear
+    can produce.
+
+    Control: the same words with the second half displaced by a real vertical
+    gap instead of a rounding jitter must NOT fold, so this test cannot be
+    satisfied by removing the adjacency restriction.
+    """
+    from socr.tables.binding import _assign_bands
+
+    torn = [
+        (50.0, 100.46, 68.0, 110.21, "Real", 4, 7, 0),
+        (70.0, 100.46, 88.0, 110.21, "GDP", 4, 7, 1),
+        (90.0, 100.46, 100.0, 110.21, "growth", 4, 7, 2),
+        (102.0, 100.46, 108.0, 110.21, "3", 4, 7, 3),
+        (110.0, 100.54, 148.0, 110.29, "percent", 4, 7, 4),
+        (150.0, 100.54, 162.0, 110.29, "by", 4, 7, 5),
+        (164.0, 100.54, 190.0, 110.29, "2012", 4, 7, 6),
+    ]
+    # Same words, but the second half sits a real row-gap lower: keys 100 and
+    # 108, seven apart, which round() cannot produce from one printed line.
+    stacked = [w if w[1] < 100.5 else (w[0], 107.6, w[2], 117.4, *w[4:]) for w in torn]
+
+    centers_torn, _ = _assign_bands(torn)
+    centers_stacked, _ = _assign_bands(stacked)
+
+    assert len(centers_torn) == 1, f"a multi-word rounding tear was left torn: {centers_torn!r}"
+    assert len(centers_stacked) == 2, (
+        f"two rows a full gap apart were folded into one band: {centers_stacked!r}"
+    )

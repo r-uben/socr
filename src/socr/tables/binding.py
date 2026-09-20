@@ -909,17 +909,23 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     ``1t`` with an on-line ``∗``, so the line-identity destination set has
     more than one member and the fold abstains rather than guess.
 
-    A group is folded only when it is a SINGLE word (GH-862). Two or more
-    words already form their own horizontal run, and a horizontal run of
-    words at a shared top IS what a table row is; re-attaching one run to
-    another is a row collapse, not the repair of a torn line. This is a
-    categorical distinction — fragment versus run — not a tuned size. It is
-    what refuses the two shapes GH-600's x-guard let through: a third group
-    bridging two rows that the x-guard refuses pairwise, and two stacked
-    rows that happen to be x-disjoint because one carries content only on
-    the left and the next only on the right. The cost is that a line torn
-    into two multi-word halves is left torn; in this corpus a wrong merge
-    outranks a missed heal.
+    A MULTI-word group is folded only across an ADJACENT band key (GH-862).
+    Two or more words already form their own horizontal run, and a horizontal
+    run of words at a shared top IS what a table row is; re-attaching one run
+    to another across a real vertical gap is a row collapse, not the repair of
+    a torn line. ``1`` is the quantum of the ``round(y0)`` key function, so it
+    is the widest span a rounding tear can produce — a derived quantity, not a
+    tuned tolerance. A LONE displaced word may still fold further, because a
+    raised marker (GH-330) legitimately lands several keys away; that is a
+    DIFFERENT repair sharing this code path, and applying the tear rule to it
+    indiscriminately is what makes a single-rule fix fail one shape or the
+    other. Together the two arms refuse the shapes GH-600's x-guard let
+    through: a third group bridging two rows that the x-guard refuses
+    pairwise, and two stacked rows that happen to be x-disjoint because one
+    carries content only on the left and the next only on the right. The
+    residual cost is a LONE displaced word that is really its own short row
+    (a one-word section label stacked under a data row) — that shape folds
+    here and folded before GH-862 too; it is not closed by this change.
 
     Measured residual (GH-600 corpus scan, table-region words only): this
     fold resolves part of the torn printed lines found; the
@@ -963,12 +969,6 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
             parent[root_a] = root_b
 
     for y_key, row_words in rows_by_y.items():
-        # GH-862: only a SINGLE displaced word may be re-attached. Two or
-        # more words already form their own horizontal run, which is what a
-        # table row IS; re-attaching a run to another run is a row collapse,
-        # not the repair of a torn line.
-        if len(row_words) > 1:
-            continue
         candidates = set()
         for word in row_words:
             for other_key in line_to_groups.get((word[5], word[6]), ()):
@@ -976,6 +976,18 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
                     continue
                 if len(rows_by_y[other_key]) <= len(row_words):
                     continue  # only fold into a STRICTLY larger group
+                # GH-862: a MULTI-word group is a horizontal run, and a
+                # horizontal run of words at a shared top is what a table row
+                # IS -- so it may only be re-attached across an ADJACENT band
+                # key. 1 is the quantum of the round(y0) key function itself,
+                # so it is the widest span a rounding tear can produce; it is
+                # not a tuned tolerance. A LONE displaced word may fold
+                # further, because a raised marker legitimately lands several
+                # keys away (GH-330) -- that is a different repair sharing
+                # this code path, and applying the tear rule to it is what
+                # broke the superscript fixtures.
+                if len(row_words) > 1 and abs(other_key - y_key) > 1:
+                    continue
                 # A displaced word is part of the same printed line when its
                 # extracted box intersects one of the other group's own
                 # words. This exact geometry guard keeps default/synthetic

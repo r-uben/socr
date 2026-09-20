@@ -20,18 +20,62 @@ missed repair (CLAUDE.md, "no silent content loss").
 
 ## What ships
 
-At the top of the fold loop:
+Inside the fold loop, gating the destination:
 
 ```python
-if len(row_words) > 1:
+if len(row_words) > 1 and abs(other_key - y_key) > 1:
     continue
 ```
 
-Only a SINGLE displaced word may be re-attached. Two or more words already form their own
-horizontal run, and a horizontal run of words at a shared top IS what a table row is;
-re-attaching one run to another is a row collapse, not the repair of a torn line. This is
-a categorical distinction — fragment versus run — not a tuned size, so it does not breach
-the no-magic-numbers rule.
+A MULTI-word group may be re-attached only across an ADJACENT band key. Two or more
+words already form their own horizontal run, and a horizontal run of words at a shared
+top IS what a table row is; re-attaching one run to another across a real vertical gap is
+a row collapse, not the repair of a torn line. `1` is the quantum of the `round(y0)` key
+function itself, so it is the widest span a rounding tear can produce — derived, not a
+tuned tolerance. A LONE displaced word may still fold further, because a raised marker
+(GH-330) legitimately lands several keys away.
+
+That disjunction is the whole point: this code path serves TWO different repairs, and
+every single-rule fix fails one shape or the other.
+
+## Measured, across every shape
+
+Band counts from calling `_assign_bands` directly. "want" is the correct answer.
+
+| shape | want | main@d07d6e2 | single-word-only | shipped |
+|---|---|---|---|---|
+| multi-word span tear (keys 100/101) | 1 | 1 | **2** | 1 |
+| lone-word tear (GH-600 archetype) | 1 | 1 | 1 | 1 |
+| bridging third group (CASE 1) | 2 | **1** | 2 | 2 |
+| CASE 1, reversed emission order | 2 | **1** | 2 | 2 |
+| x-disjoint stacked rows (CASE 2) | 2 | **1** | 2 | 2 |
+| x-disjoint stacked rows, text | 2 | **1** | 2 | 2 |
+| lone-word section label stacked under a data row | 2 | **1** | **1** | **1** |
+
+Bold is wrong. The shipped rule is correct on six of seven; `main` on two of seven.
+
+### The one shape still wrong
+
+A one-word non-numeric section label ("Liabilities") carrying spurious shared line
+identity with the numeric row above it folds into that row, welding a row stub onto a
+data row. It is a LABEL loss rather than a numeric-row collapse, but under this corpus's
+doctrine a stub attributed to the wrong row is still silent content loss. **It fails
+identically on `main`, so this branch neither creates nor closes it.** Filed separately
+rather than bolted on here.
+
+## The first attempt: single-word-only, and why it was replaced
+
+The first version of this fix allowed a fold only when the displaced group was a SINGLE
+word. It closes all four collapse shapes, but it loses a genuine heal: PyMuPDF jitters
+tops per SPAN, not per word, so a styled run straddling the `.5` boundary tears WHOLE.
+Three words at y0 100.46 and four at 100.54 are one printed line that `main` heals and
+the single-word rule refuses.
+
+That miss was found by an independent adversarial review, not by the 113 tests in the
+first commit — every fixture there had a single-word fragment by construction. It is now
+pinned by `test_gh862_multi_word_span_tear_across_adjacent_keys_still_heals`, whose
+control half is the same words displaced by a real row gap, so the test cannot be
+satisfied by dropping the adjacency restriction either.
 
 ## Two candidates measured and rejected
 
@@ -60,9 +104,12 @@ uncapped `count(anchor) == 1` assertion before editing.
 
 | Guard deleted in the mutant | Test that fails |
 | --- | --- |
-| single-word restriction (this fix) | `test_gh862_union_composition_does_not_bridge_two_rows`, `test_gh862_x_disjoint_unequal_stacked_rows_do_not_merge` |
+| the adjacency arm (leaving single-word-only) | `test_gh862_multi_word_span_tear_across_adjacent_keys_still_heals` |
+| the whole GH-862 clause (leaving `main`) | the three `test_gh862_union_composition_does_not_bridge_two_rows` orders, `test_gh862_x_disjoint_unequal_stacked_rows_do_not_merge`, and the multi-word tear test's control half |
 | GH-600 x-overlap refusal | `test_gh862_x_disjoint_unequal_stacked_rows_do_not_merge` |
 | strictly-larger-group rule | `test_gh862_equal_size_single_word_groups_x_disjoint_do_not_merge` |
+
+Neither arm of the disjunction is inert: removing either one turns a passing test red.
 
 The fourth new test, `test_gh862_rounding_tear_across_adjacent_keys_still_heals`, is the
 control: it fails if the fold is disabled outright, so the suite cannot be satisfied by
