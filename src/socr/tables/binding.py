@@ -839,25 +839,65 @@ def _boxes_vertically_overlap(left: tuple, right: tuple) -> bool:
 def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     """Assign rowizer-compatible y groups without chaining adjacent rows.
 
-    ``rowize_from_word_list`` uses ``round(y0)`` as its row key.  Keep that
-    exact partition here: unlike x-lane clustering, it cannot make a run of
-    nearby printed rows collapse into one band.
+    ``rowize_from_word_list`` uses ``round(y0)`` as its row key. Keep that
+    exact partition as the STARTING point here: unlike x-lane clustering, it
+    cannot make a run of nearby printed rows collapse into one band. But two
+    words on the SAME printed line can round to different integer tops when
+    their true tops straddle a ``.5`` boundary (GH-600), tearing one printed
+    line into two ``round(y0)`` groups -- including when both halves carry a
+    number, which the fold below used to refuse to touch.
 
-    A superscript or marker can have a different y0 from the number it
-    annotates.  Such a numeric-free group is folded only when its PyMuPDF
-    ``(block_no, line_no)`` metadata points to exactly one numeric-bearing
-    y-group; exact bbox intersection is only a corroborating guard against
-    synthetic or stale metadata on distant prose. No distance tolerance is
-    used as row evidence.
+    Fold group B into group A when (1) B's PyMuPDF ``(block_no, line_no)``
+    metadata points to exactly ONE other group A, corroborated by an exact
+    bbox intersection against one of A's own words, AND (2) A holds STRICTLY
+    MORE words on that shared line identity than B does. Both are evidence
+    already present in the data -- word membership and a word count -- not a
+    distance tolerance or proximity radius. Folding is symmetric in numeric
+    content (either group may carry numbers) and resolved by union-find so a
+    chain of shared-line groups collapses transitively into one band.
 
-    Numeric-free groups are never folded into other numeric-free groups.
-    On the measured fixture (doc04 p3 ``1t`` under ``ROTATED PCs``) the
-    subscript is a different ``(block_no, line_no)`` from its parent, its
-    box top sits inside the parent height (also true of a short overlapping
-    annotation such as ``(a)``), and the page's shorter-glyph height class
-    mixes the ``1t`` with an on-line ``∗``, so no page-derived test
-    separates a subscript from an annotation. The fold abstains rather
-    than guess.
+    The word-count majority direction is what makes this safe to generalize
+    past the old numeric-free-only restriction. Two round(y0) groups that
+    are genuinely separate table rows but happen to carry identical
+    ``(block_no, line_no)`` metadata (a synthetic/degenerate input; real
+    PyMuPDF extraction keys separate visual lines separately) can satisfy
+    the uniqueness-plus-overlap test in BOTH directions if their row content
+    physically overlaps in y -- see
+    ``test_vertical_band_ambiguity_from_word_extents_not_lane_gap_constant``.
+    Requiring the destination to hold strictly more words breaks that tie:
+    two same-size rows never fold into each other, so the pre-existing
+    row-extent-overlap ambiguity flag still fires for them. A genuinely torn
+    printed line is the opposite shape -- one or a few words diverge from a
+    line whose OTHER words agree, so the majority side is unambiguous.
+
+    Symmetric folding was also measured safe against catastrophic
+    over-merging on real PDF metadata: a column of 29 stacked "-"
+    placeholders sharing one PyMuPDF ``(block_no, line_no)`` (MPR corpus)
+    each round to a DIFFERENT ``round(y0)`` and are each one printed row;
+    naively keying on ``(block_no, line_no)`` alone would collapse all 29
+    into one row. Here they are not merged, because each dash's line-mates
+    resolve to 28 OTHER candidate destinations, not a unique one -- the same
+    uniqueness guard that protects the original marker fold protects this
+    generalization too.
+
+    A group is still never folded when doing so is ambiguous. On the
+    measured fixture (doc04 p3 ``1t`` under ``ROTATED PCs``) the subscript
+    is a different ``(block_no, line_no)`` from its parent, its box top sits
+    inside the parent height (also true of a short overlapping annotation
+    such as ``(a)``), and the page's shorter-glyph height class mixes the
+    ``1t`` with an on-line ``∗``, so the line-identity destination set has
+    more than one member and the fold abstains rather than guess.
+
+    Measured residual (GH-600 corpus scan, table-region words only): this
+    fold resolves the large majority of torn printed lines found; the
+    residual is concentrated in rotated text (a word run where consecutive
+    words share x0 and vary in y0 instead of the reverse) -- there the "same
+    printed line" words do not vertically overlap by construction, so this
+    fold's evidence cannot corroborate them. That is the SAME rotated-content
+    boundary this docstring already documents above, not a new one. Nearly
+    all rotated-text residual in the corpus scan was on SEP dot-plot /
+    projection-table pages, a known chart-content class handled outside
+    native table binding (see GH-734/GH-739).
     """
     rows_by_y: dict[int, list] = {}
     for word in words:
@@ -866,48 +906,54 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     if not rows_by_y:
         return [], {}
 
-    numeric_y_keys = {
-        y_key
-        for y_key, row_words in rows_by_y.items()
-        if any(is_numeric_token(word[4]) for word in row_words)
-    }
-    numeric_words_by_y = {
-        y_key: [word for word in rows_by_y[y_key] if is_numeric_token(word[4])]
-        for y_key in numeric_y_keys
-    }
-
-    # A metadata line may contain words in more than one y-group.  Retain all
-    # such groups so that folding is allowed only when the line identity has a
-    # unique numeric-bearing destination.
-    line_to_numeric_groups: dict[tuple[object, object], set[int]] = {}
-    for y_key in numeric_y_keys:
-        for word in rows_by_y[y_key]:
-            line_key = (word[5], word[6])
-            line_to_numeric_groups.setdefault(line_key, set()).add(y_key)
-
-    y_to_group_key = {y_key: y_key for y_key in rows_by_y}
+    # A metadata line may contain words split across more than one
+    # round(y0) group. Retain every such group so folding is allowed only
+    # when the line identity has a UNIQUE other destination.
+    line_to_groups: dict[tuple[object, object], set[int]] = {}
     for y_key, row_words in rows_by_y.items():
-        if y_key in numeric_y_keys:
-            continue
+        for word in row_words:
+            line_to_groups.setdefault((word[5], word[6]), set()).add(y_key)
+
+    parent: dict[int, int] = {y_key: y_key for y_key in rows_by_y}
+
+    def _find(y_key: int) -> int:
+        root = y_key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[y_key] != root:
+            parent[y_key], y_key = root, parent[y_key]
+        return root
+
+    def _union(a: int, b: int) -> None:
+        root_a, root_b = _find(a), _find(b)
+        if root_a != root_b:
+            parent[root_a] = root_b
+
+    for y_key, row_words in rows_by_y.items():
         destinations = set()
         for word in row_words:
-            for destination in line_to_numeric_groups.get((word[5], word[6]), ()):
-                # A displaced marker is part of the same printed line when
-                # its extracted box intersects the numeric word's box. This
-                # exact geometry guard keeps default/synthetic metadata on
-                # distant headers and panel rows from being treated as line
-                # evidence; no proximity radius is introduced.
+            for other_key in line_to_groups.get((word[5], word[6]), ()):
+                if other_key == y_key:
+                    continue
+                if len(rows_by_y[other_key]) <= len(row_words):
+                    continue  # only fold into a STRICTLY larger group
+                # A displaced word is part of the same printed line when its
+                # extracted box intersects one of the other group's own
+                # words. This exact geometry guard keeps default/synthetic
+                # metadata on distant headers and panel rows from being
+                # treated as line evidence; no proximity radius is
+                # introduced.
                 if any(
-                    _boxes_vertically_overlap(word, numeric_word)
-                    for numeric_word in numeric_words_by_y[destination]
+                    _boxes_vertically_overlap(word, other_word)
+                    for other_word in rows_by_y[other_key]
                 ):
-                    destinations.add(destination)
+                    destinations.add(other_key)
         if len(destinations) == 1:
-            y_to_group_key[y_key] = destinations.pop()
+            _union(y_key, destinations.pop())
 
-    group_keys = sorted(set(y_to_group_key.values()))
+    group_keys = sorted({_find(y_key) for y_key in rows_by_y})
     group_to_band = {group_key: idx for idx, group_key in enumerate(group_keys)}
-    y_to_band = {y_key: group_to_band[group_key] for y_key, group_key in y_to_group_key.items()}
+    y_to_band = {y_key: group_to_band[_find(y_key)] for y_key in rows_by_y}
     return [float(group_key) for group_key in group_keys], y_to_band
 
 
