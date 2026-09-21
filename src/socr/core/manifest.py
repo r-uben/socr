@@ -2337,12 +2337,19 @@ def native_region_text(words: list) -> str:
     line per band, words left to right. Reuses ``cluster_band_words`` so this
     reconstruction and the prose/table partition can never disagree about
     where a line begins.
+
+    #700: this module's own caller (below) always passes ``prose_words`` --
+    already the page's own prose bands, so page-scoped -- so this sets
+    ``column_aware=True`` to match ``partition_prose_bands``'s banding
+    exactly, per the "never disagree" guarantee above. See
+    ``cluster_band_words``'s docstring for why that flag is opt-in rather
+    than default and scoped away from region-scoped table callers.
     """
     from socr.tables.row_corroboration import cluster_band_words
 
     lines = [
         " ".join(str(w[4]) for w in sorted(band, key=lambda w: w[0]))
-        for band in cluster_band_words(words)
+        for band in cluster_band_words(words, column_aware=True)
     ]
     return "\n".join(line for line in lines if line.strip())
 

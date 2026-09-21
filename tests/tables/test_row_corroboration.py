@@ -375,3 +375,49 @@ def test_column_index_legend_row_excluded_not_counted_as_data_row():
     assert result.total == 1  # the index row does not count
     assert result.bound == 1
     assert result.clears is True
+
+
+class TestSingleWideTableSurvivesColumnAwareBanding:
+    """#700 round 2 (review finding). ``corroborate_rows`` reaches
+    ``cluster_band_words`` through :func:`baseline_bands` with REGION-SCOPED
+    table words -- a single table's own cells, never a page. A table with
+    one wide inter-column-GROUP gap (a ``Mean | SD`` block beside a
+    ``Q1 | Q3`` block, an ordinary central-bank shape) has exactly the kind
+    of x-gap #700's column split looks for; splitting it in two does not
+    recover two independent structures the way a genuine two-column PAGE
+    does -- it cuts every row's own cells in half at the same y, so no
+    candidate row's full numeric run survives in either half. This class
+    pins that a correct transcription of exactly that table shape still
+    corroborates fully -- it must fail if #700's split is not scoped away
+    from ``baseline_bands``'s region-scoped callers.
+    """
+
+    _WIDE_GAP = 300.0  # exceeds ALIGNED_RUN_GAP_MAX_WORD_SPACES * median word gap
+
+    def _wide_table_words(self) -> list[tuple]:
+        # Item | Mean | SD  ...wide gap...  Q1 | Q3
+        left_xs = [10.0, 100.0, 160.0]
+        right_xs = [left_xs[-1] + 40.0 + self._WIDE_GAP, left_xs[-1] + 100.0 + self._WIDE_GAP]
+        words: list[tuple] = []
+        for i in range(5):
+            y = 10.0 + i * 20.0
+            values = [f"Row{i}", f"{10 + i}.5", f"{20 + i}.5", f"{30 + i}.5", f"{40 + i}.5"]
+            for x, value in zip(left_xs + right_xs, values):
+                words.append(w(x, y, value))
+        return words
+
+    def _wide_table_markdown(self) -> str:
+        rows = [
+            [f"Row{i}", f"{10 + i}.5", f"{20 + i}.5", f"{30 + i}.5", f"{40 + i}.5"]
+            for i in range(5)
+        ]
+        return md_table(["Item", "Mean", "SD", "Q1", "Q3"], rows)
+
+    def test_a_correct_wide_table_transcription_still_fully_corroborates(self) -> None:
+        words = self._wide_table_words()
+        markdown = self._wide_table_markdown()
+        region = (0.0, 0.0, 800.0, 200.0)
+        result = corroborate_rows(words, markdown, region)
+        assert result.native_numeric_rows == 5  # NOT 10: the row is not cut in half
+        assert result.bound == result.total == 5
+        assert result.clears is True

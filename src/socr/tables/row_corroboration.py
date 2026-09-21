@@ -276,7 +276,7 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
-def cluster_band_words(words: list) -> list[list[tuple]]:
+def cluster_band_words(words: list, *, column_aware: bool = False) -> list[list[tuple]]:
     """Cluster *words* into ordered baseline bands, keeping each band's WORDS.
 
     The clustering half of :func:`baseline_bands`, factored out (#652) so the
@@ -285,38 +285,59 @@ def cluster_band_words(words: list) -> list[list[tuple]]:
     calls this and then reduces each band to its tokens, so the two can never
     disagree about where a printed line begins.
 
-    #700: bands were clustered by y across the FULL page width, so on a
-    two-column page a left-column prose line and a right-column table row --
-    same y, disjoint x -- landed in one band. That band's numeric tokens made
-    the whole thing table-shaped, so the left column's prose was withheld
-    behind the right column's marker along with the table (content loss, not
-    a leak -- the shared band still carried a printed numeral and was
-    correctly withheld). Column geometry is detected first with
-    ``_detect_column_gutter`` (GH-152's own detector, reused rather than a
-    second one invented for this call site: same
+    #700: on a two-column PAGE, bands clustered by y across the full page
+    width put a left-column prose line and a right-column table row -- same
+    y, disjoint x -- in one band. That band's numeric tokens made the whole
+    thing table-shaped, so the left column's prose was withheld behind the
+    right column's marker along with the table (content loss, not a leak --
+    the shared band still carried a printed numeral and was correctly
+    withheld). *column_aware* (opt-in, default ``False``) detects column
+    geometry with ``_detect_column_gutter`` (GH-152's own detector, reused
+    rather than a second one invented for this call site: same
     ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` yardstick, same "a spanning word
-    rules it out" fail-closed behaviour). When a single gutter is found, each
-    side is clustered independently and returned left-column bands first,
-    top to bottom, then right-column bands, top to bottom -- the same
+    rules it out" fail-closed behaviour) and, when a single gutter is found,
+    clusters each side independently, returning left-column bands first, top
+    to bottom, then right-column bands, top to bottom -- the same
     left-band-then-right-band convention ``reconstruct.py``'s own two-table
     split already returns (see that function's docstring: true left-to-right
-    interleaving is a known, separately-scoped remainder there too). No
-    gutter, or any doubt raised while detecting one, falls through to the
-    original single full-width clustering, unchanged.
+    interleaving is a known, separately-scoped remainder there too).
+
+    #700 round 2 (review finding, reproduced before this fix): every OTHER
+    caller of this function reaches it through :func:`baseline_bands` with
+    REGION-SCOPED words -- a single table's own cells, not a page. A table
+    with one wide inter-column-GROUP gap (a ``Mean | SD`` block beside a
+    ``Q1 | Q3`` block, an ordinary central-bank shape) has exactly the x-gap
+    ``_detect_column_gutter`` looks for, but splitting it in two does not
+    recover two independent structures the way the two-column PAGE case
+    does -- it cuts every row's own cells in half at the same y, so
+    ``corroborate_rows`` can no longer find any candidate row's full numeric
+    run in either half (measured: a correct 5x5 table transcription went
+    from ``bound=5`` to ``bound=0``, see
+    ``TestSingleWideTableSurvivesColumnAwareBanding``). There is no
+    threshold that tells "two columns" and "one wide table" apart from the
+    gap width alone -- both are "one wide empty x-interval" by construction
+    -- so the split is scoped to the ONE call site that actually holds a
+    page and needs it (:func:`partition_prose_bands`, plus
+    ``manifest.native_region_text`` for the same words so the two can never
+    disagree about where a line begins) rather than defaulting on inside
+    this shared primitive. Every ``baseline_bands`` caller -- all of them
+    region-scoped table words -- keeps the pre-#700 full-width clustering,
+    unchanged.
     """
     if not words:
         return []
-    try:
-        gutter_x = _detect_column_gutter(words)
-    except Exception:  # pragma: no cover - defensive, mirrors reconstruct.py's own guard
-        gutter_x = None
-    if gutter_x is not None:
-        left_words = [w for w in words if w[2] <= gutter_x]
-        right_words = [w for w in words if w[0] >= gutter_x]
-        if left_words and right_words:
-            return _cluster_band_words_single_column(
-                left_words
-            ) + _cluster_band_words_single_column(right_words)
+    if column_aware:
+        try:
+            gutter_x = _detect_column_gutter(words)
+        except Exception:  # pragma: no cover - defensive, mirrors reconstruct.py's own guard
+            gutter_x = None
+        if gutter_x is not None:
+            left_words = [w for w in words if w[2] <= gutter_x]
+            right_words = [w for w in words if w[0] >= gutter_x]
+            if left_words and right_words:
+                return _cluster_band_words_single_column(
+                    left_words
+                ) + _cluster_band_words_single_column(right_words)
     return _cluster_band_words_single_column(words)
 
 
@@ -418,9 +439,15 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
 
     Bands run top of page to bottom, words left to right inside each band --
-    page reading order, not the input order of *words*. #649's caller ships
-    these bands as text and has to put the fail-closed marker where each
-    withheld run actually sits, so the interleaving is the point.
+    page reading order, not the input order of *words* -- UNLESS a single
+    column gutter is detected (#700), in which case the left column's bands
+    are returned in full, top to bottom, before the right column's: reading
+    order for a genuine two-column page, not full-page y order. See
+    :func:`cluster_band_words`'s ``column_aware`` parameter, which this
+    caller always sets, for the detector and why it is scoped to this
+    (page-words) caller specifically. #649's caller ships these bands as
+    text and has to put the fail-closed marker where each withheld run
+    actually sits, so the interleaving is the point.
 
     #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
     table geometry there is no bbox to scope prose with, so the prose region is
@@ -472,7 +499,7 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     if row_shape_min is None:
         row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
     bands: list[tuple[bool, list]] = []
-    for band in cluster_band_words(words):
+    for band in cluster_band_words(words, column_aware=True):
         numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
         ordered = sorted(band, key=lambda w: w[0])
         bands.append((numeral_count < row_shape_min, ordered))
