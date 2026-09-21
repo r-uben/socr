@@ -5440,8 +5440,8 @@ class UnifiedPipeline:
                 retry_note = ""
             parts.append(
                 f"page(s) {', '.join(str(n) for n in withheld)}: "
-                f"{FailureMode.TABLE_WITHHELD.value} (table judge ladder rejected it and "
-                "neither the geometry guard nor a blind cell transcription cleared it; "
+                f"{FailureMode.TABLE_WITHHELD.value} (table judge ladder rejected it and a "
+                "blind cell transcription read different tokens out of the same cells; "
                 f"the table's content was WITHHELD, not shipped{retry_note})"
             )
         if rejected:
@@ -7451,8 +7451,9 @@ class UnifiedPipeline:
             elif result.outcome is TableLadderOutcome.WITHHELD:
                 kind = TABLE_LADDER_WITHHELD_KIND
                 detail = (
-                    f"table {result.table_id} WITHHELD: the readers rejected it and neither "
-                    f"guard cleared it ({guard_detail_by_table.get(result.table_id, 'not cleared')}) "
+                    f"table {result.table_id} WITHHELD: the readers rejected it and a blind "
+                    "cell transcription read different tokens out of the same cells "
+                    f"({guard_detail_by_table.get(result.table_id, 'blind MISMATCH')}) "
                     "-- no table bytes ship for this region"
                 )
             elif result.outcome is TableLadderOutcome.REJECTED:
@@ -13996,8 +13997,8 @@ class UnifiedPipeline:
                     ]
                     console.print(
                         f"  [red]{len(table_withheld_pages)} table page(s) WITHHELD — "
-                        f"TABLE_WITHHELD (the judge ladder rejected the table and neither the "
-                        f"geometry guard nor a blind cell transcription cleared it; the "
+                        f"TABLE_WITHHELD (the judge ladder rejected the table and a blind "
+                        f"cell transcription read different tokens out of the same cells; the "
                         f"table's content was NOT shipped, see the page image): "
                         f"{table_withheld_pages}[/red]"
                     )

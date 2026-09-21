@@ -525,7 +525,9 @@ class TestLadderOutcomes:
             "witness_scope": "located",
         }
 
-    def test_rejected_sets_disposition_and_emits_rejected_event(self, tmp_path: Path) -> None:
+    def test_rejected_mismatch_sets_withheld_disposition_and_emits_withheld_event(
+        self, tmp_path: Path
+    ) -> None:
         pipeline = _make_pipeline()
         pdf_path = _ruled_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -592,6 +594,8 @@ class TestLadderOutcomes:
 
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         assert _events_of_kind(state, TABLE_LADDER_WITHHELD_KIND) == []
+        events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
+        assert len(events) == 1
 
     def test_reduce_page_ladder_rejected_wins_over_unverified(self, tmp_path: Path) -> None:
         """Two tables, one REJECTED one UNVERIFIED: page disposition is REJECTED
