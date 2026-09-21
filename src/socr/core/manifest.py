@@ -2738,7 +2738,9 @@ class PagePrimaryReason(str, Enum):
     NO_USABLE_OUTPUT = "no_usable_output"
     INVALID_TABLE_EMISSION = "invalid_table_emission"
     #: P1 (owner ruling Q2): the page shipped a fail-closed marker in place of a
-    #: table because the readers rejected it and neither ruled guard cleared it.
+    #: table because the readers rejected it and a blind cell transcription read
+    #: different tokens out of the same cells (a blind MISMATCH, not merely a
+    #: guard that could not clear it -- see GH-575).
     #: Distinct from SHIPPED_FAILURE_MARKER, which means socr cannot attribute
     #: the marker it is looking at; here it can, exactly.
     TABLE_JUDGE_WITHHELD = "table_judge_withheld"
@@ -3821,7 +3823,9 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
     if disposition is FailureMode.TABLE_WITHHELD:
         # P1 (owner ruling Q2). REJECTED and UNVERIFIED are LABELS: the text
         # ships, demoted. WITHHELD is not -- the readers refused this table
-        # and neither guard cleared it, so its bytes do not ship at all.
+        # and a blind cell transcription read different tokens out of the
+        # same cells (a blind MISMATCH, per GH-575), so its bytes do not
+        # ship at all.
         #
         # Rewritten HERE, in the guard that already runs before
         # ``finalized_page_records`` / ``canonical_page_texts``, so the saved
