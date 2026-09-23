@@ -141,7 +141,12 @@ def probe_page_loads(path: Path | str) -> PageLoadProbe:
     except Exception as exc:  # noqa: BLE001 - an unopenable file is a finding, not a crash
         return PageLoadProbe(declared=0, loadable=0, first_error=f"{type(exc).__name__}: {exc}")
     try:
-        declared = doc.page_count
+        # #882: reading the declared count can itself raise on a damaged page
+        # tree -- before any page is loaded -- so it is guarded like the rest.
+        try:
+            declared = doc.page_count
+        except Exception as exc:  # noqa: BLE001 - a count we cannot read is a finding
+            return PageLoadProbe(declared=0, loadable=0, first_error=f"{type(exc).__name__}: {exc}")
         loadable = 0
         first_error: str | None = None
         for index in range(declared):

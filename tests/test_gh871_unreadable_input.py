@@ -248,3 +248,49 @@ def test_a_known_zero_page_count_is_not_recounted(tmp_path):
     bogus.write_bytes(b"not a pdf at all")
     handle = DocumentHandle(path=bogus, page_count=0, page_count_known=True)
     assert handle.page_count == 0
+
+
+class _CountRaises:
+    """A document whose declared page count itself cannot be read (#882)."""
+
+    closed = False
+
+    @property
+    def page_count(self):
+        raise fitz.mupdf.FzErrorFormat("cannot read page tree")
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_page_count_that_cannot_be_read_is_reported_not_raised(monkeypatch, tmp_path):
+    """#882: ``probe_page_loads`` promises never to raise. ``page_count`` sat
+    outside both guards, so a page tree that fails on the count escaped as a raw
+    traceback -- the #871 failure one line earlier."""
+    fake = _CountRaises()
+    monkeypatch.setattr(pdf_mod.fitz, "open", lambda p: fake)
+    probe = probe_page_loads(tmp_path / "any.pdf")
+    assert probe.unreadable
+    assert "cannot read page tree" in (probe.first_error or "")
+    assert fake.closed, "the handle must still be closed on this path"
+
+
+def test_process_refuses_a_file_whose_page_count_raises(monkeypatch, pipeline, tmp_path):
+    """End to end: the refusal record, not a traceback."""
+    pdf = _real_pdf(tmp_path / "doc.pdf")
+    real_open = pdf_mod.fitz.open
+    monkeypatch.setattr(
+        pdf_mod.fitz, "open", lambda p: _CountRaises() if str(p) == str(pdf) else real_open(p)
+    )
+    # Hermetic (cubic on #894): no judge is under test, and the fingerprint the
+    # refusal record carries would otherwise probe ollama for one (#886).
+    pipeline._resolve_judge_model = lambda *a, **k: ""
+    out = tmp_path / "out"
+    result = pipeline.process(pdf, out)
+    assert result.status is DocumentStatus.ERROR
+    assert result.failure_mode is FailureMode.UNREADABLE_INPUT
+    # The fix promises a RECORD, not only a return value (cubic on #894): a
+    # regression that returned ERROR but dropped the metadata would otherwise pass.
+    doc_meta = json.loads((out / "doc" / "metadata.json").read_text())
+    assert doc_meta["status"] == "failed"
+    assert FailureMode.UNREADABLE_INPUT.value in doc_meta["error"]
