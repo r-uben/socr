@@ -193,6 +193,20 @@ def test_judge_builds_a_data_uri_from_the_rendered_file(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 
 
+def _serve(monkeypatch, *ids, calls=None):
+    """Make the named vLLM server answer /models with ``ids`` (none = unreachable)."""
+    import httpx as real_httpx
+
+    def _get(url, **kwargs):
+        if calls is not None:
+            calls.append(url)
+        if not ids:
+            raise real_httpx.ConnectError("refused")
+        return _Resp(_models_payload(*ids))
+
+    monkeypatch.setattr(vllm_judge.httpx, "get", _get)
+
+
 def _pipeline(config: PipelineConfig) -> UnifiedPipeline:
     """A pipeline with no constructor side effects, as the orchestrator's own
     comments say tests build one."""
@@ -201,7 +215,7 @@ def _pipeline(config: PipelineConfig) -> UnifiedPipeline:
     return p
 
 
-def test_resolver_returns_the_vllm_model_without_probing_ollama(monkeypatch):
+def test_resolver_returns_the_vllm_model_without_touching_ollama(monkeypatch):
     """The whole point: no Ollama daemon, and a judge model still resolves.
 
     ``OllamaVisionJudge`` is replaced with something that explodes on
@@ -215,6 +229,7 @@ def test_resolver_returns_the_vllm_model_without_probing_ollama(monkeypatch):
             raise AssertionError("the Ollama ladder must not be probed when vLLM is named")
 
     monkeypatch.setattr(oj, "OllamaVisionJudge", _Explode)
+    _serve(monkeypatch, SERVED)
 
     cfg = PipelineConfig(judge_vllm_url=URL, judge_vllm_model=SERVED)
     assert _pipeline(cfg)._resolve_judge_model() == SERVED
@@ -237,6 +252,7 @@ def test_the_vllm_pair_is_what_changes_the_resolution(monkeypatch):
             return False
 
     monkeypatch.setattr(oj, "OllamaVisionJudge", _Absent)
+    _serve(monkeypatch, SERVED)
 
     without = _pipeline(PipelineConfig())._resolve_judge_model()
     with_pair = _pipeline(
@@ -246,6 +262,52 @@ def test_the_vllm_pair_is_what_changes_the_resolution(monkeypatch):
     assert without is None
     assert with_pair == SERVED
     assert without != with_pair
+
+
+def test_an_unreachable_named_server_fingerprints_as_heuristic(monkeypatch):
+    """PR #874 review finding: provenance must follow reachability.
+
+    ``_resolve_judge_model`` feeds ``_run_fingerprint``'s ``judge_model``. If it
+    named the vLLM model while the server was down, pages that heuristics judged
+    would fingerprint as VLM-judged, and the resume gate would later skip them
+    as up to date once the server came back -- the resume half of #133.
+
+    Difference pin: same config, same process, changing only whether the named
+    server answers. It must also NOT fall through to an Ollama model, because
+    ``_build_page_judge`` would still build the (dead) vLLM judge and the
+    fingerprint would then name a judge that never ran.
+    """
+    import socr.judge.ollama_judge as oj
+
+    class _OllamaWouldAnswer:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True  # a live Ollama the resolver must NOT fall back to
+
+    monkeypatch.setattr(oj, "OllamaVisionJudge", _OllamaWouldAnswer)
+    cfg = PipelineConfig(judge_vllm_url=URL, judge_vllm_model=SERVED)
+
+    _serve(monkeypatch)  # unreachable
+    down = _pipeline(cfg)._resolve_judge_model()
+    _serve(monkeypatch, SERVED)  # reachable
+    up = _pipeline(cfg)._resolve_judge_model()
+
+    assert down is None, "an unreachable server must not be named as the judge"
+    assert up == SERVED
+    assert down != up
+
+
+def test_reachability_is_probed_once_per_run(monkeypatch):
+    """The fingerprint consults the resolver on every page; the probe must not
+    repeat, or every page pays an HTTP round-trip."""
+    calls: list = []
+    _serve(monkeypatch, SERVED, calls=calls)
+    p = _pipeline(PipelineConfig(judge_vllm_url=URL, judge_vllm_model=SERVED))
+    for _ in range(5):
+        assert p._resolve_judge_model() == SERVED
+    assert len(calls) == 1
 
 
 def test_half_a_pair_is_not_a_configuration(monkeypatch):
@@ -287,6 +349,7 @@ def test_strict_local_does_not_forbid_an_operator_named_server(monkeypatch):
             return False
 
     monkeypatch.setattr(oj, "OllamaVisionJudge", _Absent)
+    _serve(monkeypatch, SERVED)
     cfg = PipelineConfig(judge_vllm_url=URL, judge_vllm_model=SERVED, strict_local=True)
     assert _pipeline(cfg)._resolve_judge_model() == SERVED
 

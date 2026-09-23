@@ -9941,21 +9941,37 @@ class UnifiedPipeline:
         def _permitted(model: str) -> bool:
             return "cloud" not in model.casefold() or not forbid_cloud
 
-        # GH-873: an operator-named vLLM server short-circuits the Ollama
-        # candidate ladder, exactly as ``--judge-model`` does, and for the same
-        # reason: the operator has named the thing, so probing for something
-        # else would discard their setting. It is checked BEFORE
-        # ``judge_model`` only in the sense that both are explicit; a run that
-        # sets both gets the vLLM pair, because that names a server as well as
-        # a model and is therefore the more specific instruction.
+        # GH-873: an operator-named vLLM server replaces the Ollama candidate
+        # ladder, exactly as ``--judge-model`` names a model -- the operator has
+        # named the thing, so probing for something else would discard their
+        # setting. A run that sets both gets the vLLM pair, because that names a
+        # server as well as a model and is the more specific instruction.
         #
-        # Not probed here. ``_build_page_judge`` calls ``is_available()`` on
-        # the judge it builds, so an unreachable server still degrades to
-        # heuristics there; resolving eagerly would add an HTTP round-trip to
-        # every page's fingerprint (the same cost ``_judge_model_cache``
-        # exists to avoid).
+        # It IS probed, and the answer is memoized. This value feeds
+        # ``_run_fingerprint``'s ``judge_model``, which is availability-dependent
+        # by design: a page judged by heuristics because the server was down must
+        # not fingerprint as VLM-judged, or the resume gate would later skip it
+        # as up to date once the server is back -- the resume half of #133.
+        # ``_judge_model_cache`` bounds the cost to one probe per run.
+        #
+        # An unreachable named server resolves to None and does NOT fall through
+        # to the Ollama ladder: ``_build_page_judge`` builds the vLLM judge
+        # whenever the pair is set, so naming an Ollama model here would record a
+        # judge that never ran.
         if self.config.judge_vllm_url and self.config.judge_vllm_model:
-            return self.config.judge_vllm_model
+            if self._judge_model_cache is not False:
+                return self._judge_model_cache  # type: ignore[return-value]
+            from socr.judge.vllm_judge import VLLMVisionJudge
+
+            try:
+                reachable = VLLMVisionJudge(
+                    model=self.config.judge_vllm_model,
+                    base_url=self.config.judge_vllm_url,
+                ).is_available()
+            except Exception:
+                reachable = False
+            self._judge_model_cache = self.config.judge_vllm_model if reachable else None
+            return self._judge_model_cache
 
         if self.config.judge_model:
             if _permitted(self.config.judge_model):
