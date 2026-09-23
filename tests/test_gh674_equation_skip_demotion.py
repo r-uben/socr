@@ -45,6 +45,9 @@ def _make_pipeline(**overrides) -> UnifiedPipeline:
     # #885: this file is about equation-sidecar demotion, not engine
     # selection; pin the engine so the AUTO default does not shell out to
     # `ollama` (via _phase_assemble's fingerprinting).
+    # #886: also pin the page judge off -- `_phase_assemble`'s fingerprinting
+    # calls `_resolve_judge_model`, a second Ollama probe, whenever
+    # `judge_backend` is not "heuristic"; this file is not about the judge.
     cfg = PipelineConfig(
         agentic=True,
         quiet=True,
@@ -55,6 +58,7 @@ def _make_pipeline(**overrides) -> UnifiedPipeline:
         primary_engine=EngineType.QWEN,
         local_engine=EngineType.QWEN,
         enabled_engines=[EngineType.QWEN],
+        judge_backend="heuristic",
         **overrides,
     )
     return UnifiedPipeline(cfg)

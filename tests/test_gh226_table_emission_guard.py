@@ -271,6 +271,9 @@ def test_post_figure_body_guard_updates_markdown_sidecar_manifest_and_status(
     # #885: this test is about the table-emission guard, not engine
     # selection; pin the engine so the AUTO default does not shell out to
     # `ollama` (via _phase_assemble's fingerprinting).
+    # #886: also pin the page judge off -- `_phase_assemble`'s fingerprinting
+    # calls `_resolve_judge_model`, a second Ollama probe, whenever
+    # `judge_backend` is not "heuristic"; this test is not about the judge.
     pipeline = UnifiedPipeline(
         PipelineConfig(
             save_figures=True,
@@ -279,6 +282,7 @@ def test_post_figure_body_guard_updates_markdown_sidecar_manifest_and_status(
             primary_engine=EngineType.QWEN,
             local_engine=EngineType.QWEN,
             enabled_engines=[EngineType.QWEN],
+            judge_backend="heuristic",
         )
     )
     out_dir = tmp_path / "out"

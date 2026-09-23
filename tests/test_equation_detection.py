@@ -623,10 +623,14 @@ class TestFingerprintDiffers:
         # #885: this test is about the detect_equations fingerprint key, not
         # engine selection; pin the engine so the AUTO default does not shell
         # out to `ollama`.
+        # #886: also pin the page judge off -- `_run_fingerprint` calls
+        # `_resolve_judge_model`, a second Ollama probe, whenever
+        # `judge_backend` is not "heuristic"; this test is not about the judge.
         pinned = {
             "primary_engine": EngineType.QWEN,
             "local_engine": EngineType.QWEN,
             "enabled_engines": [EngineType.QWEN],
+            "judge_backend": "heuristic",
         }
         cfg_off = PipelineConfig(**pinned)
         cfg_off.detect_equations = False

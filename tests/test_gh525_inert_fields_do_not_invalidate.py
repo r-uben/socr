@@ -41,6 +41,11 @@ _PIN_ENGINE = {
     "primary_engine": EngineType.QWEN,
     "local_engine": EngineType.QWEN,
     "enabled_engines": [EngineType.QWEN],
+    # #886: also pin the page judge off -- `_run_fingerprint` calls
+    # `_resolve_judge_model`, a second Ollama probe, whenever `judge_backend`
+    # is not "heuristic"; this file is about inert-field hygiene, not the
+    # judge.
+    "judge_backend": "heuristic",
 }
 
 

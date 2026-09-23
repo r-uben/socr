@@ -39,11 +39,20 @@ def _base_config() -> PipelineConfig:
     which config knobs move the fingerprint -- so pinning is safe; the one test
     that IS about AUTO resolution already pins ``primary_engine`` explicitly
     itself (see ``test_table_judge_rung1_host_records_the_resolved_host``).
+
+    #886: ``judge_backend="heuristic"`` closes the matching gap for the PAGE
+    (vision) judge -- ``_run_fingerprint`` still calls ``_resolve_judge_model``,
+    which probes Ollama, whenever ``judge_backend != "heuristic"``. None of
+    these tests are about that judge either, so the resolver never needs to
+    run; ``test_table_judge_rung1_host_records_the_resolved_host`` covers a
+    different judge entirely (the TABLE ladder's rung 1 host), which this
+    field does not gate.
     """
     return PipelineConfig(
         primary_engine=EngineType.QWEN,
         local_engine=EngineType.QWEN,
         enabled_engines=[EngineType.QWEN],
+        judge_backend="heuristic",
     )
 
 

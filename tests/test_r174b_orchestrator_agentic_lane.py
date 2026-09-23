@@ -46,6 +46,10 @@ def _make_config(**overrides) -> PipelineConfig:
         enabled_engines=[EngineType.GLM, EngineType.GEMINI],
         quiet=True,
         tiered=False,
+        # #886: process() reaches _run_fingerprint via _write_metadata, which
+        # calls _resolve_judge_model (an Ollama probe) whenever judge_backend
+        # is not "heuristic". None of these tests are about the judge.
+        judge_backend="heuristic",
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)

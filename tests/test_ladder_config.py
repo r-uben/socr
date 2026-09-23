@@ -294,10 +294,15 @@ class TestRunFingerprintBindsKimiOnlyWhenLadderEnabled:
     # #885: this class is about the adjudicator's fingerprint fields, not
     # engine selection; pin the engine so the AUTO default does not shell out
     # to `ollama`.
+    # #886: also pin the page judge off -- `_run_fingerprint` calls
+    # `_resolve_judge_model`, a second Ollama probe, whenever `judge_backend`
+    # is not "heuristic"; this class is about the TABLE adjudicator's
+    # fingerprint fields, not the page judge.
     _ENGINE = {
         "primary_engine": EngineType.QWEN,
         "local_engine": EngineType.QWEN,
         "enabled_engines": [EngineType.QWEN],
+        "judge_backend": "heuristic",
     }
 
     def test_kimi_binary_changes_the_enabled_fingerprint(self):
