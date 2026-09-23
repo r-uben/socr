@@ -683,8 +683,11 @@ TABLE_LADDER_ACCEPTED_KIND = "table_ladder_accepted"
 TABLE_LADDER_REJECTED_KIND = "table_ladder_rejected"
 TABLE_LADDER_UNVERIFIED_KIND = "table_ladder_unverified"
 #: P1 (owner ruling Q2): the FOURTH terminal. A table two readers rejected
-#: and neither guard could clear ships NO table bytes -- the region is
-#: replaced by the failed-table marker plus the page image. Distinct from
+#: AND whose cells a blind transcription read as different tokens (a blind
+#: MISMATCH, per GH-575) ships NO table bytes -- the region is replaced by the
+#: failed-table marker plus the page image. A guard that merely could not clear
+#: the table leaves it UNVERIFIED with its bytes intact, not WITHHELD; see
+#: ``tables_trust.LADDER_TERMINAL_NOTES["table_ladder_withheld"]``. Distinct from
 #: ``table_ladder_rejected`` on purpose: rejected shipped the text demoted
 #: under a warning, withheld ships none of it, and conflating them would
 #: make every historical rejected page look like a withhold on replay.
