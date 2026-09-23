@@ -174,6 +174,14 @@ _UNEXERCISED = {
     # Both real consumers (_build_page_judge, _resolve_crop_vlm_model) are
     # stubbed; the remaining reader is _resolve_judge_model under the fingerprint.
     "judge_model",
+    # GH-873, same bucket and same reason as judge_model above: both real
+    # consumers are _build_page_judge (stubbed in this fixture) and
+    # _resolve_judge_model, which this fixture reaches only under the
+    # fingerprint. Falsified directly in
+    # tests/test_gh873_judge_vllm_backend.py, which pins the difference the
+    # pair makes to _resolve_judge_model with the Ollama ladder patched absent.
+    "judge_vllm_url",
+    "judge_vllm_model",
     # Consumed outside the orchestrator entirely (cli.py, engine subprocesses):
     "dry_run",
     "verbose",

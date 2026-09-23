@@ -339,6 +339,15 @@ class PipelineConfig:
     strict_local: bool = False  # if True, agentic ladder uses only local/free rungs
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
     judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
+    # GH-873: the judge's own vLLM pair, mirroring qwen_vllm_url/qwen_vllm_model.
+    # Without these the ONLY VLM judge is Ollama-backed, so a box serving the
+    # vision model through vLLM and running no Ollama daemon (the HPC nodes)
+    # can never resolve a judge and silently degrades to heuristics. An empty
+    # url means "not configured"; the Ollama candidate ladder is then used as
+    # before. Setting the url is an operator naming a specific server, so it is
+    # honoured under --strict-local exactly as --qwen-vllm-url is.
+    judge_vllm_url: str = ""  # OpenAI-compatible base URL, e.g. http://127.0.0.1:8000/v1
+    judge_vllm_model: str = ""  # served model id, e.g. Qwen/Qwen3-VL-30B-A3B-Instruct
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap
     # True when the user passed --max-cost-per-page explicitly (including 0).
     # GH-154: the bare float can't distinguish "the user typed 0" from "the

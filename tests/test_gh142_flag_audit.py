@@ -136,6 +136,14 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "qwen_vllm_url": (AGENTIC, "read in _phase_agentic"),
     "judge_backend": (AGENTIC, "read by _build_page_judge"),
     "judge_model": (AGENTIC, "read by _build_page_judge"),
+    "judge_vllm_url": (
+        AGENTIC,
+        "read by _resolve_judge_model and _build_page_judge; names the OpenAI-compatible server the judge calls where no Ollama daemon exists",
+    ),
+    "judge_vllm_model": (
+        AGENTIC,
+        "read by _resolve_judge_model and _build_page_judge; the served model id that pair resolves to",
+    ),
     "table_judge_ladder": (AGENTIC, "read by the table judge ladder"),
     "auto_patch_tables": (AGENTIC, "read by _reread_page_tables"),
     "timeout": (AGENTIC, "provider/judge/crop deadlines"),
