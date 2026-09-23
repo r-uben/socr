@@ -282,6 +282,15 @@ def test_process_refuses_a_file_whose_page_count_raises(monkeypatch, pipeline, t
     monkeypatch.setattr(
         pdf_mod.fitz, "open", lambda p: _CountRaises() if str(p) == str(pdf) else real_open(p)
     )
-    result = pipeline.process(pdf, tmp_path / "out")
+    # Hermetic (cubic on #894): no judge is under test, and the fingerprint the
+    # refusal record carries would otherwise probe ollama for one (#886).
+    pipeline._resolve_judge_model = lambda *a, **k: ""
+    out = tmp_path / "out"
+    result = pipeline.process(pdf, out)
     assert result.status is DocumentStatus.ERROR
     assert result.failure_mode is FailureMode.UNREADABLE_INPUT
+    # The fix promises a RECORD, not only a return value (cubic on #894): a
+    # regression that returned ERROR but dropped the metadata would otherwise pass.
+    doc_meta = json.loads((out / "doc" / "metadata.json").read_text())
+    assert doc_meta["status"] == "failed"
+    assert FailureMode.UNREADABLE_INPUT.value in doc_meta["error"]
