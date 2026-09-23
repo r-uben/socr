@@ -240,6 +240,65 @@ def reconstruct_table_regions(
     )
 
 
+#: #887: glyphs a PDF may set as a SEPARATE word in front of a number's digits.
+#: U+2212 MINUS SIGN is the typeset minus; the en dash and ASCII hyphen are what
+#: many papers actually use for it.
+_SIGN_GLYPHS = frozenset({"\u2212", "\u2013", "-"})
+
+
+def _reattach_detached_signs(grid: list, table, words: list) -> list:
+    """Move a minus sign back onto its number when a column boundary split them (#887).
+
+    Some PDFs set a negative number's sign as its own one-glyph word, touching the
+    digits. ``find_tables``' text strategy can then put a column boundary BETWEEN
+    the sign and the digits: the sign ships at the end of the left neighbour's
+    cell and the value ships unsigned -- ``-0.25`` becomes ``0.25``, a wrong number
+    that the numeric-multiset guards cannot see, because both pieces are still on
+    the page.
+
+    Repaired only on geometric evidence that the two pieces are ONE printed
+    token: a one-glyph sign word inside the left cell whose right edge meets or
+    overlaps the left edge of a digit word inside the right cell, on the same
+    text line. Measured on the affected corpus pages, every such sign abuts its
+    digits exactly (gap 0.00), while two genuinely separate numbers in adjacent
+    columns are never flush -- so no tolerance constant is needed. A placeholder
+    dash in a cell of its own is separated by a column gap and is left alone.
+    """
+    rows = getattr(table, "rows", None)
+    if not rows or not words:
+        return grid
+
+    def _inside(word, bbox) -> bool:
+        cx = (word[0] + word[2]) / 2
+        cy = (word[1] + word[3]) / 2
+        return bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
+
+    repaired = [list(r) for r in grid]
+    for r, row in enumerate(rows):
+        if r >= len(repaired):
+            break
+        cells = list(getattr(row, "cells", []) or [])
+        texts = repaired[r]
+        for c in range(min(len(cells), len(texts)) - 1):
+            left_box, right_box = cells[c], cells[c + 1]
+            left, right = texts[c], texts[c + 1]
+            if left_box is None or right_box is None or not left or not right:
+                continue
+            left_s, right_s = left.rstrip(), right.lstrip()
+            if not left_s or left_s[-1] not in _SIGN_GLYPHS or not right_s[:1].isdigit():
+                continue
+            signs = [w for w in words if w[4] in _SIGN_GLYPHS and _inside(w, left_box)]
+            digits = [w for w in words if w[4][:1].isdigit() and _inside(w, right_box)]
+            joined = any(
+                s[5:7] == d[5:7] and s[2] >= d[0] and d[0] >= s[0] for s in signs for d in digits
+            )
+            if not joined:
+                continue
+            texts[c] = left_s[:-1].rstrip()
+            texts[c + 1] = left_s[-1] + right_s
+    return repaired
+
+
 def _clip_rect_for_words(words: list):
     """``fitz.Rect`` covering exactly these words.
 
@@ -290,6 +349,7 @@ def _reconstruct_table_regions_for_words(
             grid = table.extract()
         except Exception:
             continue
+        grid = _reattach_detached_signs(grid, table, words)
         cleaned = _clean_grid(grid)
         if not _looks_tabular(cleaned):
             continue
