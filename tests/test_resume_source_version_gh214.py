@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.pipeline import orchestrator as orch
 
 
@@ -30,7 +30,16 @@ def _clear_digest_cache():
 
 
 def _pipeline():
-    return orch.UnifiedPipeline(PipelineConfig())
+    # #885: this file is about the source-digest fingerprint key, not engine
+    # selection; pin the engine so the AUTO default does not shell out to
+    # `ollama`.
+    return orch.UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
 
 
 def test_source_digest_is_in_the_run_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:

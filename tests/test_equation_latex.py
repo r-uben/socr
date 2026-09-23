@@ -339,11 +339,21 @@ class TestDefaultOff:
 
     def test_fingerprint_includes_recover_clean_equations(self):
         """Fingerprint differs when recover_clean_equations changes."""
-        from socr.core.config import PipelineConfig
+        from socr.core.config import EngineType, PipelineConfig
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        cfg_off = PipelineConfig()
-        cfg_on = PipelineConfig()
+        # #885: this test is about the fingerprint, not engine selection;
+        # pin the engine so the AUTO default does not shell out to `ollama`.
+        cfg_off = PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+        cfg_on = PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
         cfg_on.recover_clean_equations = True
 
         orch_off = UnifiedPipeline(cfg_off)
@@ -950,13 +960,20 @@ class TestSkippedSkipEventSurvivesResume:
         import json
 
         from socr.core.audit_log import AuditEvent
-        from socr.core.config import PipelineConfig
+        from socr.core.config import EngineType, PipelineConfig
         from socr.core.document import DocumentHandle
         from socr.core.result import PageOutput, PageStatus
         from socr.core.state import DocumentState, PageState
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        cfg = PipelineConfig()
+        # #885: this test is about the skip-event resume round trip, not
+        # engine selection; pin the engine so the AUTO default does not shell
+        # out to `ollama`.
+        cfg = PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
         cfg.recover_clean_equations = True
         cfg.detect_equations = True
         orch = UnifiedPipeline(cfg)

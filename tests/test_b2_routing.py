@@ -78,11 +78,16 @@ class TestStrictLocalFiltersCloudRungs:
     The filter is by tier, not by cost."""
 
     def _make_pipeline(self, strict_local: bool) -> UnifiedPipeline:
+        # #885: this class is about strict_local's cloud-tier filter, not the
+        # AUTO default; pin primary/local engine so the run does not shell
+        # out to `ollama`.
         config = PipelineConfig(
             agentic=True,
             strict_local=strict_local,
             judge_backend="heuristic",
             enabled_engines=[EngineType.GLM, EngineType.QWEN, EngineType.GEMINI],
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
             quiet=True,
         )
         return UnifiedPipeline(config)

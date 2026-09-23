@@ -37,8 +37,20 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 
+_PIN_ENGINE = {
+    "primary_engine": EngineType.QWEN,
+    "local_engine": EngineType.QWEN,
+    "enabled_engines": [EngineType.QWEN],
+}
+
+
 def _fingerprint(**overrides) -> str:
-    return UnifiedPipeline(PipelineConfig(quiet=True, **overrides))._run_fingerprint()
+    # #885: this file is about inert-field fingerprint hygiene, not engine
+    # selection; pin the engine so the AUTO default does not shell out to
+    # `ollama`.
+    return UnifiedPipeline(
+        PipelineConfig(quiet=True, **{**_PIN_ENGINE, **overrides})
+    )._run_fingerprint()
 
 
 def test_toggling_an_inert_field_does_not_move_the_fingerprint() -> None:
@@ -128,7 +140,8 @@ class TestTheWarningReachesTheRun:
             pdfs.append(path)
 
         overrides = {"judge_hard_pages": False} if inert else {}
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, **overrides))
+        # #885: pin the engine (see _fingerprint's note above).
+        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, **{**_PIN_ENGINE, **overrides}))
 
         with (
             caplog.at_level(logging.WARNING),

@@ -60,7 +60,16 @@ def _exit_codes(tmp_path: Path, status: DocumentStatus, error: str | None) -> tu
     def _fake_process(self, pdf_path, output_dir=None, scan_root=None):
         return _result(Path(pdf_path), status, error)
 
-    with patch.object(UnifiedPipeline, "process", _fake_process):
+    # #885: this file is about exit-code policy, not engine selection, but
+    # cli.py resolves AUTO before constructing UnifiedPipeline (whose
+    # `.process` is stubbed, but not its constructor). Pin it so the run does
+    # not shell out to `ollama`.
+    from socr.core.config import EngineType
+
+    with (
+        patch.object(UnifiedPipeline, "process", _fake_process),
+        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+    ):
         single = CliRunner().invoke(cli, ["process", str(pdf), "-o", str(tmp_path / "o1"), "-q"])
         batch = CliRunner().invoke(
             cli, ["batch", str(pdf.parent), "-o", str(tmp_path / "o2"), "-q"]
@@ -162,7 +171,12 @@ def test_batch_exits_nonzero_when_a_file_raises(tmp_path: Path) -> None:
             raise RuntimeError("engine blew up on this file")
         return _result(Path(pdf_path), DocumentStatus.SUCCESS, None)
 
-    with patch.object(UnifiedPipeline, "process", _process):
+    from socr.core.config import EngineType
+
+    with (
+        patch.object(UnifiedPipeline, "process", _process),
+        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+    ):
         res = CliRunner().invoke(cli, ["batch", str(in_dir), "-o", str(tmp_path / "o"), "-q"])
 
     assert bad.name in seen and good.name in seen, (

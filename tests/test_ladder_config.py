@@ -29,6 +29,7 @@ from socr.cli import build_config, cli
 from socr.core.config import (
     TABLE_JUDGE_ADJUDICATOR_MODEL_DEFAULT,
     TABLE_JUDGE_TIMEOUT_SEC_DEFAULT,
+    EngineType,
     PipelineConfig,
 )
 from socr.core.result import DocumentStatus, EngineResult
@@ -290,34 +291,61 @@ class TestKimiAdjudicatorConfig:
 
 
 class TestRunFingerprintBindsKimiOnlyWhenLadderEnabled:
+    # #885: this class is about the adjudicator's fingerprint fields, not
+    # engine selection; pin the engine so the AUTO default does not shell out
+    # to `ollama`.
+    _ENGINE = {
+        "primary_engine": EngineType.QWEN,
+        "local_engine": EngineType.QWEN,
+        "enabled_engines": [EngineType.QWEN],
+    }
+
     def test_kimi_binary_changes_the_enabled_fingerprint(self):
         base = _run_fingerprint_for(
-            PipelineConfig(table_judge_ladder=True, table_judge_adjudicator_host=None)
+            PipelineConfig(
+                table_judge_ladder=True, table_judge_adjudicator_host=None, **self._ENGINE
+            )
         )
         changed = _run_fingerprint_for(
             PipelineConfig(
-                table_judge_ladder=True, table_judge_adjudicator_host="http://elsewhere:11434"
+                table_judge_ladder=True,
+                table_judge_adjudicator_host="http://elsewhere:11434",
+                **self._ENGINE,
             )
         )
         assert base != changed
 
     def test_kimi_model_changes_the_enabled_fingerprint(self):
         base = _run_fingerprint_for(
-            PipelineConfig(table_judge_ladder=True, table_judge_adjudicator_model="kimi-k3-max")
+            PipelineConfig(
+                table_judge_ladder=True,
+                table_judge_adjudicator_model="kimi-k3-max",
+                **self._ENGINE,
+            )
         )
         changed = _run_fingerprint_for(
             PipelineConfig(
-                table_judge_ladder=True, table_judge_adjudicator_model="other-adjudicator:cloud"
+                table_judge_ladder=True,
+                table_judge_adjudicator_model="other-adjudicator:cloud",
+                **self._ENGINE,
             )
         )
         assert base != changed
 
     def test_kimi_cost_changes_the_enabled_fingerprint(self):
         base = _run_fingerprint_for(
-            PipelineConfig(table_judge_ladder=True, table_judge_adjudicator_cost_per_call_usd=0.0)
+            PipelineConfig(
+                table_judge_ladder=True,
+                table_judge_adjudicator_cost_per_call_usd=0.0,
+                **self._ENGINE,
+            )
         )
         changed = _run_fingerprint_for(
-            PipelineConfig(table_judge_ladder=True, table_judge_adjudicator_cost_per_call_usd=0.05)
+            PipelineConfig(
+                table_judge_ladder=True,
+                table_judge_adjudicator_cost_per_call_usd=0.05,
+                **self._ENGINE,
+            )
         )
         assert base != changed
 
@@ -327,6 +355,7 @@ class TestRunFingerprintBindsKimiOnlyWhenLadderEnabled:
                 table_judge_ladder=False,
                 table_judge_adjudicator_host=None,
                 table_judge_adjudicator_cost_per_call_usd=0.0,
+                **self._ENGINE,
             )
         )
         changed = _run_fingerprint_for(
@@ -334,6 +363,7 @@ class TestRunFingerprintBindsKimiOnlyWhenLadderEnabled:
                 table_judge_ladder=False,
                 table_judge_adjudicator_host="http://elsewhere:11434",
                 table_judge_adjudicator_cost_per_call_usd=0.09,
+                **self._ENGINE,
             )
         )
         assert base == changed

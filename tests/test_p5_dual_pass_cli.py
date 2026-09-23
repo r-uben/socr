@@ -22,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 from socr.cli import cli
+from socr.core.config import EngineType
 
 
 def _make_pdf(tmp_path: Path) -> Path:
@@ -54,6 +55,10 @@ def _run_capturing_config(
             return tmp_path / "out"
 
     monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+    # #885: this file is about dual_pass_tables precedence, not engine
+    # selection, but `process` resolves AUTO in cli.py before the (stubbed)
+    # pipeline is built. Pin it so the run does not shell out to `ollama`.
+    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
 
     cmd = ["process", str(pdf)]
     if config_text is not None:

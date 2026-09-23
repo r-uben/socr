@@ -618,12 +618,20 @@ class TestFingerprintDiffers:
         """The run fingerprint changes when detect_equations is toggled."""
         from unittest.mock import patch
 
-        from socr.core.config import PipelineConfig
+        from socr.core.config import EngineType, PipelineConfig
 
-        cfg_off = PipelineConfig()
+        # #885: this test is about the detect_equations fingerprint key, not
+        # engine selection; pin the engine so the AUTO default does not shell
+        # out to `ollama`.
+        pinned = {
+            "primary_engine": EngineType.QWEN,
+            "local_engine": EngineType.QWEN,
+            "enabled_engines": [EngineType.QWEN],
+        }
+        cfg_off = PipelineConfig(**pinned)
         cfg_off.detect_equations = False
 
-        cfg_on = PipelineConfig()
+        cfg_on = PipelineConfig(**pinned)
         cfg_on.detect_equations = True
 
         # Build two minimal orchestrators and compare their fingerprints.

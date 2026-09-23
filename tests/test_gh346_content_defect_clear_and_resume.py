@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.state import DocumentHandle, DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -75,7 +75,17 @@ class TestRecoveryClearsTheContentTerm:
 
 class TestTheSidecarRoundTripsTheContentTerm:
     def test_the_term_survives_a_write_and_restore(self, tmp_path: Path) -> None:
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+        # #885: this file is about the content-defect sidecar round-trip, not
+        # engine selection; pin the engine so the AUTO default does not shell
+        # out to `ollama`.
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipeline._scan_root = tmp_path
         state = _state()
         _flagged_page(state)
@@ -103,7 +113,14 @@ class TestTheSidecarRoundTripsTheContentTerm:
     def test_emission_and_content_round_trip_the_same_way(self, tmp_path: Path) -> None:
         """Difference pin against a half-fix: whatever happens to emission must
         happen to content, since GH-303 made them siblings."""
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipeline._scan_root = tmp_path
         state = _state()
         _flagged_page(state)

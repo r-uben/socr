@@ -65,7 +65,15 @@ class _State:
 
 
 def _pipeline(**overrides):
-    return UnifiedPipeline(PipelineConfig(**overrides))
+    # #885: this file is about page-judge wiring, not engine selection; pin
+    # the engine so the AUTO default does not shell out to `ollama`.
+    pinned = {
+        "primary_engine": EngineType.QWEN,
+        "local_engine": EngineType.QWEN,
+        "enabled_engines": [EngineType.QWEN],
+    }
+    pinned.update(overrides)
+    return UnifiedPipeline(PipelineConfig(**pinned))
 
 
 # ---------------------------------------------------------------------------

@@ -32,8 +32,23 @@ def _pin_source_digest(monkeypatch: pytest.MonkeyPatch):
     orch._SOURCE_DIGEST_CACHE = None
 
 
+def _base_config() -> PipelineConfig:
+    """#885: pin the engine so an AUTO default does not shell out to `ollama`.
+
+    None of the tests in this file are about engine SELECTION -- they are about
+    which config knobs move the fingerprint -- so pinning is safe; the one test
+    that IS about AUTO resolution already pins ``primary_engine`` explicitly
+    itself (see ``test_table_judge_rung1_host_records_the_resolved_host``).
+    """
+    return PipelineConfig(
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
+    )
+
+
 def _fingerprint(**overrides: object) -> str:
-    config = PipelineConfig()
+    config = _base_config()
     for key, value in overrides.items():
         assert hasattr(config, key), f"PipelineConfig has no field {key!r}"
         setattr(config, key, value)
@@ -54,7 +69,7 @@ def _fingerprint_extra(**overrides: object) -> dict[str, object]:
     it claims to cover, structurally, independent of any other key riding
     along with it.
     """
-    config = PipelineConfig()
+    config = _base_config()
     for key, value in overrides.items():
         assert hasattr(config, key), f"PipelineConfig has no field {key!r}"
         setattr(config, key, value)
