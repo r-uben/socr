@@ -920,18 +920,37 @@ class UnifiedPipeline:
             logger.warning("resume check failed (non-fatal): %s", exc)
             return None
 
+        # #728 review: the recorded outcome travels with the skip. A document
+        # whose last run was PARTIAL is skipped too (``_resume_skippable``), and
+        # GH-177's policy is that a partial document exits nonzero -- so the CLI
+        # must be able to tell a clean skip from a partial one, not see both as
+        # "nothing happened".
+        recorded = ""
+        try:
+            entry = RootIndex(out_dir).files.get(rel_key) or {}
+            recorded = str(entry.get("status") or "")
+        except Exception:  # the skip was already decided; this is only reporting
+            recorded = ""
+        partial = recorded == "partial"
         if not self.config.quiet:
             # #728: say what to do, not only what happened. The advice a failed
             # page carries ("re-run the page") is unreachable without this flag,
             # because this gate decides before the per-page ledger is consulted.
+            state_note = " (recorded as partial)" if partial else ""
             console.print(
-                f"[dim]Skipping (already processed): {pdf_path.name} -- "
+                f"[dim]Skipping (already processed{state_note}): {pdf_path.name} -- "
                 "pass --reprocess to process it again[/dim]"
             )
         return EngineResult(
             document_path=pdf_path,
             engine=self.config.primary_engine.value,
             status=DocumentStatus.SKIPPED,
+            error=(
+                "already processed and recorded as partial: some pages failed on the "
+                "previous run; pass --reprocess to retry"
+                if partial
+                else None
+            ),
         )
 
     def _equation_lane_retry_blocks_resume(self) -> bool:

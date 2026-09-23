@@ -24,6 +24,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 
 
 def _pdf(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "text")
     path = tmp_path / "doc.pdf"
@@ -66,3 +67,71 @@ def test_the_skip_message_names_the_flag():
     src = inspect.getsource(orchestrator.UnifiedPipeline._resume_skip)
     assert "--reprocess" in src
     assert "re-run the page with --reprocess" in inspect.getsource(orchestrator)
+
+
+def test_a_skipped_partial_document_keeps_a_nonzero_exit_with_a_real_reason(monkeypatch, tmp_path):
+    """#728 review: ``_resume_skippable`` also skips a document whose last run was
+    PARTIAL, and GH-177's policy is that a partial document exits nonzero. The skip
+    must not launder that into a clean exit -- but it must say why, not 'None'."""
+    reason = "already processed and recorded as partial: pass --reprocess to retry"
+    result = _invoke(monkeypatch, tmp_path, DocumentStatus.SKIPPED, error=reason)
+    assert result.exit_code != 0
+    assert "recorded as partial" in result.output
+    assert "Processing failed: None" not in result.output
+
+
+def _record(out_dir: Path, pdf: Path, status_name: str) -> None:
+    from ocr_output_contract import (
+        DocMetadata,
+        RootIndex,
+        Status,
+        relative_key,
+        safe_checksum,
+        utc_timestamp,
+    )
+
+    index = RootIndex(out_dir)
+    index.record(
+        relative_key(pdf, pdf.parent),
+        DocMetadata(
+            status=Status[status_name],
+            checksum=safe_checksum(pdf),
+            model="qwen",
+            backend="socr",
+            processing_time=0.0,
+            timestamp=utc_timestamp(),
+            output_path=str(out_dir / "doc" / "doc.md"),
+            pages=1,
+        ),
+    )
+
+
+def test_the_skip_carries_the_recorded_outcome(monkeypatch, tmp_path):
+    """The difference the fix depends on, at its source: the same skip, only the
+    recorded status changing. Completed -> no error; partial -> an error naming it."""
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline import orchestrator
+
+    monkeypatch.setattr(orchestrator, "_resume_skippable", lambda *a, **k: True)
+    outcomes = {}
+    for name in ("COMPLETED", "PARTIAL"):
+        pdf = _pdf(tmp_path / name)
+        out = tmp_path / name / "out"
+        out.mkdir(parents=True)
+        _record(out, pdf, name)
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                judge_backend="heuristic",
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
+        pipe._scan_root = pdf.parent
+        outcomes[name] = pipe._resume_skip(pdf, out)
+
+    assert outcomes["COMPLETED"].status is DocumentStatus.SKIPPED
+    assert outcomes["COMPLETED"].error is None
+    assert outcomes["PARTIAL"].status is DocumentStatus.SKIPPED
+    assert "partial" in (outcomes["PARTIAL"].error or "")
