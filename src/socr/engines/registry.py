@@ -25,6 +25,18 @@ _ENGINES: dict[EngineType, type[BaseEngine]] = {
 }
 
 
+def has_cli_engine(engine_type: EngineType) -> bool:
+    """True when ``get_engine`` can build an engine for *engine_type*.
+
+    #842: ``EngineType.VLLM`` and ``EngineType.DEEPSEEK_VLLM`` have profiles in
+    ``DEFAULT_PROVIDERS`` but no entry here -- ``hpc_pipeline.py`` constructs
+    those engines directly. Asking this is a STRUCTURAL question with a fixed
+    answer, and callers must not learn it by catching the ``ValueError`` below,
+    which is indistinguishable from a provider that is merely down.
+    """
+    return engine_type in _ENGINES
+
+
 def get_engine(engine_type: EngineType) -> BaseEngine:
     """Get an engine instance by type."""
     cls = _ENGINES.get(engine_type)
