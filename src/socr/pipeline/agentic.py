@@ -98,6 +98,13 @@ class PageJudge(Protocol):
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision: ...
 
 
+#: The ``ProviderAttempt.reason`` recorded when a provider itself exceeded its
+#: deadline. #800: consumers that must act on a PROVIDER timeout -- and not on a
+#: judge timeout, whose reason is ``"judge raised: page judge timeout ..."`` and
+#: also contains the word -- compare against this, never a substring.
+REASON_PROVIDER_TIMEOUT = "provider timeout"
+
+
 @dataclass
 class ProviderAttempt:
     engine: EngineType
@@ -295,7 +302,7 @@ def route_page(
                             ),
                             cost_usd=0.0,
                             accepted=False,
-                            reason="provider timeout",
+                            reason=REASON_PROVIDER_TIMEOUT,
                             # GH-344: the timeout branch was the only attempt
                             # that omitted these. Budget skip, provider raise,
                             # judge raise and the accepted path all record them,

@@ -18,8 +18,11 @@ page loop on `_had_timeout and decision.accepted` — the branch #799 left empty
 only if all of these hold:
 
 - the rung is `TIER_LOCAL`;
-- its own attempt on this page was a provider timeout (`"timeout"` in the attempt reason —
-  the same provider-half signal `_attempts_show_timeout` reads);
+- its own attempt on this page was a **provider** timeout: `reason == REASON_PROVIDER_TIMEOUT`
+  (a named constant in `agentic.py`, now also used where that reason is written). Not the
+  `"timeout"` substring `_attempts_show_timeout` scans — the review of #890 showed a judge
+  timeout on the rung's output records `"judge raised: page judge timeout …"`, which contains
+  the word but says nothing about the local backend (the judge may be a cloud model);
 - `_probe_backend_idle()` says the backend is still unresponsive now (a slow page on a healthy
   machine keeps its rung);
 - at least one rung survives (the rescuing rung is never local-and-timed-out, so this holds by
@@ -43,3 +46,16 @@ pinned per #841.
 
 Mutations seen to fail (out-of-repo copy, import canary): never calling the exclusion → 2 failures;
 ignoring the probe → 1 failure. Timing margins are named constants with the reason for each.
+
+## Review (PR #890) — accepted with follow-ups, both handled
+
+1. **Judge timeouts could drop a healthy rung.** My first version matched the `"timeout"`
+   substring, and I wrote that this was "the same provider-half signal" — it is not: a judge
+   timeout contains the word too. Fixed by exact comparison with `REASON_PROVIDER_TIMEOUT`;
+   `test_a_judge_timeout_never_costs_a_local_rung_its_place` pins the difference and fails with
+   the substring restored.
+2. **`state.agentic_ladder` is a pre-loop snapshot** and still lists an excluded rung. Left as is,
+   deliberately: it records the ladder the document *started* with, and the
+   `local_rung_excluded_after_rescue` event carries the page, the excluded ids and the remaining
+   ids, so which rungs later pages used is recoverable from the audit trail. Overwriting the
+   snapshot would lose the starting ladder instead.

@@ -8093,11 +8093,16 @@ class UnifiedPipeline:
         """
         from socr.core.audit_log import AuditEvent
         from socr.core.providers import TIER_LOCAL
+        from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT
 
+        # Exact match, not the substring ``_attempts_show_timeout`` scans: a JUDGE
+        # timeout on this rung's output records "judge raised: page judge timeout
+        # ...", which says nothing about the local backend (the judge may be a
+        # cloud model) and must never cost a healthy rung its place (PR #890 review).
         timed_out = {
             getattr(att, "provider_id", "")
             for att in decision.attempts
-            if "timeout" in (getattr(att, "reason", "") or "")
+            if getattr(att, "reason", "") == REASON_PROVIDER_TIMEOUT
         }
         doomed = [p for p in ladder if p.tier == TIER_LOCAL and p.id and p.id in timed_out]
         if not doomed:

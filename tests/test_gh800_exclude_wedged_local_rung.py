@@ -155,3 +155,55 @@ def test_the_exclusion_is_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(UnifiedPipeline, "_exclude_wedged_local_rungs", _spy)
     _run(tmp_path, monkeypatch, backend_idle=False)
     assert "local_rung_excluded_after_rescue" in captured.get("events", [])
+
+
+def _decision_with_local_attempt(reason: str):
+    from types import SimpleNamespace
+
+    from socr.pipeline.agentic import ProviderAttempt
+
+    local = ProviderAttempt(
+        engine=EngineType.QWEN,
+        output=PageOutput(page_num=1, text="", status=PageStatus.ERROR, engine="qwen"),
+        cost_usd=0.0,
+        accepted=False,
+        reason=reason,
+        provider_id=PROFILE_QWEN_LOCAL.id,
+    )
+    cloud = ProviderAttempt(
+        engine=EngineType.QWEN,
+        output=PageOutput(page_num=1, text="t", status=PageStatus.SUCCESS, engine="qwen"),
+        cost_usd=0.0,
+        accepted=True,
+        reason="accepted",
+        provider_id=PROFILE_QWEN_CLOUD.id,
+    )
+    return SimpleNamespace(attempts=[local, cloud], accepted=True)
+
+
+def test_a_judge_timeout_never_costs_a_local_rung_its_place():
+    """PR #890 review: a judge timeout's reason also contains the word "timeout",
+    but it says nothing about the local backend. Only a PROVIDER timeout counts.
+    Difference pin over the reason alone, with the backend reported wedged."""
+    from types import SimpleNamespace
+
+    from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT
+
+    pipe = object.__new__(UnifiedPipeline)
+    pipe.config = PipelineConfig(quiet=True)
+    pipe._probe_backend_idle = lambda: False
+    ladder = [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD]
+    state = SimpleNamespace(events=[])
+
+    after_judge = pipe._exclude_wedged_local_rungs(
+        state,
+        1,
+        _decision_with_local_attempt("judge raised: page judge timeout after 5.0s"),
+        ladder,
+    )
+    after_provider = pipe._exclude_wedged_local_rungs(
+        state, 1, _decision_with_local_attempt(REASON_PROVIDER_TIMEOUT), ladder
+    )
+
+    assert after_judge == ladder
+    assert after_provider == [PROFILE_QWEN_CLOUD]
