@@ -371,3 +371,79 @@ def test_config_defaults_leave_the_pair_unset():
     assert cfg.judge_vllm_url == ""
     assert cfg.judge_vllm_model == ""
     assert json.dumps({"url": cfg.judge_vllm_url})  # serialisable, no sentinel object
+
+
+# --------------------------------------------------------------------------
+# #877: the BUILDER, not only the resolver
+# --------------------------------------------------------------------------
+
+
+class _BuildState:
+    """Minimal DocumentState stand-in for ``_build_page_judge`` (same shape as
+    tests/test_judge_wiring_gh133.py's ``_State``)."""
+
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.events = []
+        self.agentic_judge_model = ""
+        self.pages = {}
+        self.handle = SimpleNamespace(path=Path("/nonexistent/doc.pdf"))
+
+
+def _built_judge_kind(monkeypatch, config):
+    """Run the real ``_build_page_judge`` and report which VLM judge it built.
+
+    Ollama is patched absent and the vLLM server present, so the ONLY way to get
+    a VLM judge here is the vLLM branch. Constructors are spied, not replaced.
+    """
+    import socr.judge.ollama_judge as oj
+    from socr.core.config import EngineType
+
+    built: list[str] = []
+    # A context per call, so the second run's spies do not wrap the first's.
+    with monkeypatch.context() as m:
+        real_ollama_init = oj.OllamaVisionJudge.__init__
+        real_vllm_init = VLLMVisionJudge.__init__
+
+        def _ollama_spy(self, *a, **k):
+            built.append("ollama")
+            real_ollama_init(self, *a, **k)
+
+        def _vllm_spy(self, *a, **k):
+            built.append("vllm")
+            real_vllm_init(self, *a, **k)
+
+        m.setattr(oj.OllamaVisionJudge, "__init__", _ollama_spy)
+        m.setattr(oj.OllamaVisionJudge, "is_available", lambda self: False)
+        m.setattr(VLLMVisionJudge, "__init__", _vllm_spy)
+        _serve(m, SERVED)
+
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                **config,
+            )
+        )
+        state = _BuildState()
+        pipe._build_page_judge(state)
+    return built, state.agentic_judge_model
+
+
+def test_the_builder_constructs_the_vllm_judge_when_the_pair_is_set(monkeypatch):
+    """#877: the resolver tests above would stay green if the builder's vLLM branch
+    were deleted -- the fingerprint would name the vLLM model while the builder
+    constructed an Ollama judge that is not there, and heuristics would judge.
+    Difference pin at the builder: only the config changes."""
+    with_pair, ran_with = _built_judge_kind(
+        monkeypatch, {"judge_vllm_url": URL, "judge_vllm_model": SERVED}
+    )
+    without_pair, ran_without = _built_judge_kind(monkeypatch, {})
+
+    assert "vllm" in with_pair and "ollama" not in with_pair
+    assert ran_with == SERVED, "provenance must name the judge that actually ran"
+    assert "vllm" not in without_pair
+    assert ran_without != SERVED
