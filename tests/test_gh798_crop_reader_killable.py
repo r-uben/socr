@@ -74,6 +74,13 @@ _OUTER_DEADLINE_SEC = 1.5
 # run_killable's own term+kill grace (3.0s + 3.0s, see core/killable.py) plus
 # headroom for a loaded CI machine.
 _KILLABLE_GRACE_SEC = 8.0
+#: #857: headroom on the OUTER subprocess ceiling for child interpreter start-up
+#: (a cold CI import of socr can take several seconds). Generous on purpose: the
+#: child's own exit-code check is what enforces the bounded-time property this
+#: test is about; this ceiling only turns a genuine hang into a failure instead of
+#: a stuck job, and a tight one produced a naked ``TimeoutExpired`` before the
+#: diagnostics could bind.
+_CHILD_STARTUP_HEADROOM_SEC = 60.0
 
 
 class _TrickleServer:
@@ -224,7 +231,7 @@ def test_legacy_thread_wedges_new_reader_raises_typed_timeout(trickle_server, cr
         # Outer safety net: the hard ceiling itself. `_KILLABLE_GRACE_SEC`
         # already covers run_killable's own term/kill grace; the extra 5.0s
         # is headroom for child interpreter startup on a loaded machine.
-        timeout=_READER_TIMEOUT_SEC + _KILLABLE_GRACE_SEC + 5.0,
+        timeout=_READER_TIMEOUT_SEC + _KILLABLE_GRACE_SEC + _CHILD_STARTUP_HEADROOM_SEC,
         text=True,
     )
     elapsed = time.monotonic() - start

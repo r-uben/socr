@@ -20,7 +20,7 @@ which patches `socr.tables.extract.run_killable` itself, captures the
 - `base64.b64decode(image_b64)` round-trips to the real PNG bytes written to
   the crop file (not merely "a non-empty string").
 
-The nine pre-existing `_vllm_read_crop` parsing tests are untouched.
+The eight tests that already existed in the file are untouched; two of them exercise `_vllm_read_crop`'s parsing (corrected by #857 — this line said "nine").
 
 ### Mutation guard proof
 

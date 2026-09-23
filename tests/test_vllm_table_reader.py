@@ -149,4 +149,8 @@ class TestVllmTableReaderReadWiring:
         assert api_key == "sk-test"
         assert isinstance(prompt, str) and prompt  # the loaded table prompt
         assert timeout == 45.0
+        # #857: the OUTER wall-clock deadline is what bounds a wedged server
+        # (GH-798); the inner arg above is only the httpx per-chunk timeout.
+        # Unasserted, a revert that hardcodes or drops ``timeout=`` stays green.
+        assert captured["timeout"] == 45.0
         assert base64.b64decode(image_b64) == png_bytes
