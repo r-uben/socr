@@ -9941,6 +9941,22 @@ class UnifiedPipeline:
         def _permitted(model: str) -> bool:
             return "cloud" not in model.casefold() or not forbid_cloud
 
+        # GH-873: an operator-named vLLM server short-circuits the Ollama
+        # candidate ladder, exactly as ``--judge-model`` does, and for the same
+        # reason: the operator has named the thing, so probing for something
+        # else would discard their setting. It is checked BEFORE
+        # ``judge_model`` only in the sense that both are explicit; a run that
+        # sets both gets the vLLM pair, because that names a server as well as
+        # a model and is therefore the more specific instruction.
+        #
+        # Not probed here. ``_build_page_judge`` calls ``is_available()`` on
+        # the judge it builds, so an unreachable server still degrades to
+        # heuristics there; resolving eagerly would add an HTTP round-trip to
+        # every page's fingerprint (the same cost ``_judge_model_cache``
+        # exists to avoid).
+        if self.config.judge_vllm_url and self.config.judge_vllm_model:
+            return self.config.judge_vllm_model
+
         if self.config.judge_model:
             if _permitted(self.config.judge_model):
                 return self.config.judge_model
@@ -10692,7 +10708,22 @@ class UnifiedPipeline:
                 # (#133).
                 resolved_model = self._resolve_judge_model()
                 if resolved_model:
-                    vj = OllamaVisionJudge(model=resolved_model)
+                    # GH-873: an operator-named OpenAI-compatible server takes
+                    # precedence over the Ollama candidate ladder. Without this
+                    # branch a box with no Ollama daemon -- the HPC nodes, where
+                    # vLLM already serves the vision model in the same job --
+                    # has no reachable judge at all and falls through to
+                    # heuristics, shipping tables no judge ever saw.
+                    vj: object
+                    if self.config.judge_vllm_url and self.config.judge_vllm_model:
+                        from socr.judge.vllm_judge import VLLMVisionJudge
+
+                        vj = VLLMVisionJudge(
+                            model=self.config.judge_vllm_model,
+                            base_url=self.config.judge_vllm_url,
+                        )
+                    else:
+                        vj = OllamaVisionJudge(model=resolved_model)
                     if vj.is_available():
                         inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
                         judge_identity = resolved_model

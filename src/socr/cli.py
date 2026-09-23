@@ -260,6 +260,22 @@ def common_options(f):
         help="VLM model for the judge (e.g. qwen2-vl:7b)",
     )(f)
     f = click.option(
+        "--judge-vllm-url",
+        type=str,
+        default="",
+        help=(
+            "OpenAI-compatible base URL for the judge (e.g. http://127.0.0.1:8000/v1). "
+            "Use where no Ollama daemon exists, such as HPC: without it the judge "
+            "cannot resolve a model and silently degrades to heuristics"
+        ),
+    )(f)
+    f = click.option(
+        "--judge-vllm-model",
+        type=str,
+        default="",
+        help="Model id served by --judge-vllm-url (e.g. Qwen/Qwen3-VL-30B-A3B-Instruct)",
+    )(f)
+    f = click.option(
         "--max-cost-per-page",
         type=float,
         default=0.0,
@@ -367,6 +383,8 @@ def build_config(
     strict_local: bool = False,
     judge_backend: str = "auto",
     judge_model: str = "",
+    judge_vllm_url: str = "",
+    judge_vllm_model: str = "",
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     write_manifest: bool = False,
@@ -578,6 +596,10 @@ def build_config(
         config.judge_backend = judge_backend
     if _explicitly_given("judge_model"):
         config.judge_model = judge_model
+    if _explicitly_given("judge_vllm_url"):
+        config.judge_vllm_url = judge_vllm_url
+    if _explicitly_given("judge_vllm_model"):
+        config.judge_vllm_model = judge_vllm_model
     if _explicitly_given("max_cost_per_page"):
         config.max_cost_per_page = max_cost_per_page
         config.max_cost_per_page_pinned = True
