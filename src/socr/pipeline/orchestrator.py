@@ -921,7 +921,13 @@ class UnifiedPipeline:
             return None
 
         if not self.config.quiet:
-            console.print(f"[dim]Skipping (already processed): {pdf_path.name}[/dim]")
+            # #728: say what to do, not only what happened. The advice a failed
+            # page carries ("re-run the page") is unreachable without this flag,
+            # because this gate decides before the per-page ledger is consulted.
+            console.print(
+                f"[dim]Skipping (already processed): {pdf_path.name} -- "
+                "pass --reprocess to process it again[/dim]"
+            )
         return EngineResult(
             document_path=pdf_path,
             engine=self.config.primary_engine.value,
@@ -15054,7 +15060,7 @@ class UnifiedPipeline:
                     f"page(s) {', '.join(str(n) for n in sorted(timeout_floor))}: "
                     "the page judge TIMED OUT and no verified table-acceptance "
                     "credential vouched for the tables; fail-closed floor shipped "
-                    "(marker plus page image) — re-run the page"
+                    "(marker plus page image) — re-run the page with --reprocess"
                 )
             if credentialed:
                 parts.append(
