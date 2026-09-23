@@ -207,3 +207,34 @@ def test_a_refused_document_is_retried_not_skipped_on_the_next_run(monkeypatch, 
     assert pipeline._resume_skip(pdf, out) is not None, (
         "control failed: the gate never skips in this fixture, so the FAILED case is untested"
     )
+
+
+def test_a_file_that_will_not_even_open_is_refused_and_recorded(pipeline, tmp_path):
+    """PR #878 review: the unopenable case, through ``process()``, with NO mocks.
+
+    ``probe_page_loads`` returns ``declared=0`` for bytes ``fitz`` rejects, and 0
+    looked like "unset" to ``DocumentHandle``, which re-counted through
+    ``open_pdf`` and raised -- the same raw traceback, one frame later. Every
+    earlier test used ``declared=64``, so none reached it.
+    """
+    bogus = tmp_path / "bogus.pdf"
+    bogus.write_bytes(b"not a pdf at all")
+    out = tmp_path / "out"
+
+    result = pipeline.process(bogus, out)
+
+    assert result.status is DocumentStatus.ERROR
+    assert result.failure_mode is FailureMode.UNREADABLE_INPUT
+    doc_meta = json.loads((out / "bogus" / "metadata.json").read_text())
+    assert doc_meta["status"] == "failed"
+    assert FailureMode.UNREADABLE_INPUT.value in doc_meta["error"]
+
+
+def test_a_known_zero_page_count_is_not_recounted(tmp_path):
+    """The handle must keep a measured 0 rather than re-derive it."""
+    from socr.core.document import DocumentHandle
+
+    bogus = tmp_path / "bogus.pdf"
+    bogus.write_bytes(b"not a pdf at all")
+    handle = DocumentHandle(path=bogus, page_count=0, page_count_known=True)
+    assert handle.page_count == 0

@@ -14643,10 +14643,14 @@ class UnifiedPipeline:
             f"{FailureMode.UNREADABLE_INPUT.value}: 0 of {probe.declared} declared "
             f"page(s) could be loaded ({probe.first_error or 'no pages declared'})"
         )
-        # ``page_count`` passed explicitly: letting the handle count for itself
-        # goes through ``open_pdf(repair=True)``, which reports 0 on exactly this
-        # kind of file and would record a 64-page document as empty.
-        state = DocumentState(handle=DocumentHandle(path=pdf_path, page_count=probe.declared))
+        # ``page_count`` passed explicitly AND marked known: letting the handle
+        # count for itself goes through ``open_pdf(repair=True)``, which reports 0
+        # on a damaged page tree (recording a 64-page document as empty) and
+        # RAISES on a file ``fitz`` cannot open at all -- re-creating the very
+        # traceback this refusal exists to replace (PR #878 review).
+        state = DocumentState(
+            handle=DocumentHandle(path=pdf_path, page_count=probe.declared, page_count_known=True)
+        )
         result = EngineResult(
             document_path=pdf_path,
             engine="none",
