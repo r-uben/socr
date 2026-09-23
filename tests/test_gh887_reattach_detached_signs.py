@@ -134,3 +134,80 @@ def test_a_sign_with_space_before_it_and_flush_after_it_is_a_minus():
     words = [_word(60, 90, "1990"), _word(140, 146, "-"), _word(146, 170, "2000")]
     grid = [["1990 -", "2000"]]
     assert _reattach_detached_signs(grid, _TABLE, words) == [["1990", "-2000"]]
+
+
+# --------------------------------------------------------------------------
+# #891: pin the CALL SITE, not only the helper
+# --------------------------------------------------------------------------
+
+
+class _Cell:
+    def __init__(self, bbox):
+        self.bbox = bbox
+
+
+@dataclass
+class _WireRow:
+    cells: list
+    bbox: tuple
+
+
+class _WireTable:
+    """What ``page.find_tables`` hands ``_reconstruct_table_regions_for_words``:
+    rows with cell rectangles, a bbox, and ``extract()`` returning the split grid."""
+
+    def __init__(self, rows, grid):
+        self.rows = rows
+        self._grid = grid
+        self.bbox = (
+            min(r.bbox[0] for r in rows),
+            min(r.bbox[1] for r in rows),
+            max(r.bbox[2] for r in rows),
+            max(r.bbox[3] for r in rows),
+        )
+
+    def extract(self):
+        return [row[:] for row in self._grid]
+
+
+class _WirePage:
+    def __init__(self, table):
+        self._table = table
+
+    def find_tables(self, **_kwargs):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(tables=[self._table])
+
+
+def test_the_table_builder_actually_calls_the_repair():
+    """#891: every test above calls ``_reattach_detached_signs`` directly, so
+    deleting its one call in ``_reconstruct_table_regions_for_words`` stayed green
+    while the affected pages shipped unsigned again. This drives the builder itself
+    with the split grid ``find_tables`` produced on the real pages."""
+    from socr.tables.reconstruct import _reconstruct_table_regions_for_words
+
+    # Three data rows, three columns; the middle column's value is negative and its
+    # sign was split into the first column by the inferred boundary.
+    col = [(50.0, 150.0), (150.0, 250.0), (250.0, 350.0)]
+    rows, grid, words = [], [], []
+    for r, y in enumerate((100.0, 120.0, 140.0)):
+        cells = [(x0, y - 2, x1, y + 12) for x0, x1 in col]
+        rows.append(_WireRow(cells=cells, bbox=(50.0, y - 2, 350.0, y + 12)))
+        grid.append([f"1.{r}1 {MINUS}", f"0.2{r}", f"3.{r}3"])
+        words += [
+            _word(60, 90, f"1.{r}1", y0=y, y1=y + 10, line=r),
+            _word(140, 146, MINUS, y0=y, y1=y + 10, line=r),
+            _word(146, 170, f"0.2{r}", y0=y, y1=y + 10, line=r),
+            _word(260, 290, f"3.{r}3", y0=y, y1=y + 10, line=r),
+        ]
+
+    out = _reconstruct_table_regions_for_words(_WirePage(_WireTable(rows, grid)), words)
+
+    assert out, "the stand-in table must be shipped for this pin to mean anything"
+    markdown = "\n".join(md for _, md in out)
+    for r in range(3):
+        assert f"{MINUS}0.2{r}" in markdown, "the value must ship with its sign"
+    assert f" {MINUS} |" not in markdown and f"{MINUS} |" not in markdown, (
+        "no cell may end in the stranded sign"
+    )
