@@ -28,6 +28,7 @@ import pytest
 from click.testing import CliRunner
 
 from socr.cli import cli
+from socr.core.config import EngineType
 
 
 def _pdf(tmp_path: Path) -> Path:
@@ -60,9 +61,14 @@ def _run(tmp_path: Path, body: str):
     hpc = type("HPCPipeline", (_Recorder,), {})
     unified = type("UnifiedPipeline", (_Recorder,), {})
 
+    # #885: this file is about the HPC-vs-agentic lane switch, not engine
+    # selection, but the non-HPC lane in cli.py resolves AUTO before the
+    # (stubbed) pipeline is built. Pin it so the run does not shell out to
+    # `ollama`.
     with (
         patch("socr.pipeline.hpc_pipeline.HPCPipeline", hpc),
         patch("socr.pipeline.orchestrator.UnifiedPipeline", unified),
+        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
     ):
         result = CliRunner().invoke(
             cli, ["process", str(_pdf(tmp_path)), "--config", str(_config(tmp_path, body))]
@@ -182,7 +188,10 @@ def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
         def process_batch(self, *_a, **_k):
             return []
 
-    with patch("socr.pipeline.orchestrator.UnifiedPipeline", _Unified):
+    with (
+        patch("socr.pipeline.orchestrator.UnifiedPipeline", _Unified),
+        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+    ):
         result = CliRunner().invoke(
             cli, ["batch", str(tmp), "--config", str(_config(tmp, "quiet: true\n"))]
         )

@@ -26,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from socr.cli import cli
+from socr.core.config import EngineType
 
 CONFIG = """
 cost_budget: 5.0
@@ -84,6 +85,10 @@ def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
             return tmp_path / "out"
 
     monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+    # #885: this file is about CLI/config precedence, not engine selection, but
+    # `process` resolves AUTO in cli.py before the (stubbed) pipeline is built.
+    # Pin it so the run does not shell out to `ollama`.
+    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
     CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
     assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
     return seen["config"]

@@ -550,7 +550,17 @@ class TestThreeFlagPageIsNotDoubleCounted:
             )
         )
 
-        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        # #885: this class is about d3-floor/native-fallback exclusivity, not
+        # engine selection; pin the engine so the AUTO default does not shell
+        # out to `ollama` (via _phase_assemble's fingerprinting).
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipe._phase_assemble(state, tmp_path)
 
         kinds = [e.kind for e in state.events if e.page_num == 1]
@@ -575,7 +585,14 @@ class TestThreeFlagPageIsNotDoubleCounted:
             )
         )
 
-        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipe._phase_assemble(state, tmp_path)
 
         kinds = [e.kind for e in state.events if e.page_num == 1]
@@ -613,7 +630,14 @@ class TestThreeFlagPageIsNotDoubleCounted:
             )
         )
 
-        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipe._phase_assemble(state, tmp_path)
 
         kinds = [e.kind for e in state.events if e.page_num == 1]

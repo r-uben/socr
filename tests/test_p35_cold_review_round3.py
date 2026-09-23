@@ -39,7 +39,7 @@ fitz = pytest.importorskip("fitz")
 from ocr_output_contract import PAGE_MARKER_RE  # noqa: E402
 
 from socr.core.audit_log import AuditEvent  # noqa: E402
-from socr.core.config import PipelineConfig  # noqa: E402
+from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import SOCR_MARKER_RE  # noqa: E402
 from socr.core.providers import PROFILE_GEMINI  # noqa: E402
@@ -407,7 +407,17 @@ class TestRejudgeMeteringAttribution:
 
     def test_rejudge_cost_survives_terminal_resume(self, tmp_path: Path) -> None:
         state, ps, bo = _state(tmp_path, text="patched")
-        config = PipelineConfig(quiet=True, judge_backend="heuristic", reprocess=True)
+        # #885: this test is about spend-attribution resume, not engine
+        # selection; pin the engine so the AUTO default does not shell out to
+        # `ollama`.
+        config = PipelineConfig(
+            quiet=True,
+            judge_backend="heuristic",
+            reprocess=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
         pipeline = UnifiedPipeline(config)
         # Round 5: per-page spend is a RECORDED FACT. Production records it at
         # the same site that journals the EngineResult, so the fixture does too;

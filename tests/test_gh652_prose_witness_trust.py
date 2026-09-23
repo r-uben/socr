@@ -31,7 +31,7 @@ from unittest.mock import patch
 
 import pytest
 
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.manifest import (
     SCANNED_PROSE_RECOVERED_FLAG,
     _select_page_output_tagged,
@@ -608,7 +608,17 @@ class TestTheVerdictRoundTripsThroughTheSidecar:
 
     @pytest.mark.parametrize("verdict", [True, False])
     def test_write_then_restore_preserves_the_verdict(self, tmp_path: Path, verdict: bool) -> None:
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+        # #885: this class is about the table_bbox_sane sidecar round-trip,
+        # not engine selection; pin the engine so the AUTO default does not
+        # shell out to `ollama`.
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipeline._scan_root = tmp_path
         state = self._state()
         state.pages[1].table_bbox_sane = verdict
@@ -635,7 +645,14 @@ class TestTheVerdictRoundTripsThroughTheSidecar:
     def test_an_older_sidecar_restores_doubt_not_sanity(self, tmp_path: Path) -> None:
         """A sidecar written before this key existed must not read back as a
         pass: ``None`` is "never evaluated", and that is doubt."""
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
         pipeline._scan_root = tmp_path
         state = self._state()
         state.pages[1].table_bbox_sane = True

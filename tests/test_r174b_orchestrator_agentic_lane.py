@@ -99,6 +99,17 @@ class TestOrchestratorAgenticLane:
                     return_value=sample_providers,
                 ),
                 patch.object(pipeline, "_phase_agentic", side_effect=_stub_phase_agentic),
+                # #885: this test is about _phase_agentic always running, not
+                # AUTO resolution -- `_make_config` leaves `primary_engine`
+                # at its literal AUTO default, so pin the resolver rather
+                # than the config field to avoid shelling out to `ollama`.
+                # `orchestrator.py` imports `resolve_auto_engine` by name at
+                # module scope, so the patch target is the orchestrator's own
+                # bound name, not the registry module.
+                patch(
+                    "socr.pipeline.orchestrator.resolve_auto_engine",
+                    return_value=EngineType.QWEN,
+                ),
             ):
                 result = pipeline.process(pdf_path, output_dir=out_dir)
 

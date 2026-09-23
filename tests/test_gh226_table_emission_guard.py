@@ -12,7 +12,7 @@ from ocr_output_contract import assemble_pages
 
 from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.cache import BlobStore
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
     Manifest,
@@ -268,7 +268,19 @@ def test_post_figure_body_guard_updates_markdown_sidecar_manifest_and_status(
     invalid_final = assemble_pages(
         [r"| A | \multicolumn{2}{c}{B} |" + "\n| --- | --- |\n| 1 | 2 |"]
     )
-    pipeline = UnifiedPipeline(PipelineConfig(save_figures=True, write_manifest=True, quiet=True))
+    # #885: this test is about the table-emission guard, not engine
+    # selection; pin the engine so the AUTO default does not shell out to
+    # `ollama` (via _phase_assemble's fingerprinting).
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            save_figures=True,
+            write_manifest=True,
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
     out_dir = tmp_path / "out"
 
     with patch.object(

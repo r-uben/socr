@@ -22,7 +22,7 @@ import dataclasses
 
 import pytest
 
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 
 
 def test_the_field_exists_at_all():
@@ -110,7 +110,16 @@ class TestFingerprintCoverage:
     def _pipeline(self, **overrides):
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        cfg = PipelineConfig(**overrides)
+        # #885: this class is about the equation-lane fingerprint, not engine
+        # selection; pin the engine so the AUTO default does not shell out to
+        # `ollama`.
+        pinned = {
+            "primary_engine": EngineType.QWEN,
+            "local_engine": EngineType.QWEN,
+            "enabled_engines": [EngineType.QWEN],
+        }
+        pinned.update(overrides)
+        cfg = PipelineConfig(**pinned)
         return UnifiedPipeline(cfg)
 
     def test_fingerprint_records_flag_on_vs_off(self):

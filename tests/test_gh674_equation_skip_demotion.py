@@ -23,7 +23,7 @@ import pytest
 fitz = pytest.importorskip("fitz")
 
 from socr.core.audit_log import AuditEvent
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
@@ -42,6 +42,9 @@ def _pdf(tmp_path: Path, name: str = "doc.pdf") -> Path:
 
 
 def _make_pipeline(**overrides) -> UnifiedPipeline:
+    # #885: this file is about equation-sidecar demotion, not engine
+    # selection; pin the engine so the AUTO default does not shell out to
+    # `ollama` (via _phase_assemble's fingerprinting).
     cfg = PipelineConfig(
         agentic=True,
         quiet=True,
@@ -49,6 +52,9 @@ def _make_pipeline(**overrides) -> UnifiedPipeline:
         recover_clean_equations=True,
         detect_equations=True,
         write_manifest=False,
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
         **overrides,
     )
     return UnifiedPipeline(cfg)

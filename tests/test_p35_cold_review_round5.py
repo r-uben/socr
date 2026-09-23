@@ -30,7 +30,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
-from socr.core.config import PipelineConfig  # noqa: E402
+from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.providers import PROFILE_GEMINI, PROFILE_MISTRAL  # noqa: E402
 from socr.core.result import (  # noqa: E402
@@ -115,6 +115,10 @@ class TestMultiRungSpendSurvivesTwoResumes:
             judge_backend="heuristic",
             reprocess=True,
             table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            # #885: pin the engine; not about engine selection.
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
         )
         pipeline = UnifiedPipeline(config)
         pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old", _Accept(), PROFILE_MISTRAL)
@@ -165,6 +169,9 @@ class TestMultiRungSpendSurvivesTwoResumes:
                 quiet=True,
                 reprocess=True,
                 table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
             )
         )
         pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old", _Accept(), PROFILE_MISTRAL)
@@ -198,6 +205,9 @@ class TestRejectedEscalationSpendIsRecorded:
             PipelineConfig(
                 quiet=True,
                 table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
             )
         )
 
@@ -249,6 +259,10 @@ class TestOldSidecarUpgradesToAFact:
             judge_backend="heuristic",
             reprocess=True,
             table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            # #885: pin the engine; not about engine selection.
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
         )
         pipeline = UnifiedPipeline(config)
         out_dir = tmp_path / "out"

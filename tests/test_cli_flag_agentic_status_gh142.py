@@ -30,7 +30,7 @@ from unittest.mock import patch
 import fitz
 import pytest
 
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import AcceptDecision
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -323,6 +323,9 @@ def readers(tmp_path_factory):
     calls: dict[str, set[str]] = {}
     tmp = tmp_path_factory.mktemp("flagsweep")
 
+    # #885: this fixture is about which config fields are read, not engine
+    # selection; pin the engine so the AUTO default does not shell out to
+    # `ollama`.
     cfg = PipelineConfig(
         agentic=True,
         quiet=True,
@@ -330,6 +333,9 @@ def readers(tmp_path_factory):
         recover_clean_equations=True,
         recover_corrupt_math=True,
         save_figures=True,
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
     )
     pipe = UnifiedPipeline(_Recorder(cfg, fields, calls))
 
@@ -536,7 +542,15 @@ def test_unfingerprinted_fields_really_are_absent_from_the_fingerprint(field):
     # daemon that CI does not have and a workstation may or may not -- the exact
     # local-passes/CI-fails trap this repo documents, and the reason the fixture
     # above does the same.
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    # #885: pin the engine (see the note in the `readers` fixture above).
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
     pipe._resolve_judge_model = lambda: ""
     with patch.object(contract, "run_fingerprint", spy):
         pipe._run_fingerprint()

@@ -63,7 +63,12 @@ def _clean_env(monkeypatch):
 
 
 def _pipeline(**overrides: object) -> orch.UnifiedPipeline:
-    config = PipelineConfig()
+    # #885: pin the primary/local engine by default -- this file isolates the
+    # CAPTION engine's identity, and an unpinned AUTO default both shells out
+    # to `ollama` and (per the module docstring above) can itself resolve to
+    # GEMINI, confounding the very route this file is isolating. Callers that
+    # pass their own engine fields (none currently do) still win via override.
+    config = PipelineConfig(**_ISOLATE_FROM_GEMINI_ROUTE)
     for key, value in overrides.items():
         assert hasattr(config, key), f"PipelineConfig has no field {key!r}"
         setattr(config, key, value)
