@@ -844,6 +844,20 @@ def process(
 
     try:
         result = pipeline.process(pdf_path, output_dir)
+        # #728: a skip reports a PREVIOUS run's outcome; nothing was attempted,
+        # so nothing failed. It used to fall through to "Processing failed: None"
+        # and exit 1 on every re-invocation. Batch already treats skipped files
+        # as neither completed nor failed; this matches it.
+        from socr.core.result import DocumentStatus
+
+        if result.status is DocumentStatus.SKIPPED:
+            # A clean skip exits 0. A skip of a document whose last run was
+            # PARTIAL keeps GH-177's nonzero exit -- with a real reason now, not
+            # "Processing failed: None" (#728 review).
+            if result.error:
+                console.print(f"[yellow]Skipped:[/yellow] {result.error}")
+                raise SystemExit(1)
+            return
         if not result.success:
             from ocr_output_contract import Status
 
