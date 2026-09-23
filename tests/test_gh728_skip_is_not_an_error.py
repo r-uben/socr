@@ -57,18 +57,6 @@ def test_a_real_failure_still_fails(monkeypatch, tmp_path):
     assert "something broke" in result.output
 
 
-def test_the_skip_message_names_the_flag():
-    """The advice on a failed page ('re-run the page') is unreachable without
-    --reprocess, because the document gate decides first; both messages must name it."""
-    import inspect
-
-    from socr.pipeline import orchestrator
-
-    src = inspect.getsource(orchestrator.UnifiedPipeline._resume_skip)
-    assert "--reprocess" in src
-    assert "re-run the page with --reprocess" in inspect.getsource(orchestrator)
-
-
 def test_a_skipped_partial_document_keeps_a_nonzero_exit_with_a_real_reason(monkeypatch, tmp_path):
     """#728 review: ``_resume_skippable`` also skips a document whose last run was
     PARTIAL, and GH-177's policy is that a partial document exits nonzero. The skip
@@ -135,3 +123,72 @@ def test_the_skip_carries_the_recorded_outcome(monkeypatch, tmp_path):
     assert outcomes["COMPLETED"].error is None
     assert outcomes["PARTIAL"].status is DocumentStatus.SKIPPED
     assert "partial" in (outcomes["PARTIAL"].error or "")
+
+
+def test_the_skip_message_the_user_sees_names_the_flag(monkeypatch, tmp_path):
+    """cubic on #896: pin the text actually printed, not the source (which a comment
+    could satisfy). A completed record is skipped and the console says how to redo it."""
+    import io
+
+    from rich.console import Console
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline import orchestrator
+
+    buf = io.StringIO()
+    monkeypatch.setattr(orchestrator, "console", Console(file=buf, width=200))
+    monkeypatch.setattr(orchestrator, "_resume_skippable", lambda *a, **k: True)
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    _record(out, pdf, "COMPLETED")
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            judge_backend="heuristic",
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
+    pipe._scan_root = pdf.parent
+    pipe._resume_skip(pdf, out)
+    assert "--reprocess" in buf.getvalue()
+
+
+def test_a_real_partial_record_exits_nonzero_end_to_end(monkeypatch, tmp_path):
+    """cubic on #896: the two halves above never meet. Drive the real CLI and the
+    real ``process()`` against a real recorded PARTIAL entry -- only the resume
+    gate's fingerprint comparison is forced to match -- so a ``process()`` that
+    stripped ``_resume_skip``'s reason would fail here."""
+    from socr.pipeline import orchestrator
+
+    monkeypatch.setattr(orchestrator, "_resume_skippable", lambda *a, **k: True)
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    _record(out, pdf, "PARTIAL")
+    result = CliRunner().invoke(
+        cli,
+        ["process", str(pdf), "-o", str(out), "--primary", "qwen", "--judge-backend", "heuristic"],
+    )
+    assert result.exit_code != 0, result.output
+    assert "recorded as partial" in result.output
+    assert "Processing failed: None" not in result.output
+
+
+def test_a_real_completed_record_exits_zero_end_to_end(monkeypatch, tmp_path):
+    """The control for the test above: same CLI, same process(), only the recorded
+    status differs."""
+    from socr.pipeline import orchestrator
+
+    monkeypatch.setattr(orchestrator, "_resume_skippable", lambda *a, **k: True)
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    _record(out, pdf, "COMPLETED")
+    result = CliRunner().invoke(
+        cli,
+        ["process", str(pdf), "-o", str(out), "--primary", "qwen", "--judge-backend", "heuristic"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Processing failed" not in result.output
