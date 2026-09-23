@@ -8074,6 +8074,59 @@ class UnifiedPipeline:
         if cleaned:
             state.pages[page_num].binding_adjudication = cleaned
 
+    def _exclude_wedged_local_rungs(self, state, page_num: int, decision, ladder: list) -> list:
+        """Drop local rungs that timed out on a page a LATER rung rescued, if still wedged (#800).
+
+        #227 / #799 stopped a rescued page from halting the document, which was
+        right -- the cloud rung recovered the text. But nothing else happened: the
+        ladder is built once per document, so every later page walked into the same
+        still-wedged local backend, paid its full provider timeout, and only then
+        reached the rung that works. Slow and expensive, silently, for the whole
+        document.
+
+        Only rungs that are local-tier AND whose own attempt on this page was a
+        provider timeout are removed, and only when the run's backend probe says
+        the backend is still unresponsive now -- a slow page on a healthy machine
+        keeps its rung. The rung that rescued the page is never removed, so the
+        ladder cannot become empty through this path and a healthy document is
+        never truncated. Removed rungs are recorded as an event and on the console.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.providers import TIER_LOCAL
+
+        timed_out = {
+            getattr(att, "provider_id", "")
+            for att in decision.attempts
+            if "timeout" in (getattr(att, "reason", "") or "")
+        }
+        doomed = [p for p in ladder if p.tier == TIER_LOCAL and p.id and p.id in timed_out]
+        if not doomed:
+            return ladder
+        if self._probe_backend_idle():
+            return ladder  # it answered: that timeout was a slow page, not a wedge
+        survivors = [p for p in ladder if p not in doomed]
+        if not survivors:
+            return ladder  # never strand the document without a rung
+        ids = ", ".join(p.id for p in doomed)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="local_rung_excluded_after_rescue",
+                engine="",
+                detail=(
+                    f"{ids} timed out on p{page_num}, a later rung rescued the page, and "
+                    "the local backend is still unresponsive; excluded for the remaining pages"
+                ),
+                data={"excluded": [p.id for p in doomed], "remaining": [p.id for p in survivors]},
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                f"  [yellow]p{page_num}: local backend unresponsive after a rescued timeout; "
+                f"skipping {ids} for the remaining pages[/yellow]"
+            )
+        return survivors
+
     @staticmethod
     def _attempts_show_timeout(attempts) -> bool:
         """PP-0 cascade-halt trigger: did anything on this page time out?
@@ -9049,6 +9102,10 @@ class UnifiedPipeline:
                                 )
                             # Fall through to flush this page's output, then break at
                             # the top of the next iteration.
+                        elif _had_timeout and decision.accepted:
+                            ladder = self._exclude_wedged_local_rungs(
+                                state, page_num, decision, ladder
+                            )
 
                     finally:
                         _route_span.__exit__(None, None, None)
