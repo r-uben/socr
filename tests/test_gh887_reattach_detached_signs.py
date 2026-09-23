@@ -117,3 +117,20 @@ def test_missing_cell_geometry_is_a_no_op():
     words = [_word(140, 146, MINUS), _word(146, 170, "0.25")]
     grid = [[MINUS, "0.25"]]
     assert _reattach_detached_signs(grid, table, words) == grid
+
+
+def test_a_hyphen_flush_on_both_sides_is_a_range_not_a_minus():
+    """PR #888 review: "1990-2000" set as three flush words. The hyphen touches
+    the digits after it, but it touches the number BEFORE it too -- the shape of a
+    range. Moving it would invent a negative year."""
+    words = [_word(110, 140, "1990"), _word(140, 146, "-"), _word(146, 170, "2000")]
+    grid = [["1990-", "2000"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == grid
+
+
+def test_a_sign_with_space_before_it_and_flush_after_it_is_a_minus():
+    """The complementary case, and the typographic rule itself: space on the left,
+    contact on the right is how a minus is set -- this is what the real pages show."""
+    words = [_word(60, 90, "1990"), _word(140, 146, "-"), _word(146, 170, "2000")]
+    grid = [["1990 -", "2000"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == [["1990", "-2000"]]

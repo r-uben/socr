@@ -263,10 +263,24 @@ def _reattach_detached_signs(grid: list, table, words: list) -> list:
     digits exactly (gap 0.00), while two genuinely separate numbers in adjacent
     columns are never flush -- so no tolerance constant is needed. A placeholder
     dash in a cell of its own is separated by a column gap and is left alone.
+    A hyphen flush on BOTH sides is a range or compound ("1990-2000"), not a
+    minus, and is left alone too.
     """
     rows = getattr(table, "rows", None)
     if not rows or not words:
         return grid
+
+    def _flush_on_the_left(sign, all_words) -> bool:
+        """A range or compound hyphen ("1990-2000") abuts BOTH neighbours; a minus
+        abuts only the digits after it (PR #888 review). Measured on the affected
+        pages: of 145 detached minus signs, none was flush against anything on its
+        left -- 144 open their own text line, 1 sits 6.03pt after its neighbour.
+        So refusing a sign that is flush on BOTH sides costs nothing observed and
+        blocks the one shape that is geometrically a range, not a minus."""
+        return any(
+            w is not sign and w[5:7] == sign[5:7] and w[0] < sign[0] and w[2] >= sign[0]
+            for w in all_words
+        )
 
     def _inside(word, bbox) -> bool:
         cx = (word[0] + word[2]) / 2
@@ -290,7 +304,12 @@ def _reattach_detached_signs(grid: list, table, words: list) -> list:
             signs = [w for w in words if w[4] in _SIGN_GLYPHS and _inside(w, left_box)]
             digits = [w for w in words if w[4][:1].isdigit() and _inside(w, right_box)]
             joined = any(
-                s[5:7] == d[5:7] and s[2] >= d[0] and d[0] >= s[0] for s in signs for d in digits
+                s[5:7] == d[5:7]
+                and s[2] >= d[0]
+                and d[0] >= s[0]
+                and not _flush_on_the_left(s, words)
+                for s in signs
+                for d in digits
             )
             if not joined:
                 continue
