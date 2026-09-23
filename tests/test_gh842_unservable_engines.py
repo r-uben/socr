@@ -112,3 +112,12 @@ def test_registry_and_structural_check_agree():
     registry rather than a hardcoded list."""
     for et in EngineType:
         assert has_cli_engine(et) == (et in registry._ENGINES)
+
+
+def test_every_real_engine_without_auto_counts_as_the_default(hermetic, caplog):
+    """PR #883 review: ``AUTO`` is a sentinel. Listing every real engine but not
+    AUTO is still "everything", and must not warn about engines nobody chose."""
+    everything_real = [e for e in EngineType if e is not EngineType.AUTO]
+    with caplog.at_level(logging.WARNING):
+        _pipeline(enabled_engines=everything_real)._available_engines_for_agentic()
+    assert _warnings(caplog) == []

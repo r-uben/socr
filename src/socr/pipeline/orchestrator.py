@@ -9940,7 +9940,11 @@ class UnifiedPipeline:
         """
         if not unservable or self._warned_unservable_engines:
             return
-        if set(self.config.enabled_engines) >= set(EngineType):
+        # ``AUTO`` is a selection sentinel, not an engine anyone "enables", so it
+        # is left out of the comparison: a config listing every real engine but
+        # not AUTO asked for everything too, and must stay quiet (PR #883 review).
+        real_engines = set(EngineType) - {EngineType.AUTO}
+        if set(self.config.enabled_engines) >= real_engines:
             return
         self._warned_unservable_engines = True
         names = ", ".join(e.value for e in unservable)
