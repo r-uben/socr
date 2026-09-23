@@ -281,7 +281,8 @@ def test_the_agentic_loop_hands_the_profile_down_to_the_engine_runner(tmp_path):
 
     So drive the real phase and record what arrives. Hermetic per CLAUDE.md: the
     provider ladder is patched, the judge is a stub, and the crop-VLM probe is
-    pinned, so nothing contacts ollama and CI behaves like a workstation.
+    pinned, and the engines are pinned (#841), so nothing contacts ollama and CI
+    behaves like a workstation.
     """
     import fitz
 
@@ -300,7 +301,20 @@ def test_the_agentic_loop_hands_the_profile_down_to_the_engine_runner(tmp_path):
 
     seen: list = []
 
-    pipe = UnifiedPipeline(PipelineConfig(agentic=True, quiet=True))
+    # #841: pin the engines. The default ``AUTO`` makes ``process()`` call
+    # ``resolve_auto_engine()``, which instantiates engines from the registry
+    # directly (not through any patch below) and shells out to ``ollama`` to probe
+    # them -- measured at ~7s per call against an unreachable ollama host, and
+    # 0.3s on a workstation where ollama is up, so it hides locally.
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
 
     # A clean born-digital prose page takes the trusted-native bypass and never
     # reaches the ladder (that bypass is GH-317 itself), so force the page to need
