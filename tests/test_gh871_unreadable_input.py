@@ -248,3 +248,40 @@ def test_a_known_zero_page_count_is_not_recounted(tmp_path):
     bogus.write_bytes(b"not a pdf at all")
     handle = DocumentHandle(path=bogus, page_count=0, page_count_known=True)
     assert handle.page_count == 0
+
+
+class _CountRaises:
+    """A document whose declared page count itself cannot be read (#882)."""
+
+    closed = False
+
+    @property
+    def page_count(self):
+        raise fitz.mupdf.FzErrorFormat("cannot read page tree")
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_page_count_that_cannot_be_read_is_reported_not_raised(monkeypatch, tmp_path):
+    """#882: ``probe_page_loads`` promises never to raise. ``page_count`` sat
+    outside both guards, so a page tree that fails on the count escaped as a raw
+    traceback -- the #871 failure one line earlier."""
+    fake = _CountRaises()
+    monkeypatch.setattr(pdf_mod.fitz, "open", lambda p: fake)
+    probe = probe_page_loads(tmp_path / "any.pdf")
+    assert probe.unreadable
+    assert "cannot read page tree" in (probe.first_error or "")
+    assert fake.closed, "the handle must still be closed on this path"
+
+
+def test_process_refuses_a_file_whose_page_count_raises(monkeypatch, pipeline, tmp_path):
+    """End to end: the refusal record, not a traceback."""
+    pdf = _real_pdf(tmp_path / "doc.pdf")
+    real_open = pdf_mod.fitz.open
+    monkeypatch.setattr(
+        pdf_mod.fitz, "open", lambda p: _CountRaises() if str(p) == str(pdf) else real_open(p)
+    )
+    result = pipeline.process(pdf, tmp_path / "out")
+    assert result.status is DocumentStatus.ERROR
+    assert result.failure_mode is FailureMode.UNREADABLE_INPUT
