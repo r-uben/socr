@@ -26,7 +26,7 @@ import fitz
 import pytest
 
 from socr.core import pdf as pdf_mod
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.pdf import PageLoadProbe, probe_page_loads
 from socr.core.result import DocumentStatus, FailureMode
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -115,7 +115,17 @@ def test_the_probe_does_not_go_through_glyph_recovery(monkeypatch, tmp_path):
 
 @pytest.fixture
 def pipeline(tmp_path):
-    return UnifiedPipeline(PipelineConfig(output_dir=tmp_path / "out", quiet=True))
+    # Engines pinned (#841): the default ``AUTO`` makes ``process()`` shell out to
+    # ``ollama`` to resolve an engine -- a live probe these tests never need.
+    return UnifiedPipeline(
+        PipelineConfig(
+            output_dir=tmp_path / "out",
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
 
 
 def _set_probe(monkeypatch, probe: PageLoadProbe):
