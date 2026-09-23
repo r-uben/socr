@@ -783,6 +783,9 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
+    # #842: once-per-pipeline guard for ``_report_unservable_engines``; class
+    # level for the same ``object.__new__`` reason as the caches around it.
+    _warned_unservable_engines: bool = False
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -9896,10 +9899,20 @@ class UnifiedPipeline:
         from socr.core.providers import DEFAULT_PROVIDERS, PROFILE_QWEN_CLOUD
         from socr.engines.qwen import cloud_model_available
 
+        from socr.engines.registry import has_cli_engine
+
         available = []
+        unservable: list[EngineType] = []
         for engine_type in self.config.enabled_engines:
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
+                continue
+            # #842: a type with no CLI engine can NEVER be a rung on this path.
+            # That is a structural fact, not an outage, so it is decided here
+            # explicitly rather than by the reachability ``except`` below, which
+            # used to swallow it together with "the daemon is down".
+            if not has_cli_engine(engine_type):
+                unservable.append(engine_type)
                 continue
             try:
                 if get_engine(engine_type).is_available():
@@ -9912,7 +9925,37 @@ class UnifiedPipeline:
                         available.append(PROFILE_QWEN_CLOUD)
                 except Exception:  # same rule: a probe must never crash routing
                     pass
+        self._report_unservable_engines(unservable)
         return available
+
+    def _report_unservable_engines(self, unservable: list) -> None:
+        """Say so, once per pipeline, when the operator ASKED for a rung that cannot run.
+
+        #842. Only when ``enabled_engines`` was narrowed on purpose. The default
+        lists every ``EngineType``, including the two this path has no engine
+        for, so warning then would fire on every run about engines nobody asked
+        for -- the noise GH-525 learned to avoid. An explicit list naming one of
+        them is a configuration that will silently do less than it says, and
+        that must be visible.
+        """
+        if not unservable or self._warned_unservable_engines:
+            return
+        # ``AUTO`` is a selection sentinel, not an engine anyone "enables", so it
+        # is left out of the comparison: a config listing every real engine but
+        # not AUTO asked for everything too, and must stay quiet (PR #883 review).
+        real_engines = set(EngineType) - {EngineType.AUTO}
+        if set(self.config.enabled_engines) >= real_engines:
+            return
+        self._warned_unservable_engines = True
+        names = ", ".join(e.value for e in unservable)
+        message = (
+            f"enabled_engines names {names}, which the agentic ladder cannot run "
+            "(no CLI engine is registered for it; the vLLM server is reached through "
+            "--qwen-backend vllm instead). It is left out of the ladder (#842)"
+        )
+        logger.warning("%s", message)
+        if not self.config.quiet:
+            console.print(f"  [yellow]{message}[/yellow]")
 
     # Vision models tried (in order) as the hard-page judge when judge_model is
     # unset. Cloud-first so the judge is fast; local small VLM as offline fallback.
