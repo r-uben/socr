@@ -432,6 +432,23 @@ class TestPhaseAssemble:
 
 
 class TestFullPipeline:
+    @pytest.fixture(autouse=True)
+    def _readable_input(self, monkeypatch):
+        """These tests mock the document layer (``DocumentHandle.from_path``) and
+        pass a path that does not exist. GH-871's page-load probe runs before that
+        mock and would correctly refuse a missing file, so the probe is told the
+        input is readable here: these tests are about the agentic loop on a
+        document, not about whether the file on disk can be opened. The refusal
+        itself is covered in tests/test_gh871_unreadable_input.py."""
+        from socr.core import pdf as pdf_mod
+        from socr.core.pdf import PageLoadProbe
+
+        monkeypatch.setattr(
+            pdf_mod,
+            "probe_page_loads",
+            lambda path: PageLoadProbe(declared=1, loadable=1, first_error=None),
+        )
+
     def test_full_loop_success(self, tmp_path: Path) -> None:
         """Mock all externals and run the full agentic loop end to end."""
         config = _make_config(quiet=True, judge_backend="heuristic")

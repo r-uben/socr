@@ -197,6 +197,16 @@ class FailureMode(str, Enum):
     #: text cells: a completed page-judge acceptance, or #713's table-acceptance
     #: credential.
     ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE = "row_shape_not_reconcilable_text_table"
+    #: #871: the input PDF could not be read at all -- the file opens and declares
+    #: pages, but not one of them can be loaded (e.g. MuPDF "format error:
+    #: non-page object in page tree"). Previously the first page load raised
+    #: out of ``_phase_analyze`` and the whole run died with a traceback: no
+    #: ``metadata.json``, no root-index entry, nothing an audit could count.
+    #: Deliberately NOT ``EMPTY_OUTPUT`` or ``CLI_ERROR``, which describe what an
+    #: ENGINE produced -- here no engine ever ran, because there was nothing to
+    #: give it. The document is recorded FAILED, which the resume gate refuses,
+    #: so the next run retries it rather than skipping it.
+    UNREADABLE_INPUT = "unreadable_input"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The

@@ -30,6 +30,7 @@ fresh Document object each time.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
@@ -102,6 +103,58 @@ def apply_glyph_recovery(doc: fitz.Document, path: Path | str) -> GlyphRepairRep
         # (an affected font whose glyphs are genuinely unknown) that paying for
         # it is preferable to remembering a stale verdict.
     return report
+
+
+@dataclass(frozen=True)
+class PageLoadProbe:
+    """What loading every page of a PDF actually yields (#871).
+
+    ``declared`` is the page count the file claims; ``loadable`` is how many of
+    those pages MuPDF can really load. They differ on a damaged page tree: a
+    measured real file declared 64 pages and loaded none.
+    """
+
+    declared: int
+    loadable: int
+    first_error: str | None
+
+    @property
+    def unreadable(self) -> bool:
+        """True when the file declares nothing loadable -- not one page reads."""
+        return self.loadable == 0
+
+
+def probe_page_loads(path: Path | str) -> PageLoadProbe:
+    """Load every page of *path* and report how many actually load.
+
+    Opens WITHOUT glyph recovery on purpose. ``open_pdf``'s default
+    ``repair=True`` touches pages, which makes MuPDF run its own xref repair on
+    a damaged page tree -- and on the measured file that repair collapsed the
+    page count from 64 to 0 with no exception at all. That is exactly the
+    evidence this probe exists to see, so it must not be erased first.
+
+    Never raises for a damaged file: an unopenable file is reported as zero
+    declared, zero loadable, with the error named.
+    """
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:  # noqa: BLE001 - an unopenable file is a finding, not a crash
+        return PageLoadProbe(declared=0, loadable=0, first_error=f"{type(exc).__name__}: {exc}")
+    try:
+        declared = doc.page_count
+        loadable = 0
+        first_error: str | None = None
+        for index in range(declared):
+            try:
+                doc.load_page(index)
+            except Exception as exc:  # noqa: BLE001 - one bad page costs one page
+                if first_error is None:
+                    first_error = f"{type(exc).__name__}: {exc}"
+                continue
+            loadable += 1
+        return PageLoadProbe(declared=declared, loadable=loadable, first_error=first_error)
+    finally:
+        doc.close()
 
 
 def open_pdf(path: Path | str, *, repair: bool = True) -> fitz.Document:

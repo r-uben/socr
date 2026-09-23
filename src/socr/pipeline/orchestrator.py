@@ -1455,6 +1455,10 @@ class UnifiedPipeline:
         if refused is not None:
             return refused
 
+        unreadable = self._refuse_unreadable_input(pdf_path, out_dir)
+        if unreadable is not None:
+            return unreadable
+
         doc = DocumentHandle.from_path(pdf_path)
         state = DocumentState(handle=doc)
 
@@ -14614,6 +14618,50 @@ class UnifiedPipeline:
         self._write_audit_log(state, doc_dir, records=final_records)
 
         return final_result
+
+    def _refuse_unreadable_input(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
+        """Refuse, and RECORD, a PDF none of whose pages can be loaded (#871).
+
+        Without this, the first page load raised out of ``_phase_analyze`` and the
+        run died with a raw traceback: no ``metadata.json``, no root-index entry,
+        no document status -- the failure surfaced at no level at all, only in a
+        job log a human happened to read.
+
+        Returns ``None`` whenever at least one page loads; partially-damaged
+        documents are NOT handled here. Otherwise writes a FAILED record through
+        the ordinary ``_write_metadata`` path -- so ``metadata.json`` and the root
+        index both carry it -- and returns an ERROR result naming the cause. The
+        resume gate refuses a FAILED entry, so the next run retries the file.
+        """
+        from socr.core.pdf import probe_page_loads
+
+        probe = probe_page_loads(pdf_path)
+        if not probe.unreadable:
+            return None
+
+        detail = (
+            f"{FailureMode.UNREADABLE_INPUT.value}: 0 of {probe.declared} declared "
+            f"page(s) could be loaded ({probe.first_error or 'no pages declared'})"
+        )
+        # ``page_count`` passed explicitly AND marked known: letting the handle
+        # count for itself goes through ``open_pdf(repair=True)``, which reports 0
+        # on a damaged page tree (recording a 64-page document as empty) and
+        # RAISES on a file ``fitz`` cannot open at all -- re-creating the very
+        # traceback this refusal exists to replace (PR #878 review).
+        state = DocumentState(
+            handle=DocumentHandle(path=pdf_path, page_count=probe.declared, page_count_known=True)
+        )
+        result = EngineResult(
+            document_path=pdf_path,
+            engine="none",
+            status=DocumentStatus.ERROR,
+            failure_mode=FailureMode.UNREADABLE_INPUT,
+            error=detail,
+        )
+        self._write_metadata(state, result, out_dir, has_text=False)
+        if not self.config.quiet:
+            console.print(f"[red]Unreadable PDF:[/red] {pdf_path.name} -- {detail}")
+        return result
 
     def _write_metadata(
         self,

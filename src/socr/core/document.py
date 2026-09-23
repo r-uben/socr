@@ -28,13 +28,18 @@ class DocumentHandle:
     page_count: int = 0
     file_hash: str = ""
     _file_size_bytes: int = 0
+    #: #871: ``page_count`` was measured by the caller and is final, even when it
+    #: is 0. Without this, 0 is indistinguishable from "unset" and
+    #: ``__post_init__`` re-counts through ``open_pdf`` -- which raises on a file
+    #: ``fitz`` cannot open, the very case a refusal record is being built for.
+    page_count_known: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.path, str):
             self.path = Path(self.path)
         if self.path.exists() and not self._file_size_bytes:
             self._file_size_bytes = self.path.stat().st_size
-        if not self.page_count and self.path.exists():
+        if not self.page_count and not self.page_count_known and self.path.exists():
             self.page_count = self._count_pages()
         if not self.file_hash and self.path.exists():
             self.file_hash = self._compute_hash()
