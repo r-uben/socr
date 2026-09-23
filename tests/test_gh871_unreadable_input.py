@@ -117,6 +117,11 @@ def test_the_probe_does_not_go_through_glyph_recovery(monkeypatch, tmp_path):
 def pipeline(tmp_path):
     # Engines pinned (#841): the default ``AUTO`` makes ``process()`` shell out to
     # ``ollama`` to resolve an engine -- a live probe these tests never need.
+    # Judge pinned (#886): ``_write_metadata``/``_resume_skip`` call
+    # ``_run_fingerprint``, which resolves the page judge via
+    # ``_resolve_judge_model`` -- another Ollama probe -- whenever
+    # ``judge_backend`` is not "heuristic". None of these tests are about the
+    # judge, so it stays off.
     return UnifiedPipeline(
         PipelineConfig(
             output_dir=tmp_path / "out",
@@ -124,6 +129,7 @@ def pipeline(tmp_path):
             primary_engine=EngineType.QWEN,
             local_engine=EngineType.QWEN,
             enabled_engines=[EngineType.QWEN],
+            judge_backend="heuristic",
         )
     )
 

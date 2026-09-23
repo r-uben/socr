@@ -344,15 +344,20 @@ class TestDefaultOff:
 
         # #885: this test is about the fingerprint, not engine selection;
         # pin the engine so the AUTO default does not shell out to `ollama`.
+        # #886: also pin the page judge off -- `_run_fingerprint` calls
+        # `_resolve_judge_model`, a second Ollama probe, whenever
+        # `judge_backend` is not "heuristic"; this test is not about the judge.
         cfg_off = PipelineConfig(
             primary_engine=EngineType.QWEN,
             local_engine=EngineType.QWEN,
             enabled_engines=[EngineType.QWEN],
+            judge_backend="heuristic",
         )
         cfg_on = PipelineConfig(
             primary_engine=EngineType.QWEN,
             local_engine=EngineType.QWEN,
             enabled_engines=[EngineType.QWEN],
+            judge_backend="heuristic",
         )
         cfg_on.recover_clean_equations = True
 
@@ -969,10 +974,15 @@ class TestSkippedSkipEventSurvivesResume:
         # #885: this test is about the skip-event resume round trip, not
         # engine selection; pin the engine so the AUTO default does not shell
         # out to `ollama`.
+        # #886: also pin the page judge off -- `_flush_page_sidecar` calls
+        # `_run_fingerprint`, which calls `_resolve_judge_model` (a second
+        # Ollama probe) whenever `judge_backend` is not "heuristic"; this
+        # test is not about the judge.
         cfg = PipelineConfig(
             primary_engine=EngineType.QWEN,
             local_engine=EngineType.QWEN,
             enabled_engines=[EngineType.QWEN],
+            judge_backend="heuristic",
         )
         cfg.recover_clean_equations = True
         cfg.detect_equations = True

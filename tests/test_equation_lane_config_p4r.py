@@ -113,10 +113,14 @@ class TestFingerprintCoverage:
         # #885: this class is about the equation-lane fingerprint, not engine
         # selection; pin the engine so the AUTO default does not shell out to
         # `ollama`.
+        # #886: also pin the page judge off -- `_run_fingerprint` calls
+        # `_resolve_judge_model`, a second Ollama probe, whenever
+        # `judge_backend` is not "heuristic"; this class is not about the judge.
         pinned = {
             "primary_engine": EngineType.QWEN,
             "local_engine": EngineType.QWEN,
             "enabled_engines": [EngineType.QWEN],
+            "judge_backend": "heuristic",
         }
         pinned.update(overrides)
         cfg = PipelineConfig(**pinned)
