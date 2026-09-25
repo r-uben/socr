@@ -17,7 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import fitz
-import pytest
 from click.testing import CliRunner
 
 from socr.cli import cli
@@ -84,8 +83,7 @@ def test_an_all_skipped_batch_of_completed_files_exits_zero(monkeypatch, tmp_pat
     assert result.exit_code == 0, result.output
 
 
-@pytest.mark.parametrize("status", ["PARTIAL"])
-def test_the_partial_skip_matches_single_file(monkeypatch, tmp_path, status):
+def test_the_partial_skip_matches_single_file(monkeypatch, tmp_path):
     """Batch and `socr process` must give the same exit code for the same file (#896)."""
     from socr.pipeline import orchestrator
 
@@ -93,7 +91,7 @@ def test_the_partial_skip_matches_single_file(monkeypatch, tmp_path, status):
     out = tmp_path / "out"
     out.mkdir(parents=True)
     pdf = _pdf(tmp_path / "in" / "doc0.pdf")
-    _record(out, pdf, status)
+    _record(out, pdf, "PARTIAL")
     single = CliRunner().invoke(
         cli,
         ["process", str(pdf), "-o", str(out), "--primary", "qwen", "--judge-backend", "heuristic"],
