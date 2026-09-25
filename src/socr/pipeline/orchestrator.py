@@ -1554,6 +1554,7 @@ class UnifiedPipeline:
             return []
 
         to_process = []
+        skipped_partial: list[str] = []
 
         # Cold review round 3, finding 1: the pre-gate predicate is now
         # per-file, because each entry names the rung kinds IT is waiting on.
@@ -1577,11 +1578,31 @@ class UnifiedPipeline:
                 table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
             )
             if already_done and not self.config.reprocess:
+                # #897: a skipped file whose last run was PARTIAL still counts as
+                # partial in this run's outcome, so GH-177's nonzero-on-partial
+                # holds for batch exactly as #896 made it hold for `socr process`.
+                # A cleanly completed file is skipped silently: nothing was
+                # attempted and nothing is wrong.
+                entry = root_index.files.get(rel_key) or {}
+                if str(entry.get("status") or "") == "partial":
+                    skipped_partial.append(pdf.name)
+                    # A --dry-run only previews; it must not change the exit code
+                    # (GH-368). It still names the partial files below.
+                    if not self.config.dry_run:
+                        outcome.add(
+                            Status.PARTIAL,
+                            detail=f"{pdf} (skipped: recorded as partial; pass --reprocess to retry)",
+                        )
                 if self.config.verbose:
                     console.print(f"[dim]Skipping: {pdf.name}[/dim]")
             else:
                 to_process.append(pdf)
 
+        if skipped_partial and not self.config.quiet:
+            console.print(
+                f"[yellow]{len(skipped_partial)} skipped file(s) are recorded as partial"
+                "[/yellow] -- pass --reprocess to retry them"
+            )
         if not to_process:
             if not self.config.quiet:
                 console.print("[green]All files already processed[/green]")
