@@ -1586,10 +1586,13 @@ class UnifiedPipeline:
                 entry = root_index.files.get(rel_key) or {}
                 if str(entry.get("status") or "") == "partial":
                     skipped_partial.append(pdf.name)
-                    outcome.add(
-                        Status.PARTIAL,
-                        detail=f"{pdf} (skipped: recorded as partial; pass --reprocess to retry)",
-                    )
+                    # A --dry-run only previews; it must not change the exit code
+                    # (GH-368). It still names the partial files below.
+                    if not self.config.dry_run:
+                        outcome.add(
+                            Status.PARTIAL,
+                            detail=f"{pdf} (skipped: recorded as partial; pass --reprocess to retry)",
+                        )
                 if self.config.verbose:
                     console.print(f"[dim]Skipping: {pdf.name}[/dim]")
             else:

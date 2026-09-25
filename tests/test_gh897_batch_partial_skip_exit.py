@@ -112,3 +112,30 @@ def test_the_partial_skip_matches_single_file(monkeypatch, tmp_path, status):
         ],
     )
     assert (single.exit_code != 0) == (batch.exit_code != 0), (single.output, batch.output)
+
+
+def test_a_dry_run_names_skipped_partials_but_keeps_exit_zero(monkeypatch, tmp_path):
+    """PR #900 review: --dry-run previews and must not change the exit code (GH-368),
+    but it should still tell the user which skipped files are partial."""
+    from socr.pipeline import orchestrator
+
+    monkeypatch.setattr(orchestrator, "_resume_skippable", lambda *a, **k: True)
+    src, out = tmp_path / "in", tmp_path / "out"
+    out.mkdir(parents=True)
+    _record(out, _pdf(src / "doc0.pdf"), "PARTIAL")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "batch",
+            str(src),
+            "-o",
+            str(out),
+            "--dry-run",
+            "--primary",
+            "qwen",
+            "--judge-backend",
+            "heuristic",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "partial" in result.output
