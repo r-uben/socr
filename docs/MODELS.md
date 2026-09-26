@@ -19,8 +19,12 @@ equations, tables, and figures.
 ## Why these models (measured, not benchmarked in the abstract)
 
 Numbers below are **measured on the owner's 64GB M-series Mac on the real workload**,
-not generic leaderboard scores. See `[[reference-sococrbench]]` in memory and the
-design logs under `docs/log/` for the raw data.
+not generic leaderboard scores. See [Checking for newer models](#checking-for-newer-models)
+for the external leaderboard, and the design logs under `docs/log/` for the raw data.
+
+> **`qwen3.5:cloud` was retired by Ollama Cloud on 2026-09-25.** Every call now returns
+> `410 Gone`, but `ollama list` still shows it. Its rows below are historical until a
+> replacement is measured (#903).
 
 | Model | Where | Quality | Speed | Cost | Verdict |
 |-------|-------|--------:|-------|------|---------|
@@ -123,6 +127,29 @@ and is a larger, separately-tested change:
   local → Ollama-Cloud → Gemini ladder has its middle rung. `EngineType.QWEN` still
   names two backends, and `DEFAULT_PROVIDERS` still holds only one profile per engine —
   a deliberate collision, worked around rather than removed.
+
+## Checking for newer models
+
+Check these periodically, and always before re-ranking an engine:
+
+- **[socOCRbench](https://noahdasanaike.github.io/posts/sococrbench.html)** (N. Dasanaike):
+  an OCR leaderboard for social-science documents, covering text (NES, chrF) and tables
+  (TEDS), with open-weight and API models side by side. It uses historical, handwritten
+  and degraded scans, while socr's workload is born-digital papers. Use it to shortlist
+  candidates, never to rank them.
+- **Ollama library pages** (`https://ollama.com/library/<name>`): which tags exist,
+  which are `:cloud`, and which read images. Cloud models can be **retired without
+  notice**, as `qwen3.5:cloud` was on 2026-09-25.
+
+Before switching a default:
+1. Probe the exact model with a 1-token generation. Do not trust `ollama list` or
+   `/api/tags`: they keep listing retired models.
+2. Measure it head-to-head against the current default on the owner's pages. Score
+   decimals against the native text layer, and record seconds per page and whether it
+   finished. For a thinking build, verify that thinking is actually off: the run must
+   finish, and the output must contain no reasoning text. Asking is not enough. On
+   Ollama 0.30.8, `qwen3-vl:30b` ignored both `think:false` and `/no_think` (see the
+   trap above), so only an instruct variant was usable there.
 
 ## How to add or re-rank an engine
 
