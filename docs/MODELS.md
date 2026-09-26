@@ -146,7 +146,10 @@ Before switching a default:
    `/api/tags`: they keep listing retired models.
 2. Measure it head-to-head against the current default on the owner's pages. Score
    decimals against the native text layer, and record seconds per page and whether it
-   finished. Thinking builds must be run with thinking off.
+   finished. For a thinking build, verify that thinking is actually off: the run must
+   finish, and the output must contain no reasoning text. Asking is not enough. On
+   Ollama 0.30.8, `qwen3-vl:30b` ignored both `think:false` and `/no_think` (see the
+   trap above), so only an instruct variant was usable there.
 
 ## How to add or re-rank an engine
 
