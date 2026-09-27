@@ -257,3 +257,175 @@ Copies at `/tmp/socr-mut-903-r3a`/`r3b` (`src` + `tests` + `pyproject.toml`,
   reintroduce `think:false` on the table judge) were spot-re-checked (A)
   against the round-3 tree and still kill correctly; not exhaustively
   re-run, since none of the round-3 changes touch that code.
+
+## Round 4 (this commit, on top of `09c729b`): CI failure + slowdown + cubic P2 on the trickle test
+
+PR #906's commit `09c729b` FAILED CI, and the CI job's own duration went from
+3m22s (`54ef144`, round 2) to 9m21s (`09c729b`, round 3).
+
+**1. CI failure -- the no-provider trap, again.**
+`tests/test_canon_round3.py::TestFingerprintCoversOutputAffectingFlags::test_fingerprint_differs_across_output_affecting_flags`
+failed on `dict(judge_model="qwen2-vl:7b")`: the fingerprint was unchanged.
+In CI (no Ollama) round 3's explicit-override probe (P2-a) now correctly
+resolves the override to unavailable -> `None`, and the base config's
+default candidate ALSO resolves `None` -> both fingerprint as
+`JUDGE_IDENTITY_HEURISTIC` -> identical fingerprints. Locally, the base
+config's default candidate (`qwen3.8:27b`) happened to be actually pulled,
+so it resolved to a real model while the explicit override (never pulled)
+did not -- the test passed by ACCIDENT of what was installed on the machine
+that wrote it, not because of what it claims to pin. Fixed by wrapping the
+whole test in `patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available",
+return_value=True)`: both the base ladder and the explicit override now
+resolve deterministically to real (if fictional) model identities, so the
+fingerprint difference the test actually claims to prove -- a usable judge
+model CHANGE changes the fingerprint -- is what's being exercised, not
+whichever models happen to be pulled on whoever's machine runs the suite.
+
+Sweep: grepped every test file matching `_run_fingerprint`/`_resolve_judge_model`
+(25 files) plus, after finding a SECOND live failure the grep didn't catch
+(any `.process()`/`.process_batch()` call also reaches `_run_fingerprint`
+internally), every `.process(`/`.process_batch(` call site in
+`test_canon_round3.py` specifically (the file with the confirmed defect).
+`TestFingerprintCoversOutputAffectingFlags._run_once` (feeding
+`test_save_figures_toggle_reprocesses_not_skipped` and the `judge_model`
+toggle test), the inline "same config -> SKIPPED" `.process()` call, and
+`test_failed_doc_uses_contract_failure_checksum`'s `.process_batch()` all
+constructed a real `UnifiedPipeline` and called `.process()`/`.process_batch()`
+with default `judge_backend` ("auto") and NOTHING patching judge resolution
+-- on a machine with a real, slow-to-cold-load Ollama daemon,
+`_save_figures_toggle...` actually hung on a real ~120s `_probe_generate`
+timeout during this investigation and then FAILED (`DocumentStatus.ERROR`
+instead of `SKIPPED`) -- live proof this was a real defect, not a
+theoretical one. All three now patch
+`patch.object(UnifiedPipeline, "_resolve_judge_model", return_value="")`
+(the exact CLAUDE.md-documented pattern) alongside their existing
+`_phase_agentic` patch -- none of them are about the judge, so the fast,
+network-free heuristic identity is the correct pin, not a specific model.
+The other 24 grepped files were audited and found to already patch either
+the pipeline method directly, `OllamaVisionJudge`/`is_available` wholesale,
+or `judge_backend="heuristic"` (which short-circuits resolution before any
+probe) -- confirmed by running each with `OLLAMA_HOST=http://127.0.0.1:9`
+(see Verification).
+
+**2. CI slowdown -- a real spawn per candidate, per unhermetic construction.**
+Every `run_killable` call is a real `multiprocessing.spawn`, tens of
+milliseconds even to fail fast; CI (no Ollama at all) paid that on every
+candidate in the ladder, for every place a judge got resolved for real. Fix:
+`OllamaVisionJudge.is_available()` now runs a cheap, spawn-free reachability
+pre-check (`_host_reachable`) FIRST -- a raw `socket.create_connection`
+(deliberately NOT an `httpx` request: an HTTP round trip has to read a
+response, and a peer that trickles the BODY, exactly what this module's own
+killable-boundary tests use, would defeat an `httpx` timeout the same way it
+defeats `_probe_generate`'s -- see point 3). A connect failure (refused, DNS,
+the new `CONNECT_PROBE_TIMEOUT_SEC = 1.0` budget expiring) is DEFINITIVE
+unavailability, with reason `"ollama host unreachable: <host>"`, and NO
+spawn. This is explicitly NOT a model-availability claim (the daemon can be
+up with zero pulled models) -- it only ever short-circuits to unavailable,
+never to available; a reachable host still gets the full killable
+generation probe unchanged from round 3.
+
+A second, load-bearing gap this surfaced: `OllamaVisionJudge` had ALWAYS
+ignored `OLLAMA_HOST` (unlike every other Ollama call site in this repo,
+`socr.tables.extract.resolve_ollama_host`) -- every construction site left
+`host` unset, hard-defaulting to the literal `"http://localhost:11434"`
+regardless of environment. Fixed: `__init__`'s `host` default is now `None`
+and resolves through `resolve_ollama_host(host)`, so the coordinator's
+suggested `OLLAMA_HOST=http://127.0.0.1:9` hermeticity check (and any real
+deployment pointing its Ollama client elsewhere) actually has an effect on
+the page judge.
+
+**3. cubic P2 on the new trickle test.** A regression that makes
+`is_available()` bypass `run_killable` would make
+`test_probe_is_bounded_and_typed_against_a_trickling_peer` HANG, not fail --
+worse than a red test, since a hung worker wedges the whole job with no
+signal. Fixed by adding `test_probe_exits_in_a_child_process`, mirroring the
+repo's own existing pattern for exactly this failure mode
+(`test_judge_call_exits_in_a_child_process`, same file): the probe under
+test runs inside a further CHILD process, and the OUTER
+`subprocess.run(..., timeout=_OUTER_BOUND_SEC + 5.0)` is what actually
+survives a regression that hangs the child -- `subprocess.run` raises
+`TimeoutExpired`, a clean, fast test FAILURE, in the exact bound.
+
+### Files (round 4)
+
+- `src/socr/judge/ollama_judge.py` -- `_host_reachable` (raw socket connect,
+  `CONNECT_PROBE_TIMEOUT_SEC = 1.0`, named and documented separately from
+  `DEFAULT_JUDGE_TIMEOUT_SEC`); `is_available()` calls it first; `__init__`'s
+  `host` now resolves through `socr.tables.extract.resolve_ollama_host`
+  (default `None`, was the `DEFAULT_HOST` literal).
+- `tests/test_canon_round3.py` -- hermetic-ized the `judge_model` fingerprint
+  toggle (`is_available` patched True) and three unpatched `.process()`/
+  `.process_batch()` call sites (`_resolve_judge_model` patched to `""`).
+- `tests/test_gh172_judge_killable.py` -- new `test_probe_exits_in_a_child_process`
+  (the outer-bounded pair for the round-3 in-process trickle test).
+- `tests/test_judge_wiring_gh133.py`, `tests/test_gh903_judge_model_retired.py`
+  -- the shared autouse fixture also defaults `_host_reachable` to `True`
+  (every existing `httpx.post`-stubbing test keeps determining its outcome
+  from the generation stub, not from whether THIS machine has a real
+  daemon); new tests for the reachability pre-check (unreachable -> no
+  spawn; reachable -> falls through; the `OLLAMA_HOST` env var wiring).
+
+### Verification (round 4)
+
+- `~/venvs/socr/bin/pytest tests/test_gh172_judge_killable.py
+  tests/test_gh903_judge_model_retired.py tests/test_judge_wiring_gh133.py -q`
+  -- 40 passed.
+- `~/venvs/socr/bin/pytest tests/test_gh154_remote_call_entry_points.py
+  tests/test_gh873_judge_vllm_backend.py tests/test_table_rung_ollama.py
+  tests/test_canon_round3.py tests/test_gh172_killable_boundary.py
+  tests/test_gh849_peer_timeout_no_cascade.py -q` -- 126 passed (found the
+  live `test_save_figures_toggle_reprocesses_not_skipped` failure here on the
+  first pass; fixed, re-ran clean).
+- Hermeticity, both ways, per the coordinator's ask: `tests/test_canon_round3.py`
+  and the judge-focused files above pass identically with and without
+  `OLLAMA_HOST=http://127.0.0.1:9` set.
+- Full suite with `OLLAMA_HOST=http://127.0.0.1:9` (CI-like: no daemon
+  reachable) -- **5832 passed, 4 xfailed**, 573.16s (0:09:33). Compare
+  round 3's local full-suite run (real daemon reachable): 1899.70s.
+  Round-2 baseline (also real daemon reachable, before this whole judge
+  rewrite touched anything): 358s. The unreachable-host run is not quite at
+  round 2's number -- the residual ~215s is not fully accounted for and may
+  include ordinary machine-load variance (this repo's own operating note:
+  the machine runs concurrent agent sessions) rather than a further judge-
+  probing cost; see Deviations.
+- `uvx ruff@0.16.0 format --check .` -- clean.
+
+### Mutation check (per CLAUDE.md), round 4
+
+Copies at `/tmp/socr-mut-903-r4`/`r4b` (`src` + `tests` + `pyproject.toml`,
+`socr.__file__` canary confirmed inside each copy; both deleted after):
+
+- **Re-run of round 3's mutation 2** (bypass `run_killable`, call
+  `_probe_generate` directly): killed, and now FAILS FAST instead of
+  hanging -- `test_probe_exits_in_a_child_process` failed with
+  `subprocess.TimeoutExpired` in 10.59s (bounded by `_OUTER_BOUND_SEC + 5.0
+  = 10.5s`), not an unbounded hang. This is the direct fix for cubic P2 on
+  this test.
+- **New: remove the `_host_reachable` pre-check** (reverts to spawning
+  `run_killable` unconditionally): killed --
+  `test_unreachable_host_is_unavailable_with_no_spawn` and
+  `test_reachable_host_still_gets_the_generation_probe` both failed, 18
+  passed.
+
+### Deviations / follow-ups (round 4)
+
+- The full-suite-with-unreachable-Ollama time (573.16s) is a large
+  improvement over round 3's local reachable-daemon run (1899.70s) and
+  plausibly comparable to round 3's OWN reported CI number (9m21s = 561s,
+  which also had no daemon reachable) -- meaning this local repro may be
+  measuring close to what CI itself would now see, but I could not get a
+  true controlled "round 3 code, Ollama unreachable" baseline to diff
+  against directly: round 3's `OllamaVisionJudge` never read `OLLAMA_HOST`
+  at all (that wiring is itself part of this round's fix), so setting the
+  env var against round-3 code would have had no effect, and re-checking
+  out that commit into a separate scratch copy to measure it directly was
+  judged out of scope for the time available. The number to watch is the
+  next real CI run's job duration.
+- The 24 other `_run_fingerprint`/`_resolve_judge_model`-matching files were
+  audited by inspection (checking each for an existing patch) and then
+  re-verified by running the affected subset with `OLLAMA_HOST` unreachable,
+  not by an exhaustive line-by-line trace of every one of the 45 files in
+  this repo that call `.process()`/`.process_batch()` -- the full suite run
+  (both with and without a reachable daemon) is the actual completeness
+  check; it was green both ways at the time of writing.
+

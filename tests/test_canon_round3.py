@@ -139,10 +139,20 @@ class TestLimitOutputPersists:
             "socr.engines.registry.resolve_auto_engine", lambda: EngineType.DEEPSEEK
         )
 
-        with patch.object(
-            UnifiedPipeline,
-            "_phase_agentic",
-            _backbone_writing_pages({1: "limited one", 2: "limited two"}),
+        # GH-903 round 4: `.process()`/CLI `batch` calls `_run_fingerprint`,
+        # which calls `_resolve_judge_model` under the default `judge_backend`
+        # ("auto") -- an unpatched real probe here is exactly the "no-provider
+        # trap" CLAUDE.md documents (the CI slowdown this ticket exists to
+        # fix, and a real hang risk on a workstation with Ollama half up).
+        # This test is not about the judge at all, so pin it to the fast,
+        # network-free heuristic path.
+        with (
+            patch.object(
+                UnifiedPipeline,
+                "_phase_agentic",
+                _backbone_writing_pages({1: "limited one", 2: "limited two"}),
+            ),
+            patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
         ):
             result = CliRunner().invoke(
                 socr_cli.cli,
@@ -184,10 +194,18 @@ class TestLimitOutputPersists:
 
 class TestFingerprintCoversOutputAffectingFlags:
     def _run_once(self, pipeline, pdf, out):
-        with patch.object(
-            UnifiedPipeline,
-            "_phase_agentic",
-            _backbone_writing_pages({1: "content one", 2: "content two"}),
+        # GH-903 round 4: pin judge resolution off-network here too (see the
+        # matching note on `test_limit_batch_without_o_persists_output`) --
+        # this class's assertions are all about the FINGERPRINT/resume gate,
+        # not the judge, except `test_fingerprint_differs_across_output_affecting_flags`,
+        # which patches `is_available` itself for its own, different reason.
+        with (
+            patch.object(
+                UnifiedPipeline,
+                "_phase_agentic",
+                _backbone_writing_pages({1: "content one", 2: "content two"}),
+            ),
+            patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
         ):
             return pipeline.process(pdf, out)
 
@@ -202,7 +220,10 @@ class TestFingerprintCoversOutputAffectingFlags:
         assert first.status == DocumentStatus.SUCCESS
 
         # Same config -> resume gate SKIPS (sanity: the gate works at all).
-        with patch.object(UnifiedPipeline, "_phase_agentic") as backbone:
+        with (
+            patch.object(UnifiedPipeline, "_phase_agentic") as backbone,
+            patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+        ):
             skipped = UnifiedPipeline(_config(save_figures=False)).process(pdf, out)
         assert skipped.status == DocumentStatus.SKIPPED
         backbone.assert_not_called()
@@ -215,27 +236,44 @@ class TestFingerprintCoversOutputAffectingFlags:
         """Each output-affecting flag the round-3 fix added must change the run
         fingerprint when toggled (so a changed setting can never silently reuse a
         cached result)."""
-        base = UnifiedPipeline(_config())
-        base_fp = base._run_fingerprint()
+        # GH-903 round 4 (CI failure on `judge_model="qwen2-vl:7b"`): the
+        # fingerprint's `judge_model` key is the RESOLVED identity, which is
+        # availability-dependent BY DESIGN (see `_run_fingerprint`'s own
+        # docstring) -- that is the whole point GH-133 fixed. On a workstation
+        # with Ollama installed, the base config's default candidate resolved
+        # to an actually-pulled model while the explicit override
+        # ("qwen2-vl:7b", never pulled here) resolved to
+        # `JUDGE_IDENTITY_HEURISTIC`, so the two fingerprints differed --  by
+        # accident of what happened to be installed, not because the toggle
+        # itself is what this test exists to pin. In CI (no Ollama) BOTH
+        # resolve to `JUDGE_IDENTITY_HEURISTIC` and the fingerprints matched,
+        # failing the assertion for a reason that has nothing to do with the
+        # toggle. This test's actual claim -- a usable judge model change
+        # changes the fingerprint -- needs both models to resolve as
+        # available, deterministically, regardless of what is or is not
+        # pulled on the machine running the suite.
+        with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=True):
+            base = UnifiedPipeline(_config())
+            base_fp = base._run_fingerprint()
 
-        toggles = [
-            dict(save_figures=True),
-            dict(figures_max_total=99),
-            dict(figures_max_per_page=9),
-            dict(local_engine=EngineType.GEMINI),
-            # GH-525 removed `fallback_chain` from this list. It is not an
-            # output-affecting flag and never was: no execution path reads it
-            # (the multi-engine branches that did were deleted in #298), so
-            # requiring it to invalidate the run was requiring a reprocess that
-            # produces identical output. Pinned in the other direction now, in
-            # `test_gh525_inert_fields_do_not_invalidate.py`.
-            dict(tiered=False),
-            dict(judge_backend="vlm"),
-            dict(judge_model="qwen2-vl:7b"),
-        ]
-        for override in toggles:
-            fp = UnifiedPipeline(_config(**override))._run_fingerprint()
-            assert fp != base_fp, f"fingerprint did not change for {override}"
+            toggles = [
+                dict(save_figures=True),
+                dict(figures_max_total=99),
+                dict(figures_max_per_page=9),
+                dict(local_engine=EngineType.GEMINI),
+                # GH-525 removed `fallback_chain` from this list. It is not an
+                # output-affecting flag and never was: no execution path reads it
+                # (the multi-engine branches that did were deleted in #298), so
+                # requiring it to invalidate the run was requiring a reprocess that
+                # produces identical output. Pinned in the other direction now, in
+                # `test_gh525_inert_fields_do_not_invalidate.py`.
+                dict(tiered=False),
+                dict(judge_backend="vlm"),
+                dict(judge_model="qwen2-vl:7b"),
+            ]
+            for override in toggles:
+                fp = UnifiedPipeline(_config(**override))._run_fingerprint()
+                assert fp != base_fp, f"fingerprint did not change for {override}"
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +343,12 @@ class TestFailureRecordConformance:
             return None
 
         pipeline = UnifiedPipeline(_config())
-        with patch.object(UnifiedPipeline, "_phase_agentic", _selective_backbone):
+        # GH-903 round 4: same reason as the fingerprint-coverage tests above
+        # -- this test is about the failure-checksum contract, not the judge.
+        with (
+            patch.object(UnifiedPipeline, "_phase_agentic", _selective_backbone),
+            patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+        ):
             pipeline.process_batch(in_dir, out)
 
         # The FAILED doc's recorded checksum is a valid sha256: sentinel/digest,

@@ -12,7 +12,9 @@ importable and testable without Ollama installed.
 from __future__ import annotations
 
 import base64
+import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -21,6 +23,31 @@ from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
 
 DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
+
+#: GH-903 round 4: the page judge used to ignore ``OLLAMA_HOST`` entirely --
+#: every construction site left ``host`` unset, so it always hit the bare
+#: ``DEFAULT_HOST`` literal above regardless of where the daemon (or a test's
+#: fake one) actually was, unlike every other Ollama call site in this repo
+#: (``socr.tables.extract.resolve_ollama_host``, used by the table judge and
+#: the engines). ``OllamaVisionJudge.__init__`` now resolves through the same
+#: helper, so a deployment that has pointed its Ollama client at a remote or
+#: non-default host via the env var socr's other subsystems already honor is
+#: not silently disagreed with here, and so the reachability tests below can
+#: actually exercise "no daemon" by setting that variable rather than hoping
+#: nothing is listening on localhost.
+#: GH-903 round 4 (CI slowdown, cubic P2): a per-candidate ``run_killable``
+#: spawn is a real ``multiprocessing.spawn`` -- tens of milliseconds even to
+#: fail fast -- and CI (no Ollama daemon at all) pays that on EVERY candidate
+#: in the ladder, on every run. A plain, short-timeout connect is enough to
+#: tell "nothing is listening here" apart from "something is, slowly", and
+#: unlike the generation probe's own budget (which must accommodate a cold
+#: MODEL load, ~46s measured), an unreachable HOST does not get any more
+#: reachable the longer you wait -- so this budget is small and fixed, not
+#: derived from ``self.timeout``. This is NOT a model-availability claim: the
+#: daemon can be up with the wrong model pulled, or none at all -- the check
+#: below only ever short-circuits to unavailable, never to available, and a
+#: reachable host still gets the full killable generation probe.
+CONNECT_PROBE_TIMEOUT_SEC = 1.0
 
 #: The judge call's own wall-clock budget (``OllamaVisionJudge.timeout``, and
 #: the default the availability probe below now shares -- GH-903 round 2). A
@@ -111,6 +138,36 @@ def _probe_failure_reason(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> bool:
+    """Cheap "is anything listening at all" check -- never spawns a process,
+    never sends an HTTP request, never generates a token (GH-903 round 4,
+    cubic P2).
+
+    A raw TCP connect, deliberately -- NOT an ``httpx`` request. An HTTP
+    round trip has to read a response, and a peer that trickles the BODY
+    (this module's own killable-boundary tests use exactly such a server)
+    would defeat an ``httpx`` timeout the same way it defeats
+    ``_probe_generate``'s, hanging this "cheap" check indefinitely with
+    nothing bounding it (unlike the generation probe, this check does not run
+    behind ``run_killable``, on purpose -- it exists to AVOID that spawn). A
+    bare socket connect only waits on the TCP handshake, which a trickling
+    peer cannot stall -- the handshake either completes or the OS refuses it,
+    both fast. Any failure to connect (refused, DNS failure, this timeout)
+    means "no daemon here": that is the one case ``is_available`` may treat
+    as definitive without ever calling ``_probe_generate``.
+    """
+    parts = urlsplit(host)
+    hostname = parts.hostname
+    if not hostname:
+        return False
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
     """Top-level, picklable probe body run through ``run_killable`` (GH-903
     round 3, P2-b) -- never called directly by ``is_available``.
@@ -161,11 +218,18 @@ class OllamaVisionJudge:
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
-        host: str = DEFAULT_HOST,
+        host: str | None = None,
         timeout: float = DEFAULT_JUDGE_TIMEOUT_SEC,
     ) -> None:
+        from socr.tables.extract import resolve_ollama_host
+
         self.model = model
-        self.host = host.rstrip("/")
+        # GH-903 round 4: resolve through the SAME helper the table judge and
+        # engines use (explicit arg, then ``OLLAMA_HOST``, then
+        # ``DEFAULT_HOST``) -- an unset ``host`` used to always mean the bare
+        # ``DEFAULT_HOST`` literal, ignoring a deployment that has already
+        # pointed its Ollama client elsewhere via the env var.
+        self.host = resolve_ollama_host(host).rstrip("/")
         self.timeout = timeout
         self._prompt = load_judge_prompt()
         #: Set by ``is_available()`` -- "" when it returned True, otherwise a
@@ -206,8 +270,17 @@ class OllamaVisionJudge:
         distinctly from an HTTP error status (``_probe_failure_reason``): the
         latter is definitive, the former only proves this call needed longer
         than ``timeout``.
+
+        GH-903 round 4 (cubic P2): a cheap reachability pre-check
+        (``_host_reachable``) runs FIRST, with no spawn -- an unreachable
+        host is definitive and does not need the killable generation probe
+        at all. This is what keeps a host with no Ollama daemon (CI) from
+        paying a real ``multiprocessing.spawn`` per candidate in the ladder.
         """
         self.unavailable_reason = ""
+        if not _host_reachable(self.host):
+            self.unavailable_reason = f"ollama host unreachable: {self.host}"
+            return False
         spec = CallSpec(
             func="socr.judge.ollama_judge:_probe_generate",
             args=(self.host, self.model, self.timeout),

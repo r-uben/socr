@@ -69,6 +69,12 @@ def _run_killable_inprocess(spec, timeout):
 @pytest.fixture(autouse=True)
 def _probe_run_killable_is_synchronous(monkeypatch):
     monkeypatch.setattr(ollama_judge_module, "run_killable", _run_killable_inprocess)
+    # GH-903 round 4: is_available() now pre-checks reachability before ever
+    # spawning. Default it to "reachable" so every existing httpx.post-based
+    # test still determines its outcome purely from the generation stub, not
+    # from whether THIS machine happens to have a real daemon listening.
+    # Tests that specifically exercise the pre-check override this back.
+    monkeypatch.setattr(ollama_judge_module, "_host_reachable", lambda *a, **k: True)
 
 
 def _with_implicit_tag(name: str) -> str:

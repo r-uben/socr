@@ -60,6 +60,12 @@ def _run_killable_inprocess(spec, timeout):
 @pytest.fixture(autouse=True)
 def _probe_run_killable_is_synchronous(monkeypatch):
     monkeypatch.setattr(ollama_judge_module, "run_killable", _run_killable_inprocess)
+    # GH-903 round 4: is_available() now pre-checks reachability before ever
+    # spawning. Default it to "reachable" so every existing httpx.post-based
+    # test still determines its outcome purely from the generation stub, not
+    # from whether THIS machine happens to have a real daemon listening.
+    # Tests that specifically exercise the pre-check override this back.
+    monkeypatch.setattr(ollama_judge_module, "_host_reachable", lambda *a, **k: True)
 
 
 def _pipeline(**overrides):
@@ -430,7 +436,71 @@ def test_explicit_override_probe_is_memoized(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 7. strict_local still forbids cloud candidates
+# 7. Reachability pre-check: no spawn for a host with no daemon at all
+# ---------------------------------------------------------------------------
+
+
+def test_unreachable_host_is_unavailable_with_no_spawn(monkeypatch):
+    """GH-903 round 4 (cubic P2, CI slowdown): a host with no Ollama daemon
+    at all must be classified WITHOUT ever spawning the killable generation
+    probe -- that's the whole fix. ``_probe_generate`` exploding proves it
+    was never called."""
+    from socr.judge import ollama_judge as oj
+
+    monkeypatch.setattr(oj, "_host_reachable", lambda *a, **k: False)
+
+    def _boom(*a, **k):
+        raise AssertionError("the generation probe must not spawn for an unreachable host")
+
+    monkeypatch.setattr(oj, "run_killable", _boom)
+
+    judge = OllamaVisionJudge(model="qwen3.8:27b", host="http://127.0.0.1:9")
+    assert judge.is_available() is False
+    assert judge.unavailable_reason == "ollama host unreachable: http://127.0.0.1:9"
+
+
+def test_reachable_host_still_gets_the_generation_probe(monkeypatch):
+    """Difference pin: same model, only reachability changes -- an
+    unreachable host must never falsely report the killable probe's own
+    (correct, generation-based) verdict."""
+    from socr.judge import ollama_judge as oj
+
+    def _post(url, json=None, **kwargs):
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": ""}
+
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+    monkeypatch.setattr(oj, "_host_reachable", lambda *a, **k: False)
+    unreachable = OllamaVisionJudge(model="qwen3.8:27b").is_available()
+
+    monkeypatch.setattr(oj, "_host_reachable", lambda *a, **k: True)
+    reachable = OllamaVisionJudge(model="qwen3.8:27b").is_available()
+
+    assert unreachable is False
+    assert reachable is True
+    assert unreachable != reachable
+
+
+def test_ollama_visionjudge_host_honours_the_env_var(monkeypatch):
+    """GH-903 round 4: an unset ``host`` used to always mean the hardcoded
+    ``DEFAULT_HOST`` literal, unlike every other Ollama call site in this
+    repo -- so pointing the env var at an unreachable address (the same
+    mechanism used to prove hermeticity for whole test FILES) had no effect
+    on the page judge at all."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://192.0.2.1:9")
+    judge = OllamaVisionJudge(model="qwen3.8:27b")
+    assert judge.host == "http://192.0.2.1:9"
+
+
+# ---------------------------------------------------------------------------
+# 8. strict_local still forbids cloud candidates
 # ---------------------------------------------------------------------------
 
 
