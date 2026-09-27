@@ -89,15 +89,20 @@ The thinking build never terminates — the timeout guard is its only defence.
   authority for a cell value (silent corruption of a research number is the worst
   failure mode). `auto_patch_tables` stays **off** by default.
 - **Layout only:** the dual-pass crop reader uses the resolved judge model
-  (`qwen3.5:cloud` first) to restore row×column *structure*, reconciled against the
-  native values.
-- Crop-read VLMs are all unreliable on dense tables (`qwen3.5:cloud` flaky 502s,
-  `qwen3-vl:8b` times out, `minicpm-v:8b` collapses sub-columns) — `qwen3.5:cloud`
-  is the least-bad default. Gemini is the edge fallback for dense *scanned* tables.
+  (`qwen3.8:27b` first, since GH-903) to restore row×column *structure*, reconciled
+  against the native values.
+- Crop-read VLMs vary in reliability on dense tables (`qwen3-vl:8b` times out,
+  `minicpm-v:8b` collapses sub-columns). `qwen3.5:cloud` is no longer in this
+  ladder at all — Ollama Cloud retired it 2026-09-25 (GH-903). Gemini is the edge
+  fallback for dense *scanned* tables.
 
 ### Judge (quality gate / escalation decider)
-- `_JUDGE_MODEL_CANDIDATES = [qwen3.5:cloud, minicpm-v:8b, qwen3-vl:8b]` — already
-  cloud-first; first available wins. Override via `config.judge_model`.
+- `_JUDGE_MODEL_CANDIDATES = [qwen3.8:27b, minicpm-v:8b, qwen3-vl:8b]` — local-first
+  since GH-903 (Ollama Cloud retired `qwen3.5:cloud`, the former first candidate,
+  2026-09-25); first available wins. Availability is a real 1-token generation on
+  the exact model (`OllamaVisionJudge.is_available`), not a `/api/tags` listing —
+  a retired cloud model can still be *listed* while every generation 410s.
+  Override via `config.judge_model`.
 
 ## The ladders in code
 

@@ -106,7 +106,16 @@ def _rung_id(model: str) -> str:
 
 def _build_payload(model: str, prompt: str, image_b64: str) -> dict[str, Any]:
     """The exact `/api/chat` request body — kept separate from the network
-    call so tests can assert on it without touching `httpx`."""
+    call so tests can assert on it without touching `httpx`.
+
+    GH-903: `think: false` sent unconditionally, same reasoning as
+    `socr.judge.ollama_judge._post_generate` — a thinking-model rung/adjudicator
+    candidate would otherwise put its answer in `message.thinking` and leave
+    `message.content` empty, which reads as an unparseable verdict rather than
+    as "unavailable". Verified harmless on the non-thinking candidates this
+    module already uses (`glm-5.3-flash:cloud`, `kimi-k2.6:cloud`) — normal
+    HTTP 200 output, not just no error.
+    """
     return {
         "model": model,
         "messages": [
@@ -118,6 +127,7 @@ def _build_payload(model: str, prompt: str, image_b64: str) -> dict[str, Any]:
         ],
         "format": "json",
         "stream": False,
+        "think": False,
     }
 
 

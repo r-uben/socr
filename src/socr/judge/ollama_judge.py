@@ -22,6 +22,34 @@ from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
 DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
 
+#: GH-903: the judge model ladder includes thinking models (e.g. `qwen3.8:27b`).
+#: With `think` unset and `format=json`, a thinking model puts its answer in
+#: `thinking` and leaves `response` empty, which socr then reports as "no JSON
+#: object found in judge output" or a 120s timeout waiting on a stream that
+#: never emits the final answer. `"think": false` was measured (2026-09-26) to
+#: return correct JSON in ~8s warm, and was verified harmless (HTTP 200, normal
+#: output) on non-thinking models too (`qwen3-vl:30b-a3b-instruct`,
+#: `glm-5.3-flash:cloud`), so it is sent unconditionally rather than branching
+#: on a per-model "is this a thinking model" table that would need updating
+#: every time a new candidate is added.
+_THINK = False
+
+#: GH-903: the availability probe used to be a `/api/tags` listing, which lied
+#: about a model Ollama Cloud had retired (410 Gone on generation, but the tag
+#: still listed). A real 1-token generation is the only check that observes
+#: what a judge call will actually see. Bounded to the same order as
+#: `socr.core.ollama_utils.check_ollama_model`'s subprocess timeout (10s): this
+#: is a probe, not the judge call itself (`timeout`, default 120s), and a
+#: candidate that cannot answer this fast must not block the ladder while the
+#: real judge call further down still has its own generous budget.
+PROBE_TIMEOUT_SEC = 10.0
+
+#: Minimal generation: `num_predict=1` bounds the token count so probing a
+#: model that turns out to be slow to answer costs one token, not a full
+#: judge-sized response.
+_PROBE_OPTIONS = {"num_predict": 1}
+_PROBE_PROMPT = "hi"
+
 
 def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: float) -> str:
     """The ONLY part of ``judge()`` that crosses the killable boundary (GH-172).
@@ -43,6 +71,7 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
             "stream": False,
             "options": {"temperature": 0},  # judging should be as stable as we can make it
             "format": "json",
+            "think": _THINK,
         },
         timeout=timeout,
     )
@@ -50,9 +79,25 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
     return resp.json().get("response", "")
 
 
-def _with_implicit_tag(name: str) -> str:
-    """Ollama resolves an untagged model reference to ``:latest``."""
-    return name if ":" in name else f"{name}:latest"
+def _probe_failure_reason(exc: Exception) -> str:
+    """A short, human-readable reason a judge candidate failed its probe.
+
+    Distinguishes a model Ollama Cloud retired (410, still listed in
+    ``/api/tags``) from a model that was simply never pulled (404) or a
+    daemon that is not reachable at all -- the run-level surface (GH-903)
+    needs to say WHY, not just that the ladder fell through.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        body_detail = ""
+        try:
+            body = exc.response.json()
+            if isinstance(body, dict):
+                body_detail = str(body.get("error", ""))
+        except ValueError:
+            body_detail = exc.response.text
+        status = exc.response.status_code
+        return f"HTTP {status}" + (f": {body_detail}" if body_detail else "")
+    return f"{type(exc).__name__}: {exc}"
 
 
 class OllamaVisionJudge:
@@ -63,27 +108,51 @@ class OllamaVisionJudge:
         model: str = DEFAULT_MODEL,
         host: str = DEFAULT_HOST,
         timeout: float = 120.0,
+        probe_timeout: float = PROBE_TIMEOUT_SEC,
     ) -> None:
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
+        self.probe_timeout = probe_timeout
         self._prompt = load_judge_prompt()
+        #: Set by ``is_available()`` -- "" when it returned True, otherwise a
+        #: short reason (GH-903) a caller can surface at run level (e.g. the
+        #: 410/retired message), without changing ``is_available``'s bool
+        #: contract that every existing caller relies on.
+        self.unavailable_reason: str = ""
 
     def is_available(self) -> bool:
-        """True if the Ollama server is up and THIS EXACT model is pulled.
+        """True iff a real 1-token generation on THIS EXACT model succeeds.
 
-        Matched on the full ``name:tag``. A prefix match on the name alone (the
-        historical behaviour) let an installed ``qwen3-vl:30b-a3b-instruct``
-        satisfy a request for ``qwen3-vl:8b``: the model reported as available,
-        then ``judge()`` 404'd at judge time on a model that was never pulled
-        (#133). Availability must mean the pull, not the family.
+        GH-903: a ``/api/tags`` listing is not this check -- Ollama Cloud
+        retired ``qwen3.5:cloud`` on 2026-09-25, but ``/api/tags`` kept
+        listing it (retirement is a generation-time 410, not a catalogue
+        change), so the old tags-based probe kept selecting a judge that
+        raised on every call. Only a real generation observes what a judge
+        call will actually see. ``think: false`` matches ``_post_generate``:
+        a thinking-model candidate (e.g. ``qwen3.8:27b``) would otherwise put
+        its answer in ``thinking`` and leave ``response`` empty, which reads
+        as an empty/unparseable body rather than as "unavailable" -- so this
+        probe must send the same flag the real judge call does, or a thinking
+        candidate could pass the probe and still fail every judge call.
         """
+        self.unavailable_reason = ""
         try:
-            resp = httpx.get(f"{self.host}/api/tags", timeout=5.0)
+            resp = httpx.post(
+                f"{self.host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": _PROBE_PROMPT,
+                    "stream": False,
+                    "think": _THINK,
+                    "options": _PROBE_OPTIONS,
+                },
+                timeout=self.probe_timeout,
+            )
             resp.raise_for_status()
-            names = {_with_implicit_tag(m.get("name", "")) for m in resp.json().get("models", [])}
-            return _with_implicit_tag(self.model) in names
-        except (httpx.HTTPError, ValueError):
+            return True
+        except (httpx.HTTPError, OSError) as exc:
+            self.unavailable_reason = _probe_failure_reason(exc)
             return False
 
     def judge(self, image_path: Path, ocr_text: str) -> JudgeVerdict:
