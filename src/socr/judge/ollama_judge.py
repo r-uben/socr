@@ -22,27 +22,34 @@ from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
 DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
 
+#: The judge call's own wall-clock budget (``OllamaVisionJudge.timeout``, and
+#: the default the availability probe below now shares -- GH-903 round 2). A
+#: cold-loaded ``qwen3.8:27b`` (the new default candidate; unloaded, i.e. not
+#: resident in GPU memory when the probe runs) was measured on the owner's
+#: Mac to take ~46s to answer a 1-token generation. The probe's FIRST cut
+#: (a separate, shorter budget) treated that slow-but-real load as
+#: unavailability, memoized ``None`` for the whole run (and a whole ``socr
+#: batch``), and degraded every page to the heuristic judge. The probe must
+#: get the same budget the real judge call gets, or it will keep being wrong
+#: about exactly the case (a cold model) it exists to tell apart from a
+#: genuinely retired/missing one.
+DEFAULT_JUDGE_TIMEOUT_SEC = 120.0
+
 #: GH-903: the judge model ladder includes thinking models (e.g. `qwen3.8:27b`).
 #: With `think` unset and `format=json`, a thinking model puts its answer in
 #: `thinking` and leaves `response` empty, which socr then reports as "no JSON
-#: object found in judge output" or a 120s timeout waiting on a stream that
-#: never emits the final answer. `"think": false` was measured (2026-09-26) to
+#: object found in judge output" or a timeout waiting on a stream that never
+#: emits the final answer. `"think": false` was measured (2026-09-26) to
 #: return correct JSON in ~8s warm, and was verified harmless (HTTP 200, normal
-#: output) on non-thinking models too (`qwen3-vl:30b-a3b-instruct`,
-#: `glm-5.3-flash:cloud`), so it is sent unconditionally rather than branching
-#: on a per-model "is this a thinking model" table that would need updating
-#: every time a new candidate is added.
+#: output) on non-thinking models too (`qwen3-vl:30b-a3b-instruct`), so it is
+#: sent unconditionally rather than branching on a per-model "is this a
+#: thinking model" table that would need updating every time a new candidate
+#: is added. Only the PAGE judge sends this (GH-903 round 2): the table judge
+#: ladder and the cell-transcription adjudicator use cloud thinking models
+#: (`glm-5.3-flash:cloud`, `kimi-k2.6:cloud`) with measured accuracy behind
+#: their reasoning traces, and turning that off is an unmeasured change this
+#: ticket does not make -- see `table_rung_ollama.py` and the GH-903 log.
 _THINK = False
-
-#: GH-903: the availability probe used to be a `/api/tags` listing, which lied
-#: about a model Ollama Cloud had retired (410 Gone on generation, but the tag
-#: still listed). A real 1-token generation is the only check that observes
-#: what a judge call will actually see. Bounded to the same order as
-#: `socr.core.ollama_utils.check_ollama_model`'s subprocess timeout (10s): this
-#: is a probe, not the judge call itself (`timeout`, default 120s), and a
-#: candidate that cannot answer this fast must not block the ladder while the
-#: real judge call further down still has its own generous budget.
-PROBE_TIMEOUT_SEC = 10.0
 
 #: Minimal generation: `num_predict=1` bounds the token count so probing a
 #: model that turns out to be slow to answer costs one token, not a full
@@ -79,13 +86,20 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
     return resp.json().get("response", "")
 
 
-def _probe_failure_reason(exc: Exception) -> str:
+def _probe_failure_reason(exc: Exception, timeout: float) -> str:
     """A short, human-readable reason a judge candidate failed its probe.
 
-    Distinguishes a model Ollama Cloud retired (410, still listed in
-    ``/api/tags``) from a model that was simply never pulled (404) or a
-    daemon that is not reachable at all -- the run-level surface (GH-903)
-    needs to say WHY, not just that the ladder fell through.
+    Two different kinds of evidence, on purpose (GH-903 round 2):
+
+    - An HTTP error status (``httpx.HTTPStatusError``, e.g. 410 retired, 404
+      never pulled) is DEFINITIVE: the daemon answered and said no, so this
+      candidate is unavailable regardless of how long the probe waited.
+    - A timeout is NOT proof of unavailability -- it only proves the probe's
+      own budget was too short for a candidate that may simply be cold-
+      loading (measured ~46s for an unloaded ``qwen3.8:27b``). It is reported
+      distinctly (``"timed out after Ns"``) so a run that degrades to
+      heuristics can tell "this model is gone" apart from "this model needed
+      longer than ``timeout`` to warm up".
     """
     if isinstance(exc, httpx.HTTPStatusError):
         body_detail = ""
@@ -97,6 +111,8 @@ def _probe_failure_reason(exc: Exception) -> str:
             body_detail = exc.response.text
         status = exc.response.status_code
         return f"HTTP {status}" + (f": {body_detail}" if body_detail else "")
+    if isinstance(exc, httpx.TimeoutException):
+        return f"timed out after {timeout:.0f}s"
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -107,13 +123,11 @@ class OllamaVisionJudge:
         self,
         model: str = DEFAULT_MODEL,
         host: str = DEFAULT_HOST,
-        timeout: float = 120.0,
-        probe_timeout: float = PROBE_TIMEOUT_SEC,
+        timeout: float = DEFAULT_JUDGE_TIMEOUT_SEC,
     ) -> None:
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
-        self.probe_timeout = probe_timeout
         self._prompt = load_judge_prompt()
         #: Set by ``is_available()`` -- "" when it returned True, otherwise a
         #: short reason (GH-903) a caller can surface at run level (e.g. the
@@ -135,6 +149,15 @@ class OllamaVisionJudge:
         as an empty/unparseable body rather than as "unavailable" -- so this
         probe must send the same flag the real judge call does, or a thinking
         candidate could pass the probe and still fail every judge call.
+
+        GH-903 round 2: the probe uses ``self.timeout`` -- the SAME budget
+        the judge call itself gets -- not a shorter, separate one. A cold
+        model load (measured ~46s for an unloaded ``qwen3.8:27b``) is real
+        latency, not unavailability; a probe with its own tighter budget
+        mistook that load for a 404 and memoized ``None`` for the whole run.
+        A timeout is therefore reported distinctly from an HTTP error status
+        (see ``_probe_failure_reason``): the latter is definitive, the former
+        only proves this call needed longer than ``timeout``.
         """
         self.unavailable_reason = ""
         try:
@@ -147,12 +170,12 @@ class OllamaVisionJudge:
                     "think": _THINK,
                     "options": _PROBE_OPTIONS,
                 },
-                timeout=self.probe_timeout,
+                timeout=self.timeout,
             )
             resp.raise_for_status()
             return True
         except (httpx.HTTPError, OSError) as exc:
-            self.unavailable_reason = _probe_failure_reason(exc)
+            self.unavailable_reason = _probe_failure_reason(exc, self.timeout)
             return False
 
     def judge(self, image_path: Path, ocr_text: str) -> JudgeVerdict:

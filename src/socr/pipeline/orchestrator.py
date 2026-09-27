@@ -10164,7 +10164,13 @@ class UnifiedPipeline:
             # A memoized cloud identity that policy now forbids: re-resolve
             # instead of returning stale cloud provenance.
         resolved: str | None = None
-        last_reason = ""
+        # GH-903 round 2: every candidate's failure, not just the last one --
+        # a run where the FIRST (default) candidate merely timed out on a
+        # cold load looked identical, from the last-reason-only surface, to
+        # one where it was flat-out retired; an operator needs to see BOTH
+        # "qwen3.8:27b timed out" (probably just needs a warm-up) and
+        # "qwen3-vl:8b: HTTP 404" (never pulled) to diagnose which.
+        reasons: list[str] = []
         for model in self._JUDGE_MODEL_CANDIDATES:
             if not _permitted(model):
                 continue
@@ -10172,14 +10178,14 @@ class UnifiedPipeline:
                 candidate = OllamaVisionJudge(model=model)
                 if candidate.is_available():
                     resolved = model
-                    last_reason = ""
+                    reasons = []
                     break
-                last_reason = f"{model}: {candidate.unavailable_reason}"
+                reasons.append(f"{model}: {candidate.unavailable_reason}")
             except Exception as exc:
-                last_reason = f"{model}: {type(exc).__name__}: {exc}"
+                reasons.append(f"{model}: {type(exc).__name__}: {exc}")
                 continue
         self._judge_model_cache = resolved
-        self._judge_unavailable_reason = last_reason
+        self._judge_unavailable_reason = "; ".join(reasons)
         return resolved
 
     def _resolve_caption_engine_identity(self) -> str:

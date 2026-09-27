@@ -108,13 +108,15 @@ def _build_payload(model: str, prompt: str, image_b64: str) -> dict[str, Any]:
     """The exact `/api/chat` request body — kept separate from the network
     call so tests can assert on it without touching `httpx`.
 
-    GH-903: `think: false` sent unconditionally, same reasoning as
-    `socr.judge.ollama_judge._post_generate` — a thinking-model rung/adjudicator
-    candidate would otherwise put its answer in `message.thinking` and leave
-    `message.content` empty, which reads as an unparseable verdict rather than
-    as "unavailable". Verified harmless on the non-thinking candidates this
-    module already uses (`glm-5.3-flash:cloud`, `kimi-k2.6:cloud`) — normal
-    HTTP 200 output, not just no error.
+    GH-903 round 2 (owner ruling): deliberately does NOT send `think: false`.
+    This module's models (`glm-5.3-flash:cloud` rung 1,
+    `TABLE_JUDGE_ADJUDICATOR_MODEL_DEFAULT` = `kimi-k2.6:cloud`) are cloud
+    thinking models whose measured accuracy (the GH-356 bake-off, the P1
+    adjudicator design) was established WITH reasoning on. Turning it off
+    here would be an unmeasured accuracy change outside this ticket's scope
+    -- see `docs/log/2026-09-26_903-judge-model-retired.md`. `think: false`
+    is scoped to the PAGE judge only (`socr.judge.ollama_judge`), whose
+    retired/replacement candidates this ticket is actually about.
     """
     return {
         "model": model,
@@ -127,7 +129,6 @@ def _build_payload(model: str, prompt: str, image_b64: str) -> dict[str, Any]:
         ],
         "format": "json",
         "stream": False,
-        "think": False,
     }
 
 
