@@ -32,14 +32,34 @@ Hermetic by construction: every HTTP call is stubbed.
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import patch
 
 import httpx
+import pytest
 
+import socr.judge.ollama_judge as ollama_judge_module
 from socr.core.config import EngineType, PipelineConfig
+from socr.core.killable import KillableTimeoutError
 from socr.judge.ollama_judge import DEFAULT_JUDGE_TIMEOUT_SEC, OllamaVisionJudge, _post_generate
 from socr.judge.table_rung_ollama import _build_payload
 from socr.pipeline.orchestrator import UnifiedPipeline
+
+
+def _run_killable_inprocess(spec, timeout):
+    """Same in-process stand-in as ``test_judge_wiring_gh133.py`` -- see that
+    file's copy for the full rationale (GH-903 round 3, P2-b)."""
+    module_name, _, qualname = spec.func.partition(":")
+    fn = getattr(importlib.import_module(module_name), qualname)
+    try:
+        return fn(*spec.args, **(spec.kwargs or {}))
+    except httpx.TimeoutException as exc:
+        raise KillableTimeoutError(spec.func, timeout, killed=False) from exc
+
+
+@pytest.fixture(autouse=True)
+def _probe_run_killable_is_synchronous(monkeypatch):
+    monkeypatch.setattr(ollama_judge_module, "run_killable", _run_killable_inprocess)
 
 
 def _pipeline(**overrides):
@@ -325,7 +345,92 @@ def test_tags_listing_does_not_override_a_failing_generation(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 5. strict_local still forbids cloud candidates
+# 5. The intended default is pinned, not just "whatever the ladder resolves"
+# ---------------------------------------------------------------------------
+
+
+def test_judge_model_default_is_qwen3_8_27b():
+    """cubic P2-c: pin the intended replacement by name, not just its
+    position -- a refactor that silently changed the constant's VALUE while
+    keeping ``_JUDGE_MODEL_CANDIDATES[0]`` self-consistent would pass every
+    other test in this file."""
+    from socr.pipeline.orchestrator import UnifiedPipeline as _UP
+
+    assert _UP.JUDGE_MODEL_DEFAULT == "qwen3.8:27b"
+    assert _UP._JUDGE_MODEL_CANDIDATES[0] == _UP.JUDGE_MODEL_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# 6. An explicit --judge-model override is probed too, and degrades on failure
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_override_that_410s_degrades_to_heuristic_with_reason(monkeypatch):
+    """cubic P2-a: round 1 removed ``_build_page_judge``'s own re-probe of an
+    already-resolved model, but the explicit-override branch never probed AT
+    ALL -- so a retired or unpulled ``--judge-model`` used to be treated as
+    an active judge and fail on every page instead of degrading with a
+    surfaced reason."""
+
+    def _post(url, json=None, **kwargs):
+        request = httpx.Request("POST", "http://x/api/generate")
+        response = httpx.Response(410, request=request, json={"error": "my-judge was retired"})
+        raise httpx.HTTPStatusError("410 error", request=request, response=response)
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+    pipe = _pipeline(judge_model="my-judge:v2")
+    chosen = pipe._resolve_judge_model()
+
+    assert chosen is None
+    assert "my-judge:v2" in pipe._judge_unavailable_reason
+    assert "410" in pipe._judge_unavailable_reason
+
+
+def test_explicit_override_that_answers_is_selected(monkeypatch):
+    def _post(url, json=None, **kwargs):
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": ""}
+
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+    pipe = _pipeline(judge_model="my-judge:v2")
+    assert pipe._resolve_judge_model() == "my-judge:v2"
+    assert pipe._judge_unavailable_reason == ""
+
+
+def test_explicit_override_probe_is_memoized(monkeypatch):
+    calls = {"n": 0}
+
+    def _post(url, json=None, **kwargs):
+        calls["n"] += 1
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": ""}
+
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+    pipe = _pipeline(judge_model="my-judge:v2")
+    for _ in range(5):
+        assert pipe._resolve_judge_model() == "my-judge:v2"
+
+    assert calls["n"] == 1, f"expected the explicit override probed once, got {calls['n']}"
+
+
+# ---------------------------------------------------------------------------
+# 7. strict_local still forbids cloud candidates
 # ---------------------------------------------------------------------------
 
 

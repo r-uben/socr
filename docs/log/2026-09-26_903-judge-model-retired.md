@@ -129,9 +129,131 @@ copies deleted after):
 - Round 1's `_build_page_judge` no longer re-probes `is_available()` a
   second time after `_resolve_judge_model` already verified the same model
   (removed as redundant, since a probe is now a real generation call, not a
-  cheap GET). Unchanged in round 2.
+  cheap GET). Unchanged in round 2 and round 3.
 - All #901-era real-page measurements taken since 2026-09-25 were made
   against the broken judge and still need to be redone — out of scope here.
 - If the owner later wants `think: false` (or off) measured for the table
   judge / cell adjudicator, that is a new ticket with its own accuracy
   comparison — not folded into this one per the round-2 ruling.
+
+## Round 3 (this commit, on top of `54ef144`): cubic findings on PR #906
+
+PR #906 (branch `fix/903-judge-model-retired`, pushed at `54ef144`, CI green)
+got 5 cubic findings; the coordinator verified all 5 as valid.
+
+**P2-a (real regression from round 1).** An explicit `--judge-model` bypasses
+the candidate LADDER in `_resolve_judge_model` (an operator named the exact
+model; the ladder must never substitute a different one on failure) but,
+before this round, it never probed AT ALL -- it returned the string verbatim.
+Round 1 removed `_build_page_judge`'s own second `is_available()` call as a
+redundant re-probe of an already-verified ladder candidate; that reasoning
+never covered the explicit-override branch, which had NO probe to be
+redundant with. The net effect: an unpulled or retired explicit override
+started being treated as an active judge and failing on every page, instead
+of degrading to heuristics with a reason. Fix: the explicit-override branch
+now probes through the same `OllamaVisionJudge(model=...).is_available()`,
+memoized on the same `_judge_model_cache` (one probe per run, not one per
+page via `_run_fingerprint`). The vLLM pair (#873) is unaffected -- it
+already had, and keeps, its own separate probe/memoization.
+
+**P2-b.** `is_available()`'s `httpx` `timeout=` is a per-READ inactivity
+timeout, not a total wall-clock deadline -- the same gap #172 closed for
+`judge()` itself. A peer that trickles a byte before every read interval
+never trips it, so the probe (and everything that consults
+`_resolve_judge_model`, i.e. the whole per-page loop) could wedge
+indefinitely. Fix: `is_available()` now runs its probe body
+(`_probe_generate`, a new top-level, picklable function) through
+`run_killable`/`CallSpec` -- the exact same killable-process boundary
+`judge()` uses -- with the same budget constant (`self.timeout`, unchanged
+from round 2). `_probe_generate` classifies HTTP-status/connection failures
+itself and returns a plain `{"available": bool, "reason": str}` dict (
+`run_killable` collapses any child exception crossing the pipe into a bare
+`RuntimeError` string, which would lose the response body
+`_probe_failure_reason` needs -- classifying inside the child, before the
+pipe, keeps it); it re-raises a genuine `httpx.TimeoutException`, which
+`run_killable` reclassifies as `KillableTimeoutError` (a `TimeoutError`
+subclass) exactly as it does for `judge()`, and `is_available()` reports that
+as `"timed out after Ns"`, inconclusive, per round 2's classification.
+
+**P2-c.** Added `test_judge_model_default_is_qwen3_8_27b`, pinning
+`UnifiedPipeline.JUDGE_MODEL_DEFAULT == "qwen3.8:27b"` and
+`_JUDGE_MODEL_CANDIDATES[0] == JUDGE_MODEL_DEFAULT` by NAME, not just
+position.
+
+**P3-a/P3-b.** The `_judge_unavailable_reason` class-level comment
+(orchestrator.py ~786) and the `_resolve_judge_model` docstring (~10096)
+both still described round-1/round-2 semantics (last-candidate-only reason;
+`qwen3.5:cloud` as the first candidate). Both updated to describe the
+current (round 2/3) behaviour, with the superseded claims kept as explicitly
+labelled history (GH-154 round 5 predates this ticket).
+
+### Files (round 3)
+
+- `src/socr/judge/ollama_judge.py` -- new top-level `_probe_generate`
+  (picklable probe body, classifies HTTP/connection failures itself,
+  re-raises a real timeout); `is_available()` rewritten to run it through
+  `run_killable`; `_probe_failure_reason` no longer takes a `timeout` arg or
+  classifies `httpx.TimeoutException` (that case never reaches it now --
+  `run_killable`'s own `TimeoutError` is caught first, in `is_available()`).
+- `src/socr/pipeline/orchestrator.py` -- explicit-override branch in
+  `_resolve_judge_model` now probes and memoizes; stale comments (P3-a,
+  P3-b) corrected.
+- `tests/test_judge_wiring_gh133.py` -- added an autouse
+  `_probe_run_killable_is_synchronous` fixture (fakes `run_killable` to call
+  the probe body in-process, reclassifying a real `httpx.TimeoutException` as
+  `KillableTimeoutError` the same way the real boundary would) so every
+  existing `httpx.post`-stubbing test in this file keeps working un-changed;
+  rewrote `test_explicit_judge_model_is_never_discarded` (now
+  `test_explicit_judge_model_bypasses_the_ladder_not_the_probe`) for the new
+  P2-a behaviour.
+- `tests/test_gh903_judge_model_retired.py` -- same autouse fixture; added
+  P2-a tests (410 degrades with reason, healthy override selected, probed
+  once) and the P2-c default-pinning test.
+- `tests/test_gh172_judge_killable.py` -- new
+  `test_probe_is_bounded_and_typed_against_a_trickling_peer`, reusing the
+  existing `trickle_server` fixture, proving the REAL `run_killable`
+  boundary (no in-process fake) bounds `is_available()` the same way it
+  bounds `judge()`; corrected a stale comment that `is_available()` still
+  used `httpx.get`.
+
+### Verification (round 3)
+
+- Focused run: `~/venvs/socr/bin/pytest tests/test_gh903_judge_model_retired.py
+  tests/test_judge_wiring_gh133.py tests/test_gh172_judge_killable.py -q` --
+  36 passed (includes the real trickling-server test, ~5s total).
+- Broader judge-adjacent run: `tests/test_gh154_remote_call_entry_points.py
+  tests/test_gh873_judge_vllm_backend.py tests/test_table_rung_ollama.py
+  tests/test_gh172_killable_boundary.py tests/test_gh849_peer_timeout_no_cascade.py`
+  -- 121 passed.
+- Full suite: `~/venvs/socr/bin/pytest tests/ -q` -- **5828 passed, 4
+  xfailed**, 0 failed (1899s; slower than round 2's 358s -- no root cause
+  identified in the code touched here, all `_resolve_judge_model`-adjacent
+  test files were audited and confirmed to patch either the pipeline method
+  directly or the whole `OllamaVisionJudge`/`is_available`, so none of them
+  newly cross the `run_killable` boundary for real; the machine is shared
+  with other concurrent agent sessions per this repo's own operating note,
+  which is the more likely explanation, but this was not proven).
+- `uvx ruff@0.16.0 format --check .` -- clean.
+
+### Mutation check (per CLAUDE.md), round 3
+
+Copies at `/tmp/socr-mut-903-r3a`/`r3b` (`src` + `tests` + `pyproject.toml`,
+`socr.__file__` canary confirmed inside each copy; both deleted after):
+
+- **(1) remove the explicit-override probe** (revert to the round-1/2
+  unconditional `return self.config.judge_model`): killed -- 3 tests failed
+  (`test_explicit_override_that_410s_degrades_to_heuristic_with_reason`,
+  `test_explicit_override_probe_is_memoized`,
+  `test_explicit_judge_model_bypasses_the_ladder_not_the_probe`), 30 passed.
+- **(2) call the probe body directly, without the `run_killable` deadline
+  wrapper**: killed -- `test_probe_is_bounded_and_typed_against_a_trickling_peer`
+  hung indefinitely (confirmed still running after 12s wall-clock against a
+  peer that answers within ~5s when the fix is in place; killed by hand
+  rather than waited out), while every other test in the same file (2
+  tests) still passed -- proving the kill is specific to the deadline
+  boundary, not a broken fixture.
+- Round 1/round 2 mutants ((A) drop page-judge `think:false`, (B) revert
+  probe to tags-only, (C) collapse per-candidate reasons to last-only, (D)
+  reintroduce `think:false` on the table judge) were spot-re-checked (A)
+  against the round-3 tree and still kill correctly; not exhaustively
+  re-run, since none of the round-3 changes touch that code.

@@ -17,12 +17,14 @@ stubbed, so these pin the same behaviour in CI as on a workstation.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+import socr.judge.ollama_judge as ollama_judge_module
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import provider_ladder
 from socr.core.result import PageOutput, PageStatus
@@ -35,6 +37,38 @@ from socr.pipeline.orchestrator import JUDGE_IDENTITY_HEURISTIC, UnifiedPipeline
 # ---------------------------------------------------------------------------
 
 INSTALLED = ["qwen3-vl:30b-a3b-instruct", "llama3:latest"]
+
+
+def _run_killable_inprocess(spec, timeout):
+    """Bypass the real ``multiprocessing`` spawn: call the probe body
+    directly, in THIS process (GH-903 round 3, P2-b made ``is_available()``
+    cross ``run_killable``'s real subprocess boundary). A real spawned child
+    re-imports everything fresh, so an ``httpx.post`` monkeypatch made in the
+    test process would never reach it -- every hermetic test in this file
+    fakes ``run_killable`` this way instead. The real boundary (a genuine
+    wall-clock deadline against a trickling peer) is exercised separately, in
+    ``tests/test_gh172_judge_killable.py``, against a real server.
+
+    Mirrors just enough of the real ``run_killable``/``_child_main``
+    reclassification (``socr/core/killable.py``) to be a faithful stand-in:
+    a timeout raised by the probe body is reclassified as
+    ``KillableTimeoutError`` (a ``TimeoutError`` subclass), the same as the
+    real boundary would, so ``is_available()``'s ``except TimeoutError``
+    still fires.
+    """
+    from socr.core.killable import KillableTimeoutError
+
+    module_name, _, qualname = spec.func.partition(":")
+    fn = getattr(importlib.import_module(module_name), qualname)
+    try:
+        return fn(*spec.args, **(spec.kwargs or {}))
+    except httpx.TimeoutException as exc:
+        raise KillableTimeoutError(spec.func, timeout, killed=False) from exc
+
+
+@pytest.fixture(autouse=True)
+def _probe_run_killable_is_synchronous(monkeypatch):
+    monkeypatch.setattr(ollama_judge_module, "run_killable", _run_killable_inprocess)
 
 
 def _with_implicit_tag(name: str) -> str:
@@ -270,8 +304,11 @@ def test_resolution_is_memoized(monkeypatch):
     assert calls["n"] <= 2, f"expected memoized resolution, got {calls['n']} probes"
 
 
-def test_explicit_judge_model_is_never_discarded(monkeypatch):
-    """An operator override wins without probing — a brief outage must not drop it."""
+def test_explicit_judge_model_bypasses_the_ladder_not_the_probe(monkeypatch):
+    """GH-903 round 3 (P2-a, cubic): the ladder never substitutes a different
+    model for an explicit override, but a genuinely unreachable daemon still
+    means "no judge" (heuristics), surfaced with a reason -- an override that
+    silently ran unavailable used to fail on every page instead."""
 
     def _boom(*a, **k):
         raise httpx.ConnectError("daemon down")
@@ -279,7 +316,8 @@ def test_explicit_judge_model_is_never_discarded(monkeypatch):
     monkeypatch.setattr(httpx, "post", _boom)
     pipe = _pipeline(judge_model="my-judge:v2")
 
-    assert pipe._resolve_judge_model() == "my-judge:v2"
+    assert pipe._resolve_judge_model() is None
+    assert "my-judge:v2" in pipe._judge_unavailable_reason
 
 
 # ---------------------------------------------------------------------------

@@ -86,20 +86,17 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
     return resp.json().get("response", "")
 
 
-def _probe_failure_reason(exc: Exception, timeout: float) -> str:
-    """A short, human-readable reason a judge candidate failed its probe.
+def _probe_failure_reason(exc: Exception) -> str:
+    """A short, human-readable reason a judge candidate's probe answered "no".
 
-    Two different kinds of evidence, on purpose (GH-903 round 2):
-
-    - An HTTP error status (``httpx.HTTPStatusError``, e.g. 410 retired, 404
-      never pulled) is DEFINITIVE: the daemon answered and said no, so this
-      candidate is unavailable regardless of how long the probe waited.
-    - A timeout is NOT proof of unavailability -- it only proves the probe's
-      own budget was too short for a candidate that may simply be cold-
-      loading (measured ~46s for an unloaded ``qwen3.8:27b``). It is reported
-      distinctly (``"timed out after Ns"``) so a run that degrades to
-      heuristics can tell "this model is gone" apart from "this model needed
-      longer than ``timeout`` to warm up".
+    Only reached for a DEFINITIVE answer -- the daemon actually responded
+    (an HTTP error status, e.g. 410 retired / 404 never pulled) or refused
+    the connection outright. A timeout is never classified here: it is not
+    proof of unavailability (the probe's budget may simply have been too
+    short for a candidate that is cold-loading, measured ~46s for an unloaded
+    ``qwen3.8:27b``), and ``is_available`` reports it distinctly, from the
+    ``run_killable`` boundary's own ``TimeoutError`` (see below), before this
+    function is ever called.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         body_detail = ""
@@ -111,9 +108,51 @@ def _probe_failure_reason(exc: Exception, timeout: float) -> str:
             body_detail = exc.response.text
         status = exc.response.status_code
         return f"HTTP {status}" + (f": {body_detail}" if body_detail else "")
-    if isinstance(exc, httpx.TimeoutException):
-        return f"timed out after {timeout:.0f}s"
     return f"{type(exc).__name__}: {exc}"
+
+
+def _probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
+    """Top-level, picklable probe body run through ``run_killable`` (GH-903
+    round 3, P2-b) -- never called directly by ``is_available``.
+
+    ``httpx``'s ``timeout=`` is a per-READ inactivity timeout, not a total
+    wall-clock deadline (the same gap #172 closed for ``judge()`` itself): a
+    peer that keeps the connection open and trickles a byte before every read
+    interval never trips it. ``run_killable`` is what actually bounds this
+    call now, by killing the child's process group past ``timeout`` -- so
+    THIS function must not classify a timeout itself; it returns a plain,
+    picklable outcome for anything it CAN classify (an HTTP status, a refused
+    connection), and re-raises a timeout so ``run_killable``'s own
+    reclassification (``KillableTimeoutError``, a ``TimeoutError`` subclass)
+    is what the parent sees -- exactly the same path ``judge()`` already
+    relies on for ``is_page_judge_timeout``.
+
+    A caught exception is returned, not raised, for every non-timeout case:
+    ``run_killable`` collapses ANY child exception that crosses the pipe into
+    a generic ``RuntimeError`` carrying only the original type name and
+    message (it cannot safely pickle arbitrary exception instances, e.g. an
+    ``httpx.HTTPStatusError`` holding a live ``Response``), which would lose
+    the response body ``_probe_failure_reason`` needs. Classifying HERE, then
+    crossing the pipe as a plain dict, keeps that detail.
+    """
+    try:
+        resp = httpx.post(
+            f"{host}/api/generate",
+            json={
+                "model": model,
+                "prompt": _PROBE_PROMPT,
+                "stream": False,
+                "think": _THINK,
+                "options": _PROBE_OPTIONS,
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return {"available": True, "reason": ""}
+    except httpx.TimeoutException:
+        raise
+    except (httpx.HTTPError, OSError) as exc:
+        return {"available": False, "reason": _probe_failure_reason(exc)}
 
 
 class OllamaVisionJudge:
@@ -150,33 +189,38 @@ class OllamaVisionJudge:
         probe must send the same flag the real judge call does, or a thinking
         candidate could pass the probe and still fail every judge call.
 
-        GH-903 round 2: the probe uses ``self.timeout`` -- the SAME budget
-        the judge call itself gets -- not a shorter, separate one. A cold
+        GH-903 round 2: the probe's budget is ``self.timeout`` -- the SAME
+        one the judge call itself gets -- not a shorter, separate one. A cold
         model load (measured ~46s for an unloaded ``qwen3.8:27b``) is real
         latency, not unavailability; a probe with its own tighter budget
         mistook that load for a 404 and memoized ``None`` for the whole run.
-        A timeout is therefore reported distinctly from an HTTP error status
-        (see ``_probe_failure_reason``): the latter is definitive, the former
-        only proves this call needed longer than ``timeout``.
+
+        GH-903 round 3 (P2-b): that budget is enforced by ``run_killable``,
+        the SAME killable-process boundary ``judge()`` uses (GH-172) -- not
+        by ``httpx``'s own ``timeout=`` alone, which only bounds inactivity
+        between reads. A peer that trickles a byte before every read interval
+        never trips that, and would otherwise wedge resolution (and the whole
+        per-page loop that consults it) indefinitely. A timeout here -- from
+        ``run_killable``'s own deadline, or the child's own httpx timeout,
+        which ``run_killable`` reclassifies identically -- is reported
+        distinctly from an HTTP error status (``_probe_failure_reason``): the
+        latter is definitive, the former only proves this call needed longer
+        than ``timeout``.
         """
         self.unavailable_reason = ""
+        spec = CallSpec(
+            func="socr.judge.ollama_judge:_probe_generate",
+            args=(self.host, self.model, self.timeout),
+        )
         try:
-            resp = httpx.post(
-                f"{self.host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": _PROBE_PROMPT,
-                    "stream": False,
-                    "think": _THINK,
-                    "options": _PROBE_OPTIONS,
-                },
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            return True
-        except (httpx.HTTPError, OSError) as exc:
-            self.unavailable_reason = _probe_failure_reason(exc, self.timeout)
+            outcome = run_killable(spec, timeout=self.timeout)
+        except TimeoutError:
+            self.unavailable_reason = f"timed out after {self.timeout:.0f}s"
             return False
+        if outcome["available"]:
+            return True
+        self.unavailable_reason = str(outcome["reason"])
+        return False
 
     def judge(self, image_path: Path, ocr_text: str) -> JudgeVerdict:
         """Judge one page. The model call runs behind a killable process boundary.

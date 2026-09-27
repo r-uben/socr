@@ -783,9 +783,11 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
-    # GH-903: the reason the LAST candidate tried in ``_resolve_judge_model``
-    # failed its probe (e.g. "HTTP 410: qwen3.5:397b was retired ..."), or ""
-    # when resolution succeeded or has not run. Consulted only by
+    # GH-903: every candidate ``_resolve_judge_model`` tried and rejected,
+    # joined into one string (round 2: not just the last one -- an operator
+    # needs "qwen3.8:27b timed out after 120s; minicpm-v:8b: HTTP 404; ..."
+    # to tell a cold-loading candidate apart from one that was never pulled),
+    # or "" when resolution succeeded or has not run. Consulted only by
     # ``_build_page_judge`` to surface WHY the ladder produced no judge --
     # never by resolution logic itself, so it carries no memoization
     # obligation of its own; ``_judge_model_cache`` alone still bounds probing
@@ -10097,18 +10099,25 @@ class UnifiedPipeline:
         Memoized for the lifetime of the pipeline (#133): every call probes
         Ollama once per candidate, and ``_run_fingerprint`` consults this on
         every page sidecar flush. An explicit ``--judge-model`` short-circuits
-        the probing entirely and is returned verbatim, so an operator override
-        is never silently discarded because the daemon was briefly unreachable.
+        the candidate LADDER (never tries a different model the operator did
+        not name) but NOT the availability probe (GH-903 round 3, P2-a): an
+        unpulled or retired override degrades to the heuristic judge with its
+        own reason recorded, the same as any ladder candidate, rather than
+        being treated as an active judge that then fails on every page.
 
-        GH-154 round 5: that short-circuit, the memoized cache, and the
-        candidate ladder's own default order (``_JUDGE_MODEL_CANDIDATES[0]``
-        is ``qwen3.5:cloud``) were all three cloud-first with no policy check
-        -- a local-only OCR rung under an EXPLICIT ``--max-cost-per-page 0``
-        still shipped its page image to the cloud for judging. A forbidden
-        cloud identity, whether explicit, cached, or the next candidate in
-        line, is treated as absent here; ``_build_page_judge`` already
-        degrades to the heuristic judge when this returns None, so no
-        separate change is needed there.
+        GH-154 round 5: the explicit-override short-circuit, the memoized
+        cache, and the candidate ladder's own default order were all three
+        cloud-first with no policy check at the time -- ``_JUDGE_MODEL_CANDIDATES[0]``
+        was ``qwen3.5:cloud`` -- so a local-only OCR rung under an EXPLICIT
+        ``--max-cost-per-page 0`` still shipped its page image to the cloud
+        for judging. (GH-903: that default candidate was Ollama Cloud's
+        retirement of ``qwen3.5:cloud`` on 2026-09-25; ``_JUDGE_MODEL_CANDIDATES[0]``
+        is now ``JUDGE_MODEL_DEFAULT`` = ``qwen3.8:27b``, local, with no cloud
+        entry left in the default ladder at all.) A forbidden cloud identity,
+        whether explicit, cached, or the next candidate in line, is treated
+        as absent here; ``_build_page_judge`` already degrades to the
+        heuristic judge when this returns None, so no separate change is
+        needed there.
         """
         from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.judge.ollama_judge import OllamaVisionJudge
@@ -10152,7 +10161,33 @@ class UnifiedPipeline:
 
         if self.config.judge_model:
             if _permitted(self.config.judge_model):
-                return self.config.judge_model
+                # GH-903 round 3 (P2-a): an explicit override still bypasses
+                # the candidate LADDER -- an operator named the exact model,
+                # so trying a different one on failure would discard their
+                # setting -- but NOT the availability probe. Round 1 removed
+                # ``_build_page_judge``'s own second ``is_available()`` call
+                # as a redundant re-probe of an already-verified ladder
+                # candidate; that reasoning never covered this branch, which
+                # never probed at all, so an unpulled or retired override
+                # started being treated as an active judge and failing on
+                # every page instead of degrading to heuristics with a
+                # reason. Memoized on the SAME ``_judge_model_cache`` as the
+                # ladder, so the per-page ``_run_fingerprint`` call still
+                # costs one probe per run, not one per page.
+                if self._judge_model_cache is not False:
+                    cached = self._judge_model_cache
+                    if cached is None or _permitted(cached):
+                        return cached  # type: ignore[return-value]
+                candidate = OllamaVisionJudge(model=self.config.judge_model)
+                if candidate.is_available():
+                    self._judge_model_cache = self.config.judge_model
+                    self._judge_unavailable_reason = ""
+                else:
+                    self._judge_model_cache = None
+                    self._judge_unavailable_reason = (
+                        f"{self.config.judge_model}: {candidate.unavailable_reason}"
+                    )
+                return self._judge_model_cache
             # Forbidden explicit override: fall through to the same
             # local-first auto-resolution an unset judge_model gets, rather
             # than silently honoring an operator setting that violates the

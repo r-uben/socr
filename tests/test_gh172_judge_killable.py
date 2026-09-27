@@ -127,12 +127,10 @@ def page_image(tmp_path) -> Path:
 
 
 def test_judge_call_is_bounded_and_typed_in_process(trickle_server, page_image) -> None:
-    # `is_available()` is not exercised here: it calls `httpx.get`, which the
-    # suite's autouse `_table_judge_rungs_are_absent` fixture patches globally
-    # (module-attribute patching makes it global, not per-module) to keep the
-    # rest of the suite hermetic against a real ollama daemon. `judge()` itself
-    # only ever uses `httpx.post`, which that fixture leaves untouched -- the
-    # call under test here.
+    # `is_available()` is exercised separately, below
+    # (`test_probe_is_bounded_and_typed_against_a_trickling_peer`) -- GH-903
+    # round 3 (P2-b) moved it onto this same killable boundary, so it now
+    # POSTs too and needs the identical real-server proof `judge()` gets here.
     judge = OllamaVisionJudge(
         model="qwen2-vl:7b", host=trickle_server.url, timeout=_JUDGE_TIMEOUT_SEC
     )
@@ -187,4 +185,29 @@ def test_judge_call_exits_in_a_child_process(trickle_server, page_image) -> None
     assert elapsed < _OUTER_BOUND_SEC, (
         f"child process lived {elapsed:.2f}s against a trickling peer; "
         f"expected it to exit within ~{_OUTER_BOUND_SEC:.1f}s"
+    )
+
+
+def test_probe_is_bounded_and_typed_against_a_trickling_peer(trickle_server) -> None:
+    """GH-903 round 3 (P2-b, cubic): ``is_available()``'s probe used to rely
+    on ``httpx``'s own ``timeout=`` alone -- a per-READ inactivity timeout,
+    not a total wall-clock deadline, so a peer that trickles a byte before
+    every read interval (this server, on ``/api/generate``) never tripped it
+    and could wedge resolution indefinitely. It now crosses the same
+    ``run_killable`` boundary ``judge()`` does, so it must be bounded exactly
+    the same way -- and report the timeout as inconclusive, not a fabricated
+    HTTP status."""
+    judge = OllamaVisionJudge(
+        model="qwen2-vl:7b", host=trickle_server.url, timeout=_JUDGE_TIMEOUT_SEC
+    )
+
+    start = time.monotonic()
+    available = judge.is_available()
+    elapsed = time.monotonic() - start
+
+    assert available is False
+    assert "timed out" in judge.unavailable_reason
+    assert elapsed < _OUTER_BOUND_SEC, (
+        f"is_available() took {elapsed:.2f}s against a trickling peer; expected it "
+        f"bounded by ~{_JUDGE_TIMEOUT_SEC}s + kill grace"
     )
