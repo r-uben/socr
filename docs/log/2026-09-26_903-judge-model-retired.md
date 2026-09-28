@@ -429,3 +429,11 @@ Copies at `/tmp/socr-mut-903-r4`/`r4b` (`src` + `tests` + `pyproject.toml`,
   (both with and without a reachable daemon) is the actual completeness
   check; it was green both ways at the time of writing.
 
+
+## Round 5 (2026-09-28): malformed host (cubic P2 on bfd8fc8)
+
+`_host_reachable` called `urlsplit(host)` / `.port` outside the `try`. A malformed `OLLAMA_HOST`, which `resolve_ollama_host` passes through unchanged (e.g. a non-numeric port or an unclosed IPv6 bracket), raised `ValueError` and aborted the run instead of degrading the judge. The parse now sits inside `try/except ValueError` and returns `False` ("unreachable").
+
+Test: `test_malformed_host_degrades_instead_of_raising`, parametrised over both malformed shapes. It calls the real pre-check captured before the file's autouse stub. Mutation: moving the parse back outside the `try` makes both cases fail with `ValueError` (copy in /tmp, `socr.__file__` canary inside the copy, deleted after).
+
+Round 4's CI: the test job took 3m33s, against 3m22s before round 3 and 9m21s on round 3, so the unreachable-host fast path removed the slowdown.

@@ -155,12 +155,20 @@ def _host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> bo
     both fast. Any failure to connect (refused, DNS failure, this timeout)
     means "no daemon here": that is the one case ``is_available`` may treat
     as definitive without ever calling ``_probe_generate``.
+
+    A host string that does not parse (a malformed ``OLLAMA_HOST``, e.g. a
+    non-numeric port -- ``resolve_ollama_host`` returns such values
+    unchanged) is also "no daemon here": ``urlsplit`` / ``.port`` raise
+    ``ValueError`` on it, and that must degrade the judge, not abort the run.
     """
-    parts = urlsplit(host)
-    hostname = parts.hostname
+    try:
+        parts = urlsplit(host)
+        hostname = parts.hostname
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
     if not hostname:
         return False
-    port = parts.port or (443 if parts.scheme == "https" else 80)
     try:
         with socket.create_connection((hostname, port), timeout=timeout):
             return True

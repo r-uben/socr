@@ -45,6 +45,9 @@ from socr.judge.ollama_judge import DEFAULT_JUDGE_TIMEOUT_SEC, OllamaVisionJudge
 from socr.judge.table_rung_ollama import _build_payload
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+# The real pre-check, captured before the autouse fixture below stubs it out.
+_REAL_HOST_REACHABLE = ollama_judge_module._host_reachable
+
 
 def _run_killable_inprocess(spec, timeout):
     """Same in-process stand-in as ``test_judge_wiring_gh133.py`` -- see that
@@ -518,3 +521,12 @@ def test_strict_local_permits_the_local_default(monkeypatch):
     _stub_generate_with_status(monkeypatch, {_UP.JUDGE_MODEL_DEFAULT: 200})
     pipe = _pipeline(strict_local=True)
     assert pipe._resolve_judge_model() == _UP.JUDGE_MODEL_DEFAULT
+
+
+@pytest.mark.parametrize("host", ["http://localhost:notaport", "http://[::1"])
+def test_malformed_host_degrades_instead_of_raising(host):
+    """GH-903 round 5 (cubic P2): ``urlsplit`` / ``.port`` raise ``ValueError``
+    on a malformed host (``resolve_ollama_host`` passes such values through
+    unchanged). The pre-check must report "unreachable" so the judge degrades,
+    not propagate the exception and abort the run."""
+    assert _REAL_HOST_REACHABLE(host) is False
