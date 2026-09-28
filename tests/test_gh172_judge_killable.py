@@ -127,12 +127,10 @@ def page_image(tmp_path) -> Path:
 
 
 def test_judge_call_is_bounded_and_typed_in_process(trickle_server, page_image) -> None:
-    # `is_available()` is not exercised here: it calls `httpx.get`, which the
-    # suite's autouse `_table_judge_rungs_are_absent` fixture patches globally
-    # (module-attribute patching makes it global, not per-module) to keep the
-    # rest of the suite hermetic against a real ollama daemon. `judge()` itself
-    # only ever uses `httpx.post`, which that fixture leaves untouched -- the
-    # call under test here.
+    # `is_available()` is exercised separately, below
+    # (`test_probe_is_bounded_and_typed_against_a_trickling_peer`) -- GH-903
+    # round 3 (P2-b) moved it onto this same killable boundary, so it now
+    # POSTs too and needs the identical real-server proof `judge()` gets here.
     judge = OllamaVisionJudge(
         model="qwen2-vl:7b", host=trickle_server.url, timeout=_JUDGE_TIMEOUT_SEC
     )
@@ -170,6 +168,84 @@ def test_judge_call_exits_in_a_child_process(trickle_server, page_image) -> None
         except TimeoutError:
             raise SystemExit(0)
         raise SystemExit(3)  # did not time out — unexpected, fail loudly
+        """
+    )
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", child_src],
+        env=child_env,
+        capture_output=True,
+        timeout=_OUTER_BOUND_SEC + 5.0,  # outer safety net; the assertion below is the real bound
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0, (
+        f"child exited {result.returncode}, stderr={result.stderr.decode(errors='replace')[-2000:]}"
+    )
+    assert elapsed < _OUTER_BOUND_SEC, (
+        f"child process lived {elapsed:.2f}s against a trickling peer; "
+        f"expected it to exit within ~{_OUTER_BOUND_SEC:.1f}s"
+    )
+
+
+def test_probe_is_bounded_and_typed_against_a_trickling_peer(trickle_server) -> None:
+    """GH-903 round 3 (P2-b, cubic): ``is_available()``'s probe used to rely
+    on ``httpx``'s own ``timeout=`` alone -- a per-READ inactivity timeout,
+    not a total wall-clock deadline, so a peer that trickles a byte before
+    every read interval (this server, on ``/api/generate``) never tripped it
+    and could wedge resolution indefinitely. It now crosses the same
+    ``run_killable`` boundary ``judge()`` does, so it must be bounded exactly
+    the same way -- and report the timeout as inconclusive, not a fabricated
+    HTTP status.
+
+    GH-903 round 4 (cubic P2): this is the FAST, in-process evidence, exactly
+    like ``test_judge_call_is_bounded_and_typed_in_process`` above -- it
+    relies on ``run_killable``'s OWN deadline actually firing. A regression
+    that made the probe bypass that boundary would make THIS test hang
+    rather than fail, which is worse than a red test (a hung worker wedges
+    the whole suite/CI job with no signal). The paired child-process test
+    immediately below is the one with an OUTER bound that survives that
+    exact regression -- mirroring ``test_judge_call_exits_in_a_child_process``
+    for ``judge()`` itself.
+    """
+    judge = OllamaVisionJudge(
+        model="qwen2-vl:7b", host=trickle_server.url, timeout=_JUDGE_TIMEOUT_SEC
+    )
+
+    start = time.monotonic()
+    available = judge.is_available()
+    elapsed = time.monotonic() - start
+
+    assert available is False
+    assert "timed out" in judge.unavailable_reason
+    assert elapsed < _OUTER_BOUND_SEC, (
+        f"is_available() took {elapsed:.2f}s against a trickling peer; expected it "
+        f"bounded by ~{_JUDGE_TIMEOUT_SEC}s + kill grace"
+    )
+
+
+def test_probe_exits_in_a_child_process(trickle_server) -> None:
+    """Mirrors ``test_judge_call_exits_in_a_child_process`` for ``is_available()``
+    (GH-903 round 4, cubic P2): the test itself runs in a further CHILD
+    process, bounded by ``subprocess.run``'s own ``timeout=`` -- an OUTER
+    bound that survives even a regression that bypasses ``run_killable``
+    entirely (unlike the in-process test above, which would simply hang next
+    to that exact regression)."""
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = os.pathsep.join([src_dir, tests_dir, child_env.get("PYTHONPATH", "")])
+
+    child_src = textwrap.dedent(
+        f"""
+        from socr.judge.ollama_judge import OllamaVisionJudge
+        judge = OllamaVisionJudge(
+            model="qwen2-vl:7b", host={trickle_server.url!r}, timeout={_JUDGE_TIMEOUT_SEC}
+        )
+        available = judge.is_available()
+        if available is False and "timed out" in judge.unavailable_reason:
+            raise SystemExit(0)
+        raise SystemExit(3)  # did not classify as an inconclusive timeout — fail loudly
         """
     )
     start = time.monotonic()

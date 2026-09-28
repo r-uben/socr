@@ -17,12 +17,14 @@ stubbed, so these pin the same behaviour in CI as on a workstation.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+import socr.judge.ollama_judge as ollama_judge_module
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import provider_ladder
 from socr.core.result import PageOutput, PageStatus
@@ -37,17 +39,88 @@ from socr.pipeline.orchestrator import JUDGE_IDENTITY_HEURISTIC, UnifiedPipeline
 INSTALLED = ["qwen3-vl:30b-a3b-instruct", "llama3:latest"]
 
 
-def _stub_tags(monkeypatch, names):
-    """Make /api/tags report exactly ``names`` as the pulled models."""
+def _run_killable_inprocess(spec, timeout):
+    """Bypass the real ``multiprocessing`` spawn: call the probe body
+    directly, in THIS process (GH-903 round 3, P2-b made ``is_available()``
+    cross ``run_killable``'s real subprocess boundary). A real spawned child
+    re-imports everything fresh, so an ``httpx.post`` monkeypatch made in the
+    test process would never reach it -- every hermetic test in this file
+    fakes ``run_killable`` this way instead. The real boundary (a genuine
+    wall-clock deadline against a trickling peer) is exercised separately, in
+    ``tests/test_gh172_judge_killable.py``, against a real server.
+
+    Mirrors just enough of the real ``run_killable``/``_child_main``
+    reclassification (``socr/core/killable.py``) to be a faithful stand-in:
+    a timeout raised by the probe body is reclassified as
+    ``KillableTimeoutError`` (a ``TimeoutError`` subclass), the same as the
+    real boundary would, so ``is_available()``'s ``except TimeoutError``
+    still fires.
+    """
+    from socr.core.killable import KillableTimeoutError
+
+    module_name, _, qualname = spec.func.partition(":")
+    fn = getattr(importlib.import_module(module_name), qualname)
+    try:
+        return fn(*spec.args, **(spec.kwargs or {}))
+    except httpx.TimeoutException as exc:
+        raise KillableTimeoutError(spec.func, timeout, killed=False) from exc
+
+
+@pytest.fixture(autouse=True)
+def _probe_run_killable_is_synchronous(monkeypatch):
+    monkeypatch.setattr(ollama_judge_module, "run_killable", _run_killable_inprocess)
+    # GH-903 round 4: is_available() now pre-checks reachability before ever
+    # spawning. Default it to "reachable" so every existing httpx.post-based
+    # test still determines its outcome purely from the generation stub, not
+    # from whether THIS machine happens to have a real daemon listening.
+    # Tests that specifically exercise the pre-check override this back.
+    monkeypatch.setattr(ollama_judge_module, "_host_reachable", lambda *a, **k: True)
+
+
+def _with_implicit_tag(name: str) -> str:
+    """Mirror Ollama's own untagged -> ``:latest`` resolution for the stub."""
+    return name if ":" in name else f"{name}:latest"
+
+
+def _stub_generate(monkeypatch, names, on_call=None):
+    """Make POST /api/generate (the real GH-903 probe) succeed for exactly
+    ``names`` (matched on the full ``name:tag``, mirroring Ollama's own
+    untagged -> ``:latest`` resolution) and 404 for anything else.
+
+    ``/api/tags`` is no longer what availability means (GH-903): a retired
+    Ollama Cloud model stayed listed there while every generation 410'd, so
+    the probe now POSTs the exact generation call ``is_available`` sends and
+    this stub answers THAT, never ``httpx.get``.
+    """
+    available = {_with_implicit_tag(n) for n in names}
 
     class _Resp:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+
         def raise_for_status(self):
-            return None
+            if self.status_code >= 400:
+                request = httpx.Request("POST", "http://x/api/generate")
+                response = httpx.Response(
+                    self.status_code,
+                    request=request,
+                    json={"error": "model not found"},
+                )
+                raise httpx.HTTPStatusError(
+                    f"{self.status_code} error", request=request, response=response
+                )
 
         def json(self):
-            return {"models": [{"name": n} for n in names]}
+            return {"response": "{}"}
 
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    def _post(url, json=None, **kwargs):
+        if on_call is not None:
+            on_call()
+        model = (json or {}).get("model", "")
+        ok = _with_implicit_tag(model) in available
+        return _Resp(200 if ok else 404)
+
+    monkeypatch.setattr(httpx, "post", _post)
 
 
 class _State:
@@ -87,18 +160,18 @@ def test_installed_sibling_does_not_satisfy_a_different_tag(monkeypatch):
     This is the trap: the prefix match reported the 8B judge as present, and the
     404 only surfaced later, at judge time, mid-document.
     """
-    _stub_tags(monkeypatch, INSTALLED)
+    _stub_generate(monkeypatch, INSTALLED)
     assert OllamaVisionJudge(model="qwen3-vl:8b").is_available() is False
 
 
 def test_exact_tag_is_available(monkeypatch):
-    _stub_tags(monkeypatch, INSTALLED)
+    _stub_generate(monkeypatch, INSTALLED)
     assert OllamaVisionJudge(model="qwen3-vl:30b-a3b-instruct").is_available() is True
 
 
 def test_untagged_reference_resolves_to_latest(monkeypatch):
     """Ollama treats a bare name as ``:latest``; availability must agree."""
-    _stub_tags(monkeypatch, INSTALLED)
+    _stub_generate(monkeypatch, INSTALLED)
     assert OllamaVisionJudge(model="llama3").is_available() is True
     assert OllamaVisionJudge(model="qwen3-vl").is_available() is False
 
@@ -107,7 +180,7 @@ def test_unreachable_daemon_is_unavailable_not_an_error(monkeypatch):
     def _boom(*a, **k):
         raise httpx.ConnectError("no daemon")
 
-    monkeypatch.setattr(httpx, "get", _boom)
+    monkeypatch.setattr(httpx, "post", _boom)
     assert OllamaVisionJudge(model="anything:1b").is_available() is False
 
 
@@ -176,7 +249,7 @@ def test_judge_exception_preserves_provider_provenance():
 
 def test_provenance_says_heuristic_when_no_vlm_resolves(monkeypatch):
     """metadata.json must not claim a VLM judged heuristic-gated pages."""
-    _stub_tags(monkeypatch, INSTALLED)  # none of the candidates are installed
+    _stub_generate(monkeypatch, INSTALLED)  # none of the candidates are installed
     pipe = _pipeline()
     state = _State()
 
@@ -187,7 +260,7 @@ def test_provenance_says_heuristic_when_no_vlm_resolves(monkeypatch):
 
 def test_degradation_emits_an_audit_event_under_default_backend(monkeypatch):
     """judge_backend defaults to "auto", where this used to be silent."""
-    _stub_tags(monkeypatch, INSTALLED)
+    _stub_generate(monkeypatch, INSTALLED)
     pipe = _pipeline()
     assert pipe.config.judge_backend == "auto"
     state = _State()
@@ -200,7 +273,7 @@ def test_degradation_emits_an_audit_event_under_default_backend(monkeypatch):
 
 def test_resolved_model_is_the_one_constructed(monkeypatch):
     """The judge must be built from the resolved model, never the module default."""
-    _stub_tags(monkeypatch, ["minicpm-v:8b"])
+    _stub_generate(monkeypatch, ["minicpm-v:8b"])
     pipe = _pipeline()
     state = _State()
 
@@ -224,33 +297,33 @@ def test_resolution_is_memoized(monkeypatch):
     """_run_fingerprint runs per page; resolving each time would be 3 probes/page."""
     calls = {"n": 0}
 
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            calls["n"] += 1
-            return {"models": [{"name": "minicpm-v:8b"}]}
-
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    _stub_generate(
+        monkeypatch, ["minicpm-v:8b"], on_call=lambda: calls.__setitem__("n", calls["n"] + 1)
+    )
     pipe = _pipeline()
 
     for _ in range(5):
         pipe._resolve_judge_model()
 
+    # JUDGE_MODEL_DEFAULT fails its probe, minicpm-v:8b succeeds -- 2 probes on
+    # the FIRST (unmemoized) call, then 0 on the remaining 4.
     assert calls["n"] <= 2, f"expected memoized resolution, got {calls['n']} probes"
 
 
-def test_explicit_judge_model_is_never_discarded(monkeypatch):
-    """An operator override wins without probing — a brief outage must not drop it."""
+def test_explicit_judge_model_bypasses_the_ladder_not_the_probe(monkeypatch):
+    """GH-903 round 3 (P2-a, cubic): the ladder never substitutes a different
+    model for an explicit override, but a genuinely unreachable daemon still
+    means "no judge" (heuristics), surfaced with a reason -- an override that
+    silently ran unavailable used to fail on every page instead."""
 
     def _boom(*a, **k):
         raise httpx.ConnectError("daemon down")
 
-    monkeypatch.setattr(httpx, "get", _boom)
+    monkeypatch.setattr(httpx, "post", _boom)
     pipe = _pipeline(judge_model="my-judge:v2")
 
-    assert pipe._resolve_judge_model() == "my-judge:v2"
+    assert pipe._resolve_judge_model() is None
+    assert "my-judge:v2" in pipe._judge_unavailable_reason
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +333,10 @@ def test_explicit_judge_model_is_never_discarded(monkeypatch):
 
 def test_fingerprint_changes_when_the_judge_model_appears(monkeypatch):
     """Pulling a judge model changes gating, so terminal pages must not resume."""
-    _stub_tags(monkeypatch, INSTALLED)
+    _stub_generate(monkeypatch, INSTALLED)
     without = _pipeline()._run_fingerprint()
 
-    _stub_tags(monkeypatch, INSTALLED + ["minicpm-v:8b"])
+    _stub_generate(monkeypatch, INSTALLED + ["minicpm-v:8b"])
     with_judge = _pipeline()._run_fingerprint()
 
     assert without != with_judge
@@ -275,7 +348,7 @@ def test_heuristic_backend_does_not_probe(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("heuristic backend must not probe Ollama")
 
-    monkeypatch.setattr(httpx, "get", _boom)
+    monkeypatch.setattr(httpx, "post", _boom)
 
     _pipeline(judge_backend="heuristic")._run_fingerprint()
 
@@ -283,7 +356,7 @@ def test_heuristic_backend_does_not_probe(monkeypatch):
 @pytest.mark.parametrize("backend", ["auto", "vlm"])
 def test_fingerprint_is_stable_across_repeated_calls(backend, monkeypatch):
     """Per-page sidecar flushes must not produce drifting fingerprints."""
-    _stub_tags(monkeypatch, ["minicpm-v:8b"])
+    _stub_generate(monkeypatch, ["minicpm-v:8b"])
     pipe = _pipeline(judge_backend=backend)
 
     assert pipe._run_fingerprint() == pipe._run_fingerprint()

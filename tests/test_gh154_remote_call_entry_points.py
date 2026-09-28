@@ -336,8 +336,12 @@ def test_pinned_zero_blocks_page_judge_cloud_model(explicit_model):
     assert "cloud" not in (chosen or "").lower()
 
 
-def test_unpinned_zero_still_resolves_cloud_page_judge_by_default():
-    pipe = _pipeline(max_cost_per_page=0.0)
+def test_unpinned_zero_still_permits_an_explicit_cloud_page_judge():
+    """GH-903: the default candidate ladder is local-only now (Ollama Cloud
+    retired the former default, ``qwen3.5:cloud``), so this policy -- unpinned
+    zero doesn't forbid cloud -- is only reachable via an explicit override,
+    not the ladder's own first candidate."""
+    pipe = _pipeline(max_cost_per_page=0.0, judge_model="qwen3.5:cloud")
     pipe._judge_model_cache = False
     with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=True):
         chosen = pipe._resolve_judge_model()

@@ -783,6 +783,17 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
+    # GH-903: every candidate ``_resolve_judge_model`` tried and rejected,
+    # joined into one string (round 2: not just the last one -- an operator
+    # needs "qwen3.8:27b timed out after 120s; minicpm-v:8b: HTTP 404; ..."
+    # to tell a cold-loading candidate apart from one that was never pulled),
+    # or "" when resolution succeeded or has not run. Consulted only by
+    # ``_build_page_judge`` to surface WHY the ladder produced no judge --
+    # never by resolution logic itself, so it carries no memoization
+    # obligation of its own; ``_judge_model_cache`` alone still bounds probing
+    # to once per run. Class-level for the same ``object.__new__`` reason as
+    # ``_judge_model_cache`` above.
+    _judge_unavailable_reason: str = ""
     # #842: once-per-pipeline guard for ``_report_unservable_engines``; class
     # level for the same ``object.__new__`` reason as the caches around it.
     _warned_unservable_engines: bool = False
@@ -10065,9 +10076,22 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  [yellow]{message}[/yellow]")
 
+    # GH-903: Ollama Cloud retired ``qwen3.5:cloud`` on 2026-09-25 (measured
+    # 2026-09-26: POST /api/generate -> 410 Gone, while /api/tags kept listing
+    # it -- the availability probe below is generation-based specifically so a
+    # retirement like this is caught). Owner-chosen replacement: local
+    # ``qwen3.8:27b`` (installed, vision, thinking model -- ``is_available``
+    # and ``_post_generate`` both send ``think: false`` so it answers instead
+    # of putting the verdict in ``thinking``). Named as its own constant, not
+    # inlined, so the default is documented in exactly one place.
+    JUDGE_MODEL_DEFAULT = "qwen3.8:27b"
+
     # Vision models tried (in order) as the hard-page judge when judge_model is
-    # unset. Cloud-first so the judge is fast; local small VLM as offline fallback.
-    _JUDGE_MODEL_CANDIDATES = ["qwen3.5:cloud", "minicpm-v:8b", "qwen3-vl:8b"]
+    # unset. ``JUDGE_MODEL_DEFAULT`` is local, so this ladder no longer has a
+    # cloud entry at all; a cloud judge is only ever reached via an explicit
+    # ``--judge-model`` override (still subject to the strict_local /
+    # zero-cap-pinned policy check below).
+    _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b", "qwen3-vl:8b"]
 
     def _resolve_judge_model(self) -> str | None:
         """Pick an available vision model for judging, or None if none usable.
@@ -10075,18 +10099,25 @@ class UnifiedPipeline:
         Memoized for the lifetime of the pipeline (#133): every call probes
         Ollama once per candidate, and ``_run_fingerprint`` consults this on
         every page sidecar flush. An explicit ``--judge-model`` short-circuits
-        the probing entirely and is returned verbatim, so an operator override
-        is never silently discarded because the daemon was briefly unreachable.
+        the candidate LADDER (never tries a different model the operator did
+        not name) but NOT the availability probe (GH-903 round 3, P2-a): an
+        unpulled or retired override degrades to the heuristic judge with its
+        own reason recorded, the same as any ladder candidate, rather than
+        being treated as an active judge that then fails on every page.
 
-        GH-154 round 5: that short-circuit, the memoized cache, and the
-        candidate ladder's own default order (``_JUDGE_MODEL_CANDIDATES[0]``
-        is ``qwen3.5:cloud``) were all three cloud-first with no policy check
-        -- a local-only OCR rung under an EXPLICIT ``--max-cost-per-page 0``
-        still shipped its page image to the cloud for judging. A forbidden
-        cloud identity, whether explicit, cached, or the next candidate in
-        line, is treated as absent here; ``_build_page_judge`` already
-        degrades to the heuristic judge when this returns None, so no
-        separate change is needed there.
+        GH-154 round 5: the explicit-override short-circuit, the memoized
+        cache, and the candidate ladder's own default order were all three
+        cloud-first with no policy check at the time -- ``_JUDGE_MODEL_CANDIDATES[0]``
+        was ``qwen3.5:cloud`` -- so a local-only OCR rung under an EXPLICIT
+        ``--max-cost-per-page 0`` still shipped its page image to the cloud
+        for judging. (GH-903: that default candidate was Ollama Cloud's
+        retirement of ``qwen3.5:cloud`` on 2026-09-25; ``_JUDGE_MODEL_CANDIDATES[0]``
+        is now ``JUDGE_MODEL_DEFAULT`` = ``qwen3.8:27b``, local, with no cloud
+        entry left in the default ladder at all.) A forbidden cloud identity,
+        whether explicit, cached, or the next candidate in line, is treated
+        as absent here; ``_build_page_judge`` already degrades to the
+        heuristic judge when this returns None, so no separate change is
+        needed there.
         """
         from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.judge.ollama_judge import OllamaVisionJudge
@@ -10130,7 +10161,33 @@ class UnifiedPipeline:
 
         if self.config.judge_model:
             if _permitted(self.config.judge_model):
-                return self.config.judge_model
+                # GH-903 round 3 (P2-a): an explicit override still bypasses
+                # the candidate LADDER -- an operator named the exact model,
+                # so trying a different one on failure would discard their
+                # setting -- but NOT the availability probe. Round 1 removed
+                # ``_build_page_judge``'s own second ``is_available()`` call
+                # as a redundant re-probe of an already-verified ladder
+                # candidate; that reasoning never covered this branch, which
+                # never probed at all, so an unpulled or retired override
+                # started being treated as an active judge and failing on
+                # every page instead of degrading to heuristics with a
+                # reason. Memoized on the SAME ``_judge_model_cache`` as the
+                # ladder, so the per-page ``_run_fingerprint`` call still
+                # costs one probe per run, not one per page.
+                if self._judge_model_cache is not False:
+                    cached = self._judge_model_cache
+                    if cached is None or _permitted(cached):
+                        return cached  # type: ignore[return-value]
+                candidate = OllamaVisionJudge(model=self.config.judge_model)
+                if candidate.is_available():
+                    self._judge_model_cache = self.config.judge_model
+                    self._judge_unavailable_reason = ""
+                else:
+                    self._judge_model_cache = None
+                    self._judge_unavailable_reason = (
+                        f"{self.config.judge_model}: {candidate.unavailable_reason}"
+                    )
+                return self._judge_model_cache
             # Forbidden explicit override: fall through to the same
             # local-first auto-resolution an unset judge_model gets, rather
             # than silently honoring an operator setting that violates the
@@ -10142,16 +10199,28 @@ class UnifiedPipeline:
             # A memoized cloud identity that policy now forbids: re-resolve
             # instead of returning stale cloud provenance.
         resolved: str | None = None
+        # GH-903 round 2: every candidate's failure, not just the last one --
+        # a run where the FIRST (default) candidate merely timed out on a
+        # cold load looked identical, from the last-reason-only surface, to
+        # one where it was flat-out retired; an operator needs to see BOTH
+        # "qwen3.8:27b timed out" (probably just needs a warm-up) and
+        # "qwen3-vl:8b: HTTP 404" (never pulled) to diagnose which.
+        reasons: list[str] = []
         for model in self._JUDGE_MODEL_CANDIDATES:
             if not _permitted(model):
                 continue
             try:
-                if OllamaVisionJudge(model=model).is_available():
+                candidate = OllamaVisionJudge(model=model)
+                if candidate.is_available():
                     resolved = model
+                    reasons = []
                     break
-            except Exception:
+                reasons.append(f"{model}: {candidate.unavailable_reason}")
+            except Exception as exc:
+                reasons.append(f"{model}: {type(exc).__name__}: {exc}")
                 continue
         self._judge_model_cache = resolved
+        self._judge_unavailable_reason = "; ".join(reasons)
         return resolved
 
     def _resolve_caption_engine_identity(self) -> str:
@@ -10885,6 +10954,15 @@ class UnifiedPipeline:
                     # vLLM already serves the vision model in the same job --
                     # has no reachable judge at all and falls through to
                     # heuristics, shipping tables no judge ever saw.
+                    #
+                    # GH-903: ``resolved_model`` already means "the availability
+                    # probe for this exact model just succeeded" -- either the
+                    # vLLM reachability check or the Ollama generation probe
+                    # inside ``_resolve_judge_model``, both memoized on
+                    # ``_judge_model_cache``. Re-probing here would be a SECOND
+                    # real generation per run for no reason the memoization
+                    # comment does not already forbid; the judge is built
+                    # directly from the resolved identity instead.
                     vj: object
                     if self.config.judge_vllm_url and self.config.judge_vllm_model:
                         from socr.judge.vllm_judge import VLLMVisionJudge
@@ -10895,9 +10973,8 @@ class UnifiedPipeline:
                         )
                     else:
                         vj = OllamaVisionJudge(model=resolved_model)
-                    if vj.is_available():
-                        inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
-                        judge_identity = resolved_model
+                    inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
+                    judge_identity = resolved_model
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
             if inner_judge is None:
@@ -10906,11 +10983,20 @@ class UnifiedPipeline:
                 # default path degraded in total silence — the one place this
                 # repo's "failures surface at every level" rule was not applied
                 # to the judge itself.
-                detail = (
-                    f"requested judge model {resolved_model!r} is not available"
-                    if resolved_model
-                    else "no vision model from the judge candidate ladder is available"
-                )
+                #
+                # GH-903: name WHY, not just that nothing resolved -- a 410
+                # (retired) or 404 (never pulled) reads very differently to an
+                # operator, and ``_judge_unavailable_reason`` (set by the same
+                # resolution call above) already carries that detail.
+                if resolved_model:
+                    detail = f"requested judge model {resolved_model!r} is not available"
+                elif self._judge_unavailable_reason:
+                    detail = (
+                        "no vision model from the judge candidate ladder is "
+                        f"available ({self._judge_unavailable_reason})"
+                    )
+                else:
+                    detail = "no vision model from the judge candidate ladder is available"
                 if not self.config.quiet:
                     console.print(
                         f"  [yellow]VLM judge unavailable ({detail}) -> "
@@ -10927,6 +11013,14 @@ class UnifiedPipeline:
                             "judge_backend": backend,
                             "requested_model": resolved_model or "",
                             "candidates": list(self._JUDGE_MODEL_CANDIDATES),
+                            # GH-903: the last candidate's probe failure (e.g.
+                            # "qwen3.8:27b: HTTP 410: ... retired ..."), so a
+                            # retirement/misconfiguration is machine-readable
+                            # from the existing per-page audit trail rather
+                            # than only from ``detail``'s prose. "" when
+                            # resolution never got as far as a probe (e.g.
+                            # ``judge_backend=heuristic`` never reaches here).
+                            "unavailable_reason": self._judge_unavailable_reason,
                         },
                     )
                 )
