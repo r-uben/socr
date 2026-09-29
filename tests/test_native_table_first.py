@@ -183,8 +183,7 @@ class TestPlanNativeTable:
         assert not retained_prose_survives(composed, retained, table_markdown=table)
         composed_with_note = (
             "Table 1. GDP growth forecasts across baseline and shock scenarios.\n"
-            "* Forecasts are annualized percent changes.\n\n"
-            + table
+            "* Forecasts are annualized percent changes.\n\n" + table
         )
         assert retained_prose_survives(composed_with_note, retained, table_markdown=table)
 

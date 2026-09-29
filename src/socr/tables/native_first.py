@@ -211,7 +211,9 @@ def splice_retained_prose_beside_table(
 ) -> str:
     """Prepend GH-147 prose lines that the upright grid does not already carry."""
     body = interleaved or ""
-    extra = [line for line in retained_prose_lines_to_keep(retained, table_markdown) if line not in body]
+    extra = [
+        line for line in retained_prose_lines_to_keep(retained, table_markdown) if line not in body
+    ]
     if not extra:
         return body
     return "\n".join(extra + ["", body]).strip()

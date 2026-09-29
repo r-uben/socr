@@ -10105,9 +10105,7 @@ class UnifiedPipeline:
                 # ``route_page``. CELLS is excluded until crops and the
                 # post-repair verifier use the upright word frame.
                 return None
-            if not retained_prose_survives(
-                composed, retained, table_markdown=attempt.markdown
-            ):
+            if not retained_prose_survives(composed, retained, table_markdown=attempt.markdown):
                 return None
             return NativeTableFirstWork(
                 attempt.plan,
