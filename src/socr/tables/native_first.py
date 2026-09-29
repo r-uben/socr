@@ -54,6 +54,172 @@ class NativeTablePlan:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class NativeTableFirstWork:
+    """Planner output for one born-digital table page."""
+
+    plan: NativeTablePlan
+    #: When set, the upright rowizer produced this markdown and it must replace
+    #: ``PageState.native_text`` before shipping or re-verifying cells.
+    markdown: str | None = None
+    structure_defective: bool | None = None
+    header_unattributed: bool | None = None
+    orphan_word_drops: tuple[dict, ...] = ()
+    clear_ocr_enhancement: bool = True
+
+
+@dataclass(frozen=True)
+class RotatedNativeTableAttempt:
+    """Upright re-read of a GH-147 refused rotated table page."""
+
+    plan: NativeTablePlan
+    markdown: str
+    words: list
+    structure_defective: bool
+    header_unattributed: bool
+    orphan_words: tuple[str, ...] = ()
+    regions: tuple[tuple[object, str], ...] = ()
+    orphan_drops: tuple[dict, ...] = ()
+
+
+def upright_words_for_page(page) -> tuple[list, int]:
+    """Word list in the upright frame ``rowize_from_words`` uses for *page*.
+
+    Returns ``([], 0)`` when the page has no rotation or no words.
+    """
+    from socr.core.born_digital import upright_rotation_for
+    from socr.tables.reconstruct import _rotate_word_bbox
+
+    try:
+        words = list(page.get_text("words"))
+    except Exception:
+        return [], 0
+    if not words:
+        return [], 0
+    rotation = upright_rotation_for(page)
+    if rotation == 0:
+        return words, 0
+    xs = [w[0] for w in words]
+    ys = [w[1] for w in words]
+    cx = (min(xs) + max(xs)) / 2
+    cy = (min(ys) + max(ys)) / 2
+    return [_rotate_word_bbox(w, cx, cy, -rotation) for w in words], rotation
+
+
+def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
+    """Rowize a rotated table page upright and run ``plan_native_table``.
+
+    Returns None when the page is not rotated or the rowizer finds no grid.
+    """
+    from socr.core.born_digital import upright_rotation_for
+    from socr.tables import structure_check
+    from socr.tables.reconstruct import rowize_from_words
+
+    rotation = upright_rotation_for(page)
+    if rotation == 0:
+        return None
+    orphan_drops: list[dict] = []
+    regions = rowize_from_words(page, orphan_drops=orphan_drops)
+    if not regions:
+        return None
+    markdown = "\n\n".join(md for _rect, md in regions if (md or "").strip())
+    if not markdown.strip():
+        return None
+    words, _ = upright_words_for_page(page)
+    reports = structure_check.check_markdown(markdown)
+    structure_defective = bool(
+        structure_check.table_emission_defect(markdown)
+        or structure_check.table_content_defect(markdown)
+        or structure_check.structural_gate_fires(reports)
+    )
+    header_unattributed = False
+    if not structure_defective:
+        header_unattributed = (
+            structure_check.table_output_defect(markdown, words)
+            == structure_check.DEFECT_HEADER_UNATTRIBUTED
+        )
+    orphan_words = tuple(
+        str(drop.get("word", ""))
+        for drop in orphan_drops
+        if isinstance(drop, dict) and drop.get("word")
+    )
+    plan = plan_native_table(
+        words,
+        markdown,
+        structure_defective=structure_defective,
+        header_unattributed=header_unattributed,
+        orphan_words=list(orphan_words),
+    )
+    return RotatedNativeTableAttempt(
+        plan=plan,
+        markdown=markdown,
+        words=words,
+        structure_defective=structure_defective,
+        header_unattributed=header_unattributed,
+        orphan_words=orphan_words,
+        regions=tuple(regions),
+        orphan_drops=tuple(orphan_drops),
+    )
+
+
+def compose_upright_shipped_page(page, regions: list) -> str:
+    """Interleave upright table regions with the page's surviving prose blocks."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    return BornDigitalDetector().interleave_table_regions_into_page(page, list(regions))
+
+
+def splice_retained_prose_beside_table(
+    retained: str,
+    table_markdown: str,
+    interleaved: str,
+) -> str:
+    """Prepend GH-147 prose lines that the upright grid does not already carry."""
+    table_tokens: set[str] = set()
+    for line in (table_markdown or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("| ---"):
+            continue
+        for cell in stripped.strip("|").split("|"):
+            token = cell.strip()
+            if token:
+                table_tokens.add(token)
+    extra: list[str] = []
+    seen: set[str] = set()
+    body = interleaved or ""
+    for line in (retained or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in seen:
+            continue
+        if stripped in body:
+            continue
+        if stripped in table_tokens:
+            continue
+        if stripped.replace(".", "").replace(",", "").isdigit():
+            continue
+        if len(stripped) <= 3 and stripped.isalpha() and stripped.isupper():
+            continue
+        words = stripped.split()
+        if stripped.startswith("Table ") or len(words) >= 2 or len(stripped) >= 12:
+            extra.append(stripped)
+            seen.add(stripped)
+    if not extra:
+        return body
+    return "\n".join(extra + ["", body]).strip()
+
+
+def retained_prose_survives(composed: str, retained: str) -> bool:
+    """Whether title/prose lines GH-147 kept are still present after splicing."""
+    composed_text = composed or ""
+    for line in (retained or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Table ") and stripped not in composed_text:
+            return False
+    return True
+
+
 def plan_native_table(
     words: list,
     markdown: str,
