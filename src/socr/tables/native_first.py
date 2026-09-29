@@ -64,6 +64,8 @@ class NativeTableFirstWork:
     markdown: str | None = None
     structure_defective: bool | None = None
     header_unattributed: bool | None = None
+    orphan_word_drops: tuple[dict, ...] = ()
+    clear_ocr_enhancement: bool = True
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,8 @@ class RotatedNativeTableAttempt:
     structure_defective: bool
     header_unattributed: bool
     orphan_words: tuple[str, ...] = ()
+    regions: tuple[tuple[object, str], ...] = ()
+    orphan_drops: tuple[dict, ...] = ()
 
 
 def upright_words_for_page(page) -> tuple[list, int]:
@@ -153,7 +157,67 @@ def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
         structure_defective=structure_defective,
         header_unattributed=header_unattributed,
         orphan_words=orphan_words,
+        regions=tuple(regions),
+        orphan_drops=tuple(orphan_drops),
     )
+
+
+def compose_upright_shipped_page(page, regions: list) -> str:
+    """Interleave upright table regions with the page's surviving prose blocks."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    return BornDigitalDetector().interleave_table_regions_into_page(page, list(regions))
+
+
+def splice_retained_prose_beside_table(
+    retained: str,
+    table_markdown: str,
+    interleaved: str,
+) -> str:
+    """Prepend GH-147 prose lines that the upright grid does not already carry."""
+    table_tokens: set[str] = set()
+    for line in (table_markdown or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("| ---"):
+            continue
+        for cell in stripped.strip("|").split("|"):
+            token = cell.strip()
+            if token:
+                table_tokens.add(token)
+    extra: list[str] = []
+    seen: set[str] = set()
+    body = interleaved or ""
+    for line in (retained or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in seen:
+            continue
+        if stripped in body:
+            continue
+        if stripped in table_tokens:
+            continue
+        if stripped.replace(".", "").replace(",", "").isdigit():
+            continue
+        if len(stripped) <= 3 and stripped.isalpha() and stripped.isupper():
+            continue
+        words = stripped.split()
+        if stripped.startswith("Table ") or len(words) >= 2 or len(stripped) >= 12:
+            extra.append(stripped)
+            seen.add(stripped)
+    if not extra:
+        return body
+    return "\n".join(extra + ["", body]).strip()
+
+
+def retained_prose_survives(composed: str, retained: str) -> bool:
+    """Whether title/prose lines GH-147 kept are still present after splicing."""
+    composed_text = composed or ""
+    for line in (retained or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Table ") and stripped not in composed_text:
+            return False
+    return True
 
 
 def plan_native_table(

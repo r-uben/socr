@@ -10071,16 +10071,28 @@ class UnifiedPipeline:
             NativeTableFirstWork,
             NativeTablePlan,
             attempt_rotated_native_table,
+            compose_upright_shipped_page,
             plan_native_table,
+            retained_prose_survives,
+            splice_retained_prose_beside_table,
         )
 
         if self._is_rotated_native_table_lane_page(page_num, ps):
             from socr.core.pdf import open_pdf
             from socr.tables.native_first import SHIP
 
+            retained = (ps.native_text_raw or ps.native_text or "").strip()
+            attempt = None
+            composed = ""
             try:
                 with open_pdf(state.handle.path) as doc:
-                    attempt = attempt_rotated_native_table(doc[page_num - 1])
+                    page = doc[page_num - 1]
+                    attempt = attempt_rotated_native_table(page)
+                    if attempt is not None and attempt.plan.action == SHIP:
+                        interleaved = compose_upright_shipped_page(page, list(attempt.regions))
+                        composed = splice_retained_prose_beside_table(
+                            retained, attempt.markdown, interleaved
+                        )
             except Exception as exc:
                 logger.warning(
                     "native table upright: text layer unreadable on p%d (%s)",
@@ -10093,11 +10105,15 @@ class UnifiedPipeline:
                 # ``route_page``. CELLS is excluded until crops and the
                 # post-repair verifier use the upright word frame.
                 return None
+            if not retained_prose_survives(composed, retained):
+                return None
             return NativeTableFirstWork(
                 attempt.plan,
-                markdown=attempt.markdown,
+                markdown=composed,
                 structure_defective=attempt.structure_defective,
                 header_unattributed=attempt.header_unattributed,
+                orphan_word_drops=attempt.orphan_drops,
+                clear_ocr_enhancement=retained_prose_survives(composed, retained),
             )
 
         if not self._is_native_table_first_candidate(page_num, ps):
@@ -10149,7 +10165,8 @@ class UnifiedPipeline:
             ps.native_table_structure_defective = bool(work.structure_defective)
         if work.header_unattributed is not None:
             ps.native_table_header_unattributed = bool(work.header_unattributed)
-        ps.needs_ocr_enhancement = False
+        if getattr(work, "clear_ocr_enhancement", True):
+            ps.needs_ocr_enhancement = False
         self._refresh_native_table_identities(ps, ps.native_text or "")
 
     def _apply_native_table_first(
@@ -10171,6 +10188,28 @@ class UnifiedPipeline:
 
         plan = work.plan
         self._stage_native_table_first_markdown(ps, work)
+
+        drops = tuple(getattr(work, "orphan_word_drops", ()) or ())
+        if drops:
+            words = [
+                str(rec.get("word", ""))
+                for rec in drops
+                if isinstance(rec, dict) and rec.get("word")
+            ]
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="orphan_word_dropped",
+                    engine="native",
+                    detail=(
+                        f"{len(drops)} word(s) dropped by the word-geometry table rowizer "
+                        f"(further than the snap radius from every column lane): "
+                        f"{', '.join(words)}. The table shipped without them -- no cell "
+                        "carries this content."
+                    ),
+                    data={"dropped_count": len(drops), "words": words},
+                )
+            )
 
         if plan.action == SHIP:
             self._agentic_native_page(state, page_num, ps)

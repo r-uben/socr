@@ -137,7 +137,12 @@ class TestAgenticRotatedNativeTableFirst:
             result = pipeline.process(pdf_path, tmp_path / "out")
         assert route_calls == []
         assert result.status == DocumentStatus.SUCCESS
-        assert "0.253" in (result.markdown or "")
+        body = result.markdown or ""
+        assert "0.253" in body
+        assert "Table 1." in body
+        assert "GDP growth forecasts across baseline and shock scenarios." in body or (
+            "Table 1. GD" in body
+        )
         sidecar = json.loads(
             next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
         )
