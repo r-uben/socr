@@ -266,6 +266,9 @@ def _run(
         ),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        # The ladder clamps the whole-page candidate. An exact-pass native
+        # grid would ship before that candidate exists.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
     ]
     if ladder_on:
         patches.append(patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs or []))

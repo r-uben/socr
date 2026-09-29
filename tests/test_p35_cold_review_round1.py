@@ -209,6 +209,10 @@ def _run_pipeline(
         ),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch.object(pipeline, "_is_agentic_trusted_native", return_value=is_native),
+        # Exact-pass native grids ship before route_page. These cases measure
+        # the judged whole-page candidate and the crop signal after it, so
+        # the native-first lane defers here.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch.object(pipeline, "_probe_backend_idle", return_value=True),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
         patch("socr.pipeline.orchestrator.probe_openai_server_idle", return_value=True),

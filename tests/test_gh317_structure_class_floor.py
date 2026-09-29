@@ -925,6 +925,9 @@ def _hermetic_agentic_pipeline(tmp_path: Path, *, grid_qualifies: bool):
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        # Structure-class selection is what a whole-page read leaves behind.
+        # The native-first lane would settle this grid before that read.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch("socr.pipeline.orchestrator.route_page", _fake_route_page),
         patch.object(pipeline, "_backend_available", return_value=True, create=True),
     ):
@@ -1058,6 +1061,9 @@ def test_phase_agentic_renders_and_flushes_floor_png_only_for_no_grid_arm(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # Structure-class selection is what a whole-page read leaves behind.
+            # The native-first lane would settle this grid before that read.
+            patch.object(pipeline, "_plan_native_table_first", return_value=None),
             patch("socr.pipeline.orchestrator.route_page", _fake_route_page),
             patch.object(pipeline, "_backend_available", return_value=True, create=True),
             patch.object(pipeline, "_render_d3_floor_png", render_mock),
@@ -1249,6 +1255,9 @@ def test_paired_process_regression(tmp_path: Path, caplog: pytest.LogCaptureFixt
                 return_value=[PROFILE_QWEN_LOCAL],
             ),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # Structure-class selection is what a whole-page read leaves behind.
+            # The native-first lane would settle this grid before that read.
+            patch.object(pipeline, "_plan_native_table_first", return_value=None),
             patch("socr.pipeline.orchestrator.route_page", _fake_route),
             patch.object(pipeline, "_backend_available", return_value=True, create=True),
             patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),

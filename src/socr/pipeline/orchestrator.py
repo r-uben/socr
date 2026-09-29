@@ -2328,12 +2328,15 @@ class UnifiedPipeline:
     def _is_trusted_native_without_ocr(self, page_num: int, ps: PageState) -> bool:
         """Whether a page may bypass OCR and ship native text directly.
 
-        Born-digital prose takes free native text. Pages with tables need the
-        model/VLM path because PyMuPDF text often flattens grids even when the
-        character layer is otherwise clean. ``--native-only`` remains the
-        explicit override for born-digital pages — including table pages: it
-        short-circuits before the table check, exactly as the pre-split
-        predicate did (native_only returns True before ever reaching tables).
+        Born-digital prose takes free native text. This predicate still
+        returns false for a detected table, and the non-agentic paths that
+        read it keep that behavior. The agentic loop does not treat that
+        false as the last word: ``_plan_native_table_first`` ships an
+        exact-pass structured grid, or a cell read, before whole-page
+        ``route_page``. ``--native-only`` remains the explicit override for
+        born-digital pages — including table pages: it short-circuits before
+        the table check, exactly as the pre-split predicate did (native_only
+        returns True before ever reaching tables).
 
         GH-147 A2 narrows that override for the rotated+table conjunction: a
         rotated page's native table lane is already refused in
@@ -8585,11 +8588,13 @@ class UnifiedPipeline:
             native_fallback_pages = [
                 p for p in native_fallback_pages if p not in chart_winner_pages
             ]
-        # P4-R precedence, stated once and enforced here rather than only in the
+        # Precedence, stated once and enforced here rather than only in the
         # loop's elif order: corrupt math > chart asset > equation region >
-        # generic no-provider > plain native > whole-page route_page. A chart
-        # page keeps the chart lane unchanged; its equation regions are simply
-        # not read (deliberate, and recorded in the P4-R decision log).
+        # generic no-provider > plain native > native table (exact-pass or
+        # failing cells) > whole-page route_page. A chart page keeps the chart
+        # lane unchanged; its equation regions are simply not read
+        # (deliberate, and recorded in the P4-R decision log). Mixed
+        # chart+table pages stay on the whole-page route.
         equation_lane_pages -= chart_winner_pages
         equation_lane_pages -= resumed_pages
         # Pages the lane actually ran on this pass. The legacy GH-36a/36b in-loop
@@ -8597,6 +8602,23 @@ class UnifiedPipeline:
         # --recover-clean-equations` plus the lane cannot detect, crop or attach
         # the same region twice.
         equation_lane_handled: set[int] = set()
+
+        # Native structured table, before the empty-ladder stamp. An exact-pass
+        # grid does not need an OCR provider; a page this lane owns must not be
+        # marked MODEL_UNAVAILABLE just because the whole-page ladder is empty.
+        # Mixed chart+table pages are left in ``ocr_pages`` on purpose.
+        native_table_plans: dict = {}
+        for page_num in list(ocr_pages):
+            if page_num in chart_mixed_pages:
+                continue
+            plan = self._plan_native_table_first(state, page_num, state.pages[page_num])
+            if plan is not None:
+                native_table_plans[page_num] = plan
+        if native_table_plans:
+            ocr_pages = [p for p in ocr_pages if p not in native_table_plans]
+            native_fallback_pages = [
+                p for p in native_fallback_pages if p not in native_table_plans
+            ]
 
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
@@ -8882,6 +8904,15 @@ class UnifiedPipeline:
                 elif is_native:
                     with clock.span("extract"):
                         self._agentic_native_page(state, page_num, ps)
+                elif page_num in native_table_plans:
+                    with clock.span("tables"):
+                        self._apply_native_table_first(
+                            state,
+                            page_num,
+                            ps,
+                            native_table_plans[page_num],
+                            _chart_figures_dir,
+                        )
                 else:
                     _route_span = clock.span("route")
                     _route_span.__enter__()
@@ -9274,6 +9305,7 @@ class UnifiedPipeline:
                         _dual_pass_tables_enabled
                         and (_score_table_signal or _route_table_signal)
                         and not is_native
+                        and page_num not in native_table_plans
                         and bo.text
                         and bo.engine != "chart_asset"
                         and self._page_has_tables(page_num, ps)
@@ -9328,6 +9360,16 @@ class UnifiedPipeline:
                     # stale score describes text that no longer ships and the page is
                     # re-scored on what does.
                     if _lane_live and bo.text and bo.engine != "chart_asset":
+                        # A page this lane already settled must not be handed
+                        # back to a whole-page escalation rung. The cell read,
+                        # when there was one, already happened.
+                        _needs_escalation: bool | None
+                        if page_num in native_table_plans:
+                            _needs_escalation = False
+                        elif _crop_changed_text:
+                            _needs_escalation = None
+                        else:
+                            _needs_escalation = _score_table_signal
                         _escalation_degraded, bo = self._escalate_table_page(
                             state,
                             page_num,
@@ -9336,7 +9378,7 @@ class UnifiedPipeline:
                             _escalation_profile,
                             run_provider,
                             state.handle.path,
-                            needs_escalation=None if _crop_changed_text else _score_table_signal,
+                            needs_escalation=_needs_escalation,
                         )
 
                 # GH-36a/36b: per-page equation detect + crop + optional LaTeX
@@ -9990,6 +10032,234 @@ class UnifiedPipeline:
                     data={"class": "table_structure"},
                 )
             )
+
+    def _is_native_table_first_candidate(self, page_num: int, ps: PageState) -> bool:
+        """Born-digital table page whose structured grid may be read before a VLM.
+
+        Same eligibility as the free native lane, plus a detected table. A
+        rotated table (``needs_ocr_enhancement``) stays on the existing
+        whole-page route: the rowizer already refuses that text layer.
+        ``--native-only`` returns eligible before that check, so the
+        enhancement flag is tested here on its own.
+        """
+        if ps.needs_ocr_enhancement:
+            return False
+        return self._is_native_eligible_without_ocr(page_num, ps) and self._page_has_tables(
+            page_num, ps
+        )
+
+    def _plan_native_table_first(self, state: DocumentState, page_num: int, ps: PageState):
+        """The native-grid plan for one OCR page, or None when the lane defers.
+
+        None leaves the page on whole-page ``route_page``. A read failure
+        refuses the page instead: an unreadable text layer is not a reason
+        to invent a grid, and it is not a reason to hand the page to a model
+        that would replace a number this lane never saw.
+        """
+        from socr.tables.native_first import DEFER, REFUSE, NativeTablePlan, plan_native_table
+
+        if not self._is_native_table_first_candidate(page_num, ps):
+            return None
+        from socr.core.pdf import open_pdf
+
+        try:
+            with open_pdf(state.handle.path) as doc:
+                words = list(doc[page_num - 1].get_text("words"))
+        except Exception as exc:
+            logger.warning(
+                "native table first: text layer unreadable on p%d (%s)",
+                page_num,
+                exc,
+            )
+            return NativeTablePlan(REFUSE, reason="text layer unreadable")
+        orphans = [
+            str(drop.get("word", ""))
+            for drop in (ps.orphan_word_drops or [])
+            if isinstance(drop, dict)
+        ]
+        plan = plan_native_table(
+            words,
+            ps.native_text or "",
+            structure_defective=bool(
+                ps.native_table_structure_defective
+                or getattr(ps, "native_table_emission_defect", "")
+                or getattr(ps, "native_table_content_defect", "")
+            ),
+            header_unattributed=bool(ps.native_table_header_unattributed),
+            unverifiable=bool(ps.native_table_unverifiable),
+            orphan_words=orphans,
+        )
+        if plan.action == DEFER:
+            return None
+        return plan
+
+    def _apply_native_table_first(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        plan,
+        figures_dir: Path | None,
+    ) -> None:
+        """Ship an exact-pass grid, repair named cells, or refuse the table.
+
+        A repair is written into ``ps.native_text`` before the native attempt
+        is recorded. Selection ships that snapshot; a mid-string edit on the
+        attempt alone would not.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.native_first import CELLS, SHIP
+
+        if plan.action == SHIP:
+            self._agentic_native_page(state, page_num, ps)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="native_table_exact_pass",
+                    engine="native",
+                    detail=(
+                        "born-digital table exact-passed the native verifier; "
+                        "structured grid shipped without a whole-page read"
+                    ),
+                )
+            )
+            return
+        if plan.action == CELLS:
+            repaired = self._repair_native_table_cells(state, page_num, ps, plan)
+            if repaired is not None:
+                if ps.native_text_raw is None:
+                    ps.native_text_raw = ps.native_text
+                ps.native_text = repaired
+                self._refresh_native_table_identities(ps, repaired)
+                self._agentic_native_page(state, page_num, ps)
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="native_table_cell_repaired",
+                        engine="native",
+                        detail=(
+                            "failing table cells were re-read and confirmed "
+                            "against the text layer; the structured grid shipped"
+                        ),
+                        data={"cells": len(plan.cells)},
+                    )
+                )
+                return
+        self._refuse_native_table_first(state, page_num, ps, plan, figures_dir)
+
+    def _repair_native_table_cells(self, state: DocumentState, page_num: int, ps: PageState, plan):
+        """Splice text-layer spellings for cells a model confirms, or None.
+
+        The model is evidence, not the spelling that ships. A transcription
+        is kept only when it normalizes to the text-layer token and does not
+        normalize to the grid token that failed. The repaired markdown must
+        then exact-pass on its own; a partial repair does not ship.
+        """
+        from socr.core.pdf import open_pdf
+        from socr.tables.native_first import (
+            SHIP,
+            plan_native_table,
+            splice_cell_tokens,
+            transcription_matches_native,
+        )
+
+        replacements: list[tuple[str, int, str, str]] = []
+        for cell in plan.cells:
+            crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
+            token = None
+            if crop is not None:
+                try:
+                    token = self._transcribe_cell_token(crop)
+                finally:
+                    crop.unlink(missing_ok=True)
+            if not token or not transcription_matches_native(
+                str(token), cell.native_token, cell.grid_token
+            ):
+                return None
+            replacements.append(
+                (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
+            )
+        spliced = splice_cell_tokens(ps.native_text or "", replacements)
+        if spliced is None:
+            return None
+        try:
+            with open_pdf(state.handle.path) as doc:
+                words = list(doc[page_num - 1].get_text("words"))
+        except Exception as exc:
+            logger.warning(
+                "native table first: re-read failed on p%d (%s)",
+                page_num,
+                exc,
+            )
+            return None
+        # Blocking flags stay false: this pass asks only whether the spliced
+        # grid exact-passes the words. The flags already decided the first plan.
+        again = plan_native_table(words, spliced)
+        if again.action != SHIP:
+            return None
+        return spliced
+
+    @staticmethod
+    def _refresh_native_table_identities(ps: PageState, markdown: str) -> None:
+        """Re-key region identities to the repaired grid when the counts match.
+
+        D3's regional splice requires a 1:1 identity. A count mismatch leaves
+        the previous identities in place so that splice fails closed.
+        """
+        from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+        region_count = int(getattr(ps, "native_table_region_count", 0) or 0)
+        blocks = find_table_blocks(markdown)
+        if region_count and len(blocks) == region_count:
+            ps.native_table_region_identities = [
+                table_grid_identity(block.grid) for block in blocks
+            ]
+
+    def _refuse_native_table_first(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        plan,
+        figures_dir: Path | None,
+    ) -> None:
+        """Existing D3 floor: the bad grid does not ship.
+
+        ``native_table_structure_failed`` together with unverifiable (or an
+        already-set header defect) is the conjunction
+        ``_select_page_output_tagged`` already turns into
+        ``[page N failed: unverifiable table — see image]``. No non-native
+        attempt is added: that would hand the page to the structure-class
+        floor, which replaces a native grid the moment a model attempt exists.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        ps.native_table_structure_failed = True
+        if not ps.native_table_header_unattributed:
+            ps.native_table_unverifiable = True
+            ordinals = list(getattr(ps, "native_table_unverifiable_ordinals", []) or [])
+            region_count = int(getattr(ps, "native_table_region_count", 0) or 0)
+            if not ordinals and region_count > 0:
+                ps.native_table_unverifiable_ordinals = list(range(region_count))
+        if figures_dir is not None and not getattr(ps, "d3_floor_png_ref", ""):
+            ps.d3_floor_png_ref = self._render_d3_floor_png(
+                state.handle.path,
+                page_num,
+                figures_dir,
+            )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="native_table_cell_unresolved",
+                engine="native",
+                detail=(
+                    "born-digital table was not shipped: "
+                    f"{getattr(plan, 'reason', '') or 'unresolved'}"
+                ),
+                data={"reason": getattr(plan, "reason", "")},
+            )
+        )
+        self._agentic_native_page(state, page_num, ps)
 
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.

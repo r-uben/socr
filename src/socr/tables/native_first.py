@@ -1,0 +1,210 @@
+"""Native structured table as the first reader of a born-digital table page.
+
+The deterministic gate is the existing native-table verifier (``VerifierState``
+in ``native_verifier``): ``EXACT_PASS`` means the structured grid's numeric
+tokens already match the PDF's own words, row for row, with no label-binding
+failure and no row-count gap. That state is not a new threshold.
+
+When the same check names a multiset mismatch that pins to one cell, the
+caller sends a model only that cell. Anything that cannot be pinned — a
+label-binding failure, a row-count gap, a structure defect, a numeric word
+the rowizer dropped — fails closed. A lane-count warning with a clean value
+guard does not name a cell; that page is ``DEFER`` and keeps the existing
+whole-page route.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from socr.tables.native_verifier import (
+    _MD_SEP_RE,
+    VerifierState,
+    _effective_native_rows_for_output,
+    _normalize_numeric_token,
+    _pair_output_to_native_rows,
+    _parse_output_data_rows,
+    _parse_output_row_cells,
+    _verify_from_words,
+    is_numeric_token,
+)
+
+SHIP = "ship"
+CELLS = "cells"
+REFUSE = "refuse"
+DEFER = "defer"
+
+
+@dataclass(frozen=True)
+class FailingCell:
+    """One grid cell whose numeric token disagrees with the text layer."""
+
+    row_line: str
+    cell_index: int
+    grid_token: str
+    native_token: str
+    bbox: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class NativeTablePlan:
+    action: str
+    cells: tuple[FailingCell, ...] = ()
+    reason: str = ""
+
+
+def plan_native_table(
+    words: list,
+    markdown: str,
+    *,
+    structure_defective: bool = False,
+    header_unattributed: bool = False,
+    unverifiable: bool = False,
+    orphan_words: list[str] | None = None,
+) -> NativeTablePlan:
+    """Decide whether *markdown* may ship, needs cell reads, or must be refused.
+
+    ``words`` is a PyMuPDF ``get_text("words")`` list for the same page.
+    Blocking flags are the detector's existing structure verdicts, passed in
+    so this function does not re-derive them.
+    """
+    if structure_defective:
+        return NativeTablePlan(REFUSE, reason="structure_defective")
+    if header_unattributed:
+        return NativeTablePlan(REFUSE, reason="header_unattributed")
+    if any(is_numeric_token(word) for word in (orphan_words or [])):
+        # A number the rowizer dropped has no cell to put it back into.
+        # Shipping the grid would drop it. The non-numeric orphan (a dagger,
+        # ``n.a.``) stays an audit event, which is the GH-418 ruling.
+        return NativeTablePlan(REFUSE, reason="numeric_orphan")
+    if not any(_MD_SEP_RE.match(line) for line in (markdown or "").splitlines()):
+        return NativeTablePlan(DEFER, reason="no_markdown_table")
+
+    verdict = _verify_from_words(words or [], markdown or "", scope_label="native-first")
+    if verdict.state == VerifierState.EXACT_PASS and not unverifiable:
+        return NativeTablePlan(SHIP, reason="exact_pass")
+    # A row-count gap makes the per-row pairing unreliable. Do not send a
+    # model a cell chosen from that pairing, and do not ship the grid.
+    if verdict.row_count_warn:
+        return NativeTablePlan(REFUSE, reason="row_count")
+    if verdict.hard_fail:
+        if any(row.get("predicate") != "multiset_mismatch" for row in verdict.drifted_rows):
+            return NativeTablePlan(REFUSE, reason="label_binding")
+        cells = locate_mismatched_cells(words or [], markdown or "")
+        if not cells:
+            return NativeTablePlan(REFUSE, reason="unlocalizable_cells")
+        return NativeTablePlan(CELLS, cells=tuple(cells), reason="cell_mismatch")
+    if unverifiable:
+        return NativeTablePlan(REFUSE, reason="region_unverifiable")
+    return NativeTablePlan(DEFER, reason=verdict.state or VerifierState.AMBIGUOUS)
+
+
+def locate_mismatched_cells(words: list, markdown: str) -> tuple[FailingCell, ...] | None:
+    """Pin each paired-row multiset mismatch to one cell, or return None.
+
+    None means at least one disagreement could not be placed without guessing
+    a column. An empty tuple means every paired numeric cell already agrees.
+    Alignment is left-to-right against the native words' own x order, and only
+    when both sides have the same number of single-number cells. That equality
+    is the verifier's own row pairing, not a new cutoff.
+    """
+    native_rows = _effective_native_rows_for_output(words, markdown, scope_label="native-first")
+    pairs = _pair_output_to_native_rows(native_rows, _parse_output_data_rows(markdown))
+    found: list[FailingCell] = []
+    for (_row_idx, _count, row_text), native_tokens in pairs:
+        numeric_cells: list[tuple[int, str]] = []
+        for index, cell in enumerate(_parse_output_row_cells(row_text)):
+            tokens = [tok for tok in re.split(r"\s+", cell) if tok and is_numeric_token(tok)]
+            if not tokens:
+                continue
+            if len(tokens) != 1:
+                return None
+            numeric_cells.append((index, tokens[0]))
+        native_sorted = sorted(native_tokens, key=lambda item: item[0])
+        if len(numeric_cells) != len(native_sorted):
+            return None
+        for (cell_index, grid_token), (x_pos, native_token) in zip(numeric_cells, native_sorted):
+            if _normalize_numeric_token(grid_token) == _normalize_numeric_token(native_token):
+                continue
+            bbox = _bbox_for_word(words, x_pos, native_token)
+            if bbox is None:
+                return None
+            found.append(
+                FailingCell(
+                    row_line=row_text.strip(),
+                    cell_index=cell_index,
+                    grid_token=grid_token,
+                    native_token=native_token,
+                    bbox=bbox,
+                )
+            )
+    return tuple(found)
+
+
+def transcription_matches_native(heard: str, native_token: str, grid_token: str) -> bool:
+    """True when the model read the text-layer number and not the bad grid token.
+
+    Equality is the verifier's N2 normalization (``_normalize_numeric_token``):
+    precision is kept and the token is not parsed as a float. The caller then
+    writes the text-layer spelling, not the model's.
+    """
+    heard_norm = _normalize_numeric_token(heard.strip())
+    native_norm = _normalize_numeric_token(native_token)
+    grid_norm = _normalize_numeric_token(grid_token)
+    return bool(heard_norm) and heard_norm == native_norm and heard_norm != grid_norm
+
+
+def splice_cell_tokens(
+    markdown: str,
+    replacements: list[tuple[str, int, str, str]],
+) -> str | None:
+    """Replace named cell tokens, one pass per row, or return None.
+
+    Each item is ``(row_line, cell_index, old, new)``. The row must occur
+    once. The old token must occur once in that cell. Two edits of the same
+    row are applied to the original cells together, so the second edit still
+    finds the line the planner recorded.
+    """
+    if not replacements:
+        return markdown
+    lines = markdown.splitlines()
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    for row_line, cell_index, old, new in replacements:
+        grouped.setdefault(row_line.strip(), []).append((cell_index, old, new))
+    for row_line, edits in grouped.items():
+        hits = [index for index, line in enumerate(lines) if line.strip() == row_line]
+        if len(hits) != 1:
+            return None
+        line_index = hits[0]
+        cells = [cell.strip() for cell in lines[line_index].strip().strip("|").split("|")]
+        seen: set[int] = set()
+        for cell_index, old, new in edits:
+            if cell_index in seen or cell_index < 0 or cell_index >= len(cells):
+                return None
+            seen.add(cell_index)
+            if cells[cell_index].count(old) != 1:
+                return None
+            cells[cell_index] = cells[cell_index].replace(old, new, 1)
+        lines[line_index] = "| " + " | ".join(cells) + " |"
+    return "\n".join(lines)
+
+
+def _bbox_for_word(
+    words: list,
+    x_pos: float,
+    text: str,
+) -> tuple[float, float, float, float] | None:
+    """The word box whose x0 and text are the verifier's own token.
+
+    The verifier stored ``x0`` off this same word list, so the match is
+    identity, not a distance cutoff. Zero or several hits is not a cell.
+    """
+    hits: list[tuple[float, float, float, float]] = []
+    for word in words:
+        x0, y0, x1, y1, token, *_rest = word
+        if token == text and x0 == x_pos:
+            hits.append((x0, y0, x1, y1))
+    if len(hits) != 1:
+        return None
+    return hits[0]

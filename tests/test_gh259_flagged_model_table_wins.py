@@ -349,6 +349,10 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
 
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        # This page's native grid is not what the test is measuring. The
+        # native-first lane would settle it before the stubbed whole-page
+        # read, and this case is the flagged model reading that read produces.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch("socr.pipeline.orchestrator.route_page", side_effect=_rejecting_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
     ):
@@ -830,6 +834,9 @@ def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None
     out_dir = tmp_path / "out"
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        # The native grid exact-passes. This case measures value-drift on the
+        # whole-page candidate, so the native-first lane defers.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
     ):
