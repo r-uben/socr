@@ -1,9 +1,9 @@
 """Upright retry for GH-147 refused born-digital table pages.
 
 After analyze refuses the sideways rowizer output, agentic native-table-first
-re-rowizes upright and runs ``plan_native_table``. An exact pass ships the
-grid without ``route_page``. A fail-closed refusal keeps the D3 floor without
-a whole-page read. ``DEFER`` alone falls through to the existing OCR route.
+re-rowizes upright and runs ``plan_native_table``. Only an exact pass (SHIP)
+ships the grid without ``route_page``. Any other outcome — no grid, read error,
+REFUSE, DEFER, or CELLS — leaves the page on the existing whole-page route.
 """
 
 from __future__ import annotations
@@ -20,10 +20,12 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus
 from socr.pipeline.orchestrator import UnifiedPipeline
+from socr.core.result import PageOutput, PageStatus
+from socr.pipeline.agentic import PageDecision, ProviderAttempt
 from socr.tables.native_first import (
     REFUSE,
     SHIP,
-    NativeTableFirstWork,
+    RotatedNativeTableAttempt,
     NativeTablePlan,
     attempt_rotated_native_table,
 )
@@ -143,18 +145,42 @@ class TestAgenticRotatedNativeTableFirst:
         assert "landscape_page_refused" in kinds
         assert "native_table_exact_pass" in kinds
 
-    def test_upright_refuse_keeps_floor_without_route_page(self, tmp_path: Path) -> None:
+    def test_upright_failed_check_calls_route_page(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated.pdf"
         _rotated_dense_forecast_pdf(pdf_path)
         pipeline = UnifiedPipeline(_config())
         route_calls: list[int] = []
 
-        def _route(*_args, **_kwargs):
-            route_calls.append(1)
-            raise AssertionError("fail-closed refusal must not call route_page")
+        def _route(page_num, ladder, run_provider, judge, **kwargs):
+            route_calls.append(page_num)
+            rejected = PageOutput(
+                page_num=page_num,
+                text="model table",
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+                audit_passed=True,
+            )
+            prof = ladder[0]
+            att = ProviderAttempt(
+                engine=prof.engine,
+                output=rejected,
+                cost_usd=0.0,
+                accepted=True,
+                reason="test",
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
+            )
+            return PageDecision(
+                page_num=page_num, final_output=rejected, attempts=[att], accepted=True
+            )
 
-        refuse_work = NativeTableFirstWork(
-            NativeTablePlan(REFUSE, reason="upright_row_count"),
+        refuse_attempt = RotatedNativeTableAttempt(
+            plan=NativeTablePlan(REFUSE, reason="row_count"),
+            markdown="| a | b |\n| --- | --- |\n| 1 | 2 |",
+            words=[],
+            structure_defective=False,
+            header_unattributed=False,
         )
 
         with (
@@ -162,10 +188,71 @@ class TestAgenticRotatedNativeTableFirst:
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
-            patch.object(pipeline, "_plan_native_table_first", return_value=refuse_work),
+            patch(
+                "socr.tables.native_first.attempt_rotated_native_table",
+                return_value=refuse_attempt,
+            ),
         ):
             result = pipeline.process(pdf_path, tmp_path / "out")
-        assert route_calls == []
-        fragment = next((tmp_path / "out").rglob("pages/00001.md")).read_text(encoding="utf-8")
-        assert "unverifiable table" in fragment
-        assert result.status != DocumentStatus.SUCCESS
+        assert route_calls == [1]
+        assert "native_table_exact_pass" not in (result.markdown or "")
+        sidecar = json.loads(
+            next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
+        )
+        assert "native_table_cell_unresolved" not in [ev["kind"] for ev in sidecar["audit_events"]]
+
+    @pytest.mark.skipif(
+        not Path(
+            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
+            "fed-minutes-example/fomcminutes20190619.pdf"
+        ).is_file(),
+        reason="FOMC fixture not present in the project store",
+    )
+    def test_fomc_page_14_reaches_route_page(self, tmp_path: Path) -> None:
+        pdf = Path(
+            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
+            "fed-minutes-example/fomcminutes20190619.pdf"
+        )
+        single = tmp_path / "fomc-p14.pdf"
+        src = fitz.open(pdf)
+        doc = fitz.open()
+        doc.insert_pdf(src, from_page=13, to_page=13)
+        doc.save(single)
+        doc.close()
+        src.close()
+
+        pipeline = UnifiedPipeline(_config())
+        route_calls: list[int] = []
+
+        def _route(page_num, ladder, run_provider, judge, **kwargs):
+            route_calls.append(page_num)
+            rejected = PageOutput(
+                page_num=page_num,
+                text="",
+                status=PageStatus.ERROR,
+                engine="qwen",
+                audit_passed=False,
+            )
+            prof = ladder[0]
+            att = ProviderAttempt(
+                engine=prof.engine,
+                output=rejected,
+                cost_usd=0.0,
+                accepted=False,
+                reason="test",
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
+            )
+            return PageDecision(
+                page_num=page_num, final_output=rejected, attempts=[att], accepted=False
+            )
+
+        with (
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+        ):
+            pipeline.process(single, tmp_path / "out")
+        assert route_calls == [1]

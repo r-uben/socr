@@ -10076,6 +10076,7 @@ class UnifiedPipeline:
 
         if self._is_rotated_native_table_lane_page(page_num, ps):
             from socr.core.pdf import open_pdf
+            from socr.tables.native_first import SHIP
 
             try:
                 with open_pdf(state.handle.path) as doc:
@@ -10086,12 +10087,11 @@ class UnifiedPipeline:
                     page_num,
                     exc,
                 )
-                return NativeTableFirstWork(NativeTablePlan(REFUSE, reason="text layer unreadable"))
-            if attempt is None:
-                return NativeTableFirstWork(
-                    NativeTablePlan(REFUSE, reason="upright_no_grid"),
-                )
-            if attempt.plan.action == DEFER:
+                return None
+            if attempt is None or attempt.plan.action != SHIP:
+                # REFUSE, DEFER, CELLS, or no grid: keep the page on
+                # ``route_page``. CELLS is excluded until crops and the
+                # post-repair verifier use the upright word frame.
                 return None
             return NativeTableFirstWork(
                 attempt.plan,
