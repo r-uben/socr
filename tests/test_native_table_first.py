@@ -28,6 +28,7 @@ from socr.tables.native_first import (
     REFUSE,
     SHIP,
     plan_native_table,
+    retained_prose_survives,
     splice_cell_tokens,
     transcription_matches_native,
 )
@@ -172,6 +173,21 @@ class TestPlanNativeTable:
         assert plan.action == DEFER
         assert plan.cells == ()
 
+    def test_retained_prose_survives_requires_every_spliced_line(self) -> None:
+        retained = (
+            "Table 1. GDP growth forecasts across baseline and shock scenarios.\n"
+            "* Forecasts are annualized percent changes."
+        )
+        table = "| GDP | 0.253 |\n| --- | --- |\n"
+        composed = "Table 1. GDP growth forecasts across baseline and shock scenarios.\n\n" + table
+        assert not retained_prose_survives(composed, retained, table_markdown=table)
+        composed_with_note = (
+            "Table 1. GDP growth forecasts across baseline and shock scenarios.\n"
+            "* Forecasts are annualized percent changes.\n\n"
+            + table
+        )
+        assert retained_prose_survives(composed_with_note, retained, table_markdown=table)
+
     def test_splice_replaces_only_the_named_cell(self) -> None:
         markdown = "| GDP | 9.999 | 0.179 |\n| --- | --- | --- |\n| CPI | 0.144 | 0.135 |\n"
         # The data row is the line the planner saw. Header is not a data row;
@@ -200,9 +216,14 @@ class TestAgenticNativeTableFirst:
         assert route_calls == []
         assert transcribe_calls == []
         assert result.status == DocumentStatus.SUCCESS
-        assert "0.253" in (result.markdown or "")
-        assert "9.999" not in (result.markdown or "")
-        assert "| GDP |" in (result.markdown or "")
+        body = result.markdown or ""
+        assert "0.253" in body
+        assert "9.999" not in body
+        assert "| GDP |" in body
+        assert "Table 1." in body
+        assert "GDP growth forecasts across baseline and shock scenarios." in body or (
+            "Table 1. GD" in body
+        )
 
     def test_failing_cell_is_transcribed_and_not_the_whole_page(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "forecast.pdf"

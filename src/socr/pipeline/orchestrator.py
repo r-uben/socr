@@ -10105,7 +10105,9 @@ class UnifiedPipeline:
                 # ``route_page``. CELLS is excluded until crops and the
                 # post-repair verifier use the upright word frame.
                 return None
-            if not retained_prose_survives(composed, retained):
+            if not retained_prose_survives(
+                composed, retained, table_markdown=attempt.markdown
+            ):
                 return None
             return NativeTableFirstWork(
                 attempt.plan,
@@ -10113,7 +10115,9 @@ class UnifiedPipeline:
                 structure_defective=attempt.structure_defective,
                 header_unattributed=attempt.header_unattributed,
                 orphan_word_drops=attempt.orphan_drops,
-                clear_ocr_enhancement=retained_prose_survives(composed, retained),
+                clear_ocr_enhancement=retained_prose_survives(
+                    composed, retained, table_markdown=attempt.markdown
+                ),
             )
 
         if not self._is_native_table_first_candidate(page_num, ps):

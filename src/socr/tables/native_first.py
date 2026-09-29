@@ -169,12 +169,7 @@ def compose_upright_shipped_page(page, regions: list) -> str:
     return BornDigitalDetector().interleave_table_regions_into_page(page, list(regions))
 
 
-def splice_retained_prose_beside_table(
-    retained: str,
-    table_markdown: str,
-    interleaved: str,
-) -> str:
-    """Prepend GH-147 prose lines that the upright grid does not already carry."""
+def _markdown_table_tokens(table_markdown: str) -> set[str]:
     table_tokens: set[str] = set()
     for line in (table_markdown or "").splitlines():
         stripped = line.strip()
@@ -184,14 +179,17 @@ def splice_retained_prose_beside_table(
             token = cell.strip()
             if token:
                 table_tokens.add(token)
-    extra: list[str] = []
+    return table_tokens
+
+
+def retained_prose_lines_to_keep(retained: str, table_markdown: str) -> list[str]:
+    """GH-147 prose lines ``splice_retained_prose_beside_table`` may prepend."""
+    table_tokens = _markdown_table_tokens(table_markdown)
+    kept: list[str] = []
     seen: set[str] = set()
-    body = interleaved or ""
     for line in (retained or "").splitlines():
         stripped = line.strip()
         if not stripped or stripped in seen:
-            continue
-        if stripped in body:
             continue
         if stripped in table_tokens:
             continue
@@ -201,21 +199,34 @@ def splice_retained_prose_beside_table(
             continue
         words = stripped.split()
         if stripped.startswith("Table ") or len(words) >= 2 or len(stripped) >= 12:
-            extra.append(stripped)
+            kept.append(stripped)
             seen.add(stripped)
+    return kept
+
+
+def splice_retained_prose_beside_table(
+    retained: str,
+    table_markdown: str,
+    interleaved: str,
+) -> str:
+    """Prepend GH-147 prose lines that the upright grid does not already carry."""
+    body = interleaved or ""
+    extra = [line for line in retained_prose_lines_to_keep(retained, table_markdown) if line not in body]
     if not extra:
         return body
     return "\n".join(extra + ["", body]).strip()
 
 
-def retained_prose_survives(composed: str, retained: str) -> bool:
-    """Whether title/prose lines GH-147 kept are still present after splicing."""
+def retained_prose_survives(
+    composed: str,
+    retained: str,
+    *,
+    table_markdown: str = "",
+) -> bool:
+    """Whether every retained prose line the splice keeps is still in *composed*."""
     composed_text = composed or ""
-    for line in (retained or "").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("Table ") and stripped not in composed_text:
+    for line in retained_prose_lines_to_keep(retained, table_markdown):
+        if line not in composed_text:
             return False
     return True
 

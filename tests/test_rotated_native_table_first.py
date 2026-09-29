@@ -42,6 +42,13 @@ def _rotated_dense_forecast_pdf(path: Path) -> None:
         fontname="helv",
         rotate=90,
     )
+    page.insert_text(
+        (72, 400),
+        "* Forecasts are annualized percent changes.",
+        fontsize=9,
+        fontname="helv",
+        rotate=90,
+    )
     col_xs = [90.0, 180.0, 270.0, 360.0, 450.0]
     headers = ["Variable", "b", "s", "h", "q"]
     for ci, hdr in enumerate(headers):
@@ -143,6 +150,7 @@ class TestAgenticRotatedNativeTableFirst:
         assert "GDP growth forecasts across baseline and shock scenarios." in body or (
             "Table 1. GD" in body
         )
+        assert "Forecasts are annualized percent changes." in body
         sidecar = json.loads(
             next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
         )
