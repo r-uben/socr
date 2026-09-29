@@ -10036,17 +10036,26 @@ class UnifiedPipeline:
     def _is_native_table_first_candidate(self, page_num: int, ps: PageState) -> bool:
         """Born-digital table page whose structured grid may be read before a VLM.
 
-        Same eligibility as the free native lane, plus a detected table. A
-        rotated table (``needs_ocr_enhancement``) stays on the existing
-        whole-page route: the rowizer already refuses that text layer.
-        ``--native-only`` returns eligible before that check, so the
-        enhancement flag is tested here on its own.
+        Same eligibility as the free native lane, plus a detected table.
+        Rotated tables refused in ``born_digital.py`` are handled by
+        ``_is_rotated_native_table_lane_page`` instead. ``--native-only``
+        returns eligible before the enhancement check, so that flag is tested
+        here on its own.
         """
         if ps.needs_ocr_enhancement:
             return False
         return self._is_native_eligible_without_ocr(page_num, ps) and self._page_has_tables(
             page_num, ps
         )
+
+    def _is_rotated_native_table_lane_page(self, page_num: int, ps: PageState) -> bool:
+        """GH-147 table page whose sideways text layer was refused at analyze."""
+        if not self.config.native_first or not ps.is_born_digital:
+            return False
+        if not self._page_has_tables(page_num, ps):
+            return False
+        pa = self._assessment_for_page(page_num)
+        return bool(pa and getattr(pa, "native_table_lane_refused", False))
 
     def _plan_native_table_first(self, state: DocumentState, page_num: int, ps: PageState):
         """The native-grid plan for one OCR page, or None when the lane defers.
@@ -10056,7 +10065,40 @@ class UnifiedPipeline:
         to invent a grid, and it is not a reason to hand the page to a model
         that would replace a number this lane never saw.
         """
-        from socr.tables.native_first import DEFER, REFUSE, NativeTablePlan, plan_native_table
+        from socr.tables.native_first import (
+            DEFER,
+            REFUSE,
+            NativeTableFirstWork,
+            NativeTablePlan,
+            attempt_rotated_native_table,
+            plan_native_table,
+        )
+
+        if self._is_rotated_native_table_lane_page(page_num, ps):
+            from socr.core.pdf import open_pdf
+
+            try:
+                with open_pdf(state.handle.path) as doc:
+                    attempt = attempt_rotated_native_table(doc[page_num - 1])
+            except Exception as exc:
+                logger.warning(
+                    "native table upright: text layer unreadable on p%d (%s)",
+                    page_num,
+                    exc,
+                )
+                return NativeTableFirstWork(NativeTablePlan(REFUSE, reason="text layer unreadable"))
+            if attempt is None:
+                return NativeTableFirstWork(
+                    NativeTablePlan(REFUSE, reason="upright_no_grid"),
+                )
+            if attempt.plan.action == DEFER:
+                return None
+            return NativeTableFirstWork(
+                attempt.plan,
+                markdown=attempt.markdown,
+                structure_defective=attempt.structure_defective,
+                header_unattributed=attempt.header_unattributed,
+            )
 
         if not self._is_native_table_first_candidate(page_num, ps):
             return None
@@ -10071,7 +10113,7 @@ class UnifiedPipeline:
                 page_num,
                 exc,
             )
-            return NativeTablePlan(REFUSE, reason="text layer unreadable")
+            return NativeTableFirstWork(NativeTablePlan(REFUSE, reason="text layer unreadable"))
         orphans = [
             str(drop.get("word", ""))
             for drop in (ps.orphan_word_drops or [])
@@ -10091,14 +10133,31 @@ class UnifiedPipeline:
         )
         if plan.action == DEFER:
             return None
-        return plan
+        return NativeTableFirstWork(plan)
+
+    def _stage_native_table_first_markdown(self, ps: PageState, work) -> None:
+        """Apply an upright grid snapshot before native selection runs."""
+        from socr.core.state import canonical_native_text
+
+        markdown = getattr(work, "markdown", None)
+        if not markdown:
+            return
+        identities = list(getattr(ps, "native_table_region_identities", []) or [])
+        ps.native_text, identities = canonical_native_text(markdown, identities)
+        ps.native_table_region_identities = identities
+        if work.structure_defective is not None:
+            ps.native_table_structure_defective = bool(work.structure_defective)
+        if work.header_unattributed is not None:
+            ps.native_table_header_unattributed = bool(work.header_unattributed)
+        ps.needs_ocr_enhancement = False
+        self._refresh_native_table_identities(ps, ps.native_text or "")
 
     def _apply_native_table_first(
         self,
         state: DocumentState,
         page_num: int,
         ps: PageState,
-        plan,
+        work,
         figures_dir: Path | None,
     ) -> None:
         """Ship an exact-pass grid, repair named cells, or refuse the table.
@@ -10110,17 +10169,27 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
         from socr.tables.native_first import CELLS, SHIP
 
+        plan = work.plan
+        self._stage_native_table_first_markdown(ps, work)
+
         if plan.action == SHIP:
             self._agentic_native_page(state, page_num, ps)
+            detail = (
+                "born-digital table exact-passed the native verifier after "
+                "upright rowization; structured grid shipped without a "
+                "whole-page read"
+                if getattr(work, "markdown", None)
+                else (
+                    "born-digital table exact-passed the native verifier; "
+                    "structured grid shipped without a whole-page read"
+                )
+            )
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind="native_table_exact_pass",
                     engine="native",
-                    detail=(
-                        "born-digital table exact-passed the native verifier; "
-                        "structured grid shipped without a whole-page read"
-                    ),
+                    detail=detail,
                 )
             )
             return
