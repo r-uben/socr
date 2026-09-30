@@ -306,3 +306,14 @@ def test_grid_unchanged_on_gh342_gutter_marker_fixture() -> None:
     assert [md for _, md in with_wiring] == [md for _, md in without], (
         "wiring orphan_drops changed shipped markdown on the GH-342 fixture"
     )
+
+
+def test_no_orphan_drop_detail_claims_the_table_shipped():
+    """PR #907 review: ``orphan_word_dropped`` fires before selection decides
+    what ships (at analysis time and in native-table-first), so neither emit
+    site may assert that the table shipped."""
+    import inspect
+
+    from socr.pipeline import orchestrator
+
+    assert "shipped without them" not in inspect.getsource(orchestrator)
