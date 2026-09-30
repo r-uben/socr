@@ -73,7 +73,11 @@ def check_ollama_model(model_name: str) -> str | None:
             return f"{_UNREACHABLE_MSG} (HTTP {resp.status_code} from /api/tags)"
         # ``null`` is how older Ollama reports an empty store: nothing pulled,
         # so "not found", not "unreadable".
-        models = resp.json()["models"] or []
+        models = resp.json()["models"]
+        if models is None:
+            models = []
+        if not isinstance(models, list):
+            raise TypeError(f"/api/tags 'models' is {type(models).__name__}, not a list")
         names: set[str] = set()
         for entry in models:
             for key in ("name", "model"):

@@ -119,7 +119,18 @@ def test_httpx_timeout(http):
     assert err is not None and "timeout" in err.lower()
 
 
-@pytest.mark.parametrize("body", [b"not json", b"[]", b'{"nope": 1}', b'{"models": 3}'])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"[]",
+        b'{"nope": 1}',
+        b'{"models": 3}',
+        b'{"models": false}',
+        b'{"models": {}}',
+        b'{"models": ""}',
+    ],
+)
 def test_malformed_json(http, body):
     http.result = httpx.Response(
         200, content=body, request=httpx.Request("GET", "http://x/api/tags")
