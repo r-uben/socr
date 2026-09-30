@@ -737,7 +737,8 @@ def verify_scanned_table(
 def _keep_when_stored_words_unusable(page, output_text: str) -> SourceEvidenceResult | None:
     """Keep a model table when stored words cannot witness it and pixels do not refute it.
 
-    Returns ``None`` when the page has no stored words, when row corroboration
+    Returns ``None`` when the page has no stored words, when the candidate has
+    no numeric body token to corroborate, when row corroboration
     finds a positive numeric mismatch (``EXTRA_NUMBERS_MAX_SHARE``), or when
     every candidate number is absent from the layer. Only returns a passed,
     flagged verdict — never strengthens a rejection.
@@ -754,15 +755,15 @@ def _keep_when_stored_words_unusable(page, output_text: str) -> SourceEvidenceRe
     from socr.tables.row_corroboration import EXTRA_NUMBERS_MAX_SHARE, corroborate_rows
 
     rc = corroborate_rows(words, output_text, None)
+    # cubic P1 (#907): with no candidate numeric body token the numeric
+    # refutation guards below never run, so nothing independent would stand
+    # behind the keep -- an alpha-only table must stay fail-closed.
+    if rc.candidate_numbers == 0:
+        return None
     extra_share = rc.extra_share
     if extra_share is not None and extra_share > EXTRA_NUMBERS_MAX_SHARE:
         return None
-    if (
-        rc.candidate_numbers
-        and len(rc.extra_numbers) == rc.candidate_numbers
-        and rc.bound == 0
-        and rc.total > 0
-    ):
+    if len(rc.extra_numbers) == rc.candidate_numbers and rc.bound == 0 and rc.total > 0:
         return None
 
     reason = (

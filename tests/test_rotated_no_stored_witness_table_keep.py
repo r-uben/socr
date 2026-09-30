@@ -183,6 +183,7 @@ def test_agentic_fomc_page_14_keeps_model_table(tmp_path: Path) -> None:
     with (
         patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch(
             "socr.tables.native_first.attempt_rotated_native_table",
             return_value=None,
@@ -209,3 +210,77 @@ def test_agentic_fomc_page_14_keeps_model_table(tmp_path: Path) -> None:
         if ev["kind"] == "source_evidence_table_label_unverified"
     )
     assert "stored_words_unverified" in detail
+
+
+# --- cubic review fixes on #907 ------------------------------------------------
+
+
+def _rotated_layer_page():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "scrambled layer 1.0 2.0", fontsize=10, rotate=90)
+    return doc, page
+
+
+def test_alpha_only_candidate_is_not_rescued_but_numeric_is() -> None:
+    """P1: the rescue needs an independent numeric body row (difference pin).
+
+    Same page, same no-witness scenario; only the candidate's body differs.
+    """
+    numeric = "| row | a | b |\n| --- | --- | --- |\n| one | 1.0 | 2.0 |"
+    alpha = "| row | a | b |\n| --- | --- | --- |\n| one | yes | no |"
+    doc, page = _rotated_layer_page()
+    try:
+        verdicts = {}
+        for name, table in (("numeric", numeric), ("alpha", alpha)):
+            verdicts[name] = verify_scanned_table(
+                page, table, ocr_image_fn=_empty_pixel_witness, native_trusted=False
+            )
+    finally:
+        doc.close()
+    assert verdicts["numeric"].passed, verdicts["numeric"].reason
+    assert "stored_words_unverified" in verdicts["numeric"].content_unverified
+    assert not verdicts["alpha"].passed, verdicts["alpha"].reason
+    assert not verdicts["alpha"].content_unverified
+
+
+def _judge_over(page, events: list) -> SourceEvidenceTableJudge:
+    return SourceEvidenceTableJudge(
+        inner=type(
+            "Inner",
+            (),
+            {
+                "assess": staticmethod(
+                    lambda output, provider: AcceptDecision(accept=True, reason="inner ok")
+                )
+            },
+        )(),
+        get_fitz_page=lambda _pn: page,
+        record_event=events.append,
+        ocr_image_fn=_empty_pixel_witness,
+        native_trusted=lambda _pn: False,
+    )
+
+
+def test_rescue_path_runs_the_string_only_structural_gate() -> None:
+    """P2: a malformed flagged table is rejected; a well-formed one passes."""
+    well_formed = "| row | a | b |\n| --- | --- | --- |\n| one | 1.0 | 2.0 |"
+    ragged = "| row | a | b |\n| --- | --- | --- |\n| one | 1.0 | 2.0 |\n| two |"
+    doc, page = _rotated_layer_page()
+    try:
+        decisions = {}
+        events: dict[str, list] = {}
+        for name, table in (("ok", well_formed), ("ragged", ragged)):
+            events[name] = []
+            output = PageOutput(
+                page_num=1, text=table, status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+            )
+            decisions[name] = _judge_over(page, events[name]).assess(output, PROFILE_QWEN_LOCAL)
+            # Both took the stored-words rescue path (the flag is set on both).
+            assert "stored_words_unverified" in output.table_label_unverified, name
+    finally:
+        doc.close()
+    assert decisions["ok"].accept is True
+    assert decisions["ragged"].accept is False
+    assert decisions["ragged"].reason.startswith("table_structure_failed")
+    assert any(e.kind == "table_structure_failed" for e in events["ragged"])

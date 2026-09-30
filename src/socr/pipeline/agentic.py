@@ -764,7 +764,26 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             if result.content_unverified.startswith(STORED_WORDS_UNVERIFIED_PREFIX):
                 # Rotated native-table-first: the stored layer is not a witness
                 # and the native geometry verifier cannot adjudicate the model
-                # grid — shipping it here is the point of the rescue.
+                # grid — shipping it here is the point of the rescue. Native
+                # GEOMETRY verification stays bypassed, but the string-only
+                # structural gate (ragged / detached-label / malformed grids)
+                # needs no page and runs first (cubic P2 on #907).
+                from socr.tables.structure_check import table_output_defect
+
+                defect = table_output_defect(output.text, None, None)
+                if defect:
+                    self._emit_event(
+                        page_num=page_num,
+                        kind="table_structure_failed",
+                        engine=output.engine or "",
+                        detail=defect,
+                        data={"defect": defect},
+                    )
+                    return AcceptDecision(
+                        accept=False,
+                        reason=f"table_structure_failed: {defect}",
+                        confidence=0.0,
+                    )
                 return AcceptDecision(
                     accept=True,
                     reason=f"source_evidence_table: {result.reason}",

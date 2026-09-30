@@ -123,6 +123,7 @@ def _run(pdf_path: Path, tmp_path: Path, *, transcribe=None, native_text=None):
     with (
         patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch.object(pipeline, "_transcribe_cell_token", side_effect=_transcribe),
     ):
         result = pipeline.process(pdf_path, tmp_path / "out")
@@ -205,6 +206,28 @@ class TestPlanNativeTable:
         assert not transcription_matches_native("9.999", "0.253", "9.999")
         assert not transcription_matches_native("1.000", "0.253", "9.999")
         assert not transcription_matches_native("  ", "0.253", "9.999")
+
+
+class TestOrphanDropEventIsOutcomeNeutral:
+    def test_refused_plan_does_not_claim_the_table_shipped(self) -> None:
+        """cubic P2 on #907: the drop event is emitted before the plan is acted on."""
+        from types import SimpleNamespace
+
+        pipeline = UnifiedPipeline(_config())
+        state = SimpleNamespace(events=[])
+        work = SimpleNamespace(
+            plan=SimpleNamespace(action=REFUSE),
+            orphan_word_drops=[{"word": "n.a."}],
+            markdown=None,
+        )
+        ps = SimpleNamespace()
+        with patch.object(pipeline, "_refuse_native_table_first") as refuse:
+            pipeline._apply_native_table_first(state, 1, ps, work, None)
+        refuse.assert_called_once()
+        kinds = [e.kind for e in state.events]
+        assert kinds == ["orphan_word_dropped"], kinds
+        assert "shipped" not in state.events[0].detail
+        assert "n.a." in state.events[0].detail
 
 
 class TestAgenticNativeTableFirst:

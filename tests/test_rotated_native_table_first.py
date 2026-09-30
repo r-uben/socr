@@ -140,6 +140,7 @@ class TestAgenticRotatedNativeTableFirst:
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
         ):
             result = pipeline.process(pdf_path, tmp_path / "out")
         assert route_calls == []
@@ -201,6 +202,7 @@ class TestAgenticRotatedNativeTableFirst:
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
             patch(
                 "socr.tables.native_first.attempt_rotated_native_table",
                 return_value=refuse_attempt,
@@ -208,11 +210,14 @@ class TestAgenticRotatedNativeTableFirst:
         ):
             result = pipeline.process(pdf_path, tmp_path / "out")
         assert route_calls == [1]
-        assert "native_table_exact_pass" not in (result.markdown or "")
         sidecar = json.loads(
             next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
         )
-        assert "native_table_cell_unresolved" not in [ev["kind"] for ev in sidecar["audit_events"]]
+        kinds = [ev["kind"] for ev in sidecar["audit_events"]]
+        # The event lives in the sidecar's audit_events, not in the markdown:
+        # a REFUSE plan must not record an exact-pass claim.
+        assert "native_table_exact_pass" not in kinds
+        assert "native_table_cell_unresolved" not in kinds
 
     @pytest.mark.skipif(
         not Path(
@@ -266,6 +271,7 @@ class TestAgenticRotatedNativeTableFirst:
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
         ):
             pipeline.process(single, tmp_path / "out")
         assert route_calls == [1]

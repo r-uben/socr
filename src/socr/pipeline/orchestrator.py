@@ -10224,8 +10224,9 @@ class UnifiedPipeline:
                     detail=(
                         f"{len(drops)} word(s) dropped by the word-geometry table rowizer "
                         f"(further than the snap radius from every column lane): "
-                        f"{', '.join(words)}. The table shipped without them -- no cell "
-                        "carries this content."
+                        f"{', '.join(words)}. The rowized grid carries no cell with this "
+                        "content; whether that grid ships is recorded by the "
+                        "native_table_* events, not by this one."
                     ),
                     data={"dropped_count": len(drops), "words": words},
                 )

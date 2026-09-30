@@ -834,8 +834,10 @@ def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None
     out_dir = tmp_path / "out"
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
-        # The native grid exact-passes. This case measures value-drift on the
-        # whole-page candidate, so the native-first lane defers.
+        # Forced bypass: production plans an exact-passing native grid as SHIP
+        # (which would skip route_page). Mocking the planner to None sends the
+        # page down the whole-page route so the value-drift case is reached;
+        # this does NOT exercise the production exact-pass path.
         patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
