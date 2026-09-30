@@ -46,7 +46,9 @@ from socr.core.normalizer import (
 )
 from socr.core.providers import (
     ProviderProfile,
+    cloud_pinned_qwen_refusal,
     execution_overrides,
+    is_cloud_model,
     is_cloud_qwen,
     profile_by_id,
     profile_by_model,
@@ -85,7 +87,7 @@ from socr.judge.table_verdict import (
     RUNG_KIND_OLLAMA,
     rung_kind,
 )
-from socr.pipeline.agentic import route_page
+from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT, route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
@@ -797,6 +799,10 @@ class UnifiedPipeline:
     # #842: once-per-pipeline guard for ``_report_unservable_engines``; class
     # level for the same ``object.__new__`` reason as the caches around it.
     _warned_unservable_engines: bool = False
+    #: GH-905: why a pinned cloud qwen model was found unavailable by its own
+    #: generation probe ("" when it was not, or none is pinned); surfaced by
+    #: ``_refuse_cloud_pinned_qwen_rung``.
+    _qwen_cloud_pin_unavailable: str = ""
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -2428,7 +2434,7 @@ class UnifiedPipeline:
         from socr.core.providers import zero_cap_pinned_forbids_cloud
 
         model = self.config.math_model or ""
-        is_cloud = "cloud" in model.casefold()
+        is_cloud = is_cloud_model(model)
         if self.config.strict_local and is_cloud:
             return f"model call skipped: strict-local forbids remote model {model}"
         if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
@@ -2840,7 +2846,7 @@ class UnifiedPipeline:
         from socr.math.recover import DEFAULT_MODEL
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
-        is_cloud = "cloud" in model.casefold()
+        is_cloud = is_cloud_model(model)
         if self.config.strict_local and is_cloud:
             return None, f"model call skipped: strict-local forbids remote model {model}"
         if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
@@ -8622,6 +8628,7 @@ class UnifiedPipeline:
 
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
+        available = self._refuse_cloud_pinned_qwen_rung(state, available)
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -8971,6 +8978,17 @@ class UnifiedPipeline:
                             att.output.skip_reason = (
                                 att.reason if not att.accepted and not att.output.text else ""
                             )  # B3
+                            # GH-905: a rung whose CLI/HTTP call FAILED returns an ERROR
+                            # PageOutput whose ``error`` holds the cause (e.g. "CLI exited
+                            # 1: ... '410 Gone' ..."). The judge only sees "empty/error
+                            # output", so that generic string was all the manifest journal
+                            # (``reason``) kept, and the cause survived on the console
+                            # alone. Fold the provider's own error into the journaled
+                            # reason so the failure is durable at the level that already
+                            # records why the ladder escalated past this rung.
+                            att.output.skip_reason = self._skip_reason_with_provider_error(
+                                att.output
+                            )
                             # GH-169: keep the judge's verdict for EVERY attempt, not
                             # only the ones whose output was empty. A provider whose
                             # reading the judge refused journaled reason "none", so the
@@ -10374,34 +10392,31 @@ class UnifiedPipeline:
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
-        Returns a list of ``ProviderProfile`` objects (not EngineType values) so
-        that two profiles sharing the same ``EngineType`` — e.g. QWEN local and
-        QWEN cloud — can appear as distinct rungs in the ladder. Pass the result
-        directly to ``provider_ladder()`` which accepts ``list[ProviderProfile]``.
+        Returns a list of ``ProviderProfile`` objects (not EngineType values), the
+        shape ``provider_ladder()`` accepts directly.
 
-        GH-46-E2: ``DEFAULT_PROVIDERS`` is keyed by ``EngineType`` and therefore
-        holds at most one profile per engine — ``EngineType.QWEN`` maps to
-        ``PROFILE_QWEN_LOCAL``. Iterating it alone could never emit the cloud
-        rung, so the declared local -> Ollama-Cloud -> Gemini ladder had no
-        middle rung despite this docstring promising one. The cloud profile is
-        appended from its own probe instead. ``DEFAULT_PROVIDERS`` is left alone:
-        the same-EngineType collision there is deliberate and documented.
-
-        The two QWEN rungs are probed INDEPENDENTLY. A machine with the cloud
-        model but no local pull gets the cloud rung alone; a machine with only
-        the local build gets the local rung alone. Neither gates the other.
+        GH-905: the default ladder is local qwen -> marker -> gemini. The
+        Ollama-Cloud qwen rung (``PROFILE_QWEN_CLOUD``) that GH-46-E2 added as
+        a middle rung is NOT emitted any more. Its only model, ``qwen3.5:cloud``,
+        was retired by Ollama Cloud on 2026-09-25 (every call 410 Gone) while
+        ``ollama list`` kept listing it, so the rung was attempted -- and failed
+        instantly -- on every escalated page. No replacement cloud model has
+        been measured, so none is substituted. An operator who wants a cloud
+        Qwen model pins it explicitly (``--qwen-model <tag>:cloud``, honoured
+        verbatim by ``resolve_qwen_intent`` on the local rung).
 
         Tier filtering (``--strict-local``) is NOT applied here — it stays in the
         caller (``_phase_agentic``), which is the only place that knows the run's
         policy. This function reports reachability, not eligibility.
         """
-        from socr.core.providers import DEFAULT_PROVIDERS, PROFILE_QWEN_CLOUD
-        from socr.engines.qwen import cloud_model_available
+        from socr.core.providers import DEFAULT_PROVIDERS
 
+        from socr.engines.qwen import pinned_cloud_model_available, pinned_cloud_qwen_model
         from socr.engines.registry import has_cli_engine
 
         available = []
         unservable: list[EngineType] = []
+        self._qwen_cloud_pin_unavailable = ""
         for engine_type in self.config.enabled_engines:
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
@@ -10413,19 +10428,104 @@ class UnifiedPipeline:
             if not has_cli_engine(engine_type):
                 unservable.append(engine_type)
                 continue
+            if engine_type is EngineType.QWEN and pinned_cloud_qwen_model(self.config):
+                # GH-905 (cubic P1): an explicit cloud pin is judged on THAT model,
+                # not on the local build. Policy comes first: a refused pin keeps
+                # the rung in ``available`` so ``_refuse_cloud_pinned_qwen_rung``
+                # drops it AND surfaces why (dropping it here would be silent).
+                try:
+                    if cloud_pinned_qwen_refusal(self.config):
+                        available.append(prof)
+                    else:
+                        ok, reason = pinned_cloud_model_available(self.config)
+                        if ok:
+                            available.append(prof)
+                        else:
+                            self._qwen_cloud_pin_unavailable = reason
+                except Exception:  # availability probe must never crash routing
+                    pass
+                continue
             try:
                 if get_engine(engine_type).is_available():
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
-                pass  # NOT `continue` — the cloud probe below is independent
-            if engine_type is EngineType.QWEN:
-                try:
-                    if cloud_model_available():
-                        available.append(PROFILE_QWEN_CLOUD)
-                except Exception:  # same rule: a probe must never crash routing
-                    pass
+                pass
         self._report_unservable_engines(unservable)
         return available
+
+    #: GH-905: cap on the provider error folded into a journaled ``skip_reason``.
+    #: CLI stderr can be long and multi-line, and this string is copied into every
+    #: journal entry and page sidecar. The CLI layer already truncates stderr to
+    #: 500 characters (``engines/base.py``); this reuses that bound so one failing
+    #: rung cannot inflate every record beyond what the CLI itself keeps.
+    _SKIP_REASON_ERROR_MAX_CHARS = 500
+
+    @classmethod
+    def _skip_reason_with_provider_error(cls, output) -> str:
+        """``output.skip_reason`` with the provider's own error folded in (GH-905).
+
+        Only for an unaccepted ERROR output with no text whose reason exists. The
+        error is flattened to one line and capped at ``_SKIP_REASON_ERROR_MAX_CHARS``;
+        it is not appended when the reason already carries it (a timeout's reason
+        is ``provider timeout`` and its error ``qwen: timed out after Ns``: the
+        reason already says so).
+        """
+        reason = output.skip_reason
+        if not (reason and output.status is PageStatus.ERROR and output.error):
+            return reason
+        if reason == REASON_PROVIDER_TIMEOUT:
+            return reason
+        error = " ".join(str(output.error).split())
+        if len(error) > cls._SKIP_REASON_ERROR_MAX_CHARS:
+            error = error[: cls._SKIP_REASON_ERROR_MAX_CHARS] + "..."
+        if error in reason:
+            return reason
+        return f"{reason}: {error}"
+
+    def _refuse_cloud_pinned_qwen_rung(self, state, available: list) -> list:
+        """Drop the qwen rung when its PINNED model is a cloud model the policy forbids.
+
+        GH-905. ``--qwen-model x:cloud`` is the one remaining way to reach a cloud
+        qwen model, and it rides on ``PROFILE_QWEN_LOCAL`` (tier local, $0), which
+        the tier and zero-cap filters wave through. Refusal is surfaced, never
+        silent: a console line plus a document-level ``qwen_cloud_pin_refused``
+        audit event (page 0), the same surface ``judge_degraded_to_heuristic`` uses.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        unavailable = self._qwen_cloud_pin_unavailable
+        if unavailable:
+            self._qwen_cloud_pin_unavailable = ""
+            logger.warning("agentic: pinned cloud qwen model unavailable: %s", unavailable)
+            if not self.config.quiet:
+                console.print(f"  [yellow]qwen rung unavailable: {unavailable}[/yellow]")
+            state.events.append(
+                AuditEvent(
+                    page_num=0,
+                    kind="qwen_cloud_pin_unavailable",
+                    engine="qwen",
+                    detail=unavailable,
+                    data={"qwen_model": self.config.qwen_model, "reason": unavailable},
+                )
+            )
+        if not any(p.engine is EngineType.QWEN for p in available):
+            return available
+        reason = cloud_pinned_qwen_refusal(self.config)
+        if not reason:
+            return available
+        logger.warning("agentic: qwen rung refused: %s", reason)
+        if not self.config.quiet:
+            console.print(f"  [yellow]qwen rung refused: {reason}[/yellow]")
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind="qwen_cloud_pin_refused",
+                engine="qwen",
+                detail=reason,
+                data={"qwen_model": self.config.qwen_model, "reason": reason},
+            )
+        )
+        return [p for p in available if p.engine is not EngineType.QWEN]
 
     def _report_unservable_engines(self, unservable: list) -> None:
         """Say so, once per pipeline, when the operator ASKED for a rung that cannot run.
@@ -10505,7 +10605,7 @@ class UnifiedPipeline:
         forbid_cloud = self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
 
         def _permitted(model: str) -> bool:
-            return "cloud" not in model.casefold() or not forbid_cloud
+            return not is_cloud_model(model) or not forbid_cloud
 
         # GH-873: an operator-named vLLM server replaces the Ollama candidate
         # ladder, exactly as ``--judge-model`` names a model -- the operator has
@@ -10653,7 +10753,7 @@ class UnifiedPipeline:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).
 
         Honors ``strict_local`` and GH-154's zero-cap-pinned policy: cloud judge
-        models (e.g. ``qwen3.5:cloud``) are never used for crop repair under
+        models (any ``:cloud`` tag) are never used for crop repair under
         either — only the local instruct VLM (``qwen3-vl:30b-a3b-instruct``)
         or another explicitly local override.
         """
@@ -16354,9 +16454,9 @@ class UnifiedPipeline:
 
         # GH-36b: use the dedicated clean-equation model field (defaults to
         # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
-        # Do NOT fall back to math_model here: that field defaults to
-        # qwen3.5:cloud for the corrupt-font path and would route every
-        # default-config clean-equation run to a cloud endpoint, violating
+        # Do NOT fall back to math_model here: that field is the
+        # corrupt-font model and may be set to a cloud tag; falling back to it
+        # could route a clean-equation run to a cloud endpoint, violating
         # the consilium local-first mandate (20260615T210537Z-6621).
         model = self.config.clean_equation_model or DEFAULT_MODEL
 
@@ -16366,7 +16466,7 @@ class UnifiedPipeline:
         # cloud override) bypassed both ``--strict-local`` and an EXPLICIT
         # ``--max-cost-per-page 0`` entirely. Same policy, same shared
         # predicate as every other direct-model entry point.
-        if "cloud" in model.casefold() and (
+        if is_cloud_model(model) and (
             self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
         ):
             reason = (

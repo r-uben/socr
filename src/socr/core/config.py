@@ -44,17 +44,18 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 }
 
 # Auto-selection order: try CLI engines until one is available.
-# Local-first -> Ollama Cloud -> paid cloud edge case. Qwen leads because its
-# default backend is qwen3.5:cloud (Ollama Cloud, no extra key): ~0.57 quality
-# at ~49s/page on the owner's Mac and the only engine that cleared all three
-# hard page types (math/table/equation). Gemini is the quality escalation when
+# Local-first -> paid cloud edge case. Qwen leads: its default is the local
+# qwen3-vl:30b-a3b-instruct (free). The 0.57 quality / ~49s-per-page figures
+# that used to justify it were measured on qwen3.5:cloud, which Ollama Cloud
+# retired on 2026-09-25 (GH-905); they are historical, not a claim about the
+# local model. Gemini is the quality escalation when
 # Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench), Mistral (worse AND
 # ~5x pricier than Gemini), and Nougat (GH-637: produced nothing on any table
 # page in the 2026-09-06 ECB defect census, matching D1's auto_eligible=False
 # ruling in providers.py) are deliberately OUT of the auto path; reach them
 # only via an explicit --primary. Empirics in [[reference-sococrbench]].
 AUTO_ENGINE_ORDER: list[EngineType] = [
-    EngineType.QWEN,  # qwen3.5:cloud — practical cheap winner; native PDF-free per-page
+    EngineType.QWEN,  # local qwen3-vl:30b-a3b-instruct — free; native PDF-free per-page
     EngineType.GEMINI,  # Best quality, paid — escalation when Qwen is unavailable
     EngineType.MARKER,  # Local, layout-aware
     EngineType.GLM,  # Local, small model, fast
@@ -159,6 +160,12 @@ _FROM_FILE_REMOVED_FIELDS: dict[str, str] = {
 }
 
 
+#: GH-905: default model for corrupt-font equation-crop recovery
+#: (``PipelineConfig.math_model``): the validated local instruct VLM, the same
+#: one ``clean_equation_model`` and ``socr.math.recover.DEFAULT_MODEL`` use.
+DEFAULT_MATH_MODEL = "qwen3-vl:30b-a3b-instruct"
+
+
 @dataclass
 class PipelineConfig:
     """Single configuration for the socr pipeline.
@@ -209,10 +216,13 @@ class PipelineConfig:
     # region-recovery lane ships by default. Kill switch:
     # ``--no-recover-corrupt-math``.
     recover_corrupt_math: bool = True
-    # qwen3.5:cloud (Ollama Cloud) is the practical winner: reliable on dense
-    # equation regions where local qwen3-vl:30b-a3b-instruct times out, no extra
-    # key.  Override with --math-model qwen3-vl:30b-a3b-instruct for offline runs.
-    math_model: str = "qwen3.5:cloud"  # Ollama Cloud VLM used for equation -> LaTeX
+    # GH-905: local by default. The former default, qwen3.5:cloud (Ollama Cloud),
+    # was retired on 2026-09-25 (every call 410 Gone), so every recovery attempt
+    # failed. qwen3-vl:30b-a3b-instruct is free, needs no egress, and produced
+    # flawless LaTeX in the June 2026 local OCR benchmark. Override with
+    # --math-model for another model; a name containing "cloud" is treated as a
+    # remote model and gated by --strict-local / --max-cost-per-page.
+    math_model: str = DEFAULT_MATH_MODEL
 
     # --- GH-36a: Display-equation region detection (model-free) ---
     # Detect display-equation regions on born-digital pages using PyMuPDF
@@ -239,8 +249,9 @@ class PipelineConfig:
     # Model for the clean-equation crop→LaTeX engine call (GH-36b only).
     # MUST default to the validated local instruct VLM — NEVER to a cloud
     # model — per consilium 20260615T210537Z-6621 (local-first mandate).
-    # Kept separate from ``math_model`` (corrupt-font path) which defaults to
-    # qwen3.5:cloud for historical reasons and operator convenience there.
+    # Both this and ``math_model`` (corrupt-font path) now default to the same
+    # local model (GH-905); they stay separate fields so each lane can be
+    # overridden independently.
     # Override with --clean-equation-model for a different local model or an
     # explicit cloud opt-in.  Never use ":8b" (wrong model tier) or ":30b"
     # (thinking/non-instruct, runs away on dense regions).
@@ -473,7 +484,7 @@ class PipelineConfig:
     # (qwen3-vl:30b-a3b-instruct); cloud or vllm/api paths keep their own defaults.
     qwen_model: str = ""
     # True when the user passed --qwen-model explicitly. The resolver honours this flag
-    # to avoid rewriting a deliberate model pin (e.g. qwen3.5:cloud for cloud-only runs).
+    # to avoid rewriting a deliberate model pin (e.g. a ``:cloud`` tag for cloud-only runs).
     qwen_model_pinned: bool = False
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
