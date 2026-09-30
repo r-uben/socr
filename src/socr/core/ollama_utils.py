@@ -143,7 +143,13 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        sock = socket.socket(family, socktype, proto)
+        # Socket CONSTRUCTION can fail too (descriptor exhaustion, an address
+        # family the host doesn't support); that must degrade to "unreachable",
+        # not raise out of routing (GH-905 round 4, cubic P2).
+        try:
+            sock = socket.socket(family, socktype, proto)
+        except OSError:
+            continue
         try:
             sock.settimeout(remaining)
             sock.connect(sockaddr)
@@ -156,7 +162,15 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
 
 
 def _resolve_within(hostname: str, port: int, timeout: float) -> list | None:
-    """``getaddrinfo`` bounded by *timeout* seconds; ``None`` on failure or expiry."""
+    """``getaddrinfo`` bounded by *timeout* seconds; ``None`` on failure or expiry.
+
+    A lookup that outlives *timeout* leaves its daemon thread running until the
+    system resolver itself gives up. This is deliberate and bounded: availability
+    is resolved once per candidate model per run and then memoized (the judge
+    ladder and the pinned cloud rung), so a stuck resolver costs at most a
+    handful of short-lived threads per run, never one per page, and a daemon
+    thread cannot keep the process alive (GH-905 round 4, cubic P2).
+    """
     box: list = []
 
     def _work() -> None:

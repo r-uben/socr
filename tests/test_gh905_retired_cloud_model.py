@@ -512,3 +512,23 @@ def test_host_reachable_is_bounded_by_a_slow_resolver(monkeypatch):
     start = time.monotonic()
     assert ollama_utils.host_reachable("http://slow-resolver.invalid:11434", timeout=0.2) is False
     assert time.monotonic() - start < 2.0
+
+
+def test_socket_construction_failure_degrades_to_unreachable(monkeypatch):
+    """GH-905 round 4 (cubic P2): an OSError while CONSTRUCTING the socket
+    (e.g. descriptor exhaustion) must read as "unreachable", not raise."""
+    import socket as _socket
+
+    from socr.core import ollama_utils
+
+    monkeypatch.setattr(
+        ollama_utils,
+        "_resolve_within",
+        lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 0, "", ("127.0.0.1", 11434))],
+    )
+
+    def _boom(*a, **k):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(ollama_utils.socket, "socket", _boom)
+    assert ollama_utils.host_reachable("http://127.0.0.1:11434", timeout=0.5) is False

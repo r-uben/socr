@@ -191,3 +191,8 @@ Test count for `test_gh905_retired_cloud_model.py`: 12 (round 1) + 7 (round 2) +
   reaches `check_ollama_model`. Proven by running the file with a temporary autouse guard
   that raises on any `subprocess.run` of the ollama CLI (24 passed, guard removed after).
   The full suite was run with the DEFAULT OLLAMA_HOST, per the #910 instruction.
+
+## Round 4 (2026-09-29): two cubic P2s on 0d779e6
+
+- **Socket construction outside the handler.** `socket.socket(...)` in `host_reachable` could raise `OSError` (descriptor exhaustion, an unsupported address family) and abort routing. It now sits in its own `try` and degrades to "unreachable". Test: `test_socket_construction_failure_degrades_to_unreachable`. Mutation: moving construction back outside the `try` makes the test fail with the raw `OSError` (copy in /tmp, `socr.__file__` canary inside the copy, deleted after).
+- **Resolver thread outliving its deadline.** Accepted as bounded, not redesigned, and documented in `_resolve_within`'s docstring. Availability is resolved once per candidate model per run and then memoized, so a stuck resolver costs at most a handful of daemon threads per run, never one per page, and daemon threads cannot keep the process alive. Putting DNS behind `run_killable` would reintroduce the per-probe process spawn that round 4 of #903 removed to fix the CI slowdown.
