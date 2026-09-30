@@ -262,6 +262,57 @@ def _judge_over(page, events: list) -> SourceEvidenceTableJudge:
     )
 
 
+def test_rotated_refused_unsupported_tokens_keeps_model_table() -> None:
+    """Unsupported OCR tokens on a refused lane are not a witness contradiction."""
+    doc, page = _rotated_layer_page()
+    table = "| row | a | b |\n| --- | --- | --- |\n| one | 1.0 | 2.0 |"
+
+    def _partial_ocr(_pix) -> str:
+        return "prose fragment 999.9"
+
+    try:
+        result = verify_scanned_table(
+            page,
+            table,
+            ocr_image_fn=_partial_ocr,
+            native_trusted=False,
+        )
+        assert result.passed, result.reason
+        assert "stored_words_unverified" in result.content_unverified
+        assert "numeric tokens unsupported" not in result.reason
+    finally:
+        doc.close()
+
+
+def test_unsupported_tokens_still_reject_when_layer_contradicts() -> None:
+    """A usable stored layer that refutes numerics stays fail-closed."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for i in range(3):
+        page.insert_text((72, 100 + i * 20), f"Line {i} 999.9 888.8", fontsize=10)
+    candidate = (
+        "| Counterparty | Amount | Drawn |\n"
+        "| --- | --- | --- |\n"
+        "| Bundesbank | 62.5 | 12.5 |\n"
+        "| Bank of Japan | 67.0 | 15.0 |\n"
+    )
+
+    def _partial_ocr(_pix) -> str:
+        return "OCR noise 12.5"
+
+    try:
+        result = verify_scanned_table(
+            page,
+            candidate,
+            ocr_image_fn=_partial_ocr,
+            native_trusted=False,
+        )
+        assert not result.passed, result.reason
+        assert not result.content_unverified
+    finally:
+        doc.close()
+
+
 def test_rescue_path_runs_the_string_only_structural_gate() -> None:
     """P2: a malformed flagged table is rejected; a well-formed one passes."""
     well_formed = "| row | a | b |\n| --- | --- | --- |\n| one | 1.0 | 2.0 |"

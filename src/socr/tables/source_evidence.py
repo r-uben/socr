@@ -730,6 +730,20 @@ def verify_scanned_table(
             kept = _keep_when_stored_words_unusable(page, output_text)
             if kept is not None:
                 return kept
+    elif (
+        native_trusted is False
+        and result.passed is False
+        and result.verifiable
+        and result.reason.startswith("numeric tokens unsupported by page evidence:")
+    ):
+        # GH-147 / native-table-first: derotated classical OCR may read prose or
+        # partial digits while the distrusted stored layer is excluded from the
+        # bundle. That "unsupported" verdict is not a positive contradiction —
+        # only row corroboration against the stored layer may refute (same
+        # guards as ``_keep_when_stored_words_unusable``).
+        kept = _keep_when_stored_words_unusable(page, output_text)
+        if kept is not None:
+            return kept
 
     return result
 
