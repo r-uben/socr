@@ -6,6 +6,7 @@ Hermetic: no subprocess, no socket, no real HTTP. ``host_reachable`` and
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 
@@ -146,8 +147,20 @@ def test_never_spawns_a_process(http, monkeypatch):
     for name in ("run", "Popen", "call", "check_call", "check_output"):
         monkeypatch.setattr(subprocess, name, _boom)
     monkeypatch.setattr("os.system", _boom)
+    for name in ("posix_spawn", "posix_spawnp", "execv", "execvp", "execve", "fork"):
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, _boom)
     assert _check_ollama_model(_MODEL) is None
     http.result = _tags([])
     assert _check_ollama_model(_MODEL) is not None
     monkeypatch.setattr(ollama_utils, "host_reachable", lambda host, *a, **k: False)
     assert _check_ollama_model(_MODEL) is not None
+
+
+def test_null_models_reads_as_not_found(http):
+    """Older Ollama reports an empty store as ``{"models": null}``."""
+    http.result = httpx.Response(
+        200, content=b'{"models": null}', request=httpx.Request("GET", "http://x/api/tags")
+    )
+    err = _check_ollama_model(_MODEL)
+    assert err is not None and "not found" in err

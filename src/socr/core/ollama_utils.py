@@ -71,7 +71,9 @@ def check_ollama_model(model_name: str) -> str | None:
             return "Ollama did not respond (timeout)"
         if resp.status_code != 200:
             return f"{_UNREACHABLE_MSG} (HTTP {resp.status_code} from /api/tags)"
-        models = resp.json()["models"]
+        # ``null`` is how older Ollama reports an empty store: nothing pulled,
+        # so "not found", not "unreadable".
+        models = resp.json()["models"] or []
         names: set[str] = set()
         for entry in models:
             for key in ("name", "model"):

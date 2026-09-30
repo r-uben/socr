@@ -36,7 +36,7 @@ The old code took the first column of `ollama list` and tested
 existed). The new code builds the set of `models[].name` plus `models[].model`
 and does the same exact test. `tests/test_check_ollama_model.py::_MATCH_TABLE`
 (12 cases, x2 for `name`/`model` keys) pins this. The same table was also run
-against the OLD implementation (`git show HEAD:...` with `subprocess.run`
+against the OLD implementation (`git show f35efc4:src/socr/core/ollama_utils.py`, the pre-change revision on main, with `subprocess.run`
 stubbed to a formatted `ollama list`): 12/12 agreed.
 
 ### Bounding
@@ -90,3 +90,10 @@ per-read timeout ends it; checks run once per engine init, not per page.
   fails (1 failed).
 - (c) matching broken: prefix match, 8 failures in `test_matching_rules`;
   `:latest` defaulting added, 4 failures in `test_matching_rules`.
+
+
+## Review round (2026-09-30)
+
+- **Log citation:** the old-code comparison now cites `f35efc4:src/socr/core/ollama_utils.py` (cubic P2: the earlier `HEAD:...` was a placeholder, and HEAD is now the new code).
+- **Abandoned worker on a trickling peer (cubic P2):** accepted as bounded and not redesigned, the same trade-off as `_resolve_within` in #905. The check runs per `is_available()` (engine or ladder construction), not per page. A worker is left behind only when a peer accepts the TCP connect and then trickles bytes past the deadline: refused or dead hosts short-circuit in `host_reachable`, and a stalled (silent) peer is ended by httpx's own read timeout. True cancellation would mean closing a shared `httpx.Client` from the caller. That is noted for a follow-up if a trickling Ollama is ever seen in practice.
+- **Reviewer extras:** `{"models": null}` (older Ollama with an empty store) now reads as an empty list, so the message is "not found" and not "unreadable". The no-spawn guard also covers `os.posix_spawn`, `os.posix_spawnp`, `os.execv`, `os.execvp`, `os.execve` and `os.fork`.
