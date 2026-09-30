@@ -759,6 +759,17 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 detail=result.content_unverified,
                 data={"cause": ""},
             )
+            from socr.tables.source_evidence import STORED_WORDS_UNVERIFIED_PREFIX
+
+            if result.content_unverified.startswith(STORED_WORDS_UNVERIFIED_PREFIX):
+                # Rotated native-table-first: the stored layer is not a witness
+                # and the native geometry verifier cannot adjudicate the model
+                # grid — shipping it here is the point of the rescue.
+                return AcceptDecision(
+                    accept=True,
+                    reason=f"source_evidence_table: {result.reason}",
+                    confidence=0.5,
+                )
 
         return self._inner.assess(output, provider)
 

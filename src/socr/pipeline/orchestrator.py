@@ -11462,7 +11462,18 @@ class UnifiedPipeline:
             # verifier on TRUST, not on the presence of words. A scanned page
             # with a baked-in OCR layer has words and no trustworthy reading.
             ps = state.pages.get(page_num)
-            return None if ps is None else bool(ps.is_born_digital)
+            if ps is None:
+                return None
+            if not ps.is_born_digital:
+                return False
+            # GH-147 / native-table-first: a rotated born-digital table page
+            # keeps its prose text layer but the rowizer refuses the sideways
+            # grid — those stored words are not a trustworthy witness for the
+            # model table the VLM emits after upright retry fails.
+            pa = self._assessment_for_page(page_num)
+            if pa is not None and getattr(pa, "native_table_lane_refused", False):
+                return False
+            return True
 
         return SourceEvidenceTableJudge(
             inner=native_judge,
