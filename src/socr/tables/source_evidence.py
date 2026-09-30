@@ -188,10 +188,6 @@ NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 #: reason ``NO_WITNESS_BACKEND_KIND`` is one).
 LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
 
-#: Prefix on ``content_unverified`` when the model table is kept because the
-#: stored word layer cannot witness it and pixel OCR found nothing refuting it.
-STORED_WORDS_UNVERIFIED_PREFIX: str = "stored_words_unverified:"
-
 
 @dataclass(frozen=True)
 class TableTokens:
@@ -718,79 +714,8 @@ def verify_scanned_table(
         rescued = _corroborate_via_distrusted_layer(page, output_text)
         if rescued is not None:
             return rescued
-        # Rotated born-digital table pages (GH-147 refusal + native-table-first):
-        # the stored word layer is present but not trusted for token evidence,
-        # classical OCR on the derotated raster often returns nothing useful, and
-        # row corroboration may abstain or fail on layout alone without finding
-        # any numeric contradiction. In that case the model table is kept,
-        # flagged — fail closed still applies when corroboration finds extras.
-        if not bundle.no_reading and (
-            result.reason == "no local content evidence available for scanned table"
-        ):
-            kept = _keep_when_stored_words_unusable(page, output_text)
-            if kept is not None:
-                return kept
-    elif (
-        native_trusted is False
-        and result.passed is False
-        and result.verifiable
-        and result.reason.startswith("numeric tokens unsupported by page evidence:")
-    ):
-        # GH-147 / native-table-first: derotated classical OCR may read prose or
-        # partial digits while the distrusted stored layer is excluded from the
-        # bundle. That "unsupported" verdict is not a positive contradiction —
-        # only row corroboration against the stored layer may refute (same
-        # guards as ``_keep_when_stored_words_unusable``).
-        kept = _keep_when_stored_words_unusable(page, output_text)
-        if kept is not None:
-            return kept
 
     return result
-
-
-def _keep_when_stored_words_unusable(page, output_text: str) -> SourceEvidenceResult | None:
-    """Keep a model table when stored words cannot witness it and pixels do not refute it.
-
-    Returns ``None`` when the page has no stored words, when the candidate has
-    no numeric body token to corroborate, when row corroboration
-    finds a positive numeric mismatch (``EXTRA_NUMBERS_MAX_SHARE``), or when
-    every candidate number is absent from the layer. Only returns a passed,
-    flagged verdict — never strengthens a rejection.
-    """
-    if not page_has_native_words(page):
-        return None
-    try:
-        words = page.get_text("words") or []
-    except Exception:
-        words = []
-    if not words:
-        return None
-
-    from socr.tables.row_corroboration import EXTRA_NUMBERS_MAX_SHARE, corroborate_rows
-
-    rc = corroborate_rows(words, output_text, None)
-    # cubic P1 (#907): with no candidate numeric body token the numeric
-    # refutation guards below never run, so nothing independent would stand
-    # behind the keep -- an alpha-only table must stay fail-closed.
-    if rc.candidate_numbers == 0:
-        return None
-    extra_share = rc.extra_share
-    if extra_share is not None and extra_share > EXTRA_NUMBERS_MAX_SHARE:
-        return None
-    if len(rc.extra_numbers) == rc.candidate_numbers and rc.bound == 0 and rc.total > 0:
-        return None
-
-    reason = (
-        f"{STORED_WORDS_UNVERIFIED_PREFIX} no usable stored words to compare against "
-        "the model table; numeric corroboration against the text layer did not "
-        "refute the candidate"
-    )
-    return SourceEvidenceResult(
-        verifiable=True,
-        passed=True,
-        reason=reason,
-        content_unverified=reason,
-    )
 
 
 def _corroborate_via_distrusted_layer(page, output_text: str) -> SourceEvidenceResult | None:
