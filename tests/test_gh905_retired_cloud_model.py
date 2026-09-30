@@ -412,3 +412,103 @@ def test_a_timeout_reason_is_not_duplicated_with_its_own_error():
         _err_output(REASON_PROVIDER_TIMEOUT, "qwen: timed out after 300s")
     )
     assert out == REASON_PROVIDER_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# 6. review round 3 (cubic P1): a cloud pin is probed as ITSELF, not as the local build
+# ---------------------------------------------------------------------------
+
+
+def _ladder_for_pin(monkeypatch, *, local_present: bool, probe, **cfg_kw):
+    """``_available_engines_for_agentic`` with the local probe and cloud probe stubbed.
+
+    Neither stub reaches ``ollama list`` or a socket: ``get_engine`` is replaced
+    and the generation probe is a recorded fake.
+    """
+    from unittest.mock import MagicMock
+
+    engine = MagicMock()
+    engine.is_available.return_value = local_present
+    monkeypatch.setattr("socr.pipeline.orchestrator.get_engine", lambda *_a, **_k: engine)
+    calls: list[str] = []
+
+    def _probe(host, model, timeout, **_kw):
+        calls.append(model)
+        return probe
+
+    monkeypatch.setattr("socr.engines.qwen.probe_model_generation", _probe)
+    pipe = UnifiedPipeline(_qwen_cfg(qwen_model="foo:cloud", qwen_model_pinned=True, **cfg_kw))
+    return pipe, [p.id for p in pipe._available_engines_for_agentic()], calls
+
+
+def test_cloud_pin_is_present_when_local_is_absent_and_its_own_probe_is_ok(monkeypatch):
+    pipe, ids, calls = _ladder_for_pin(monkeypatch, local_present=False, probe=(True, ""))
+    assert ids == ["qwen-local-instruct"]
+    assert calls == ["foo:cloud"]
+    assert pipe._qwen_cloud_pin_unavailable == ""
+
+
+def test_cloud_pin_410_makes_the_rung_absent_and_surfaces_the_reason(monkeypatch):
+    # Difference pin: the local probe says PRESENT in both runs; only the cloud probe varies.
+    _, ok_ids, _ = _ladder_for_pin(monkeypatch, local_present=True, probe=(True, ""))
+    pipe, gone_ids, _ = _ladder_for_pin(
+        monkeypatch, local_present=True, probe=(False, "HTTP 410: retired")
+    )
+    assert ok_ids == ["qwen-local-instruct"]
+    assert gone_ids == []
+    assert "410" in pipe._qwen_cloud_pin_unavailable
+
+    state = _State()
+    pipe._refuse_cloud_pinned_qwen_rung(state, gone_ids)
+    [event] = state.events
+    assert event.kind == "qwen_cloud_pin_unavailable"
+    assert "HTTP 410" in event.detail
+    assert pipe._qwen_cloud_pin_unavailable == ""
+
+
+def test_strict_local_refuses_a_cloud_pin_without_probing_it(monkeypatch):
+    pipe, ids, calls = _ladder_for_pin(
+        monkeypatch, local_present=False, probe=(True, ""), strict_local=True
+    )
+    assert calls == [], "policy comes first: a forbidden model is never probed"
+    assert ids == ["qwen-local-instruct"], "kept so the refusal can be surfaced"
+    state = _State()
+    from socr.core.providers import PROFILE_QWEN_LOCAL as _local
+
+    assert pipe._refuse_cloud_pinned_qwen_rung(state, [_local]) == []
+    assert [e.kind for e in state.events] == ["qwen_cloud_pin_refused"]
+
+
+def test_local_pin_and_no_pin_still_use_the_local_probe(monkeypatch):
+    from unittest.mock import MagicMock
+
+    engine = MagicMock()
+    engine.is_available.return_value = True
+    monkeypatch.setattr("socr.pipeline.orchestrator.get_engine", lambda *_a, **_k: engine)
+
+    def _boom(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("a local model must not be generation-probed as cloud")
+
+    monkeypatch.setattr("socr.engines.qwen.probe_model_generation", _boom)
+    for cfg in (_qwen_cfg(), _qwen_cfg(qwen_model="qwen3.5:27b", qwen_model_pinned=True)):
+        ids = [p.id for p in UnifiedPipeline(cfg)._available_engines_for_agentic()]
+        assert ids == ["qwen-local-instruct"]
+
+
+# ---------------------------------------------------------------------------
+# 7. review round 3 (cubic P2): the reachability pre-check bounds DNS too
+# ---------------------------------------------------------------------------
+
+
+def test_host_reachable_is_bounded_by_a_slow_resolver(monkeypatch):
+    import socket
+    import time
+
+    def _slow_getaddrinfo(*_a, **_k):
+        time.sleep(5.0)
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", _slow_getaddrinfo)
+    start = time.monotonic()
+    assert ollama_utils.host_reachable("http://slow-resolver.invalid:11434", timeout=0.2) is False
+    assert time.monotonic() - start < 2.0

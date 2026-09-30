@@ -678,8 +678,9 @@ class TestCleanEquationModelResolution:
         return state, [po], crop_file
 
     def test_default_config_uses_local_instruct_model(self, tmp_path):
-        """On default PipelineConfig the model passed to process_equation_region
-        must be 'qwen3-vl:30b-a3b-instruct', NOT 'qwen3.5:cloud'.
+        """With a default clean_equation_model and a CLOUD math_model set explicitly
+        (GH-905: the math_model default is local now), the model passed to
+        process_equation_region must be 'qwen3-vl:30b-a3b-instruct', NOT 'qwen3.5:cloud'.
 
         Pre-fix: FAILS (math_model="qwen3.5:cloud" was used → model="qwen3.5:cloud").
         Post-fix: PASSES (clean_equation_model="qwen3-vl:30b-a3b-instruct" is used).

@@ -799,6 +799,10 @@ class UnifiedPipeline:
     # #842: once-per-pipeline guard for ``_report_unservable_engines``; class
     # level for the same ``object.__new__`` reason as the caches around it.
     _warned_unservable_engines: bool = False
+    #: GH-905: why a pinned cloud qwen model was found unavailable by its own
+    #: generation probe ("" when it was not, or none is pinned); surfaced by
+    #: ``_refuse_cloud_pinned_qwen_rung``.
+    _qwen_cloud_pin_unavailable: str = ""
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -10027,10 +10031,12 @@ class UnifiedPipeline:
         """
         from socr.core.providers import DEFAULT_PROVIDERS
 
+        from socr.engines.qwen import pinned_cloud_model_available, pinned_cloud_qwen_model
         from socr.engines.registry import has_cli_engine
 
         available = []
         unservable: list[EngineType] = []
+        self._qwen_cloud_pin_unavailable = ""
         for engine_type in self.config.enabled_engines:
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
@@ -10041,6 +10047,23 @@ class UnifiedPipeline:
             # used to swallow it together with "the daemon is down".
             if not has_cli_engine(engine_type):
                 unservable.append(engine_type)
+                continue
+            if engine_type is EngineType.QWEN and pinned_cloud_qwen_model(self.config):
+                # GH-905 (cubic P1): an explicit cloud pin is judged on THAT model,
+                # not on the local build. Policy comes first: a refused pin keeps
+                # the rung in ``available`` so ``_refuse_cloud_pinned_qwen_rung``
+                # drops it AND surfaces why (dropping it here would be silent).
+                try:
+                    if cloud_pinned_qwen_refusal(self.config):
+                        available.append(prof)
+                    else:
+                        ok, reason = pinned_cloud_model_available(self.config)
+                        if ok:
+                            available.append(prof)
+                        else:
+                            self._qwen_cloud_pin_unavailable = reason
+                except Exception:  # availability probe must never crash routing
+                    pass
                 continue
             try:
                 if get_engine(engine_type).is_available():
@@ -10090,6 +10113,21 @@ class UnifiedPipeline:
         """
         from socr.core.audit_log import AuditEvent
 
+        unavailable = self._qwen_cloud_pin_unavailable
+        if unavailable:
+            self._qwen_cloud_pin_unavailable = ""
+            logger.warning("agentic: pinned cloud qwen model unavailable: %s", unavailable)
+            if not self.config.quiet:
+                console.print(f"  [yellow]qwen rung unavailable: {unavailable}[/yellow]")
+            state.events.append(
+                AuditEvent(
+                    page_num=0,
+                    kind="qwen_cloud_pin_unavailable",
+                    engine="qwen",
+                    detail=unavailable,
+                    data={"qwen_model": self.config.qwen_model, "reason": unavailable},
+                )
+            )
         if not any(p.engine is EngineType.QWEN for p in available):
             return available
         reason = cloud_pinned_qwen_refusal(self.config)

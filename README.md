@@ -101,7 +101,7 @@ the full design.
 
 ## Engines
 
-Routing is **local-first → Ollama Cloud → paid cloud edge case**. See
+Routing is **native text → local qwen → marker → gemini (paid cloud edge case)**. See
 `docs/MODELS.md` for the full per-sub-task policy and the measured data behind it.
 
 | Engine | Package | Type | Routing role |

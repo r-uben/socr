@@ -225,17 +225,19 @@ class TestCLIFlags:
 
 
 class TestCloudRungReachable:
-    """The declared local -> Ollama-Cloud -> Gemini ladder must have its middle rung.
+    """The DEFAULT agentic ladder is local qwen -> marker -> gemini (GH-905).
 
-    These tests call the REAL ``_available_engines_for_agentic``. The class above
-    hand-builds its profile list, which is exactly how the missing rung went
-    unnoticed: every existing assertion was made against a list no production
-    code path could produce.
+    GH-46-E2 once made these tests prove a cloud qwen middle rung existed. That
+    rung's only model (``qwen3.5:cloud``) was retired on 2026-09-25, so they now
+    prove the opposite: the real ``_available_engines_for_agentic`` never emits
+    ``qwen-cloud`` and never consults the cloud probe, whatever it reports.
+    They call the REAL method; the class above hand-builds its profile list,
+    which is how a rung no production path could produce once went unnoticed.
 
-    CI hermeticity: CI has no ollama and no ``qwen-ocr`` CLI, so BOTH probes must
-    be patched by name or these pass locally and fail there. ``get_engine`` is
+    CI hermeticity: CI has no ollama and no ``qwen-ocr`` CLI. ``get_engine`` is
     patched in the orchestrator namespace (module-level import) and the cloud
-    probe at its definition site (function-level import, resolved per call).
+    probe at its definition site (function-level import, resolved per call), so
+    nothing here reaches ``ollama list``.
     """
 
     @staticmethod

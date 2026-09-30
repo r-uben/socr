@@ -88,6 +88,40 @@ def cloud_model_available() -> bool:
     return available
 
 
+def pinned_cloud_qwen_model(config: PipelineConfig) -> str:
+    """The cloud model the qwen rung would run on a local/auto backend, else "".
+
+    GH-905. ``--qwen-model x:cloud`` pins the tag verbatim (``resolve_qwen_intent``
+    rule 1); the local build (``OLLAMA_MODEL``) is then NOT what will run, so it
+    is not what availability may be decided on.
+    """
+    from socr.core.providers import is_cloud_model
+
+    backend, model = resolve_qwen_intent(config)
+    return model if backend in _LOCAL_BACKENDS and is_cloud_model(model) else ""
+
+
+def pinned_cloud_model_available(config: PipelineConfig) -> tuple[bool, str]:
+    """``(available, reason)`` for the pinned cloud qwen model, by a real generation.
+
+    GH-905 (cubic P1). On a host with no local qwen pull, ``QwenEngine.is_available``
+    (local build) says no and the documented cloud opt-in would be dropped before
+    any policy or probe ran. This probes THE PINNED MODEL instead, with the same
+    1-token ``think:false`` generation as ``cloud_model_available``; a 410 or any
+    error reads as unavailable and the reason is returned so the caller can
+    surface it. Returns ``(False, "")`` when nothing cloud is pinned.
+    """
+    from socr.tables.extract import resolve_ollama_host
+
+    model = pinned_cloud_qwen_model(config)
+    if not model:
+        return False, ""
+    ok, reason = probe_model_generation(
+        resolve_ollama_host().rstrip("/"), model, DEFAULT_PROBE_TIMEOUT_SEC
+    )
+    return ok, "" if ok else f"{model}: {reason}"
+
+
 def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
     """Return (resolved_backend, resolved_model) for the qwen-ocr-cli invocation.
 

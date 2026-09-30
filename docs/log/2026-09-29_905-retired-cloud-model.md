@@ -146,7 +146,7 @@ deleted):
    changing: they are unchanged now.
 3. `probe_generate` docstring fixed.
 
-Tests added (8, in `test_gh905_retired_cloud_model.py`): strict on/off difference pin on
+Tests added (7, in `test_gh905_retired_cloud_model.py`): strict on/off difference pin on
 the predicate and on the real `_phase_agentic` (rung calls > 0 vs 0), typed-vs-defaulted
 zero cap, local/unpinned pin unaffected, only the qwen rung dropped plus audit event,
 cap+flatten, timeout not duplicated.
@@ -154,3 +154,40 @@ cap+flatten, timeout not duplicated.
 Mutations (copies in /tmp, canary passed, anchors count==1): gate removed -> 2 tests fail
 (`test_refusal_drops_only_the_qwen_rung...`, `test_strict_local_stops_pages_reaching...`);
 cap removed -> `test_a_long_multiline_provider_error_is_flattened_and_capped` fails.
+
+## Round 3 (cubic on PR #911)
+
+Test count for `test_gh905_retired_cloud_model.py`: 12 (round 1) + 7 (round 2) + 5 (round 3)
+= 24 (the round-2 line above said 8; it was 7).
+
+- **P1 (fixed).** A cloud pin was dropped on a host with no local qwen pull because
+  `QwenEngine.is_available()` probes the local build, before any policy or probe ran.
+  `engines/qwen.py`: `pinned_cloud_qwen_model(config)` (the cloud model the qwen rung
+  would run on a local/auto backend) and `pinned_cloud_model_available(config)` (a
+  `probe_model_generation` on THAT model, reason returned). `_available_engines_for_agentic`
+  now, for QWEN with a cloud pin: policy first (`cloud_pinned_qwen_refusal` non-empty ->
+  rung kept in `available` so `_refuse_cloud_pinned_qwen_rung` drops and surfaces it,
+  never probed); otherwise probe the pinned model; a 410 or any failure leaves the rung
+  out and stores the reason, which `_refuse_cloud_pinned_qwen_rung` surfaces (console,
+  log, and a page-0 `qwen_cloud_pin_unavailable` audit event). Local pins and no pin keep
+  the local probe.
+- **P2 (fixed).** `host_reachable` now runs `getaddrinfo` in a daemon thread joined with
+  the budget and connects with only the time left, so one total deadline covers resolve +
+  connect, no process spawned. Reuses `CONNECT_PROBE_TIMEOUT_SEC`; no new constant. Test
+  stubs `getaddrinfo` to sleep 5s and asserts `host_reachable(..., timeout=0.2)` returns
+  False in under 2s. Also fixed a stray "`the caller`" in that docstring.
+- **P3 (fixed).** Reworded the `test_default_config_uses_local_instruct_model` docstring;
+  README routing sentence is now native -> local qwen -> marker -> gemini;
+  `--clean-equation-model` / `--qwen-model` help say "any name containing 'cloud'"
+  (matching `is_cloud_model`); `TestCloudRungReachable` docstring rewritten.
+- **Tests (5):** cloud pin present when local absent and its own probe OK; 410 -> absent,
+  reason surfaced, local probe held constant (difference pin), event emitted;
+  strict_local -> refused without probing; local/no pin still use the local probe; slow
+  resolver bounded.
+- **Mutations** (copies in /tmp, canary passed, anchors count==1): revert the pin branch
+  to local-only availability -> 3 tests fail; revert `host_reachable` to plain
+  `create_connection` -> the slow-resolver test fails.
+- **#910 hermeticity.** The new tests patch `get_engine` and `probe_model_generation`; none
+  reaches `check_ollama_model`. Proven by running the file with a temporary autouse guard
+  that raises on any `subprocess.run` of the ollama CLI (24 passed, guard removed after).
+  The full suite was run with the DEFAULT OLLAMA_HOST, per the #910 instruction.

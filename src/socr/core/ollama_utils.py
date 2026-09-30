@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import threading
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -111,7 +113,7 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
     bare socket connect only waits on the TCP handshake, which a trickling
     peer cannot stall -- the handshake either completes or the OS refuses it,
     both fast. Any failure to connect (refused, DNS failure, this timeout)
-    means "no daemon here": that is the one case `the caller` may treat
+    means "no daemon here": that is the one case a caller may treat
     as definitive without ever calling ``probe_generate``.
 
     A host string that does not parse (a malformed ``OLLAMA_HOST``, e.g. a
@@ -127,11 +129,46 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
         return False
     if not hostname:
         return False
-    try:
-        with socket.create_connection((hostname, port), timeout=timeout):
-            return True
-    except OSError:
+    # GH-905 (cubic P2): ``socket.create_connection(..., timeout=)`` bounds each
+    # connect, NOT the DNS lookup it performs first, so a slow resolver could
+    # block this pre-check past its budget. One TOTAL deadline covers resolve +
+    # connect: the lookup runs in a daemon thread joined with the budget (a
+    # stuck resolver is abandoned, not waited on, and cannot keep the process
+    # alive), and the connect gets only what is left. No process is spawned.
+    deadline = time.monotonic() + timeout
+    infos = _resolve_within(hostname, port, timeout)
+    if not infos:
         return False
+    for family, socktype, proto, _canon, sockaddr in infos:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(remaining)
+            sock.connect(sockaddr)
+            return True
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    return False
+
+
+def _resolve_within(hostname: str, port: int, timeout: float) -> list | None:
+    """``getaddrinfo`` bounded by *timeout* seconds; ``None`` on failure or expiry."""
+    box: list = []
+
+    def _work() -> None:
+        try:
+            box.append(socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM))
+        except OSError:
+            box.append(None)
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    return box[0] if box else None
 
 
 def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
