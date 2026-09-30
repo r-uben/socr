@@ -106,7 +106,7 @@ Routing is **local-first → Ollama Cloud → paid cloud edge case**. See
 
 | Engine | Package | Type | Routing role |
 |--------|---------|------|------|
-| Qwen | `qwen-ocr-cli` | Ollama Cloud / local | **Workhorse VLM** (`qwen3.5:cloud`, no extra key) |
+| Qwen | `qwen-ocr-cli` | Local (Ollama) | **Workhorse VLM** (`qwen3-vl:30b-a3b-instruct`; the former `qwen3.5:cloud` was retired 2026-09-25) |
 | Gemini | `gemini-ocr-cli` | Cloud | Edge-case escalation, ~$0.0002/page |
 | Marker | `marker-ocr-cli` | Local | Layout-aware fallback (Surya + Texify) |
 | GLM | `glm-ocr-cli` | Local | Fast local emergency fallback |

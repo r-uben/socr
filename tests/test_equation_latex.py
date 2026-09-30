@@ -619,7 +619,7 @@ class TestOrchestratorEquationLatex:
 
 class TestCleanEquationModelResolution:
     """Verify that the clean-equation path uses clean_equation_model (local by
-    default), NOT math_model (which defaults to cloud).
+    default), NOT math_model (which was a cloud default before GH-905 and may still be set to one).
 
     Pre-fix behaviour (OLD): orchestrator line 2742 was
         model = self.config.math_model or DEFAULT_MODEL
@@ -690,9 +690,11 @@ class TestCleanEquationModelResolution:
         cfg = PipelineConfig()
         cfg.recover_clean_equations = True
         cfg.detect_equations = True
-        # Deliberately leave clean_equation_model at its default; math_model at
-        # its cloud default.  The bug was that math_model polluted this path.
-        assert cfg.math_model == "qwen3.5:cloud"
+        # Deliberately leave clean_equation_model at its default and give
+        # math_model a cloud value.  The bug was that math_model polluted this
+        # path.  (GH-905: math_model's DEFAULT is now local, so the cloud value
+        # is set explicitly to keep this guard meaningful.)
+        cfg.math_model = "qwen3.5:cloud"
         assert cfg.clean_equation_model == "qwen3-vl:30b-a3b-instruct"
 
         orch = UnifiedPipeline(cfg)
@@ -771,10 +773,8 @@ class TestCleanEquationModelResolution:
 
         cfg = PipelineConfig()
         assert cfg.clean_equation_model == "qwen3-vl:30b-a3b-instruct"
-        # math_model is left at its cloud default (corrupt-font path)
-        assert cfg.math_model == "qwen3.5:cloud"
-        # The two are distinct
-        assert cfg.clean_equation_model != cfg.math_model
+        # GH-905: math_model (corrupt-font path) is local by default too.
+        assert cfg.math_model == "qwen3-vl:30b-a3b-instruct"
 
     def test_forbidden_models_not_reachable_by_default(self):
         """Neither :8b nor the non-instruct :30b are reachable on default config."""

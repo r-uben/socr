@@ -19,14 +19,16 @@ Design choices (deliberate):
   judge catches a cheap provider failing on a hard page and the loop escalates.
   Letting the judge reason beats a brittle static capability matrix.
 - **Provider identity = engine + backend + model.** QWEN alone is ambiguous:
-  it covers both local qwen3-vl:30b-a3b-instruct (Ollama, free) and cloud
-  qwen3.5:cloud (Ollama Cloud, ~free). Named profiles carry all three fields
+  it covers both local qwen3-vl:30b-a3b-instruct (Ollama, free) and the
+  (historical, GH-905: retired 2026-09-25, no longer in the default ladder)
+  cloud qwen3.5:cloud. Named profiles carry all three fields
   so the manifest and replay logic can distinguish them unambiguously.
 - **Direct profile injection.** ``provider_ladder`` accepts either a set of
   ``EngineType`` values (dict-lookup path, backward-compatible) or a list of
   ``ProviderProfile`` objects (direct path, skips dict). The direct path lets
-  callers like ``_available_engines_for_agentic`` supply two QWEN profiles
-  (local + cloud) as distinct rungs without needing two ``EngineType`` keys.
+  callers can supply two QWEN profiles as distinct rungs without needing two
+  ``EngineType`` keys. (``_available_engines_for_agentic`` no longer does: the
+  default ladder is local qwen -> marker -> gemini, GH-905.)
 """
 
 from __future__ import annotations
@@ -71,6 +73,16 @@ PROFILE_QWEN_LOCAL = ProviderProfile(
     model="qwen3-vl:30b-a3b-instruct",
 )
 
+# GH-905: HISTORICAL. Ollama Cloud retired ``qwen3.5:cloud`` on 2026-09-25 (every
+# call 410 Gone; ``ollama list`` still lists it). This profile is NOT emitted by
+# the default ladder (``_available_engines_for_agentic``) and no replacement
+# cloud model has been measured. It stays registered so that (a) manifests and
+# sidecars written before the retirement still resolve ``provider_id
+# "qwen-cloud"`` through ``profile_by_id`` (replay, resume, provenance) and
+# (b) ``profile_by_model`` still prices a historical ``qwen3.5:cloud`` judge
+# name. Anything that runs it anyway is gated by a real generation probe
+# (``engines.qwen.cloud_model_available``), so a retired model reads as
+# unavailable instead of being attempted.
 PROFILE_QWEN_CLOUD = ProviderProfile(
     engine=EngineType.QWEN,
     tier=TIER_CLOUD,
@@ -167,9 +179,9 @@ PROFILE_VLLM = ProviderProfile(
 # be tuned, not trusted as exact. Edit here or override via PipelineConfig.
 #
 # QWEN maps to the local-instruct profile by default. PROFILE_QWEN_CLOUD shares
-# the same EngineType.QWEN key and cannot coexist in this dict — callers that
-# need both as distinct rungs (e.g. _available_engines_for_agentic) pass a
-# list[ProviderProfile] directly to provider_ladder() instead of using this dict.
+# the same EngineType.QWEN key and cannot coexist in this dict — a caller that
+# needs both as distinct rungs passes a list[ProviderProfile] directly to
+# provider_ladder() instead of using this dict.
 DEFAULT_PROVIDERS: dict[EngineType, ProviderProfile] = {
     EngineType.QWEN: PROFILE_QWEN_LOCAL,
     EngineType.GLM: PROFILE_GLM,

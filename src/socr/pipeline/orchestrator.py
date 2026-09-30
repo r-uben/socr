@@ -8940,6 +8940,23 @@ class UnifiedPipeline:
                             att.output.skip_reason = (
                                 att.reason if not att.accepted and not att.output.text else ""
                             )  # B3
+                            # GH-905: a rung whose CLI/HTTP call FAILED returns an ERROR
+                            # PageOutput whose ``error`` holds the cause (e.g. "CLI exited
+                            # 1: ... '410 Gone' ..."). The judge only sees "empty/error
+                            # output", so that generic string was all the manifest journal
+                            # (``reason``) kept, and the cause survived on the console
+                            # alone. Fold the provider's own error into the journaled
+                            # reason so the failure is durable at the level that already
+                            # records why the ladder escalated past this rung.
+                            if (
+                                att.output.skip_reason
+                                and att.output.status is PageStatus.ERROR
+                                and att.output.error
+                                and att.output.error not in att.output.skip_reason
+                            ):
+                                att.output.skip_reason = (
+                                    f"{att.output.skip_reason}: {att.output.error}"
+                                )
                             # GH-169: keep the judge's verdict for EVERY attempt, not
                             # only the ones whose output was empty. A provider whose
                             # reading the judge refused journaled reason "none", so the
@@ -9994,29 +10011,24 @@ class UnifiedPipeline:
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
-        Returns a list of ``ProviderProfile`` objects (not EngineType values) so
-        that two profiles sharing the same ``EngineType`` — e.g. QWEN local and
-        QWEN cloud — can appear as distinct rungs in the ladder. Pass the result
-        directly to ``provider_ladder()`` which accepts ``list[ProviderProfile]``.
+        Returns a list of ``ProviderProfile`` objects (not EngineType values), the
+        shape ``provider_ladder()`` accepts directly.
 
-        GH-46-E2: ``DEFAULT_PROVIDERS`` is keyed by ``EngineType`` and therefore
-        holds at most one profile per engine — ``EngineType.QWEN`` maps to
-        ``PROFILE_QWEN_LOCAL``. Iterating it alone could never emit the cloud
-        rung, so the declared local -> Ollama-Cloud -> Gemini ladder had no
-        middle rung despite this docstring promising one. The cloud profile is
-        appended from its own probe instead. ``DEFAULT_PROVIDERS`` is left alone:
-        the same-EngineType collision there is deliberate and documented.
-
-        The two QWEN rungs are probed INDEPENDENTLY. A machine with the cloud
-        model but no local pull gets the cloud rung alone; a machine with only
-        the local build gets the local rung alone. Neither gates the other.
+        GH-905: the default ladder is local qwen -> marker -> gemini. The
+        Ollama-Cloud qwen rung (``PROFILE_QWEN_CLOUD``) that GH-46-E2 added as
+        a middle rung is NOT emitted any more. Its only model, ``qwen3.5:cloud``,
+        was retired by Ollama Cloud on 2026-09-25 (every call 410 Gone) while
+        ``ollama list`` kept listing it, so the rung was attempted -- and failed
+        instantly -- on every escalated page. No replacement cloud model has
+        been measured, so none is substituted. An operator who wants a cloud
+        Qwen model pins it explicitly (``--qwen-model <tag>:cloud``, honoured
+        verbatim by ``resolve_qwen_intent`` on the local rung).
 
         Tier filtering (``--strict-local``) is NOT applied here — it stays in the
         caller (``_phase_agentic``), which is the only place that knows the run's
         policy. This function reports reachability, not eligibility.
         """
-        from socr.core.providers import DEFAULT_PROVIDERS, PROFILE_QWEN_CLOUD
-        from socr.engines.qwen import cloud_model_available
+        from socr.core.providers import DEFAULT_PROVIDERS
 
         from socr.engines.registry import has_cli_engine
 
@@ -10037,13 +10049,7 @@ class UnifiedPipeline:
                 if get_engine(engine_type).is_available():
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
-                pass  # NOT `continue` — the cloud probe below is independent
-            if engine_type is EngineType.QWEN:
-                try:
-                    if cloud_model_available():
-                        available.append(PROFILE_QWEN_CLOUD)
-                except Exception:  # same rule: a probe must never crash routing
-                    pass
+                pass
         self._report_unservable_engines(unservable)
         return available
 
@@ -10273,7 +10279,7 @@ class UnifiedPipeline:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).
 
         Honors ``strict_local`` and GH-154's zero-cap-pinned policy: cloud judge
-        models (e.g. ``qwen3.5:cloud``) are never used for crop repair under
+        models (any ``:cloud`` tag) are never used for crop repair under
         either — only the local instruct VLM (``qwen3-vl:30b-a3b-instruct``)
         or another explicitly local override.
         """
@@ -15963,9 +15969,9 @@ class UnifiedPipeline:
 
         # GH-36b: use the dedicated clean-equation model field (defaults to
         # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
-        # Do NOT fall back to math_model here: that field defaults to
-        # qwen3.5:cloud for the corrupt-font path and would route every
-        # default-config clean-equation run to a cloud endpoint, violating
+        # Do NOT fall back to math_model here: that field is the
+        # corrupt-font model and may be set to a cloud tag; falling back to it
+        # could route a clean-equation run to a cloud endpoint, violating
         # the consilium local-first mandate (20260615T210537Z-6621).
         model = self.config.clean_equation_model or DEFAULT_MODEL
 

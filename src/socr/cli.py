@@ -164,7 +164,7 @@ def common_options(f):
             "GH-36b: local Ollama vision model for clean-equation crop → LaTeX "
             "(default: qwen3-vl:30b-a3b-instruct — the validated local instruct VLM). "
             "Never use :8b or the non-instruct :30b. "
-            "Cloud opt-in: pass e.g. qwen3.5:cloud explicitly."
+            "Cloud opt-in: pass a ':cloud' model tag explicitly."
         ),
     )(f)
     f = click.option(
@@ -172,7 +172,8 @@ def common_options(f):
         default=None,
         help=(
             "Ollama-compatible vision model for corrupt-font equation-crop recovery "
-            "(default: qwen3.5:cloud; use qwen3-vl:30b-a3b-instruct for offline). "
+            "(default: qwen3-vl:30b-a3b-instruct, local and free; a name containing "
+            "'cloud' is a remote model and is refused under --strict-local). "
             "This is a region-only math path, not the whole-page Qwen OCR tier."
         ),
     )(f)
@@ -207,7 +208,7 @@ def common_options(f):
         "--qwen-model",
         type=str,
         default=None,
-        help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)",
+        help="Qwen model override (e.g. qwen3.5:27b local, or a ':cloud' tag you have verified generates)",
     )(f)
     f = click.option(
         "--save-figures",

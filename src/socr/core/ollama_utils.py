@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import socket
 import subprocess
+from urllib.parse import urlsplit
+
+import httpx
 
 
 def check_ollama_model(model_name: str) -> str | None:
-    """Return an error string if the model is not available, or None if it is."""
+    """Return an error string if the model is not PULLED, or None if it is.
+
+    This reads ``ollama list``: a LISTING, not proof the model can generate.
+    Ollama Cloud kept listing ``qwen3.5:cloud`` after retiring it (every call
+    410 Gone, GH-903/GH-905), so a ``:cloud`` tag must never be gated on this
+    alone -- use :func:`probe_model_generation`.
+    """
     try:
         result = subprocess.run(
             ["ollama", "list"],
@@ -26,3 +36,188 @@ def check_ollama_model(model_name: str) -> str | None:
     except subprocess.TimeoutExpired:
         return "Ollama did not respond (timeout)"
     return None
+
+
+#: GH-903 round 4 (CI slowdown, cubic P2); moved here by GH-905 so the qwen
+#: cloud-rung probe shares it: a per-candidate ``run_killable``
+#: spawn is a real ``multiprocessing.spawn`` -- tens of milliseconds even to
+#: fail fast -- and CI (no Ollama daemon at all) pays that on EVERY candidate
+#: in the ladder, on every run. A plain, short-timeout connect is enough to
+#: tell "nothing is listening here" apart from "something is, slowly", and
+#: unlike the generation probe's own budget (which must accommodate a cold
+#: MODEL load, ~46s measured), an unreachable HOST does not get any more
+#: reachable the longer you wait -- so this budget is small and fixed, not
+#: derived from ``self.timeout``. This is NOT a model-availability claim: the
+#: daemon can be up with the wrong model pulled, or none at all -- the check
+#: below only ever short-circuits to unavailable, never to available, and a
+#: reachable host still gets the full killable generation probe.
+CONNECT_PROBE_TIMEOUT_SEC = 1.0
+
+#: GH-903 / GH-905: probes send ``think: false``. A thinking model otherwise
+#: puts its answer in ``thinking`` and leaves ``response`` empty, so a probe
+#: (one token) could pass or fail for reasons unrelated to availability.
+PROBE_THINK = False
+
+#: Wall-clock budget for a generation probe. A cold-loaded model was measured
+#: (GH-903, 2026-09-26, unloaded ``qwen3.8:27b`` on the owner's Mac) to take
+#: ~46s to answer a 1-token generation; a shorter budget mistook that load for
+#: unavailability. Shared by the page-judge probe and the cloud-rung probe.
+DEFAULT_PROBE_TIMEOUT_SEC = 120.0
+
+#: Minimal generation: `num_predict=1` bounds the token count so probing a
+#: model that turns out to be slow to answer costs one token, not a full
+#: judge-sized response.
+_PROBE_OPTIONS = {"num_predict": 1}
+_PROBE_PROMPT = "hi"
+
+
+def probe_failure_reason(exc: Exception) -> str:
+    """A short, human-readable reason a judge candidate's probe answered "no".
+
+    Only reached for a DEFINITIVE answer -- the daemon actually responded
+    (an HTTP error status, e.g. 410 retired / 404 never pulled) or refused
+    the connection outright. A timeout is never classified here: it is not
+    proof of unavailability (the probe's budget may simply have been too
+    short for a candidate that is cold-loading, measured ~46s for an unloaded
+    ``qwen3.8:27b``), and `the caller` reports it distinctly, from the
+    ``run_killable`` boundary's own ``TimeoutError`` (see below), before this
+    function is ever called.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        body_detail = ""
+        try:
+            body = exc.response.json()
+            if isinstance(body, dict):
+                body_detail = str(body.get("error", ""))
+        except ValueError:
+            body_detail = exc.response.text
+        status = exc.response.status_code
+        return f"HTTP {status}" + (f": {body_detail}" if body_detail else "")
+    return f"{type(exc).__name__}: {exc}"
+
+
+def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> bool:
+    """Cheap "is anything listening at all" check -- never spawns a process,
+    never sends an HTTP request, never generates a token (GH-903 round 4,
+    cubic P2).
+
+    A raw TCP connect, deliberately -- NOT an ``httpx`` request. An HTTP
+    round trip has to read a response, and a peer that trickles the BODY
+    (this module's own killable-boundary tests use exactly such a server)
+    would defeat an ``httpx`` timeout the same way it defeats
+    ``probe_generate``'s, hanging this "cheap" check indefinitely with
+    nothing bounding it (unlike the generation probe, this check does not run
+    behind ``run_killable``, on purpose -- it exists to AVOID that spawn). A
+    bare socket connect only waits on the TCP handshake, which a trickling
+    peer cannot stall -- the handshake either completes or the OS refuses it,
+    both fast. Any failure to connect (refused, DNS failure, this timeout)
+    means "no daemon here": that is the one case `the caller` may treat
+    as definitive without ever calling ``probe_generate``.
+
+    A host string that does not parse (a malformed ``OLLAMA_HOST``, e.g. a
+    non-numeric port -- ``resolve_ollama_host`` returns such values
+    unchanged) is also "no daemon here": ``urlsplit`` / ``.port`` raise
+    ``ValueError`` on it, and that must degrade the judge, not abort the run.
+    """
+    try:
+        parts = urlsplit(host)
+        hostname = parts.hostname
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
+    """Top-level, picklable probe body run through ``run_killable`` (GH-903
+    round 3, P2-b) -- never called directly by `the caller`.
+
+    ``httpx``'s ``timeout=`` is a per-READ inactivity timeout, not a total
+    wall-clock deadline (the same gap #172 closed for ``judge()`` itself): a
+    peer that keeps the connection open and trickles a byte before every read
+    interval never trips it. ``run_killable`` is what actually bounds this
+    call now, by killing the child's process group past ``timeout`` -- so
+    THIS function must not classify a timeout itself; it returns a plain,
+    picklable outcome for anything it CAN classify (an HTTP status, a refused
+    connection), and re-raises a timeout so ``run_killable``'s own
+    reclassification (``KillableTimeoutError``, a ``TimeoutError`` subclass)
+    is what the parent sees -- exactly the same path ``judge()`` already
+    relies on for ``is_page_judge_timeout``.
+
+    A caught exception is returned, not raised, for every non-timeout case:
+    ``run_killable`` collapses ANY child exception that crosses the pipe into
+    a generic ``RuntimeError`` carrying only the original type name and
+    message (it cannot safely pickle arbitrary exception instances, e.g. an
+    ``httpx.HTTPStatusError`` holding a live ``Response``), which would lose
+    the response body ``probe_failure_reason`` needs. Classifying HERE, then
+    crossing the pipe as a plain dict, keeps that detail.
+    """
+    try:
+        resp = httpx.post(
+            f"{host}/api/generate",
+            json={
+                "model": model,
+                "prompt": _PROBE_PROMPT,
+                "stream": False,
+                "think": PROBE_THINK,
+                "options": _PROBE_OPTIONS,
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return {"available": True, "reason": ""}
+    except httpx.TimeoutException:
+        raise
+    except (httpx.HTTPError, OSError) as exc:
+        return {"available": False, "reason": probe_failure_reason(exc)}
+
+
+def probe_model_generation(
+    host: str,
+    model: str,
+    timeout: float,
+    *,
+    reachable=None,
+    runner=None,
+) -> tuple[bool, str]:
+    """Whether a real 1-token generation on THIS EXACT *model* succeeds.
+
+    GH-905 (shared with GH-903's page-judge probe). Returns
+    ``(available, reason)``; *reason* is "" when available. A listing
+    (``ollama list`` / ``/api/tags``) is NOT this check: Ollama Cloud retired
+    ``qwen3.5:cloud`` on 2026-09-25 and kept listing it, while every generation
+    returned 410 Gone.
+
+    Order: (1) ``host_reachable`` -- a spawn-free TCP connect; unreachable is
+    definitive. (2) ``probe_generate`` run through ``run_killable`` with
+    *timeout* as the wall-clock deadline, so a peer that trickles bytes cannot
+    wedge the caller. A timeout is reported as such (inconclusive, not
+    "retired"); an HTTP error status is definitive.
+
+    *reachable* / *runner* default to :func:`host_reachable` /
+    :func:`socr.core.killable.run_killable`; callers pass their own module-level
+    names so tests that patch those names on the caller keep working.
+    """
+    from socr.core.killable import CallSpec, run_killable
+
+    reachable = reachable or host_reachable
+    runner = runner or run_killable
+    if not reachable(host):
+        return False, f"ollama host unreachable: {host}"
+    spec = CallSpec(
+        func="socr.core.ollama_utils:probe_generate",
+        args=(host, model, timeout),
+    )
+    try:
+        outcome = runner(spec, timeout=timeout)
+    except TimeoutError:
+        return False, f"timed out after {timeout:.0f}s"
+    if outcome["available"]:
+        return True, ""
+    return False, str(outcome["reason"])

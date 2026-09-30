@@ -1,0 +1,126 @@
+# 2026-09-29 - GH-905: drop the retired cloud qwen rung, move the math model local
+
+## Problem (measured 2026-09-29, main@bda9660)
+
+Ollama Cloud retired `qwen3.5:cloud` on 2026-09-25 (410 Gone on every call);
+`ollama list` / `/api/tags` still list it. Two non-judge defaults still used it:
+
+1. `PROFILE_QWEN_CLOUD` (cloud OCR rung). `engines/qwen.py::cloud_model_available()`
+   gated it on `check_ollama_model` (an `ollama list` LISTING), so the rung was emitted
+   and attempted on every escalated page. On an 11-page run it was reached 13 times in
+   11/22 runs, each failing instantly (`[qwen] CLI exited 1: ... '410 Gone'`).
+2. `PipelineConfig.math_model = "qwen3.5:cloud"`: every corrupt-font equation-crop
+   recovery failed.
+
+The 410 appeared on the console only. No page JSON, audit_log, manifest or metadata had it.
+
+## What changed
+
+1. **`math_model` default** -> named constant `core/config.py::DEFAULT_MATH_MODEL =
+   "qwen3-vl:30b-a3b-instruct"` (local, free, June benchmark: flawless LaTeX). Policy
+   check: `_corrupt_math_model_disabled_reason` gates on the substring "cloud", so the
+   local default runs under `--strict-local` / `--max-cost-per-page 0`; an explicit
+   `--math-model <x>:cloud` is still accepted and still gated (tests pin both). The
+   `--clean-equation-model` path is untouched (it already defaulted local, and its own
+   cloud policy gate at orchestrator ~15974 is unchanged). CLI help, config and
+   orchestrator comments, README and `docs/MODELS.md` updated; `qwen3.5:cloud` rows are
+   marked historical.
+2. **Default ladder** is now local qwen -> marker -> gemini.
+   `_available_engines_for_agentic` no longer emits `PROFILE_QWEN_CLOUD` and no longer
+   calls `cloud_model_available`. No replacement cloud model is picked (none is measured).
+   **Explicit opt-in that already exists and still works:** `--qwen-model <tag>:cloud`
+   (or `qwen_model:` in YAML) pins the model on the local rung; `resolve_qwen_intent`
+   passes it verbatim. I did not add a new opt-in mechanism.
+   **`PROFILE_QWEN_CLOUD` is kept, model string unchanged** (`"qwen3.5:cloud"`), with a
+   HISTORICAL comment. Reason: `profile_by_id("qwen-cloud")` must still resolve
+   pre-retirement manifests/sidecars (replay, resume, provenance) and `profile_by_model`
+   still prices a historical `qwen3.5:cloud` judge name. It cannot reach the default
+   ladder any more, and if a caller names it anyway the probe below reads it as
+   unavailable. Changing the string would have made old manifests resolve to a model
+   they never ran.
+3. **Cloud availability check is a real generation.** `cloud_model_available` now uses
+   `probe_model_generation` (1-token, `think:false`, `run_killable`-bounded, spawn-free
+   reachability pre-check first). #906's probe body moved to a neutral module
+   (`socr/core/ollama_utils.py`: `host_reachable`, `probe_generate`,
+   `probe_failure_reason`, `probe_model_generation`, `PROBE_THINK`,
+   `DEFAULT_PROBE_TIMEOUT_SEC`, `CONNECT_PROBE_TIMEOUT_SEC`), because
+   `test_package_layering.py` forbids importing `_`-prefixed names across packages and
+   `engines -> judge` would need `_probe_generate`. No allowlist entry added.
+   `OllamaVisionJudge.is_available` now delegates to `probe_model_generation`, passing
+   its own module-level `_host_reachable` / `run_killable` so #906's tests that patch
+   those names on `socr.judge.ollama_judge` keep working unchanged.
+   `DEFAULT_JUDGE_TIMEOUT_SEC` now equals `DEFAULT_PROBE_TIMEOUT_SEC` (same 120.0, the
+   46s cold-load rationale moved with it). `check_ollama_model`'s docstring now says it
+   is a listing and must not gate a `:cloud` tag.
+4. **No-silent-failure.** The mechanism that should have recorded it already exists: the
+   manifest journal (`manifest.py` builds each entry's `reason` from `skip_reason`, then
+   `judge_reason`, then `failure_mode`), and the agentic loop stamps `skip_reason =
+   att.reason` on every unaccepted, textless attempt. It missed the 410 because a failing
+   CLI does not raise: `base.py` returns a `PageOutput(status=ERROR, error="CLI exited
+   1: ...")`, the judge answers only `"empty/error output"`, and that generic string was
+   the whole `reason`; the provider's `error` was dropped. Fix in the loop that stamps
+   `skip_reason` (`orchestrator.py`, `_phase_agentic`): append the output's own `error`
+   to `skip_reason` when the attempt is an ERROR with no text. No new persisted record
+   kind, so no new emit site and no resume implication (journal entries are recomputed
+   from `ps.attempts`).
+
+## Files
+
+`src/socr/core/ollama_utils.py`, `src/socr/judge/ollama_judge.py`,
+`src/socr/engines/qwen.py`, `src/socr/core/config.py`, `src/socr/core/providers.py`,
+`src/socr/pipeline/orchestrator.py`, `src/socr/cli.py`, `README.md`, `docs/MODELS.md`,
+`tests/test_gh905_retired_cloud_model.py` (new), `tests/test_b2_routing.py`,
+`tests/test_equation_latex.py`, `tests/test_orchestrator.py`.
+
+## Tests
+
+- New `tests/test_gh905_retired_cloud_model.py` (12): math_model default and policy
+  (local passes strict-local, explicit cloud still gated), CLI help, 410 on the probe ->
+  unavailable while the listing says present, 200 -> available, difference pin (only the
+  generation status varies), unreachable host -> unavailable with no generation,
+  `PROFILE_QWEN_CLOUD` still resolves by id, journal carries the CLI error text (plus a
+  difference pin: only the error text varies, the journal reason varies with it).
+- `test_b2_routing.py::TestCloudRungReachable` rewritten: the ladder is identical whether
+  the cloud probe says yes or no and never contains `qwen-cloud`; the probe is never
+  consulted. `test_equation_latex.py`: the "math_model must not pollute the clean-equation
+  path" guard now sets a cloud `math_model` explicitly (the default is local now).
+- Hermetic: run with `OLLAMA_HOST=http://127.0.0.1:9`. The journal tests pin the ladder,
+  judge, crop VLM and engines (#841) and assert a difference, not a machine-measured tuple.
+
+## Mutation checks
+
+Copies at `/tmp/socr-mut-905-{a,b,c}` (src + tests + pyproject; canary asserting
+`socr.__file__` inside the copy passed; anchors asserted `count == 1` uncapped; copies
+deleted):
+
+- (a) re-add the cloud rung to the default ladder: killed by
+  `test_default_ladder_has_no_cloud_qwen_rung_even_if_the_probe_says_yes` and
+  `test_no_cloud_rung_when_local_model_absent`.
+- (b) revert `cloud_model_available` to the listing: killed by
+  `test_a_410_on_the_cloud_probe_is_unavailable_even_though_it_is_listed` and
+  `test_cloud_probe_difference_pin_only_the_generation_status_varies`.
+- (c) drop the failure persistence: killed by
+  `test_a_rung_cli_failure_is_recorded_in_the_manifest_journal` and
+  `test_journal_reason_differs_exactly_by_the_provider_error`.
+
+## Follow-ups / deviations
+
+- Timeout attempts (`reason == "provider timeout"`, output error "qwen: timed out after
+  Ns") now also carry that error in the journal `reason` ("provider timeout: qwen: timed
+  out after Ns"). Intentional (same rule), but any external reader matching the journal
+  reason by equality would see the change.
+- `is_cloud_qwen` / `execution_overrides` / the cloud branch of `_run_engine_on_pages`
+  are now reachable only by a caller that hands the cloud profile to the runner
+  directly (tests do). Left in place rather than deleted so the profile stays coherent;
+  a later cleanup can remove them once nothing needs the historical profile.
+- `test_orchestrator.py::test_agentic_corrupt_math_remote_model_policy_is_visible` relied
+  on the cloud default to exercise the remote-model policy; it now names a `:cloud`
+  `math_model` explicitly.
+
+## Verification
+
+- Full suite with `OLLAMA_HOST=http://127.0.0.1:9`, from the worktree root (pytest's
+  `pythonpath=["src"]` resolves `socr` to the worktree; a canary confirmed it):
+  first run 3 failed / 5842 passed / 4 xfailed (the `test_orchestrator` test above);
+  after the fix the full suite is **5845 passed, 4 xfailed** (439s).
+- `uvx ruff@0.16.0 format --check .`: clean.

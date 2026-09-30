@@ -9,7 +9,8 @@
 
 ## The policy in one line
 
-**Native text first (free) → local / Ollama-Cloud VLM → paid cloud (Gemini) only for edge cases.**
+**Native text first (free) → local VLM → paid cloud (Gemini) only for edge cases.**
+(The Ollama-Cloud Qwen rung was removed from the default ladder in #905; see below.)
 
 Best *cheap* combination, not best absolute quality. The workload is overwhelmingly
 **born-digital academic PDFs**, where PyMuPDF native-text extraction already handles
@@ -24,12 +25,14 @@ for the external leaderboard, and the design logs under `docs/log/` for the raw 
 
 > **`qwen3.5:cloud` was retired by Ollama Cloud on 2026-09-25.** Every call now returns
 > `410 Gone`, but `ollama list` still shows it. Its rows below are historical until a
-> replacement is measured (#903).
+> replacement is measured (#903). #905 removed it from the default provider ladder
+> (now local qwen → marker → gemini) and moved the equation-crop `math_model` default
+> to the local `qwen3-vl:30b-a3b-instruct`. No cloud replacement is chosen: none is measured.
 
 | Model | Where | Quality | Speed | Cost | Verdict |
 |-------|-------|--------:|-------|------|---------|
 | **native (PyMuPDF)** | local | exact text | instant | free | Default for born-digital prose + table *values* |
-| **`qwen3.5:cloud`** | Ollama Cloud | ~0.57 | ~49s/pg | free* | **Workhorse VLM.** Only engine that cleared all 3 hard page types (math/table/equation) |
+| ~~`qwen3.5:cloud`~~ (retired 2026-09-25) | Ollama Cloud | ~0.57 | ~49s/pg | free* | **HISTORICAL.** Was the workhorse VLM (cleared all 3 hard page types). Every call now 410s |
 | `qwen3-vl:8b` | local Ollama | ~0.47 | ~135s/pg | free | Offline / simple-page fallback. **Times out (>300s) on dense pages** |
 | **Gemini 3.x** | cloud API | 0.60–0.64 | fast | ~$0.0002/pg | **Edge-case escalation.** Best quality on the board; occasionally returns empty |
 | Mistral OCR | cloud API | 0.45 | fast | ~$0.001/pg | **Manual only.** Worse *and* ~5x pricier than Gemini → strictly dominated |
@@ -37,7 +40,7 @@ for the external leaderboard, and the design logs under `docs/log/` for the raw 
 | DeepSeek-OCR | local Ollama | 0.085 | — | free | **Dead weight.** Dropped from auto/local ladders; reach via `--primary deepseek` only |
 | `minicpm-v:8b` | local Ollama | — | ~27s/pg | free | Coarse offline captions only; **collapses table sub-columns** |
 
-\* `qwen3.5:cloud` runs on the Ollama Cloud account — no extra API key, billed as
+\* (Historical) `qwen3.5:cloud` ran on the Ollama Cloud account — no extra API key, billed as
 part of the Ollama subscription, treated as the cheap "cloud" rung.
 
 ## Routing per sub-task
@@ -68,11 +71,13 @@ The thinking build never terminates — the timeout guard is its only defence.
 
 ### 1. Text & formulas (LaTeX in markdown)
 - **Default:** native PyMuPDF text for born-digital prose (free).
-- **Hard / scanned / math pages:** local `qwen3-vl:30b-a3b-instruct` (free) or `qwen3.5:cloud`
-  (Ollama Cloud) depending on backend.
+- **Hard / scanned / math pages:** local `qwen3-vl:30b-a3b-instruct` (free). A cloud Qwen
+  model is reached only by an explicit `--qwen-model <tag>:cloud` pin.
 - **Escalation:** Gemini when Qwen is unavailable or returns empty.
 - **Font-corrupted equations** (`recover_corrupt_math`): `config.math_model` =
-  `qwen3.5:cloud`. Override with `--math-model qwen3-vl:8b` for fully offline runs.
+  `qwen3-vl:30b-a3b-instruct` (`DEFAULT_MATH_MODEL`, local, free; changed from the retired
+  `qwen3.5:cloud` in #905). Override with `--math-model`; a name containing `cloud` is
+  refused under `--strict-local` / `--max-cost-per-page 0`.
 
 ### 2. Figures (images)
 - **Extraction is model-free:** PyMuPDF locates figures, crops the frame, writes the
@@ -127,9 +132,11 @@ and is a larger, separately-tested change:
   (`DEFAULT_PROVIDERS` / `ENGINE_PRIORITY`). Today they remain in the cost registry for
   replay and `cost_of`.
 - Splitting provider identity by **engine + backend + model** at the *engine* layer.
-  GH-46-E2 closed the routing half of this: `_available_engines_for_agentic` now emits
-  `PROFILE_QWEN_LOCAL` and `PROFILE_QWEN_CLOUD` as independently probed rungs, so the
-  local → Ollama-Cloud → Gemini ladder has its middle rung. `EngineType.QWEN` still
+  GH-46-E2 closed the routing half of this by emitting `PROFILE_QWEN_LOCAL` and
+  `PROFILE_QWEN_CLOUD` as independently probed rungs. #905 reversed the emission:
+  `qwen3.5:cloud` is retired, so the default ladder is local qwen → marker → gemini and
+  `PROFILE_QWEN_CLOUD` stays registered only so pre-retirement manifests still resolve
+  (its `cloud_model_available` probe is now a real generation, not a listing). `EngineType.QWEN` still
   names two backends, and `DEFAULT_PROVIDERS` still holds only one profile per engine —
   a deliberate collision, worked around rather than removed.
 

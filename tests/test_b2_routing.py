@@ -252,24 +252,42 @@ class TestCloudRungReachable:
         engine.is_available.return_value = available
         return engine
 
-    def test_both_qwen_rungs_appear_as_distinct_profiles(self) -> None:
-        """The regression this ticket exists for: cloud was unreachable by construction."""
+    def test_default_ladder_has_no_cloud_qwen_rung_even_if_the_probe_says_yes(self) -> None:
+        """GH-905: ``qwen3.5:cloud`` was retired (410 Gone) while still listed.
+
+        The cloud rung is not emitted by the default ladder at all. Pinned as a
+        DIFFERENCE, not a value: the same pipeline is built twice, changing only
+        what the cloud probe reports, and the two ladders must be identical.
+        (Before GH-905 a truthy probe added ``qwen-cloud``, so they differed.)
+        """
+        pipeline = self._pipeline()
+        ladders = []
+        for probe in (True, False):
+            with (
+                patch("socr.pipeline.orchestrator.get_engine", return_value=self._engine(True)),
+                patch("socr.engines.qwen.cloud_model_available", return_value=probe),
+            ):
+                ladders.append([p.id for p in pipeline._available_engines_for_agentic()])
+
+        assert ladders[0] == ladders[1] == ["qwen-local-instruct"]
+        assert "qwen-cloud" not in ladders[0]
+
+    def test_cloud_probe_is_not_consulted_by_the_default_ladder(self) -> None:
+        """Nothing in the default ladder path may call the cloud probe."""
         pipeline = self._pipeline()
         with (
             patch("socr.pipeline.orchestrator.get_engine", return_value=self._engine(True)),
-            patch("socr.engines.qwen.cloud_model_available", return_value=True),
+            patch(
+                "socr.engines.qwen.cloud_model_available",
+                side_effect=AssertionError("default ladder must not probe the cloud rung"),
+            ),
         ):
-            profiles = pipeline._available_engines_for_agentic()
+            ids = [p.id for p in pipeline._available_engines_for_agentic()]
 
-        ids = [p.id for p in profiles]
-        assert "qwen-local-instruct" in ids
-        assert "qwen-cloud" in ids
-        # Distinct rungs, not one profile counted twice.
-        assert len(set(ids)) == len(ids)
-        assert len({id(p) for p in profiles}) == 2
+        assert ids == ["qwen-local-instruct"]
 
-    def test_cloud_rung_alone_when_local_model_absent(self) -> None:
-        """A machine that can reach cloud but has no local pull still gets a rung."""
+    def test_no_cloud_rung_when_local_model_absent(self) -> None:
+        """A machine with no local pull gets NO qwen rung, not a dead cloud one."""
         pipeline = self._pipeline()
         with (
             patch("socr.pipeline.orchestrator.get_engine", return_value=self._engine(False)),
@@ -277,44 +295,16 @@ class TestCloudRungReachable:
         ):
             ids = [p.id for p in pipeline._available_engines_for_agentic()]
 
-        assert ids == ["qwen-cloud"]
+        assert ids == []
 
-    def test_local_rung_alone_when_cloud_unreachable(self) -> None:
-        """The pre-GH-46-E2 world stays intact when the cloud model is not pulled."""
-        pipeline = self._pipeline()
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=self._engine(True)),
-            patch("socr.engines.qwen.cloud_model_available", return_value=False),
-        ):
-            ids = [p.id for p in pipeline._available_engines_for_agentic()]
-
-        assert ids == ["qwen-local-instruct"]
-
-    def test_local_probe_crash_does_not_suppress_cloud_rung(self) -> None:
-        """The two probes are independent; neither may gate the other."""
+    def test_local_probe_crash_never_crashes_routing(self) -> None:
         pipeline = self._pipeline()
         engine = self._engine(True)
         engine.is_available.side_effect = RuntimeError("ollama socket exploded")
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=engine),
-            patch("socr.engines.qwen.cloud_model_available", return_value=True),
-        ):
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=engine):
             ids = [p.id for p in pipeline._available_engines_for_agentic()]
 
-        assert ids == ["qwen-cloud"]
-
-    def test_cloud_probe_crash_never_crashes_routing(self) -> None:
-        pipeline = self._pipeline()
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=self._engine(True)),
-            patch(
-                "socr.engines.qwen.cloud_model_available",
-                side_effect=RuntimeError("network on fire"),
-            ),
-        ):
-            ids = [p.id for p in pipeline._available_engines_for_agentic()]
-
-        assert ids == ["qwen-local-instruct"]
+        assert ids == []
 
     def test_escalation_lane_prefers_cloud_rung_over_gemini(self) -> None:
         """Real behaviour change to the GH-96 lane: $0.00 beats $0.0002.

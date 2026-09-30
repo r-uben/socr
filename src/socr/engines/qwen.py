@@ -21,7 +21,9 @@ import os
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
+from socr.core.ollama_utils import DEFAULT_PROBE_TIMEOUT_SEC
 from socr.core.ollama_utils import check_ollama_model as _check_ollama_model
+from socr.core.ollama_utils import probe_model_generation
 from socr.engines.base import BaseEngine
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,16 @@ def cloud_model_available() -> bool:
       attribute is truthy, which would make a method-based cloud probe pass
       vacuously and hide the real gate.
 
+    GH-905: "reachable" means a real 1-token generation on the exact cloud
+    model succeeds (``think: false``, bounded by ``run_killable``), NOT that
+    ``ollama list`` shows it. Ollama Cloud retired ``qwen3.5:cloud`` on
+    2026-09-25 (410 Gone on every call) yet the daemon still lists it, so the
+    previous listing-based check emitted the dead rung and every escalated
+    page hit it. A 410 (or any HTTP error, refused connection, or timeout)
+    now reads as unavailable. ``PROFILE_QWEN_CLOUD`` is no longer part of the
+    DEFAULT ladder (``_available_engines_for_agentic``); this probe gates
+    only a caller that names that profile explicitly.
+
     The model name comes from ``PROFILE_QWEN_CLOUD`` so the profile registry
     stays the single source of truth for what the cloud rung actually runs.
 
@@ -66,8 +78,14 @@ def cloud_model_available() -> bool:
     local probe and by the provider's own failure path.
     """
     from socr.core.providers import PROFILE_QWEN_CLOUD
+    from socr.tables.extract import resolve_ollama_host
 
-    return _check_ollama_model(PROFILE_QWEN_CLOUD.model) is None
+    available, _reason = probe_model_generation(
+        resolve_ollama_host().rstrip("/"),
+        PROFILE_QWEN_CLOUD.model,
+        DEFAULT_PROBE_TIMEOUT_SEC,
+    )
+    return available
 
 
 def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
