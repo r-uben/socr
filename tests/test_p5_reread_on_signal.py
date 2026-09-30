@@ -198,6 +198,12 @@ def _run_pipeline(
         patch.object(pipeline, "_available_engines_for_agentic", return_value=available_profiles),
         patch.object(pipeline, "_resolve_judge_model", return_value="fake-vlm-model"),
         patch.object(pipeline, "_is_agentic_trusted_native", return_value=False),
+        # This fixture's native grid exact-passes. The native-first lane would
+        # ship it and never call route_page, so the crop signal this file
+        # measures would not exist. Defer that lane: the subject here is the
+        # crop reread after a whole-page read, which only runs for a page the
+        # native grid did not take.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch.object(
             UnifiedPipeline,
             "_run_engine_on_pages",

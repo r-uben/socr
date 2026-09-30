@@ -171,6 +171,10 @@ def _run_pipeline(tmp_path: Path):
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch.object(pipeline, "_is_agentic_trusted_native", return_value=False),
+        # The fixture's native grid exact-passes, so the native-first lane
+        # would ship it before route_page. This file measures the judged
+        # whole-page candidate, which only exists when that lane defers.
+        patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch.object(pipeline, "_probe_backend_idle", return_value=True),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
         patch("socr.pipeline.orchestrator.probe_openai_server_idle", return_value=True),

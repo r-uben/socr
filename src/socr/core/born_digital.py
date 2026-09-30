@@ -3800,10 +3800,39 @@ class BornDigitalDetector:
                 return _apply_links_to_flat_text(assembled, _links, _flat_words)
             return _apply_links_to_flat_text(page.get_text("text").strip(), _links, _flat_words)
 
+        table_regions.sort(key=lambda tr: tr[0].y0)
+        from socr.tables.label_canonical import canonicalize_table_labels
+
+        raw_table_regions = list(table_regions)
+        table_regions = [(rect, canonicalize_table_labels(md)[0]) for rect, md in table_regions]
+
+        had_unverifiable = self._verify_regions(page, table_regions)
+        self._last_extraction_had_unverifiable = had_unverifiable
+        self._check_token_coverage(page, table_regions)
+        return self.interleave_table_regions_into_page(page, raw_table_regions)
+
+    def interleave_table_regions_into_page(
+        self,
+        page: fitz.Page,
+        table_regions: list[tuple[object, str]],
+    ) -> str:
+        """Interleave *table_regions* with the page's non-table text blocks.
+
+        *table_regions* is a list of ``(rect, markdown)`` in page coordinates,
+        typically from the word-geometry rowizer. Used by the upright native-
+        table SHIP path after GH-147 refused the sideways rowizer output.
+        """
+        _links = _uri_links(page)
+        try:
+            _flat_words_early = page.get_text("words")
+        except Exception:
+            _flat_words_early = []
+
         # Sort regions top-to-bottom by their y0 coordinate (reading order).
         # Column-aware ordering (x-band then y) would be needed for multi-column
         # layouts; for single-column pages (CE p.4 style) y0 alone is correct.
         # This is documented as a known limitation in the design note §1b.
+        table_regions = list(table_regions)
         table_regions.sort(key=lambda tr: tr[0].y0)
 
         # #688 round 3: the native regions cross the label-canonicalisation
@@ -3823,30 +3852,6 @@ class BornDigitalDetector:
 
         raw_table_regions = list(table_regions)
         table_regions = [(rect, canonicalize_table_labels(md)[0]) for rect, md in table_regions]
-
-        # TR-2/TR-3 per-region verifier scoping: verify each table region
-        # independently against its own native numeric lanes.  The whole-page
-        # verifier (verify_native_table) combines lanes from ALL tables on the
-        # page, which causes false geometry_impossible_collapse hard-fails when
-        # two tables with different schemas sit on the same page (e.g. a 4-col
-        # forecaster grid + a 3-col historical table → 7 combined lanes but each
-        # table only has 3-4).  Calling verify_native_table_region per region
-        # fixes this by clipping get_text("words") to the region bbox first.
-        # TR-3: _verify_regions now returns True when any region hard-fails so
-        # _assess_page can flag the page for D3 fail-closed routing.
-        had_unverifiable = self._verify_regions(page, table_regions)
-        # Store on the instance so _assess_page can read it after the call to
-        # extract_structured — the PageAssessment is built there, not here.
-        self._last_extraction_had_unverifiable = had_unverifiable
-
-        # TR-2 token-coverage post-check: every native numeric token must land in
-        # exactly one region (no orphaned / double-counted token).  This is a
-        # deterministic safety net — not a gate that suppresses output, just a
-        # debug log so operators can trace lost tokens without re-running.
-        self._check_token_coverage(page, table_regions)
-
-        # Collect all region bboxes for the overlap-suppress check below.
-        all_region_rects = [r for r, _ in table_regions]
 
         # Build output by interleaving prose text and region content.
         # Use text blocks from get_text("dict") to get position-aware text.
