@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import subprocess
 import threading
 import time
 from urllib.parse import urlsplit
@@ -11,32 +10,82 @@ from urllib.parse import urlsplit
 import httpx
 
 
+#: GH-910: total wall-clock budget for the ``/api/tags`` listing. The retired
+#: ``ollama list`` subprocess used 10s; kept so a slow-but-alive daemon is
+#: treated as before. It is a TOTAL deadline (see ``_get_tags``), not httpx's
+#: per-read timeout.
+TAGS_CHECK_TIMEOUT_SEC = 10.0
+
+_UNREACHABLE_MSG = "Ollama is not running or not installed"
+
+
+def _get_tags(host: str, timeout: float) -> httpx.Response | None:
+    """``GET {host}/api/tags`` under a TOTAL deadline; ``None`` when it expires.
+
+    httpx's ``timeout=`` is per-read inactivity, so a peer trickling bytes never
+    trips it. The request runs in a daemon thread joined with *timeout* (the
+    approach ``_resolve_within`` uses): an overrun is abandoned, not waited on,
+    and cannot keep the process alive. No process is spawned. Transport errors
+    propagate as ``httpx.HTTPError`` / ``OSError``.
+    """
+    box: list = []
+
+    def _work() -> None:
+        try:
+            box.append(httpx.get(f"{host}/api/tags", timeout=timeout))
+        except BaseException as exc:  # handed to the caller, re-raised there
+            box.append(exc)
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if not box:
+        return None
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return box[0]
+
+
 def check_ollama_model(model_name: str) -> str | None:
     """Return an error string if the model is not PULLED, or None if it is.
 
-    This reads ``ollama list``: a LISTING, not proof the model can generate.
-    Ollama Cloud kept listing ``qwen3.5:cloud`` after retiring it (every call
-    410 Gone, GH-903/GH-905), so a ``:cloud`` tag must never be gated on this
-    alone -- use :func:`probe_model_generation`.
+    GH-910: reads ``GET {OLLAMA_HOST}/api/tags`` over HTTP, never the ``ollama``
+    CLI -- on macOS that binary launches Ollama.app and steals window focus
+    whenever the server is unreachable. Matching is an EXACT compare of
+    *model_name* against each listed ``name`` (or ``model``), tag included, as
+    the ``ollama list`` NAME column was: no ``:latest`` defaulting, no prefix.
+
+    A LISTING, not proof the model can generate. Ollama Cloud kept listing
+    ``qwen3.5:cloud`` after retiring it (every call 410 Gone, GH-903/GH-905),
+    so a ``:cloud`` tag must never be gated on this alone -- use
+    :func:`probe_model_generation`.
     """
+    from socr.tables.extract import resolve_ollama_host
+
+    host = resolve_ollama_host()
+    if not host_reachable(host):
+        return _UNREACHABLE_MSG
     try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return "Ollama is not running or not installed"
-        model_names = [
-            line.split()[0] for line in result.stdout.strip().splitlines()[1:] if line.split()
-        ]
-        if model_name not in model_names:
-            return f"Ollama model '{model_name}' not found. Pull it with: ollama pull {model_name}"
-    except FileNotFoundError:
-        return "Ollama is not installed (ollama command not found)"
-    except subprocess.TimeoutExpired:
+        resp = _get_tags(host, TAGS_CHECK_TIMEOUT_SEC)
+        if resp is None:
+            return "Ollama did not respond (timeout)"
+        if resp.status_code != 200:
+            return f"{_UNREACHABLE_MSG} (HTTP {resp.status_code} from /api/tags)"
+        models = resp.json()["models"]
+        names: set[str] = set()
+        for entry in models:
+            for key in ("name", "model"):
+                value = entry.get(key)
+                if isinstance(value, str):
+                    names.add(value)
+    except httpx.TimeoutException:
         return "Ollama did not respond (timeout)"
+    except (httpx.HTTPError, OSError):
+        return _UNREACHABLE_MSG
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return f"{_UNREACHABLE_MSG} (unreadable /api/tags response)"
+    if model_name not in names:
+        return f"Ollama model '{model_name}' not found. Pull it with: ollama pull {model_name}"
     return None
 
 
