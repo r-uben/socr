@@ -40,12 +40,15 @@ pages, audits quality, and falls back. One control loop: the
   `_resolve_judge_model` to `""` to make such a file hermetic.
   **That list is not complete (#841).** `PipelineConfig.primary_engine` defaults to `AUTO`,
   so `process()` calls `resolve_auto_engine()`, which instantiates engines from the registry
-  directly — not through `get_engine`, so patching that does not stop it — and shells out to
-  `ollama` to probe them. It costs ~7s per call against an unreachable host and ~0.3s where
-  ollama is up, so it hides on a workstation. Pin `primary_engine`, `local_engine` and
-  `enabled_engines` in any test that drives `process()`. For one test, `OLLAMA_HOST=127.0.0.1:1`
-  exposes it as a multi-second floor; at suite scale use the recorder plugin in
-  `docs/log/2026-09-23_841_probe_recorder.py` instead (138 tests in 29 files hit it on 2026-09-23).
+  directly — not through `get_engine`, so patching that does not stop it — and probes them.
+  Since #910 (#912) the probe is HTTP (`GET /api/tags` after a spawn-free TCP pre-check), not
+  the `ollama` CLI, which on macOS launched Ollama.app and stole the owner's window focus
+  whenever the host was unreachable. It is now cheap (~1 ms unreachable, ~15 ms with ollama up,
+  measured 2026-09-30), so a leaked probe no longer shows up as slowness. It shows up as a test
+  whose outcome depends on which models this machine has pulled. Pin `primary_engine`,
+  `local_engine` and `enabled_engines` in any test that drives `process()`. To find leaks at
+  suite scale, use the recorder plugin in `docs/log/2026-09-23_841_probe_recorder.py` (138 tests
+  in 29 files hit it on 2026-09-23; that count predates #912).
 - **A PR that CONFLICTS with its base runs NO CI at all, and the checks tab still looks green.**
   GitHub cannot compute a merge commit for a conflicting PR, so no `pull_request` workflow
   starts; the checks list then shows only the advisory reviewers (CodeRabbit, cubic) with green
