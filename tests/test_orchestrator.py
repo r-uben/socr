@@ -1715,6 +1715,10 @@ class TestAgenticIntegration:
             "recover_corrupt_math": True,
             "judge_backend": "heuristic",
             "enabled_engines": [],
+            # GH-905: math_model now defaults to a LOCAL model, which no policy
+            # gates. This test is about the policy on a REMOTE model, so name
+            # one explicitly (an operator's `--math-model <x>:cloud` opt-in).
+            "math_model": "remote-fixture-model:cloud",
         }
         config_values.update(config_overrides)
         config = _make_config(**config_values)
