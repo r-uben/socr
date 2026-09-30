@@ -72,7 +72,9 @@ The thinking build never terminates — the timeout guard is its only defence.
 ### 1. Text & formulas (LaTeX in markdown)
 - **Default:** native PyMuPDF text for born-digital prose (free).
 - **Hard / scanned / math pages:** local `qwen3-vl:30b-a3b-instruct` (free). A cloud Qwen
-  model is reached only by an explicit `--qwen-model <tag>:cloud` pin.
+  model is reached only by an explicit `--qwen-model <tag>:cloud` pin, which is treated as
+  cloud egress: refused (console line plus a `qwen_cloud_pin_refused` audit event) under
+  `--strict-local` or an explicit `--max-cost-per-page 0`.
 - **Escalation:** Gemini when Qwen is unavailable or returns empty.
 - **Font-corrupted equations** (`recover_corrupt_math`): `config.math_model` =
   `qwen3-vl:30b-a3b-instruct` (`DEFAULT_MATH_MODEL`, local, free; changed from the retired

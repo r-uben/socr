@@ -46,7 +46,9 @@ from socr.core.normalizer import (
 )
 from socr.core.providers import (
     ProviderProfile,
+    cloud_pinned_qwen_refusal,
     execution_overrides,
+    is_cloud_model,
     is_cloud_qwen,
     profile_by_id,
     profile_by_model,
@@ -85,7 +87,7 @@ from socr.judge.table_verdict import (
     RUNG_KIND_OLLAMA,
     rung_kind,
 )
-from socr.pipeline.agentic import route_page
+from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT, route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
@@ -2425,7 +2427,7 @@ class UnifiedPipeline:
         from socr.core.providers import zero_cap_pinned_forbids_cloud
 
         model = self.config.math_model or ""
-        is_cloud = "cloud" in model.casefold()
+        is_cloud = is_cloud_model(model)
         if self.config.strict_local and is_cloud:
             return f"model call skipped: strict-local forbids remote model {model}"
         if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
@@ -2837,7 +2839,7 @@ class UnifiedPipeline:
         from socr.math.recover import DEFAULT_MODEL
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
-        is_cloud = "cloud" in model.casefold()
+        is_cloud = is_cloud_model(model)
         if self.config.strict_local and is_cloud:
             return None, f"model call skipped: strict-local forbids remote model {model}"
         if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
@@ -8600,6 +8602,7 @@ class UnifiedPipeline:
 
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
+        available = self._refuse_cloud_pinned_qwen_rung(state, available)
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -8948,15 +8951,9 @@ class UnifiedPipeline:
                             # alone. Fold the provider's own error into the journaled
                             # reason so the failure is durable at the level that already
                             # records why the ladder escalated past this rung.
-                            if (
-                                att.output.skip_reason
-                                and att.output.status is PageStatus.ERROR
-                                and att.output.error
-                                and att.output.error not in att.output.skip_reason
-                            ):
-                                att.output.skip_reason = (
-                                    f"{att.output.skip_reason}: {att.output.error}"
-                                )
+                            att.output.skip_reason = self._skip_reason_with_provider_error(
+                                att.output
+                            )
                             # GH-169: keep the judge's verdict for EVERY attempt, not
                             # only the ones whose output was empty. A provider whose
                             # reading the judge refused journaled reason "none", so the
@@ -10053,6 +10050,65 @@ class UnifiedPipeline:
         self._report_unservable_engines(unservable)
         return available
 
+    #: GH-905: cap on the provider error folded into a journaled ``skip_reason``.
+    #: CLI stderr can be long and multi-line, and this string is copied into every
+    #: journal entry and page sidecar. The CLI layer already truncates stderr to
+    #: 500 characters (``engines/base.py``); this reuses that bound so one failing
+    #: rung cannot inflate every record beyond what the CLI itself keeps.
+    _SKIP_REASON_ERROR_MAX_CHARS = 500
+
+    @classmethod
+    def _skip_reason_with_provider_error(cls, output) -> str:
+        """``output.skip_reason`` with the provider's own error folded in (GH-905).
+
+        Only for an unaccepted ERROR output with no text whose reason exists. The
+        error is flattened to one line and capped at ``_SKIP_REASON_ERROR_MAX_CHARS``;
+        it is not appended when the reason already carries it (a timeout's reason
+        is ``provider timeout`` and its error ``qwen: timed out after Ns``: the
+        reason already says so).
+        """
+        reason = output.skip_reason
+        if not (reason and output.status is PageStatus.ERROR and output.error):
+            return reason
+        if reason == REASON_PROVIDER_TIMEOUT:
+            return reason
+        error = " ".join(str(output.error).split())
+        if len(error) > cls._SKIP_REASON_ERROR_MAX_CHARS:
+            error = error[: cls._SKIP_REASON_ERROR_MAX_CHARS] + "..."
+        if error in reason:
+            return reason
+        return f"{reason}: {error}"
+
+    def _refuse_cloud_pinned_qwen_rung(self, state, available: list) -> list:
+        """Drop the qwen rung when its PINNED model is a cloud model the policy forbids.
+
+        GH-905. ``--qwen-model x:cloud`` is the one remaining way to reach a cloud
+        qwen model, and it rides on ``PROFILE_QWEN_LOCAL`` (tier local, $0), which
+        the tier and zero-cap filters wave through. Refusal is surfaced, never
+        silent: a console line plus a document-level ``qwen_cloud_pin_refused``
+        audit event (page 0), the same surface ``judge_degraded_to_heuristic`` uses.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        if not any(p.engine is EngineType.QWEN for p in available):
+            return available
+        reason = cloud_pinned_qwen_refusal(self.config)
+        if not reason:
+            return available
+        logger.warning("agentic: qwen rung refused: %s", reason)
+        if not self.config.quiet:
+            console.print(f"  [yellow]qwen rung refused: {reason}[/yellow]")
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind="qwen_cloud_pin_refused",
+                engine="qwen",
+                detail=reason,
+                data={"qwen_model": self.config.qwen_model, "reason": reason},
+            )
+        )
+        return [p for p in available if p.engine is not EngineType.QWEN]
+
     def _report_unservable_engines(self, unservable: list) -> None:
         """Say so, once per pipeline, when the operator ASKED for a rung that cannot run.
 
@@ -10131,7 +10187,7 @@ class UnifiedPipeline:
         forbid_cloud = self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
 
         def _permitted(model: str) -> bool:
-            return "cloud" not in model.casefold() or not forbid_cloud
+            return not is_cloud_model(model) or not forbid_cloud
 
         # GH-873: an operator-named vLLM server replaces the Ollama candidate
         # ladder, exactly as ``--judge-model`` names a model -- the operator has
@@ -15981,7 +16037,7 @@ class UnifiedPipeline:
         # cloud override) bypassed both ``--strict-local`` and an EXPLICIT
         # ``--max-cost-per-page 0`` entirely. Same policy, same shared
         # predicate as every other direct-model entry point.
-        if "cloud" in model.casefold() and (
+        if is_cloud_model(model) and (
             self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
         ):
             reason = (

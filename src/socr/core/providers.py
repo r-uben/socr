@@ -279,6 +279,38 @@ def provider_ladder(
     return sorted(ladder, key=_sort_key)
 
 
+def is_cloud_model(model: str | None) -> bool:
+    """Whether *model* names a remote (Ollama-Cloud style) model.
+
+    GH-905: the ONE spelling of "this model string is a cloud model" that every
+    policy site shares (corrupt-math and clean-equation direct calls, the judge
+    ladder, and the qwen OCR rung), so a pinned ``--qwen-model x:cloud`` is
+    treated as cloud egress exactly like ``--math-model x:cloud`` is.
+    """
+    return "cloud" in (model or "").casefold()
+
+
+def cloud_pinned_qwen_refusal(config: object) -> str:
+    """Why the LOCAL qwen rung must be refused under the run's policy, else "".
+
+    GH-905. ``--qwen-model foo:cloud`` pins the model verbatim on
+    ``PROFILE_QWEN_LOCAL`` (tier local, price $0), so the tier filter
+    (``--strict-local``) and the zero-cap filter, both of which read the
+    PROFILE, let a cloud tag through and pages reached Ollama Cloud. The
+    profile's tier is not the truth for this rung: the model that will run is.
+    """
+    from socr.engines.qwen import resolve_qwen_intent
+
+    _backend, model = resolve_qwen_intent(config)  # type: ignore[arg-type]
+    if not is_cloud_model(model):
+        return ""
+    if getattr(config, "strict_local", False):
+        return f"strict-local forbids remote qwen model {model}"
+    if zero_cap_pinned_forbids_cloud(config):
+        return f"--max-cost-per-page 0 forbids remote qwen model {model}"
+    return ""
+
+
 def zero_cap_pinned_forbids_cloud(config: object) -> bool:
     """GH-154: True when an EXPLICIT ``--max-cost-per-page 0`` forbids a
     cloud/remote call, the same way ``--strict-local`` does.

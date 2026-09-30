@@ -136,7 +136,8 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
 
 def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
     """Top-level, picklable probe body run through ``run_killable`` (GH-903
-    round 3, P2-b) -- never called directly by `the caller`.
+    round 3, P2-b). Reached only via ``probe_model_generation``; callers never
+    invoke it directly.
 
     ``httpx``'s ``timeout=`` is a per-READ inactivity timeout, not a total
     wall-clock deadline (the same gap #172 closed for ``judge()`` itself): a

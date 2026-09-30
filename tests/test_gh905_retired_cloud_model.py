@@ -267,3 +267,148 @@ def test_journal_reason_differs_exactly_by_the_provider_error(tmp_path):
     assert a != b
     assert any("alpha" in r for r in a) and not any("beta" in r for r in a)
     assert any("beta" in r for r in b) and not any("alpha" in r for r in b)
+
+
+# ---------------------------------------------------------------------------
+# 4. review round 2: a pinned cloud tag on the qwen rung is policy-gated
+# ---------------------------------------------------------------------------
+
+
+def _qwen_cfg(**kw) -> PipelineConfig:
+    return PipelineConfig(
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
+        quiet=True,
+        **kw,
+    )
+
+
+def test_pinned_cloud_qwen_model_is_refused_under_strict_local_but_not_without_it():
+    from socr.core.providers import cloud_pinned_qwen_refusal
+
+    pin = dict(qwen_model="foo:cloud", qwen_model_pinned=True)
+    on = cloud_pinned_qwen_refusal(_qwen_cfg(strict_local=True, **pin))
+    off = cloud_pinned_qwen_refusal(_qwen_cfg(strict_local=False, **pin))
+    assert "strict-local" in on and "foo:cloud" in on
+    assert off == ""
+
+
+def test_pinned_cloud_qwen_model_is_refused_under_a_typed_zero_cap():
+    from socr.core.providers import cloud_pinned_qwen_refusal
+
+    pin = dict(qwen_model="foo:cloud", qwen_model_pinned=True)
+    typed_zero = cloud_pinned_qwen_refusal(
+        _qwen_cfg(max_cost_per_page=0.0, max_cost_per_page_pinned=True, **pin)
+    )
+    defaulted_zero = cloud_pinned_qwen_refusal(_qwen_cfg(**pin))
+    assert "--max-cost-per-page 0" in typed_zero
+    assert defaulted_zero == ""
+
+
+def test_a_local_or_unpinned_qwen_model_is_never_refused():
+    from socr.core.providers import cloud_pinned_qwen_refusal
+
+    strict = dict(strict_local=True, max_cost_per_page=0.0, max_cost_per_page_pinned=True)
+    assert cloud_pinned_qwen_refusal(_qwen_cfg(**strict)) == ""
+    local_pin = _qwen_cfg(qwen_model="qwen3.5:27b", qwen_model_pinned=True, **strict)
+    assert cloud_pinned_qwen_refusal(local_pin) == ""
+
+
+class _State:
+    def __init__(self):
+        self.events = []
+
+
+def test_refusal_drops_only_the_qwen_rung_and_leaves_a_surfaced_audit_event():
+    from socr.core.providers import PROFILE_GEMINI
+
+    pipe = UnifiedPipeline(
+        _qwen_cfg(strict_local=True, qwen_model="foo:cloud", qwen_model_pinned=True)
+    )
+    state = _State()
+    kept = pipe._refuse_cloud_pinned_qwen_rung(state, [PROFILE_QWEN_LOCAL, PROFILE_GEMINI])
+    assert kept == [PROFILE_GEMINI]
+    [event] = state.events
+    assert event.kind == "qwen_cloud_pin_refused"
+    assert "foo:cloud" in event.detail
+
+    # Same pin, policy off: the rung stays and nothing is recorded.
+    pipe = UnifiedPipeline(
+        _qwen_cfg(strict_local=False, qwen_model="foo:cloud", qwen_model_pinned=True)
+    )
+    state = _State()
+    kept = pipe._refuse_cloud_pinned_qwen_rung(state, [PROFILE_QWEN_LOCAL, PROFILE_GEMINI])
+    assert kept == [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
+    assert state.events == []
+
+
+def _rung_calls(tmp_path, **cfg_kw) -> int:
+    pipe = UnifiedPipeline(_qwen_cfg(qwen_model="foo:cloud", qwen_model_pinned=True, **cfg_kw))
+    detect = pipe.bd_detector.detect
+
+    def _needs_ocr(path):
+        assessment = detect(path)
+        for p in assessment.pages:
+            p.needs_ocr_enhancement = True
+        return assessment
+
+    pipe.bd_detector.detect = _needs_ocr
+    pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+    pipe._build_page_judge = lambda state: _RejectEmptyOrError()
+    pipe._resolve_crop_vlm_model = lambda: None
+    pipe._resolve_judge_model = lambda *a, **k: ""
+    calls: list[str] = []
+
+    def spy(state, nums, nat, eng, phase, profile=None, **_kw):
+        calls.append(profile.id if profile else "?")
+        return [
+            PageOutput(page_num=p, text=f"t {p}", status=PageStatus.SUCCESS, engine="qwen")
+            for p in nums
+        ]
+
+    pipe._run_engine_on_pages = spy
+    pipe.process(_pdf(tmp_path), output_dir=tmp_path / "out")
+    return len(calls)
+
+
+def test_strict_local_stops_pages_reaching_a_pinned_cloud_qwen_model(tmp_path):
+    """Difference pin through the real ``_phase_agentic``: only strict_local varies."""
+    allowed = _rung_calls(tmp_path / "off", strict_local=False)
+    refused = _rung_calls(tmp_path / "on", strict_local=True)
+    assert allowed > 0
+    assert refused == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. review round 2: the folded-in provider error is capped and not duplicated
+# ---------------------------------------------------------------------------
+
+
+def _err_output(reason: str, error: str) -> PageOutput:
+    return PageOutput(
+        page_num=1,
+        text="",
+        status=PageStatus.ERROR,
+        engine="qwen",
+        error=error,
+        skip_reason=reason,
+    )
+
+
+def test_a_long_multiline_provider_error_is_flattened_and_capped():
+    cap = UnifiedPipeline._SKIP_REASON_ERROR_MAX_CHARS
+    error = "CLI exited 1: " + "\n".join(["Traceback line " + "x" * 80] * 200)
+    out = UnifiedPipeline._skip_reason_with_provider_error(_err_output("empty/error output", error))
+    assert out.startswith("empty/error output: CLI exited 1: ")
+    assert "\n" not in out
+    assert len(out) <= len("empty/error output: ") + cap + len("...")
+
+
+def test_a_timeout_reason_is_not_duplicated_with_its_own_error():
+    from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT
+
+    out = UnifiedPipeline._skip_reason_with_provider_error(
+        _err_output(REASON_PROVIDER_TIMEOUT, "qwen: timed out after 300s")
+    )
+    assert out == REASON_PROVIDER_TIMEOUT

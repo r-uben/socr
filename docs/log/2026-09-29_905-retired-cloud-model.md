@@ -124,3 +124,33 @@ deleted):
   first run 3 failed / 5842 passed / 4 xfailed (the `test_orchestrator` test above);
   after the fix the full suite is **5845 passed, 4 xfailed** (439s).
 - `uvx ruff@0.16.0 format --check .`: clean.
+
+## Round 2 (review: ACCEPT-WITH-FIXES)
+
+1. **Privacy gap fixed.** A pinned `--qwen-model x:cloud` rode on `PROFILE_QWEN_LOCAL`
+   (tier local, $0), so the strict-local tier filter and the zero-cap filter (both read the
+   profile) let it reach Ollama Cloud. New in `core/providers.py`: `is_cloud_model` (the one
+   "cloud" casefold predicate, now used by the corrupt-math, clean-equation, judge-ladder
+   and equation-lane sites instead of four inline copies) and `cloud_pinned_qwen_refusal`
+   (resolves the model that will actually run through `resolve_qwen_intent`, refuses under
+   strict-local or `zero_cap_pinned_forbids_cloud`). `_phase_agentic` calls
+   `_refuse_cloud_pinned_qwen_rung` right after building `available`; the refusal is
+   surfaced as a console line, a log warning and a document-level (page 0)
+   `qwen_cloud_pin_refused` audit event, the surface `judge_degraded_to_heuristic` uses.
+   Scope: the agentic ladder. The non-agentic single-engine path does not build this
+   ladder and is unchanged.
+2. **Journal error capped/deduped.** `_skip_reason_with_provider_error`: flattened to one
+   line, capped at named `_SKIP_REASON_ERROR_MAX_CHARS = 500` (the bound `engines/base.py`
+   already applies to stderr), not appended when the reason is `REASON_PROVIDER_TIMEOUT`
+   or already contains the error. This supersedes the round-1 note about timeout reasons
+   changing: they are unchanged now.
+3. `probe_generate` docstring fixed.
+
+Tests added (8, in `test_gh905_retired_cloud_model.py`): strict on/off difference pin on
+the predicate and on the real `_phase_agentic` (rung calls > 0 vs 0), typed-vs-defaulted
+zero cap, local/unpinned pin unaffected, only the qwen rung dropped plus audit event,
+cap+flatten, timeout not duplicated.
+
+Mutations (copies in /tmp, canary passed, anchors count==1): gate removed -> 2 tests fail
+(`test_refusal_drops_only_the_qwen_rung...`, `test_strict_local_stops_pages_reaching...`);
+cap removed -> `test_a_long_multiline_provider_error_is_flattened_and_capped` fails.
