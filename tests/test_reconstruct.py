@@ -280,23 +280,27 @@ def _create_synthetic_table_page(rotation: int = 0) -> tuple[fitz.Document, fitz
             y += 25
         page.insert_text((100, y + 20), notes, fontsize=9, rotate=0)
     elif rotation == 90:
-        # Rotated 90 degrees clockwise
-        x = 520
-        rows_y = [100, 220, 340, 460]
-        for row in data:
-            for c, cell in enumerate(row):
-                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=90)
-            x -= 25
-        page.insert_text((x - 20, 100), notes, fontsize=9, rotate=90)
-    elif rotation in (270, -90):
-        # Rotated 270 degrees (or -90)
+        # GH-902: text reads bottom-to-top; the upright top edge is the page's LEFT
+        # edge, so rows advance rightward and columns advance upward. (This layout
+        # used to be the 270 one and vice versa -- 180 degrees off, which the wrong
+        # rowizer sign undid, so the matrix test passed against the bug.)
         x = 80
         rows_y = [500, 380, 260, 140]
         for row in data:
             for c, cell in enumerate(row):
-                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=270)
+                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=90)
             x += 25
-        page.insert_text((x + 20, 500), notes, fontsize=9, rotate=270)
+        page.insert_text((x + 20, 500), notes, fontsize=9, rotate=90)
+    elif rotation in (270, -90):
+        # 270: upright top edge is the page's RIGHT edge; rows advance leftward,
+        # columns advance downward.
+        x = 520
+        rows_y = [100, 220, 340, 460]
+        for row in data:
+            for c, cell in enumerate(row):
+                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=270)
+            x -= 25
+        page.insert_text((x - 20, 100), notes, fontsize=9, rotate=270)
     else:
         raise ValueError(f"Unsupported rotation: {rotation}")
 
@@ -327,6 +331,10 @@ def test_rowize_from_words_orientation_aware_rotation_matrix():
         doc, page = _create_synthetic_table_page(rotation=rot)
         words = page.get_text("words")
         assert words, f"Page must contain words for rotation={rot}"
+        from socr.core.born_digital import upright_rotation_for
+
+        # The fixture is only meaningful if the page measures as the rotation passed.
+        assert upright_rotation_for(page) == rot
 
         try:
             regions = rowize_from_word_list(words, rotation=rot, page_rect=page.rect)

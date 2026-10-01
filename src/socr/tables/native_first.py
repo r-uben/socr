@@ -103,7 +103,7 @@ def upright_words_for_page(page) -> tuple[list, int]:
     ys = [w[1] for w in words]
     cx = (min(xs) + max(xs)) / 2
     cy = (min(ys) + max(ys)) / 2
-    return [_rotate_word_bbox(w, cx, cy, -rotation) for w in words], rotation
+    return [_rotate_word_bbox(w, cx, cy, rotation) for w in words], rotation
 
 
 def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
