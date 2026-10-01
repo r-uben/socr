@@ -1,7 +1,7 @@
 # GH-934: line-level prose/caption predicate, single-walk stub-first header band (retry of #925)
 
-Status: IMPLEMENTED, merge bar met after revision 2 (the rowizer-side partial-header fallback, option 2). Revision 1 shipped Ayivodji 43 as a
-partial-header new silent ship; that is superseded below. Not pushed. Wait for CI green on the exact head before merging.
+Status: NOT MERGED. The branch met the 127-page census bar after revision 2, was pushed as PR #938, and was closed after
+review (see "Outcome" at the end). The sections below are the record of what was built and measured.
 
 Revision 2 (ruling: option 2, no waiver, `ship_gate.py` untouched): in `_header_band_ys`, when `_is_prose_like_row` rejects a LANE-SHAPED row
 (`_is_lane_shaped_row`: 2+ words, every word snaps, 2+ distinct lanes) after the walk has left main's rule, the whole stub recovery is
@@ -160,7 +160,9 @@ SHIP:
 - The gain is small and cheap to forgo. In revision 2, 1 page of 127 (Gong 53) skips one model read, Boukus 38 gets a
   better header, and Fama 561 still refuses.
 - The risk is in the class this repo ranks worst: a page that DEFERs on main ships a wrong header with no gate signal.
-- A missed header costs one model read today, because `header_band_missing` catches it.
+- On the census, every stub-first band main drops fires `header_band_missing` (18 pages), so that miss costs one model
+  read today. `header_band_missing` does not detect every missing header: a missing one-word spanning heading (the
+  #938 counterexample) is not something it sees, which is why a partial band must never be shipped as if complete.
 
 **Where the measurement goes instead:**
 - The prose-line predicate (single run at `ALIGNED_RUN_GAP_MAX_WORD_SPACES`, plus a font-size clause) belongs on the
