@@ -416,7 +416,7 @@ def test_a_failed_candidate_is_refused(pdf_path):
     assert "table_escalation_refused" in [e.kind for e in state.events]
 
 
-def test_a_wedged_provider_disables_the_lane_for_the_document(pdf_path):
+def test_a_timed_out_call_is_abandoned_not_latched(pdf_path):
     """Observed live: a cloud OCR CLI sat wedged mid-request for 97 minutes.
 
     Escalation runs inline in the page-major loop, so an unbounded call stalls the
@@ -435,7 +435,9 @@ def test_a_wedged_provider_disables_the_lane_for_the_document(pdf_path):
 
     degraded, bo = pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, hang, pdf_path)
 
-    assert degraded is True, "the lane must latch off after a hang"
+    # GH-851: one slow call is not evidence of a wedge; see
+    # test_gh851_escalation_latch_evidence.py for the wedge-vs-slow pins.
+    assert degraded is False, "a single timeout must not disable the lane"
     assert bo.text == _SHIFTED
     assert "table_escalation_timeout" in [e.kind for e in state.events]
 

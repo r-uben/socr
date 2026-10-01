@@ -161,9 +161,14 @@ def _run(tmp_path: Path, *, page_one_degrades: bool) -> tuple[Path, list[int]]:
     escalated_pages: list[int] = []
 
     def _stub_escalate(state, page_num, ps, bo, profile, run_provider, pdf_path, **kwargs):
+        # GH-851: the lane is no longer a document-scoped latch; a wedged
+        # provider withholds escalation PER PAGE (``_escalate_table_page``
+        # returns True without calling the provider). The double models that:
+        # in the "degraded" run page 2 is withheld, so it is not a call.
+        if page_one_degrades and page_num == 2:
+            return True, bo
         escalated_pages.append(page_num)
-        degraded = page_one_degrades and page_num == 1
-        return degraded, bo
+        return False, bo
 
     with (
         patch.object(

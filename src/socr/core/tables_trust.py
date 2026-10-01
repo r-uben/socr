@@ -153,6 +153,8 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # the disagreement was resolved and the shipped table is the better one.
         "table_escalation_refused",
         "table_escalation_timeout",
+        # GH-851: a page that lost its escalation to a wedged provider.
+        "table_escalation_withheld",
         # GH-353 TICKET-B2: the two ladder terminals (content problem / infra
         # problem, see the terminal-notes dict below). Values are literal
         # strings, not an import, matching every other entry in this set --
