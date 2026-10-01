@@ -29,6 +29,7 @@ from socr.tables.native_verifier import (
     _verify_from_words,
     is_numeric_token,
 )
+from socr.tables.ship_gate import SHIP_GATE_REASON_PREFIX, native_ship_gate
 
 SHIP = "ship"
 CELLS = "cells"
@@ -55,6 +56,10 @@ class NativeTablePlan:
     action: str
     cells: tuple[FailingCell, ...] = ()
     reason: str = ""
+    #: GH-916: faults the ship gate found on a grid that exact-passed (empty
+    #: unless ``reason`` starts with ``ship_gate``). Carried to the caller so it
+    #: can record why the native grid was rejected.
+    faults: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -275,6 +280,15 @@ def plan_native_table(
 
     verdict = _verify_from_words(words or [], markdown or "", scope_label="native-first")
     if verdict.state == VerifierState.EXACT_PASS and not unverifiable:
+        # GH-916: EXACT_PASS pairs rows by numeric multiset and ignores sign
+        # glyphs, so it cannot see a detached sign, a dropped row, or reversed
+        # order. Defer (never refuse): a refuse would skip the model attempt.
+        faults = native_ship_gate(words or [], markdown or "")
+        if faults:
+            names = ",".join(sorted({f["predicate"] for f in faults}))
+            return NativeTablePlan(
+                DEFER, reason=f"{SHIP_GATE_REASON_PREFIX}:{names}", faults=faults
+            )
         return NativeTablePlan(SHIP, reason="exact_pass")
     # A row-count gap makes the per-row pairing unreliable. Do not send a
     # model a cell chosen from that pairing, and do not ship the grid.
