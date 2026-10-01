@@ -1,7 +1,15 @@
 # 2026-10-01 Behaviour-preserving cleanup: ollama utils, judge, providers
 
-Branch `chore/cleanup-ollama-judge` from origin/main c0c67e4. Source review:
-`~/.local/state/socr-housekeeping/cleanup/clean-pipeline.md` (item numbers below).
+Branch `chore/cleanup-ollama-judge` from origin/main c0c67e4. Source: an Opus 5.5 read-only
+cleanliness review (2026-10-01) of the code added by #903/#905/#910. Its items, by number:
+1 repeated `retained_prose_survives` call; 2 duplicated thread-with-deadline helpers; 3 the think
+flag defined twice; 4 an orphaned comment in ollama_judge; 5 history-laden or wrong judge docstrings;
+6 a stale `zero_cap_pinned_forbids_cloud` docstring; 7 `_resolve_judge_model` duplication and
+sentinel; 8 `_plan_native_table_first` size; 9 audit kinds as string literals; 10
+`resume_restore_kinds` comment bulk; 11 the duplicated qwen cloud probe; 12 inconsistent host
+slash-stripping; 13 stale ollama_utils comments; 14 a duplicated timeout string and name parsing;
+15 type hints; 16 an outdated noqa import; 17 the routing side channel; 18 duplicated warn/print/event;
+19 `_build_page_judge` comments; 20 providers docstrings and `import os`.
 No behaviour change intended; nothing here alters outputs, events, error strings or routing.
 
 ## Done
@@ -54,3 +62,5 @@ No behaviour change intended; nothing here alters outputs, events, error strings
 ## Tests
 
 See the commit message / final report for the counts. Tests touched: none.
+
+- **Review follow-up (cubic P2):** the `CONNECT_PROBE_TIMEOUT_SEC` re-export from `ollama_judge` is RESTORED. Nothing in src or tests imports it, but this PR promises no behaviour change, and an external importer would break.

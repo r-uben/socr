@@ -17,7 +17,8 @@ from pathlib import Path
 import httpx
 
 from socr.core.killable import CallSpec, run_killable
-from socr.core.ollama_utils import (
+from socr.core.ollama_utils import (  # noqa: F401 -- CONNECT_PROBE_TIMEOUT_SEC re-exported
+    CONNECT_PROBE_TIMEOUT_SEC,
     DEFAULT_PROBE_TIMEOUT_SEC,
     PROBE_THINK,
     probe_model_generation,
