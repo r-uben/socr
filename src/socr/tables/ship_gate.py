@@ -84,6 +84,9 @@ LABEL_ROW_MISSING = "label_row_missing"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
+#: Distinct lanes a paired row needs to be CORE (``_table_geometry``), and so the
+#: fewest lanes a block can have and still be judged the same table as another.
+_MIN_CORE_LANES = 2
 #: Largest vertical gap, in row pitches, allowed between the table's edge row and
 #: the next full-width row that extends its span OUTWARD; the whole outward reach (no
 #: floors), so bound 0 means no outward extension. Rows between consecutive blocks of
@@ -315,7 +318,7 @@ def _table_geometry(found, src_rows):
     def lane_count(ws: list) -> int:
         return len({_lane_of(w[0], lanes) for w in ws} - {None})
 
-    core = [y for y, ws in multi if lane_count(ws) >= 2]
+    core = [y for y, ws in multi if lane_count(ws) >= _MIN_CORE_LANES]
     if len(core) < 2:
         return None
     return lanes, core
@@ -366,11 +369,14 @@ def _same_table_lanes(a: list[float], b: list[float]) -> bool:
     """Whether two blocks' lane sets are the same table's columns, by lanes alone.
 
     Every lane of the narrower block lies within the snap radius of a lane of the
-    other, and at least ``_MIN_LANES_PER_ROW`` lanes are shared. Proximity on the
-    page plays no part: stacked tables with different columns are different tables.
+    wider one, and the narrower block has at least the lanes a CORE row needs
+    (``_MIN_CORE_LANES``, the same minimum ``_table_geometry`` uses). So a two-column
+    panel whose columns line up with two of a four-column table's is the same table;
+    two unrelated tables whose columns do not line up are not. Proximity on the page
+    plays no part.
     """
     small, big = (a, b) if len(a) <= len(b) else (b, a)
-    return len(small) >= _MIN_LANES_PER_ROW and all(_lane_of(x, big) is not None for x in small)
+    return len(small) >= _MIN_CORE_LANES and all(_lane_of(x, big) is not None for x in small)
 
 
 def table_spans(blocks, anchors: _Anchors, src_rows, panel_gap_rows=_PANEL_GAP_ROWS):
@@ -435,36 +441,35 @@ def data_row_missing_faults(
         for idx, _y in found:
             pool.subtract(_normalize_numeric_token(t) for t in _row_tokens(block[idx]))
     anchor_ys = {y for found in anchors.per_block for _i, y in found}
-    seen: set[int] = set()  # a row in two blocks' spans is judged once
-    for lanes, _core, y_lo, y_hi in table_spans(blocks, anchors, src_rows, panel_gap_rows):
-
-        def lane_hits(y: int, lanes=lanes) -> list:
-            return [w for w in _numeric_words(src_rows[y]) if _lane_of(w[0], lanes) is not None]
-
-        def lane_count(y: int, lanes=lanes) -> int:
-            return len({_lane_of(w[0], lanes) for w in lane_hits(y)})
-
-        for y, ws in sorted(src_rows.items()):
-            if y in anchor_ys or y in seen or not (y_lo <= y <= y_hi):
-                continue
-            in_lane = lane_hits(y)
-            k = lane_count(y)
-            if k < 2:
-                continue
-            seen.add(y)
-            need = Counter(_normalize_numeric_token(w[4]) for w in in_lane)
-            if all(pool[t] >= n for t, n in need.items()):
-                pool.subtract(need)
-                continue
-            faults.append(
-                {
-                    "predicate": DATA_ROW_MISSING,
-                    "detail": (
-                        f"source row at y={y} with {k} numeric lane(s) "
-                        f"({', '.join(w[4] for w in in_lane[:6])}) has no output row"
-                    ),
-                }
-            )
+    spans = table_spans(blocks, anchors, src_rows, panel_gap_rows)
+    for y, ws in sorted(src_rows.items()):
+        if y in anchor_ys:
+            continue
+        # Judge the row ONCE, against the UNION of the lanes of every block whose span
+        # covers it. A row between a three-lane and a four-lane block that keeps its
+        # first three values and loses the fourth must not pass the narrow check and
+        # then be shielded from the wider one.
+        applicable = [lanes for lanes, _core, y_lo, y_hi in spans if y_lo <= y <= y_hi]
+        if not applicable:
+            continue
+        numeric = _numeric_words(ws)
+        in_lane = [w for w in numeric if any(_lane_of(w[0], L) is not None for L in applicable)]
+        k = max(len({_lane_of(w[0], L) for w in numeric} - {None}) for L in applicable)
+        if k < _MIN_CORE_LANES:
+            continue
+        need = Counter(_normalize_numeric_token(w[4]) for w in in_lane)
+        if all(pool[t] >= n for t, n in need.items()):
+            pool.subtract(need)
+            continue
+        faults.append(
+            {
+                "predicate": DATA_ROW_MISSING,
+                "detail": (
+                    f"source row at y={y} with {k} numeric lane(s) "
+                    f"({', '.join(w[4] for w in in_lane[:6])}) has no output row"
+                ),
+            }
+        )
     return faults
 
 

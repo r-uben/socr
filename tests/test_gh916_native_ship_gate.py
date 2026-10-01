@@ -1020,3 +1020,71 @@ class TestBlockInterior:
         anchors = ship_gate._Anchors(blocks, src)
         assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
         assert ship_gate.data_row_missing_faults(blocks, anchors, src) == []
+
+
+class TestBlockInteriorColumnCounts:
+    """Blocks of one table with different column counts, and the union of their lanes."""
+
+    @staticmethod
+    def _stack(a_cols, b_cols, b_dx=0.0, extra_row_in_a=None):
+        def words_for(ys, cols, dx, base, line0):
+            out = []
+            for k, y in enumerate(ys):
+                out.append(_word(COL_XS[0], float(y), f"r{base + k}", line0 + k, 0))
+                for ci in cols:
+                    out.append(_word(COL_XS[ci] + dx, float(y), f"{base + k}.{ci}5", line0 + k, ci))
+            return out
+
+        def md_for(cols, base, extra=None):
+            rows = [[f"r{base + k}"] + [f"{base + k}.{ci}5" for ci in cols] for k in range(3)]
+            if extra:
+                rows.append(extra)
+            return _md(["Var"] + ["abcd"[ci - 1] for ci in cols], rows)
+
+        words = words_for([100, 110, 120], a_cols, 0.0, 1, 0) + words_for(
+            [300, 310, 320], b_cols, b_dx, 7, 10
+        )
+        return words, md_for(a_cols, 1, extra_row_in_a) + "\n\n" + md_for(b_cols, 7)
+
+    @staticmethod
+    def _omitted(words, cols, dx=0.0):
+        for ci in cols:
+            words.append(_word(COL_XS[ci] + dx, 200.0, f"4.{ci}9", 99, ci))
+
+    def _faults(self, words, md, bound=ship_gate._PANEL_GAP_ROWS):
+        blocks = ship_gate._output_blocks(md)
+        src = ship_gate._source_rows(words)
+        anchors = ship_gate._Anchors(blocks, src)
+        return ship_gate.data_row_missing_faults(blocks, anchors, src, bound)
+
+    def test_a_two_lane_block_and_a_four_lane_block_are_one_table(self) -> None:
+        words, md = self._stack([1, 2], [1, 2, 3, 4])
+        assert self._faults(words, md) == []
+        self._omitted(words, [1, 2, 3, 4])
+        for bound in (0, ship_gate._PANEL_GAP_ROWS):
+            got = self._faults(words, md, bound)
+            assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING, bound
+
+    def test_two_unrelated_two_lane_tables_do_not_merge(self) -> None:
+        # Second table's columns are 60 points to the right.
+        words, md = self._stack([1, 2], [1, 2], b_dx=60.0)
+        self._omitted(words, [1, 2])
+        assert self._faults(words, md, 0) == []
+        assert self._faults(words, md) == []
+
+    def test_a_row_is_judged_against_the_union_of_covering_lanes(self) -> None:
+        # Three-lane block above, four-lane block below. The interior row prints four
+        # values; the grid keeps its first three (as an extra row of the first block)
+        # and loses the fourth. The narrow check alone would pass it.
+        words, md = self._stack(
+            [1, 2, 3], [1, 2, 3, 4], extra_row_in_a=["x", "4.19", "4.29", "4.39"]
+        )
+        self._omitted(words, [1, 2, 3, 4])
+        got = self._faults(words, md, 0)
+        assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING
+        # With the fourth value kept too, nothing fires.
+        words, md = self._stack(
+            [1, 2, 3], [1, 2, 3, 4], extra_row_in_a=["x", "4.19", "4.29", "4.39", "4.49"]
+        )
+        self._omitted(words, [1, 2, 3, 4])
+        assert self._faults(words, md, 0) == []

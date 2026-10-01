@@ -640,3 +640,73 @@ new7 pages and all 8 new8 pages fire).
 ### Results
 
 All mutants killed (the 25 of round 5 plus 4 new; the one-shared-lane mutant survived the first run and now dies after adding the one-shared-lane control). Full suite: 5976 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 2007 s). `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 7 (Astra: two remaining false negatives in the block-interior rule)
+
+1. **Fewer-column panel.** `_same_table_lanes` effectively needed >= 3 lanes (`_MIN_LANES_PER_ROW`) although
+   `_table_geometry` accepts a core row with two. A two-lane panel above or below a four-lane one was never
+   merged, so an omitted four-lane row between them was outside both spans. The minimum is now the core-row
+   minimum (`_MIN_CORE_LANES = 2`, shared by `_table_geometry` and `_same_table_lanes`): a narrower block
+   whose lanes ALL align with lanes of the wider block is the same table. Two unrelated tables whose columns
+   do not line up still do not merge. MUST-FIRE test: two-lane core rows at y=100/110/120, four-lane at
+   300/310/320, an omitted four-lane row at y=200 fires at bound 0 and at the default bound. Controls: the
+   non-matching four-lane tables and the one-shared-lane blocks (round 6), and two unrelated two-lane tables
+   with shifted lanes.
+2. **Dedup blind spot.** A row was marked seen after checking only the first block's lanes, so a three-lane
+   block before a matching four-lane block let an interior row that keeps three values and loses the fourth
+   pass the narrow check and shielded it from the wider one. Each candidate row is now evaluated ONCE against
+   the UNION of the lanes of every block whose span covers it (hits from any applicable lane set, width = the
+   widest applicable lane count), then judged. MUST-FIRE test: that shape (the grid keeps the first three
+   values as an extra row of the first block); with the fourth value kept too, nothing fires.
+
+Mutants (each reverts one fix): same-table minimum back to `_MIN_LANES_PER_ROW` fails the two-lane/four-lane
+test; judging a row against only the first covering block fails the union test; the earlier set (interior
+removed, interior across non-matching tables, one-shared-lane) still dies.
+
+### Re-measurement (round 6 to round 7)
+
+| set | measure | round 6 | round 7 |
+|---|---|---|---|
+| upright SHIP (92) | pages firing | 25 | 25 |
+| | data_row_missing / label_row_missing | 6 / 20 | 6 / 20 |
+| | sign_detached / row_order / cell_order | 0 | 0 |
+| rotated (35) | wrong / other pages stopped | 12 of 14 / 6 of 21 | 12 of 14 / 6 of 21 |
+| | label wrong / other, data wrong, sign wrong | 9 / 6, 2, 2 | 9 / 6, 2, 2 |
+
+No verdict flips on any page set; new7 and new8 unchanged (the four true new7 pages and all 8 new8 pages fire,
+gomez-cram p10 fires as the accepted trade, piller p33 is quiet). The corpus has no page on which these two
+fixes change a verdict; they close synthetic shapes only.
+
+### Pages that fire (upright SHIP, round 7): basename, page, predicates
+
+| basename | page | predicates |
+|---|---|---|
+| 2003__woodford.pdf | 787 | data_row_missing |
+| 2003__woodford.pdf | 791 | label_row_missing |
+| 2003__woodford.pdf | 802 | data_row_missing |
+| 2006__boukus_rosenber__information_content_fomc_minutes__WP.pdf | 46 | label_row_missing |
+| 2008__faust_wright__efficient_prediction_of_excess_returns.pdf | 44 | label_row_missing |
+| 2016__ramey__shocks.pdf | 104 | data_row_missing, label_row_missing |
+| 2018__brochet_kolev_lerman__information_transfer_conference_calls__RAS.pdf | 21 | data_row_missing |
+| 2020__cieslak_vissing-jorgensen__the_economics_of_fed_put__WP.pdf | 63 | label_row_missing |
+| 2021__gow_larcker_zakolyukina__non_answers_during_conference_calls__JAR.pdf | 48 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 10 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 67 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 78 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 83 | label_row_missing |
+| 2023__cook_kazinnik_hansen_mcadam__local_language_models_financial_earnings_calls.pdf | 21 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 29 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 30 | label_row_missing |
+| 2023__segal.pdf | 66 | data_row_missing |
+| 2025__barry_bruns_kandemir_klose_smirnov_tillmann__emotions_monetary_policy__WP.pdf | 19 | label_row_missing |
+| 2025__fernandez-fuertes__monetary_policy_shocks_a_new_hope.pdf | 73 | label_row_missing |
+| 2025__gomez-cram_jensen_kung__financial_prediction_markets_a_new_measure_of_earnings_expectations.pdf | 10 | label_row_missing |
+| 2025__hack_istrefi_meier__systematic_origins_of_monetary_policy_shocks__WP.pdf | 38 | label_row_missing |
+| 2025__wang_liu_chen__current_stance_vs_future_guidance_llm_evidence_on_how_pbc_communication_shapes_the_yield_curve__EL.pdf | 11 | label_row_missing |
+| 2026__bugel_hidalgo_luetticke__unconventional_unified_narrative_mp_shocks__WP.pdf | 11 | data_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 44 | label_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 50 | label_row_missing |
+
+### Results
+
+Full suite: 5979 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 595 s); all 30 mutants killed. `uvx ruff@0.16.0 format --check .` clean.
