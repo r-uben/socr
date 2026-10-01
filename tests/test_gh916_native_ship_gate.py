@@ -1101,3 +1101,13 @@ class TestBlockInteriorColumnCounts:
         )
         self._omitted(words, [1, 2, 3, 4])
         assert self._faults(words, md, 0) == []
+
+
+def test_gap_measurement_rejects_a_page_in_two_input_sets() -> None:
+    """cubic P2 on #920: results are keyed by (doc, page), so a page given in both
+    the rotated and the upright set must be refused, not silently overwritten."""
+    from socr.benchmark import ship_gate_gaps
+
+    rows = [("rotated", "d.pdf", 3, [], ""), ("upright", "d.pdf", 3, [], "")]
+    with pytest.raises(ValueError, match="d.pdf:3"):
+        ship_gate_gaps.measure(rows, ["0"])

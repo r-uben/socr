@@ -114,6 +114,17 @@ def measure(inputs, bounds):
     covered: dict[str, dict[tuple[str, int], list[int]]] = {b: {} for b in bounds}
     fired: dict[str, dict[tuple[str, int], list[int]]] = {b: {} for b in bounds}
     order: dict[tuple[str, int], list[int]] = {}
+    inputs = list(inputs)
+    # Results are keyed by (doc, page). A page present in both the rotated and the
+    # upright set would silently overwrite one measurement, so refuse it (cubic P2, #920).
+    seen: dict[tuple[str, int], str] = {}
+    dupes = []
+    for set_name, doc, page, _words, _md in inputs:
+        if (doc, page) in seen:
+            dupes.append(f"{doc}:{page} ({seen[(doc, page)]} and {set_name})")
+        seen.setdefault((doc, page), set_name)
+    if dupes:
+        raise ValueError("pages appear in more than one input set: " + "; ".join(dupes))
     for set_name, doc, page, words, markdown in inputs:
         blocks = g._output_blocks(markdown)
         if not blocks or not words:
