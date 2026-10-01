@@ -932,7 +932,7 @@ def _data_rows(kinds: list[list[str]], paired: set[int]) -> list[int]:
 
 def _numeric_columns(kinds: list[list[str]], rows: list[int]) -> list[int]:
     """Columns where MORE THAN HALF of *rows* hold a number."""
-    width = max(len(ks) for ks in kinds)
+    width = max((len(ks) for ks in kinds), default=0)
     return [
         c
         for c in range(width)
@@ -948,7 +948,8 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
     * PLACEHOLDERS: a text that the SAME column holds in two or more rows (``n.a.`` in a
       column of a table that prints it) is a placeholder, not prose; it counts as neither
       text nor number. A bare dash has no letter and is never text. No vocabulary: prose
-      does not repeat verbatim down one column.
+      rarely repeats verbatim down one column (two identical footnote lines in one
+      column would read as a placeholder: a missed DEFER, not a false one).
     * DATA ROWS: rows that pair uniquely to a source row (so the PDF confirms them), carry at
       least ``_MIN_CORE_LANES`` number cells (the rowizer's own minimum for a row of values),
       and whose values (numbers, dashes, placeholders) reach more than half of the columns
@@ -969,6 +970,11 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
     """
     faults: list[GateFault] = []
     for block, found in zip(blocks, pairs):
+        if not any(block):
+            # A separator-only or empty block has no cells to judge; skipping it keeps
+            # it from raising into ``native_ship_gate``'s handler, which would replace
+            # the other blocks' faults with ``gate_error`` (Astra, PR #931).
+            continue
         kinds = [[_cell_kind(c) for c in row] for row in block]
         repeats: Counter = Counter()
         for row, ks in zip(block, kinds):

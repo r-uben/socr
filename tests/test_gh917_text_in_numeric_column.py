@@ -215,3 +215,10 @@ class TestDerivation:
         rows = [[r[0], "firms", r[1], r[2], ""] for r in ROWS]
         words, md = _grid(rows, tail=[["", "", "see note", "", ""]])
         assert _fired(words, md) == {TNC}
+
+
+def test_a_separator_only_block_does_not_mask_another_blocks_fault() -> None:
+    """Astra on PR #931: a separator-only block (``| --- | --- |``) made the predicate
+    raise, and the gate's handler then replaced the real fault with ``gate_error``."""
+    words, md = _grid(tail=[["", "", "", "", "(Continued)"]])
+    assert _fired(words, md + "\n\n| --- | --- |\n") == {TNC}

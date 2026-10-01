@@ -180,3 +180,4 @@ are inside it and pass unchanged: the new predicate does not fire on their fixtu
   signal I could not find on these pages; (C) keep the quarantine for rotated pages whose first data row
   sits below non-heading text (not measurable on the output grid).
 - The quarantine (#918) stays. A re-audit of the 13 is still the lift protocol.
+- **Review follow-up (Astra P2 on PR #931):** a separator-only block made `_numeric_columns`' `max()` raise, and the gate's handler then replaced the other blocks' faults with `gate_error`. Empty blocks are now skipped (and `max` has `default=0`). Regression test: `test_a_separator_only_block_does_not_mask_another_blocks_fault`. Mutant (both guards reverted) fails it. The placeholder docstring no longer claims prose can never repeat in a column.
