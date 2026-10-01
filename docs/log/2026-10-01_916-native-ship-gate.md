@@ -448,3 +448,112 @@ started with an opener, and a later patch of mine had deleted it; it is restored
 ### Results
 
 Full suite: 5966 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 374 s). `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 5 (Astra rejected round 4: the Notes rule still hides faults)
+
+### Decision: the Notes/Source rule is removed entirely
+
+Astra's three counterexamples to round 4's narrowed rule: (a) a genuine "Source of shock" heading after
+four-lane rows, followed by narrower two-lane data, never regained core, so a dropped "Panel B" label or
+a dropped numeric row in that section escaped; (b) openers were collected page-wide, so a neighbouring
+column's "Notes:" suppressed this table; (c) the resume threshold compared numeric-word counts with
+distinct lanes. The rule is deleted. Core membership is: >= 2 numeric words in >= 2 table lanes, nothing
+else. **The trade, stated explicitly:** a Notes paragraph swallowed into the grid (gomez-cram p10, a false
+DEFER per Fable) now fires again, because a false fire costs one model call and a missed fault can ship a
+wrong number. Tests pin the counterexamples as MUST-FIRE: a narrow section after "Source of shock",
+"Notes:" or "Source:" (dropped label fires, dropped numeric row fires, intact grid does not); a
+neighbouring column's "Notes:" on a row inside the table; and the gomez-shaped paragraph itself, pinned as
+an accepted false DEFER. Mutant "Notes rule re-added" fails 5 tests.
+Related: the width a row needs to extend the span is now the modal DISTINCT-LANE count of the core rows
+(was the modal numeric-word count); a test with two numbers per lane pins it.
+
+### `ship_gate_gaps.py` evidence fixes
+
+- (b) is row level: `--known DOC:PAGE:Y,Y` names the specific omitted source rows and the report says
+  whether each lies in a covered span (not whether the page has some missing-row fault).
+- (c) lists every row newly covered, and every row newly FIRING, beyond the unextended span, on every page
+  including pages that already fire (page, y, row index), plus the increment over the previous bound.
+- Bound 0 is a true no-extension baseline: the 10 pt floor and the peer-block gap floor in `extended_span`
+  are gone, so the bound is the whole reach (`reach = bound * pitch`). Test: bound 0 extends nothing.
+  Before the floors went, lopez-lira p32 and bugel p11 looked reachable at every bound; they were reached
+  by the floors, not by the constant.
+
+### Sweep (35 rotated + 92 upright pages; 14 known omitted rows: Fama p398 x4, lopez-lira p32 x2, bugel p11 x4,
+brochet p21 x2, segal p66 x2)
+
+| bound (row pitches) | known omitted rows reached | newly FIRING rows beyond baseline (known / other) |
+|---|---|---|
+| 0 | 0 / 14 | 0 |
+| 1 | 0 / 14 | 3 (0 / 3) |
+| 2 | 4 / 14 | 7 (4 / 3) |
+| 3 | 10 / 14 | 16 (10 / 6) |
+| 4 | 12 / 14 | 20 (14 / 6) |
+| 5 | **14 / 14** | 26 (16 / 10) |
+| 6 | 14 / 14 | 26 (16 / 10) |
+| 8 | 14 / 14 | 27 (16 / 11) |
+| 10, unbounded | 14 / 14 | 27 (16 / 11) |
+
+"Other" rows at 5: woodford p787/p802 (index pages, a non-table, present from bound 1), ramey p104 (five
+rows of a text table that have no grid row), bugel p11 (three more omitted rows of the same missing first
+panel, so true). The first row a larger bound adds that is not a real omitted row is ljungvist p7 (a table of
+contents) at 8. **5 stays**: it is the smallest bound that reaches every known omitted row (segal p66 needs
+5), 6 adds no firing row, and the first false extension is at 8. The unbounded structural variant fires on
+exactly the rows 8 does, so it is no better.
+
+### Re-measurement (round 4 to round 5)
+
+| set | measure | round 4 | round 5 |
+|---|---|---|---|
+| upright SHIP (92) | pages firing | 23 | 25 |
+| | data_row_missing | 6 | 6 |
+| | label_row_missing | 18 | 20 |
+| | sign_detached / row_order / cell_order | 0 | 0 |
+| rotated (35) | wrong pages stopped | 12 / 14 | 12 / 14 |
+| | other pages stopped | 6 / 21 | 6 / 21 |
+| | label_row_missing wrong / other | 9 / 6 | 9 / 6 |
+| | data_row_missing wrong / sign_detached wrong | 2 / 2 | 2 / 2 |
+
+Flips, upright: fernandez-fuertes p73 (true per Fable) fires again; gomez-cram p10 (false per Fable) fires,
+the accepted trade. Nothing else changes. piller p33 stays quiet. The four true new7 pages and all 8 new8
+pages still fire; the rotated 12 of 14 holds with the same set.
+
+### Pages that fire (upright SHIP, round 5): basename, page, predicates
+
+| basename | page | predicates |
+|---|---|---|
+| 2003__woodford.pdf | 787 | data_row_missing |
+| 2003__woodford.pdf | 791 | label_row_missing |
+| 2003__woodford.pdf | 802 | data_row_missing |
+| 2006__boukus_rosenber__information_content_fomc_minutes__WP.pdf | 46 | label_row_missing |
+| 2008__faust_wright__efficient_prediction_of_excess_returns.pdf | 44 | label_row_missing |
+| 2016__ramey__shocks.pdf | 104 | data_row_missing, label_row_missing |
+| 2018__brochet_kolev_lerman__information_transfer_conference_calls__RAS.pdf | 21 | data_row_missing |
+| 2020__cieslak_vissing-jorgensen__the_economics_of_fed_put__WP.pdf | 63 | label_row_missing |
+| 2021__gow_larcker_zakolyukina__non_answers_during_conference_calls__JAR.pdf | 48 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 10 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 67 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 78 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 83 | label_row_missing |
+| 2023__cook_kazinnik_hansen_mcadam__local_language_models_financial_earnings_calls.pdf | 21 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 29 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 30 | label_row_missing |
+| 2023__segal.pdf | 66 | data_row_missing |
+| 2025__barry_bruns_kandemir_klose_smirnov_tillmann__emotions_monetary_policy__WP.pdf | 19 | label_row_missing |
+| 2025__fernandez-fuertes__monetary_policy_shocks_a_new_hope.pdf | 73 | label_row_missing |
+| 2025__gomez-cram_jensen_kung__financial_prediction_markets_a_new_measure_of_earnings_expectations.pdf | 10 | label_row_missing |
+| 2025__hack_istrefi_meier__systematic_origins_of_monetary_policy_shocks__WP.pdf | 38 | label_row_missing |
+| 2025__wang_liu_chen__current_stance_vs_future_guidance_llm_evidence_on_how_pbc_communication_shapes_the_yield_curve__EL.pdf | 11 | label_row_missing |
+| 2026__bugel_hidalgo_luetticke__unconventional_unified_narrative_mp_shocks__WP.pdf | 11 | data_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 44 | label_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 50 | label_row_missing |
+
+### Mutation
+
+All killed (canary on `socr.__file__`, uncapped `count == 1`), including: Notes rule re-added (5 tests),
+word-count rule re-added (2), reach zero (11), constant 2 (1), unbounded reach above / below (1 / 4), prose
+bridges the scan (1), core needs 2 lanes and 2 numerics (1), width counted in numeric words instead of lanes
+(1, after adding the two-numbers-per-lane test: the first run left it alive), and the unchanged earlier set.
+
+### Results
+
+Full suite: 5972 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 1310 s). `uvx ruff@0.16.0 format --check .` clean.

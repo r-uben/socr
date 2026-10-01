@@ -7,11 +7,14 @@ SHIP pages, what that bound should be:
 
 (a) the distribution of gaps (in the block's own row pitches) between consecutive
     core paired rows, and which pages sit in its tail;
-(b) for each candidate bound, whether the gate still reaches the omitted rows of
-    known dropped-panel pages (``--known DOC_PREFIX:PAGE``);
-(c) for each candidate bound, the pages that fire ``data_row_missing`` ONLY because
-    of the extension (the rows are outside the core span), i.e. the pages where a
-    larger bound pulls in more numeric lines. Inspect those against the page image.
+(b) for each candidate bound, whether each SPECIFIC omitted source row of the known
+    dropped-row pages lies inside the covered span (``--known DOC:PAGE:Y,Y``, the y
+    keys of the rows the grid omits);
+(c) for each candidate bound, every source row newly covered beyond the bound-0
+    baseline (page, y, row index), on every page including those that already fire,
+    and the increment over the previous bound; rows not in ``--known`` are the
+    candidates for false extension: inspect them against the page image.
+Bound 0 is a true no-extension baseline (the core span only).
 
 Inputs are the two page sets the gate was measured on: a rotated-pages index
 (``[{"doc","page"}]``, upright re-read via ``attempt_rotated_native_table``) and a
@@ -20,7 +23,7 @@ census of upright native-first SHIP pages (one JSON object per line with ``doc``
 
     uv run socr-measure-ship-gate-gaps --pdf-dir ~/papers/pdf \
         --rotated-index gh902/q917/index.json --census upright-census/census.jsonl \
-        --known 2017__fama__ap.pdf:398 --known lopez_lira_tang_zhu:32
+        --known 2017__fama__ap.pdf:398:310,321,343,354
 """
 
 from __future__ import annotations
@@ -85,16 +88,38 @@ def _page_inputs(args):
                     yield "upright", doc_name, page, words, state.pages[page].native_text or ""
 
 
-def measure(inputs, bounds, known):
+def _included_rows(g, blocks, anchors, src, bound):
+    """Source rows (y keys) that a candidate-row check would cover at *bound*.
+
+    A row is covered when it lies in the extended span of some block, is not itself a
+    paired row, and occupies >= 2 of that block's lanes (what ``data_row_missing``
+    treats as a candidate). Bound ``"0"`` is the unextended baseline: the core span.
+    """
+    anchor_ys = {y for found in anchors.per_block for _i, y in found}
+    covered: set[int] = set()
+    for lanes, _core, y_lo, y_hi in g.table_spans(blocks, anchors, src, _bound(bound)):
+        for y, words in src.items():
+            if y in anchor_ys or not (y_lo <= y <= y_hi):
+                continue
+            hit = {g._lane_of(w[0], lanes) for w in g._numeric_words(words)} - {None}
+            if len(hit) >= 2:
+                covered.add(y)
+    return covered
+
+
+def measure(inputs, bounds):
     from socr.tables import ship_gate as g
 
     gaps: list[tuple[str, str, int, float]] = []
-    fires: dict[str, dict[tuple[str, int], int]] = {b: {} for b in bounds}
+    covered: dict[str, dict[tuple[str, int], list[int]]] = {b: {} for b in bounds}
+    fired: dict[str, dict[tuple[str, int], list[int]]] = {b: {} for b in bounds}
+    order: dict[tuple[str, int], list[int]] = {}
     for set_name, doc, page, words, markdown in inputs:
         blocks = g._output_blocks(markdown)
         if not blocks or not words:
             continue
         src = g._source_rows(words)
+        order[(doc, page)] = sorted(src)
         anchors = g._Anchors(blocks, src)
         for found in anchors.per_block:
             geo = g._table_geometry(found, src)
@@ -108,13 +133,26 @@ def measure(inputs, bounds, known):
             if pitch > 0:
                 gaps += [(set_name, doc, page, round(d / pitch, 2)) for d in diffs]
         for b in bounds:
-            found_faults = g.data_row_missing_faults(blocks, anchors, src, _bound(b))
-            if found_faults:
-                fires[b][(doc, page)] = len(found_faults)
-    return gaps, fires
+            rows = _included_rows(g, blocks, anchors, src, b)
+            if rows:
+                covered[b][(doc, page)] = sorted(rows)
+            faults = g.data_row_missing_faults(blocks, anchors, src, _bound(b))
+            ys = [int(f["detail"].split("y=")[1].split()[0]) for f in faults]
+            if ys:
+                fired[b][(doc, page)] = sorted(ys)
+    return gaps, covered, fired, order
 
 
-def report(gaps, fires, bounds, known) -> dict:
+def _parse_known(specs):
+    """``DOC_SUBSTRING:PAGE:Y,Y`` -> ``[(substring, page, [y, ...])]``."""
+    out = []
+    for spec in specs:
+        needle, page, ys = spec.rsplit(":", 2)
+        out.append((needle, int(page), [int(y) for y in ys.split(",") if y]))
+    return out
+
+
+def report(gaps, covered, fired, order, bounds, known) -> dict:
     vals = sorted(v for *_rest, v in gaps)
     out: dict = {"n_gaps": len(vals)}
     quant = {}
@@ -126,20 +164,66 @@ def report(gaps, fires, bounds, known) -> dict:
     out["tail_above_p95_pages"] = [
         {"doc": d, "page": p, "gaps_above_p95": n} for (d, p), n in tail.most_common()
     ]
+    parsed = _parse_known(known)
 
-    def reaches(bound: str, spec: str) -> bool:
-        needle, _, page = spec.rpartition(":")
-        return any(needle in doc and int(page) == pg for (doc, pg) in fires[bound])
+    def is_known(doc: str, page: int, y: int) -> bool:
+        return any(n in doc and pg == page and y in ys for n, pg, ys in parsed)
 
-    out["known_dropped_panel_pages_fire"] = {
-        b: {spec: reaches(b, spec) for spec in known} for b in bounds
+    # (b) ROW level: is each specific omitted source row inside a covered span?
+    out["known_omitted_rows_reached"] = {
+        b: {
+            f"{n}:{pg}:{y}": any(
+                n in doc and pg == page and y in rows for (doc, page), rows in covered[b].items()
+            )
+            for n, pg, ys in parsed
+            for y in ys
+        }
+        for b in bounds
     }
-    out["pages_firing_data_row_missing"] = {b: len(fires[b]) for b in bounds}
+    # (c) every row covered at a bound but not at the no-extension baseline, on ANY
+    # page (including pages that already fire at the baseline), and the increment
+    # over the previous bound. A row is "known" only if listed in --known.
     base = bounds[0]
-    out["pages_firing_only_with_larger_bound"] = {
-        b: sorted([f"{d}:{p}" for (d, p) in fires[b] if (d, p) not in fires[base]])
-        for b in bounds[1:]
-    }
+    newly: dict[str, dict] = {}
+    previous = covered[base]
+    for b in bounds[1:]:
+        rows = []
+        increment = []
+        for key, ys in covered[b].items():
+            base_rows = set(covered[base].get(key, []))
+            prev_rows = set(previous.get(key, []))
+            for y in ys:
+                tag = f"{key[0]}:{key[1]}:y={y}:row#{order[key].index(y)}"
+                if y not in base_rows:
+                    rows.append((tag, is_known(key[0], key[1], y)))
+                    if y not in prev_rows:
+                        increment.append((tag, is_known(key[0], key[1], y)))
+        newly[b] = {
+            "newly_covered_vs_baseline": len(rows),
+            "of_which_known_omitted": sum(1 for _t, k in rows if k),
+            "not_known_omitted": [t for t, k in rows if not k],
+            "increment_over_previous_bound": [t for t, _k in increment],
+        }
+        previous = covered[b]
+    out["extension_by_bound"] = newly
+    # Rows that FIRE (are reported missing) at a bound but not at the baseline: the
+    # ones that matter. A fired row not in --known is a candidate false extension.
+    firing: dict[str, dict] = {}
+    for b in bounds[1:]:
+        rows = []
+        for key, ys in fired[b].items():
+            base_rows = set(fired[base].get(key, []))
+            rows += [
+                (f"{key[0]}:{key[1]}:y={y}:row#{order[key].index(y)}", is_known(key[0], key[1], y))
+                for y in ys
+                if y not in base_rows
+            ]
+        firing[b] = {
+            "newly_firing": len(rows),
+            "of_which_known_omitted": sum(1 for _t, k in rows if k),
+            "not_known_omitted": [t for t, k in rows if not k],
+        }
+    out["newly_firing_by_bound"] = firing
     return out
 
 
@@ -149,13 +233,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rotated-index")
     parser.add_argument("--census")
     parser.add_argument("--bounds", default=",".join(DEFAULT_BOUNDS))
-    parser.add_argument("--known", action="append", default=[], help="DOC_SUBSTRING:PAGE")
+    parser.add_argument(
+        "--known",
+        action="append",
+        default=[],
+        help="DOC_SUBSTRING:PAGE:Y,Y (source row y keys omitted from the grid)",
+    )
     parser.add_argument("--out", help="write the full JSON report here")
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     bounds = args.bounds.split(",")
-    gaps, fires = measure(_page_inputs(args), bounds, args.known)
-    result = report(gaps, fires, bounds, args.known)
+    gaps, covered, fired, order = measure(_page_inputs(args), bounds)
+    result = report(gaps, covered, fired, order, bounds, args.known)
     text = json.dumps(result, indent=1)
     if args.out:
         Path(args.out).expanduser().write_text(text)

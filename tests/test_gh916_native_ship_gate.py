@@ -398,6 +398,40 @@ class TestDataRowRound2:
             got = {f["predicate"] for f in ship_gate.native_ship_gate(words, md)}
             assert (got == {ship_gate.DATA_ROW_MISSING}) is fires, (pitches, got)
 
+    def test_bound_zero_extends_nothing(self) -> None:
+        # The benchmark's baseline: no floor may extend the span at bound 0.
+        words, md = _base()
+        y = Y0 + (len(ROWS) + 1) * PITCH
+        for ci in range(1, 5):
+            words.append(_word(COL_XS[ci], y, f"{ci}.5", 70, ci))
+        blocks = ship_gate._output_blocks(md)
+        src = ship_gate._source_rows(words)
+        anchors = ship_gate._Anchors(blocks, src)
+        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
+        assert len(ship_gate.data_row_missing_faults(blocks, anchors, src)) == 1
+
+    def test_width_is_counted_in_lanes_not_numeric_words(self) -> None:
+        # Every cell prints two numbers in ONE lane ("0.253 (1)"), so a row has twice
+        # as many numeric words as lanes. A dropped last row must still extend the span.
+        words = []
+        out_rows = []
+        for ri, row in enumerate([HEADER] + ROWS):
+            y = Y0 + ri * PITCH
+            md_cells = [row[0]]
+            words.append(_word(COL_XS[0], y, row[0], ri, 0))
+            for ci in range(1, 5):
+                words.append(_word(COL_XS[ci], y, row[ci], ri, ci))
+                if ri:
+                    words.append(_word(COL_XS[ci] + 4.0, y, "(1)", ri, 10 + ci))
+                md_cells.append(row[ci] + (" (1)" if ri else ""))
+            out_rows.append(md_cells)
+        md = _md(out_rows[0], out_rows[1:])
+        assert ship_gate.native_ship_gate(words, md) == ()
+        dropped = _md(out_rows[0], out_rows[1:-1])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, dropped)} == {
+            ship_gate.DATA_ROW_MISSING
+        }
+
     def test_dropped_copy_of_a_repeated_row_fires(self) -> None:
         rows = [list(r) for r in ROWS]
         rows.insert(3, list(rows[2]))  # an identical row prints twice
@@ -480,11 +514,12 @@ class TestLabelRowRound2:
         } == {ship_gate.LABEL_ROW_MISSING}
         assert ship_gate.native_ship_gate(words, _md(HEADER, rows[:3] + inserted + rows[3:])) == ()
 
-    def test_notes_paragraph_continuation_lines_with_numerals_are_not_core(self) -> None:
-        # A paragraph opened by "Notes:" has continuation lines carrying a few
-        # numerals that fall in table lanes. The grid ships them as rows but drops
-        # the unnumbered line between them. Their line starts with an opener, so
-        # they must not stretch the table down to the dropped line.
+    def test_a_notes_paragraph_with_numerals_is_a_false_defer_we_accept(self) -> None:
+        # The gomez-cram p10 / piller p33 shape: a Notes paragraph swallowed into
+        # the grid whose continuation lines carry numerals in table lanes, with an
+        # unnumbered line dropped between them. The gate FIRES. Pinned on purpose:
+        # a false DEFER costs one model call, a missed fault can ship a wrong
+        # number, so no Notes/Source rule is allowed to suppress it (GH-916 round 5).
         words, _ = _base()
         y0 = Y0 + (len(ROWS) + 2) * PITCH
         out_rows = [list(r) for r in ROWS]
@@ -500,7 +535,52 @@ class TestLabelRowRound2:
             words.append(_word(COL_XS[2], y, b, 101 + n, 21))
             out_rows.append([" ".join(filler), a, b, "", ""])
         words.append(_word(95.0, y0 + 2 * PITCH, "between", 110, 0))
-        assert ship_gate.native_ship_gate(words, _md(HEADER, out_rows)) == ()
+        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, out_rows))}
+        assert got == {ship_gate.LABEL_ROW_MISSING}
+
+    @staticmethod
+    def _narrow_section(heading: str, drop_label: bool, drop_row: bool):
+        """Four-lane rows, a heading, then a NARROWER (two-lane) trailing section."""
+        rows = [list(r) for r in ROWS[:3]]
+        blank = ["", "", "", ""]
+        narrow = [
+            ["N1", "1.5", "2.5", "", ""],
+            ["Panel B"] + blank,
+            ["N2", "3.5", "4.5", "", ""],
+            ["N3", "5.5", "6.5", "", ""],
+        ]
+        words = _words([HEADER] + rows + [[heading] + blank] + narrow)
+        md_narrow = [
+            r
+            for r in narrow
+            if not (drop_label and r[0] == "Panel B") and not (drop_row and r[0] == "N2")
+        ]
+        return words, _md(HEADER, rows + [[heading] + blank] + md_narrow)
+
+    @pytest.mark.parametrize("heading", ["Source of shock", "Notes:", "Source:"])
+    def test_a_narrow_section_after_a_source_or_notes_heading_is_still_checked(
+        self, heading: str
+    ) -> None:
+        words, md = self._narrow_section(heading, drop_label=False, drop_row=False)
+        assert ship_gate.native_ship_gate(words, md) == ()
+        words, md = self._narrow_section(heading, drop_label=True, drop_row=False)
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.LABEL_ROW_MISSING
+        }
+        words, md = self._narrow_section(heading, drop_label=False, drop_row=True)
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.DATA_ROW_MISSING
+        }
+
+    def test_a_neighbouring_columns_notes_opener_does_not_suppress_this_table(self) -> None:
+        rows = [list(r) for r in ROWS]
+        blank = ["", "", "", ""]
+        words = _words([HEADER] + rows[:3] + [["Panel B"] + blank] + rows[3:])
+        # A second column's paragraph opens with "Notes:" on a row inside this table.
+        words.append(_word(520.0, Y0 + 4 * PITCH, "Notes:", 200, 0))
+        words.append(_word(560.0, Y0 + 4 * PITCH, "elsewhere", 200, 1))
+        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))}
+        assert ship_gate.LABEL_ROW_MISSING in got
 
     def test_data_resuming_after_an_in_table_notes_heading_is_core_again(self) -> None:
         # Full-width rows after the heading are table rows: a label dropped

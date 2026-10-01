@@ -66,7 +66,6 @@ from socr.tables.reconstruct import (
     _NUM_TOKEN_RE,
     _NUMERIC_RE,
     _SIGN_GLYPHS,
-    _SPLIT_GAP_MIN_PT,
     detached_sign_pairs,
 )
 
@@ -85,22 +84,19 @@ LABEL_ROW_MISSING = "label_row_missing"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
-#: First word of a Notes/Source paragraph. Used ONLY to keep such a paragraph's
-#: continuation lines out of the core row set (see ``_table_geometry``); it never
-#: changes what counts as a number and never exempts a label.
-_NOTE_OPENER_RE = re.compile(r"^(?:notes?|sources?)[:.]?$", re.IGNORECASE)
 #: Largest vertical gap, in row pitches, allowed between the table's edge row and
-#: the next full-width row that extends its span. Chosen from what the bound DOES on
-#: the corpus, measured by ``socr-measure-ship-gate-gaps`` (35 rotated + 92 upright
-#: native-first SHIP pages, 1815 gaps between consecutive core paired rows; median 1.0,
-#: p90 2.0, p95 2.25, p99 4.42; the tail is panel gaps of multi-panel tables plus
-#: index/contents pages). Sweeping the bound 0..10 and unbounded: the dropped rows of
-#: Fama p398 are reached from 2, of brochet p21 from 3, of segal p66 from 5 (every one
-#: a real dropped-row page); lopez-lira p32 and bugel p11 fire from 0. 6 adds nothing
-#: beyond 5; 8 and unbounded first add ljungvist p7, a table of contents (a numeric
-#: line that is not a table row). So 5 is the smallest bound that reaches every known
-#: dropped row, and the next page any larger bound pulls in is a false extension. An
-#: unbounded structural rule ("any full-width row") does no better: same pages as 8.
+#: the next full-width row that extends its span; the WHOLE reach (no floors), so
+#: bound 0 extends nothing. Chosen from what each bound does on the corpus, measured
+#: by ``socr-measure-ship-gate-gaps`` (35 rotated + 92 upright native-first SHIP
+#: pages; gaps between consecutive core paired rows: median 1.0, p90 2.0, p95 2.25,
+#: p99 4.83). Row level, against 14 source rows known to be omitted from their grids
+#: (Fama p398, lopez-lira p32, bugel p11, brochet p21, segal p66): reached 0 of 14 at
+#: bounds 0-1, 4 at 2, 10 at 3, 12 at 4, 14 at 5, and 14 at every larger bound.
+#: Newly FIRING rows beyond the known ones: at 5 only woodford index rows, ramey p104
+#: text-table rows and three more omitted bugel rows (all real or non-table); 6 adds
+#: nothing that fires; 8 first adds ljungvist p7, a table of contents. So 5 is the
+#: smallest bound that reaches every known omitted row, and the first false extension
+#: appears at 8. The unbounded structural rule fires on the same rows as 8.
 _PANEL_GAP_ROWS = 5
 #: Separator inserted where a matched label was removed, so two neighbouring
 #: removals can never concatenate into a new match.
@@ -296,11 +292,10 @@ def _table_geometry(found, src_rows):
 
     Lanes are the x-clusters of numeric words in paired rows that carry >= 2
     numeric words, kept only when >= 2 paired rows use them. A paired row is
-    CORE when it occupies >= 2 of those lanes and is not a continuation line of a
-    Notes/Source paragraph (see below). A prose line that paired by one stray
-    number (``p<0.01``) is not core either, so a Notes paragraph swallowed into
-    the grid does not stretch the table's span. Nothing else (word count, width)
-    changes core membership.
+    CORE when it occupies >= 2 of those lanes. Nothing else (word count, width, a
+    Notes/Source opener) changes core membership: a false DEFER costs one model call,
+    a missed fault can ship a wrong number. A prose line that paired by one stray
+    number (``p<0.01``) has one numeric word and is not core.
     """
     multi = [(y, _numeric_words(src_rows[y])) for _i, y in found]
     multi = [(y, ws) for y, ws in multi if len(ws) >= 2]
@@ -318,31 +313,7 @@ def _table_geometry(found, src_rows):
     def lane_count(ws: list) -> int:
         return len({_lane_of(w[0], lanes) for w in ws} - {None})
 
-    core: list[int] = []
-    in_note = False
-    openers = [y for y, ws in src_rows.items() if ws and _NOTE_OPENER_RE.match(ws[0][4])]
-    strong_k = 0
-    last_y = None
-    for y, ws in sorted(multi):
-        if lane_count(ws) < 2:
-            continue
-        # A Notes/Source paragraph can carry a few numerals ("for 7, 5, 3"). From a
-        # line that STARTS with an opener, its rows are not core until a row is again
-        # as wide (in lanes) as the table's own rows above the opener: data that
-        # resumes after an in-table "Notes:" heading is full-width, a paragraph's
-        # continuation lines are not.
-        if not in_note and core and any((last_y or 0) < o <= y for o in openers):
-            in_note = True
-            widths = Counter(len(_numeric_words(src_rows[c])) for c in core)
-            strong_k = max(widths.most_common(1)[0][0], _MIN_LANES_PER_ROW)
-        if in_note:
-            if lane_count(ws) >= strong_k:
-                in_note = False
-            else:
-                last_y = y
-                continue
-        core.append(y)
-        last_y = y
+    core = [y for y, ws in multi if lane_count(ws) >= 2]
     if len(core) < 2:
         return None
     return lanes, core
@@ -351,7 +322,6 @@ def _table_geometry(found, src_rows):
 def extended_span(
     core: list[int],
     lanes: list[float],
-    geos: list,
     src_rows: dict,
     strong_k: int,
     panel_gap_rows: float | None = _PANEL_GAP_ROWS,
@@ -362,8 +332,7 @@ def extended_span(
     so the span must reach past the first/last core row. Walk outward; only a
     FULL-WIDTH row (>= ``strong_k`` lanes, the table's own modal width) extends the
     span, and only if it is within ``reach`` of the current edge, where ``reach`` is
-    ``panel_gap_rows`` row pitches (measured, see ``_PANEL_GAP_ROWS``) or the gap
-    between the table's own blocks, whichever is larger. Prose or labels in between
+    ``panel_gap_rows`` row pitches (measured, see ``_PANEL_GAP_ROWS``). Prose or labels in between
     neither extend the span nor bridge to a numeric line further away.
     ``panel_gap_rows=None`` removes the bound (the benchmark's structural variant).
     """
@@ -375,14 +344,9 @@ def extended_span(
 
     ys_sorted = sorted(core)
     pitch = statistics.median([b - a for a, b in zip(ys_sorted, ys_sorted[1:])] or [0])
-    # Blocks of the same table (same lane count) show how far apart its own blocks
-    # sit; that gap is allowed too.
-    peers = sorted(y for g in geos if g is not None and len(g[0]) == len(lanes) for y in g[1])
-    own_gap = max([b - a for a, b in zip(peers, peers[1:])] or [0])
-    if panel_gap_rows is None:
-        reach = float("inf")
-    else:
-        reach = max(panel_gap_rows * pitch, _SPLIT_GAP_MIN_PT, own_gap)
+    # The bound is the whole reach: no floor, so bound 0 extends nothing and the
+    # benchmark's sweep measures exactly what the constant does.
+    reach = float("inf") if panel_gap_rows is None else panel_gap_rows * pitch
     for y in sorted((y for y in src_rows if y < y_lo), reverse=True):
         if lane_count(y) >= strong_k:
             if y_lo - y > reach:
@@ -394,6 +358,29 @@ def extended_span(
                 break
             y_hi = y
     return y_lo, y_hi
+
+
+def table_spans(blocks, anchors: _Anchors, src_rows, panel_gap_rows=_PANEL_GAP_ROWS):
+    """``[(lanes, core, y_lo, y_hi)]`` for each block whose table membership is established.
+
+    ``strong_k`` (the width a row needs to extend the span) is the table's modal
+    DISTINCT-LANE count over its core rows, with the rowizer's own minimum.
+    """
+    spans = []
+    for found in anchors.per_block:
+        geo = _table_geometry(found, src_rows)
+        if geo is None:
+            continue
+        lanes, core = geo
+
+        def lane_count(y: int, lanes=lanes) -> int:
+            return len({_lane_of(w[0], lanes) for w in _numeric_words(src_rows[y])} - {None})
+
+        modal = Counter(lane_count(y) for y in core).most_common(1)[0][0]
+        strong_k = max(modal, _MIN_LANES_PER_ROW)
+        y_lo, y_hi = extended_span(core, lanes, src_rows, strong_k, panel_gap_rows)
+        spans.append((lanes, core, y_lo, y_hi))
+    return spans
 
 
 def data_row_missing_faults(
@@ -418,21 +405,14 @@ def data_row_missing_faults(
         for idx, _y in found:
             pool.subtract(_normalize_numeric_token(t) for t in _row_tokens(block[idx]))
     anchor_ys = {y for found in anchors.per_block for _i, y in found}
-    geos = [_table_geometry(found, src_rows) for found in anchors.per_block]
-    for geo in geos:
-        if geo is None:
-            continue  # table membership not established: abstain
-        lanes, core = geo
-        modal = Counter(len(_numeric_words(src_rows[y])) for y in core).most_common(1)[0][0]
-        strong_k = max(modal, _MIN_LANES_PER_ROW)
+    for lanes, _core, y_lo, y_hi in table_spans(blocks, anchors, src_rows, panel_gap_rows):
 
-        def lane_hits(y: int) -> list:
+        def lane_hits(y: int, lanes=lanes) -> list:
             return [w for w in _numeric_words(src_rows[y]) if _lane_of(w[0], lanes) is not None]
 
-        def lane_count(y: int) -> int:
+        def lane_count(y: int, lanes=lanes) -> int:
             return len({_lane_of(w[0], lanes) for w in lane_hits(y)})
 
-        y_lo, y_hi = extended_span(core, lanes, geos, src_rows, strong_k, panel_gap_rows)
         for y, ws in sorted(src_rows.items()):
             if y in anchor_ys or not (y_lo <= y <= y_hi):
                 continue
