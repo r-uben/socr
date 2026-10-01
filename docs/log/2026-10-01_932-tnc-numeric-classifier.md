@@ -92,3 +92,48 @@ canary test asserting `socr.__file__` is inside the copy (it passed in every run
 The in-place mutation of round 1 is superseded by this table.
 
 Full suite (default OLLAMA_HOST, nohup): 6064 passed, 2 skipped, 4 xfailed. `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 3: the predicate is monotone by construction (Astra rejected da3234e)
+
+**Defect in round 2.** The shared-support clause admitted rows as data that main's rule excludes. Astra's
+table: four 4-column data rows plus two note rows (`1968 | 2021 | see appendix`, `1970 | 2022 | sample
+restriction`). Main: columns 1-4 numeric, each note covers 2 of 4 (not data), the text in column 3 fires.
+Round 2: both notes share the support {1, 2}, become data rows, are skipped; the catch was lost.
+
+**Fix.** `text_in_numeric_column_faults` now runs the block under BOTH rules and reports the union, de-duplicated
+by row (main's fault wins on a shared row): `_rule_faults(..., panels=False)` is main's original column and
+data-row rule (with the new canonical `_cell_kind`); `_rule_faults(..., panels=True)` is the filled-row column
+rule plus shared-support rows. Every fault main's rule finds is therefore still found; the gate is DEFER-only,
+so the union can add a DEFER and never lose one. `_data_rows` and `_numeric_columns` take a keyword-only
+`panels` flag (no default, so no caller silently gets one rule).
+
+**Pins** (`TestMonotone`): Astra's table fires on the branch exactly as on main (two faults, rows 5 and 6,
+text named); mixed plain-number panels next to currency panels with the footrow text in a currency column
+(on main the currency column is not numeric, so this one differs from main). The two disjoint-panel pins
+remain.
+
+**Gate comparison, main vs branch, 105 frozen pages:** the same 9 additions as round 2 (lift p481; upright
+woodford p786/p800/p802, ljungvist p7, gomez-cram p10, theodoridis p371/p545/p1203; all rendered and checked in
+round 2, all real faults), **0 predicate removals and 0 lost TNC rows**, both asserted mechanically in the
+measurement script (`removals` empty; per page, the set of TNC row ids on main is a subset of the branch's).
+116 TNC rows added over those pages in total (most on the reference-list and index pages).
+
+**Mutations** (external copy of src + tests + pyproject; canary asserting `socr.__file__` inside the copy;
+uncapped anchor count == 1 asserted; file restored after). A no-mutation baseline run is part of the script
+(92 passed): without it I misread an always-failing pin as "killed by every mutant" (the mixed pin first fed
+`$`-prefixed source words, which do not pair; the source prints bare numbers, only the markdown carries the sign).
+
+| mutant | killed by |
+|---|---|
+| M0 baseline | none (92 passed) |
+| M1 no canonical in `_cell_kind` | currency, star, `_cell_kind`, currency-panels, mixed pin |
+| M2 canonical only | `test_footnote_markers_and_stars_on_numbers` |
+| M3 panel columns over all rows | both disjoint-panel pins, mixed pin |
+| M4 no minimum filled rows | single-filled-cell pin |
+| M5 no shared-support clause | both disjoint-panel pins, mixed pin |
+| **M8 drop the main-rule half of the union** | **`test_notes_sharing_a_column_set_are_still_caught` (Astra's pin)** |
+| M9 drop the panel-rule half | both disjoint-panel pins, mixed pin |
+| M6 whole file = main | 8: classifier, star, `_cell_kind`, both panel pins, empty-column, single-cell, mixed |
+| M7 `>=` for `>` | `test_numeric_column_needs_more_than_half_the_data_rows` |
+
+Full suite (default OLLAMA_HOST, nohup, one complete run on the final tree): 6066 passed, 2 skipped, 4 xfailed. An earlier run in this round had 1 failure: the mixed pin as first written (see above), fixed before this run.
