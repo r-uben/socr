@@ -15,9 +15,9 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from socr.math.detect_equations import EquationRegion
@@ -108,6 +108,15 @@ from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
+@dataclass(frozen=True)
+class _AbandonedEscalation:
+    """An escalation call released at its outer deadline whose worker may still run."""
+
+    future: Any
+    page_num: int
+    started: float
+
+
 #: Audit-event kinds ``resume_restore_kinds`` replays on resume, beyond the table-ladder
 #: terminals and ``EQUATION_LANE_EVENT_KINDS``, each with why. The shared reason: a resumed
 #: page is terminal and is not re-processed, so nothing re-emits the event; the sidecar
@@ -115,6 +124,14 @@ from socr.tables.label_canonical import canonicalize_candidate, canonicalize_tab
 #: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
 #: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
 _RESUME_REPLAYED: dict[str, str] = {
+    "table_escalation_timeout": (
+        "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
+        "the shipped table is the unescalated incumbent"
+    ),
+    "table_escalation_withheld": (
+        "GH-851: a page that lost its escalation because the provider was wedged; the "
+        "record that it was never re-read lives only on this event"
+    ),
     TABLE_BINDING_ADJUDICATED_KIND: "GH-609: binding adjudication record",
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND: (
         "GH-609 round 3: neither a ladder terminal nor resolvable by one "
@@ -636,6 +653,7 @@ def _resume_skippable(
     *,
     equation_lane_retry_blocks: bool | Callable[[], bool] = False,
     table_judge_retry_blocks: bool | Callable[[list[str]], bool] = False,
+    table_escalation_retry_blocks: bool | Callable[[], bool] = False,
 ) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
@@ -676,6 +694,20 @@ def _resume_skippable(
                 equation_lane_retry_blocks()
                 if callable(equation_lane_retry_blocks)
                 else equation_lane_retry_blocks
+            )
+            if blocks:
+                return False
+        if entry.get("table_escalation_retry_pending") is True:
+            # GH-851: a page needed table escalation and never got it (timeout, or
+            # withheld behind a still-outstanding call). Provider health is
+            # transient and absent from the fingerprint, so everything else here
+            # can match while the document still holds an unescalated table: same
+            # shape as the equation-lane latch above. Asked lazily, only when the
+            # entry carries the latch.
+            blocks = (
+                table_escalation_retry_blocks()
+                if callable(table_escalation_retry_blocks)
+                else table_escalation_retry_blocks
             )
             if blocks:
                 return False
@@ -1019,6 +1051,7 @@ class UnifiedPipeline:
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
                 table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
+                table_escalation_retry_blocks=self._escalation_retry_blocks_resume,
             ):
                 return None
         except Exception as exc:  # never let the resume check break a run
@@ -1066,6 +1099,26 @@ class UnifiedPipeline:
         earlier run is inert history and must not force endless reprocessing.
         """
         return bool(self.config.equation_region_lane and self.config.agentic)
+
+    def _escalation_retry_blocks_resume(self) -> bool:
+        """Whether a recorded GH-851 pending escalation should refuse a document skip.
+
+        Only when the lane could act on it NOW: agentic, escalation enabled, and an
+        escalation rung exists in the tier- and cost-filtered ladder. With the lane
+        off, strict-local, or no rung, the marker is inert history and must not
+        force endless reprocessing. (Does not apply the cloud-pinned-qwen refusal,
+        which needs a ``DocumentState``: at worst the document reopens and that
+        refusal then applies as usual.)
+        """
+        if not (self.config.agentic and getattr(self.config, "escalate_ambiguous_tables", False)):
+            return False
+        available = self._available_engines_for_agentic()
+        if self.config.strict_local:
+            from socr.core.providers import TIER_LOCAL
+
+            available = [p for p in available if p.tier == TIER_LOCAL]
+        _, profile = self._build_ladder_and_escalation_profile(available)
+        return profile is not None
 
     def _table_judge_retry_blocks_resume(self, rung_kinds: list[str] | None = None) -> bool:
         """Whether a recorded table-judge pending retry should refuse a document skip.
@@ -1681,6 +1734,7 @@ class UnifiedPipeline:
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
                 table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
+                table_escalation_retry_blocks=self._escalation_retry_blocks_resume,
             )
             if already_done and not self.config.reprocess:
                 # #897: a skipped file whose last run was PARTIAL still counts as
@@ -5751,6 +5805,28 @@ class UnifiedPipeline:
             )
             return False
 
+    @staticmethod
+    def _mark_escalation_not_received(ps) -> None:
+        """GH-851: a page that needed escalation and did not get it ships DEMOTED.
+
+        Reuses the table-ladder's own "needed a verdict, did not get one" state
+        instead of inventing a status: ``TABLE_UNVERIFIED`` makes
+        ``_apply_ladder_disposition_guard`` demote the FINALIZED copy to WARNING
+        (``best_output.audit_passed`` is never flipped in place, which would make
+        assemble discard the text), feeds the document status / CLI buckets /
+        manifest admission that already read the disposition, and is NOT
+        resume-skippable. A stronger terminal (REJECTED / WITHHELD) is kept, but
+        ``table_ladder_incomplete`` forfeits its resume-skip exception so the next
+        run retries the escalation the page never got.
+        """
+        if getattr(ps, "table_ladder_disposition", None) is None:
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        ps.table_ladder_incomplete = True
+        # Document-scoped resume latch (see ``_resume_skippable``): the per-page
+        # ledger above already refuses to skip this page, but the DOCUMENT gate
+        # runs first and would skip the whole file as an identical-config partial.
+        ps.table_escalation_retry_pending = True
+
     def _escalate_table_page(
         self,
         state: DocumentState,
@@ -5762,11 +5838,17 @@ class UnifiedPipeline:
         pdf_path,
         *,
         needs_escalation: bool | None = None,
+        abandoned: list[_AbandonedEscalation] | None = None,
     ) -> tuple[bool, PageOutput]:
         """Re-read one table page with *profile*; keep it only if it measures better.
 
-        Returns whether the lane should be disabled for the rest of the document
-        (a wedged provider), plus the output the caller must use downstream.
+        Returns whether THIS page was withheld because the provider is wedged
+        (GH-851: an earlier abandoned call is still outstanding), plus the output
+        the caller must use downstream. A single timeout no longer latches the
+        lane: the abandoned call is recorded in *abandoned* (document-scoped,
+        owned by the caller) and the lane is withheld only while that call is
+        observably unfinished -- a slow call completes and reopens it, a wedge
+        does not.
 
         Every rejection path returns the incumbent untouched. Acceptance promotes
         the candidate object itself so text, provenance, cost, and audit metadata
@@ -5809,6 +5891,35 @@ class UnifiedPipeline:
                 if not needs_escalation:
                     return False, bo
 
+                # GH-851: evidence of a wedge, not of one slow page. An earlier
+                # call this document abandoned at the outer deadline is either
+                # still running (a wedge: launching a second call on top of an
+                # unresponsive provider only stacks another stuck worker) or it
+                # has finished (merely slow: the lane is open again). No count
+                # and no duration constant -- ``Future.done()`` is observed
+                # directly. The page that loses its escalation here says so on
+                # the record; it is never silent.
+                if abandoned:
+                    outstanding = [a for a in abandoned if not a.future.done()]
+                    abandoned[:] = outstanding
+                    if outstanding:
+                        first = outstanding[0]
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="table_escalation_withheld",
+                                engine=profile.engine.value,
+                                detail=(
+                                    f"escalation withheld: the call abandoned on p{first.page_num} "
+                                    f"{time.monotonic() - first.started:.0f}s ago is still "
+                                    "outstanding (provider presumed wedged); this page keeps its "
+                                    "incumbent table"
+                                ),
+                            )
+                        )
+                        self._mark_escalation_not_received(ps)
+                        return True, bo
+
                 # GH-160: the profile itself was already priced under
                 # --max-cost-per-page by ``_resolve_table_escalation_provider``,
                 # but a per-page cap says nothing about what the DOCUMENT has
@@ -5846,25 +5957,33 @@ class UnifiedPipeline:
                 # must not.
                 deadline = float(getattr(self.config, "escalation_timeout_sec", 120.0))
                 ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                started = time.monotonic()
                 future = ex.submit(run_provider, profile, page_num)
                 try:
                     out = future.result(timeout=deadline)
                     ex.shutdown(wait=False)
                 except concurrent.futures.TimeoutError:
                     ex.shutdown(wait=False)
+                    # GH-851: ONE slow call is not evidence of a wedge. Remember
+                    # the abandoned future; the next qualifying page decides
+                    # from whether it has finished (see above).
+                    if abandoned is not None:
+                        abandoned.append(_AbandonedEscalation(future, page_num, started))
                     state.events.append(
                         AuditEvent(
                             page_num=page_num,
                             kind="table_escalation_timeout",
                             engine=profile.engine.value,
                             detail=(
-                                f"escalation exceeded {deadline:.0f}s; lane disabled "
-                                "for the rest of this document"
+                                f"escalation exceeded {deadline:.0f}s; call abandoned, this "
+                                "page keeps its incumbent table. The lane stays open for later "
+                                "pages unless this call is still outstanding when one needs it"
                             ),
                         )
                     )
                     _record_attempt_cost()
-                    return True, bo
+                    self._mark_escalation_not_received(ps)
+                    return False, bo
                 except Exception:
                     # GH-160 round 3: `run_provider` raised something OTHER than
                     # a timeout (e.g. an API error surfaced by `.result()`). The
@@ -8598,7 +8717,7 @@ class UnifiedPipeline:
 
             available = [p for p in available if p.tier == TIER_LOCAL]
         ladder, _escalation_profile = self._build_ladder_and_escalation_profile(available)
-        _escalation_degraded = False
+        _escalation_abandoned: list[_AbandonedEscalation] = []
 
         no_ocr_provider_pages: set[int] = set()
         if not ladder and ocr_pages:
@@ -9296,15 +9415,12 @@ class UnifiedPipeline:
                 # chart-asset table pages included.
                 # GH-855: this UNION is deliberately gated on the lane being
                 # CONFIGURED (``_escalation_profile is not None``), not on it being
-                # HEALTHY. ``_escalation_degraded`` is a document-scoped latch (set
-                # once, never cleared, see below) -- coupling scoring to it means
-                # the moment recovery gives up on a document, reporting goes dark
-                # for the rest of it too. Scoring is observation-only (state.events
-                # only; see ``_surface_table_scoring``), so this is safe to run on
-                # every page the lane would have covered regardless of latch state.
-                # The latch keeps gating the recovery attempt itself, unchanged,
-                # at ``_lane_live`` below.
-                _lane_live = _escalation_profile is not None and not _escalation_degraded
+                # HEALTHY. GH-851: health is now decided per page inside
+                # ``_escalate_table_page`` from whether a previously abandoned call
+                # is still outstanding (``_escalation_abandoned``), so there is no
+                # document-scoped latch left to couple to; scoring stays
+                # observation-only (state.events only).
+                _lane_live = _escalation_profile is not None
                 _lane_configured = _escalation_profile is not None
                 _score_table_signal = False
                 with clock.span("tables"):
@@ -9393,7 +9509,7 @@ class UnifiedPipeline:
                             _needs_escalation = None
                         else:
                             _needs_escalation = _score_table_signal
-                        _escalation_degraded, bo = self._escalate_table_page(
+                        _, bo = self._escalate_table_page(
                             state,
                             page_num,
                             ps,
@@ -9402,6 +9518,7 @@ class UnifiedPipeline:
                             run_provider,
                             state.handle.path,
                             needs_escalation=_needs_escalation,
+                            abandoned=_escalation_abandoned,
                         )
 
                 # GH-36a/36b: per-page equation detect + crop + optional LaTeX
@@ -15548,6 +15665,10 @@ class UnifiedPipeline:
             pending: dict = {}
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
                 pending["equation_lane_retry_pending"] = True
+            if any(
+                getattr(p, "table_escalation_retry_pending", False) for p in state.pages.values()
+            ):
+                pending["table_escalation_retry_pending"] = True
             if any(getattr(p, "table_judge_retry_pending", False) for p in state.pages.values()):
                 pending["table_judge_retry_pending"] = True
                 # Cold review round 3, finding 1: the UNION of the rung kinds

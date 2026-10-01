@@ -337,6 +337,12 @@ class PageState:
     #: page's shipped bytes, status and audit verdict are exactly what they are
     #: with the lane switched off, per the no-provider parity requirement.
     equation_lane_retry_pending: bool = False
+    #: GH-851: the page needed table escalation and did not get it (its own call
+    #: timed out, or it was withheld behind a still-outstanding call). In-run only:
+    #: it feeds the root-index latch so the DOCUMENT gate does not skip a document
+    #: holding an unescalated table; the page itself is already not resumable via
+    #: ``table_ladder_incomplete`` / the UNVERIFIED disposition.
+    table_escalation_retry_pending: bool = False
     #: GH-353 TICKET-B1: the table judge ladder's page-level disposition
     #: (``FailureMode.TABLE_REJECTED`` / ``TABLE_UNVERIFIED`` / ``None``).
     #: This is the durable, pre-guard signal C3's manifest guard

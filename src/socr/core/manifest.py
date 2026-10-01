@@ -1791,6 +1791,8 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         "table_ladder_withheld",
         "table_escalation_refused",
         "table_escalation_timeout",
+        # GH-851: a page that lost its escalation to a wedged provider.
+        "table_escalation_withheld",
         # a shipped ditto mark nobody resolved
         "table_ditto_unresolved",
         # a reported native-lane omission (#713 round 2)

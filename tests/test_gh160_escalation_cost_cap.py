@@ -190,7 +190,7 @@ def test_escalation_timeout_still_bills_the_attempt(tmp_path: Path):
         state.handle.path,
         needs_escalation=True,
     )
-    assert degraded is True  # lane disabled for the rest of the document
+    assert degraded is False  # GH-851: one timeout does not disable the lane
     assert out is bo
     assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
         "a call that was actually launched is billable even though it timed out"
