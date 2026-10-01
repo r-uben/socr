@@ -74,7 +74,17 @@ from socr.math.accounting import (
     missing_coverage_witnesses,
     unresolved_math_detail,
 )
+from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
+from socr.figures.chart_reader import CHART_DERIVATION, CHART_DERIVATION_REFUSED
+from socr.figures.chart_reconcile import (
+    GRID_CONTRADICTED,
+    GRID_RECONCILE_REFUSED,
+    GRID_RECONCILED,
+)
 from socr.tables.ditto import DITTO_UNRESOLVED_KIND
+from socr.tables.native_first import ROTATED_QUARANTINE_KIND
+from socr.tables.ship_gate import SHIP_GATE_KIND
+from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
@@ -85,12 +95,90 @@ from socr.judge.table_verdict import (
     RUNG_KIND_CELL_ADJUDICATOR,
     RUNG_KIND_GEMINI,
     RUNG_KIND_OLLAMA,
+    TABLE_BINDING_ADJUDICATED_KIND,
+    TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+    TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    TABLE_SPACER_ROWS_DROPPED_KIND,
+    TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
 )
 from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT, route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
+
+
+#: Audit-event kinds ``resume_restore_kinds`` replays on resume, beyond the table-ladder
+#: terminals and ``EQUATION_LANE_EVENT_KINDS``, each with why. The shared reason: a resumed
+#: page is terminal and is not re-processed, so nothing re-emits the event; the sidecar
+#: keeps it and ``audit_log.json`` / the CLI summary silently lose it unless it is
+#: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
+#: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
+_RESUME_REPLAYED: dict[str, str] = {
+    TABLE_BINDING_ADJUDICATED_KIND: "GH-609: binding adjudication record",
+    TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND: (
+        "GH-609 round 3: neither a ladder terminal nor resolvable by one "
+        "(tables_trust.NON_RESOLVABLE_DISTRUST_KINDS); records which boundary word "
+        "geometry could not rule out as table content"
+    ),
+    TABLE_BINDING_BOUNDARY_RESOLVED_KIND: (
+        "GH-609 round 4: the companion resolution event; dropping it would un-resolve "
+        "a table a prior run proved clean"
+    ),
+    VISUAL_VALUES_NOT_TRANSCRIBED_KIND: (
+        "GH-519 / GH-563: the chart lane's debt is a standing property of the page; "
+        "the document note and CLI summary read this event"
+    ),
+    NO_WITNESS_BACKEND_KIND: (
+        "#658: the witness state lives only on this event; dropping it downgrades "
+        "the explanation to 'cause not recorded'"
+    ),
+    UNRESOLVED_MATH_KIND: (
+        "#165: unresolved math is a standing property of the page's source; a resumed "
+        "run would otherwise report a clean SUCCESS on missing mathematics"
+    ),
+    MATH_FONT_UNRECOVERED_KIND: "#140: same contract as UNRESOLVED_MATH_KIND, for math-font damage",
+    LABEL_UNVERIFIED_KIND: (
+        "#659: tables_trust.json reads it; its history must not disappear on resume"
+    ),
+    SKELETON_SUPPRESSED: (
+        "#635: the only archive of a withheld grid (original_text, sha256); the CLI "
+        "count is computed from these events"
+    ),
+    SKELETON_UNBOUND: "#635: travels with SKELETON_SUPPRESSED",
+    GRID_RECONCILED: (
+        "#734 Stage B: counters are computed from these events, and the restored body "
+        "still carries WITHHELD where numbers were removed"
+    ),
+    GRID_CONTRADICTED: "#734 Stage B: travels with GRID_RECONCILED",
+    GRID_RECONCILE_REFUSED: "#734 Stage B: the record that a chart-page grid went unchecked",
+    CHART_DERIVATION: (
+        "#635 Stage 1: calibration, crop digest and per-cell interval live only in the event"
+    ),
+    CHART_DERIVATION_REFUSED: "#635 Stage 1: the record of a refusal to derive",
+    TABLE_SPACER_ROWS_DROPPED_KIND: (
+        "#601 / #624b: the normalisation counters live only on these events"
+    ),
+    TABLE_WRAPPED_LABEL_MERGED_KIND: "#601 / #624b: travels with TABLE_SPACER_ROWS_DROPPED_KIND",
+    DITTO_UNRESOLVED_KIND: (
+        "#625: the ditto flag is a standing property of the shipped table; there is no "
+        "resolving event to wait for"
+    ),
+    "native_encoding_hygiene_suspect": (
+        "GH-819: emitted by _agentic_native_page, which a terminal resumed page skips; "
+        "a suspect text layer is a property of the source"
+    ),
+    "native_unrecovered_symbol_glyphs": "GH-819: as native_encoding_hygiene_suspect",
+    "possible_table_structure_not_reconstructed": "GH-819: as native_encoding_hygiene_suspect",
+    ROTATED_QUARANTINE_KIND: (
+        "GH-917: emitted by _plan_native_table_first, which runs only over pages not "
+        "resumed; the quarantine is a standing property of the page's source grid"
+    ),
+    SHIP_GATE_KIND: (
+        "GH-916: emitted by _plan_native_table_first (upright and rotated); the fault is "
+        "a standing property of the native grid and records why native was rejected"
+    ),
+}
 
 
 def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
@@ -2655,151 +2743,10 @@ class UnifiedPipeline:
         green while the filter silently stopped replaying a whole family --
         exactly the failure the guard exists to catch, reproduced in the guard.
         """
-        from socr.judge.table_verdict import (
-            TABLE_BINDING_ADJUDICATED_KIND,
-            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
-            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
-            TABLE_LADDER_EVENT_KINDS,
-            TABLE_SPACER_ROWS_DROPPED_KIND,
-            TABLE_WRAPPED_LABEL_MERGED_KIND,
-        )
-        from socr.figures.chart_data import SKELETON_SUPPRESSED, SKELETON_UNBOUND
-        from socr.figures.chart_reader import CHART_DERIVATION, CHART_DERIVATION_REFUSED
-        from socr.figures.chart_reconcile import (
-            GRID_CONTRADICTED,
-            GRID_RECONCILE_REFUSED,
-            GRID_RECONCILED,
-        )
-        from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
+        from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
 
         return frozenset(
-            TABLE_LADDER_EVENT_KINDS
-            | {TABLE_BINDING_ADJUDICATED_KIND}
-            # GH-609 round 3 (Astra P2): explicit inclusion, not folded into
-            # TABLE_LADDER_EVENT_KINDS -- that set is deliberately the GH-359
-            # drift guard's exact three/four terminals, and this kind is
-            # neither a terminal nor resolvable by one (see
-            # tables_trust.NON_RESOLVABLE_DISTRUST_KINDS). Without this, a
-            # resumed run's audit trail silently drops which boundary word
-            # geometry could not rule out as table content.
-            | {TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND}
-            # GH-609 round 4: its companion resolution event, same reasoning
-            # -- dropping it on resume would silently un-resolve a table that
-            # a prior run had already proven clean, word for word.
-            | {TABLE_BINDING_BOUNDARY_RESOLVED_KIND}
-            | cls.EQUATION_LANE_EVENT_KINDS
-            # GH-519: the chart lane's debt is a standing property of the page,
-            # not of the run that noticed it. GH-563 is the cautionary case: a
-            # record that lives only in memory tells the truth once and then
-            # tells the resumed operator the opposite. The note and the CLI
-            # summary below both read this event, so dropping it on resume
-            # would silently retire the debt.
-            | {VISUAL_VALUES_NOT_TRANSCRIBED_KIND}
-            # #658: same contract, same reason. The witness state lives ONLY on
-            # this event, and the document note and CLI line read it to say
-            # which fix applies to which page. Dropping it on resume would not
-            # retire the finding -- the page's own flag and failure mode still
-            # name it -- but it would silently downgrade the explanation to
-            # "cause not recorded" on every resumed run.
-            | {NO_WITNESS_BACKEND_KIND}
-            # #165: the unresolved-math record is a standing property of the
-            # page's SOURCE, not of the run that noticed it. A resumed page is
-            # not re-assessed and not re-recovered, so without this replay the
-            # damage would be reported once and then vanish -- and the resumed
-            # run would report a clean SUCCESS on a document whose mathematics
-            # is known to be missing.
-            | {UNRESOLVED_MATH_KIND}
-            # #140: same contract as ``UNRESOLVED_MATH_KIND`` immediately above,
-            # for the sibling math-font damage class -- a standing property of
-            # the page's source, not of the run that noticed it. Without this
-            # replay a resumed page would lose the record and report a clean
-            # SUCCESS on math the equation lane never covered.
-            | {MATH_FONT_UNRECOVERED_KIND}
-            # #659: the terminal ``table_label_unverified`` field on the
-            # winning ``PageOutput`` is what makes the page note/CLI line
-            # retire when a later, fully-supported candidate wins -- and that
-            # field round-trips through the sidecar on its own. This event is
-            # still what ``tables_trust.json`` reads (its history is real
-            # history and must not disappear on resume, same as every other
-            # distrust kind), so it is replayed the same as the rest.
-            | {LABEL_UNVERIFIED_KIND}
-            # #635: the ONLY archive of a withheld grid is its suppression
-            # event -- ``original_text`` and ``sha256`` live nowhere else, and
-            # the restored body cannot regenerate them because the grid is
-            # already gone from it. Dropping these on resume would leave a
-            # resumed run unable to say what was withheld or why, and would
-            # silently zero the document's CLI count, which is computed from
-            # these events. The refusal kind travels with it for the same
-            # reason every other lane's refusal does: it is the record that an
-            # empty form on a chart page was looked at and deliberately kept.
-            | {SKELETON_SUPPRESSED, SKELETON_UNBOUND}
-            # #734 Stage B: the same contract as the #635 line above, and the
-            # argument there applies here word for word -- these counters are
-            # computed from these events, so dropping them would silently zero
-            # the document's CLI count. It is worse than the #635 case, though,
-            # and that is why it is called out rather than folded in: a resumed
-            # page is terminal and never re-processed, so the reconciler does
-            # not run, while the restored BODY still carries ``WITHHELD`` where
-            # numbers were removed. Without this replay the document ships with
-            # content removed and no surface anywhere saying why -- the CLI
-            # prints nothing, the contradicted counter reads zero and the
-            # sidecar carries no reconciliation event. The refusal kind travels
-            # with the other two for the reason every lane's refusal does: it
-            # is the record that a grid on a chart page went unchecked.
-            | {GRID_RECONCILED, GRID_CONTRADICTED, GRID_RECONCILE_REFUSED}
-            # #635 Stage 1: a derivation and a refusal to derive are both
-            # standing properties of the PAGE's chart, not of the run that
-            # read it. The published table's whole provenance -- calibration,
-            # crop digest, per-cell interval -- lives in the event and nowhere
-            # else, so dropping it on resume would leave a resumed run
-            # shipping a table of counts it can no longer account for.
-            | {CHART_DERIVATION, CHART_DERIVATION_REFUSED}
-            # #601 / #624b: the candidate-row normalisation counters live
-            # only on these events (the ``BindingResult`` that produced them
-            # is not itself persisted). Dropping them on resume would make
-            # the "no silent content loss" trail lie -- a resumed page would
-            # report normalisation that never happened this run.
-            | {TABLE_SPACER_ROWS_DROPPED_KIND}
-            | {TABLE_WRAPPED_LABEL_MERGED_KIND}
-            # #625: same contract as ``UNRESOLVED_MATH_KIND`` above -- the
-            # ditto flag is a standing property of the page's shipped table
-            # (its terminal truth lives on ``PageOutput.table_ditto_columns``,
-            # which round-trips through the sidecar), not of the run that
-            # noticed it, and there is no resolving event to wait for (no
-            # fill-down, ever). Dropping it on resume would silently retire
-            # the flag and let a resumed run report a clean SUCCESS on a
-            # table column it never re-examined.
-            | {DITTO_UNRESOLVED_KIND}
-            # GH-819: all three emitted by ``_agentic_native_page``, which does
-            # NOT run for a page skipped as terminal on resume (unlike
-            # ``_phase_analyze``'s per-run kinds, e.g. ``orphan_word_dropped``,
-            # which is deliberately absent because it is RE-EMITTED every run
-            # and would double-count). Each is a standing property of the
-            # page's SOURCE (a suspect text layer, an unrecovered symbol
-            # glyph, an unreconstructed table shape), not of the run that
-            # noticed it, so a resumed run must still say it. Without this the
-            # sidecar keeps the record and ``audit_log.json`` / the CLI line
-            # silently lose it the moment the page resumes -- same #252 /
-            # GH-353 D1a shape the allowlist above already documents.
-            | {
-                "native_encoding_hygiene_suspect",
-                "native_unrecovered_symbol_glyphs",
-                "possible_table_structure_not_reconstructed",
-            }
-            # GH-917: emitted by ``_plan_native_table_first``, which runs only
-            # over ``ocr_pages`` AFTER resumed pages are removed from it (see
-            # ``ocr_pages = [p for p in ocr_pages if p not in resumed_pages]``),
-            # so nothing re-emits it for a page skipped as terminal. The
-            # quarantine is a standing property of the page's source grid, not
-            # of the run that noticed it; without this the sidecar keeps the
-            # record and a resumed run's ``audit_log.json`` / CLI line lose it.
-            | {"rotated_native_table_quarantined"}
-            # GH-916: emitted by ``_plan_native_table_first`` (upright and
-            # rotated branches), which runs only over ``ocr_pages`` after
-            # resumed pages are removed, so nothing re-emits it on resume. The
-            # fault is a standing property of the page's native grid; without
-            # this the replacement's provenance loses why native was rejected.
-            | {"native_ship_gate_deferred"}
+            TABLE_LADDER_EVENT_KINDS | cls.EQUATION_LANE_EVENT_KINDS | _RESUME_REPLAYED.keys()
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -10140,7 +10087,6 @@ class UnifiedPipeline:
         if not faults:
             return
         from socr.core.audit_log import AuditEvent
-        from socr.tables.ship_gate import SHIP_GATE_KIND
 
         names = sorted({str(f.get("predicate", "")) for f in faults})
         logger.warning(
@@ -10160,6 +10106,109 @@ class UnifiedPipeline:
             )
         )
 
+    @staticmethod
+    def _record_rotated_quarantine(state: DocumentState, page_num: int) -> None:
+        """GH-917: record that a rotated grid exact-passed and was quarantined."""
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.native_first import ROTATED_QUARANTINE_KIND
+
+        logger.warning(
+            "rotated native grid exact-passed but was quarantined (GH-917) on p%d; "
+            "page stays on route_page",
+            page_num,
+        )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=ROTATED_QUARANTINE_KIND,
+                engine="native",
+                detail=(
+                    "rotated native grid exact-passed but was quarantined "
+                    "(GH-917, GH-916); deferred to normal routing"
+                ),
+            )
+        )
+
+    @staticmethod
+    def _read_page_words(
+        pdf_path: Path, page_num: int, *, open_pdf, line_directions_for_page
+    ) -> tuple[list, object]:
+        """``(words, line_dirs)`` of one page's text layer.
+
+        Raises when the PDF or page cannot be read; each caller keeps its own
+        ``except`` and log text. The callers import ``open_pdf`` and
+        ``line_directions_for_page`` BEFORE their ``try``, as the pre-refactor code did,
+        so an import failure still propagates instead of reading as an unreadable text
+        layer. ``line_directions_for_page`` never raises (GH-917): a failed extraction
+        travels as a fault the gate DEFERs on, so it must not inherit a caller's REFUSE.
+        """
+        with open_pdf(pdf_path) as doc:
+            page = doc[page_num - 1]
+            return list(page.get_text("words")), line_directions_for_page(page)
+
+    def _plan_rotated_native_table(self, state: DocumentState, page_num: int, ps: PageState):
+        """The native-grid plan for a GH-147 rotated table page, or None.
+
+        The rotated page is rowized upright. Only a SHIP that survives the prose splice
+        becomes work; a quarantined SHIP is recorded and left on ``route_page``.
+        """
+        from socr.core.pdf import open_pdf
+        from socr.tables.native_first import (
+            DEFER,
+            ROTATED_SHIP_QUARANTINED,
+            SHIP,
+            NativeTableFirstWork,
+            attempt_rotated_native_table,
+            compose_upright_shipped_page,
+            retained_prose_survives,
+            splice_retained_prose_beside_table,
+        )
+
+        retained = (ps.native_text_raw or ps.native_text or "").strip()
+        attempt = None
+        composed = ""
+        try:
+            with open_pdf(state.handle.path) as doc:
+                page = doc[page_num - 1]
+                attempt = attempt_rotated_native_table(page)
+                if attempt is not None and attempt.plan.action == SHIP:
+                    interleaved = compose_upright_shipped_page(page, list(attempt.regions))
+                    composed = splice_retained_prose_beside_table(
+                        retained, attempt.markdown, interleaved
+                    )
+        except Exception as exc:
+            logger.warning(
+                "native table upright: text layer unreadable on p%d (%s)",
+                page_num,
+                exc,
+            )
+            return None
+        if (
+            attempt is not None
+            and attempt.plan.action == DEFER
+            and attempt.plan.reason == ROTATED_SHIP_QUARANTINED
+        ):
+            self._record_rotated_quarantine(state, page_num)
+        if attempt is not None:
+            self._record_native_ship_gate(state, page_num, attempt.plan)
+        if attempt is None or attempt.plan.action != SHIP:
+            # REFUSE, DEFER, CELLS, or no grid: keep the page on
+            # ``route_page``. CELLS is excluded until crops and the
+            # post-repair verifier use the upright word frame.
+            return None
+        if not retained_prose_survives(composed, retained, table_markdown=attempt.markdown):
+            return None
+        return NativeTableFirstWork(
+            attempt.plan,
+            markdown=composed,
+            structure_defective=attempt.structure_defective,
+            header_unattributed=attempt.header_unattributed,
+            orphan_word_drops=attempt.orphan_drops,
+            # The guard above proved every retained prose line survives in ``composed``,
+            # so the second ``retained_prose_survives`` call this replaces could only be True.
+            clear_ocr_enhancement=True,
+        )
+
     def _plan_native_table_first(self, state: DocumentState, page_num: int, ps: PageState):
         """The native-grid plan for one OCR page, or None when the lane defers.
 
@@ -10171,81 +10220,13 @@ class UnifiedPipeline:
         from socr.tables.native_first import (
             DEFER,
             REFUSE,
-            ROTATED_SHIP_QUARANTINED,
             NativeTableFirstWork,
             NativeTablePlan,
-            attempt_rotated_native_table,
-            compose_upright_shipped_page,
             plan_native_table,
-            retained_prose_survives,
-            splice_retained_prose_beside_table,
         )
 
         if self._is_rotated_native_table_lane_page(page_num, ps):
-            from socr.core.pdf import open_pdf
-            from socr.tables.native_first import SHIP
-
-            retained = (ps.native_text_raw or ps.native_text or "").strip()
-            attempt = None
-            composed = ""
-            try:
-                with open_pdf(state.handle.path) as doc:
-                    page = doc[page_num - 1]
-                    attempt = attempt_rotated_native_table(page)
-                    if attempt is not None and attempt.plan.action == SHIP:
-                        interleaved = compose_upright_shipped_page(page, list(attempt.regions))
-                        composed = splice_retained_prose_beside_table(
-                            retained, attempt.markdown, interleaved
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "native table upright: text layer unreadable on p%d (%s)",
-                    page_num,
-                    exc,
-                )
-                return None
-            if (
-                attempt is not None
-                and attempt.plan.action == DEFER
-                and attempt.plan.reason == ROTATED_SHIP_QUARANTINED
-            ):
-                from socr.core.audit_log import AuditEvent
-
-                logger.warning(
-                    "rotated native grid exact-passed but was quarantined (GH-917) on p%d; "
-                    "page stays on route_page",
-                    page_num,
-                )
-                state.events.append(
-                    AuditEvent(
-                        page_num=page_num,
-                        kind="rotated_native_table_quarantined",
-                        engine="native",
-                        detail=(
-                            "rotated native grid exact-passed but was quarantined "
-                            "(GH-917, GH-916); deferred to normal routing"
-                        ),
-                    )
-                )
-            if attempt is not None:
-                self._record_native_ship_gate(state, page_num, attempt.plan)
-            if attempt is None or attempt.plan.action != SHIP:
-                # REFUSE, DEFER, CELLS, or no grid: keep the page on
-                # ``route_page``. CELLS is excluded until crops and the
-                # post-repair verifier use the upright word frame.
-                return None
-            if not retained_prose_survives(composed, retained, table_markdown=attempt.markdown):
-                return None
-            return NativeTableFirstWork(
-                attempt.plan,
-                markdown=composed,
-                structure_defective=attempt.structure_defective,
-                header_unattributed=attempt.header_unattributed,
-                orphan_word_drops=attempt.orphan_drops,
-                clear_ocr_enhancement=retained_prose_survives(
-                    composed, retained, table_markdown=attempt.markdown
-                ),
-            )
+            return self._plan_rotated_native_table(state, page_num, ps)
 
         if not self._is_native_table_first_candidate(page_num, ps):
             return None
@@ -10253,12 +10234,12 @@ class UnifiedPipeline:
         from socr.tables.ship_gate import line_directions_for_page
 
         try:
-            with open_pdf(state.handle.path) as doc:
-                words = list(doc[page_num - 1].get_text("words"))
-                # GH-917: never raises. A failed extraction travels as a fault the gate
-                # DEFERs on; it must not inherit this block's REFUSE (an unreadable
-                # direction map is not an unreadable text layer).
-                line_dirs = line_directions_for_page(doc[page_num - 1])
+            words, line_dirs = self._read_page_words(
+                state.handle.path,
+                page_num,
+                open_pdf=open_pdf,
+                line_directions_for_page=line_directions_for_page,
+            )
         except Exception as exc:
             logger.warning(
                 "native table first: text layer unreadable on p%d (%s)",
@@ -10410,8 +10391,6 @@ class UnifiedPipeline:
         normalize to the grid token that failed. The repaired markdown must
         then exact-pass on its own; a partial repair does not ship.
         """
-        from socr.core.pdf import open_pdf
-        from socr.tables.ship_gate import line_directions_for_page
         from socr.tables.native_first import (
             SHIP,
             plan_native_table,
@@ -10438,10 +10417,16 @@ class UnifiedPipeline:
         spliced = splice_cell_tokens(ps.native_text or "", replacements)
         if spliced is None:
             return None, None
+        from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
+
         try:
-            with open_pdf(state.handle.path) as doc:
-                words = list(doc[page_num - 1].get_text("words"))
-                line_dirs = line_directions_for_page(doc[page_num - 1])
+            words, line_dirs = self._read_page_words(
+                state.handle.path,
+                page_num,
+                open_pdf=open_pdf,
+                line_directions_for_page=line_directions_for_page,
+            )
         except Exception as exc:
             logger.warning(
                 "native table first: re-read failed on p%d (%s)",

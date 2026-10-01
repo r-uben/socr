@@ -17,40 +17,47 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from native_table_fixtures import (
+    CHAR_W,
+    COL_XS,
+    HEADER,
+    PITCH,
+    ROWS,
+    UNCHECKED,
+    WORD_H,
+    Y0,
+    dense_pdf,
+    flush_and_restore,
+    native_first_config,
+    rotated_forecast_pdf,
+    routed_decision,
+)
 
 from socr.core.audit_log import AuditEvent
-from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.tables.ship_gate import LineDirections
 from socr.tables import native_first as nf
 from socr.tables import ship_gate
-from socr.tables.native_first import DEFER, SHIP, plan_native_table
+from socr.tables.native_first import DEFER, ROTATED_QUARANTINE_KIND, SHIP, plan_native_table
 from socr.tables.reconstruct import detached_sign_pairs
 
-COL_XS = [90.0, 180.0, 270.0, 360.0, 450.0]
-CHAR_W = 5.0
-PITCH = 14.0
-Y0 = 100.0
-
-HEADER = ["Variable", "b", "s", "h", "q"]
-ROWS = [
-    ["GDP", "0.253", "0.179", "0.211", "0.301"],
-    ["CPI", "0.144", "0.135", "0.290", "0.188"],
-    ["IP", "0.041", "0.050", "0.154", "0.099"],
-    ["UR", "0.082", "0.321", "0.144", "0.211"],
-    ["CB", "0.180", "0.171", "0.365", "0.244"],
-    ["TR", "0.310", "0.220", "0.410", "0.188"],
-]
-
-UNCHECKED = LineDirections.unchecked_for_tests()
+#: Four empty cells: a label-only row under HEADER.
+BLANK = ["", "", "", ""]
 
 
 def _word(x: float, y: float, text: str, line: int, no: int) -> tuple:
-    return (x, y, x + CHAR_W * len(text), y + 9.0, text, 0, line, no)
+    return (x, y, x + CHAR_W * len(text), y + WORD_H, text, 0, line, no)
+
+
+def _sign_word(num_x: float, y: float, line: int, *, dx: float = 0.0) -> tuple:
+    """A one-glyph ``-`` ending ``dx`` points left of the number that starts at *num_x*.
+
+    ``dx=0`` puts it in contact with the number's digits (the #887 criterion).
+    """
+    x = num_x + 0.2 - CHAR_W * 0.7 - dx
+    return (x, y, x + CHAR_W * 0.7, y + WORD_H, "-", 0, line, 9)
 
 
 def _words(rows, *, start_line: int = 0, y_start: float = Y0) -> list:
@@ -64,13 +71,34 @@ def _words(rows, *, start_line: int = 0, y_start: float = Y0) -> list:
     return out
 
 
-def _md(header, rows) -> str:
+def _md(header, rows, *, sep_width: int | None = None) -> str:
+    """A markdown table. The separator is as wide as the header unless *sep_width* says so.
+
+    A row wider than the header (a sign glyph in a cell of its own) can sit under a
+    separator that matches the row, not the header; the verifier reads the two shapes
+    differently, so a test names the one it means.
+    """
+
     def line(cells):
         return "| " + " | ".join(cells) + " |"
 
     return "\n".join(
-        [line(header), "| " + " | ".join(["---"] * len(header)) + " |"] + [line(r) for r in rows]
+        [line(header), line(["---"] * (sep_width or len(header)))] + [line(r) for r in rows]
     )
+
+
+def _gate(words, md) -> set[str]:
+    """The predicates the gate fires on *words* + *md* (line directions unchecked)."""
+    faults = ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+    return {f["predicate"] for f in faults}
+
+
+def _data_row_faults(words, md, bound=ship_gate._PANEL_GAP_ROWS) -> list:
+    """``data_row_missing`` faults at outward reach *bound* (row pitches)."""
+    blocks = ship_gate._output_blocks(md)
+    src = ship_gate._source_rows(words)
+    pairs = ship_gate._unique_pairs(blocks, src)
+    return ship_gate.data_row_missing_faults(blocks, pairs, src, bound)
 
 
 def _plan(words, markdown, *, gate: bool = True):
@@ -103,12 +131,8 @@ def _sign_rows(*, sign_dx: float, num: str = "0.230"):
     rows = [list(r) for r in ROWS]
     rows[2][1] = num
     words = _words([HEADER] + rows)
-    num_x = COL_XS[1]
     ri = 3  # header is line 0
-    y = Y0 + ri * PITCH
-    sign_x = num_x + 0.2 - CHAR_W * 0.7 - sign_dx
-    sign = (sign_x, y, sign_x + CHAR_W * 0.7, y + 9.0, "-", 0, ri, 9)
-    words.append(sign)
+    words.append(_sign_word(COL_XS[1], Y0 + ri * PITCH, ri, dx=sign_dx))
     return rows, words
 
 
@@ -117,17 +141,9 @@ def _sign_md(rows, *, in_label: bool):
     if in_label:
         rows[2][0] = rows[2][0] + " -"
         return _md(HEADER, rows)
-    row = rows[2]
-    row = row[:1] + ["-"] + row[1:]
     md_rows = [list(r) for r in rows]
-    md_rows[2] = row
-    return "\n".join(
-        [
-            _md(HEADER, rows).splitlines()[0],
-            "| " + " | ".join(["---"] * 6) + " |",
-        ]
-        + ["| " + " | ".join(r) + " |" for r in md_rows]
-    )
+    md_rows[2] = rows[2][:1] + ["-"] + rows[2][1:]
+    return _md(HEADER, md_rows, sep_width=len(HEADER) + 1)
 
 
 class TestSignDetached:
@@ -173,11 +189,7 @@ class TestSignDetached:
         assert detached_sign_pairs(words) == []
         md_rows = [list(r) for r in rows]
         md_rows[2] = [rows[2][0], "1990", "-", "2000", rows[2][3], rows[2][4]]
-        md = "\n".join(
-            ["| " + " | ".join(HEADER) + " |", "| " + " | ".join(["---"] * 5) + " |"]
-            + ["| " + " | ".join(r) + " |" for r in md_rows]
-        )
-        plan = _plan(words, md)
+        plan = _plan(words, _md(HEADER, md_rows))
         assert plan.action == SHIP and plan.faults == ()
 
     def test_contact_is_bound_to_the_output_row_when_values_repeat(self) -> None:
@@ -189,11 +201,7 @@ class TestSignDetached:
         md_rows = [list(r) for r in rows]
         # The bare sign is shipped on the row whose source number is UNSIGNED.
         md_rows[4] = md_rows[4][:2] + ["-"] + md_rows[4][2:]
-        md = "\n".join(
-            [_md(HEADER, rows).splitlines()[0], "| " + " | ".join(["---"] * 6) + " |"]
-            + ["| " + " | ".join(r) + " |" for r in md_rows]
-        )
-        plan = _plan(words, md)
+        plan = _plan(words, _md(HEADER, md_rows, sep_width=len(HEADER) + 1))
         # Row 4's own multiset differs from row 2's, so the contact on row 2's
         # line is not evidence for row 4: the gate abstains on this cell.
         assert ship_gate.SIGN_DETACHED not in _predicates(plan)
@@ -201,13 +209,9 @@ class TestSignDetached:
         # now the contact belongs to that output occurrence and the gate fires.
         md_rows = [list(r) for r in rows]
         md_rows[2] = md_rows[2][:1] + ["-"] + md_rows[2][1:]
-        md = "\n".join(
-            [_md(HEADER, rows).splitlines()[0], "| " + " | ".join(["---"] * 6) + " |"]
-            + ["| " + " | ".join(r) + " |" for r in md_rows]
+        assert ship_gate.SIGN_DETACHED in _gate(
+            words, _md(HEADER, md_rows, sep_width=len(HEADER) + 1)
         )
-        assert ship_gate.SIGN_DETACHED in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        }
 
 
 # ---------------------------------------------------------------- P1 order
@@ -302,19 +306,15 @@ class TestLabelRowMissing:
         assert _plan(words, md).action == SHIP
 
 
-class TestSignDetachedRound2:
-    """Occurrence-specific binding and the shapes Astra named."""
+class TestSignDetachedBinding:
+    """Occurrence-specific binding of a sign to its row and column."""
 
     @staticmethod
     def _md_with(rows, row_index, cells):
         md_rows = [list(r) for r in rows]
         md_rows[row_index] = cells
         width = max(len(r) for r in md_rows)
-        return "\n".join(
-            ["| " + " | ".join(HEADER + [""] * (width - len(HEADER))) + " |"]
-            + ["| " + " | ".join(["---"] * width) + " |"]
-            + ["| " + " | ".join(r) + " |" for r in md_rows]
-        )
+        return _md(HEADER + [""] * (width - len(HEADER)), md_rows)
 
     def test_leading_decimal_fires_and_is_in_the_shared_helper(self) -> None:
         rows, words = _sign_rows(sign_dx=0.0, num=".230")
@@ -329,9 +329,7 @@ class TestSignDetachedRound2:
     def test_sign_attached_as_a_tail_of_the_label_fires_only_with_contact(self) -> None:
         rows, words = _sign_rows(sign_dx=0.0)
         md = self._md_with(rows, 2, [rows[2][0] + "-"] + rows[2][1:])
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.SIGN_DETACHED}
+        assert _gate(words, md) == {ship_gate.SIGN_DETACHED}
         rows, words = _sign_rows(sign_dx=40.0)
         assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
@@ -347,9 +345,7 @@ class TestSignDetachedRound2:
         # The sign cell on the row that really carries the sign: the two identical
         # lines still disagree about it, so the gate abstains there too.
         md2 = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
-        assert ship_gate.SIGN_DETACHED not in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md2, line_dirs=UNCHECKED)
-        }
+        assert ship_gate.SIGN_DETACHED not in _gate(words, md2)
 
     def test_contact_must_sit_on_the_cells_own_column(self) -> None:
         # One row prints 0.230 twice; the sign touches the SECOND. A bare sign
@@ -358,19 +354,14 @@ class TestSignDetachedRound2:
         rows[2][1] = "0.230"
         rows[2][3] = "0.230"
         words = _words([HEADER] + rows)
-        y = Y0 + 3 * PITCH
-        x = COL_XS[3]
-        words.append((x + 0.2 - CHAR_W * 0.7, y, x + 0.2, y + 9.0, "-", 0, 3, 9))
+        words.append(_sign_word(COL_XS[3], Y0 + 3 * PITCH, 3))
         md_first = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
         assert ship_gate.native_ship_gate(words, md_first, line_dirs=UNCHECKED) == ()
         md_second = self._md_with(rows, 2, rows[2][:3] + ["-"] + rows[2][3:])
-        assert {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, md_second, line_dirs=UNCHECKED)
-        } == {ship_gate.SIGN_DETACHED}
+        assert _gate(words, md_second) == {ship_gate.SIGN_DETACHED}
 
 
-class TestDataRowRound2:
+class TestDataRowSpan:
     def test_full_width_numeric_prose_far_above_or_below_does_not_fire(self) -> None:
         words, md = _base()
         far = 8 * PITCH
@@ -399,9 +390,7 @@ class TestDataRowRound2:
             words, md = _base()
             for ci in range(1, 5):
                 words.append(_word(COL_XS[ci], last + pitches * PITCH, f"{ci}.5", 70, ci))
-            got = {
-                f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-            }
+            got = _gate(words, md)
             assert (got == {ship_gate.DATA_ROW_MISSING}) is fires, (pitches, got)
 
     def test_bound_zero_extends_nothing(self) -> None:
@@ -410,11 +399,8 @@ class TestDataRowRound2:
         y = Y0 + (len(ROWS) + 1) * PITCH
         for ci in range(1, 5):
             words.append(_word(COL_XS[ci], y, f"{ci}.5", 70, ci))
-        blocks = ship_gate._output_blocks(md)
-        src = ship_gate._source_rows(words)
-        anchors = ship_gate._Anchors(blocks, src)
-        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
-        assert len(ship_gate.data_row_missing_faults(blocks, anchors, src)) == 1
+        assert _data_row_faults(words, md, 0) == []
+        assert len(_data_row_faults(words, md)) == 1
 
     def test_width_is_counted_in_lanes_not_numeric_words(self) -> None:
         # Every cell prints two numbers in ONE lane ("0.253 (1)"), so a row has twice
@@ -434,9 +420,7 @@ class TestDataRowRound2:
         md = _md(out_rows[0], out_rows[1:])
         assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         dropped = _md(out_rows[0], out_rows[1:-1])
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped, line_dirs=UNCHECKED)
-        } == {ship_gate.DATA_ROW_MISSING}
+        assert _gate(words, dropped) == {ship_gate.DATA_ROW_MISSING}
 
     def test_dropped_copy_of_a_repeated_row_fires(self) -> None:
         rows = [list(r) for r in ROWS]
@@ -445,9 +429,7 @@ class TestDataRowRound2:
         both = _md(HEADER, rows)
         one = _md(HEADER, rows[:3] + rows[4:])
         assert ship_gate.native_ship_gate(words, both, line_dirs=UNCHECKED) == ()
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, one, line_dirs=UNCHECKED)
-        } == {ship_gate.DATA_ROW_MISSING}
+        assert _gate(words, one) == {ship_gate.DATA_ROW_MISSING}
 
     def test_a_data_row_equal_to_the_header_numbers_is_not_hidden(self) -> None:
         header = ["Year", "2001", "2002", "2003", "2004"]
@@ -457,43 +439,36 @@ class TestDataRowRound2:
         kept = _md(header, rows)
         dropped = _md(header, rows[:3] + rows[4:])
         assert ship_gate.native_ship_gate(words, kept, line_dirs=UNCHECKED) == ()
-        assert ship_gate.DATA_ROW_MISSING in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped, line_dirs=UNCHECKED)
-        }
+        assert ship_gate.DATA_ROW_MISSING in _gate(words, dropped)
 
 
-class TestLabelRowRound2:
+class TestLabelRowMatching:
     @staticmethod
     def _grid(label_rows, out_labels):
         """ROWS with *label_rows* inserted after row 2; the markdown carries *out_labels*."""
         rows = [list(r) for r in ROWS]
-        blank = ["", "", "", ""]
-        words = _words([HEADER] + rows[:3] + [[t] + blank for t in label_rows] + rows[3:])
-        md_rows = rows[:3] + [list(c) + [""] * (5 - len(c)) for c in out_labels] + rows[3:]
+        words = _words([HEADER] + rows[:3] + [[t] + BLANK for t in label_rows] + rows[3:])
+        md_rows = (
+            rows[:3] + [list(c) + [""] * (len(HEADER) - len(c)) for c in out_labels] + rows[3:]
+        )
         return words, _md(HEADER, md_rows)
 
     def test_dehyphenated_line_break_is_not_missing(self) -> None:
         words, md = self._grid(["Evalu-", "ation"], [["Evaluation"]])
         assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         words, md = self._grid(["Evalu-", "ation"], [])
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        assert _gate(words, md) == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_match_cannot_straddle_two_cells(self) -> None:
         # "bc" is in neither "ab" nor "cd"; it only exists in their concatenation.
         words, md = self._grid(["bc"], [["ab", "cd"]])
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        assert _gate(words, md) == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_repeated_label_is_counted(self) -> None:
         words, md_two = self._grid(["Panel B", "Panel B"], [["Panel B"], ["Panel B"]])
         _w, md_one = self._grid(["Panel B", "Panel B"], [["Panel B"]])
         assert ship_gate.native_ship_gate(words, md_two, line_dirs=UNCHECKED) == ()
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md_one, line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        assert _gate(words, md_one) == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_full_width_heading_inside_the_span_is_a_missing_label(self) -> None:
         # Five words spanning every lane, between two data rows, dropped from the
@@ -501,10 +476,7 @@ class TestLabelRowRound2:
         rows = [list(r) for r in ROWS]
         heading = ["Averages", "are", "taken", "over", "years"]
         words = _words([HEADER] + rows[:3] + [heading] + rows[3:])
-        assert {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        assert _gate(words, _md(HEADER, rows)) == {ship_gate.LABEL_ROW_MISSING}
         kept = [list(r) for r in rows[:3]] + [heading] + [list(r) for r in rows[3:]]
         assert ship_gate.native_ship_gate(words, _md(HEADER, kept), line_dirs=UNCHECKED) == ()
 
@@ -512,14 +484,10 @@ class TestLabelRowRound2:
         # "Notes:" sits between two data blocks and numeric rows resume after it,
         # so the label that vanishes after it is still a fault.
         rows = [list(r) for r in ROWS]
-        blank = ["", "", "", ""]
-        inserted = [["Notes:"] + blank, ["Panel C"] + blank]
+        inserted = [["Notes:"] + BLANK, ["Panel C"] + BLANK]
         words = _words([HEADER] + rows[:3] + inserted + rows[3:])
-        md_rows = rows[:3] + [["Notes:"] + blank] + rows[3:]
-        assert {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows), line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        md_rows = rows[:3] + [["Notes:"] + BLANK] + rows[3:]
+        assert _gate(words, _md(HEADER, md_rows)) == {ship_gate.LABEL_ROW_MISSING}
         assert (
             ship_gate.native_ship_gate(
                 words, _md(HEADER, rows[:3] + inserted + rows[3:]), line_dirs=UNCHECKED
@@ -532,7 +500,7 @@ class TestLabelRowRound2:
         # the grid whose continuation lines carry numerals in table lanes, with an
         # unnumbered line dropped between them. The gate FIRES. Pinned on purpose:
         # a false DEFER costs one model call, a missed fault can ship a wrong
-        # number, so no Notes/Source rule is allowed to suppress it (GH-916 round 5).
+        # number, so no Notes/Source rule is allowed to suppress it.
         words, _ = _base()
         y0 = Y0 + (len(ROWS) + 2) * PITCH
         out_rows = [list(r) for r in ROWS]
@@ -548,30 +516,26 @@ class TestLabelRowRound2:
             words.append(_word(COL_XS[2], y, b, 101 + n, 21))
             out_rows.append([" ".join(filler), a, b, "", ""])
         words.append(_word(95.0, y0 + 2 * PITCH, "between", 110, 0))
-        got = {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, out_rows), line_dirs=UNCHECKED)
-        }
+        got = _gate(words, _md(HEADER, out_rows))
         assert got == {ship_gate.LABEL_ROW_MISSING}
 
     @staticmethod
     def _narrow_section(heading: str, drop_label: bool, drop_row: bool):
         """Four-lane rows, a heading, then a NARROWER (two-lane) trailing section."""
         rows = [list(r) for r in ROWS[:3]]
-        blank = ["", "", "", ""]
         narrow = [
             ["N1", "1.5", "2.5", "", ""],
-            ["Panel B"] + blank,
+            ["Panel B"] + BLANK,
             ["N2", "3.5", "4.5", "", ""],
             ["N3", "5.5", "6.5", "", ""],
         ]
-        words = _words([HEADER] + rows + [[heading] + blank] + narrow)
+        words = _words([HEADER] + rows + [[heading] + BLANK] + narrow)
         md_narrow = [
             r
             for r in narrow
             if not (drop_label and r[0] == "Panel B") and not (drop_row and r[0] == "N2")
         ]
-        return words, _md(HEADER, rows + [[heading] + blank] + md_narrow)
+        return words, _md(HEADER, rows + [[heading] + BLANK] + md_narrow)
 
     @pytest.mark.parametrize("heading", ["Source of shock", "Notes:", "Source:"])
     def test_a_narrow_section_after_a_source_or_notes_heading_is_still_checked(
@@ -580,69 +544,53 @@ class TestLabelRowRound2:
         words, md = self._narrow_section(heading, drop_label=False, drop_row=False)
         assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         words, md = self._narrow_section(heading, drop_label=True, drop_row=False)
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.LABEL_ROW_MISSING}
+        assert _gate(words, md) == {ship_gate.LABEL_ROW_MISSING}
         words, md = self._narrow_section(heading, drop_label=False, drop_row=True)
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.DATA_ROW_MISSING}
+        assert _gate(words, md) == {ship_gate.DATA_ROW_MISSING}
 
     def test_a_neighbouring_columns_notes_opener_does_not_suppress_this_table(self) -> None:
         rows = [list(r) for r in ROWS]
-        blank = ["", "", "", ""]
-        words = _words([HEADER] + rows[:3] + [["Panel B"] + blank] + rows[3:])
+        words = _words([HEADER] + rows[:3] + [["Panel B"] + BLANK] + rows[3:])
         # A second column's paragraph opens with "Notes:" on a row inside this table.
         words.append(_word(520.0, Y0 + 4 * PITCH, "Notes:", 200, 0))
         words.append(_word(560.0, Y0 + 4 * PITCH, "elsewhere", 200, 1))
-        got = {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED)
-        }
+        got = _gate(words, _md(HEADER, rows))
         assert ship_gate.LABEL_ROW_MISSING in got
 
     def test_data_resuming_after_an_in_table_notes_heading_is_core_again(self) -> None:
         # Full-width rows after the heading are table rows: a label dropped
         # further down is still seen.
         rows = [list(r) for r in ROWS]
-        blank = ["", "", "", ""]
         words = _words(
             [HEADER]
             + rows[:2]
-            + [["Notes:"] + blank]
+            + [["Notes:"] + BLANK]
             + rows[2:4]
-            + [["Panel D"] + blank]
+            + [["Panel D"] + BLANK]
             + rows[4:]
         )
-        md_rows = rows[:2] + [["Notes:"] + blank] + rows[2:]
-        got = {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows), line_dirs=UNCHECKED)
-        }
+        md_rows = rows[:2] + [["Notes:"] + BLANK] + rows[2:]
+        got = _gate(words, _md(HEADER, md_rows))
         assert got == {ship_gate.LABEL_ROW_MISSING}
 
     def test_text_heavy_final_rows_do_not_hide_a_dropped_panel_heading(self) -> None:
         # Short rows, a panel heading, then two final numeric rows with long text in
         # the lane region. Word count must not push those rows out of the table.
         rows = [list(r) for r in ROWS]
-        blank = ["", "", "", ""]
         heavy = []
         for k, base in enumerate(rows[3:5]):
             heavy.append(["Long label " * 3 + "ab"[k]] + base[1:])
-        words = _words([HEADER] + rows[:3] + [["Panel B"] + blank] + heavy)
+        words = _words([HEADER] + rows[:3] + [["Panel B"] + BLANK] + heavy)
         for k in range(2):
             y = Y0 + (5 + k) * PITCH
             for j in range(10):
                 words.append(_word(100.0 + 24.0 * j, y, f"w{j}", 120 + k, 30 + j))
-        with_heading = rows[:3] + [["Panel B"] + blank] + heavy
+        with_heading = rows[:3] + [["Panel B"] + BLANK] + heavy
         assert (
             ship_gate.native_ship_gate(words, _md(HEADER, with_heading), line_dirs=UNCHECKED) == ()
         )
         without = rows[:3] + heavy
-        got = {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, without), line_dirs=UNCHECKED)
-        }
+        got = _gate(words, _md(HEADER, without))
         assert ship_gate.LABEL_ROW_MISSING in got
 
 
@@ -658,143 +606,75 @@ class TestPunctuatedValues:
         words = _words([HEADER] + rows)
         assert ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED) == ()
         reversed_rows = _md(HEADER, list(reversed(rows)))
-        assert ship_gate.ROW_ORDER in {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, reversed_rows, line_dirs=UNCHECKED)
-        }
+        assert ship_gate.ROW_ORDER in _gate(words, reversed_rows)
         swapped = [r[:1] + list(reversed(r[1:])) for r in rows]
-        assert ship_gate.CELL_ORDER in {
-            f["predicate"]
-            for f in ship_gate.native_ship_gate(words, _md(HEADER, swapped), line_dirs=UNCHECKED)
-        }
+        assert ship_gate.CELL_ORDER in _gate(words, _md(HEADER, swapped))
         # A detached sign before a punctuated number.
         signed = [list(r) for r in rows]
         signed[2][1] = "0.230,"
         words = _words([HEADER] + signed)
-        y = Y0 + 3 * PITCH
-        x = COL_XS[1]
-        words.append((x + 0.2 - CHAR_W * 0.7, y, x + 0.2, y + 9.0, "-", 0, 3, 9))
+        words.append(_sign_word(COL_XS[1], Y0 + 3 * PITCH, 3))
         md_rows = [list(r) for r in signed]
         md_rows[2] = md_rows[2][:1] + ["-"] + md_rows[2][1:]
-        md = "\n".join(
-            ["| " + " | ".join(HEADER + [""]) + " |", "| " + " | ".join(["---"] * 6) + " |"]
-            + ["| " + " | ".join(r) + " |" for r in md_rows]
-        )
-        assert ship_gate.SIGN_DETACHED in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        }
+        assert ship_gate.SIGN_DETACHED in _gate(words, _md(HEADER + [""], md_rows))
 
     def test_a_dropped_punctuated_edge_row_fires(self) -> None:
         rows = self._punct(ROWS)
         words = _words([HEADER] + rows)
         for drop in (0, -1):
             kept = [r for i, r in enumerate(rows) if i != drop % len(rows)]
-            got = {
-                f["predicate"]
-                for f in ship_gate.native_ship_gate(words, _md(HEADER, kept), line_dirs=UNCHECKED)
-            }
+            got = _gate(words, _md(HEADER, kept))
             assert got == {ship_gate.DATA_ROW_MISSING}, (drop, got)
 
 
 # ------------------------------------------------------ lane + resume pins
 
 
-def _config() -> PipelineConfig:
-    return PipelineConfig(
-        agentic=True,
-        native_first=True,
-        native_only=False,
-        primary_engine=EngineType.QWEN,
-        local_engine=EngineType.QWEN,
-        enabled_engines=[EngineType.QWEN],
-        tiered=False,
-        dual_pass_tables=False,
-        detect_equations=False,
-        save_figures=False,
-        quiet=True,
-        table_judge_ladder=False,
-    )
+def _run_lane(tmp_path: Path, providers: list, *, drop_row: bool):
+    from socr.core.born_digital import BornDigitalDetector
 
+    pdf = tmp_path / "t.pdf"
+    if not pdf.exists():
+        dense_pdf(pdf)
+    pipeline = UnifiedPipeline(native_first_config())
+    if drop_row:
+        real = BornDigitalDetector()
 
-def _dense_pdf(path: Path) -> None:
-    import fitz
+        class _Drop(BornDigitalDetector):
+            def detect(self, path):
+                assessment = real.detect(path)
+                page = assessment.pages[0]
+                lines = (page.native_text or "").splitlines()
+                keep = [ln for ln in lines if not ln.startswith("| TR ")]
+                assert len(keep) == len(lines) - 1
+                page.native_text = "\n".join(keep)
+                return assessment
 
-    doc = fitz.open()
-    page = doc.new_page(width=612, height=792)
-    page.insert_text((72, 50), "Table 1. GDP growth forecasts.", fontsize=10, fontname="helv")
-    for ci, hdr in enumerate(HEADER):
-        page.insert_text((COL_XS[ci], 80), hdr, fontsize=9, fontname="helv")
-    for ri, row in enumerate(ROWS):
-        for ci, cell in enumerate(row):
-            page.insert_text((COL_XS[ci], 100 + ri * 22), cell, fontsize=9, fontname="helv")
-    doc.save(str(path))
-    doc.close()
+        pipeline.bd_detector = _Drop()
+    routes: list[int] = []
+
+    def _route(page_num, ladder, run_provider, judge, **kwargs):
+        routes.append(page_num)
+        return routed_decision(page_num, ladder)
+
+    out_dir = tmp_path / ("out_drop" if drop_row else "out_ok")
+    with (
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=providers),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+    ):
+        result = pipeline.process(pdf, out_dir)
+    sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text(encoding="utf-8"))
+    return result, sidecar, routes
 
 
 class TestLane:
-    def _run(self, tmp_path: Path, providers: list, *, drop_row: bool):
-        from socr.core.born_digital import BornDigitalDetector
-
-        pdf = tmp_path / "t.pdf"
-        if not pdf.exists():
-            _dense_pdf(pdf)
-        pipeline = UnifiedPipeline(_config())
-        if drop_row:
-            real = BornDigitalDetector()
-
-            class _Drop(BornDigitalDetector):
-                def detect(self, path):
-                    assessment = real.detect(path)
-                    page = assessment.pages[0]
-                    lines = (page.native_text or "").splitlines()
-                    keep = [ln for ln in lines if not ln.startswith("| TR ")]
-                    assert len(keep) == len(lines) - 1
-                    page.native_text = "\n".join(keep)
-                    return assessment
-
-            pipeline.bd_detector = _Drop()
-        routes: list[int] = []
-
-        def _route(page_num, ladder, run_provider, judge, **kwargs):
-            routes.append(page_num)
-            out = PageOutput(
-                page_num=page_num,
-                text="model table",
-                status=PageStatus.SUCCESS,
-                engine="qwen",
-                audit_passed=True,
-            )
-            from socr.pipeline.agentic import PageDecision, ProviderAttempt
-
-            prof = ladder[0]
-            att = ProviderAttempt(
-                engine=prof.engine,
-                output=out,
-                cost_usd=0.0,
-                accepted=True,
-                reason="test",
-                provider_id=prof.id,
-                model=prof.model,
-                backend=prof.backend,
-            )
-            return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
-
-        out_dir = tmp_path / ("out_drop" if drop_row else "out_ok")
-        with (
-            patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
-            patch.object(pipeline, "_available_engines_for_agentic", return_value=providers),
-            patch.object(pipeline, "_resolve_judge_model", return_value=""),
-        ):
-            result = pipeline.process(pdf, out_dir)
-        sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text(encoding="utf-8"))
-        return result, sidecar, routes
-
     @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
     def test_gate_defers_to_route_page_and_records_the_fault(
         self, tmp_path: Path, providers: list
     ) -> None:
-        clean_result, clean_side, clean_routes = self._run(tmp_path, providers, drop_row=False)
-        _result, side, routes = self._run(tmp_path, providers, drop_row=True)
+        clean_result, clean_side, clean_routes = _run_lane(tmp_path, providers, drop_row=False)
+        _result, side, routes = _run_lane(tmp_path, providers, drop_row=True)
         clean_kinds = [e["kind"] for e in clean_side["audit_events"]]
         kinds = [e["kind"] for e in side["audit_events"]]
         # Same page, only the dropped row differs: native exact-pass vs deferral.
@@ -816,33 +696,19 @@ class TestLane:
 
 class TestEventSurvivesResume:
     def _emit_flush_restore(self, tmp_path: Path):
-        from socr.core.born_digital import BornDigitalDetector
-
         pdf = tmp_path / "t.pdf"
-        _dense_pdf(pdf)
+        dense_pdf(pdf)
         out_dir = tmp_path / "out"
-        pipeline = UnifiedPipeline(_config())
+        pipeline = UnifiedPipeline(native_first_config())
         state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
         pipeline._phase_analyze(state)
         ps = state.pages[1]
-        assert BornDigitalDetector is not None
         ps.native_text = "\n".join(
             ln for ln in (ps.native_text or "").splitlines() if "| TR " not in ln
         )
         with patch.object(pipeline, "_available_engines_for_agentic", return_value=[]):
             assert pipeline._plan_native_table_first(state, 1, ps) is None
-        assert pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True) is not None
-        resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-        resumed.pages[1] = ps
-        restored = PageOutput(
-            page_num=1,
-            text="model table",
-            status=PageStatus.SUCCESS,
-            engine="qwen",
-            audit_passed=True,
-        )
-        pipeline._restore_terminal_page_state(resumed, 1, restored, out_dir)
-        return state, resumed
+        return state, flush_and_restore(pipeline, state, pdf, out_dir)
 
     def test_event_replays_exactly_once(self, tmp_path: Path) -> None:
         kind = ship_gate.SHIP_GATE_KIND
@@ -855,7 +721,7 @@ class TestEventSurvivesResume:
         assert ship_gate.SHIP_GATE_KIND in UnifiedPipeline.resume_restore_kinds()
 
 
-# ---------------------------------------------------- round 2: wiring pins
+# ---------------------------------------------------------- wiring pins
 
 
 class TestRotatedGateEvent:
@@ -869,12 +735,11 @@ class TestRotatedGateEvent:
     @staticmethod
     def _plan(tmp_path: Path, *, drop_last_row: bool):
         import socr.tables.reconstruct as reconstruct
-        from test_rotated_native_table_first import _rotated_dense_forecast_pdf
 
         pdf = tmp_path / "rotated.pdf"
         if not pdf.exists():
-            _rotated_dense_forecast_pdf(pdf)
-        pipeline = UnifiedPipeline(_config())
+            rotated_forecast_pdf(pdf)
+        pipeline = UnifiedPipeline(native_first_config())
         state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
         pipeline._phase_analyze(state)
         real = reconstruct.rowize_from_words
@@ -899,7 +764,7 @@ class TestRotatedGateEvent:
         assert clean_work is None and work is None  # both defer to route_page
         # Quarantine alone explains the clean page; the faulty page is explained by
         # the gate, and the gate event is on the record.
-        assert "rotated_native_table_quarantined" in clean_kinds
+        assert ROTATED_QUARANTINE_KIND in clean_kinds
         assert ship_gate.SHIP_GATE_KIND not in clean_kinds
         assert kinds.count(ship_gate.SHIP_GATE_KIND) == 1
         event = next(e for e in events if e.kind == ship_gate.SHIP_GATE_KIND)
@@ -914,13 +779,13 @@ class TestGateError:
             faults = ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
             plan = plan_native_table(words, md, line_dirs=UNCHECKED)
         assert [f["predicate"] for f in faults] == [ship_gate.GATE_ERROR]
-        assert plan.action == DEFER and plan.action != SHIP
+        assert plan.action == DEFER
         assert ship_gate.GATE_ERROR in plan.reason
 
     def test_a_gate_error_is_recorded_like_any_other_fault(self) -> None:
         words, md = _base()
         state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=1))
-        with patch.object(ship_gate, "order_faults", side_effect=ValueError("bad")):
+        with patch.object(ship_gate, "row_order_faults", side_effect=ValueError("bad")):
             plan = plan_native_table(words, md, line_dirs=UNCHECKED)
         UnifiedPipeline._record_native_ship_gate(state, 1, plan)
         assert [e.kind for e in state.events] == [ship_gate.SHIP_GATE_KIND]
@@ -935,12 +800,11 @@ class TestGateDeferEqualsOrdinaryDefer:
         def run(name: str, *, ordinary: bool):
             sub = tmp_path / name
             sub.mkdir()
-            runner = TestLane()
             if not ordinary:
-                return runner._run(sub, providers, drop_row=True)
+                return _run_lane(sub, providers, drop_row=True)
             ordinary_plan = nf.NativeTablePlan(DEFER, reason="AMBIGUOUS")
             with patch.object(nf, "plan_native_table", return_value=ordinary_plan):
-                return runner._run(sub, providers, drop_row=True)
+                return _run_lane(sub, providers, drop_row=True)
 
         g_result, g_side, g_routes = run("gate", ordinary=False)
         o_result, o_side, o_routes = run("ordinary", ordinary=True)
@@ -982,16 +846,18 @@ class TestBlockInterior:
     """Rows between consecutive blocks of one table are inside it, whatever the bound."""
 
     @staticmethod
-    def _two_blocks(second_dx: float):
-        """Blocks at y=100/110/120 and y=300/310/320, 4 lanes each (second shifted by dx)."""
+    def _two_blocks(second_dx: list[float]):
+        """Blocks at y=100/110/120 and y=300/310/320, 4 lanes each.
+
+        ``second_dx`` is the second block's per-lane x shift (one entry per lane).
+        """
 
         def block_words(ys, dx, base, line0):
             out = []
             for k, y in enumerate(ys):
                 for ci in range(1, 5):
-                    shift = dx[ci - 1] if isinstance(dx, list) else dx
                     out.append(
-                        _word(COL_XS[ci] + shift, float(y), f"{base + k}.{ci}5", line0 + k, ci)
+                        _word(COL_XS[ci] + dx[ci - 1], float(y), f"{base + k}.{ci}5", line0 + k, ci)
                     )
             return out
 
@@ -1001,7 +867,7 @@ class TestBlockInterior:
             ]
             return _md(["Var", "a", "b", "c", "d"], rows)
 
-        words = block_words([100, 110, 120], 0.0, 1, 0) + block_words(
+        words = block_words([100, 110, 120], [0.0] * 4, 1, 0) + block_words(
             [300, 310, 320], second_dx, 7, 10
         )
         words += [
@@ -1012,23 +878,18 @@ class TestBlockInterior:
         return words, block_md(1) + "\n\n" + block_md(7)
 
     def test_a_row_omitted_between_two_blocks_of_one_table_fires_at_any_bound(self) -> None:
-        words, md = self._two_blocks(0.0)
+        words, md = self._two_blocks([0.0] * 4)
         # The omitted row: full width, in the same lanes, midway between the blocks.
         for ci in range(1, 5):
             words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
-        blocks = ship_gate._output_blocks(md)
-        src = ship_gate._source_rows(words)
-        anchors = ship_gate._Anchors(blocks, src)
         # 80 and 100 points from the nearest block, outward reach 5 pitches = 50.
         for bound in (0, ship_gate._PANEL_GAP_ROWS):
-            got = ship_gate.data_row_missing_faults(blocks, anchors, src, bound)
+            got = _data_row_faults(words, md, bound)
             assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING, bound
-        assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
-        } == {ship_gate.DATA_ROW_MISSING}
+        assert _gate(words, md) == {ship_gate.DATA_ROW_MISSING}
 
     def test_without_the_omitted_row_nothing_fires(self) -> None:
-        words, md = self._two_blocks(0.0)
+        words, md = self._two_blocks([0.0] * 4)
         assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_blocks_sharing_only_one_lane_are_not_one_table(self) -> None:
@@ -1036,22 +897,16 @@ class TestBlockInterior:
         words, md = self._two_blocks([0.0, 60.0, 60.0, 60.0])
         for ci in range(1, 5):
             words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
-        blocks = ship_gate._output_blocks(md)
-        src = ship_gate._source_rows(words)
-        anchors = ship_gate._Anchors(blocks, src)
-        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
+        assert _data_row_faults(words, md, 0) == []
 
     def test_two_different_tables_are_not_one_tables_interior(self) -> None:
         # The second table's columns are 60 points to the right: different lanes.
-        words, md = self._two_blocks(60.0)
+        words, md = self._two_blocks([60.0] * 4)
         # Unrelated numeric text between them, lying in the FIRST table's lanes.
         for ci in range(1, 5):
             words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
-        blocks = ship_gate._output_blocks(md)
-        src = ship_gate._source_rows(words)
-        anchors = ship_gate._Anchors(blocks, src)
-        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
-        assert ship_gate.data_row_missing_faults(blocks, anchors, src) == []
+        assert _data_row_faults(words, md, 0) == []
+        assert _data_row_faults(words, md) == []
 
 
 class TestBlockInteriorColumnCounts:
@@ -1083,38 +938,31 @@ class TestBlockInteriorColumnCounts:
         for ci in cols:
             words.append(_word(COL_XS[ci] + dx, 200.0, f"4.{ci}9", 99, ci))
 
-    def _faults(self, words, md, bound=ship_gate._PANEL_GAP_ROWS):
-        blocks = ship_gate._output_blocks(md)
-        src = ship_gate._source_rows(words)
-        anchors = ship_gate._Anchors(blocks, src)
-        return ship_gate.data_row_missing_faults(blocks, anchors, src, bound)
-
     def test_a_two_lane_block_and_a_four_lane_block_are_one_table(self) -> None:
         words, md = self._stack([1, 2], [1, 2, 3, 4])
-        assert self._faults(words, md) == []
+        assert _data_row_faults(words, md) == []
         self._omitted(words, [1, 2, 3, 4])
         for bound in (0, ship_gate._PANEL_GAP_ROWS):
-            got = self._faults(words, md, bound)
+            got = _data_row_faults(words, md, bound)
             assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING, bound
 
     def test_two_unrelated_two_lane_tables_do_not_merge(self) -> None:
         # Second table's columns are 60 points to the right.
         words, md = self._stack([1, 2], [1, 2], b_dx=60.0)
         self._omitted(words, [1, 2])
-        assert self._faults(words, md, 0) == []
-        assert self._faults(words, md) == []
+        assert _data_row_faults(words, md, 0) == []
+        assert _data_row_faults(words, md) == []
 
     def test_identical_column_separate_tables_are_an_accepted_false_defer(self) -> None:
-        # Astra on round 7 (0e52ddd): two UNRELATED tables whose numeric columns sit at the
-        # same x positions, with prose carrying numbers at those positions between them,
-        # are linked as one table, so the prose reads as an omitted interior row and the
-        # page DEFERs. This is a KNOWN FALSE DEFER, accepted under the round-5 policy (a false
-        # fire costs one model call; a false negative can ship a wrong number). Astra
-        # confirmed linking can only widen coverage, never cause a missed fault (NO-FN).
-        # Pinned so that a future change to this behaviour is a deliberate one.
+        # Two UNRELATED tables whose numeric columns sit at the same x positions, with
+        # prose carrying numbers at those positions between them, are linked as one
+        # table, so the prose reads as an omitted interior row and the page DEFERs. This
+        # is a KNOWN FALSE DEFER, accepted because a false DEFER costs one model call and
+        # a false negative can ship a wrong number; linking can only widen coverage, never
+        # cause a missed fault. Pinned so that a change to this behaviour is deliberate.
         words, md = self._stack([1, 2], [1, 2])
         self._omitted(words, [1, 2])
-        got = self._faults(words, md, 0)
+        got = _data_row_faults(words, md, 0)
         assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING
 
     def test_a_row_is_judged_against_the_union_of_covering_lanes(self) -> None:
@@ -1125,19 +973,19 @@ class TestBlockInteriorColumnCounts:
             [1, 2, 3], [1, 2, 3, 4], extra_row_in_a=["x", "4.19", "4.29", "4.39"]
         )
         self._omitted(words, [1, 2, 3, 4])
-        got = self._faults(words, md, 0)
+        got = _data_row_faults(words, md, 0)
         assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING
         # With the fourth value kept too, nothing fires.
         words, md = self._stack(
             [1, 2, 3], [1, 2, 3, 4], extra_row_in_a=["x", "4.19", "4.29", "4.39", "4.49"]
         )
         self._omitted(words, [1, 2, 3, 4])
-        assert self._faults(words, md, 0) == []
+        assert _data_row_faults(words, md, 0) == []
 
 
 def test_gap_measurement_rejects_a_page_in_two_input_sets() -> None:
-    """cubic P2 on #920: results are keyed by (doc, page), so a page given in both
-    the rotated and the upright set must be refused, not silently overwritten."""
+    """Results are keyed by (doc, page), so a page given in both the rotated and the
+    upright set must be refused, not silently overwritten."""
     from socr.benchmark import ship_gate_gaps
 
     rows = [("rotated", "d.pdf", 3, [], ""), ("upright", "d.pdf", 3, [], "")]

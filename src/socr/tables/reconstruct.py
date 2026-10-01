@@ -251,15 +251,20 @@ def starts_a_number(text: str) -> bool:
     return text[:1].isdigit() or (text[:1] == "." and text[1:2].isdigit())
 
 
+def _same_line(a, b) -> bool:
+    """Whether two PyMuPDF word tuples sit in the same block and line."""
+    return a[5:7] == b[5:7]
+
+
 def _flush_on_the_left(sign, all_words) -> bool:
     """A range or compound hyphen ("1990-2000") abuts BOTH neighbours; a minus
-    abuts only the digits after it (PR #888 review). Measured on the affected
+    abuts only the digits after it. Measured on the affected
     pages: of 145 detached minus signs, none was flush against anything on its
     left -- 144 open their own text line, 1 sits 6.03pt after its neighbour.
     So refusing a sign that is flush on BOTH sides costs nothing observed and
     blocks the one shape that is geometrically a range, not a minus."""
     return any(
-        w is not sign and w[5:7] == sign[5:7] and w[0] < sign[0] and w[2] >= sign[0]
+        w is not sign and _same_line(w, sign) and w[0] < sign[0] and w[2] >= sign[0]
         for w in all_words
     )
 
@@ -286,7 +291,7 @@ def detached_sign_pairs(words: list) -> list[tuple[tuple, tuple]]:
         if _flush_on_the_left(s, words):
             continue
         for d in digits:
-            if s[5:7] == d[5:7] and s[2] >= d[0] >= s[0]:
+            if _same_line(s, d) and s[2] >= d[0] >= s[0]:
                 pairs.append((s, d))
     return pairs
 
@@ -2280,6 +2285,13 @@ def _rowize_word_group(
     return out
 
 
+def _words_center(words: list) -> tuple[float, float]:
+    """Centre of the bounding box of the words' top-left corners (the rotation pivot)."""
+    xs = [w[0] for w in words]
+    ys = [w[1] for w in words]
+    return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+
 def rowize_from_word_list(
     words: list,
     rotation: int = 0,
@@ -2321,9 +2333,9 @@ def rowize_from_word_list(
     When ``rotation`` is non-zero, word coordinates are rotated into an upright
     frame before rowization (and before the column-gutter check, so the split
     reasons about the page's own upright geometry); returned region rects are
-    rotated back to the original orientation. ``page_rect`` (a fitz.Rect)
-    provides the center point for rotation; if not supplied, rotation defaults
-    to unrotated behaviour.
+    rotated back to the original orientation. The rotation centre is the centre of
+    the words' bounding box (``_words_center``); ``page_rect`` only switches rotation
+    on (without it ``rotation`` is treated as 0, unrotated behaviour).
 
     Never raises. Returns ``[]`` if no valid table segment is found.
 
@@ -2343,26 +2355,13 @@ def rowize_from_word_list(
     if rotation == 0 or not page_rect:
         rotation = 0
 
+    rotation_center = None
     if rotation != 0:
-        if words:
-            xs = [w[0] for w in words]
-            ys = [w[1] for w in words]
-            cx = (min(xs) + max(xs)) / 2
-            cy = (min(ys) + max(ys)) / 2
-        else:
-            cx = (page_rect.x0 + page_rect.x1) / 2
-            cy = (page_rect.y0 + page_rect.y1) / 2
+        rotation_center = cx, cy = _words_center(words)
         # GH-902: +rotation, not -rotation. ``rotation`` is the correction that makes
         # text upright, and _rotate_point's positive sense is that correction (measured
         # on synthetic 90/270 pages); -rotation read the table 180 degrees flipped.
         words = [_rotate_word_bbox(w, cx, cy, rotation) for w in words]
-
-    # Save the rotation center if rotating, so we can use it for output rect rotation
-    if rotation != 0:
-        _rotation_center_x = cx
-        _rotation_center_y = cy
-    else:
-        _rotation_center_x = _rotation_center_y = None
 
     out: list[tuple[object, str]] = []
     gutter_x = _detect_column_gutter(words)
@@ -2389,11 +2388,8 @@ def rowize_from_word_list(
     if orphan_drops is not None:
         orphan_drops.extend(_split_drops)
 
-    if rotation != 0 and _rotation_center_x is not None:
-        out = [
-            (_rotate_rect(rect, _rotation_center_x, _rotation_center_y, -rotation), md)
-            for rect, md in out
-        ]
+    if rotation_center is not None:
+        out = [(_rotate_rect(rect, *rotation_center, -rotation), md) for rect, md in out]
 
     return out
 

@@ -88,16 +88,16 @@ def _page_inputs(args):
                     yield "upright", doc_name, page, words, state.pages[page].native_text or ""
 
 
-def _included_rows(g, blocks, anchors, src, bound):
+def _included_rows(g, blocks, pairs, src, bound):
     """Source rows (y keys) that a candidate-row check would cover at *bound*.
 
     A row is covered when it lies in the extended span of some block, is not itself a
     paired row, and occupies >= 2 of that block's lanes (what ``data_row_missing``
     treats as a candidate). Bound ``"0"`` is the unextended baseline: the core span.
     """
-    anchor_ys = {y for found in anchors.per_block for _i, y in found}
+    anchor_ys = {y for found in pairs for _i, y in found}
     covered: set[int] = set()
-    for lanes, _core, y_lo, y_hi in g.table_spans(blocks, anchors, src, _bound(bound)):
+    for lanes, _core, y_lo, y_hi in g.table_spans(blocks, pairs, src, _bound(bound)):
         for y, words in src.items():
             if y in anchor_ys or not (y_lo <= y <= y_hi):
                 continue
@@ -131,8 +131,8 @@ def measure(inputs, bounds):
             continue
         src = g._source_rows(words)
         order[(doc, page)] = sorted(src)
-        anchors = g._Anchors(blocks, src)
-        for found in anchors.per_block:
+        pairs = g._unique_pairs(blocks, src)
+        for found in pairs:
             geo = g._table_geometry(found, src)
             if not geo:
                 continue
@@ -144,10 +144,10 @@ def measure(inputs, bounds):
             if pitch > 0:
                 gaps += [(set_name, doc, page, round(d / pitch, 2)) for d in diffs]
         for b in bounds:
-            rows = _included_rows(g, blocks, anchors, src, b)
+            rows = _included_rows(g, blocks, pairs, src, b)
             if rows:
                 covered[b][(doc, page)] = sorted(rows)
-            faults = g.data_row_missing_faults(blocks, anchors, src, _bound(b))
+            faults = g.data_row_missing_faults(blocks, pairs, src, _bound(b))
             ys = [int(f["detail"].split("y=")[1].split()[0]) for f in faults]
             if ys:
                 fired[b][(doc, page)] = sorted(ys)

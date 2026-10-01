@@ -14,126 +14,49 @@ from unittest.mock import patch
 
 import fitz
 import pytest
+from native_table_fixtures import (
+    HEADER,
+    ROWS,
+    UNCHECKED,
+    flush_and_restore,
+    forecast_pdf,
+    native_first_config,
+    rotated_forecast_pdf,
+    routed_decision,
+)
 
 from socr.core.born_digital import BornDigitalDetector
-from socr.core.config import EngineType, PipelineConfig
+from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus
+from socr.core.result import PageStatus
+from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.core.result import PageOutput, PageStatus
-from socr.pipeline.agentic import PageDecision, ProviderAttempt
-from socr.tables.ship_gate import LineDirections
 from socr.tables.native_first import (
     DEFER,
     REFUSE,
+    ROTATED_QUARANTINE_KIND,
     ROTATED_SHIP_QUARANTINED,
     SHIP,
-    RotatedNativeTableAttempt,
     NativeTablePlan,
+    RotatedNativeTableAttempt,
     attempt_rotated_native_table,
     plan_native_table,
 )
 
-UNCHECKED = LineDirections.unchecked_for_tests()
-
-
-def _place(u: float, v: float, rotation: int, width: float, height: float) -> tuple[float, float]:
-    """Map an upright-frame point (u right, v down) onto a page drawn at *rotation*.
-
-    GH-902: fitz ``rotate=90`` text reads bottom-to-top, so the upright top edge
-    lands on the LEFT of the page and the upright left edge at the BOTTOM;
-    ``rotate=270`` is the mirror image. The earlier fixture laid the grid out
-    180 degrees off this mapping, which is exactly what the wrong rowizer sign
-    undid, so the fixture and the bug agreed and nothing failed.
-    """
-    if rotation == 0:
-        return u, v
-    if rotation == 90:
-        return v, height - u
-    if rotation == 270:
-        return width - v, u
-    raise ValueError(rotation)
-
-
-_FORECAST_HEADERS = ["Variable", "b", "s", "h", "q"]
-_FORECAST_ROWS = [
-    ["GDP", "0.253", "0.179", "0.211", "0.301"],
-    ["CPI", "0.144", "0.135", "0.290", "0.188"],
-    ["IP", "0.041", "0.050", "0.154", "0.099"],
-    ["UR", "0.082", "0.321", "0.144", "0.211"],
-    ["CB", "0.180", "0.171", "0.365", "0.244"],
-    ["TR", "0.310", "0.220", "0.410", "0.188"],
-]
-
-
-def _forecast_pdf(path: Path, rotation: int = 90) -> None:
-    """The PP-6 grid with a ruled table signal, drawn at *rotation* (0, 90, 270)."""
-    doc = fitz.open()
-    width, height = 612, 792
-    page = doc.new_page(width=width, height=height)
-
-    def text(u: float, v: float, s: str, size: float) -> None:
-        page.insert_text(
-            _place(u, v, rotation, width, height),
-            s,
-            fontsize=size,
-            fontname="helv",
-            rotate=rotation,
-        )
-
-    text(72, 50, "Table 1. GDP growth forecasts across baseline and shock scenarios.", 10)
-    text(72, 400, "* Forecasts are annualized percent changes.", 9)
-    col_xs = [90.0, 180.0, 270.0, 360.0, 450.0]
-    for ci, hdr in enumerate(_FORECAST_HEADERS):
-        text(col_xs[ci], 80, hdr, 9)
-    for ri, row in enumerate(_FORECAST_ROWS):
-        for ci, cell in enumerate(row):
-            text(col_xs[ci], 100 + ri * 22, cell, 9)
-    x0, y0, tw, th = 70, 70, 400, 180
-    for r in range(9):
-        page.draw_line(
-            _place(x0, y0 + r * 20, rotation, width, height),
-            _place(x0 + tw, y0 + r * 20, rotation, width, height),
-        )
-    for c in range(6):
-        page.draw_line(
-            _place(x0 + c * 70, y0, rotation, width, height),
-            _place(x0 + c * 70, y0 + th, rotation, width, height),
-        )
-    # GH-902 (cubic P3): pin the fixture to real PDF geometry, not to the code
-    # under test. The pre-fix fixtures drew 90/270 swapped, and the wrong sign
-    # undid it, so the tests passed against the bug.
-    from socr.core.born_digital import upright_rotation_for
-
-    assert upright_rotation_for(page) == rotation, (upright_rotation_for(page), rotation)
-    doc.save(str(path))
-    doc.close()
-
-
-def _rotated_dense_forecast_pdf(path: Path) -> None:
-    _forecast_pdf(path, 90)
-
-
-def _config() -> PipelineConfig:
-    return PipelineConfig(
-        agentic=True,
-        native_first=True,
-        native_only=False,
-        primary_engine=EngineType.QWEN,
-        enabled_engines=[EngineType.QWEN],
-        tiered=False,
-        dual_pass_tables=False,
-        detect_equations=False,
-        save_figures=False,
-        quiet=True,
-        table_judge_ladder=False,
-    )
+#: A real rotated Fed minutes page (p14); the tests using it skip where the store is absent.
+_FOMC_PDF = Path(
+    "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
+    "fed-minutes-example/fomcminutes20190619.pdf"
+)
+requires_fomc_fixture = pytest.mark.skipif(
+    not _FOMC_PDF.is_file(), reason="FOMC fixture not present in the project store"
+)
 
 
 class TestAttemptRotatedNativeTable:
     def test_upright_rowizer_exact_passes(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated.pdf"
-        _rotated_dense_forecast_pdf(pdf_path)
+        rotated_forecast_pdf(pdf_path)
         assessment = BornDigitalDetector().detect(pdf_path).pages[0]
         assert assessment.native_table_lane_refused is True
         doc = fitz.open(pdf_path)
@@ -156,20 +79,10 @@ class TestAttemptRotatedNativeTable:
         )
         assert raw.action == SHIP
 
-    @pytest.mark.skipif(
-        not Path(
-            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
-            "fed-minutes-example/fomcminutes20190619.pdf"
-        ).is_file(),
-        reason="FOMC fixture not present in the project store",
-    )
+    @requires_fomc_fixture
     def test_fomc_page_14_does_not_exact_pass_upright(self) -> None:
         """Real rotated table: upright arm must not invent a shippable grid."""
-        pdf = Path(
-            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
-            "fed-minutes-example/fomcminutes20190619.pdf"
-        )
-        doc = fitz.open(pdf)
+        doc = fitz.open(_FOMC_PDF)
         attempt = attempt_rotated_native_table(doc[13])
         doc.close()
         assert attempt is not None
@@ -177,42 +90,20 @@ class TestAttemptRotatedNativeTable:
 
 
 class TestAgenticRotatedNativeTableFirst:
-    @staticmethod
-    def _routed_decision(page_num, ladder):
-        out = PageOutput(
-            page_num=page_num,
-            text="model table",
-            status=PageStatus.SUCCESS,
-            engine="qwen",
-            audit_passed=True,
-        )
-        prof = ladder[0]
-        att = ProviderAttempt(
-            engine=prof.engine,
-            output=out,
-            cost_usd=0.0,
-            accepted=True,
-            reason="test",
-            provider_id=prof.id,
-            model=prof.model,
-            backend=prof.backend,
-        )
-        return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
-
     def _run(self, tmp_path: Path, providers: list, *, quarantine: bool):
         """One process() run; ``quarantine=False`` restores the pre-#917 SHIP."""
         import dataclasses
 
         pdf_path = tmp_path / "rotated.pdf"
         if not pdf_path.exists():
-            _rotated_dense_forecast_pdf(pdf_path)
+            rotated_forecast_pdf(pdf_path)
         out_dir = tmp_path / ("out_q" if quarantine else "out_noq")
-        pipeline = UnifiedPipeline(_config())
+        pipeline = UnifiedPipeline(native_first_config())
         route_calls: list[int] = []
 
         def _route(page_num, ladder, run_provider, judge, **kwargs):
             route_calls.append(page_num)
-            return self._routed_decision(page_num, ladder)
+            return routed_decision(page_num, ladder)
 
         def _unquarantined(page):
             attempt = attempt_rotated_native_table(page)
@@ -258,11 +149,11 @@ class TestAgenticRotatedNativeTableFirst:
         u_kinds = [ev["kind"] for ev in u_side["audit_events"]]
         # Quarantine on: no exact-pass claim, the quarantine is recorded once.
         assert "landscape_page_refused" in q_kinds
-        assert q_kinds.count("rotated_native_table_quarantined") == 1
+        assert q_kinds.count(ROTATED_QUARANTINE_KIND) == 1
         assert "native_table_exact_pass" not in q_kinds
         # Quarantine off: the old behaviour, so the pin is not vacuous.
         assert "native_table_exact_pass" in u_kinds
-        assert "rotated_native_table_quarantined" not in u_kinds
+        assert ROTATED_QUARANTINE_KIND not in u_kinds
         assert u_routes == []
         # The page no longer takes the native-grid outcome.
         assert q_result.markdown != u_result.markdown
@@ -281,33 +172,13 @@ class TestAgenticRotatedNativeTableFirst:
 
     def test_upright_failed_check_calls_route_page(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated.pdf"
-        _rotated_dense_forecast_pdf(pdf_path)
-        pipeline = UnifiedPipeline(_config())
+        rotated_forecast_pdf(pdf_path)
+        pipeline = UnifiedPipeline(native_first_config())
         route_calls: list[int] = []
 
         def _route(page_num, ladder, run_provider, judge, **kwargs):
             route_calls.append(page_num)
-            rejected = PageOutput(
-                page_num=page_num,
-                text="model table",
-                status=PageStatus.SUCCESS,
-                engine="qwen",
-                audit_passed=True,
-            )
-            prof = ladder[0]
-            att = ProviderAttempt(
-                engine=prof.engine,
-                output=rejected,
-                cost_usd=0.0,
-                accepted=True,
-                reason="test",
-                provider_id=prof.id,
-                model=prof.model,
-                backend=prof.backend,
-            )
-            return PageDecision(
-                page_num=page_num, final_output=rejected, attempts=[att], accepted=True
-            )
+            return routed_decision(page_num, ladder)
 
         refuse_attempt = RotatedNativeTableAttempt(
             plan=NativeTablePlan(REFUSE, reason="row_count"),
@@ -339,51 +210,23 @@ class TestAgenticRotatedNativeTableFirst:
         assert "native_table_exact_pass" not in kinds
         assert "native_table_cell_unresolved" not in kinds
 
-    @pytest.mark.skipif(
-        not Path(
-            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
-            "fed-minutes-example/fomcminutes20190619.pdf"
-        ).is_file(),
-        reason="FOMC fixture not present in the project store",
-    )
+    @requires_fomc_fixture
     def test_fomc_page_14_reaches_route_page(self, tmp_path: Path) -> None:
-        pdf = Path(
-            "/cursor/stores/bc-f87a255a-cbe0-40f3-b811-f505faf8233d/media/"
-            "fed-minutes-example/fomcminutes20190619.pdf"
-        )
         single = tmp_path / "fomc-p14.pdf"
-        src = fitz.open(pdf)
+        src = fitz.open(_FOMC_PDF)
         doc = fitz.open()
         doc.insert_pdf(src, from_page=13, to_page=13)
         doc.save(single)
         doc.close()
         src.close()
 
-        pipeline = UnifiedPipeline(_config())
+        pipeline = UnifiedPipeline(native_first_config())
         route_calls: list[int] = []
 
         def _route(page_num, ladder, run_provider, judge, **kwargs):
             route_calls.append(page_num)
-            rejected = PageOutput(
-                page_num=page_num,
-                text="",
-                status=PageStatus.ERROR,
-                engine="qwen",
-                audit_passed=False,
-            )
-            prof = ladder[0]
-            att = ProviderAttempt(
-                engine=prof.engine,
-                output=rejected,
-                cost_usd=0.0,
-                accepted=False,
-                reason="test",
-                provider_id=prof.id,
-                model=prof.model,
-                backend=prof.backend,
-            )
-            return PageDecision(
-                page_num=page_num, final_output=rejected, attempts=[att], accepted=False
+            return routed_decision(
+                page_num, ladder, text="", status=PageStatus.ERROR, accepted=False
             )
 
         with (
@@ -401,7 +244,7 @@ class TestAgenticRotatedNativeTableFirst:
 # GH-902: the upright correction must be applied with the right sign
 # ---------------------------------------------------------------------------
 
-_LABEL_ORDER = [_FORECAST_HEADERS[0]] + [r[0] for r in _FORECAST_ROWS]
+_LABEL_ORDER = [HEADER[0]] + [r[0] for r in ROWS]
 
 
 def _first_column(markdown: str) -> list[str]:
@@ -442,8 +285,8 @@ class TestRotationSign:
     ) -> None:
         upright_pdf = tmp_path / "upright.pdf"
         rotated_pdf = tmp_path / "rotated.pdf"
-        _forecast_pdf(upright_pdf, 0)
-        _forecast_pdf(rotated_pdf, rotation)
+        forecast_pdf(upright_pdf, 0)
+        forecast_pdf(rotated_pdf, rotation)
 
         fixed = _rowized_markdown(rotated_pdf)
         upright = _rowized_markdown(upright_pdf)
@@ -463,8 +306,8 @@ class TestRotationSign:
 
         upright_pdf = tmp_path / "upright.pdf"
         rotated_pdf = tmp_path / "rotated.pdf"
-        _forecast_pdf(upright_pdf, 0)
-        _forecast_pdf(rotated_pdf, rotation)
+        forecast_pdf(upright_pdf, 0)
+        forecast_pdf(rotated_pdf, rotation)
 
         doc = fitz.open(upright_pdf)
         upright_md = "\n\n".join(md for _r, md in rowize_from_words(doc[0]) if md.strip())
@@ -494,8 +337,8 @@ class TestRotationSign:
 
         upright_pdf = tmp_path / "upright.pdf"
         rotated_pdf = tmp_path / "rotated.pdf"
-        _forecast_pdf(upright_pdf, 0)
-        _forecast_pdf(rotated_pdf, rotation)
+        forecast_pdf(upright_pdf, 0)
+        forecast_pdf(rotated_pdf, rotation)
 
         def reading_order(pdf: Path) -> list[str]:
             doc = fitz.open(pdf)
@@ -516,12 +359,12 @@ class TestRotationSign:
         from socr.tables.reconstruct import rowize_from_words
 
         rotated_pdf = tmp_path / "rotated.pdf"
-        _forecast_pdf(rotated_pdf, rotation)
+        forecast_pdf(rotated_pdf, rotation)
         doc = fitz.open(rotated_pdf)
         try:
             page = doc[0]
             regions = rowize_from_words(page)
-            body = {c for row in _FORECAST_ROWS for c in row}
+            body = {c for row in ROWS for c in row}
             cells = [w for w in page.get_text("words") if w[4] in body]
         finally:
             doc.close()
@@ -536,36 +379,22 @@ class TestQuarantineEventSurvivesResume:
     """GH-917: the quarantine record must replay exactly once on resume."""
 
     def _emit_flush_restore(self, tmp_path: Path):
-        from socr.core.document import DocumentHandle
-        from socr.core.state import DocumentState
-
         pdf = tmp_path / "rotated.pdf"
-        _rotated_dense_forecast_pdf(pdf)
+        rotated_forecast_pdf(pdf)
         out_dir = tmp_path / "out"
-        pipeline = UnifiedPipeline(_config())
+        pipeline = UnifiedPipeline(native_first_config())
         state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
         pipeline._phase_analyze(state)
         # Real emit site; run 1 only (a resumed page is dropped from ocr_pages
         # before planning, so nothing re-emits it).
         assert pipeline._plan_native_table_first(state, 1, state.pages[1]) is None
-        assert pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True) is not None
-        resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-        resumed.pages[1] = state.pages[1]
-        restored = PageOutput(
-            page_num=1,
-            text="model table",
-            status=PageStatus.SUCCESS,
-            engine="qwen",
-            audit_passed=True,
-        )
-        pipeline._restore_terminal_page_state(resumed, 1, restored, out_dir)
-        return state, resumed
+        return state, flush_and_restore(pipeline, state, pdf, out_dir)
 
     def test_quarantine_event_replays_exactly_once(self, tmp_path: Path) -> None:
-        kind = "rotated_native_table_quarantined"
+        kind = ROTATED_QUARANTINE_KIND
         state, resumed = self._emit_flush_restore(tmp_path)
         assert [e.kind for e in state.events].count(kind) == 1
         assert [e.kind for e in resumed.events].count(kind) == 1
 
     def test_kind_is_in_the_resume_allowlist(self) -> None:
-        assert "rotated_native_table_quarantined" in UnifiedPipeline.resume_restore_kinds()
+        assert ROTATED_QUARANTINE_KIND in UnifiedPipeline.resume_restore_kinds()
