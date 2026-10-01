@@ -924,22 +924,36 @@ def _data_rows(kinds: list[list[str]], paired: set[int]) -> list[int]:
     # A row carrying a number or two (a panel label with a year range, a "p < 0.05" note)
     # is a candidate but not a data row: its values must reach most numeric columns (a
     # dash or a placeholder in a value cell counts: a row can print one where it has no number).
+    # A table of disjoint panels (each row fills only its own panel's columns) never reaches
+    # more than half of them, so a row also counts when its exact set of number columns is
+    # shared by another candidate row: a repeat is evidence, a one-off label is not
+    # (``_PLACEHOLDER_MIN_ROWS``, GH-932).
+    supports = Counter(
+        frozenset(c for c, k in enumerate(kinds[i]) if k == _NUMBER) for i in candidates
+    )
     return [
         i
         for i in candidates
         if 2 * sum(1 for c in cols if c < len(kinds[i]) and kinds[i][c] in _FILLS_A_VALUE_CELL)
         > len(cols)
+        or supports[frozenset(c for c, k in enumerate(kinds[i]) if k == _NUMBER)]
+        >= _PLACEHOLDER_MIN_ROWS
     ]
 
 
 def _numeric_columns(kinds: list[list[str]], rows: list[int]) -> list[int]:
-    """Columns where MORE THAN HALF of *rows* hold a number."""
+    """Columns where numbers fill MORE THAN HALF of the *rows* that have anything in them
+    (a row with an empty cell there says nothing about the column: a table of disjoint
+    panels, each filling its own columns, would otherwise show every column at exactly
+    half and no column would be numeric). At least ``_PLACEHOLDER_MIN_ROWS`` such rows: one
+    filled cell is not a column."""
     width = max((len(ks) for ks in kinds), default=0)
-    return [
-        c
-        for c in range(width)
-        if 2 * sum(1 for i in rows if c < len(kinds[i]) and kinds[i][c] == _NUMBER) > len(rows)
-    ]
+    cols = []
+    for c in range(width):
+        filled = [kinds[i][c] for i in rows if c < len(kinds[i]) and kinds[i][c] != _EMPTY]
+        if len(filled) >= _PLACEHOLDER_MIN_ROWS and 2 * filled.count(_NUMBER) > len(filled):
+            cols.append(c)
+    return cols
 
 
 def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) -> list[GateFault]:

@@ -173,11 +173,11 @@ class TestMustNotFire:
 
 class TestDerivation:
     def test_numeric_column_needs_more_than_half_the_data_rows(self) -> None:
-        # Column 4 holds a number in `k` of the six data rows; text sits in it below the table.
+        # Column 4 holds a number in `k` of the six data rows and text in the rest; text also sits in it below the table.
         def fired(k: int) -> set[str]:
             rows = [list(r) for r in ROWS]
-            for r in rows[k:]:
-                r[4] = ""
+            for j, r in enumerate(rows[k:]):
+                r[4] = "ab cd"[: 2 + j % 2] + "xyz"[j % 3]  # distinct text: not a placeholder
             words, md = _grid(rows, tail=[["", "", "", "", "see note"]])
             return _fired(words, md)
 
@@ -270,3 +270,50 @@ class TestNumericClassifierIsTheVerifiers:
             assert _fired(words, md) == set()
             words, md = self._dressed(sign, tail=[["a See footnote table 8b.", "", "", "", ""]])
             assert _fired(words, md) == set()
+
+
+class TestDisjointPanels:
+    """GH-932 (Astra, PR #935): value rows that each fill only their own panel's columns
+    (Alpha/Beta in A-B, Gamma/Delta in C-D) leave every column at exactly half of the data
+    rows, so a count over ALL data rows finds no numeric column and the predicate abstains.
+    A column's numbers are counted against the data rows that have a cell there."""
+
+    PANELS = [
+        ["Alpha", "0.11", "0.12", "", ""],
+        ["Beta", "0.21", "0.22", "", ""],
+        ["Gamma", "", "", "0.31", "0.32"],
+        ["Delta", "", "", "0.41", "0.42"],
+    ]
+
+    def _table(self, prefix="", *, tail):
+        words = _words([HEADER] + [list(r) for r in self.PANELS])
+        body = [
+            [c if not (c[:1].isdigit() and prefix) else prefix + c for c in r] for r in self.PANELS
+        ]
+        return words, _md(HEADER, body + [list(t) for t in tail])
+
+    def test_currency_panels_with_a_text_footrow_defer(self) -> None:
+        note = [["", "see note", "", "", ""]]
+        words, clean = self._table("$", tail=[])
+        _, faulty = self._table("$", tail=note)
+        assert _fired(words, clean) == set()
+        assert _fired(words, faulty) == {TNC}
+
+    def test_plain_number_panels_with_a_text_footrow_defer(self) -> None:
+        note = [["", "see note", "", "", ""]]
+        words, clean = self._table(tail=[])
+        _, faulty = self._table(tail=note)
+        assert _fired(words, clean) == set()
+        assert _fired(words, faulty) == {TNC}
+
+    def test_an_empty_column_is_not_numeric(self) -> None:
+        kinds = [["text", "number", "empty"], ["text", "number", "empty"]]
+        assert ship_gate._numeric_columns(kinds, [0, 1]) == [1]
+
+    def test_one_filled_cell_is_not_a_column(self) -> None:
+        kinds = [
+            ["text", "number", "empty"],
+            ["text", "empty", "empty"],
+            ["text", "empty", "empty"],
+        ]
+        assert ship_gate._numeric_columns(kinds, [0, 1, 2]) == []
