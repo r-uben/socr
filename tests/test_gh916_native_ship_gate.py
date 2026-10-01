@@ -944,3 +944,79 @@ class TestSwallowedNotesDoNotStretchTheTable:
         md_rows = [list(r) for r in ROWS]
         md_rows += [["stars noted", "", "10%", "", ""], ["again", "", "5%", "", ""]]
         assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows)) == ()
+
+
+class TestBlockInterior:
+    """Rows between consecutive blocks of one table are inside it, whatever the bound."""
+
+    @staticmethod
+    def _two_blocks(second_dx: float):
+        """Blocks at y=100/110/120 and y=300/310/320, 4 lanes each (second shifted by dx)."""
+
+        def block_words(ys, dx, base, line0):
+            out = []
+            for k, y in enumerate(ys):
+                for ci in range(1, 5):
+                    shift = dx[ci - 1] if isinstance(dx, list) else dx
+                    out.append(
+                        _word(COL_XS[ci] + shift, float(y), f"{base + k}.{ci}5", line0 + k, ci)
+                    )
+            return out
+
+        def block_md(base):
+            rows = [
+                [f"r{base + k}"] + [f"{base + k}.{ci}5" for ci in range(1, 5)] for k in range(3)
+            ]
+            return _md(["Var", "a", "b", "c", "d"], rows)
+
+        words = block_words([100, 110, 120], 0.0, 1, 0) + block_words(
+            [300, 310, 320], second_dx, 7, 10
+        )
+        words += [
+            _word(COL_XS[0], float(y), f"r{base + k}", 50 + k, 0)
+            for base, ys in ((1, [100, 110, 120]), (7, [300, 310, 320]))
+            for k, y in enumerate(ys)
+        ]
+        return words, block_md(1) + "\n\n" + block_md(7)
+
+    def test_a_row_omitted_between_two_blocks_of_one_table_fires_at_any_bound(self) -> None:
+        words, md = self._two_blocks(0.0)
+        # The omitted row: full width, in the same lanes, midway between the blocks.
+        for ci in range(1, 5):
+            words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
+        blocks = ship_gate._output_blocks(md)
+        src = ship_gate._source_rows(words)
+        anchors = ship_gate._Anchors(blocks, src)
+        # 80 and 100 points from the nearest block, outward reach 5 pitches = 50.
+        for bound in (0, ship_gate._PANEL_GAP_ROWS):
+            got = ship_gate.data_row_missing_faults(blocks, anchors, src, bound)
+            assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING, bound
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.DATA_ROW_MISSING
+        }
+
+    def test_without_the_omitted_row_nothing_fires(self) -> None:
+        words, md = self._two_blocks(0.0)
+        assert ship_gate.native_ship_gate(words, md) == ()
+
+    def test_blocks_sharing_only_one_lane_are_not_one_table(self) -> None:
+        # One lane coincides, the other three are shifted: not the same columns.
+        words, md = self._two_blocks([0.0, 60.0, 60.0, 60.0])
+        for ci in range(1, 5):
+            words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
+        blocks = ship_gate._output_blocks(md)
+        src = ship_gate._source_rows(words)
+        anchors = ship_gate._Anchors(blocks, src)
+        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
+
+    def test_two_different_tables_are_not_one_tables_interior(self) -> None:
+        # The second table's columns are 60 points to the right: different lanes.
+        words, md = self._two_blocks(60.0)
+        # Unrelated numeric text between them, lying in the FIRST table's lanes.
+        for ci in range(1, 5):
+            words.append(_word(COL_XS[ci], 200.0, f"4.{ci}9", 99, ci))
+        blocks = ship_gate._output_blocks(md)
+        src = ship_gate._source_rows(words)
+        anchors = ship_gate._Anchors(blocks, src)
+        assert ship_gate.data_row_missing_faults(blocks, anchors, src, 0) == []
+        assert ship_gate.data_row_missing_faults(blocks, anchors, src) == []

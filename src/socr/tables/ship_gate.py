@@ -85,8 +85,10 @@ GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
 #: Largest vertical gap, in row pitches, allowed between the table's edge row and
-#: the next full-width row that extends its span; the WHOLE reach (no floors), so
-#: bound 0 extends nothing. Chosen from what each bound does on the corpus, measured
+#: the next full-width row that extends its span OUTWARD; the whole outward reach (no
+#: floors), so bound 0 means no outward extension. Rows between consecutive blocks of
+#: the same table are covered regardless (see ``table_spans``), so this bound governs
+#: only reach beyond a table's first and last block. Chosen from what each bound does on the corpus, measured
 #: by ``socr-measure-ship-gate-gaps`` (35 rotated + 92 upright native-first SHIP
 #: pages; gaps between consecutive core paired rows: median 1.0, p90 2.0, p95 2.25,
 #: p99 4.83). Row level, against 14 source rows known to be omitted from their grids
@@ -360,11 +362,31 @@ def extended_span(
     return y_lo, y_hi
 
 
+def _same_table_lanes(a: list[float], b: list[float]) -> bool:
+    """Whether two blocks' lane sets are the same table's columns, by lanes alone.
+
+    Every lane of the narrower block lies within the snap radius of a lane of the
+    other, and at least ``_MIN_LANES_PER_ROW`` lanes are shared. Proximity on the
+    page plays no part: stacked tables with different columns are different tables.
+    """
+    small, big = (a, b) if len(a) <= len(b) else (b, a)
+    return len(small) >= _MIN_LANES_PER_ROW and all(_lane_of(x, big) is not None for x in small)
+
+
 def table_spans(blocks, anchors: _Anchors, src_rows, panel_gap_rows=_PANEL_GAP_ROWS):
     """``[(lanes, core, y_lo, y_hi)]`` for each block whose table membership is established.
 
-    ``strong_k`` (the width a row needs to extend the span) is the table's modal
-    DISTINCT-LANE count over its core rows, with the rowizer's own minimum.
+    Two different reaches, kept separate:
+
+    * OUTWARD, beyond a table's first and last block: governed by ``panel_gap_rows``
+      (``extended_span``). Bound 0 means no outward extension.
+    * BETWEEN consecutive blocks of the SAME table (lane sets consistent, see
+      ``_same_table_lanes``): the interior is inside the table by construction and is
+      always covered, whatever the bound. A row omitted from the gap between two blocks
+      has the table on both sides.
+
+    ``strong_k`` (the width a row needs to extend the span outward) is the table's
+    modal DISTINCT-LANE count over its core rows, with the rowizer's own minimum.
     """
     spans = []
     for found in anchors.per_block:
@@ -379,8 +401,16 @@ def table_spans(blocks, anchors: _Anchors, src_rows, panel_gap_rows=_PANEL_GAP_R
         modal = Counter(lane_count(y) for y in core).most_common(1)[0][0]
         strong_k = max(modal, _MIN_LANES_PER_ROW)
         y_lo, y_hi = extended_span(core, lanes, src_rows, strong_k, panel_gap_rows)
-        spans.append((lanes, core, y_lo, y_hi))
-    return spans
+        spans.append([lanes, core, y_lo, y_hi])
+    order = sorted(range(len(spans)), key=lambda i: min(spans[i][1]))
+    for pos, i in enumerate(order):
+        for j in order[pos + 1 :]:
+            if _same_table_lanes(spans[i][0], spans[j][0]):
+                # consecutive blocks of one table: cover everything between their cores
+                spans[i][3] = max(spans[i][3], min(spans[j][1]))
+                spans[j][2] = min(spans[j][2], max(spans[i][1]))
+                break
+    return [tuple(sp) for sp in spans]
 
 
 def data_row_missing_faults(
@@ -405,6 +435,7 @@ def data_row_missing_faults(
         for idx, _y in found:
             pool.subtract(_normalize_numeric_token(t) for t in _row_tokens(block[idx]))
     anchor_ys = {y for found in anchors.per_block for _i, y in found}
+    seen: set[int] = set()  # a row in two blocks' spans is judged once
     for lanes, _core, y_lo, y_hi in table_spans(blocks, anchors, src_rows, panel_gap_rows):
 
         def lane_hits(y: int, lanes=lanes) -> list:
@@ -414,12 +445,13 @@ def data_row_missing_faults(
             return len({_lane_of(w[0], lanes) for w in lane_hits(y)})
 
         for y, ws in sorted(src_rows.items()):
-            if y in anchor_ys or not (y_lo <= y <= y_hi):
+            if y in anchor_ys or y in seen or not (y_lo <= y <= y_hi):
                 continue
             in_lane = lane_hits(y)
             k = lane_count(y)
             if k < 2:
                 continue
+            seen.add(y)
             need = Counter(_normalize_numeric_token(w[4]) for w in in_lane)
             if all(pool[t] >= n for t, n in need.items()):
                 pool.subtract(need)

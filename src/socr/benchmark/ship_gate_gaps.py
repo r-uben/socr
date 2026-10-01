@@ -183,7 +183,9 @@ def report(gaps, covered, fired, order, bounds, known) -> dict:
     # (c) every row covered at a bound but not at the no-extension baseline, on ANY
     # page (including pages that already fire at the baseline), and the increment
     # over the previous bound. A row is "known" only if listed in --known.
-    base = bounds[0]
+    base = "0"
+    if base != bounds[0]:
+        raise ValueError("the first bound must be the zero baseline")
     newly: dict[str, dict] = {}
     previous = covered[base]
     for b in bounds[1:]:
@@ -243,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     bounds = args.bounds.split(",")
+    # The zero baseline is always computed, first, whatever the caller asked for.
+    bounds = ["0"] + [b for b in bounds if b != "0"]
     gaps, covered, fired, order = measure(_page_inputs(args), bounds)
     result = report(gaps, covered, fired, order, bounds, args.known)
     text = json.dumps(result, indent=1)

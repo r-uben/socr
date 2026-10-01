@@ -557,3 +557,86 @@ bridges the scan (1), core needs 2 lanes and 2 numerics (1), width counted in nu
 ### Results
 
 Full suite: 5972 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 1310 s). `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 6 (Astra: removing the peer-block gap floor shrank production coverage)
+
+### Regression and fix
+
+Round 5 dropped the peer-block gap floor so bound 0 would be a true baseline. That also stopped covering a
+row omitted from the gap BETWEEN two blocks of one table. Astra's counterexample: two output blocks sharing
+four lanes, paired rows at y=100/110/120 and y=300/310/320, an omitted full-width row at y=200; pitch 10,
+reach 50, so the row was outside both spans and the gate shipped it.
+
+`table_spans` now keeps two reaches apart:
+- OUTWARD, beyond a table's first and last block: governed by `_PANEL_GAP_ROWS` (`extended_span`). Bound 0 means
+  no outward extension.
+- BETWEEN consecutive blocks of the SAME table: always covered, whatever the bound. The interior has the table
+  on both sides. "Same table" is decided from lanes alone (`_same_table_lanes`: every lane of the narrower
+  block lies within the snap radius of a lane of the other, and at least `_MIN_LANES_PER_ROW` lanes), never from
+  proximity. A row that lies in two blocks' spans is judged once.
+
+Tests: the counterexample must fire `data_row_missing` at bound 0 and at the default bound (and the same page
+without the omitted row is clean); the control, a second table whose columns are shifted so its lanes do not
+match, with unrelated numeric text between the two tables in the first table's lanes, must not fire.
+Mutants: interior coverage removed fails the counterexample; interior applied across non-matching tables fails
+the control; lane consistency weakened to one shared lane fails; a row judged twice fails the counterexample.
+
+### Benchmark
+
+`ship_gate_gaps.py` always computes the zero baseline first (the bound list is normalised to start with `0`, and
+the comparison refuses to run otherwise), instead of assuming the first custom bound is 0.
+
+### Sweep re-run
+
+Row-level reach of the 14 known omitted rows is unchanged: 0 at bounds 0 and 1, 4 at 2, 10 at 3, 12 at 4,
+14 at 5 and above. None of the known rows lies between two blocks, so interior coverage does not reach any at
+bound 0. Newly firing rows beyond baseline at 5 fall from 26 to 24 (consistent with two rows now firing at
+the bound-0 baseline through interior coverage; I did not identify them), the rest as in round 5: woodford
+index rows, ramey p104 rows, three more bugel rows, and the first false extension (ljungvist p7) at 8.
+`_PANEL_GAP_ROWS` stays 5, now documented as governing the outward reach only.
+
+### Re-measurement (round 5 to round 6)
+
+| set | measure | round 5 | round 6 |
+|---|---|---|---|
+| upright SHIP (92) | pages firing | 25 | 25 |
+| | data_row_missing / label_row_missing | 6 / 20 | 6 / 20 |
+| rotated (35) | wrong / other pages stopped | 12 of 14 / 6 of 21 | 12 of 14 / 6 of 21 |
+| | label wrong / other, data wrong, sign wrong | 9 / 6, 2, 2 | 9 / 6, 2, 2 |
+
+No verdict flips on any page set. new7 and new8: unchanged (gomez-cram p10 fires, piller p33 quiet, the four true
+new7 pages and all 8 new8 pages fire).
+
+### Pages that fire (upright SHIP, round 6): basename, page, predicates
+
+| basename | page | predicates |
+|---|---|---|
+| 2003__woodford.pdf | 787 | data_row_missing |
+| 2003__woodford.pdf | 791 | label_row_missing |
+| 2003__woodford.pdf | 802 | data_row_missing |
+| 2006__boukus_rosenber__information_content_fomc_minutes__WP.pdf | 46 | label_row_missing |
+| 2008__faust_wright__efficient_prediction_of_excess_returns.pdf | 44 | label_row_missing |
+| 2016__ramey__shocks.pdf | 104 | data_row_missing, label_row_missing |
+| 2018__brochet_kolev_lerman__information_transfer_conference_calls__RAS.pdf | 21 | data_row_missing |
+| 2020__cieslak_vissing-jorgensen__the_economics_of_fed_put__WP.pdf | 63 | label_row_missing |
+| 2021__gow_larcker_zakolyukina__non_answers_during_conference_calls__JAR.pdf | 48 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 10 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 67 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 78 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 83 | label_row_missing |
+| 2023__cook_kazinnik_hansen_mcadam__local_language_models_financial_earnings_calls.pdf | 21 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 29 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 30 | label_row_missing |
+| 2023__segal.pdf | 66 | data_row_missing |
+| 2025__barry_bruns_kandemir_klose_smirnov_tillmann__emotions_monetary_policy__WP.pdf | 19 | label_row_missing |
+| 2025__fernandez-fuertes__monetary_policy_shocks_a_new_hope.pdf | 73 | label_row_missing |
+| 2025__gomez-cram_jensen_kung__financial_prediction_markets_a_new_measure_of_earnings_expectations.pdf | 10 | label_row_missing |
+| 2025__hack_istrefi_meier__systematic_origins_of_monetary_policy_shocks__WP.pdf | 38 | label_row_missing |
+| 2025__wang_liu_chen__current_stance_vs_future_guidance_llm_evidence_on_how_pbc_communication_shapes_the_yield_curve__EL.pdf | 11 | label_row_missing |
+| 2026__bugel_hidalgo_luetticke__unconventional_unified_narrative_mp_shocks__WP.pdf | 11 | data_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 44 | label_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 50 | label_row_missing |
+
+### Results
+
+All mutants killed (the 25 of round 5 plus 4 new; the one-shared-lane mutant survived the first run and now dies after adding the one-shared-lane control). Full suite: 5976 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 2007 s). `uvx ruff@0.16.0 format --check .` clean.
