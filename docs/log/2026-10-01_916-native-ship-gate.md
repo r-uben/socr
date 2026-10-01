@@ -710,3 +710,11 @@ fixes change a verdict; they close synthetic shapes only.
 ### Results
 
 Full suite: 5979 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 595 s); all 30 mutants killed. `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 7 review outcome: accepted false DEFER (2026-10-01)
+
+Astra flagged an over-merge in 0e52ddd: two unrelated tables whose numeric columns share x positions are linked as one table, so numbers in prose between them read as an omitted interior row and the page DEFERs.
+
+On follow-up, Astra confirmed **NO-FN**: linking only widens spans; pairing, lanes, core rows and outward reach are computed per block before linking; and union-of-lanes can only add requirements. So the over-merge can add false DEFERs but never cause a wrong SHIP.
+
+Under the round-5 policy (a false DEFER costs one model call; a false negative can ship a wrong number) this is accepted. It is pinned as `test_identical_column_separate_tables_are_an_accepted_false_defer`, so any change to it is deliberate.

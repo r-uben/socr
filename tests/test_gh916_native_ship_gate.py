@@ -1072,6 +1072,19 @@ class TestBlockInteriorColumnCounts:
         assert self._faults(words, md, 0) == []
         assert self._faults(words, md) == []
 
+    def test_identical_column_separate_tables_are_an_accepted_false_defer(self) -> None:
+        # Astra on round 7 (0e52ddd): two UNRELATED tables whose numeric columns sit at the
+        # same x positions, with prose carrying numbers at those positions between them,
+        # are linked as one table, so the prose reads as an omitted interior row and the
+        # page DEFERs. This is a KNOWN FALSE DEFER, accepted under the round-5 policy (a false
+        # fire costs one model call; a false negative can ship a wrong number). Astra
+        # confirmed linking can only widen coverage, never cause a missed fault (NO-FN).
+        # Pinned so that a future change to this behaviour is a deliberate one.
+        words, md = self._stack([1, 2], [1, 2])
+        self._omitted(words, [1, 2])
+        got = self._faults(words, md, 0)
+        assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING
+
     def test_a_row_is_judged_against_the_union_of_covering_lanes(self) -> None:
         # Three-lane block above, four-lane block below. The interior row prints four
         # values; the grid keeps its first three (as an extra row of the first block)
