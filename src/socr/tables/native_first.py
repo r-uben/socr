@@ -35,6 +35,9 @@ CELLS = "cells"
 REFUSE = "refuse"
 DEFER = "defer"
 
+# GH-917 / GH-916: reason on the DEFER that replaces a rotated exact-pass SHIP.
+ROTATED_SHIP_QUARANTINED = "rotated_ship_quarantined"
+
 
 @dataclass(frozen=True)
 class FailingCell:
@@ -150,6 +153,16 @@ def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
         header_unattributed=header_unattributed,
         orphan_words=list(orphan_words),
     )
+    if plan.action == SHIP:
+        # GH-917 / GH-916 containment: a rotated SHIP is not trustworthy yet.
+        # ``plan_native_table`` pairs rows by numeric multiset and excludes
+        # standalone signs, so it cannot see a detached minus with the row
+        # shifted one column, dropped rows/panels, or text in numeric columns.
+        # A vision audit of the 35 rotated pages that exact-passed in the
+        # 400-PDF library found 14/35 wrong (mechanically confirmed). Keep the
+        # page on route_page + judges + table ladder until the verifier is
+        # order-aware. The grid is still returned for the grid-order tests.
+        plan = NativeTablePlan(DEFER, reason=ROTATED_SHIP_QUARANTINED)
     return RotatedNativeTableAttempt(
         plan=plan,
         markdown=markdown,

@@ -2786,6 +2786,14 @@ class UnifiedPipeline:
                 "native_unrecovered_symbol_glyphs",
                 "possible_table_structure_not_reconstructed",
             }
+            # GH-917: emitted by ``_plan_native_table_first``, which runs only
+            # over ``ocr_pages`` AFTER resumed pages are removed from it (see
+            # ``ocr_pages = [p for p in ocr_pages if p not in resumed_pages]``),
+            # so nothing re-emits it for a page skipped as terminal. The
+            # quarantine is a standing property of the page's source grid, not
+            # of the run that noticed it; without this the sidecar keeps the
+            # record and a resumed run's ``audit_log.json`` / CLI line lose it.
+            | {"rotated_native_table_quarantined"}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -10087,6 +10095,7 @@ class UnifiedPipeline:
         from socr.tables.native_first import (
             DEFER,
             REFUSE,
+            ROTATED_SHIP_QUARANTINED,
             NativeTableFirstWork,
             NativeTablePlan,
             attempt_rotated_native_table,
@@ -10119,6 +10128,29 @@ class UnifiedPipeline:
                     exc,
                 )
                 return None
+            if (
+                attempt is not None
+                and attempt.plan.action == DEFER
+                and attempt.plan.reason == ROTATED_SHIP_QUARANTINED
+            ):
+                from socr.core.audit_log import AuditEvent
+
+                logger.warning(
+                    "rotated native grid exact-passed but was quarantined (GH-917) on p%d; "
+                    "page stays on route_page",
+                    page_num,
+                )
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="rotated_native_table_quarantined",
+                        engine="native",
+                        detail=(
+                            "rotated native grid exact-passed but was quarantined "
+                            "(GH-917, GH-916); deferred to normal routing"
+                        ),
+                    )
+                )
             if attempt is None or attempt.plan.action != SHIP:
                 # REFUSE, DEFER, CELLS, or no grid: keep the page on
                 # ``route_page``. CELLS is excluded until crops and the
