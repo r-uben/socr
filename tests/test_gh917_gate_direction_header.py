@@ -20,6 +20,18 @@ from unittest.mock import patch
 
 import fitz
 import pytest
+from native_table_fixtures import (
+    CHAR_W,
+    COL_XS,
+    PITCH,
+    ROWS,
+    Y0,
+    dense_pdf,
+    forecast_pdf,
+    native_first_config,
+    place,
+)
+from test_gh916_native_ship_gate import _base, _md, _predicates, _word, _words
 
 from socr.core.config import PipelineConfig  # noqa: F401  (kept for parity with the gh916 file)
 from socr.core.document import DocumentHandle
@@ -30,22 +42,6 @@ from socr.tables import native_first as nf
 from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, SHIP, plan_native_table
 from socr.tables.ship_gate import LineDirections, line_directions_for_page
-from test_gh916_native_ship_gate import (
-    CHAR_W,
-    COL_XS,
-    HEADER,
-    PITCH,
-    ROWS,
-    Y0,
-    _base,
-    _config,
-    _dense_pdf,
-    _md,
-    _plan,
-    _predicates,
-    _word,
-    _words,
-)
 
 HORIZONTAL = (1.0, 0.0)
 UP = (0.0, -1.0)
@@ -143,7 +139,7 @@ class TestForeignDirection:
         ]
         # narrow enough that snap/extent tolerance would exceed 10 degrees
         extent = max(w[2] for w in words) - min(w[0] for w in words)
-        assert extent < ship_gate._snap() / math.tan(math.radians(10.0))
+        assert extent < ship_gate._SNAP_PT / math.tan(math.radians(10.0))
 
         def run(angle_deg: float | None):
             over = {}
@@ -361,9 +357,9 @@ class TestDirectionKeysAlignWithWords:
 # -------------------------------------------------------------------- PDF-level wiring
 
 
-def _stamped_dense_pdf(path: Path, *, stamp: bool, rotate: int = 90) -> None:
+def _stampeddense_pdf(path: Path, *, stamp: bool, rotate: int = 90) -> None:
     """``_dense_pdf`` plus a "GDP" margin stamp drawn at *rotate* (a grid label, so carried)."""
-    _dense_pdf(path)
+    dense_pdf(path)
     if stamp:
         doc = fitz.open(path)
         doc[0].insert_text((580, 400), "GDP", fontsize=9, fontname="helv", rotate=rotate)
@@ -376,8 +372,8 @@ def _upright_plan(tmp_path: Path, name: str, *, stamp: bool, rotate: int = 90, p
     import contextlib
 
     pdf = tmp_path / f"{name}.pdf"
-    _stamped_dense_pdf(pdf, stamp=stamp, rotate=rotate)
-    pipeline = UnifiedPipeline(_config())
+    _stampeddense_pdf(pdf, stamp=stamp, rotate=rotate)
+    pipeline = UnifiedPipeline(native_first_config())
     state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
     pipeline._phase_analyze(state)
     with patch.object(pipeline, "_available_engines_for_agentic", return_value=[]):
@@ -430,15 +426,13 @@ class TestUprightEmitSite:
 class TestRotatedEmitSite:
     @staticmethod
     def _attempt(tmp_path: Path, name: str, *, stamp_rotate: int | None):
-        from test_rotated_native_table_first import _place, _forecast_pdf
-
         pdf = tmp_path / f"{name}.pdf"
-        _forecast_pdf(pdf, 90)
+        forecast_pdf(pdf, 90)
         if stamp_rotate is not None:
             doc = fitz.open(pdf)
             page = doc[0]
             page.insert_text(
-                _place(500, 380, 90, 612, 792),
+                place(500, 380, 90, 612, 792),
                 "GDP",
                 fontsize=9,
                 fontname="helv",
@@ -567,12 +561,12 @@ def _repair_run(
     plan never reaches the gate). ``corrupt=False`` is an ordinary EXACT_PASS page.
     """
     from socr.core.born_digital import BornDigitalDetector
-    from socr.pipeline.agentic import PageDecision, ProviderAttempt
     from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt
 
     pdf = tmp_path / f"{tag}.pdf"
-    _stamped_dense_pdf(pdf, stamp=stamp, rotate=90)
-    pipeline = UnifiedPipeline(_config())
+    _stampeddense_pdf(pdf, stamp=stamp, rotate=90)
+    pipeline = UnifiedPipeline(native_first_config())
     if corrupt:
         real_detector = BornDigitalDetector()
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from socr.tables.native_verifier import (
     _MD_SEP_RE,
@@ -31,6 +32,7 @@ from socr.tables.native_verifier import (
 )
 from socr.tables.ship_gate import (
     SHIP_GATE_REASON_PREFIX,
+    GateFault,
     line_directions_for_page,
     native_ship_gate,
 )
@@ -40,8 +42,13 @@ CELLS = "cells"
 REFUSE = "refuse"
 DEFER = "defer"
 
+PlanAction = Literal["ship", "cells", "refuse", "defer"]
+
 # GH-917 / GH-916: reason on the DEFER that replaces a rotated exact-pass SHIP.
 ROTATED_SHIP_QUARANTINED = "rotated_ship_quarantined"
+#: Audit-event kind recorded when a rotated exact-pass SHIP is quarantined. Both the
+#: emitter and the resume replay (``resume_restore_kinds``) import this one name.
+ROTATED_QUARANTINE_KIND = "rotated_native_table_quarantined"
 
 
 @dataclass(frozen=True)
@@ -57,13 +64,13 @@ class FailingCell:
 
 @dataclass(frozen=True)
 class NativeTablePlan:
-    action: str
+    action: PlanAction
     cells: tuple[FailingCell, ...] = ()
     reason: str = ""
     #: GH-916: faults the ship gate found on a grid that exact-passed (empty
     #: unless ``reason`` starts with ``ship_gate``). Carried to the caller so it
     #: can record why the native grid was rejected.
-    faults: tuple[dict, ...] = ()
+    faults: tuple[GateFault, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,7 +107,7 @@ def upright_words_for_page(page) -> tuple[list, int]:
     Returns ``([], 0)`` when the page has no rotation or no words.
     """
     from socr.core.born_digital import upright_rotation_for
-    from socr.tables.reconstruct import _rotate_word_bbox
+    from socr.tables.reconstruct import _rotate_word_bbox, _words_center
 
     try:
         words = list(page.get_text("words"))
@@ -111,10 +118,7 @@ def upright_words_for_page(page) -> tuple[list, int]:
     rotation = upright_rotation_for(page)
     if rotation == 0:
         return words, 0
-    xs = [w[0] for w in words]
-    ys = [w[1] for w in words]
-    cx = (min(xs) + max(xs)) / 2
-    cy = (min(ys) + max(ys)) / 2
+    cx, cy = _words_center(words)
     return [_rotate_word_bbox(w, cx, cy, rotation) for w in words], rotation
 
 
@@ -169,9 +173,10 @@ def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
         # standalone signs, so it cannot see a detached minus with the row
         # shifted one column, dropped rows/panels, or text in numeric columns.
         # A vision audit of the 35 rotated pages that exact-passed in the
-        # 400-PDF library found 14/35 wrong (mechanically confirmed). Keep the
-        # page on route_page + judges + table ladder until the verifier is
-        # order-aware. The grid is still returned for the grid-order tests.
+        # 400-PDF library found 14/35 wrong (mechanically confirmed). The
+        # GH-916/GH-917 gate now runs inside ``plan_native_table``, but the
+        # quarantine stays: the page remains on route_page + judges + table
+        # ladder until the full re-audit (#917) shows no wrong grid ships.
         plan = NativeTablePlan(DEFER, reason=ROTATED_SHIP_QUARANTINED)
     return RotatedNativeTableAttempt(
         plan=plan,
@@ -277,6 +282,8 @@ def plan_native_table(
     Blocking flags are the detector's existing structure verdicts, passed in
     so this function does not re-derive them.
     """
+    words = words or []
+    markdown = markdown or ""
     if structure_defective:
         return NativeTablePlan(REFUSE, reason="structure_defective")
     if header_unattributed:
@@ -286,15 +293,15 @@ def plan_native_table(
         # Shipping the grid would drop it. The non-numeric orphan (a dagger,
         # ``n.a.``) stays an audit event, which is the GH-418 ruling.
         return NativeTablePlan(REFUSE, reason="numeric_orphan")
-    if not any(_MD_SEP_RE.match(line) for line in (markdown or "").splitlines()):
+    if not any(_MD_SEP_RE.match(line) for line in markdown.splitlines()):
         return NativeTablePlan(DEFER, reason="no_markdown_table")
 
-    verdict = _verify_from_words(words or [], markdown or "", scope_label="native-first")
+    verdict = _verify_from_words(words, markdown, scope_label="native-first")
     if verdict.state == VerifierState.EXACT_PASS and not unverifiable:
         # GH-916: EXACT_PASS pairs rows by numeric multiset and ignores sign
         # glyphs, so it cannot see a detached sign, a dropped row, or reversed
         # order. Defer (never refuse): a refuse would skip the model attempt.
-        faults = native_ship_gate(words or [], markdown or "", line_dirs=line_dirs)
+        faults = native_ship_gate(words, markdown, line_dirs=line_dirs)
         if faults:
             names = ",".join(sorted({f["predicate"] for f in faults}))
             return NativeTablePlan(
@@ -308,7 +315,7 @@ def plan_native_table(
     if verdict.hard_fail:
         if any(row.get("predicate") != "multiset_mismatch" for row in verdict.drifted_rows):
             return NativeTablePlan(REFUSE, reason="label_binding")
-        cells = locate_mismatched_cells(words or [], markdown or "")
+        cells = locate_mismatched_cells(words, markdown)
         if not cells:
             return NativeTablePlan(REFUSE, reason="unlocalizable_cells")
         return NativeTablePlan(CELLS, cells=tuple(cells), reason="cell_mismatch")
