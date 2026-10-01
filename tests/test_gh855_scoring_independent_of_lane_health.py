@@ -34,6 +34,10 @@ Two independent assertions, deliberately not one comparison carrying both:
    Selected text, per-page ``audit_passed`` and per-page status must be
    identical between the two runs.
 
+GH-851 replaced the document-scoped latch: ``_escalation_degraded`` is gone, and a page is
+withheld only while an earlier page's abandoned escalation call is still outstanding. "Latched"
+below now means that per-page withholding; the scoring separation this file pins is unchanged.
+
 CI has no ollama and no provider (see CLAUDE.md): ``_available_engines_for_agentic``
 is patched in every run, and ``_escalate_table_page`` is replaced with a
 deterministic double -- GH-96's own real timeout/networking behaviour is
@@ -142,16 +146,17 @@ def _run(tmp_path: Path, *, page_one_degrades: bool) -> tuple[Path, list[int]]:
 
     Returns ``(output_dir, escalated_pages)``, the second being the page
     numbers ``_escalate_table_page`` was actually called for, in order. The
-    call record is what lets a test tell "escalation was skipped because the
-    lane is latched" from "escalation ran and declined" -- the two are
+    call record is what lets a test tell "escalation was withheld (GH-851)"
+    from "escalation ran and declined" -- the two are
     indistinguishable from the sidecar, because this double always returns
     the incumbent unchanged (GH-861).
 
     `_page_has_tables` is forced False so every page is in the AFFECTED
     population this ticket's expression change covers -- isolated from the
     (unaffected) detector-flagged first arm. Escalation is a deterministic
-    double that ALWAYS rejects (returns the incumbent `bo` unchanged): page 1
-    latches the lane iff this run is the "degraded" one; real GH-96
+    double that ALWAYS rejects (returns the incumbent `bo` unchanged): page 2
+    is withheld (GH-851: an outstanding call from page 1) iff this run is the
+    "degraded" one; real GH-96
     timeout/networking behaviour is test_gh96_escalation_lane.py's concern.
     """
     pdf = _grid_pdf(tmp_path / "doc.pdf", pages=2)
