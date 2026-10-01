@@ -19,6 +19,9 @@ nothing here lifts it. The rowizer is untouched.
      the angle at which a line drifts by one lane snap (`_LANE_X_TOL_PT * _LANE_SNAP_MULT` = 18 pt) across the
      block's x-extent. About 2.7 degrees on a 385 pt table. Float jitter is orders of magnitude below it,
      a stamp or rotated head far above, and it is not a bucket (pairwise, no merging).
+     **SUPERSEDED in round 2** (Astra: width-derived, reaching 45° on narrow tables; cubic P3: the extent is
+     the carried words' spread, not the grid width). The tolerance is now the measured constant
+     `_SAME_TEXT_DIRECTION_TOL_RAD = 1e-5` rad. See the Round 2 section.
    - **`_CellText.has_word` is substring presence, not occurrence attribution.** A foreign `0.2` anywhere on
      the page is "carried" because `0.253` contains it, and a one-letter word is carried by nearly any cell.
      Conservative over-DEFER by design; pinned by `test_membership_is_substring_presence_a_documented_over_defer`.

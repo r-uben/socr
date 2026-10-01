@@ -686,17 +686,22 @@ class TestCellRepairKeepsTheGateDeferOnly:
         assert kinds.count(ship_gate.SHIP_GATE_KIND) == 1
         event = next(e for e in side["audit_events"] if e["kind"] == ship_gate.SHIP_GATE_KIND)
         assert event["data"]["predicates"] == [predicate]
-        # DEFER, not REFUSE: no unresolved-cell event, no refuse state, no failure marker
+        # DEFER, not REFUSE: no unresolved-cell event and no repaired grid shipped.
         assert "native_table_cell_unresolved" not in kinds
         assert "native_table_cell_repaired" not in kinds
-        assert side.get("native_table_unverifiable") in (None, False) or not providers
         assert "9.999" not in (side.get("markdown") or "")
         if providers:
+            # Routed to the model: no refuse state and no failure marker.
             assert routes == [1], "the page is routed to the model"
             assert side.get("native_table_structure_failed") in (None, False)
             assert side.get("native_table_unverifiable") in (None, False)
             assert side["status"] != "error"
         else:
+            # No provider: the page takes the SAME native-text fallback any plan-time
+            # DEFER takes with no provider (WARNING / MODEL_UNAVAILABLE). That fallback
+            # sets native_table_structure_failed on table pages, so it is not asserted
+            # absent here; test_a_repair_time_deferral_matches_a_plan_time_deferral
+            # pins that the two paths agree (cubic P3 on 1205d2b).
             assert routes == []
 
     @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
