@@ -483,7 +483,8 @@ def _reconstruct_table_regions_for_words(
             # returns above without ever computing `destroyed` — so the former
             # "broaden to the full page word list" branch is gone rather than left
             # as unreachable code behind a warning that can never fire.
-            tight = _extend_scope_for_header(numeric_scope, words)
+            word_sizes = _word_size_map(page)
+            tight = _extend_scope_for_header(numeric_scope, words, word_sizes)
             scoped_words = [w for w in words if tight.contains(fitz.Point(w[0], w[1]))]
             from socr.core.born_digital import upright_rotation_for
 
@@ -493,6 +494,7 @@ def _reconstruct_table_regions_for_words(
                 rotation=rotation,
                 page_rect=page.rect,
                 orphan_drops=orphan_drops,
+                word_sizes=word_sizes,
             )
             if rowized:
                 out.extend(rowized)
@@ -1882,7 +1884,11 @@ def rowize_from_words(page, *, orphan_drops: list[dict] | None = None) -> list[t
 
     rotation = upright_rotation_for(page)
     return rowize_from_word_list(
-        words, rotation=rotation, page_rect=page.rect, orphan_drops=orphan_drops
+        words,
+        rotation=rotation,
+        page_rect=page.rect,
+        orphan_drops=orphan_drops,
+        word_sizes=_word_size_map(page),
     )
 
 
@@ -1947,7 +1953,11 @@ def rowize_from_words_chart_aware(
 
     rotation = upright_rotation_for(page)
     table_regions = rowize_from_word_list(
-        non_chart_words, rotation=rotation, page_rect=page.rect, orphan_drops=orphan_drops
+        non_chart_words,
+        rotation=rotation,
+        page_rect=page.rect,
+        orphan_drops=orphan_drops,
+        word_sizes=_word_size_map(page),
     )
 
     # Build placeholder entries for each chart cluster.
@@ -2176,7 +2186,7 @@ def _has_row_labels(words: list) -> bool:
 
 
 def _rowize_word_group(
-    words: list, *, orphan_drops: list[dict] | None = None
+    words: list, *, orphan_drops: list[dict] | None = None, word_sizes: dict | None = None
 ) -> list[tuple[object, str]]:
     """Rowize one x-band's worth of words into ``(rect, markdown)`` regions.
 
@@ -2257,7 +2267,7 @@ def _rowize_word_group(
         # its own table (see `consumed` above).
         if i > 0 and (i - 1) not in consumed:
             grid, x0, y0, x1, y1 = _prepend_header_band(
-                grid, x0, y0, x1, y1, seg_words, segments[i - 1], rows_by_y
+                grid, x0, y0, x1, y1, seg_words, segments[i - 1], rows_by_y, word_sizes
             )
 
         cleaned = _clean_grid(grid)
@@ -2298,6 +2308,7 @@ def rowize_from_word_list(
     page_rect: object | None = None,
     *,
     orphan_drops: list[dict] | None = None,
+    word_sizes: dict | None = None,
 ) -> list[tuple[object, str]]:
     """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
 
@@ -2375,15 +2386,19 @@ def rowize_from_word_list(
             and _has_row_labels(left_words)
             and _has_row_labels(right_words)
         ):
-            left_regions = _rowize_word_group(left_words, orphan_drops=_split_drops)
-            right_regions = _rowize_word_group(right_words, orphan_drops=_split_drops)
+            left_regions = _rowize_word_group(
+                left_words, orphan_drops=_split_drops, word_sizes=word_sizes
+            )
+            right_regions = _rowize_word_group(
+                right_words, orphan_drops=_split_drops, word_sizes=word_sizes
+            )
             if left_regions and right_regions:
                 out = left_regions + right_regions
                 out.sort(key=lambda r: (r[0].y0, r[0].x0))
 
     if not out:
         _split_drops = []
-        out = _rowize_word_group(words, orphan_drops=_split_drops)
+        out = _rowize_word_group(words, orphan_drops=_split_drops, word_sizes=word_sizes)
 
     if orphan_drops is not None:
         orphan_drops.extend(_split_drops)
@@ -2495,7 +2510,161 @@ def _is_numeric_word(word: tuple) -> bool:
     return bool(_NUM_TOKEN_RE.match(word[4]) and _NUMERIC_RE.search(word[4]))
 
 
-def _extend_scope_for_header(tight, words: list):
+def _is_label_region_word(word: tuple, lane_centers: list[float]) -> bool:
+    """True when ``word`` sits left of the first numeric lane (the stub/label region).
+
+    ``lane_centers[0] - snap radius`` is the label boundary ``_rowize_segment``
+    already uses to build a data row's label cell; a folded margin note is never
+    label text. Shared so the header band and the data rows agree on it (GH-934).
+    """
+    return word[0] < lane_centers[0] - _LANE_X_TOL_PT * _LANE_SNAP_MULT and not _is_folded_marginal(
+        word
+    )
+
+
+def _word_size_map(page) -> dict[tuple, float]:
+    """``(block_no, line_no, word_no) -> font size`` for the words of ``page``.
+
+    The size is that of the span carrying the most overlap with the word (2 dp).
+    The key survives ``_rotate_word_bbox``, so the map is valid in the upright
+    frame too. Never raises: a page whose spans cannot be read yields ``{}``,
+    which leaves the size clause of ``_is_prose_like_row`` inert (never
+    rejecting a row), i.e. the pre-GH-934 behaviour.
+    """
+    try:
+        import fitz
+
+        flags = fitz.TEXTFLAGS_WORDS
+        blocks = page.get_text("dict", flags=flags)["blocks"]
+        words = page.get_text("words", flags=flags)
+    except Exception:
+        return {}
+    sizes: dict[tuple, float] = {}
+    for w in words:
+        try:
+            spans = blocks[w[5]]["lines"][w[6]]["spans"]
+        except (IndexError, KeyError):
+            continue
+        best, overlap = None, 0.0
+        for sp in spans:
+            o = min(w[2], sp["bbox"][2]) - max(w[0], sp["bbox"][0])
+            if o > overlap and sp["text"].strip():
+                best, overlap = sp, o
+        if best is not None:
+            sizes[(w[5], w[6], w[7])] = round(best["size"], 2)
+    return sizes
+
+
+def _median_word_size(words: list, word_sizes: dict | None) -> float | None:
+    vals = [word_sizes[tuple(w[5:8])] for w in words if word_sizes and tuple(w[5:8]) in word_sizes]
+    return statistics.median(vals) if vals else None
+
+
+def _data_row_size(rows: list[list], lane_centers: list[float], word_sizes: dict | None):
+    """Median font size over the words of the segment's DATA rows.
+
+    A data row is a row whose numeric words land in at least two distinct lanes
+    (the same notion of data row the GH-934 fixture was measured with).
+    """
+    snap = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+    data_words: list = []
+    for row in rows:
+        hit = {
+            min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
+            for w in row
+            if _is_numeric_word(w)
+            and not _is_label_region_word(w, lane_centers)
+            and min(abs(c - w[0]) for c in lane_centers) <= snap
+        }
+        if len(hit) >= 2:
+            data_words.extend(row)
+    return _median_word_size(data_words, word_sizes)
+
+
+def _is_prose_like_row(
+    row_ws: list, *, word_space: float | None, word_sizes: dict | None, data_size: float | None
+) -> bool:
+    """GH-934: is this candidate header row a caption / prose line, not a header?
+
+    Two independent clauses (either rejects):
+
+    * single run: two or more words and NO gap between adjacent words wider than
+      ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word spaces. A caption, title or
+      footnote is set with ordinary word spacing; a column header row has at
+      least one column-sized gap. Reuses the existing gutter yardstick, so no
+      new constant.
+    * size: the row's median font size differs from the data rows' (exact
+      equality, no tolerance). Every measured band header shares the data font
+      size; this clause exists for footnote lines whose sentence space exceeds
+      the run threshold.
+
+    Known exposure (pinned by a test): a ONE-word caption in the data font size
+    passes both clauses. Group-spanning headers set in a single run are lost to
+    the single-run clause (a lost header makes ``header_band_missing`` DEFER).
+    """
+    if len(row_ws) >= 2 and word_space:
+        ordered = sorted(row_ws, key=lambda w: w[0])
+        max_gap = max(b[0] - a[2] for a, b in zip(ordered, ordered[1:]))
+        if max_gap <= ALIGNED_RUN_GAP_MAX_WORD_SPACES * word_space:
+            return True
+    row_size = _median_word_size(row_ws, word_sizes)
+    return data_size is not None and row_size is not None and row_size != data_size
+
+
+def _stub_row_eligible(row_ws: list, lane_centers: list[float], snaps) -> bool:
+    """A row that main's all-snap rule rejects only because it carries stub
+    (label-region) words: each word is a label-region word or snaps to a lane,
+    and at least one word snaps to a lane (a caption lying wholly in the label
+    region has no lane-shaped word and is never absorbed)."""
+    if not row_ws or any(_is_numeric_word(w) for w in row_ws):
+        return False
+    if not all(_is_label_region_word(w, lane_centers) or snaps(w) for w in row_ws):
+        return False
+    return any(snaps(w) and not _is_label_region_word(w, lane_centers) for w in row_ws)
+
+
+def _header_band_ys(
+    ys_bottom_up: list[int],
+    rows_by_y: dict[int, list],
+    lane_centers: list[float],
+    snaps,
+    *,
+    word_space: float | None,
+    word_sizes: dict | None,
+    data_size: float | None,
+) -> list[int]:
+    """The ONE header-band walk, shared by ``_extend_scope_for_header`` and
+    ``_prepend_header_band`` (GH-934). Returns the absorbed ys, bottom-up.
+
+    Up to the point where main's rule stops (a row with no words, a numeric
+    token, or a word that does not snap to a lane) the walk is main's own: each
+    all-snap row is absorbed and nothing else is tested. From that point on --
+    the "reach" -- EVERY further row is tested, whatever its own lane-snap
+    status: it must be stub-eligible (``_stub_row_eligible``) and not
+    ``_is_prose_like_row``. Testing only the rows main itself rejects lets the
+    walk recover a stub row and then absorb a caption whose words all snap.
+    """
+    absorbed: list[int] = []
+    main_alive = True
+    for y in ys_bottom_up:
+        row_ws = rows_by_y.get(y, [])
+        if not row_ws or any(_is_numeric_word(w) for w in row_ws):
+            break
+        if main_alive and all(snaps(w) for w in row_ws):
+            absorbed.append(y)
+            continue
+        main_alive = False
+        if not _stub_row_eligible(row_ws, lane_centers, snaps):
+            break
+        if _is_prose_like_row(
+            row_ws, word_space=word_space, word_sizes=word_sizes, data_size=data_size
+        ):
+            break
+        absorbed.append(y)
+    return absorbed
+
+
+def _extend_scope_for_header(tight, words: list, word_sizes: dict | None = None):
     """Extend ``tight`` upward to include a preceding lane-snapping header band.
 
     GH-144 review finding 3: ``tight`` (``_numeric_row_bbox``) is, by
@@ -2545,15 +2714,19 @@ def _extend_scope_for_header(tight, words: list):
     boundary_y = round(tight.y0)
     above_ys = sorted((y for y in rows_by_y if y < boundary_y), reverse=True)
     new_y0 = tight.y0
-    for y in above_ys:
-        row_ws = rows_by_y[y]
-        if (
-            not row_ws
-            or any(_is_numeric_word(w) for w in row_ws)
-            or not all(_snaps(w) for w in row_ws)
-        ):
-            break
-        new_y0 = min(new_y0, min(w[1] for w in row_ws))
+    seg_rows: dict[int, list] = defaultdict(list)
+    for w in in_scope:
+        seg_rows[round(w[1])].append(w)
+    for y in _header_band_ys(
+        above_ys,
+        rows_by_y,
+        lane_centers,
+        _snaps,
+        word_space=_median_word_gap(words),
+        word_sizes=word_sizes,
+        data_size=_data_row_size(list(seg_rows.values()), lane_centers, word_sizes),
+    ):
+        new_y0 = min(new_y0, min(w[1] for w in rows_by_y[y]))
 
     if new_y0 == tight.y0:
         return tight
@@ -2762,6 +2935,7 @@ def _prepend_header_band(
     seg_words: list,
     prev_seg_ys: list[int],
     rows_by_y: dict[int, list],
+    word_sizes: dict | None = None,
 ) -> tuple[list[list[str]], float, float, float, float]:
     """Prepend a header band stranded in the PRECEDING y-segment (GH-144 A2b).
 
@@ -2805,20 +2979,21 @@ def _prepend_header_band(
             return True
         return min(abs(c - word[0]) for c in lane_centers) <= snap_radius
 
-    eligible_ys: list[int] = []
-    for y in reversed(prev_seg_ys):
-        row_ws = rows_by_y.get(y, [])
-        # A row that itself carries a numeric token is a data row, not a
-        # header — never absorb it, even if its words happen to snap to
-        # this segment's lanes (e.g. a second table's trailing data row
-        # stacked directly above this one).
-        if (
-            not row_ws
-            or any(_is_numeric_word(w) for w in row_ws)
-            or not all(_snaps(w) for w in row_ws)
-        ):
-            break
-        eligible_ys.append(y)
+    # A row that itself carries a numeric token is a data row, not a header --
+    # never absorbed, even if its words happen to snap to this segment's lanes
+    # (e.g. a second table's trailing data row stacked directly above this one).
+    # The walk, including the GH-934 stub-first / prose-line handling, is the
+    # single shared `_header_band_ys`.
+    seg_ys = sorted({round(w[1]) for w in seg_words})
+    eligible_ys = _header_band_ys(
+        list(reversed(prev_seg_ys)),
+        rows_by_y,
+        lane_centers,
+        _snaps,
+        word_space=_median_word_gap([w for ws in rows_by_y.values() for w in ws]),
+        word_sizes=word_sizes,
+        data_size=_data_row_size([rows_by_y[y] for y in seg_ys], lane_centers, word_sizes),
+    )
 
     if not eligible_ys:
         return grid, x0, y0, x1, y1
@@ -2832,6 +3007,7 @@ def _prepend_header_band(
         band_words.extend(row_ws)
         row_cells = [""] * len(lane_centers)
         band_note: list[str] = []
+        band_label: list[str] = []
         for w in row_ws:
             # GH-461 review: the header band has its own cell loop, and without
             # this check a folded margin word landing on a header row snapped
@@ -2840,12 +3016,15 @@ def _prepend_header_band(
             if _is_folded_marginal(w):
                 band_note.append(w[4])
                 continue
+            if _is_label_region_word(w, lane_centers):
+                band_label.append(w[4])  # stub word of a GH-934 stub-first header
+                continue
             best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
             existing = row_cells[best]
             row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
-        # Empty label cell -> _is_header_row(True); trailing cell is the note
-        # column, which `_clean_grid` drops when no row uses it.
-        header_rows.append(["", *row_cells, " ".join(band_note)])
+        # No label words -> empty label cell -> _is_header_row(True); trailing cell
+        # is the note column, which `_clean_grid` drops when no row uses it.
+        header_rows.append([" ".join(band_label), *row_cells, " ".join(band_note)])
 
     new_x0 = min([x0] + [w[0] for w in band_words])
     new_y0 = min([y0] + [w[1] for w in band_words])
