@@ -135,7 +135,9 @@ def test_all_snap_caption_above_stub_header_is_rejected_by_reach(monkeypatch) ->
     stub row has been recovered; only testing EVERY row past main's stop rejects it."""
     page = lambda: _page(above=ALL_SNAP_CAPTION)  # noqa: E731
     with_pred = _run(page())
-    assert "Descriptive" not in _flat(with_pred) and with_pred[0] == HEADER_ROW
+    # the caption is not absorbed, and (lane-shaped row rejected above the stub row)
+    # the stub recovery is discarded: main's behaviour
+    assert "Descriptive" not in _flat(with_pred) and "Country" not in _flat(with_pred)
     monkeypatch.setattr(reconstruct, "_is_prose_like_row", lambda *a, **k: False)
     assert "Descriptive" in _flat(_run(page()))
 
@@ -186,12 +188,20 @@ def test_one_word_caption_in_the_data_font_size_is_absorbed() -> None:
     assert "Notes" in _flat(rows)
 
 
-def test_spanning_header_above_stub_header_is_lost_partial_header() -> None:
-    """KNOWN LOSS: a group-spanning header set as one run is rejected; the lower stub
-    header is kept (the Ayivodji 43 shape). `header_band_missing` must still see this."""
+def test_spanning_header_above_stub_header_falls_back_to_main(monkeypatch) -> None:
+    """The Ayivodji 43 shape: a group-spanning lane-shaped row above a stub header.
+    Keeping only the lower row would ship a PARTIAL header the gate cannot see, so the
+    whole stub recovery is discarded: the output equals main's (stub exemption off).
+    KNOWN LOSS: the stub header is not recovered on such a page (the gate DEFERs it)."""
     spanning = [(250.0, "Panel", 76.0), (330.0, "A:", 76.0), (410.0, "Estimates", 76.0)]
-    rows = _run(_page(above=spanning))
-    assert rows[0] == HEADER_ROW and "Panel" not in _flat(rows)
+    after = _run(_page(above=spanning))
+    assert "Country" not in _flat(after) and "Panel" not in _flat(after)
+    monkeypatch.setattr(reconstruct, "_stub_row_eligible", lambda *a, **k: False)
+    assert _run(_page(above=spanning)) == after  # identical to main's behaviour
+    monkeypatch.undo()
+    # difference: without the fallback clause the partial header (stub row only) ships
+    monkeypatch.setattr(reconstruct, "_is_lane_shaped_row", lambda *a, **k: False)
+    assert _run(_page(above=spanning))[0] == HEADER_ROW
 
 
 @pytest.mark.parametrize("fn", ["_header_band_ys", "_is_prose_like_row", "_stub_row_eligible"])
@@ -223,7 +233,7 @@ def _extend_y0(page: Page, monkeypatch=None, *, sizes: bool = True) -> float:
 
 def test_scope_extension_recovers_stub_header_and_rejects_captions(monkeypatch) -> None:
     assert _extend_y0(_page(above=PROSE_LINE)) == 100.0  # header kept, caption not
-    assert _extend_y0(_page(above=ALL_SNAP_CAPTION)) == 100.0
+    assert _extend_y0(_page(above=ALL_SNAP_CAPTION)) == 140.0  # fallback to main
     monkeypatch.setattr(reconstruct, "_is_prose_like_row", lambda *a, **k: False)
     assert _extend_y0(_page(above=PROSE_LINE)) == 86.0  # difference: the caption is absorbed
     assert _extend_y0(_page(above=ALL_SNAP_CAPTION)) == 86.0

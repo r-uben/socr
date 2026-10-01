@@ -2623,6 +2623,16 @@ def _stub_row_eligible(row_ws: list, lane_centers: list[float], snaps) -> bool:
     return any(snaps(w) and not _is_label_region_word(w, lane_centers) for w in row_ws)
 
 
+def _is_lane_shaped_row(row_ws: list, lane_centers: list[float], snaps) -> bool:
+    """2+ words, every word snaps to a lane, and they occupy 2+ distinct lanes."""
+    if len(row_ws) < 2 or not all(snaps(w) for w in row_ws):
+        return False
+    lanes = {
+        min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0])) for w in row_ws
+    }
+    return len(lanes) >= 2
+
+
 def _header_band_ys(
     ys_bottom_up: list[int],
     rows_by_y: dict[int, list],
@@ -2645,6 +2655,7 @@ def _header_band_ys(
     walk recover a stub row and then absorb a caption whose words all snap.
     """
     absorbed: list[int] = []
+    main_part = 0  # rows absorbed by main's own rule (the prefix of ``absorbed``)
     main_alive = True
     for y in ys_bottom_up:
         row_ws = rows_by_y.get(y, [])
@@ -2652,6 +2663,7 @@ def _header_band_ys(
             break
         if main_alive and all(snaps(w) for w in row_ws):
             absorbed.append(y)
+            main_part = len(absorbed)
             continue
         main_alive = False
         if not _stub_row_eligible(row_ws, lane_centers, snaps):
@@ -2659,6 +2671,13 @@ def _header_band_ys(
         if _is_prose_like_row(
             row_ws, word_space=word_space, word_sizes=word_sizes, data_size=data_size
         ):
+            # A lane-shaped row (2+ words over 2+ lanes) rejected right above a
+            # stub-recovered row is a group-spanning header ("Relative RMSE"),
+            # and keeping only the rows below it ships a PARTIAL header the gate
+            # cannot see. Discard the stub recovery: fall back to main's band
+            # (its empty/short band is what `header_band_missing` DEFERs on).
+            if _is_lane_shaped_row(row_ws, lane_centers, snaps):
+                return absorbed[:main_part]
             break
         absorbed.append(y)
     return absorbed

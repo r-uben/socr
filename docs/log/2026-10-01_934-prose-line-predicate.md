@@ -1,7 +1,13 @@
 # GH-934: line-level prose/caption predicate, single-walk stub-first header band (retry of #925)
 
-Status: IMPLEMENTED, MERGE BAR NOT MET. One partial-header ship (Ayivodji 43) is a new silent ship under the
-hard rule. Do not merge until it is decided (see "Merge bar"). Not pushed.
+Status: IMPLEMENTED, merge bar met after revision 2 (the rowizer-side partial-header fallback, option 2). Revision 1 shipped Ayivodji 43 as a
+partial-header new silent ship; that is superseded below. Not pushed. Wait for CI green on the exact head before merging.
+
+Revision 2 (ruling: option 2, no waiver, `ship_gate.py` untouched): in `_header_band_ys`, when `_is_prose_like_row` rejects a LANE-SHAPED row
+(`_is_lane_shaped_row`: 2+ words, every word snaps, 2+ distinct lanes) after the walk has left main's rule, the whole stub recovery is
+discarded and only the rows main's own rule absorbed are returned. Census (same 127 pages): 3 pages change (Boukus 38, Fama 561, Gong 53, grids
+byte-identical to revision 1); Ayivodji 43 is byte-identical to main again and DEFERs on `header_band_missing`. Caption/prose absorbed: 0.
+Partial-header ships: 0. Revision 1 figures below are kept as the record; the revision 2 census is in "Revision 2 census".
 
 Branch `fix/934-prose-line-predicate`, cut from origin/main 0eb6121 (ancestry verified). Design: `~/.local/state/socr-housekeeping/gh934/design.md`
 (designer, audited by Fable as GO-WITH-CHANGES). The rejected attempt is #933 / `fix/925-header-band-stub` (9aa2c40); not reused except the
@@ -25,9 +31,10 @@ label-cell idea.
 
 ## Tests
 
-Full suite (default OLLAMA_HOST, one complete run): 6070 passed, 2 skipped, 4 xfailed in 3478s. `uvx ruff@0.16.0 format --check .` clean.
+Full suite (default OLLAMA_HOST, nohup, one complete run): revision 1 6070 passed, 2 skipped, 4 xfailed; revision 2 6070 passed, 2 skipped, 4 xfailed in 902s. `uvx ruff@0.16.0 format --check .` clean.
 
-`tests/test_gh934_prose_line_predicate.py`, 15 tests, all difference pins on synthetic geometry (the same page rowized twice, one thing changed):
+`tests/test_gh934_prose_line_predicate.py`, 14 tests (revision 2: the spanning-header "known loss" test is now a fallback-to-main
+difference pin, and the all-snap-caption and extend-site expectations are main's behaviour), all difference pins on synthetic geometry (the same page rowized twice, one thing changed):
 stub-first header recovered (vs stub exemption off); label-region caption/prose line above the band rejected (vs predicate off); all-snap
 caption above the stub header rejected (the Kalemli shape; needs the "every row past main's stop" placement); wide-sentence-space footnote
 rejected by the size clause only; plain header and main-absorbed single-run rows unchanged (controls); label-only row not absorbed;
@@ -46,6 +53,9 @@ both sites (`_extend_scope_for_header` and the prepend site) pinned; Fable (iv):
 | M5 drop lane-word requirement | 1 test (label-only row) |
 | M6 drop stub label cell | 7 tests |
 | M7 no word space at the extend site | 1 test (extend site) |
+| M8 (revision 2) drop the lane-shaped fallback clause | 3 tests (spanning-header fallback, all-snap caption, extend site) |
+
+Revision 2 numbers: the test file has 14 tests (15 collected with the mutation-copy canary); the control above reads 15 for that reason.
 
 Mutations also shown load-bearing on real input (census mutants, 16 gh925 pages, `~/.local/state/socr-housekeeping/gh934/census/m1..m3`):
 M1 absorbs extra rows on 7 pages (Fama 753, Boukus 38/39, Ayivodji 43, Bybee 78, Hansen 28, Eskildsen 70); M2 absorbs the
@@ -90,7 +100,25 @@ Narrowest fixes (none applied; `ship_gate.py` is out of my ownership, #932 is ed
    unaffected on the census (the rejected rows there are label-region captions, not all-snap rows). Not measured; run the census before landing.
 3. Accept: the spanning label survives as prose. Contradicts the hard rule; only the orchestrator can waive it.
 
-### Expected header loss (Fable ii)
+### Revision 2 census (current)
+
+Frozen `census/branch2/` vs `census/main/`, `socr.__file__` canary asserted; artefacts `~/.local/state/socr-housekeeping/gh934/changed2/`.
+127 pages: 3 change, 0 verdict-only; `header_band_missing` fires 18 -> 16.
+
+| page | class | predicates main -> branch | plan action |
+|---|---|---|---|
+| Boukus 2006 p38 | header recovered | none -> none | n/a |
+| Fama 2017 p561 | header recovered, still not a ship | header_band_missing + text_in_numeric_column -> text_in_numeric_column | defer -> refuse |
+| Gong 2024 p53 | header recovered | header_band_missing -> none | n/a |
+| Ayivodji 2022 p43 | unchanged (byte-identical to main, DEFER on header_band_missing) | - | - |
+
+All three grids are byte-identical to the ones I viewed in revision 1 (their renders were viewed then; the census page and grid are the same). Numerics: nothing
+removed on any page; identical over all tokens on Boukus 38 and Gong 53; on Fama 561 only the digits 1..12 of the rho1..rho12 header labels are added.
+Caption/prose absorbed: 0. Partial-header ships: 0. Boukus 38, Fama 561 and Gong 53 keep their recoveries.
+Cost: header recovery is not attempted on a page whose stub header has a lane-shaped spanning row above it (Ayivodji 43 shape) or an all-snap
+caption above it (the Kalemli shape); those pages behave as on main.
+
+### Revision 1 notes: expected header loss (Fable ii)
 
 About 9%: pooled 11 of 121 multi-word header rows score <= 2.0 word spaces, all group-spanning headers. The earlier "1 of 23" is the stub-band
 sample only. On the 127-page census exactly one row is lost (Ayivodji 43). A lost spanning row above a kept header is the partial-header shape.
@@ -110,7 +138,7 @@ fixture's one-word band rows were all headers.
 
 ## Not done / follow-ups
 
-- Decision on Ayivodji 43 (fix 1, 2 or 3 above).
-- Follow-up ticket for the 7 main-absorbed caption pages (V-all).
+- (Decided: option 2, implemented in revision 2.)
+- Follow-up ticket (to be filed by the coordinator) for the 7 main-absorbed caption pages (V-all).
 - #921 page-level prose gate (separate predicate, design section 6).
 - No `STATUS.md` / `TICKETS.md` entry: GH-934 is not in a plan folder.
