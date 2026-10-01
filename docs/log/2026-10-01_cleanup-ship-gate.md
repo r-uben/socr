@@ -85,3 +85,4 @@ because they change behaviour or routing), and the orchestrator mixin split.
 misses an aligned separator such as `|:---|`, so it can treat that row as a content row. Reusing the shared helpers would unify the
 readings, but it changes which lines count as separators and therefore which tokens the retained-prose splice and the cell splice
 see. It needs its own corpus measurement and tests, not a cleanup commit.
+- **Review follow-up (Astra P2):** `_read_page_words` had moved the `open_pdf` / `line_directions_for_page` imports inside its callers' `except Exception`, so an import failure would have read as an unreadable text layer (REFUSE) or a failed re-read. Each caller now imports them BEFORE its `try`, as the pre-refactor code did, and passes them in, so import failures propagate again.

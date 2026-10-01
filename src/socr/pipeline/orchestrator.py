@@ -10130,17 +10130,18 @@ class UnifiedPipeline:
         )
 
     @staticmethod
-    def _read_page_words(pdf_path: Path, page_num: int) -> tuple[list, object]:
+    def _read_page_words(
+        pdf_path: Path, page_num: int, *, open_pdf, line_directions_for_page
+    ) -> tuple[list, object]:
         """``(words, line_dirs)`` of one page's text layer.
 
         Raises when the PDF or page cannot be read; each caller keeps its own
-        ``except`` and log text. ``line_directions_for_page`` never raises (GH-917): a
-        failed extraction travels as a fault the gate DEFERs on, so it must not inherit
-        a caller's REFUSE (an unreadable direction map is not an unreadable text layer).
+        ``except`` and log text. The callers import ``open_pdf`` and
+        ``line_directions_for_page`` BEFORE their ``try``, as the pre-refactor code did,
+        so an import failure still propagates instead of reading as an unreadable text
+        layer. ``line_directions_for_page`` never raises (GH-917): a failed extraction
+        travels as a fault the gate DEFERs on, so it must not inherit a caller's REFUSE.
         """
-        from socr.core.pdf import open_pdf
-        from socr.tables.ship_gate import line_directions_for_page
-
         with open_pdf(pdf_path) as doc:
             page = doc[page_num - 1]
             return list(page.get_text("words")), line_directions_for_page(page)
@@ -10229,8 +10230,16 @@ class UnifiedPipeline:
 
         if not self._is_native_table_first_candidate(page_num, ps):
             return None
+        from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
+
         try:
-            words, line_dirs = self._read_page_words(state.handle.path, page_num)
+            words, line_dirs = self._read_page_words(
+                state.handle.path,
+                page_num,
+                open_pdf=open_pdf,
+                line_directions_for_page=line_directions_for_page,
+            )
         except Exception as exc:
             logger.warning(
                 "native table first: text layer unreadable on p%d (%s)",
@@ -10408,8 +10417,16 @@ class UnifiedPipeline:
         spliced = splice_cell_tokens(ps.native_text or "", replacements)
         if spliced is None:
             return None, None
+        from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
+
         try:
-            words, line_dirs = self._read_page_words(state.handle.path, page_num)
+            words, line_dirs = self._read_page_words(
+                state.handle.path,
+                page_num,
+                open_pdf=open_pdf,
+                line_directions_for_page=line_directions_for_page,
+            )
         except Exception as exc:
             logger.warning(
                 "native table first: re-read failed on p%d (%s)",
