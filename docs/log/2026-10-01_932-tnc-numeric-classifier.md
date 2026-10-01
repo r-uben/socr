@@ -137,3 +137,51 @@ uncapped anchor count == 1 asserted; file restored after). A no-mutation baselin
 | M7 `>=` for `>` | `test_numeric_column_needs_more_than_half_the_data_rows` |
 
 Full suite (default OLLAMA_HOST, nohup, one complete run on the final tree): 6066 passed, 2 skipped, 4 xfailed. An earlier run in this round had 1 failure: the mixed pin as first written (see above), fixed before this run.
+
+## Round 4: one union member is EXACTLY the GH-917 predicate (Astra rejected c035a02)
+
+**Defect in round 3.** Both union members used the NEW classifier, so the union was monotone only against
+itself. Counterexample (source prints bare 31/32): Alpha `11 12`, Beta `21 22`, Note `see appendix`, Gamma
+`$31 $32`. Main reads Gamma's cells as `other`, Beta is the last data row, the note sits below it and fires.
+With the wider classifier Gamma is data, the note becomes an interior label row (first cell in the label
+column) and is exempt. A lost catch, from the classifier, not from the rule.
+
+**Fix.** `_cell_kind(cell, *, canonical)` (keyword-only, no default): `canonical=False` is main's classifier
+(the marker regex only), `canonical=True` asks `is_numeric_token` as well. `_TNC_MEMBERS = ((False, False),
+(True, False), (True, True))` = (main classifier, main rule) [exactly GH-917], (canonical, main rule), (canonical,
+panels rule). `_block_kinds(block, canonical=...)` builds the kinds incl. placeholders; `_rule_faults` returns
+`{row: {column: text}}`. The smallest set: the second member is needed for the `$` version of the round-2 note
+table (the panels member would admit the notes), the third for disjoint panels, the first for this defect.
+Each is shown necessary by a mutant below.
+
+**P3 (diagnostic only).** Two members faulting the same row now merge column and text evidence into one detail
+(`column(s) 1, 3: 'see note | and more'`) instead of keeping the first.
+
+**Pins** (`TestUnionContainsTheOriginalPredicate`): Astra's table fires with the note named; a direct unit pin
+that (canonical=False) finds the note and (canonical=True) does not under the original rule; the merged
+evidence pin; the `$` version of the round-2 note table. Earlier pins unchanged except `_cell_kind(..., canonical=True)`.
+
+**Gate comparison, 92 upright + 13 lift, main vs branch (frozen sources):** same 9 additions as rounds 2-3
+(all render-checked: p481 and gomez-cram p10 real faults; woodford p786/p800/p802, ljungvist p7, theodoridis
+p371/p545/p1203 are non-table pages gridded as tables), **0 predicate removals, 0 lost TNC rows**, both asserted
+mechanically; 116 TNC rows added.
+
+**Mutations** (external copy of src + tests + pyproject, `socr.__file__` canary, uncapped anchor == 1, baseline control):
+
+| mutant | killed by |
+|---|---|
+| M0 baseline | none (96 passed) |
+| M1 no canonical classifier | 8 pins (currency, star, `_cell_kind`, currency-panels, mixed, unit pin, merge, `$` notes) |
+| M2 canonical regardless of flag | Astra's table, the unit pin |
+| M3 panel columns over all rows | both disjoint-panel pins, mixed pin, merge pin |
+| M4 no minimum filled rows | single-filled-cell pin |
+| M5 no shared-support clause | both disjoint-panel pins, mixed pin, merge pin |
+| **M8 baseline member's classifier swapped to canonical** | **Astra's table (`test_a_later_currency_row_does_not_hide_an_earlier_note`)** |
+| M8b baseline member dropped | Astra's table |
+| M9 panel member dropped | both disjoint-panel pins, mixed pin, merge pin |
+| M10 (canonical, main rule) member dropped | `$` notes pin |
+| M11 merge keeps the first member's evidence | merge pin |
+| M7 `>=` for `>` | half-rows test |
+| M6 whole file = main | 11 pins |
+
+Full suite (default OLLAMA_HOST, nohup, one complete run on the final tree): 6070 passed, 2 skipped, 4 xfailed. `uvx ruff@0.16.0 format --check .` clean (800 files).
