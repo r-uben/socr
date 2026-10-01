@@ -480,64 +480,108 @@ class TestLabelRowRound2:
         } == {ship_gate.LABEL_ROW_MISSING}
         assert ship_gate.native_ship_gate(words, _md(HEADER, rows[:3] + inserted + rows[3:])) == ()
 
-    def test_note_lines_carrying_numerals_are_not_table_rows(self) -> None:
-        # Two Note lines each carry two numerals that fall in table lanes, among
-        # many ordinary words. The grid ships them as rows; the line between them
-        # is dropped. They are prose with numbers, not core rows, so they must not
-        # stretch the table down to the dropped line.
+    def test_notes_paragraph_continuation_lines_with_numerals_are_not_core(self) -> None:
+        # A paragraph opened by "Notes:" has continuation lines carrying a few
+        # numerals that fall in table lanes. The grid ships them as rows but drops
+        # the unnumbered line between them. Their line starts with an opener, so
+        # they must not stretch the table down to the dropped line.
         words, _ = _base()
         y0 = Y0 + (len(ROWS) + 2) * PITCH
-        words_per_line = [
-            "Note:",
-            "values",
-            "are",
-            "shown",
-            "for",
-            "each",
-            "horizon",
-            "and",
-            "scenario",
-        ]
         out_rows = [list(r) for r in ROWS]
+        words.append(_word(95.0, y0, "Notes:", 100, 0))
+        words.append(_word(140.0, y0, "values", 100, 1))
+        out_rows.append(["Notes: values", "", "", "", ""])
+        filler = ["and", "scenario", "for", "each", "horizon", "shown"]
         for n, (a, b) in enumerate([("7.5", "8.5"), ("9.5", "6.5")]):
-            y = y0 + 2 * n * PITCH
-            for k, tok in enumerate(words_per_line):
-                words.append(_word(95.0 + 38.0 * k, y, tok, 100 + n, k))
-            words.append(_word(COL_XS[1], y + 0.0, a, 100 + n, 20))
-            words.append(_word(COL_XS[2], y + 0.0, b, 100 + n, 21))
-            out_rows.append([" ".join(words_per_line), a, b, "", ""])
-        words.append(_word(95.0, y0 + PITCH, "between", 110, 0))
+            y = y0 + (1 + 2 * n) * PITCH
+            for k, tok in enumerate(filler):
+                words.append(_word(95.0 + 38.0 * k, y, tok, 101 + n, k))
+            words.append(_word(COL_XS[1], y, a, 101 + n, 20))
+            words.append(_word(COL_XS[2], y, b, 101 + n, 21))
+            out_rows.append([" ".join(filler), a, b, "", ""])
+        words.append(_word(95.0, y0 + 2 * PITCH, "between", 110, 0))
         assert ship_gate.native_ship_gate(words, _md(HEADER, out_rows)) == ()
 
-    def test_sentence_numerals_are_not_table_values(self) -> None:
-        # "for 7, 5," inside a Note sentence: numerals with trailing punctuation
-        # are not table values, so these lines never pair into the table.
-        words, _ = _base()
-        y0 = Y0 + (len(ROWS) + 2) * PITCH
-        out_rows = [list(r) for r in ROWS]
-        for n, (a, b) in enumerate([("7,", "8,"), ("9,", "6,")]):
-            y = y0 + 2 * n * PITCH
-            words.append(_word(95.0, y, "Note:", 100 + n, 0))
-            words.append(_word(COL_XS[1], y, a, 100 + n, 20))
-            words.append(_word(COL_XS[2], y, b, 100 + n, 21))
-            out_rows.append(["Note:", a, b, "", ""])
-        words.append(_word(95.0, y0 + PITCH, "between", 110, 0))
-        assert ship_gate.native_ship_gate(words, _md(HEADER, out_rows)) == ()
+    def test_data_resuming_after_an_in_table_notes_heading_is_core_again(self) -> None:
+        # Full-width rows after the heading are table rows: a label dropped
+        # further down is still seen.
+        rows = [list(r) for r in ROWS]
+        blank = ["", "", "", ""]
+        words = _words(
+            [HEADER]
+            + rows[:2]
+            + [["Notes:"] + blank]
+            + rows[2:4]
+            + [["Panel D"] + blank]
+            + rows[4:]
+        )
+        md_rows = rows[:2] + [["Notes:"] + blank] + rows[2:]
+        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows))}
+        assert got == {ship_gate.LABEL_ROW_MISSING}
 
-    def test_notes_swallowed_into_the_grid_do_not_stretch_the_table(self) -> None:
-        # The grid ships two Note lines (one stray number each) as rows but not
-        # the unnumbered line between them. They pair by that single number, so
-        # they must not move the table's last row down to them.
-        words, _ = _base()
-        y = Y0 + (len(ROWS) + 2) * PITCH
-        lines = [("Note: stars", "10%"), ("were clustered", None), ("again", "5%")]
-        for n, (txt, num) in enumerate(lines):
-            words.append(_word(90.0, y + n * PITCH, txt, 70 + n, 0))
-            if num:
-                words.append(_word(300.0, y + n * PITCH, num, 70 + n, 1))
-        md_rows = [list(r) for r in ROWS]
-        md_rows += [["Note: stars", "", "10%", "", ""], ["again", "", "5%", "", ""]]
-        assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows)) == ()
+    def test_text_heavy_final_rows_do_not_hide_a_dropped_panel_heading(self) -> None:
+        # Short rows, a panel heading, then two final numeric rows with long text in
+        # the lane region. Word count must not push those rows out of the table.
+        rows = [list(r) for r in ROWS]
+        blank = ["", "", "", ""]
+        heavy = []
+        for k, base in enumerate(rows[3:5]):
+            heavy.append(["Long label " * 3 + "ab"[k]] + base[1:])
+        words = _words([HEADER] + rows[:3] + [["Panel B"] + blank] + heavy)
+        for k in range(2):
+            y = Y0 + (5 + k) * PITCH
+            for j in range(10):
+                words.append(_word(100.0 + 24.0 * j, y, f"w{j}", 120 + k, 30 + j))
+        with_heading = rows[:3] + [["Panel B"] + blank] + heavy
+        assert ship_gate.native_ship_gate(words, _md(HEADER, with_heading)) == ()
+        without = rows[:3] + heavy
+        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, without))}
+        assert ship_gate.LABEL_ROW_MISSING in got
+
+
+class TestPunctuatedValues:
+    """Numeric recognition matches the verifier: ``12.5,`` is a number."""
+
+    @staticmethod
+    def _punct(rows):
+        return [[r[0]] + [c + "," for c in r[1:]] for r in rows]
+
+    def test_order_and_sign_checks_stay_active_on_a_punctuated_table(self) -> None:
+        rows = self._punct(ROWS)
+        words = _words([HEADER] + rows)
+        assert ship_gate.native_ship_gate(words, _md(HEADER, rows)) == ()
+        reversed_rows = _md(HEADER, list(reversed(rows)))
+        assert ship_gate.ROW_ORDER in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, reversed_rows)
+        }
+        swapped = [r[:1] + list(reversed(r[1:])) for r in rows]
+        assert ship_gate.CELL_ORDER in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, swapped))
+        }
+        # A detached sign before a punctuated number.
+        signed = [list(r) for r in rows]
+        signed[2][1] = "0.230,"
+        words = _words([HEADER] + signed)
+        y = Y0 + 3 * PITCH
+        x = COL_XS[1]
+        words.append((x + 0.2 - CHAR_W * 0.7, y, x + 0.2, y + 9.0, "-", 0, 3, 9))
+        md_rows = [list(r) for r in signed]
+        md_rows[2] = md_rows[2][:1] + ["-"] + md_rows[2][1:]
+        md = "\n".join(
+            ["| " + " | ".join(HEADER + [""]) + " |", "| " + " | ".join(["---"] * 6) + " |"]
+            + ["| " + " | ".join(r) + " |" for r in md_rows]
+        )
+        assert ship_gate.SIGN_DETACHED in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md)
+        }
+
+    def test_a_dropped_punctuated_edge_row_fires(self) -> None:
+        rows = self._punct(ROWS)
+        words = _words([HEADER] + rows)
+        for drop in (0, -1):
+            kept = [r for i, r in enumerate(rows) if i != drop % len(rows)]
+            got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, kept))}
+            assert got == {ship_gate.DATA_ROW_MISSING}, (drop, got)
 
 
 # ------------------------------------------------------ lane + resume pins
@@ -803,3 +847,20 @@ class TestGateDeferEqualsOrdinaryDefer:
             return json.loads(json.dumps(kept, sort_keys=True, default=str))
 
         assert strip(g_side) == strip(o_side)
+
+
+class TestSwallowedNotesDoNotStretchTheTable:
+    def test_lines_with_one_stray_number_are_not_core(self) -> None:
+        # The grid ships two lines (one stray number each, no opener) as rows but
+        # not the unnumbered line between them. They pair by that single number, so
+        # they must not move the table's last row down to them.
+        words, _ = _base()
+        y = Y0 + (len(ROWS) + 2) * PITCH
+        lines = [("stars noted", "10%"), ("were clustered", None), ("again", "5%")]
+        for n, (txt, num) in enumerate(lines):
+            words.append(_word(90.0, y + n * PITCH, txt, 70 + n, 0))
+            if num:
+                words.append(_word(300.0, y + n * PITCH, num, 70 + n, 1))
+        md_rows = [list(r) for r in ROWS]
+        md_rows += [["stars noted", "", "10%", "", ""], ["again", "", "5%", "", ""]]
+        assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows)) == ()

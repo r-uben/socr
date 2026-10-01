@@ -342,3 +342,109 @@ numeral counts (1), rowizer merge condition reverted (2 in the #887 file).
 ### Results
 
 Focused: 40 tests in the gate file, 15 in the #887 file. Full suite: 5963 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 943 s). `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 4 (Astra rejected round 3: two new false-negative paths)
+
+### Changes
+
+1. **Word-count core filter removed.** It dropped legitimate paired rows with long text in the lane
+   region, which could move the core boundary above a panel heading and hide its deletion. Core
+   membership is now: >= 2 numeric words in >= 2 table lanes, and not part of a Notes/Source
+   paragraph. The paragraph rule is narrow: a source line whose FIRST word is a Notes/Source opener
+   starts a note region; rows in it are not core until a row is again as wide (in lanes) as the table's
+   own rows above the opener. Data that resumes after an in-table "Notes:" heading is full-width, so it
+   is core again; a paragraph's continuation lines are not. Nothing else (word count, width) changes core
+   membership. Regression tests: text-heavy final numeric rows after a panel heading, whose heading
+   deletion fires; data resuming after "Notes:" is core (a later dropped label fires); the gomez-shaped
+   paragraph (opener line, numeral-bearing continuation lines, dropped line between) does not fire.
+2. **Punctuation rule reverted.** `_is_num` is again the verifier's own source predicate plus the
+   gate-side leading decimal. `12.5,` is a number on both sides. The sign check compares the leading
+   number of the cell and of the source token (`_lead`), so a punctuated `0.230,` still pairs. Tests: a
+   table whose values all end in `,` keeps row-order, cell-order and detached-sign checks, and a dropped
+   punctuated first or last row fires. (Footnote-star values like `0.253*` are not numeric on either side
+   of the verifier, so there is nothing to test there.)
+3. **`_PANEL_GAP_ROWS` evidence, reproducible.** New `src/socr/benchmark/ship_gate_gaps.py`, entry point
+   `socr-measure-ship-gate-gaps` (pyproject `[project.scripts]`, like the other `socr.benchmark`/measurement
+   tools). The span logic moved into `ship_gate.extended_span` so the tool sweeps the same code. Run:
+   35 rotated + 92 upright pages, 1815 gaps between consecutive core paired rows.
+   - (a) Distribution (gap / block median row gap): median 1.0, p90 2.0, p95 2.25, p99 4.42, max 28.45.
+     Pages above p95: panel tables (Fama pp399, 427, 753, 438, 426..., bybee p83 panels A-D, barry p19,
+     jiang pp44/50, gow p48 "Panel" headings: panel headings were seen in the earlier page reviews), index
+     pages (woodford 786/787/800/802) and others not inspected (tabatabaei 61, sr99 12, herskovic 29,
+     gurkaynak 46, perico-ortiz 36, theodoridis 371/545/1203).
+   - (b) Missed-panel pages, bound swept 0..10 and unbounded: Fama p398's omitted panels are reached from
+     2, brochet p21 (two dropped data rows) from 3, segal p66 (Adj.-R2 and Obs rows) from 5; lopez-lira p32
+     and bugel p11 fire at every bound.
+   - (c) False extension: pages that fire `data_row_missing` only because of the extension. Bound 2: +Fama
+     398. 3: +brochet 21. 5: +segal 66. 6: nothing new. 8 and unbounded: +ljungvist p7 (a table of
+     contents: a numeric line that is not a table row, filed as #921). The unbounded structural variant
+     ("any full-width row") reaches the same pages as 8, so it does no better on (b) and is worse on (c).
+   - Justification: 5 is the smallest bound that reaches every known dropped-row page, 6 adds nothing, and
+     the first page a larger bound adds is a false extension. The comment on the constant records this.
+     Reproduce: `uv run socr-measure-ship-gate-gaps --rotated-index <index.json> --census <census.jsonl>
+     --known 2017__fama__ap.pdf:398 --known lopez_lira_tang_zhu:32 --known bugel_hidalgo:11`.
+
+### Re-measurement
+
+| set | measure | round 3 | round 4 |
+|---|---|---|---|
+| upright SHIP (92 pages) | pages firing | 20 | 23 |
+| | data_row_missing | 4 | 6 |
+| | label_row_missing | 17 | 18 |
+| | sign_detached / row_order / cell_order | 0 | 0 |
+| rotated (35 pages) | wrong pages stopped | 12 / 14 | 12 / 14 (same set; 00, 17 residual) |
+| | other pages stopped | 4 / 21 | 6 / 21 (11 and 23 fire again) |
+| | label_row_missing wrong / other | 8 / 4 | 9 / 6 |
+| | data_row_missing wrong | 2 | 2 |
+| | sign_detached wrong | 2 | 2 |
+
+Flips on the upright set, round 3 to round 4:
+- Fire again: woodford 787, 791, 802 (index pages) and bybee 67 (a numbered prose list). These are the
+  four non-tables of #921; their firing came back with the punctuation rule's removal, and they are out
+  of this gate's scope.
+- Stopped firing: theodoridis 1203 (not looked at).
+- Fable's pages: gomez-cram p10 and piller p33 stay quiet. The four true new7 pages (hack 38, wang 11,
+  bugel 11, jiang 44) and all 8 new8 pages still fire. fernandez-fuertes p73 (true) still does not fire
+  (Notes below the table).
+
+### Pages that fire (upright SHIP, round 4): basename, page, predicates
+
+| basename | page | predicates |
+|---|---|---|
+| 2003__woodford.pdf | 787 | data_row_missing |
+| 2003__woodford.pdf | 791 | label_row_missing |
+| 2003__woodford.pdf | 802 | data_row_missing |
+| 2006__boukus_rosenber__information_content_fomc_minutes__WP.pdf | 46 | label_row_missing |
+| 2008__faust_wright__efficient_prediction_of_excess_returns.pdf | 44 | label_row_missing |
+| 2016__ramey__shocks.pdf | 104 | data_row_missing, label_row_missing |
+| 2018__brochet_kolev_lerman__information_transfer_conference_calls__RAS.pdf | 21 | data_row_missing |
+| 2020__cieslak_vissing-jorgensen__the_economics_of_fed_put__WP.pdf | 63 | label_row_missing |
+| 2021__gow_larcker_zakolyukina__non_answers_during_conference_calls__JAR.pdf | 48 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 10 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 67 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 78 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 83 | label_row_missing |
+| 2023__cook_kazinnik_hansen_mcadam__local_language_models_financial_earnings_calls.pdf | 21 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 29 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 30 | label_row_missing |
+| 2023__segal.pdf | 66 | data_row_missing |
+| 2025__barry_bruns_kandemir_klose_smirnov_tillmann__emotions_monetary_policy__WP.pdf | 19 | label_row_missing |
+| 2025__hack_istrefi_meier__systematic_origins_of_monetary_policy_shocks__WP.pdf | 38 | label_row_missing |
+| 2025__wang_liu_chen__current_stance_vs_future_guidance_llm_evidence_on_how_pbc_communication_shapes_the_yield_curve__EL.pdf | 11 | label_row_missing |
+| 2026__bugel_hidalgo_luetticke__unconventional_unified_narrative_mp_shocks__WP.pdf | 11 | data_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 44 | label_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 50 | label_row_missing |
+
+### Mutation
+
+All killed (canary on `socr.__file__`, uncapped `count == 1`). New or changed guards: sign number compare
+exact instead of leading (1), `starts_a_number` (3), rowizer merge condition reverted (2 in the #887 file),
+core needs 2 lanes and 2 numerics (1), Notes opener ignored (1), note region never ends (2), word-count rule
+re-added (1), trailing punctuation not numeric (2), reach above / below unbounded (1 / 3), reach zero (10),
+constant 2 (1), prose bridges the scan (1), plus the unchanged earlier set. The first run left one
+survivor (core needs 2 lanes and 2 numerics): the test it relied on had lost its coverage when its lines
+started with an opener, and a later patch of mine had deleted it; it is restored without an opener.
+
+### Results
+
+Full suite: 5966 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 374 s). `uvx ruff@0.16.0 format --check .` clean.
