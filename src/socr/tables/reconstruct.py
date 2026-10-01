@@ -2331,7 +2331,10 @@ def rowize_from_word_list(
         else:
             cx = (page_rect.x0 + page_rect.x1) / 2
             cy = (page_rect.y0 + page_rect.y1) / 2
-        words = [_rotate_word_bbox(w, cx, cy, -rotation) for w in words]
+        # GH-902: +rotation, not -rotation. ``rotation`` is the correction that makes
+        # text upright, and _rotate_point's positive sense is that correction (measured
+        # on synthetic 90/270 pages); -rotation read the table 180 degrees flipped.
+        words = [_rotate_word_bbox(w, cx, cy, rotation) for w in words]
 
     # Save the rotation center if rotating, so we can use it for output rect rotation
     if rotation != 0:
@@ -2367,7 +2370,7 @@ def rowize_from_word_list(
 
     if rotation != 0 and _rotation_center_x is not None:
         out = [
-            (_rotate_rect(rect, _rotation_center_x, _rotation_center_y, rotation), md)
+            (_rotate_rect(rect, _rotation_center_x, _rotation_center_y, -rotation), md)
             for rect, md in out
         ]
 
