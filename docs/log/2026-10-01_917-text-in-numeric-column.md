@@ -45,7 +45,7 @@ a panel label with a year range, kim_muhn p52) and a reference-list page; the co
 column-repeat placeholder rule came from that. The final version dropped the `N > text` row rule (the
 coverage rule subsumes it, and no test could pin it).
 
-## Measurement (counts, basenames and pages only; `scripts/measure_tnc.py`, `socr.__file__` asserted inside the worktree)
+## Measurement (counts, basenames and pages only; `~/.local/state/socr-housekeeping/gh917/scripts/measure_tnc.py (local, not in the repo)`, `socr.__file__` asserted inside the worktree)
 
 ### The 13 lift pages (all `2017__fama__ap.pdf`), stopped vs Fable verdicts
 
@@ -109,7 +109,7 @@ fixed (eskildsen p15, kim_muhn p52, theodoridis p371/p545/p1203) does not fire i
 
 ### `empty_extra_column`: NOT implemented (ambiguous)
 
-Prototype (`scripts/measure_emptycol.py`): a column empty in EVERY data row. It would stop three of the
+Prototype (`~/.local/state/socr-housekeeping/gh917/scripts/measure_emptycol.py (local)`): a column empty in EVERY data row. It would stop three of the
 four still-shipping wrong lift pages (p481, p589, p591), but it is ambiguous, so it is skipped:
 
 - Fires on 14 of 20 rotated cosmetic pages and on 30 of 92 upright pages. Fable calls the rotated
@@ -124,7 +124,7 @@ four still-shipping wrong lift pages (p481, p589, p591), but it is ambiguous, so
   liu_cao_flake p49/p50/p62, harren_kilic_zhang p66), which is a real defect but not a defect it
   characterises.
 
-## Tests (`tests/test_gh917_text_in_numeric_column.py`, 22 tests, hermetic: synthetic word tuples, no provider)
+## Tests (`tests/test_gh917_text_in_numeric_column.py`, 23 tests, hermetic: synthetic word tuples, no provider)
 
 Difference pins (`_plan` with the gate on, the gate patched off to prove the exact-pass it overrides
 exists, and the clean grid): footnote row in numeric columns; the same text as one label cell ships;
@@ -139,7 +139,7 @@ keep a row a data row; a panel label with a year range is not a data row. Deriva
 (3 of 6 columns does not, 4 does); fewer than two data rows abstains; a row is data only if the source
 pairs it; a one-number row is not data; two label cells and two values is a data row.
 
-## Mutation (copy of src + tests + pyproject in a temp dir, `socr.__file__` canary inside the copy, uncapped `anchor.count == 1`; `scripts/mutate_tnc.py`)
+## Mutation (copy of src + tests + pyproject in a temp dir, `socr.__file__` canary inside the copy, uncapped `anchor.count == 1`; `~/.local/state/socr-housekeeping/gh917/scripts/mutate_tnc.py (local)`)
 
 17 of 17 killed against `tests/test_gh917_text_in_numeric_column.py`, canary passed each time. The first
 run had two survivors (sign glyphs: the test only signed some rows; "row with as much text as numbers is
@@ -181,3 +181,5 @@ are inside it and pass unchanged: the new predicate does not fire on their fixtu
   sits below non-heading text (not measurable on the output grid).
 - The quarantine (#918) stays. A re-audit of the 13 is still the lift protocol.
 - **Review follow-up (Astra P2 on PR #931):** a separator-only block made `_numeric_columns`' `max()` raise, and the gate's handler then replaced the other blocks' faults with `gate_error`. Empty blocks are now skipped (and `max` has `default=0`). Regression test: `test_a_separator_only_block_does_not_mask_another_blocks_fault`. Mutant (both guards reverted) fails it. The placeholder docstring no longer claims prose can never repeat in a column.
+
+- **Known limit (cubic P2, follow-up):** `_NUMBER_CELL_RE` is narrower than the verifier's numeric normaliser. Currency-prefixed values and Unicode stars classify as `_OTHER`, so a column made of them may not count as numeric and the predicate abstains there. That is a missed DEFER, not a regression against main (the predicate only adds faults). The follow-up is to classify through the canonical numeric normaliser.
