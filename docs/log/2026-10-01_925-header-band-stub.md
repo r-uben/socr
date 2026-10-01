@@ -56,7 +56,7 @@ The WIP is kept unmerged on `fix/925-header-band-stub` (9aa2c40). Do not re-impl
 
 - **Net loss under the cost model.** Three pages lose a DEFER: Fama 561, Ayivodji 43 and Gong 53. Only Gong 53 is a clean
   recovery; the other two also absorb a title or stray glyphs.
-- **New silent ships.** On at least 9 pages a footnote paragraph, caption or panel title becomes header rows, and the gate
+- **New silent ships.** On 11 pages a footnote paragraph, caption or panel title becomes header rows, and the gate
   predicates are byte-identical before and after. These are pages that shipped a correct header on main; nothing DEFERs them:
   Fama 728, 733, 753; Phillips-Zhdanov 52; Lopez-Lira 51; Bybee 78; Hansen 28; Beckmann 79; Perico-Ortiz 41;
   Eskildsen 70; De Fiore 26.
@@ -69,7 +69,7 @@ The WIP is kept unmerged on `fix/925-header-band-stub` (9aa2c40). Do not re-impl
 - **Status quo is safe.** On main a dropped stub-first header is caught by the gate's `header_band_missing`, so the page goes
   to a model read.
 - **Prerequisite for any retry:** a line-level prose/caption predicate (sentence punctuation, full-width span, no alignment
-  with the data rows below). Use the 9 pages above plus #921's pages as its fixture. #921 consumes the same predicate. A
+  with the data rows below). Use the 11 pages above plus #921's pages as its fixture. #921 consumes the same predicate. A
   retry of #925 must build the band at a single site.
 
 Census artefacts: `~/.local/state/socr-housekeeping/gh925/` (`changed/index.json`, before/after markdown, renders).
