@@ -161,7 +161,8 @@ SHIP:
   better header, and Fama 561 still refuses.
 - The risk is in the class this repo ranks worst: a page that DEFERs on main ships a wrong header with no gate signal.
 - On main, `header_band_missing` fires on the stub-first drops measured here (Fama 561, Ayivodji 43, Gong 53), so
-  those misses cost one model read today. Boukus 38 drops a band without firing it. `header_band_missing` does not detect every missing header: a missing one-word spanning heading (the
+  those misses cost one model read today. Boukus 38 drops a band without firing it.
+  `header_band_missing` does not detect every missing header: a missing one-word spanning heading (the
   #938 counterexample) is not something it sees, which is why a partial band must never be shipped as if complete.
 
 **Where the measurement goes instead:**
