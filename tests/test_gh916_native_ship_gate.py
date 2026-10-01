@@ -95,10 +95,10 @@ def test_clean_grid_ships_and_gate_is_inert() -> None:
 # ---------------------------------------------------------------- P2 sign
 
 
-def _sign_rows(*, sign_dx: float, at_end_of_label: bool = False):
+def _sign_rows(*, sign_dx: float, num: str = "0.230"):
     """Row NEG carries a sign word ``sign_dx`` pt left of its second number."""
     rows = [list(r) for r in ROWS]
-    rows[2][1] = "0.230"
+    rows[2][1] = num
     words = _words([HEADER] + rows)
     num_x = COL_XS[1]
     ri = 3  # header is line 0
@@ -299,6 +299,173 @@ class TestLabelRowMissing:
         assert _plan(words, md).action == SHIP
 
 
+class TestSignDetachedRound2:
+    """Occurrence-specific binding and the shapes Astra named."""
+
+    @staticmethod
+    def _md_with(rows, row_index, cells):
+        md_rows = [list(r) for r in rows]
+        md_rows[row_index] = cells
+        width = max(len(r) for r in md_rows)
+        return "\n".join(
+            ["| " + " | ".join(HEADER + [""] * (width - len(HEADER))) + " |"]
+            + ["| " + " | ".join(["---"] * width) + " |"]
+            + ["| " + " | ".join(r) + " |" for r in md_rows]
+        )
+
+    def test_leading_decimal_fires_and_is_in_the_shared_helper(self) -> None:
+        rows, words = _sign_rows(sign_dx=0.0, num=".230")
+        assert detached_sign_pairs(words), "the shared helper must pair a sign with .230"
+        md = self._md_with(rows, 2, [rows[2][0], "-", ".230"] + rows[2][2:])
+        faults = ship_gate.native_ship_gate(words, md)
+        assert {f["predicate"] for f in faults} == {ship_gate.SIGN_DETACHED}
+        # No contact (placeholder a column away): never fires.
+        rows, words = _sign_rows(sign_dx=40.0, num=".230")
+        assert ship_gate.native_ship_gate(words, md) == ()
+
+    def test_sign_attached_as_a_tail_of_the_label_fires_only_with_contact(self) -> None:
+        rows, words = _sign_rows(sign_dx=0.0)
+        md = self._md_with(rows, 2, [rows[2][0] + "-"] + rows[2][1:])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.SIGN_DETACHED
+        }
+        rows, words = _sign_rows(sign_dx=40.0)
+        assert ship_gate.native_ship_gate(words, md) == ()
+
+    def test_placeholder_row_with_identical_numbers_abstains(self) -> None:
+        # Rows 2 and 4 print the same numbers; only row 2's number carries a
+        # sign in contact. The bare sign cell shipped on row 4 is a placeholder
+        # as far as the page shows, so the gate must not fire on it.
+        rows, words = _sign_rows(sign_dx=0.0)
+        rows[4] = [rows[4][0]] + rows[2][1:]
+        words = _words([HEADER] + rows) + [w for w in words if w[4] == "-"]
+        md = self._md_with(rows, 4, [rows[4][0], "-"] + rows[4][1:])
+        assert ship_gate.native_ship_gate(words, md) == ()
+        # The sign cell on the row that really carries the sign: the two identical
+        # lines still disagree about it, so the gate abstains there too.
+        md2 = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
+        assert ship_gate.SIGN_DETACHED not in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md2)
+        }
+
+    def test_contact_must_sit_on_the_cells_own_column(self) -> None:
+        # One row prints 0.230 twice; the sign touches the SECOND. A bare sign
+        # shipped before the FIRST is not the printed sign.
+        rows = [list(r) for r in ROWS]
+        rows[2][1] = "0.230"
+        rows[2][3] = "0.230"
+        words = _words([HEADER] + rows)
+        y = Y0 + 3 * PITCH
+        x = COL_XS[3]
+        words.append((x + 0.2 - CHAR_W * 0.7, y, x + 0.2, y + 9.0, "-", 0, 3, 9))
+        md_first = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
+        assert ship_gate.native_ship_gate(words, md_first) == ()
+        md_second = self._md_with(rows, 2, rows[2][:3] + ["-"] + rows[2][3:])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md_second)} == {
+            ship_gate.SIGN_DETACHED
+        }
+
+
+class TestDataRowRound2:
+    def test_full_width_numeric_prose_far_above_or_below_does_not_fire(self) -> None:
+        words, md = _base()
+        far = 8 * PITCH
+        for y in (Y0 - far, Y0 + (len(ROWS) + 1) * PITCH + far):
+            for ci in range(1, 5):
+                words.append(_word(COL_XS[ci], y, f"{ci}.5", 60, ci))
+        assert ship_gate.native_ship_gate(words, md) == ()
+
+    def test_dropped_copy_of_a_repeated_row_fires(self) -> None:
+        rows = [list(r) for r in ROWS]
+        rows.insert(3, list(rows[2]))  # an identical row prints twice
+        words = _words([HEADER] + rows)
+        both = _md(HEADER, rows)
+        one = _md(HEADER, rows[:3] + rows[4:])
+        assert ship_gate.native_ship_gate(words, both) == ()
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, one)} == {
+            ship_gate.DATA_ROW_MISSING
+        }
+
+    def test_a_data_row_equal_to_the_header_numbers_is_not_hidden(self) -> None:
+        header = ["Year", "2001", "2002", "2003", "2004"]
+        rows = [list(r) for r in ROWS]
+        rows.insert(3, ["Rebased", "2001", "2002", "2003", "2004"])
+        words = _words([header] + rows)
+        kept = _md(header, rows)
+        dropped = _md(header, rows[:3] + rows[4:])
+        assert ship_gate.native_ship_gate(words, kept) == ()
+        assert ship_gate.DATA_ROW_MISSING in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped)
+        }
+
+
+class TestLabelRowRound2:
+    @staticmethod
+    def _grid(label_rows, out_labels):
+        """ROWS with *label_rows* inserted after row 2; the markdown carries *out_labels*."""
+        rows = [list(r) for r in ROWS]
+        blank = ["", "", "", ""]
+        words = _words([HEADER] + rows[:3] + [[t] + blank for t in label_rows] + rows[3:])
+        md_rows = rows[:3] + [list(c) + [""] * (5 - len(c)) for c in out_labels] + rows[3:]
+        return words, _md(HEADER, md_rows)
+
+    def test_dehyphenated_line_break_is_not_missing(self) -> None:
+        words, md = self._grid(["Evalu-", "ation"], [["Evaluation"]])
+        assert ship_gate.native_ship_gate(words, md) == ()
+        words, md = self._grid(["Evalu-", "ation"], [])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.LABEL_ROW_MISSING
+        }
+
+    def test_a_match_cannot_straddle_two_cells(self) -> None:
+        # "bc" is in neither "ab" nor "cd"; it only exists in their concatenation.
+        words, md = self._grid(["bc"], [["ab", "cd"]])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
+            ship_gate.LABEL_ROW_MISSING
+        }
+
+    def test_a_repeated_label_is_counted(self) -> None:
+        words, md_two = self._grid(["Panel B", "Panel B"], [["Panel B"], ["Panel B"]])
+        _w, md_one = self._grid(["Panel B", "Panel B"], [["Panel B"]])
+        assert ship_gate.native_ship_gate(words, md_two) == ()
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md_one)} == {
+            ship_gate.LABEL_ROW_MISSING
+        }
+
+    def test_prose_spanning_the_lanes_inside_the_span_is_not_a_label(self) -> None:
+        rows = [list(r) for r in ROWS]
+        prose = ["Averages", "are", "taken", "over", "years"]
+        words = _words([HEADER] + rows[:3] + [prose] + rows[3:])
+        assert ship_gate.native_ship_gate(words, _md(HEADER, rows)) == ()
+        # A short heading in the label column, equally absent, is a fault.
+        words = _words([HEADER] + rows[:3] + [["Panel B", "", "", "", ""]] + rows[3:])
+        assert ship_gate.LABEL_ROW_MISSING in {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))
+        }
+
+    def test_nothing_below_a_notes_opener_is_a_missing_label(self) -> None:
+        rows = [list(r) for r in ROWS]
+        blank = ["", "", "", ""]
+        inserted = [["Notes:"] + blank, ["Panel C"] + blank]
+        with_note = _words([HEADER] + rows[:3] + inserted + rows[3:])
+        assert ship_gate.native_ship_gate(with_note, _md(HEADER, rows)) == ()
+
+    def test_notes_swallowed_into_the_grid_do_not_stretch_the_table(self) -> None:
+        # The grid ships two Note lines (one stray number each) as rows but not
+        # the unnumbered line between them. They pair by that single number, so
+        # they must not move the table's last row down to them.
+        words, _ = _base()
+        y = Y0 + (len(ROWS) + 2) * PITCH
+        lines = [("Note: stars", "10%"), ("were clustered", None), ("again", "5%")]
+        for n, (txt, num) in enumerate(lines):
+            words.append(_word(90.0, y + n * PITCH, txt, 70 + n, 0))
+            if num:
+                words.append(_word(300.0, y + n * PITCH, num, 70 + n, 1))
+        md_rows = [list(r) for r in ROWS]
+        md_rows += [["Note: stars", "", "10%", "", ""], ["again", "", "5%", "", ""]]
+        assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows)) == ()
+
+
 # ------------------------------------------------------ lane + resume pins
 
 
@@ -456,3 +623,109 @@ class TestEventSurvivesResume:
 
     def test_kind_is_in_the_resume_allowlist(self) -> None:
         assert ship_gate.SHIP_GATE_KIND in UnifiedPipeline.resume_restore_kinds()
+
+
+# ---------------------------------------------------- round 2: wiring pins
+
+
+class TestRotatedGateEvent:
+    """The gate fires on a rotated attempt and the event is recorded.
+
+    The quarantine also DEFERs a rotated page, so the gate event is the only
+    record of WHY native was rejected when a real fault exists. Difference pin:
+    the same rotated page with and without a dropped row.
+    """
+
+    @staticmethod
+    def _plan(tmp_path: Path, *, drop_last_row: bool):
+        import socr.tables.reconstruct as reconstruct
+        from test_rotated_native_table_first import _rotated_dense_forecast_pdf
+
+        pdf = tmp_path / "rotated.pdf"
+        if not pdf.exists():
+            _rotated_dense_forecast_pdf(pdf)
+        pipeline = UnifiedPipeline(_config())
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        pipeline._phase_analyze(state)
+        real = reconstruct.rowize_from_words
+
+        def _dropping(page, **kwargs):
+            regions = real(page, **kwargs)
+            out = []
+            for rect, md in regions:
+                lines = md.splitlines()
+                if drop_last_row:
+                    lines = [ln for ln in lines if "| TR |" not in ln]
+                out.append((rect, "\n".join(lines)))
+            return out
+
+        with patch.object(reconstruct, "rowize_from_words", side_effect=_dropping):
+            work = pipeline._plan_native_table_first(state, 1, state.pages[1])
+        return work, [e.kind for e in state.events], state.events
+
+    def test_gate_event_recorded_when_the_rotated_grid_has_a_fault(self, tmp_path: Path) -> None:
+        clean_work, clean_kinds, _ = self._plan(tmp_path, drop_last_row=False)
+        work, kinds, events = self._plan(tmp_path, drop_last_row=True)
+        assert clean_work is None and work is None  # both defer to route_page
+        # Quarantine alone explains the clean page; the faulty page is explained by
+        # the gate, and the gate event is on the record.
+        assert "rotated_native_table_quarantined" in clean_kinds
+        assert ship_gate.SHIP_GATE_KIND not in clean_kinds
+        assert kinds.count(ship_gate.SHIP_GATE_KIND) == 1
+        event = next(e for e in events if e.kind == ship_gate.SHIP_GATE_KIND)
+        assert ship_gate.DATA_ROW_MISSING in event.data["predicates"]
+
+
+class TestGateError:
+    def test_a_predicate_that_raises_defers_and_never_ships(self) -> None:
+        words, md = _base()
+        assert _plan(words, md).action == SHIP
+        with patch.object(ship_gate, "sign_detached_faults", side_effect=RuntimeError("boom")):
+            faults = ship_gate.native_ship_gate(words, md)
+            plan = plan_native_table(words, md)
+        assert [f["predicate"] for f in faults] == [ship_gate.GATE_ERROR]
+        assert plan.action == DEFER and plan.action != SHIP
+        assert ship_gate.GATE_ERROR in plan.reason
+
+    def test_a_gate_error_is_recorded_like_any_other_fault(self) -> None:
+        words, md = _base()
+        state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=1))
+        with patch.object(ship_gate, "order_faults", side_effect=ValueError("bad")):
+            plan = plan_native_table(words, md)
+        UnifiedPipeline._record_native_ship_gate(state, 1, plan)
+        assert [e.kind for e in state.events] == [ship_gate.SHIP_GATE_KIND]
+        assert state.events[0].data["predicates"] == [ship_gate.GATE_ERROR]
+
+
+class TestGateDeferEqualsOrdinaryDefer:
+    """Only the audit event may differ between a gate DEFER and an ordinary DEFER."""
+
+    @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
+    def test_flags_text_and_selection_are_identical(self, tmp_path: Path, providers: list) -> None:
+        def run(name: str, *, ordinary: bool):
+            sub = tmp_path / name
+            sub.mkdir()
+            runner = TestLane()
+            if not ordinary:
+                return runner._run(sub, providers, drop_row=True)
+            ordinary_plan = nf.NativeTablePlan(DEFER, reason="AMBIGUOUS")
+            with patch.object(nf, "plan_native_table", return_value=ordinary_plan):
+                return runner._run(sub, providers, drop_row=True)
+
+        g_result, g_side, g_routes = run("gate", ordinary=False)
+        o_result, o_side, o_routes = run("ordinary", ordinary=True)
+
+        g_kinds = [e["kind"] for e in g_side["audit_events"]]
+        o_kinds = [e["kind"] for e in o_side["audit_events"]]
+        assert ship_gate.SHIP_GATE_KIND in g_kinds
+        assert ship_gate.SHIP_GATE_KIND not in o_kinds
+        assert [k for k in g_kinds if k != ship_gate.SHIP_GATE_KIND] == o_kinds
+        assert g_routes == o_routes
+        assert g_result.markdown == o_result.markdown
+
+        def strip(side: dict) -> dict:
+            volatile = {"audit_events", "input_checksum", "timings_s"}  # per-run bytes, clocks
+            kept = {k: v for k, v in side.items() if k not in volatile}
+            return json.loads(json.dumps(kept, sort_keys=True, default=str))
+
+        assert strip(g_side) == strip(o_side)

@@ -246,6 +246,11 @@ def reconstruct_table_regions(
 _SIGN_GLYPHS = frozenset({"\u2212", "\u2013", "-"})
 
 
+def starts_a_number(text: str) -> bool:
+    """A digit, or a leading decimal point followed by a digit (``.23``)."""
+    return text[:1].isdigit() or (text[:1] == "." and text[1:2].isdigit())
+
+
 def _flush_on_the_left(sign, all_words) -> bool:
     """A range or compound hyphen ("1990-2000") abuts BOTH neighbours; a minus
     abuts only the digits after it (PR #888 review). Measured on the affected
@@ -275,7 +280,7 @@ def detached_sign_pairs(words: list) -> list[tuple[tuple, tuple]]:
     signs = [w for w in words if w[4] in _SIGN_GLYPHS]
     if not signs:
         return []
-    digits = [w for w in words if w[4][:1].isdigit()]
+    digits = [w for w in words if starts_a_number(w[4])]
     pairs: list[tuple[tuple, tuple]] = []
     for s in signs:
         if _flush_on_the_left(s, words):
@@ -324,7 +329,7 @@ def _reattach_detached_signs(grid: list, table, words: list) -> list:
             if left_box is None or right_box is None or not left or not right:
                 continue
             left_s, right_s = left.rstrip(), right.lstrip()
-            if not left_s or left_s[-1] not in _SIGN_GLYPHS or not right_s[:1].isdigit():
+            if not left_s or left_s[-1] not in _SIGN_GLYPHS or not starts_a_number(right_s):
                 continue
             joined = any(_inside(s, left_box) and _inside(d, right_box) for s, d in contact)
             if not joined:

@@ -14,19 +14,24 @@ shows why the native grid was rejected.
 
 Predicates (each a separate function, each independently disabled in its test):
 
-``sign_detached``   an output cell is a lone sign (or a populated cell ends in
-                    one) followed by a digit-leading cell, AND the source prints
-                    that sign in contact with that number's digits
-                    (``detached_sign_pairs``, the #887 criterion shared with the
-                    ``find_tables`` merge) on a source line bound to THIS output row.
+``sign_detached``   an output cell ends in a sign glyph (bare cell, end of a
+                    populated cell, or attached tail) and the next cell starts a
+                    number, AND the source prints that sign in contact with that
+                    number's digits (``detached_sign_pairs``, the #887 criterion
+                    shared with the ``find_tables`` merge). Bound by row AND column:
+                    every source line with the row's numeric sequence must carry
+                    the contact on the number's own position, else abstain.
 ``row_order``       rows that pair to exactly one source row by numeric multiset
                     must appear in increasing source y.
 ``cell_order``      on such a pair the output's left-to-right numeric cells must
                     equal the source's x-sorted numeric words.
-``data_row_missing``  a source row that belongs to the table by its OWN lanes (the
-                    lanes of rows that pair uniquely) and has no output row.
-``label_row_missing`` a numeric-free source row between the first and last paired
-                    row, inside the table's x-extent, with a word the output lacks.
+``data_row_missing``  a source row strictly inside the table's own vertical span
+                    (first to last CORE paired row) that occupies >= 2 of the
+                    table's lanes and has no output row left. Output rows are
+                    counted, not merely found.
+``label_row_missing`` a numeric-free source row inside that span, within the table's
+                    x-extent, that is not a Notes/caption paragraph, whose text is
+                    not found (counted, per output cell, dehyphenated) in the grid.
 
 Every tolerance is an existing named rowizer quantity (``_LANE_X_TOL_PT`` x
 ``_LANE_SNAP_MULT``, ``_MIN_LANES_PER_ROW``); nothing here is a new threshold.
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 import unicodedata
 from collections import Counter, defaultdict
 
@@ -48,6 +54,7 @@ from socr.tables.native_verifier import (
     _normalize_numeric_token,
     _numeric_tokens_from_text,
     _parse_output_row_cells,
+    is_numeric_token,
 )
 from socr.tables.reconstruct import (
     _LANE_SNAP_MULT,
@@ -56,6 +63,7 @@ from socr.tables.reconstruct import (
     _NUM_TOKEN_RE,
     _NUMERIC_RE,
     _SIGN_GLYPHS,
+    _SPLIT_GAP_MIN_PT,
     detached_sign_pairs,
 )
 
@@ -73,15 +81,34 @@ DATA_ROW_MISSING = "data_row_missing"
 LABEL_ROW_MISSING = "label_row_missing"
 GATE_ERROR = "gate_error"
 
-_LEADING_NUMBER_RE = re.compile(r"^\(?\d[\d,]*(?:\.\d+)?")
+_LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
+#: A caption or note opener. Everything from such a line down is prose, not a
+#: table row. It only SUPPRESSES a label_row_missing claim (never adds one), so
+#: a vocabulary miss costs yield, not content.
+_NOTE_OPENER_RE = re.compile(r"^(?:notes?|sources?)[:.]?$", re.IGNORECASE)
+#: Largest gap, in row pitches, between consecutive full-width rows of one table:
+#: one label or blank row (a panel break) between two data blocks. Named, not derived.
+_PANEL_GAP_ROWS = 2
+#: Separator inserted where a matched label was removed, so two neighbouring
+#: removals can never concatenate into a new match.
+_USED = "\x00"
 
 
 def _compact(text: str) -> str:
+    # NFKC folds typographic ligatures (U+FB00 "ff") so the PDF's "Staff" and
+    # the grid's "Staff" are the same word.
     return unicodedata.normalize("NFKC", text).replace(" ", "")
 
 
 def _is_num(text: str) -> bool:
-    return bool(_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text))
+    """A source word the verifier's own native rows treat as a number, plus ``.23``.
+
+    The verifier's source side (``_NUM_TOKEN_RE``) misses a leading decimal that its
+    output side reads as a number; including it keeps ``-`` + ``.23`` pairable.
+    """
+    if _NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text):
+        return True
+    return text[:1] == "." and is_numeric_token(text)
 
 
 def _key(tokens) -> tuple[str, ...]:
@@ -156,42 +183,50 @@ class _Anchors:
 
 
 def sign_detached_faults(words: list, blocks, src_rows) -> list[dict]:
+    """A sign cell before a number whose source sign is in contact, bound by row AND column.
+
+    The output row's numeric sequence must equal the x-sorted numeric words of
+    every candidate source line, and the contact must be on the word at the
+    number's own position. If a candidate line (a legitimate placeholder row
+    with identical numbers) lacks that contact, or no line has the same
+    sequence, the gate abstains.
+    """
     pairs = detached_sign_pairs(words)
     if not pairs:
         return []
-    src_counters: dict[int, Counter] = {}
-    for y, ws in src_rows.items():
-        nums = _numeric_words(ws)
-        if nums:
-            src_counters[y] = Counter(_key(w[4] for w in nums))
+    contact_ids = {id(d) for _s, d in pairs}
+    lines = {y: _numeric_words(ws) for y, ws in src_rows.items()}
+    lines = {y: ws for y, ws in lines.items() if ws}
     faults: list[dict] = []
     for block in blocks:
         for cells in block:
-            row_counter = Counter(_key(_row_tokens(cells)))
-            bound = [y for y, c in src_counters.items() if not (row_counter - c)]
+            seq = [_normalize_numeric_token(t) for t in _row_tokens(cells)]
+            if not seq:
+                continue
+            bound = [
+                y for y, ws in lines.items() if [_normalize_numeric_token(w[4]) for w in ws] == seq
+            ]
             if not bound:
-                continue  # no source line carries this row: abstain
+                continue  # no source line carries this row in this order: abstain
             for i in range(len(cells) - 1):
-                tail = cells[i].split()
-                if not tail or tail[-1] not in _SIGN_GLYPHS:
-                    continue
+                if cells[i].rstrip()[-1:] not in _SIGN_GLYPHS:
+                    continue  # bare cell, end of a populated cell, or attached tail
                 m = _LEADING_NUMBER_RE.match(cells[i + 1].strip())
                 if not m:
                     continue
-                num = _normalize_numeric_token(m.group(0))
-                for s, d in pairs:
-                    dm = _LEADING_NUMBER_RE.match(d[4])
-                    if round(d[1]) in bound and dm and _normalize_numeric_token(dm.group(0)) == num:
-                        faults.append(
-                            {
-                                "predicate": SIGN_DETACHED,
-                                "detail": (
-                                    f"cell {i} is a bare sign before {num!r}; the PDF prints "
-                                    "the sign in contact with that number"
-                                ),
-                            }
-                        )
-                        break
+                pos = len(_row_tokens(cells[: i + 1]))
+                if pos >= len(seq) or seq[pos] != _normalize_numeric_token(m.group(0)):
+                    continue
+                if all(id(lines[y][pos]) in contact_ids for y in bound):
+                    faults.append(
+                        {
+                            "predicate": SIGN_DETACHED,
+                            "detail": (
+                                f"cell {i} is a sign before {seq[pos]!r}; the PDF prints "
+                                "the sign in contact with that number"
+                            ),
+                        }
+                    )
     return faults
 
 
@@ -231,42 +266,112 @@ def _lanes(anchor_numeric_words: list) -> list[float]:
 
 
 def _lane_of(x: float, lanes: list[float]) -> int | None:
+    if not lanes:
+        return None
     best = min(range(len(lanes)), key=lambda i: abs(lanes[i] - x))
     return best if abs(lanes[best] - x) <= _snap() else None
 
 
+def _table_geometry(found, src_rows):
+    """``(lanes, core_ys)`` of one block, or None when table membership is unclear.
+
+    Lanes are the x-clusters of numeric words in paired rows that carry >= 2
+    numeric words, kept only when >= 2 paired rows use them. A paired row is
+    CORE when it occupies >= 2 of those lanes. A prose line that paired by one
+    stray number (``p<0.01``) is not core, so a Notes paragraph swallowed into
+    the grid does not stretch the table's span.
+    """
+    multi = [(y, _numeric_words(src_rows[y])) for _i, y in found]
+    multi = [(y, ws) for y, ws in multi if len(ws) >= 2]
+    if len(multi) < 2:
+        return None
+    centres = _lanes([w for _y, ws in multi for w in ws])
+    support: Counter = Counter()
+    for _y, ws in multi:
+        for lane in {_lane_of(w[0], centres) for w in ws} - {None}:
+            support[lane] += 1
+    lanes = [c for i, c in enumerate(centres) if support[i] >= 2]
+    core = [y for y, ws in multi if len({_lane_of(w[0], lanes) for w in ws} - {None}) >= 2]
+    if len(core) < 2:
+        return None
+    return lanes, core
+
+
 def data_row_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict]:
+    """A source row inside the table's own vertical span with no output row left.
+
+    Membership is spatial: strictly between the first and last CORE paired row
+    and in >= 2 of the table's lanes. The grid's numbers are counted, not merely
+    found, so a dropped copy of a repeated row is a fault.
+    """
     faults: list[dict] = []
-    out_pool: Counter = Counter()
+    # Numeric tokens the grid carries and no paired row has claimed. A candidate
+    # source row is present only if ALL its numbers are still available here, and
+    # claiming them uses them up, so a dropped copy of a repeated row is missing
+    # and a row whose numbers sit merged inside another row's cells is present.
+    pool: Counter = Counter()
     for block in blocks:
         for cells in block:
-            k = _key(_row_tokens(cells))
-            if k:
-                out_pool[k] += 1
-    anchor_ys = {y for found in anchors.per_block for _i, y in found}
+            pool.update(_normalize_numeric_token(t) for t in _row_tokens(cells))
     for block, found in zip(blocks, anchors.per_block):
-        if len(found) < 2:
+        for idx, _y in found:
+            pool.subtract(_normalize_numeric_token(t) for t in _row_tokens(block[idx]))
+    anchor_ys = {y for found in anchors.per_block for _i, y in found}
+    geos = [_table_geometry(found, src_rows) for found in anchors.per_block]
+    for geo in geos:
+        if geo is None:
             continue  # table membership not established: abstain
-        anchor_words = [w for _i, y in found for w in _numeric_words(src_rows[y])]
-        lanes = _lanes(anchor_words)
-        widths = Counter(len(_numeric_words(src_rows[y])) for _i, y in found)
-        modal = widths.most_common(1)[0][0]
-        y_lo = min(y for _i, y in found)
-        y_hi = max(y for _i, y in found)
-        header_tokens = Counter(_key(_row_tokens(block[0])))
+        lanes, core = geo
+        y_lo, y_hi = min(core), max(core)
+        modal = Counter(len(_numeric_words(src_rows[y])) for y in core).most_common(1)[0][0]
+        strong_k = max(modal, _MIN_LANES_PER_ROW)
+
+        def lane_hits(y: int) -> list:
+            return [w for w in _numeric_words(src_rows[y]) if _lane_of(w[0], lanes) is not None]
+
+        def lane_count(y: int) -> int:
+            return len({_lane_of(w[0], lanes) for w in lane_hits(y)})
+
+        # A dropped first/last data row or a dropped panel is bracketed by no paired
+        # row, so the span must reach past the first/last core row. How far is
+        # bounded by the table's own row pitch (_PANEL_GAP_ROWS pitches, one label
+        # or blank row) or by the gap between its own blocks.
+        ys_sorted = sorted(core)
+        pitch = statistics.median([b - a for a, b in zip(ys_sorted, ys_sorted[1:])] or [0])
+        # Blocks of the same table (same lane count) show how far apart its own
+        # blocks sit; that gap is allowed too.
+        peers = sorted(y for g in geos if g is not None and len(g[0]) == len(lanes) for y in g[1])
+        own_gap = max([b - a for a, b in zip(peers, peers[1:])] or [0])
+        reach = max(_PANEL_GAP_ROWS * pitch, _SPLIT_GAP_MIN_PT, own_gap)
+        # Walk outward through the page's rows, stopping at the first vertical gap
+        # wider than ``reach``; every FULL-WIDTH row met (as many lanes as the
+        # table's own modal row) extends the span. A row beyond a wider gap is a
+        # different block.
+        prev = y_lo
+        for y in sorted((y for y in src_rows if y < y_lo), reverse=True):
+            if prev - y > reach:
+                break
+            prev = y
+            if lane_count(y) >= strong_k:
+                y_lo = y
+        prev = y_hi
+        for y in sorted(y for y in src_rows if y > y_hi):
+            if y - prev > reach:
+                break
+            prev = y
+            if lane_count(y) >= strong_k:
+                y_hi = y
         for y, ws in sorted(src_rows.items()):
-            if y in anchor_ys:
+            if y in anchor_ys or not (y_lo <= y <= y_hi):
                 continue
-            in_lane = [w for w in _numeric_words(ws) if _lane_of(w[0], lanes) is not None]
-            k = len({_lane_of(w[0], lanes) for w in in_lane})
-            member = (k >= 2 and y_lo < y < y_hi) or k >= max(modal, _MIN_LANES_PER_ROW)
-            if not member:
+            in_lane = lane_hits(y)
+            k = lane_count(y)
+            if k < 2:
                 continue
-            row_key = _key(w[4] for w in in_lane)
-            if out_pool.get(row_key):
+            need = Counter(_normalize_numeric_token(w[4]) for w in in_lane)
+            if all(pool[t] >= n for t, n in need.items()):
+                pool.subtract(need)
                 continue
-            if not (Counter(row_key) - header_tokens):
-                continue  # absorbed into the column header
             faults.append(
                 {
                     "predicate": DATA_ROW_MISSING,
@@ -279,39 +384,112 @@ def data_row_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict]:
     return faults
 
 
+def _prose_like(inside: list, lanes: list[float]) -> bool:
+    """A line that runs the whole numeric lane extent with more words than lanes.
+
+    A label or panel heading is short or sits in the label column; a Notes or
+    caption line is left-aligned prose whose words cross every lane. Derived
+    from this table's own lanes, no fixed width.
+    """
+    return len(inside) > len(lanes) and inside[0][0] <= min(lanes) and inside[-1][2] >= max(lanes)
+
+
+class _CellText:
+    """Per-cell normalised text of one output block, with occurrence counting."""
+
+    def __init__(self, block) -> None:
+        self.original = [_compact(c) for cells in block for c in cells if c]
+        self.avail = list(self.original)
+
+    def take(self, text: str) -> bool | None:
+        """Consume one occurrence of *text* from a single cell.
+
+        True: consumed. False: the grid has it but every occurrence is used up.
+        None: no single cell contains it as a whole.
+        """
+        for i, cell in enumerate(self.avail):
+            j = cell.find(text)
+            if j >= 0:
+                self.avail[i] = cell[:j] + _USED + cell[j + len(text) :]
+                return True
+        return False if any(text in cell for cell in self.original) else None
+
+    def has_word(self, word: str) -> bool:
+        w = _compact(word)
+        return any(w in cell for cell in self.original)
+
+
 def label_row_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict]:
     faults: list[dict] = []
     for block, found in zip(blocks, anchors.per_block):
-        if len(found) < 2:
+        geo = _table_geometry(found, src_rows)
+        if geo is None:
             continue
+        lanes, core = geo
         out_tokens = {tok for cells in block for cell in cells for tok in cell.split()}
-        # NFKC folds typographic ligatures (U+FB00 "ff") so the PDF's "Staff"
-        # and the grid's "Staff" are the same word.
-        compact = _compact("".join(c for cells in block for c in cells))
-        anchor_ys = {y for _i, y in found}
-        # The table's x-extent is the bounding box of the anchored rows' words
-        # that the shipped grid carries. Words of another text column that
-        # share a y-row never appear in the grid, so they do not widen it.
-        carried = [w for y in anchor_ys for w in src_rows[y] if w[4] in out_tokens]
+        carried = [w for y in core for w in src_rows[y] if w[4] in out_tokens]
         if not carried:
             continue
+        # The table's x-extent is the bounding box of the core rows' words
+        # that the shipped grid carries. Words of another text column that
+        # share a y-row never appear in the grid, so they do not widen it.
         x_lo = min(w[0] for w in carried)
         x_hi = max(w[2] for w in carried)
-        y_lo, y_hi = min(anchor_ys), max(anchor_ys)
+        y_lo, y_hi = min(core), max(core)
+        anchor_ys = {y for _i, y in found}
+        label_rows: list[tuple[int, list]] = []
         for y, ws in sorted(src_rows.items()):
             if not (y_lo < y < y_hi) or y in anchor_ys:
                 continue
             inside = [w for w in ws if w[0] >= x_lo and w[2] <= x_hi]
             if not inside or any(_is_num(w[4]) for w in inside):
                 continue
-            absent = [w[4] for w in inside if _compact(w[4]) not in compact]
-            if absent:
+            if _NOTE_OPENER_RE.match(inside[0][4]):
+                break  # a Notes/Source paragraph: nothing below it is a table label
+            if _prose_like(inside, lanes):
+                continue
+            label_rows.append((y, inside))
+        text = _CellText(block)
+        carry_ok = False  # the previous row ended in a hyphen whose joined word is present
+        for n, (y, inside) in enumerate(label_rows):
+            toks = [w[4] for w in inside]
+            if carry_ok:
+                # Its first word is the tail of the previous row's hyphenated word,
+                # already matched as the joined word.
+                toks = toks[1:]
+                carry_ok = False
+                if not toks:
+                    continue
+            nxt = label_rows[n + 1][1] if n + 1 < len(label_rows) else None
+            joined = None
+            variants = [toks]
+            if nxt and len(toks[-1]) > 1 and toks[-1].endswith("-"):
+                # A hyphenated line break ("Evalu-" / "ation"): also accept the joined word.
+                joined = toks[-1][:-1] + nxt[0][4]
+                variants.append(toks[:-1] + [joined])
+            carry_ok = joined is not None and text.has_word(joined)
+            missing: list[str] | None = None
+            for variant in variants:
+                got = text.take(_compact("".join(variant)))
+                if got:
+                    missing = []
+                    break
+                if got is False:
+                    missing = variant  # a repeated label with no occurrence left
+            if missing is None:
+                # Not a whole-row match in any one cell: fall back to word presence.
+                missing = [
+                    t
+                    for k, t in enumerate(toks)
+                    if not text.has_word(t) and not (k == len(toks) - 1 and carry_ok)
+                ]
+            if missing:
                 faults.append(
                     {
                         "predicate": LABEL_ROW_MISSING,
                         "detail": (
                             f"source label row at y={y} inside the table has word(s) "
-                            f"missing from the grid: {', '.join(absent[:6])}"
+                            f"missing from the grid: {', '.join(missing[:6])}"
                         ),
                     }
                 )
