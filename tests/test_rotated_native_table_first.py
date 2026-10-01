@@ -23,11 +23,14 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import PageDecision, ProviderAttempt
 from socr.tables.native_first import (
+    DEFER,
     REFUSE,
+    ROTATED_SHIP_QUARANTINED,
     SHIP,
     RotatedNativeTableAttempt,
     NativeTablePlan,
     attempt_rotated_native_table,
+    plan_native_table,
 )
 
 
@@ -134,8 +137,20 @@ class TestAttemptRotatedNativeTable:
         attempt = attempt_rotated_native_table(doc[0])
         doc.close()
         assert attempt is not None
-        assert attempt.plan.action == SHIP
+        # GH-917: the grid is still built, but the SHIP is quarantined.
+        assert attempt.plan.action == DEFER
+        assert attempt.plan.reason == ROTATED_SHIP_QUARANTINED
         assert "0.253" in attempt.markdown
+        # Difference pin: the planner itself still says SHIP on the same inputs,
+        # so the quarantine is the only thing that changed the action.
+        raw = plan_native_table(
+            attempt.words,
+            attempt.markdown,
+            structure_defective=attempt.structure_defective,
+            header_unattributed=attempt.header_unattributed,
+            orphan_words=list(attempt.orphan_words),
+        )
+        assert raw.action == SHIP
 
     @pytest.mark.skipif(
         not Path(
@@ -158,39 +173,54 @@ class TestAttemptRotatedNativeTable:
 
 
 class TestAgenticRotatedNativeTableFirst:
-    def test_upright_exact_pass_skips_route_page(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
+    def test_rotated_exact_pass_is_quarantined_not_shipped(
+        self, tmp_path: Path, providers: list
+    ) -> None:
+        """GH-917: a rotated exact-pass must not ship as native SUCCESS."""
         pdf_path = tmp_path / "rotated.pdf"
         _rotated_dense_forecast_pdf(pdf_path)
         pipeline = UnifiedPipeline(_config())
         route_calls: list[int] = []
 
-        def _route(*_args, **_kwargs):
-            route_calls.append(1)
-            raise AssertionError("whole-page route_page must not run after upright exact pass")
+        def _route(page_num, ladder, run_provider, judge, **kwargs):
+            route_calls.append(page_num)
+            out = PageOutput(
+                page_num=page_num,
+                text="model table",
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+                audit_passed=True,
+            )
+            prof = ladder[0]
+            att = ProviderAttempt(
+                engine=prof.engine,
+                output=out,
+                cost_usd=0.0,
+                accepted=True,
+                reason="test",
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
+            )
+            return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
 
         with (
             patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
-            patch.object(
-                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
-            ),
+            patch.object(pipeline, "_available_engines_for_agentic", return_value=providers),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
         ):
-            result = pipeline.process(pdf_path, tmp_path / "out")
-        assert route_calls == []
-        assert result.status == DocumentStatus.SUCCESS
-        body = result.markdown or ""
-        assert "0.253" in body
-        assert "Table 1." in body
-        assert "GDP growth forecasts across baseline and shock scenarios." in body or (
-            "Table 1. GD" in body
-        )
-        assert "Forecasts are annualized percent changes." in body
+            pipeline.process(pdf_path, tmp_path / "out")
+        # With a provider the page reaches route_page; without one the ladder is
+        # empty and nothing routes. Neither state may ship the native grid.
+        assert route_calls == ([1] if providers else [])
         sidecar = json.loads(
             next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
         )
         kinds = [ev["kind"] for ev in sidecar["audit_events"]]
         assert "landscape_page_refused" in kinds
-        assert "native_table_exact_pass" in kinds
+        assert "rotated_native_table_quarantined" in kinds
+        assert "native_table_exact_pass" not in kinds
 
     def test_upright_failed_check_calls_route_page(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated.pdf"
@@ -388,7 +418,8 @@ class TestRotationSign:
 
         assert attempt is not None
         assert attempt.markdown == upright_md
-        assert attempt.plan.action == SHIP
+        assert attempt.plan.action == DEFER
+        assert attempt.plan.reason == ROTATED_SHIP_QUARANTINED
         assert _first_column(attempt.markdown) == _LABEL_ORDER
 
     def test_the_witness_words_read_in_the_upright_twins_order(

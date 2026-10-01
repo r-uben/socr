@@ -10087,6 +10087,7 @@ class UnifiedPipeline:
         from socr.tables.native_first import (
             DEFER,
             REFUSE,
+            ROTATED_SHIP_QUARANTINED,
             NativeTableFirstWork,
             NativeTablePlan,
             attempt_rotated_native_table,
@@ -10119,6 +10120,29 @@ class UnifiedPipeline:
                     exc,
                 )
                 return None
+            if (
+                attempt is not None
+                and attempt.plan.action == DEFER
+                and attempt.plan.reason == ROTATED_SHIP_QUARANTINED
+            ):
+                from socr.core.audit_log import AuditEvent
+
+                logger.warning(
+                    "rotated native grid exact-passed but was quarantined (GH-917) on p%d; "
+                    "page stays on route_page",
+                    page_num,
+                )
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="rotated_native_table_quarantined",
+                        engine="native",
+                        detail=(
+                            "rotated native grid exact-passed but was quarantined "
+                            "(GH-917, GH-916); page routed to OCR"
+                        ),
+                    )
+                )
             if attempt is None or attempt.plan.action != SHIP:
                 # REFUSE, DEFER, CELLS, or no grid: keep the page on
                 # ``route_page``. CELLS is excluded until crops and the
