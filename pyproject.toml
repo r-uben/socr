@@ -87,6 +87,7 @@ socr-regenerate-p6-prechange = "socr.devtools.regenerate_p6_prechange:main"
 socr-replay-binding = "socr.benchmark.replay_binding:main"
 socr-measure-chart-bins = "socr.figures.measure_chart_bins:main"
 socr-score-sep-ground-truth = "socr.figures.score_sep_ground_truth:main"
+socr-measure-ship-gate-gaps = "socr.benchmark.ship_gate_gaps:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

@@ -211,3 +211,30 @@ def test_the_table_builder_actually_calls_the_repair():
     assert f" {MINUS} |" not in markdown and f"{MINUS} |" not in markdown, (
         "no cell may end in the stranded sign"
     )
+
+
+# GH-916: ``starts_a_number`` widened the shared merge to a leading decimal.
+
+
+def test_a_sign_touching_a_leading_decimal_is_moved_back():
+    words = [_word(60, 90, "0.5"), _word(140, 146, MINUS), _word(146, 170, ".23")]
+    grid = [["0.5 " + MINUS, ".23"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == [["0.5", MINUS + ".23"]]
+
+
+def test_a_leading_decimal_without_contact_is_left_alone():
+    words = [_word(60, 90, "0.5"), _word(120, 126, MINUS), _word(160, 180, ".23")]
+    grid = [["0.5 " + MINUS, ".23"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == grid
+
+
+def test_a_tail_sign_with_a_gap_before_it_is_moved_back():
+    words = [_word(60, 90, "label"), _word(140, 146, MINUS), _word(146, 170, ".23")]
+    grid = [["label" + MINUS, ".23"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == [["label", MINUS + ".23"]]
+
+
+def test_a_tail_sign_flush_against_its_label_is_a_hyphen_not_a_minus():
+    words = [_word(60, 140, "label"), _word(140, 146, MINUS), _word(146, 170, ".23")]
+    grid = [["label" + MINUS, ".23"]]
+    assert _reattach_detached_signs(grid, _TABLE, words) == grid

@@ -2794,6 +2794,12 @@ class UnifiedPipeline:
             # of the run that noticed it; without this the sidecar keeps the
             # record and a resumed run's ``audit_log.json`` / CLI line lose it.
             | {"rotated_native_table_quarantined"}
+            # GH-916: emitted by ``_plan_native_table_first`` (upright and
+            # rotated branches), which runs only over ``ocr_pages`` after
+            # resumed pages are removed, so nothing re-emits it on resume. The
+            # fault is a standing property of the page's native grid; without
+            # this the replacement's provenance loses why native was rejected.
+            | {"native_ship_gate_deferred"}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -10084,6 +10090,33 @@ class UnifiedPipeline:
         pa = self._assessment_for_page(page_num)
         return bool(pa and getattr(pa, "native_table_lane_refused", False))
 
+    @staticmethod
+    def _record_native_ship_gate(state: DocumentState, page_num: int, plan) -> None:
+        """GH-916: record why a grid that exact-passed was deferred, if the gate said so."""
+        faults = tuple(getattr(plan, "faults", ()) or ())
+        if not faults:
+            return
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.ship_gate import SHIP_GATE_KIND
+
+        names = sorted({str(f.get("predicate", "")) for f in faults})
+        logger.warning(
+            "native table ship gate deferred p%d (%s); page stays on route_page", page_num, names
+        )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=SHIP_GATE_KIND,
+                engine="native",
+                detail=(
+                    "native grid exact-passed the verifier but the ship gate (GH-916) "
+                    f"found {', '.join(names)}; deferred to normal routing. "
+                    + "; ".join(str(f.get("detail", "")) for f in faults[:3])
+                ),
+                data={"predicates": names, "faults": [dict(f) for f in faults]},
+            )
+        )
+
     def _plan_native_table_first(self, state: DocumentState, page_num: int, ps: PageState):
         """The native-grid plan for one OCR page, or None when the lane defers.
 
@@ -10151,6 +10184,8 @@ class UnifiedPipeline:
                         ),
                     )
                 )
+            if attempt is not None:
+                self._record_native_ship_gate(state, page_num, attempt.plan)
             if attempt is None or attempt.plan.action != SHIP:
                 # REFUSE, DEFER, CELLS, or no grid: keep the page on
                 # ``route_page``. CELLS is excluded until crops and the
@@ -10200,6 +10235,7 @@ class UnifiedPipeline:
             unverifiable=bool(ps.native_table_unverifiable),
             orphan_words=orphans,
         )
+        self._record_native_ship_gate(state, page_num, plan)
         if plan.action == DEFER:
             return None
         return NativeTableFirstWork(plan)
