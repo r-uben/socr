@@ -2786,6 +2786,14 @@ class UnifiedPipeline:
                 "native_unrecovered_symbol_glyphs",
                 "possible_table_structure_not_reconstructed",
             }
+            # GH-917: emitted by ``_plan_native_table_first``, which runs only
+            # over ``ocr_pages`` AFTER resumed pages are removed from it (see
+            # ``ocr_pages = [p for p in ocr_pages if p not in resumed_pages]``),
+            # so nothing re-emits it for a page skipped as terminal. The
+            # quarantine is a standing property of the page's source grid, not
+            # of the run that noticed it; without this the sidecar keeps the
+            # record and a resumed run's ``audit_log.json`` / CLI line lose it.
+            | {"rotated_native_table_quarantined"}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -10139,7 +10147,7 @@ class UnifiedPipeline:
                         engine="native",
                         detail=(
                             "rotated native grid exact-passed but was quarantined "
-                            "(GH-917, GH-916); page routed to OCR"
+                            "(GH-917, GH-916); deferred to normal routing"
                         ),
                     )
                 )

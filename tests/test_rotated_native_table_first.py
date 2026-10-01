@@ -173,54 +173,106 @@ class TestAttemptRotatedNativeTable:
 
 
 class TestAgenticRotatedNativeTableFirst:
-    @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
-    def test_rotated_exact_pass_is_quarantined_not_shipped(
-        self, tmp_path: Path, providers: list
-    ) -> None:
-        """GH-917: a rotated exact-pass must not ship as native SUCCESS."""
+    @staticmethod
+    def _routed_decision(page_num, ladder):
+        out = PageOutput(
+            page_num=page_num,
+            text="model table",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        prof = ladder[0]
+        att = ProviderAttempt(
+            engine=prof.engine,
+            output=out,
+            cost_usd=0.0,
+            accepted=True,
+            reason="test",
+            provider_id=prof.id,
+            model=prof.model,
+            backend=prof.backend,
+        )
+        return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
+
+    def _run(self, tmp_path: Path, providers: list, *, quarantine: bool):
+        """One process() run; ``quarantine=False`` restores the pre-#917 SHIP."""
+        import dataclasses
+
         pdf_path = tmp_path / "rotated.pdf"
-        _rotated_dense_forecast_pdf(pdf_path)
+        if not pdf_path.exists():
+            _rotated_dense_forecast_pdf(pdf_path)
+        out_dir = tmp_path / ("out_q" if quarantine else "out_noq")
         pipeline = UnifiedPipeline(_config())
         route_calls: list[int] = []
 
         def _route(page_num, ladder, run_provider, judge, **kwargs):
             route_calls.append(page_num)
-            out = PageOutput(
-                page_num=page_num,
-                text="model table",
-                status=PageStatus.SUCCESS,
-                engine="qwen",
-                audit_passed=True,
+            return self._routed_decision(page_num, ladder)
+
+        def _unquarantined(page):
+            attempt = attempt_rotated_native_table(page)
+            raw = plan_native_table(
+                attempt.words,
+                attempt.markdown,
+                structure_defective=attempt.structure_defective,
+                header_unattributed=attempt.header_unattributed,
+                orphan_words=list(attempt.orphan_words),
             )
-            prof = ladder[0]
-            att = ProviderAttempt(
-                engine=prof.engine,
-                output=out,
-                cost_usd=0.0,
-                accepted=True,
-                reason="test",
-                provider_id=prof.id,
-                model=prof.model,
-                backend=prof.backend,
-            )
-            return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
+            return dataclasses.replace(attempt, plan=raw)
 
         with (
             patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
             patch.object(pipeline, "_available_engines_for_agentic", return_value=providers),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
         ):
-            pipeline.process(pdf_path, tmp_path / "out")
-        # With a provider the page reaches route_page; without one the ladder is
-        # empty and nothing routes. Neither state may ship the native grid.
-        assert route_calls == ([1] if providers else [])
-        sidecar = json.loads(
-            next((tmp_path / "out").rglob("pages/00001.json")).read_text(encoding="utf-8")
+            if quarantine:
+                result = pipeline.process(pdf_path, out_dir)
+            else:
+                with patch(
+                    "socr.tables.native_first.attempt_rotated_native_table",
+                    side_effect=_unquarantined,
+                ):
+                    result = pipeline.process(pdf_path, out_dir)
+        sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text(encoding="utf-8"))
+        return result, sidecar, route_calls
+
+    @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "none"])
+    def test_rotated_exact_pass_is_quarantined_not_shipped(
+        self, tmp_path: Path, providers: list
+    ) -> None:
+        """GH-917: a rotated exact-pass must not ship as native SUCCESS.
+
+        Difference pin: the same page run twice in this process, changing only
+        whether the quarantine is in effect.
+        """
+        q_result, q_side, q_routes = self._run(tmp_path, providers, quarantine=True)
+        u_result, u_side, u_routes = self._run(tmp_path, providers, quarantine=False)
+
+        q_kinds = [ev["kind"] for ev in q_side["audit_events"]]
+        u_kinds = [ev["kind"] for ev in u_side["audit_events"]]
+        # Quarantine on: no exact-pass claim, the quarantine is recorded once.
+        assert "landscape_page_refused" in q_kinds
+        assert q_kinds.count("rotated_native_table_quarantined") == 1
+        assert "native_table_exact_pass" not in q_kinds
+        # Quarantine off: the old behaviour, so the pin is not vacuous.
+        assert "native_table_exact_pass" in u_kinds
+        assert "rotated_native_table_quarantined" not in u_kinds
+        assert u_routes == []
+        # The page no longer takes the native-grid outcome.
+        assert q_result.markdown != u_result.markdown
+        assert q_side.get("engine") != u_side.get("engine") or (
+            q_side.get("status") != u_side.get("status")
         )
-        kinds = [ev["kind"] for ev in sidecar["audit_events"]]
-        assert "landscape_page_refused" in kinds
-        assert "rotated_native_table_quarantined" in kinds
-        assert "native_table_exact_pass" not in kinds
+        if providers:
+            # With a provider the quarantined page reaches route_page and the
+            # routed output is what ships.
+            assert q_routes == [1]
+            assert "model table" in (q_result.markdown or "")
+        else:
+            # Empty ladder: nothing routes, and the native grid still must not
+            # ship as an exact-pass SUCCESS.
+            assert q_routes == []
 
     def test_upright_failed_check_calls_route_page(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated.pdf"
@@ -473,3 +525,42 @@ class TestRotationSign:
         for x0, y0, x1, y1, *_ in cells:
             assert rect.x0 - 1 <= x0 and x1 <= rect.x1 + 1
             assert rect.y0 - 1 <= y0 and y1 <= rect.y1 + 1
+
+
+class TestQuarantineEventSurvivesResume:
+    """GH-917: the quarantine record must replay exactly once on resume."""
+
+    def _emit_flush_restore(self, tmp_path: Path):
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+
+        pdf = tmp_path / "rotated.pdf"
+        _rotated_dense_forecast_pdf(pdf)
+        out_dir = tmp_path / "out"
+        pipeline = UnifiedPipeline(_config())
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        pipeline._phase_analyze(state)
+        # Real emit site; run 1 only (a resumed page is dropped from ocr_pages
+        # before planning, so nothing re-emits it).
+        assert pipeline._plan_native_table_first(state, 1, state.pages[1]) is None
+        assert pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True) is not None
+        resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        resumed.pages[1] = state.pages[1]
+        restored = PageOutput(
+            page_num=1,
+            text="model table",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        pipeline._restore_terminal_page_state(resumed, 1, restored, out_dir)
+        return state, resumed
+
+    def test_quarantine_event_replays_exactly_once(self, tmp_path: Path) -> None:
+        kind = "rotated_native_table_quarantined"
+        state, resumed = self._emit_flush_restore(tmp_path)
+        assert [e.kind for e in state.events].count(kind) == 1
+        assert [e.kind for e in resumed.events].count(kind) == 1
+
+    def test_kind_is_in_the_resume_allowlist(self) -> None:
+        assert "rotated_native_table_quarantined" in UnifiedPipeline.resume_restore_kinds()

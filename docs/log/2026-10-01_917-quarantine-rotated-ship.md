@@ -42,3 +42,18 @@ OLLAMA_HOST): 5917 passed, 2 skipped, 4 xfailed. `uvx ruff@0.16.0 format --check
 ## Follow-up
 #916 (order-aware verifier) and #917's own questions (running-head exclusion, label+year
 cells) are the real fix; lift the quarantine only after the 35-page set re-measures clean.
+
+## Round 2 (PR #918 review, 3 cubic findings)
+1. Resume: `rotated_native_table_quarantined` added to `resume_restore_kinds()`.
+   `_plan_native_table_first` only runs over `ocr_pages` after resumed pages are removed,
+   so nothing re-emits it on resume (no double count). New test drives the real emit,
+   `_flush_page_sidecar`, `_restore_terminal_page_state` and pins the count (1 emitted,
+   1 restored). Mutation (allowlist entry removed, canary + uncapped anchor count):
+   both new resume tests fail; 13 others pass.
+2. `test_rotated_exact_pass_is_quarantined_not_shipped` now keeps the result and pins a
+   difference: the same page run with and without the quarantine (pre-#917 SHIP restored
+   via a wrapper), in both provider states. Exact-pass event only without the quarantine,
+   markdown and engine/status differ, routed output ships with a provider. No absolute
+   no-provider outcome is pinned.
+3. Event detail reworded: "deferred to normal routing" (was "page routed to OCR", false
+   with an empty ladder).
