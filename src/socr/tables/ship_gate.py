@@ -1021,6 +1021,13 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
       So a footnote or "(Continued)" under the data, or a sub-header floating over numeric
       columns between data rows, defers.
 
+    GH-932: each block is judged under two rules and the faults are UNIONED (by row), so the
+    predicate can only add DEFERs relative to either rule. The first is the rule above. The
+    second (``panels=True``) counts a column as numeric against only the data rows that fill
+    it, and admits rows that share another data row's numeric support; it catches disjoint
+    panels (panel A in some columns, panel B in others), where the first rule finds no
+    majority and abstains.
+
     Limit (measured, ``docs/log/2026-10-01_917-text-in-numeric-column.md``): text emitted
     ABOVE the first data row (a caption or equation fragments between the title and the
     column headings) is indistinguishable from a column heading by the grid alone, so it is
