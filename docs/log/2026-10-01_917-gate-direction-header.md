@@ -178,3 +178,103 @@ about 70 min wall clock). `uvx ruff@0.16.0 format --check .` clean.
 - The #918 quarantine is NOT lifted. With this PR 14 of 14 audited wrong rotated pages defer; the lift
   protocol (all 449 rotated pages re-run, vision audit of every SHIP) is the separate PR B.
 - No STATUS.md / TICKETS.md entry: this is an issue-driven PR, not a plan-folder ticket.
+
+## Round 2 (PR #926, Astra REJECT)
+
+### 1. Blocker: the cell-repair path turned a gate DEFER into a REFUSE
+
+`_repair_native_table_cells` re-plans the repaired grid with `plan_native_table`. It returned `None` for any
+non-SHIP re-plan, so a DEFER (a gate fault, a P7 plumbing fault, any DEFER) lost its faults and the caller fell
+through to `_refuse_native_table_first`: `native_table_structure_failed` / `native_table_unverifiable` set, the stale
+cell-mismatch reason kept. The gate stopped being DEFER-only on that path, and the real reason was silent.
+
+Fix: `_repair_native_table_cells` returns `(markdown, replan)` and keeps the re-plan. The repair now runs in the
+`_phase_agentic` page loop (before the lane chain, for exactly the pages that would reach
+`_apply_native_table_first`), so a DEFER can still reach `route_page`: the faults are recorded with
+`_record_native_ship_gate` (same `native_ship_gate_deferred` event as the other sites), the page's plan is dropped
+so it takes the whole-page route, and with no provider it gets the same native-text fallback an upright DEFER gets at
+plan time. Only a non-DEFER failure (the transcription did not confirm, the splice failed, REFUSE/CELLS on re-plan, or an
+unreadable text layer) still refuses, as before. `_apply_native_table_first` takes the already-resolved
+`cell_repair`.
+
+Tests (`TestCellRepairKeepsTheGateDeferOnly`, through `process()`, parametrised over provider / no provider, a
+CELLS page whose first cell the grid got wrong and a repair that confirms it): the re-plan sees extraction failed,
+empty map, missing keys (the three plumbing modes) and a foreign stamp (a real post-repair gate fault). For each: the repair
+ran, exactly one gate event with the expected predicate, no `native_table_cell_unresolved`, no
+`native_table_cell_repaired`, no refuse state, the page is routed once with a provider. Difference pins: the same page with
+a clean repair SHIPs (no route, `native_table_cell_repaired`, no gate event), and a repair-time deferral matches a plan-time
+deferral of the same stamped page (routes, status, refuse flags).
+Mutants killed: faults not recorded, DEFER turned back into a refuse, re-plan discarded, re-plan run without directions.
+
+### 2. `line_dirs` is required
+
+`plan_native_table(..., *, line_dirs)` and `native_ship_gate(words, markdown, *, line_dirs)` have no default. `None` is
+now a `direction_unavailable` DEFER, not a skip. The only way to skip P7 is `LineDirections.unchecked_for_tests()`
+(grep-able; `unchecked=True`), used by the existing tests that do not exercise P7 (`UNCHECKED` in the gh916, native-table
+and rotated test files). Tests: omitting the keyword is a `TypeError`; `None` DEFERs; the sentinel skips even with a foreign
+word present. Mutants killed: `None` skips again; the sentinel ignored.
+
+### 3. P7 tolerance: measured, not derived from width
+
+The old tolerance `atan2(snap, max(extent, snap))` reached up to 45 degrees on narrow tables, and lane displacement is
+not evidence of provenance. Replaced by `_SAME_TEXT_DIRECTION_TOL_RAD = 1e-5`.
+
+Measurement (`jitter917.py` in the session scratchpad): for each of the 160 table blocks with a table geometry on the 35
+rotated + 92 upright pages (124 pages; 3 pages have none), the maximum pairwise angle among the distinct direction vectors of the lines
+that carry the block's CORE-row words (14913 line keys):
+
+| max pairwise deviation within a block's core lines | blocks |
+|---|---|
+| exactly 0 (one direction vector) | 159 |
+| > 0 up to 1e-3 rad | 0 |
+| > 0.2 rad | 1 (Martens p41, 90 degrees: a genuine running head on a core row's y-band, i.e. foreign text, not same-table jitter) |
+
+So the observed same-table deviation is 0; the tolerance is a float-noise floor. PyMuPDF `dir` comes from float32-precision
+text matrices (about 1.2e-7); 1e-5 rad (0.0006 degrees) is about 100x that and about 17x below the smallest deliberate rotation
+the tests treat as foreign (0.01 degrees = 1.7e-4 rad). Width plays no part. Tests: jitter up to ~1e-5 rad does not fire; 0.01,
+0.5, 4, 10, 45, 90, 180 degrees fire; a narrow table (extent below the width at which the old formula tolerated 10 degrees) fires on a
+10 and a 90 degree foreign line. Mutants killed: tolerance 0, 1.6 rad, 0.2 rad, width-derived again.
+
+### 4. Header-band known limitations (not expanded; for #925's scope note)
+
+`header_band_missing` is a net, and these are false negatives relative to an ideal check, not regressions versus main:
+- Whole-word containment inside the data-derived x-range: a header wider than the carried words' bounding box (an edge header
+  that overhangs the first or last data column) is outside `inside` and is not seen.
+- Numeric headers (years, `(1)`, `(2)` column numbers): a row with any numeral is excluded by design, so a numbered header band
+  is never flagged.
+- Labels repeated elsewhere: `has_word` is substring presence per block, so a header word that also occurs in any cell of the grid
+  counts as present even when the header row itself was dropped.
+- Multiword headers that share a lane: two words over one lane fail the one-per-lane rule, so a header whose label is split across
+  words on one lane is not flagged.
+#925 (the rowizer absorbing the band) should cover these; the gate predicate stays the safety net, with these gaps.
+
+### Re-measurement
+
+Same loader and sets as round 1, after all round-2 changes (required `line_dirs`, measured tolerance, repair routing).
+No page flips on either set (0 of 35 rotated, 0 of 92 upright), so the round-1 tables stand:
+
+| set | measure | round 1 | round 2 |
+|---|---|---|---|
+| rotated (35) | wrong stopped | 14 / 14 | **14 / 14** |
+| | others stopped | 8 / 21 | 8 / 21 |
+| | `foreign_direction` / `header_band_missing` pages | 4 / 1 | 4 / 1 |
+| upright SHIP (92) | pages firing (any) | 40 | 40 |
+| | `foreign_direction` / `header_band_missing` | 2 / 17 | 2 / 17 |
+| | new fires versus #920's 25 | 15 | 15 (same pages) |
+| both | pages with a `direction_unavailable` fault | 0 | 0 |
+
+The measured tolerance (1e-5 rad) changes no verdict because same-table deviation on the corpus is exactly 0 and every
+foreign line is far above it (the smallest foreign angle on a firing page is tens of degrees).
+
+### Mutation
+
+31 of 31 killed against `tests/test_gh917_gate_direction_header.py` (canary on `socr.__file__`, uncapped `count == 1`). New or changed
+this round: repair drops the faults (10 failing tests), DEFER turned back into a refuse (10), re-plan discarded (10), re-plan run
+with the unchecked sentinel (10), `None` skips P7 (1), sentinel ignored (1), tolerance 0 (3), 1.6 rad (15), 0.2 rad (3),
+width-derived again (2), `plan_native_table` forwarding the sentinel (30). The round-1 set still dies (the plumbing-site mutants
+now surface as `TypeError`s or the same pins).
+
+### Results
+
+Full suite, default OLLAMA_HOST, detached to a log: 6031 passed, 2 skipped, 4 xfailed, 0 failed (578 s).
+`uvx ruff@0.16.0 format --check .` clean.

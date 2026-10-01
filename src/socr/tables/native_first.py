@@ -264,13 +264,14 @@ def plan_native_table(
     header_unattributed: bool = False,
     unverifiable: bool = False,
     orphan_words: list[str] | None = None,
-    line_dirs=None,
+    line_dirs,
 ) -> NativeTablePlan:
     """Decide whether *markdown* may ship, needs cell reads, or must be refused.
 
-    ``line_dirs`` (GH-917, a ``ship_gate.LineDirections``) enables the gate's
-    foreign-direction check. ``None`` means "not supplied" and is for unit tests;
-    every production caller passes ``line_directions_for_page(page)``.
+    ``line_dirs`` (GH-917, a ``ship_gate.LineDirections``) is REQUIRED: it feeds the
+    gate's foreign-direction check, and every production caller passes
+    ``line_directions_for_page(page)``. Tests that do not exercise it pass
+    ``LineDirections.unchecked_for_tests()``.
 
     ``words`` is a PyMuPDF ``get_text("words")`` list for the same page.
     Blocking flags are the detector's existing structure verdicts, passed in
@@ -293,7 +294,7 @@ def plan_native_table(
         # GH-916: EXACT_PASS pairs rows by numeric multiset and ignores sign
         # glyphs, so it cannot see a detached sign, a dropped row, or reversed
         # order. Defer (never refuse): a refuse would skip the model attempt.
-        faults = native_ship_gate(words or [], markdown or "", line_dirs)
+        faults = native_ship_gate(words or [], markdown or "", line_dirs=line_dirs)
         if faults:
             names = ",".join(sorted({f["predicate"] for f in faults}))
             return NativeTablePlan(

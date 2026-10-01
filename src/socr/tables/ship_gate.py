@@ -601,6 +601,14 @@ class LineDirections:
 
     dirs: dict = field(default_factory=dict)
     fault: str = ""
+    #: True only for ``unchecked_for_tests()``: the gate skips P7. Production code
+    #: never constructs it; ``grep unchecked_for_tests`` finds every use.
+    unchecked: bool = False
+
+    @classmethod
+    def unchecked_for_tests(cls) -> "LineDirections":
+        """A grep-able sentinel for tests that do not exercise P7. Never use in src."""
+        return cls(unchecked=True)
 
 
 def line_directions_for_page(page) -> LineDirections:
@@ -649,16 +657,18 @@ def _angle_between(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.atan2(abs(a[0] * b[1] - a[1] * b[0]), a[0] * b[0] + a[1] * b[1])
 
 
-def _direction_tolerance(extent: float) -> float:
-    """Angle at which two lines drift apart by one lane snap across the table's width.
-
-    Two directions closer than this keep every word of one line within the lane snap
-    radius (``_snap()``) of the other across the table's x-extent, so no lane could
-    tell them apart. Floating-point jitter in a text matrix is orders of magnitude
-    below it; a margin stamp or a rotated running head is far above it. The extent is
-    floored at one snap so a degenerate zero-width block cannot widen it past pi/4.
-    """
-    return math.atan2(_snap(), max(extent, _snap()))
+#: Largest angle, in radians, between two text lines that are the same text for the
+#: purposes of P7. MEASURED, not derived from table width: on the 35 rotated and 92
+#: upright SHIP pages (160 table blocks on 124 pages, 14913 lines carrying core-row
+#: words; ``docs/log/2026-10-01_917-gate-direction-header.md`` round 2) the lines of one table's
+#: core rows have exactly one direction vector in 159 of 160 blocks, i.e. an observed
+#: maximum deviation of 0 (the 160th, Martens p41, has a genuine 90 degree running head
+#: in a core row's y-band). PyMuPDF reports ``dir`` from float32-precision text matrices,
+#: so the floor is about 1.2e-7; 1e-5 rad (0.0006 degrees) is ~100x that and about 17x
+#: below the smallest deliberate rotation worth the name (0.01 degrees = 1.7e-4 rad).
+#: Width plays no part: a slightly rotated stamp can contaminate a cell without
+#: crossing a lane, so lane displacement is not evidence that two lines are one text.
+_SAME_TEXT_DIRECTION_TOL_RAD = 1e-5
 
 
 def _direction_unavailable(why: str) -> dict:
@@ -671,10 +681,10 @@ def _direction_unavailable(why: str) -> dict:
 def foreign_direction_faults(words: list, blocks, line_dirs) -> list[dict]:
     """GH-917 P7: a table block carrying words written in more than one direction.
 
-    ``line_dirs=None`` means the caller did not supply directions (unit tests):
-    nothing is checked. Anything else must be a ``LineDirections`` that covers every
-    word the grid carries, otherwise the page is DEFERRED with ``direction_unavailable``
-    and the reason recorded: a plumbing fault never turns this predicate off.
+    ``line_dirs`` is required. ``LineDirections.unchecked_for_tests()`` is the only
+    way to skip the check. ``None``, a non-``LineDirections``, a failed or empty map,
+    or a carried word without a usable entry DEFERs with ``direction_unavailable`` and
+    the reason recorded: a plumbing fault never turns this predicate off.
 
     Membership is per output block. A source word is carried when its text occurs in
     some cell of that block (``_CellText.has_word``: substring presence, NOT occurrence
@@ -684,12 +694,14 @@ def foreign_direction_faults(words: list, blocks, line_dirs) -> list[dict]:
     foreign word can ship a wrong cell.
 
     Two carried words have the same direction when the angle between them is below
-    ``_direction_tolerance`` of the block's x-extent. A fault is any PAIR of carried
-    words that does not (a tie between two directions included). Nothing chains: a ~ b
-    and b ~ c do not make a ~ c.
+    ``_SAME_TEXT_DIRECTION_TOL_RAD`` (measured, independent of table width). A fault is
+    any PAIR of carried words that does not (a tie between two directions included).
+    Nothing chains: a ~ b and b ~ c do not make a ~ c.
     """
-    if line_dirs is None:
+    if isinstance(line_dirs, LineDirections) and line_dirs.unchecked:
         return []
+    if line_dirs is None:
+        return [_direction_unavailable("line_dirs was not supplied")]
     if not isinstance(line_dirs, LineDirections):
         return [_direction_unavailable(f"line_dirs is a {type(line_dirs).__name__}")]
     if line_dirs.fault:
@@ -720,8 +732,7 @@ def foreign_direction_faults(words: list, blocks, line_dirs) -> list[dict]:
                 )
             )
             continue
-        extent = max(w[2] for w in carried) - min(w[0] for w in carried)
-        tol = _direction_tolerance(extent)
+        tol = _SAME_TEXT_DIRECTION_TOL_RAD
         vectors = list(dict.fromkeys(vec for _w, vec in resolved))
         if not any(
             _angle_between(a, b) >= tol for i, a in enumerate(vectors) for b in vectors[i + 1 :]
@@ -805,13 +816,14 @@ def header_band_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict
     return faults
 
 
-def native_ship_gate(words: list, markdown: str, line_dirs=None) -> tuple[dict, ...]:
+def native_ship_gate(words: list, markdown: str, *, line_dirs) -> tuple[dict, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
     A gate that raises must not ship the grid: it reports ``gate_error`` so the
-    caller defers to normal routing. ``line_dirs`` (GH-917): ``None`` skips
-    ``foreign_direction`` (unit tests only); a ``LineDirections`` enables it, and an
-    unusable one DEFERs with ``direction_unavailable``.
+    caller defers to normal routing. ``line_dirs`` (GH-917) is required: a
+    ``LineDirections`` enables ``foreign_direction`` and an unusable one (or ``None``)
+    DEFERs with ``direction_unavailable``; only ``LineDirections.unchecked_for_tests()``
+    skips it.
     """
     try:
         blocks = _output_blocks(markdown)
