@@ -20,22 +20,26 @@ Design choices (deliberate):
   Letting the judge reason beats a brittle static capability matrix.
 - **Provider identity = engine + backend + model.** QWEN alone is ambiguous:
   it covers both local qwen3-vl:30b-a3b-instruct (Ollama, free) and the
-  (historical, GH-905: retired 2026-09-25, no longer in the default ladder)
-  cloud qwen3.5:cloud. Named profiles carry all three fields
-  so the manifest and replay logic can distinguish them unambiguously.
+  retired cloud qwen3.5:cloud (not in the default ladder). Named profiles carry
+  all three fields so the manifest and replay logic can distinguish them
+  unambiguously.
 - **Direct profile injection.** ``provider_ladder`` accepts either a set of
   ``EngineType`` values (dict-lookup path, backward-compatible) or a list of
   ``ProviderProfile`` objects (direct path, skips dict). The direct path lets
-  callers can supply two QWEN profiles as distinct rungs without needing two
-  ``EngineType`` keys. (``_available_engines_for_agentic`` no longer does: the
-  default ladder is local qwen -> marker -> gemini, GH-905.)
+  callers supply two QWEN profiles as distinct rungs without needing two
+  ``EngineType`` keys.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from socr.core.config import ENGINE_PRIORITY, EngineType
+
+if TYPE_CHECKING:
+    from socr.core.config import PipelineConfig
 
 # Descriptive tiers (for reporting / grouping, not for routing math).
 TIER_NATIVE = "native"
@@ -290,7 +294,7 @@ def is_cloud_model(model: str | None) -> bool:
     return "cloud" in (model or "").casefold()
 
 
-def cloud_pinned_qwen_refusal(config: object) -> str:
+def cloud_pinned_qwen_refusal(config: PipelineConfig) -> str:
     """Why the LOCAL qwen rung must be refused under the run's policy, else "".
 
     GH-905. ``--qwen-model foo:cloud`` pins the model verbatim on
@@ -301,7 +305,7 @@ def cloud_pinned_qwen_refusal(config: object) -> str:
     """
     from socr.engines.qwen import resolve_qwen_intent
 
-    _backend, model = resolve_qwen_intent(config)  # type: ignore[arg-type]
+    _backend, model = resolve_qwen_intent(config)
     if not is_cloud_model(model):
         return ""
     if getattr(config, "strict_local", False):
@@ -318,9 +322,8 @@ def zero_cap_pinned_forbids_cloud(config: object) -> bool:
     The codebase-wide convention is ``max_cost_per_page <= 0.0`` means "no
     cap" (the unset default -- see ``PipelineConfig.max_cost_per_page`` and
     ``provider_ladder``'s own ``max_cost_per_page`` docstring). That sentinel
-    stays in force for an OMITTED flag: the primary agentic ladder's default
-    rung is ``qwen-cloud``, priced at $0.00, and flipping the sentinel
-    globally would silently disable it on every unconfigured run.
+    stays in force for an OMITTED flag: flipping it globally would make every
+    unconfigured run (default 0.0) refuse remote calls.
 
     ``PipelineConfig.max_cost_per_page_pinned`` is set True only when the CLI
     (or another caller) already confirmed the zero was TYPED, not defaulted.
@@ -412,8 +415,8 @@ def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
 def profile_by_model(model: str) -> ProviderProfile | None:
     """The named profile whose ``model`` is *model*, or ``None``.
 
-    Cold review round 3, finding 4. A judge call has to be priced by the model
-    that ran it, not by whatever OCR rung happened to win the page. The judge is
+    A judge call is priced by the model that ran it, not by whatever OCR rung
+    won the page. The judge is
     identified by model name (``DocumentState.agentic_judge_model``), so this is
     the lookup that turns that name into a price. ``None`` means the model is
     not one of the metered rungs -- socr's judges run on a host it provides, so
@@ -499,6 +502,4 @@ def qwen_auto_resolves_to_openai(config: object) -> bool:
     Ollama even with ``VLLM_BASE_URL`` exported, because a value the user typed
     outranks one the environment happens to carry.
     """
-    import os
-
     return getattr(config, "qwen_backend", "") == "auto" and bool(os.environ.get("VLLM_BASE_URL"))

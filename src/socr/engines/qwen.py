@@ -42,6 +42,15 @@ OLLAMA_MODEL = "qwen3-vl:30b-a3b-instruct"
 _LOCAL_BACKENDS: frozenset[str] = frozenset({"auto", "ollama"})
 
 
+def _probe_cloud(model: str) -> tuple[bool, str]:
+    """A real 1-token generation on *model* at the resolved Ollama host."""
+    from socr.tables.extract import resolve_ollama_host
+
+    return probe_model_generation(
+        resolve_ollama_host().rstrip("/"), model, DEFAULT_PROBE_TIMEOUT_SEC
+    )
+
+
 def cloud_model_available() -> bool:
     """Whether the Ollama-Cloud rung is reachable right now.
 
@@ -78,13 +87,8 @@ def cloud_model_available() -> bool:
     local probe and by the provider's own failure path.
     """
     from socr.core.providers import PROFILE_QWEN_CLOUD
-    from socr.tables.extract import resolve_ollama_host
 
-    available, _reason = probe_model_generation(
-        resolve_ollama_host().rstrip("/"),
-        PROFILE_QWEN_CLOUD.model,
-        DEFAULT_PROBE_TIMEOUT_SEC,
-    )
+    available, _reason = _probe_cloud(PROFILE_QWEN_CLOUD.model)
     return available
 
 
@@ -111,14 +115,10 @@ def pinned_cloud_model_available(config: PipelineConfig) -> tuple[bool, str]:
     error reads as unavailable and the reason is returned so the caller can
     surface it. Returns ``(False, "")`` when nothing cloud is pinned.
     """
-    from socr.tables.extract import resolve_ollama_host
-
     model = pinned_cloud_qwen_model(config)
     if not model:
         return False, ""
-    ok, reason = probe_model_generation(
-        resolve_ollama_host().rstrip("/"), model, DEFAULT_PROBE_TIMEOUT_SEC
-    )
+    ok, reason = _probe_cloud(model)
     return ok, "" if ok else f"{model}: {reason}"
 
 
