@@ -29,7 +29,11 @@ from socr.tables.native_verifier import (
     _verify_from_words,
     is_numeric_token,
 )
-from socr.tables.ship_gate import SHIP_GATE_REASON_PREFIX, native_ship_gate
+from socr.tables.ship_gate import (
+    SHIP_GATE_REASON_PREFIX,
+    line_directions_for_page,
+    native_ship_gate,
+)
 
 SHIP = "ship"
 CELLS = "cells"
@@ -157,6 +161,7 @@ def attempt_rotated_native_table(page) -> RotatedNativeTableAttempt | None:
         structure_defective=structure_defective,
         header_unattributed=header_unattributed,
         orphan_words=list(orphan_words),
+        line_dirs=line_directions_for_page(page),
     )
     if plan.action == SHIP:
         # GH-917 / GH-916 containment: a rotated SHIP is not trustworthy yet.
@@ -259,8 +264,13 @@ def plan_native_table(
     header_unattributed: bool = False,
     unverifiable: bool = False,
     orphan_words: list[str] | None = None,
+    line_dirs=None,
 ) -> NativeTablePlan:
     """Decide whether *markdown* may ship, needs cell reads, or must be refused.
+
+    ``line_dirs`` (GH-917, a ``ship_gate.LineDirections``) enables the gate's
+    foreign-direction check. ``None`` means "not supplied" and is for unit tests;
+    every production caller passes ``line_directions_for_page(page)``.
 
     ``words`` is a PyMuPDF ``get_text("words")`` list for the same page.
     Blocking flags are the detector's existing structure verdicts, passed in
@@ -283,7 +293,7 @@ def plan_native_table(
         # GH-916: EXACT_PASS pairs rows by numeric multiset and ignores sign
         # glyphs, so it cannot see a detached sign, a dropped row, or reversed
         # order. Defer (never refuse): a refuse would skip the model attempt.
-        faults = native_ship_gate(words or [], markdown or "")
+        faults = native_ship_gate(words or [], markdown or "", line_dirs)
         if faults:
             names = ",".join(sorted({f["predicate"] for f in faults}))
             return NativeTablePlan(

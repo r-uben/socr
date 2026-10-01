@@ -10207,10 +10207,15 @@ class UnifiedPipeline:
         if not self._is_native_table_first_candidate(page_num, ps):
             return None
         from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
 
         try:
             with open_pdf(state.handle.path) as doc:
                 words = list(doc[page_num - 1].get_text("words"))
+                # GH-917: never raises. A failed extraction travels as a fault the gate
+                # DEFERs on; it must not inherit this block's REFUSE (an unreadable
+                # direction map is not an unreadable text layer).
+                line_dirs = line_directions_for_page(doc[page_num - 1])
         except Exception as exc:
             logger.warning(
                 "native table first: text layer unreadable on p%d (%s)",
@@ -10234,6 +10239,7 @@ class UnifiedPipeline:
             header_unattributed=bool(ps.native_table_header_unattributed),
             unverifiable=bool(ps.native_table_unverifiable),
             orphan_words=orphans,
+            line_dirs=line_dirs,
         )
         self._record_native_ship_gate(state, page_num, plan)
         if plan.action == DEFER:
@@ -10354,6 +10360,7 @@ class UnifiedPipeline:
         then exact-pass on its own; a partial repair does not ship.
         """
         from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
         from socr.tables.native_first import (
             SHIP,
             plan_native_table,
@@ -10383,6 +10390,7 @@ class UnifiedPipeline:
         try:
             with open_pdf(state.handle.path) as doc:
                 words = list(doc[page_num - 1].get_text("words"))
+                line_dirs = line_directions_for_page(doc[page_num - 1])
         except Exception as exc:
             logger.warning(
                 "native table first: re-read failed on p%d (%s)",
@@ -10392,7 +10400,7 @@ class UnifiedPipeline:
             return None
         # Blocking flags stay false: this pass asks only whether the spliced
         # grid exact-passes the words. The flags already decided the first plan.
-        again = plan_native_table(words, spliced)
+        again = plan_native_table(words, spliced, line_dirs=line_dirs)
         if again.action != SHIP:
             return None
         return spliced
