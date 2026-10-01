@@ -44,6 +44,13 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     row, within the same ``_PANEL_GAP_ROWS`` reach, whose in-lane words each
                     sit over a distinct table lane (>= ``_MIN_LANES_PER_ROW`` of them) and
                     are not all in the grid: a column-header band the rowizer dropped.
+``text_in_numeric_column``  (GH-917) a shipped grid row below the table's first data row that
+                    is not itself a data row and carries alphabetic text in a column the
+                    data rows establish as numeric (a caption, footnote paragraph, equation
+                    fragment or "(Continued)" marker emitted as a row). Output-side, per
+                    block; header rows above the first data row, panel labels that start in
+                    the label columns, number-with-marker cells, placeholders and
+                    parenthesised numbers are exempt (see ``text_in_numeric_column_faults``).
 ``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
                     differs from another carried word's, per output table block. Needs the
                     page's line directions (``LineDirections``); two directions are the
@@ -128,6 +135,7 @@ LABEL_ROW_MISSING = "label_row_missing"
 FOREIGN_DIRECTION = "foreign_direction"
 DIRECTION_UNAVAILABLE = "direction_unavailable"
 HEADER_BAND_MISSING = "header_band_missing"
+TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -869,6 +877,139 @@ def header_band_missing_faults(
     return faults
 
 
+#: A cell that is one number: optional sign (glyph, then optional space: the PDF prints
+#: ``- 0.28`` with the glyph as its own word), optional parenthesis or bracket, the digits,
+#: then footnote dressing (``*``, a dagger, ``%``, a closing bracket) and at most
+#: ``_MARKER_MAX_LETTERS`` trailing letters (``0.23a``). ``1/53-`` and ``1927-`` are not
+#: numbers: the remainder after the digits may not hold a digit or a slash.
+_MARKER_MAX_LETTERS = 1
+_NUMBER_CELL_RE = re.compile(
+    r"^[*\u2020\u2021\u00a7#]*[(\[]?[" + "".join(sorted(_SIGN_GLYPHS)) + r"+]?"
+    r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+    r"[)\]]?[%*\u2020\u2021\u00a7#]*"
+    r"(?:[(]?[^\W\d_]{1," + str(_MARKER_MAX_LETTERS) + r"}[)]?)?$"
+)
+
+#: Rows in which one column must hold the same text for it to be that column's placeholder
+#: (``n.a.``) rather than prose: a repeat is the definition, one occurrence is not evidence.
+_PLACEHOLDER_MIN_ROWS = 2
+
+_EMPTY, _NUMBER, _TEXT, _OTHER = "empty", "number", "text", "other"
+#: A text its own column repeats (see ``text_in_numeric_column_faults``).
+_PLACEHOLDER = "placeholder"
+#: Kinds that fill a cell of a data row without being prose: a value, a bare dash or
+#: punctuation, a column's own placeholder.
+_FILLS_A_VALUE_CELL = frozenset({_NUMBER, _OTHER, _PLACEHOLDER})
+
+
+def _cell_kind(cell: str) -> str:
+    """``number`` (a value with its dressing), ``text`` (carries a letter), ``empty``, or
+    ``other`` (punctuation, a bare dash, a range fragment ``1927-``: no letter, no value)."""
+    compact = _compact(cell)
+    if not compact:
+        return _EMPTY
+    if _NUMBER_CELL_RE.match(compact):
+        return _NUMBER
+    return _TEXT if any(c.isalpha() for c in compact) else _OTHER
+
+
+def _data_rows(kinds: list[list[str]], paired: set[int]) -> list[int]:
+    """Indices of the block's data rows (see ``text_in_numeric_column_faults``)."""
+    candidates = [
+        i for i, ks in enumerate(kinds) if i in paired and ks.count(_NUMBER) >= _MIN_CORE_LANES
+    ]
+    cols = _numeric_columns(kinds, candidates)
+    # A row carrying a number or two (a panel label with a year range, a "p < 0.05" note)
+    # is a candidate but not a data row: its values must reach most numeric columns (a
+    # dash or a placeholder in a value cell counts: a row can print one where it has no number).
+    return [
+        i
+        for i in candidates
+        if 2 * sum(1 for c in cols if c < len(kinds[i]) and kinds[i][c] in _FILLS_A_VALUE_CELL)
+        > len(cols)
+    ]
+
+
+def _numeric_columns(kinds: list[list[str]], rows: list[int]) -> list[int]:
+    """Columns where MORE THAN HALF of *rows* hold a number."""
+    width = max(len(ks) for ks in kinds)
+    return [
+        c
+        for c in range(width)
+        if 2 * sum(1 for i in rows if c < len(kinds[i]) and kinds[i][c] == _NUMBER) > len(rows)
+    ]
+
+
+def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) -> list[GateFault]:
+    """GH-917: a non-data row carrying letters in a column the data rows establish as numeric.
+
+    Per output block, all derived from the block's own rows:
+
+    * PLACEHOLDERS: a text that the SAME column holds in two or more rows (``n.a.`` in a
+      column of a table that prints it) is a placeholder, not prose; it counts as neither
+      text nor number. A bare dash has no letter and is never text. No vocabulary: prose
+      does not repeat verbatim down one column.
+    * DATA ROWS: rows that pair uniquely to a source row (so the PDF confirms them), carry at
+      least ``_MIN_CORE_LANES`` number cells (the rowizer's own minimum for a row of values),
+      and whose values (numbers, dashes, placeholders) reach more than half of the columns
+      that the paired rows establish as numeric. Fewer than two data rows: abstain.
+    * NUMERIC COLUMNS: a column where MORE THAN HALF of the data rows hold a number.
+    * EXEMPT: every row above the first data row (the header band, whatever it holds), a
+      number with its marker or standard-error parentheses, and a row BEFORE the last data
+      row whose first non-empty cell is left of the first numeric column (a panel label
+      that occupies the label columns).
+    * FAULT: any other row, below the first data row, with a text cell in a numeric column.
+      So a footnote or "(Continued)" under the data, or a sub-header floating over numeric
+      columns between data rows, defers.
+
+    Limit (measured, ``docs/log/2026-10-01_917-text-in-numeric-column.md``): text emitted
+    ABOVE the first data row (a caption or equation fragments between the title and the
+    column headings) is indistinguishable from a column heading by the grid alone, so it is
+    not reported here.
+    """
+    faults: list[GateFault] = []
+    for block, found in zip(blocks, pairs):
+        kinds = [[_cell_kind(c) for c in row] for row in block]
+        repeats: Counter = Counter()
+        for row, ks in zip(block, kinds):
+            repeats.update(
+                {(c, _compact(row[c]).casefold()) for c, k in enumerate(ks) if k == _TEXT}
+            )
+        for row, ks in zip(block, kinds):
+            for c, k in enumerate(ks):
+                if (
+                    k == _TEXT
+                    and repeats[(c, _compact(row[c]).casefold())] >= _PLACEHOLDER_MIN_ROWS
+                ):
+                    ks[c] = _PLACEHOLDER
+        data = _data_rows(kinds, {idx for idx, _y in found})
+        if len(data) < 2:
+            continue
+        numeric_cols = _numeric_columns(kinds, data)
+        if not numeric_cols:
+            continue
+        first, last = data[0], data[-1]
+        data_set = set(data)
+        for i in range(first + 1, len(block)):
+            if i in data_set:
+                continue
+            ks = kinds[i]
+            lead = next((c for c, k in enumerate(ks) if k != _EMPTY), None)
+            if lead is not None and lead < numeric_cols[0] and i < last:
+                continue  # a panel label starting in the label columns
+            hit = [c for c in numeric_cols if c < len(ks) and ks[c] == _TEXT]
+            if hit:
+                faults.append(
+                    _fault(
+                        TEXT_IN_NUMERIC_COLUMN,
+                        f"row {i} carries text in numeric column(s) "
+                        f"{', '.join(str(c) for c in hit[:4])}: "
+                        f"{' | '.join(block[i][c] for c in hit[:3])!r}",
+                    )
+                )
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -892,6 +1033,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += data_row_missing_faults(blocks, pairs, src_rows, geos=geos)
         faults += label_row_missing_faults(blocks, pairs, src_rows, geos)
         faults += header_band_missing_faults(blocks, pairs, src_rows, geos)
+        faults += text_in_numeric_column_faults(blocks, pairs)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
