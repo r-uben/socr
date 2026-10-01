@@ -173,11 +173,11 @@ class TestMustNotFire:
 
 class TestDerivation:
     def test_numeric_column_needs_more_than_half_the_data_rows(self) -> None:
-        # Column 4 holds a number in `k` of the six data rows; text sits in it below the table.
+        # Column 4 holds a number in `k` of the six data rows and text in the rest; text also sits in it below the table.
         def fired(k: int) -> set[str]:
             rows = [list(r) for r in ROWS]
-            for r in rows[k:]:
-                r[4] = ""
+            for j, r in enumerate(rows[k:]):
+                r[4] = "ab cd"[: 2 + j % 2] + "xyz"[j % 3]  # distinct text: not a placeholder
             words, md = _grid(rows, tail=[["", "", "", "", "see note"]])
             return _fired(words, md)
 
@@ -222,3 +222,204 @@ def test_a_separator_only_block_does_not_mask_another_blocks_fault() -> None:
     raise, and the gate's handler then replaced the real fault with ``gate_error``."""
     words, md = _grid(tail=[["", "", "", "", "(Continued)"]])
     assert _fired(words, md + "\n\n| --- | --- |\n") == {TNC}
+
+
+class TestNumericClassifierIsTheVerifiers:
+    """GH-932: a cell the verifier calls numeric (currency, ``∗``/``✱``) is a number, so a column of them is a numeric column and a footrow of text
+    under it defers. Each pin is a difference: the same markdown with and without the
+    ``tail`` row, and the dressed column against the plain one."""
+
+    FOOTROW = ["a See footnote", "table 8b.", "", "", ""]
+
+    @staticmethod
+    def _dressed(prefix="", suffix="", *, tail=()):
+        # Source words carry the bare numbers (the glyph is not in the numeric multiset);
+        # only the markdown cells in columns 1-4 are dressed.
+        words = _words([HEADER] + [list(r) for r in ROWS])
+        body = [[r[0]] + [prefix + c + suffix for c in r[1:]] for r in ROWS]
+        return words, _md(HEADER, body + [list(t) for t in tail])
+
+    def test_currency_column_with_a_text_footrow_defers(self) -> None:
+        for sign in ("$", "€", "£", "¥"):
+            words, clean = self._dressed(sign)
+            _, faulty = self._dressed(sign, tail=[self.FOOTROW[:1] + ["table 8b.", "", "", ""]])
+            assert _fired(words, clean) == set(), sign
+            assert _fired(words, faulty) == {TNC}, sign
+
+    def test_star_column_with_a_text_footrow_defers(self) -> None:
+        # ★ and ⋆ are not in the verifier's marks: such a markdown never exact-passes, so no
+        # SHIP exists for the gate to override (measured; widening the shared marks is out of scope).
+        for star in ("∗", "✱"):
+            words, clean = self._dressed(suffix=star)
+            _, faulty = self._dressed(suffix=star, tail=[["", "see note", "", "", ""]])
+            assert _fired(words, clean) == set(), star
+            assert _fired(words, faulty) == {TNC}, star
+
+    def test_cell_kind_reads_the_verifiers_numbers(self) -> None:
+        for cell in ("$1,234", "€5.2", "£3", "¥100", "0.3∗", "0.3✱", "∗0.05"):
+            assert ship_gate._cell_kind(cell, canonical=True) == ship_gate._NUMBER, cell
+        # Still text or nothing: a currency sign or star alone, a word, a long marker.
+        for cell in ("$", "★", "$ total", "0.23abc"):
+            assert ship_gate._cell_kind(cell, canonical=True) != ship_gate._NUMBER, cell
+
+    def test_dressed_columns_keep_the_must_not_fire_controls_quiet(self) -> None:
+        for sign in ("$", "€"):
+            words, md = self._dressed(sign, tail=[["", "", "", "", ""]])
+            assert _fired(words, md) == set()
+            words, md = self._dressed(sign, tail=[["", "–", "–", "", ""]])
+            assert _fired(words, md) == set()
+            words, md = self._dressed(sign, tail=[["a See footnote table 8b.", "", "", "", ""]])
+            assert _fired(words, md) == set()
+
+
+class TestDisjointPanels:
+    """GH-932 (Astra, PR #935): value rows that each fill only their own panel's columns
+    (Alpha/Beta in A-B, Gamma/Delta in C-D) leave every column at exactly half of the data
+    rows, so a count over ALL data rows finds no numeric column and the predicate abstains.
+    A column's numbers are counted against the data rows that have a cell there."""
+
+    PANELS = [
+        ["Alpha", "0.11", "0.12", "", ""],
+        ["Beta", "0.21", "0.22", "", ""],
+        ["Gamma", "", "", "0.31", "0.32"],
+        ["Delta", "", "", "0.41", "0.42"],
+    ]
+
+    def _table(self, prefix="", *, tail):
+        words = _words([HEADER] + [list(r) for r in self.PANELS])
+        body = [
+            [c if not (c[:1].isdigit() and prefix) else prefix + c for c in r] for r in self.PANELS
+        ]
+        return words, _md(HEADER, body + [list(t) for t in tail])
+
+    def test_currency_panels_with_a_text_footrow_defer(self) -> None:
+        note = [["", "see note", "", "", ""]]
+        words, clean = self._table("$", tail=[])
+        _, faulty = self._table("$", tail=note)
+        assert _fired(words, clean) == set()
+        assert _fired(words, faulty) == {TNC}
+
+    def test_plain_number_panels_with_a_text_footrow_defer(self) -> None:
+        note = [["", "see note", "", "", ""]]
+        words, clean = self._table(tail=[])
+        _, faulty = self._table(tail=note)
+        assert _fired(words, clean) == set()
+        assert _fired(words, faulty) == {TNC}
+
+    def test_an_empty_column_is_not_numeric(self) -> None:
+        kinds = [["text", "number", "empty"], ["text", "number", "empty"]]
+        assert ship_gate._numeric_columns(kinds, [0, 1], panels=True) == [1]
+
+    def test_one_filled_cell_is_not_a_column(self) -> None:
+        kinds = [
+            ["text", "number", "empty"],
+            ["text", "empty", "empty"],
+            ["text", "empty", "empty"],
+        ]
+        assert ship_gate._numeric_columns(kinds, [0, 1, 2], panels=True) == []
+
+
+class TestMonotone:
+    """GH-932 (Astra, PR #935 round 2): the disjoint-panel rule only ADDS faults. Every
+    fault the original rule finds is still found: the gate is DEFER-only, so a union of
+    the two rules can add a DEFER and never lose one."""
+
+    GRID = [
+        ["Alpha", "11", "12", "13", "14"],
+        ["Beta", "21", "22", "23", "24"],
+        ["Gamma", "31", "32", "33", "34"],
+        ["Delta", "41", "42", "43", "44"],
+    ]
+    # Two notes, each with two year-like numbers in the same two columns and text in a third.
+    NOTES = [
+        ["Note one", "1968", "2021", "see appendix", ""],
+        ["Note two", "1970", "2022", "sample restriction", ""],
+    ]
+
+    def test_notes_sharing_a_column_set_are_still_caught(self) -> None:
+        # Original rule: columns 1-4 are numeric, each note covers 2 of 4 (not data), the
+        # text in column 3 fires. The panel rule alone would admit both notes as data rows
+        # (they share the support {1, 2}) and lose that catch.
+        rows = self.GRID + self.NOTES
+        words = _words([HEADER] + rows)
+        md = _md(HEADER, rows)
+        assert _fired(words, md) == {TNC}
+        details = [f["detail"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)]
+        assert len(details) == 2, details
+        assert "row 5" in details[0] and "see appendix" in details[0]
+        assert "row 6" in details[1] and "sample restriction" in details[1]
+
+    def test_plain_panels_next_to_currency_panels_with_a_footrow_defer(self) -> None:
+        # Panel one is plain numbers, panel two is currency-prefixed: the column sets differ
+        # in kind, not only in position. The footrow's text sits in a currency column.
+        panels = [
+            ["Alpha", "0.11", "0.12", "", ""],
+            ["Beta", "0.21", "0.22", "", ""],
+            ["Gamma", "", "", "$31", "$32"],
+            ["Delta", "", "", "$41", "$42"],
+        ]
+        # The source prints the bare numbers; only the markdown carries the currency sign.
+        words = _words([HEADER] + [[c.replace("$", "") for c in r] for r in panels])
+        assert _fired(words, _md(HEADER, panels)) == set()
+        assert _fired(words, _md(HEADER, panels + [["", "", "", "see note", ""]])) == {TNC}
+
+
+class TestUnionContainsTheOriginalPredicate:
+    """GH-932 (Astra, PR #935 round 4): a wider classifier changes which row is the last data
+    row, so the original classifier + original rule is its own union member."""
+
+    HEAD = HEADER[:3]
+
+    def test_a_later_currency_row_does_not_hide_an_earlier_note(self) -> None:
+        # Main: Gamma's `$` cells are not numbers, so Beta is the last data row and the note
+        # below it fires. With the wider classifier alone Gamma is data, the note is an
+        # interior label row (its first cell is in the label column) and is exempt.
+        rows = [
+            ["Alpha", "11", "12"],
+            ["Beta", "21", "22"],
+            ["Note", "see appendix", ""],
+            ["Gamma", "$31", "$32"],
+        ]
+        words = _words([self.HEAD] + [[c.replace("$", "") for c in r] for r in rows])
+        md = _md(self.HEAD, rows)
+        assert _fired(words, md) == {TNC}
+        (fault,) = ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        assert "row 3" in fault["detail"] and "see appendix" in fault["detail"]
+
+    def test_the_wider_classifier_alone_would_lose_it(self) -> None:
+        rows = [["Alpha", "11", "12"], ["Beta", "21", "22"], ["Note", "see appendix", ""]]
+        late = ["Gamma", "$31", "$32"]
+        for canonical, expect in ((False, {2}), (True, set())):
+            kinds = [
+                [ship_gate._cell_kind(c, canonical=canonical) for c in r] for r in rows + [late]
+            ]
+            found = ship_gate._rule_faults(
+                [r for r in rows + [late]], kinds, [(0, 0.0), (1, 0.0), (3, 0.0)], panels=False
+            )
+            assert set(found) == expect, canonical
+
+    def test_evidence_of_two_members_on_one_row_is_merged(self) -> None:
+        # Column 3 is numeric only for the panel member, column 1 for both.
+        panels = [
+            ["Alpha", "0.11", "0.12", "", ""],
+            ["Beta", "0.21", "0.22", "", ""],
+            ["Gamma", "", "", "$31", "$32"],
+            ["Delta", "", "", "$41", "$42"],
+            ["", "see note", "", "and more", ""],
+        ]
+        words = _words([HEADER] + [[c.replace("$", "") for c in r] for r in panels[:4]])
+        (fault,) = ship_gate.native_ship_gate(words, _md(HEADER, panels), line_dirs=UNCHECKED)
+        assert "column(s) 1, 3:" in fault["detail"]
+        assert "see note | and more" in fault["detail"]
+
+    def test_currency_notes_sharing_a_column_set_are_still_caught(self) -> None:
+        # The round-2 table again, now with `$`-dressed values: the wider classifier with the
+        # panel rule alone would admit the notes as data rows; (wider, original rule) keeps them.
+        grid = [[r[0]] + ["$" + c for c in r[1:]] for r in TestMonotone.GRID]
+        notes = [[r[0], "$" + r[1], "$" + r[2], r[3], r[4]] for r in TestMonotone.NOTES]
+        rows = grid + notes
+        words = _words([HEADER] + [[c.replace("$", "") for c in r] for r in rows])
+        md = _md(HEADER, rows)
+        details = [f["detail"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)]
+        assert len(details) == 2, details
+        assert "see appendix" in details[0] and "sample restriction" in details[1]

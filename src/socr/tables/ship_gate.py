@@ -902,42 +902,117 @@ _PLACEHOLDER = "placeholder"
 _FILLS_A_VALUE_CELL = frozenset({_NUMBER, _OTHER, _PLACEHOLDER})
 
 
-def _cell_kind(cell: str) -> str:
+def _cell_kind(cell: str, *, canonical: bool) -> str:
     """``number`` (a value with its dressing), ``text`` (carries a letter), ``empty``, or
-    ``other`` (punctuation, a bare dash, a range fragment ``1927-``: no letter, no value)."""
+    ``other`` (punctuation, a bare dash, a range fragment ``1927-``: no letter, no value).
+
+    ``canonical=False`` is the original GH-917 classifier (the one-letter-marker regex only).
+    ``canonical=True`` asks the verifier's numeric contract first (currency prefixes,
+    ``∗``/``✱``/dagger dressing, markdown emphasis, entities: GH-932). Both are run, see
+    ``text_in_numeric_column_faults``: a wider classifier can change which row is the last data
+    row, so it is only ever used in addition to the original."""
     compact = _compact(cell)
     if not compact:
         return _EMPTY
-    if _NUMBER_CELL_RE.match(compact):
+    if _NUMBER_CELL_RE.match(compact) or (canonical and is_numeric_token(compact)):
         return _NUMBER
     return _TEXT if any(c.isalpha() for c in compact) else _OTHER
 
 
-def _data_rows(kinds: list[list[str]], paired: set[int]) -> list[int]:
-    """Indices of the block's data rows (see ``text_in_numeric_column_faults``)."""
+def _data_rows(kinds: list[list[str]], paired: set[int], *, panels: bool) -> list[int]:
+    """Indices of the block's data rows (see ``text_in_numeric_column_faults``).
+
+    ``panels=False`` is the original rule (GH-917); ``panels=True`` is the disjoint-panel
+    rule (GH-932), which is only ever run IN ADDITION to the original."""
     candidates = [
         i for i, ks in enumerate(kinds) if i in paired and ks.count(_NUMBER) >= _MIN_CORE_LANES
     ]
-    cols = _numeric_columns(kinds, candidates)
+    cols = _numeric_columns(kinds, candidates, panels=panels)
     # A row carrying a number or two (a panel label with a year range, a "p < 0.05" note)
     # is a candidate but not a data row: its values must reach most numeric columns (a
     # dash or a placeholder in a value cell counts: a row can print one where it has no number).
-    return [
+    covered = {
         i
         for i in candidates
         if 2 * sum(1 for c in cols if c < len(kinds[i]) and kinds[i][c] in _FILLS_A_VALUE_CELL)
         > len(cols)
-    ]
+    }
+    if not panels:
+        return sorted(covered)
+
+    # A table of disjoint panels (each row fills only its own panel's columns) never reaches
+    # more than half of them, so a row also counts when its exact set of number columns is
+    # shared by another candidate row: a repeat is evidence, a one-off label is not
+    # (``_PLACEHOLDER_MIN_ROWS``).
+    def support(i: int) -> frozenset[int]:
+        return frozenset(c for c, k in enumerate(kinds[i]) if k == _NUMBER)
+
+    supports = Counter(support(i) for i in candidates)
+    return [i for i in candidates if i in covered or supports[support(i)] >= _PLACEHOLDER_MIN_ROWS]
 
 
-def _numeric_columns(kinds: list[list[str]], rows: list[int]) -> list[int]:
-    """Columns where MORE THAN HALF of *rows* hold a number."""
+def _numeric_columns(kinds: list[list[str]], rows: list[int], *, panels: bool) -> list[int]:
+    """Columns where numbers fill MORE THAN HALF of the *rows*.
+
+    ``panels=True`` counts only the rows that have something in the column (a row with an
+    empty cell there says nothing about it: disjoint panels would otherwise leave every
+    column at exactly half) and needs at least ``_PLACEHOLDER_MIN_ROWS`` such rows: one
+    filled cell is not a column."""
     width = max((len(ks) for ks in kinds), default=0)
-    return [
-        c
-        for c in range(width)
-        if 2 * sum(1 for i in rows if c < len(kinds[i]) and kinds[i][c] == _NUMBER) > len(rows)
-    ]
+    cols = []
+    for c in range(width):
+        cells = [kinds[i][c] if c < len(kinds[i]) else _EMPTY for i in rows]
+        if panels:
+            cells = [k for k in cells if k != _EMPTY]
+            if len(cells) < _PLACEHOLDER_MIN_ROWS:
+                continue
+        if 2 * cells.count(_NUMBER) > len(cells):
+            cols.append(c)
+    return cols
+
+
+def _rule_faults(
+    block: Block, kinds: list[list[str]], found: BlockPairs, *, panels: bool
+) -> dict[int, dict[int, str]]:
+    """Evidence of one block under one data-row rule: row index -> {column: cell text}."""
+    out: dict[int, dict[int, str]] = {}
+    data = _data_rows(kinds, {idx for idx, _y in found}, panels=panels)
+    if len(data) < 2:
+        return out
+    numeric_cols = _numeric_columns(kinds, data, panels=panels)
+    if not numeric_cols:
+        return out
+    first, last = data[0], data[-1]
+    data_set = set(data)
+    for i in range(first + 1, len(block)):
+        if i in data_set:
+            continue
+        ks = kinds[i]
+        lead = next((c for c, k in enumerate(ks) if k != _EMPTY), None)
+        if lead is not None and lead < numeric_cols[0] and i < last:
+            continue  # a panel label starting in the label columns
+        hit = [c for c in numeric_cols if c < len(ks) and ks[c] == _TEXT]
+        if hit:
+            out[i] = {c: block[i][c] for c in hit}
+    return out
+
+
+#: The (canonical classifier, disjoint-panel rule) members whose faults are unioned. The first
+#: is the GH-917 predicate unchanged.
+_TNC_MEMBERS = ((False, False), (True, False), (True, True))
+
+
+def _block_kinds(block: Block, *, canonical: bool) -> list[list[str]]:
+    """Cell kinds of *block*, with a text its own column repeats turned into a placeholder."""
+    kinds = [[_cell_kind(c, canonical=canonical) for c in row] for row in block]
+    repeats: Counter = Counter()
+    for row, ks in zip(block, kinds):
+        repeats.update({(c, _compact(row[c]).casefold()) for c, k in enumerate(ks) if k == _TEXT})
+    for row, ks in zip(block, kinds):
+        for c, k in enumerate(ks):
+            if k == _TEXT and repeats[(c, _compact(row[c]).casefold())] >= _PLACEHOLDER_MIN_ROWS:
+                ks[c] = _PLACEHOLDER
+    return kinds
 
 
 def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) -> list[GateFault]:
@@ -963,6 +1038,15 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
       So a footnote or "(Continued)" under the data, or a sub-header floating over numeric
       columns between data rows, defers.
 
+    GH-932: each block is judged by three members and the faults are UNIONED (by row; evidence
+    from members faulting the same row is merged), so the predicate can only add DEFERs relative to
+    GH-917. ``_TNC_MEMBERS`` is (original classifier, rule above) = EXACTLY the GH-917 predicate,
+    (verifier's numeric classifier, rule above), and (verifier's classifier, ``panels=True``). A
+    wider classifier can change which row is the last data row, so it is never the only member.
+    ``panels=True`` counts a column as numeric against only the data rows that fill it and admits
+    rows sharing another data row's numeric support; it catches disjoint panels (panel A in some
+    columns, panel B in others), where the rule above finds no majority and abstains.
+
     Limit (measured, ``docs/log/2026-10-01_917-text-in-numeric-column.md``): text emitted
     ABOVE the first data row (a caption or equation fragments between the title and the
     column headings) is indistinguishable from a column heading by the grid alone, so it is
@@ -975,44 +1059,25 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
             # it from raising into ``native_ship_gate``'s handler, which would replace
             # the other blocks' faults with ``gate_error`` (Astra, PR #931).
             continue
-        kinds = [[_cell_kind(c) for c in row] for row in block]
-        repeats: Counter = Counter()
-        for row, ks in zip(block, kinds):
-            repeats.update(
-                {(c, _compact(row[c]).casefold()) for c, k in enumerate(ks) if k == _TEXT}
-            )
-        for row, ks in zip(block, kinds):
-            for c, k in enumerate(ks):
-                if (
-                    k == _TEXT
-                    and repeats[(c, _compact(row[c]).casefold())] >= _PLACEHOLDER_MIN_ROWS
-                ):
-                    ks[c] = _PLACEHOLDER
-        data = _data_rows(kinds, {idx for idx, _y in found})
-        if len(data) < 2:
-            continue
-        numeric_cols = _numeric_columns(kinds, data)
-        if not numeric_cols:
-            continue
-        first, last = data[0], data[-1]
-        data_set = set(data)
-        for i in range(first + 1, len(block)):
-            if i in data_set:
-                continue
-            ks = kinds[i]
-            lead = next((c for c, k in enumerate(ks) if k != _EMPTY), None)
-            if lead is not None and lead < numeric_cols[0] and i < last:
-                continue  # a panel label starting in the label columns
-            hit = [c for c in numeric_cols if c < len(ks) and ks[c] == _TEXT]
-            if hit:
-                faults.append(
-                    _fault(
-                        TEXT_IN_NUMERIC_COLUMN,
-                        f"row {i} carries text in numeric column(s) "
-                        f"{', '.join(str(c) for c in hit[:4])}: "
-                        f"{' | '.join(block[i][c] for c in hit[:3])!r}",
-                    )
+        # MONOTONE by construction (GH-932): the first member is EXACTLY the GH-917 predicate
+        # (original classifier, original rule), so every fault it found is still found; the
+        # others only add rows. The gate only DEFERs, so a union can add a DEFER and never lose
+        # one. Evidence from members that fault the same row is merged.
+        evidence: dict[int, dict[int, str]] = {}
+        for canonical, panels in _TNC_MEMBERS:
+            kinds = _block_kinds(block, canonical=canonical)
+            for i, cols in _rule_faults(block, kinds, found, panels=panels).items():
+                evidence.setdefault(i, {}).update(cols)
+        for i in sorted(evidence):
+            hit = sorted(evidence[i])
+            faults.append(
+                _fault(
+                    TEXT_IN_NUMERIC_COLUMN,
+                    f"row {i} carries text in numeric column(s) "
+                    f"{', '.join(str(c) for c in hit[:4])}: "
+                    f"{' | '.join(evidence[i][c] for c in hit[:3])!r}",
                 )
+            )
     return faults
 
 
