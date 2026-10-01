@@ -653,6 +653,7 @@ def _resume_skippable(
     *,
     equation_lane_retry_blocks: bool | Callable[[], bool] = False,
     table_judge_retry_blocks: bool | Callable[[list[str]], bool] = False,
+    table_escalation_retry_blocks: bool | Callable[[], bool] = False,
 ) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
@@ -693,6 +694,20 @@ def _resume_skippable(
                 equation_lane_retry_blocks()
                 if callable(equation_lane_retry_blocks)
                 else equation_lane_retry_blocks
+            )
+            if blocks:
+                return False
+        if entry.get("table_escalation_retry_pending") is True:
+            # GH-851: a page needed table escalation and never got it (timeout, or
+            # withheld behind a still-outstanding call). Provider health is
+            # transient and absent from the fingerprint, so everything else here
+            # can match while the document still holds an unescalated table: same
+            # shape as the equation-lane latch above. Asked lazily, only when the
+            # entry carries the latch.
+            blocks = (
+                table_escalation_retry_blocks()
+                if callable(table_escalation_retry_blocks)
+                else table_escalation_retry_blocks
             )
             if blocks:
                 return False
@@ -1036,6 +1051,7 @@ class UnifiedPipeline:
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
                 table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
+                table_escalation_retry_blocks=self._escalation_retry_blocks_resume,
             ):
                 return None
         except Exception as exc:  # never let the resume check break a run
@@ -1083,6 +1099,26 @@ class UnifiedPipeline:
         earlier run is inert history and must not force endless reprocessing.
         """
         return bool(self.config.equation_region_lane and self.config.agentic)
+
+    def _escalation_retry_blocks_resume(self) -> bool:
+        """Whether a recorded GH-851 pending escalation should refuse a document skip.
+
+        Only when the lane could act on it NOW: agentic, escalation enabled, and an
+        escalation rung exists in the tier- and cost-filtered ladder. With the lane
+        off, strict-local, or no rung, the marker is inert history and must not
+        force endless reprocessing. (Does not apply the cloud-pinned-qwen refusal,
+        which needs a ``DocumentState``: at worst the document reopens and that
+        refusal then applies as usual.)
+        """
+        if not (self.config.agentic and getattr(self.config, "escalate_ambiguous_tables", False)):
+            return False
+        available = self._available_engines_for_agentic()
+        if self.config.strict_local:
+            from socr.core.providers import TIER_LOCAL
+
+            available = [p for p in available if p.tier == TIER_LOCAL]
+        _, profile = self._build_ladder_and_escalation_profile(available)
+        return profile is not None
 
     def _table_judge_retry_blocks_resume(self, rung_kinds: list[str] | None = None) -> bool:
         """Whether a recorded table-judge pending retry should refuse a document skip.
@@ -1698,6 +1734,7 @@ class UnifiedPipeline:
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
                 table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
+                table_escalation_retry_blocks=self._escalation_retry_blocks_resume,
             )
             if already_done and not self.config.reprocess:
                 # #897: a skipped file whose last run was PARTIAL still counts as
@@ -5768,6 +5805,28 @@ class UnifiedPipeline:
             )
             return False
 
+    @staticmethod
+    def _mark_escalation_not_received(ps) -> None:
+        """GH-851: a page that needed escalation and did not get it ships DEMOTED.
+
+        Reuses the table-ladder's own "needed a verdict, did not get one" state
+        instead of inventing a status: ``TABLE_UNVERIFIED`` makes
+        ``_apply_ladder_disposition_guard`` demote the FINALIZED copy to WARNING
+        (``best_output.audit_passed`` is never flipped in place, which would make
+        assemble discard the text), feeds the document status / CLI buckets /
+        manifest admission that already read the disposition, and is NOT
+        resume-skippable. A stronger terminal (REJECTED / WITHHELD) is kept, but
+        ``table_ladder_incomplete`` forfeits its resume-skip exception so the next
+        run retries the escalation the page never got.
+        """
+        if getattr(ps, "table_ladder_disposition", None) is None:
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        ps.table_ladder_incomplete = True
+        # Document-scoped resume latch (see ``_resume_skippable``): the per-page
+        # ledger above already refuses to skip this page, but the DOCUMENT gate
+        # runs first and would skip the whole file as an identical-config partial.
+        ps.table_escalation_retry_pending = True
+
     def _escalate_table_page(
         self,
         state: DocumentState,
@@ -5858,6 +5917,7 @@ class UnifiedPipeline:
                                 ),
                             )
                         )
+                        self._mark_escalation_not_received(ps)
                         return True, bo
 
                 # GH-160: the profile itself was already priced under
@@ -5922,6 +5982,7 @@ class UnifiedPipeline:
                         )
                     )
                     _record_attempt_cost()
+                    self._mark_escalation_not_received(ps)
                     return False, bo
                 except Exception:
                     # GH-160 round 3: `run_provider` raised something OTHER than
@@ -15604,6 +15665,10 @@ class UnifiedPipeline:
             pending: dict = {}
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
                 pending["equation_lane_retry_pending"] = True
+            if any(
+                getattr(p, "table_escalation_retry_pending", False) for p in state.pages.values()
+            ):
+                pending["table_escalation_retry_pending"] = True
             if any(getattr(p, "table_judge_retry_pending", False) for p in state.pages.values()):
                 pending["table_judge_retry_pending"] = True
                 # Cold review round 3, finding 1: the UNION of the rung kinds

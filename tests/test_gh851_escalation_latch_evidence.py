@@ -17,9 +17,8 @@ and the engine call are all patched; nothing needs ollama or a provider.
 
 from __future__ import annotations
 
-import json
+import concurrent.futures
 import threading
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +33,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 from test_gh855_scoring_independent_of_lane_health import (  # noqa: E402
     _MISSING_COLUMNS_CANDIDATE,
     _audit_events,
+    _page_sidecar,
     _config,
     _grid_pdf,
     _route_fn,
@@ -42,28 +42,39 @@ from test_gh855_scoring_independent_of_lane_health import (  # noqa: E402
 _DEADLINE = 0.2
 
 
-def _run(tmp_path: Path, *, slow_call_finishes_before_page_two: bool):
+def _run(root: Path, *, mode: str):
     """Two-page document; page 1's escalation call outlives the deadline.
 
-    Returns ``(provider_calls, events)``. The only variable between the runs is
-    whether page 1's abandoned call has completed when page 2 asks for escalation.
+    ``mode``: ``slow_done`` (page 1's abandoned call finishes before page 2
+    qualifies), ``wedge`` (it never does), ``healthy`` (no call is slow). Runs
+    share ``root/out``, so a second call with a different mode is a RESUME.
+
+    Returns ``(provider_calls, events, process_result)``.
     """
-    pdf = _grid_pdf(tmp_path / "doc.pdf", pages=2)
+    pdf = root / "doc.pdf"
+    if not pdf.exists():  # a resume must see the SAME bytes (input checksum gate)
+        _grid_pdf(pdf, pages=2)
     cfg = _config()
     cfg.escalation_timeout_sec = _DEADLINE
     cfg.local_engine = PROFILE_QWEN_LOCAL.engine
     pipeline = UnifiedPipeline(cfg)
 
     release = threading.Event()
-    page_one_returned = threading.Event()
     calls: list[int] = []
+    escalation_futures: list[concurrent.futures.Future] = []
+    real_submit = concurrent.futures.ThreadPoolExecutor.submit
 
-    def _engine(state, pages, fallback, engine, mode, **kwargs):
+    def _recording_submit(self, fn, *args, **kwargs):
+        fut = real_submit(self, fn, *args, **kwargs)
+        if getattr(fn, "__name__", "") == "run_provider":
+            escalation_futures.append(fut)
+        return fut
+
+    def _engine(state, pages, fallback, engine, mode_, **kwargs):
         page_num = pages[0]
         calls.append(page_num)
-        if page_num == 1:
+        if page_num == 1 and mode != "healthy":
             release.wait(timeout=30)
-            page_one_returned.set()
         return [
             PageOutput(
                 page_num=page_num,
@@ -74,17 +85,18 @@ def _run(tmp_path: Path, *, slow_call_finishes_before_page_two: bool):
         ]
 
     def _score(state, page_num, ps, bo):
-        # Runs on the page-major loop thread right before escalation. This is the
-        # one place the two runs differ: let page 1's slow call finish (or not)
-        # before page 2 is judged.
-        if page_num == 2 and slow_call_finishes_before_page_two:
+        # Runs on the page-major loop thread right before escalation. In
+        # ``slow_done`` page 1's abandoned call is released and its Future is
+        # awaited itself (no sleep): by the time page 2 asks, it is done.
+        if page_num == 2 and mode == "slow_done":
             release.set()
-            assert page_one_returned.wait(timeout=10)
-            time.sleep(0.05)  # let the worker thread publish its Future result
+            concurrent.futures.wait(escalation_futures[:1], timeout=10)
+            assert escalation_futures[0].done()
         return True
 
     try:
         with (
+            patch.object(concurrent.futures.ThreadPoolExecutor, "submit", _recording_submit),
             patch.object(
                 pipeline,
                 "_available_engines_for_agentic",
@@ -101,10 +113,10 @@ def _run(tmp_path: Path, *, slow_call_finishes_before_page_two: bool):
             ),
             patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
         ):
-            pipeline.process(pdf, tmp_path / "out")
+            result = pipeline.process(pdf, root / "out")
     finally:
         release.set()
-    return calls, _audit_events(tmp_path / "out")
+    return calls, _audit_events(root / "out"), result
 
 
 def _kinds(events, page_num):
@@ -112,7 +124,7 @@ def _kinds(events, page_num):
 
 
 def test_a_slow_page_does_not_remove_escalation_from_the_next_page(tmp_path: Path) -> None:
-    calls, events = _run(tmp_path, slow_call_finishes_before_page_two=True)
+    calls, events, _ = _run(tmp_path, mode="slow_done")
 
     assert calls == [1, 2], "page 2 qualified and must get its escalation call"
     assert "table_escalation_timeout" in _kinds(events, 1)
@@ -122,7 +134,7 @@ def test_a_slow_page_does_not_remove_escalation_from_the_next_page(tmp_path: Pat
 
 
 def test_a_still_outstanding_call_withholds_the_next_page_and_says_so(tmp_path: Path) -> None:
-    calls, events = _run(tmp_path, slow_call_finishes_before_page_two=False)
+    calls, events, _ = _run(tmp_path, mode="wedge")
 
     assert calls == [1], "a second call must not stack on an unresponsive provider"
     assert "table_escalation_timeout" in _kinds(events, 1)
@@ -133,14 +145,55 @@ def test_a_still_outstanding_call_withholds_the_next_page_and_says_so(tmp_path: 
 
 def test_the_two_runs_differ_only_in_whether_the_abandoned_call_finished(tmp_path: Path) -> None:
     """Pin the DIFFERENCE: same document, same timeout, same stubs."""
-    slow_calls, slow_events = _run(tmp_path / "slow", slow_call_finishes_before_page_two=True)
-    wedge_calls, wedge_events = _run(tmp_path / "wedge", slow_call_finishes_before_page_two=False)
+    slow_calls, slow_events, _ = _run(tmp_path / "slow", mode="slow_done")
+    wedge_calls, wedge_events, _ = _run(tmp_path / "wedge", mode="wedge")
 
     assert slow_calls != wedge_calls
     assert _kinds(slow_events, 1) == _kinds(wedge_events, 1)
     assert set(_kinds(wedge_events, 2)) - set(_kinds(slow_events, 2)) == {
         "table_escalation_withheld"
     }
+
+
+def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) -> None:
+    """Pin the DIFFERENCE between runs; the fixture is otherwise identical."""
+    _, _, healthy = _run(tmp_path / "healthy", mode="healthy")
+    _, _, slow = _run(tmp_path / "slow", mode="slow_done")
+    _, _, wedge = _run(tmp_path / "wedge", mode="wedge")
+
+    slow_p2 = _page_sidecar(tmp_path / "slow" / "out", 2)
+    wedge_p2 = _page_sidecar(tmp_path / "wedge" / "out", 2)
+
+    # Page 2: escalated (slow) versus withheld (wedge) -- only the wedge demotes it.
+    assert slow_p2["status"] == PageStatus.SUCCESS.value
+    assert wedge_p2["status"] != slow_p2["status"]
+    assert wedge_p2["failure_mode"] == "table_unverified"
+    assert wedge_p2["text"] == slow_p2["text"], "demotion must not discard the page text"
+
+    # Document: a clean run is SUCCESS; one withheld page makes it not-SUCCESS, and
+    # the withheld page is named in what the document reports.
+    assert healthy.status != wedge.status
+    assert "2" in (wedge.error or "") and "1, 2" in wedge.error
+    assert "1, 2" not in (slow.error or "")
+
+
+def test_a_wedged_run_is_retried_on_resume_once_the_provider_is_healthy(tmp_path: Path) -> None:
+    wedge_calls, _, _ = _run(tmp_path, mode="wedge")
+    assert wedge_calls == [1]
+
+    resume_calls, resume_events, _ = _run(tmp_path, mode="healthy")
+
+    assert 2 in resume_calls, "the withheld page must be reprocessed and escalated on resume"
+    assert 1 in resume_calls, "the timed-out page must be reprocessed on resume"
+    assert "table_escalation_withheld" not in _kinds(resume_events, 2)
+
+
+def test_control_a_healthy_run_is_skipped_on_resume(tmp_path: Path) -> None:
+    """Without the marker the same resume skips the page (the gate is the cause)."""
+    first_calls, _, _ = _run(tmp_path, mode="healthy")
+    assert first_calls == [1, 2]
+    again_calls, _, _ = _run(tmp_path, mode="healthy")
+    assert again_calls == []
 
 
 def test_withheld_and_timeout_events_are_replayed_on_resume_and_distrust_the_page() -> None:
