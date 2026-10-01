@@ -157,8 +157,8 @@ SHIP:
 - `_extend_scope_for_header` measures word space before the upright rotation is applied.
 
 **Why it was dropped rather than patched again:**
-- The gain is small and cheap to forgo. Of 127 pages, 2 skip one model read (Gong 53 and Ayivodji, the latter only in
-  revision 1) and Boukus 38 gets a better header. Fama 561 still refuses.
+- The gain is small and cheap to forgo. In revision 2, 1 page of 127 (Gong 53) skips one model read, Boukus 38 gets a
+  better header, and Fama 561 still refuses.
 - The risk is in the class this repo ranks worst: a page that DEFERs on main ships a wrong header with no gate signal.
 - A missed header costs one model read today, because `header_band_missing` catches it.
 
