@@ -94,6 +94,12 @@ def _forecast_pdf(path: Path, rotation: int = 90) -> None:
             _place(x0 + c * 70, y0, rotation, width, height),
             _place(x0 + c * 70, y0 + th, rotation, width, height),
         )
+    # GH-902 (cubic P3): pin the fixture to real PDF geometry, not to the code
+    # under test. The pre-fix fixtures drew 90/270 swapped, and the wrong sign
+    # undid it, so the tests passed against the bug.
+    from socr.core.born_digital import upright_rotation_for
+
+    assert upright_rotation_for(page) == rotation, (upright_rotation_for(page), rotation)
     doc.save(str(path))
     doc.close()
 
