@@ -908,7 +908,9 @@ def _cell_kind(cell: str) -> str:
     compact = _compact(cell)
     if not compact:
         return _EMPTY
-    if _NUMBER_CELL_RE.match(compact):
+    # The canonical numeric contract first (currency prefixes, ``∗``/``✱``/dagger dressing,
+    # markdown emphasis, entities: GH-932), then the one-letter-marker rule it does not cover.
+    if is_numeric_token(compact) or _NUMBER_CELL_RE.match(compact):
         return _NUMBER
     return _TEXT if any(c.isalpha() for c in compact) else _OTHER
 

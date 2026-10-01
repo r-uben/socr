@@ -222,3 +222,51 @@ def test_a_separator_only_block_does_not_mask_another_blocks_fault() -> None:
     raise, and the gate's handler then replaced the real fault with ``gate_error``."""
     words, md = _grid(tail=[["", "", "", "", "(Continued)"]])
     assert _fired(words, md + "\n\n| --- | --- |\n") == {TNC}
+
+
+class TestNumericClassifierIsTheVerifiers:
+    """GH-932: a cell the verifier calls numeric (currency, ``∗``/``✱``) is a number, so a column of them is a numeric column and a footrow of text
+    under it defers. Each pin is a difference: the same markdown with and without the
+    ``tail`` row, and the dressed column against the plain one."""
+
+    FOOTROW = ["a See footnote", "table 8b.", "", "", ""]
+
+    @staticmethod
+    def _dressed(prefix="", suffix="", *, tail=()):
+        # Source words carry the bare numbers (the glyph is not in the numeric multiset);
+        # only the markdown cells in columns 1-4 are dressed.
+        words = _words([HEADER] + [list(r) for r in ROWS])
+        body = [[r[0]] + [prefix + c + suffix for c in r[1:]] for r in ROWS]
+        return words, _md(HEADER, body + [list(t) for t in tail])
+
+    def test_currency_column_with_a_text_footrow_defers(self) -> None:
+        for sign in ("$", "€", "£", "¥"):
+            words, clean = self._dressed(sign)
+            _, faulty = self._dressed(sign, tail=[self.FOOTROW[:1] + ["table 8b.", "", "", ""]])
+            assert _fired(words, clean) == set(), sign
+            assert _fired(words, faulty) == {TNC}, sign
+
+    def test_star_column_with_a_text_footrow_defers(self) -> None:
+        # ★ and ⋆ are not in the verifier's marks: such a markdown never exact-passes, so no
+        # SHIP exists for the gate to override (measured; widening the shared marks is out of scope).
+        for star in ("∗", "✱"):
+            words, clean = self._dressed(suffix=star)
+            _, faulty = self._dressed(suffix=star, tail=[["", "see note", "", "", ""]])
+            assert _fired(words, clean) == set(), star
+            assert _fired(words, faulty) == {TNC}, star
+
+    def test_cell_kind_reads_the_verifiers_numbers(self) -> None:
+        for cell in ("$1,234", "€5.2", "£3", "¥100", "0.3∗", "0.3✱", "∗0.05"):
+            assert ship_gate._cell_kind(cell) == ship_gate._NUMBER, cell
+        # Still text or nothing: a currency sign or star alone, a word, a long marker.
+        for cell in ("$", "★", "$ total", "0.23abc"):
+            assert ship_gate._cell_kind(cell) != ship_gate._NUMBER, cell
+
+    def test_dressed_columns_keep_the_must_not_fire_controls_quiet(self) -> None:
+        for sign in ("$", "€"):
+            words, md = self._dressed(sign, tail=[["", "", "", "", ""]])
+            assert _fired(words, md) == set()
+            words, md = self._dressed(sign, tail=[["", "–", "–", "", ""]])
+            assert _fired(words, md) == set()
+            words, md = self._dressed(sign, tail=[["a See footnote table 8b.", "", "", "", ""]])
+            assert _fired(words, md) == set()
