@@ -375,6 +375,29 @@ class TestDataRowRound2:
                 words.append(_word(COL_XS[ci], y, f"{ci}.5", 60, ci))
         assert ship_gate.native_ship_gate(words, md) == ()
 
+    def test_prose_between_the_table_and_a_distant_numeric_line_does_not_bridge(self) -> None:
+        # A paragraph at the table's own row pitch runs from the last row out to
+        # a full-width numeric line: the prose rows are not table rows, so they
+        # must not carry the span out to it.
+        words, md = _base()
+        last = Y0 + len(ROWS) * PITCH
+        far = last + 12 * PITCH
+        for i in range(1, 12):
+            words.append(_word(COL_XS[0], last + i * PITCH, "prose", 80 + i, 0))
+        for ci in range(1, 5):
+            words.append(_word(COL_XS[ci], far, f"{ci}.5", 90, ci))
+        assert ship_gate.native_ship_gate(words, md) == ()
+
+    def test_a_full_width_row_at_the_reach_limit_is_in_and_one_pitch_beyond_is_out(self) -> None:
+        last = Y0 + len(ROWS) * PITCH
+        limit = 5  # the measured p99 of inter-row gaps, in row pitches (see ship_gate)
+        for pitches, fires in ((limit, True), (limit + 1, False)):
+            words, md = _base()
+            for ci in range(1, 5):
+                words.append(_word(COL_XS[ci], last + pitches * PITCH, f"{ci}.5", 70, ci))
+            got = {f["predicate"] for f in ship_gate.native_ship_gate(words, md)}
+            assert (got == {ship_gate.DATA_ROW_MISSING}) is fires, (pitches, got)
+
     def test_dropped_copy_of_a_repeated_row_fires(self) -> None:
         rows = [list(r) for r in ROWS]
         rows.insert(3, list(rows[2]))  # an identical row prints twice
@@ -432,23 +455,74 @@ class TestLabelRowRound2:
             ship_gate.LABEL_ROW_MISSING
         }
 
-    def test_prose_spanning_the_lanes_inside_the_span_is_not_a_label(self) -> None:
+    def test_a_full_width_heading_inside_the_span_is_a_missing_label(self) -> None:
+        # Five words spanning every lane, between two data rows, dropped from the
+        # grid: width alone never makes a row inside the table prose.
         rows = [list(r) for r in ROWS]
-        prose = ["Averages", "are", "taken", "over", "years"]
-        words = _words([HEADER] + rows[:3] + [prose] + rows[3:])
-        assert ship_gate.native_ship_gate(words, _md(HEADER, rows)) == ()
-        # A short heading in the label column, equally absent, is a fault.
-        words = _words([HEADER] + rows[:3] + [["Panel B", "", "", "", ""]] + rows[3:])
-        assert ship_gate.LABEL_ROW_MISSING in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))
+        heading = ["Averages", "are", "taken", "over", "years"]
+        words = _words([HEADER] + rows[:3] + [heading] + rows[3:])
+        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))} == {
+            ship_gate.LABEL_ROW_MISSING
         }
+        kept = [list(r) for r in rows[:3]] + [heading] + [list(r) for r in rows[3:]]
+        assert ship_gate.native_ship_gate(words, _md(HEADER, kept)) == ()
 
-    def test_nothing_below_a_notes_opener_is_a_missing_label(self) -> None:
+    def test_a_notes_heading_between_panels_does_not_hide_later_labels(self) -> None:
+        # "Notes:" sits between two data blocks and numeric rows resume after it,
+        # so the label that vanishes after it is still a fault.
         rows = [list(r) for r in ROWS]
         blank = ["", "", "", ""]
         inserted = [["Notes:"] + blank, ["Panel C"] + blank]
-        with_note = _words([HEADER] + rows[:3] + inserted + rows[3:])
-        assert ship_gate.native_ship_gate(with_note, _md(HEADER, rows)) == ()
+        words = _words([HEADER] + rows[:3] + inserted + rows[3:])
+        md_rows = rows[:3] + [["Notes:"] + blank] + rows[3:]
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows))
+        } == {ship_gate.LABEL_ROW_MISSING}
+        assert ship_gate.native_ship_gate(words, _md(HEADER, rows[:3] + inserted + rows[3:])) == ()
+
+    def test_note_lines_carrying_numerals_are_not_table_rows(self) -> None:
+        # Two Note lines each carry two numerals that fall in table lanes, among
+        # many ordinary words. The grid ships them as rows; the line between them
+        # is dropped. They are prose with numbers, not core rows, so they must not
+        # stretch the table down to the dropped line.
+        words, _ = _base()
+        y0 = Y0 + (len(ROWS) + 2) * PITCH
+        words_per_line = [
+            "Note:",
+            "values",
+            "are",
+            "shown",
+            "for",
+            "each",
+            "horizon",
+            "and",
+            "scenario",
+        ]
+        out_rows = [list(r) for r in ROWS]
+        for n, (a, b) in enumerate([("7.5", "8.5"), ("9.5", "6.5")]):
+            y = y0 + 2 * n * PITCH
+            for k, tok in enumerate(words_per_line):
+                words.append(_word(95.0 + 38.0 * k, y, tok, 100 + n, k))
+            words.append(_word(COL_XS[1], y + 0.0, a, 100 + n, 20))
+            words.append(_word(COL_XS[2], y + 0.0, b, 100 + n, 21))
+            out_rows.append([" ".join(words_per_line), a, b, "", ""])
+        words.append(_word(95.0, y0 + PITCH, "between", 110, 0))
+        assert ship_gate.native_ship_gate(words, _md(HEADER, out_rows)) == ()
+
+    def test_sentence_numerals_are_not_table_values(self) -> None:
+        # "for 7, 5," inside a Note sentence: numerals with trailing punctuation
+        # are not table values, so these lines never pair into the table.
+        words, _ = _base()
+        y0 = Y0 + (len(ROWS) + 2) * PITCH
+        out_rows = [list(r) for r in ROWS]
+        for n, (a, b) in enumerate([("7,", "8,"), ("9,", "6,")]):
+            y = y0 + 2 * n * PITCH
+            words.append(_word(95.0, y, "Note:", 100 + n, 0))
+            words.append(_word(COL_XS[1], y, a, 100 + n, 20))
+            words.append(_word(COL_XS[2], y, b, 100 + n, 21))
+            out_rows.append(["Note:", a, b, "", ""])
+        words.append(_word(95.0, y0 + PITCH, "between", 110, 0))
+        assert ship_gate.native_ship_gate(words, _md(HEADER, out_rows)) == ()
 
     def test_notes_swallowed_into_the_grid_do_not_stretch_the_table(self) -> None:
         # The grid ships two Note lines (one stray number each) as rows but not

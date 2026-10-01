@@ -247,3 +247,98 @@ emit site removed (1), upright emit site removed (5).
 ### Results
 
 Focused file: 36 passed. Full suite: 5955 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 1028 s). `uvx ruff@0.16.0 format --check .` clean.
+
+## Round 3 (Astra rejected round 2: false negatives)
+
+### Changes
+
+1. **Notes cut-off removed.** The `break` on a Notes/Source opener skipped every later label in the
+   block. Label rows are only ever scanned strictly between the first and last CORE paired row, so a
+   Notes/Source heading there is a table label and checking resumes after it. Rows below the last core
+   row (a Notes paragraph swallowed into the grid) are never scanned, which is the note region. Test
+   flipped: "Panel C" vanishing after "Notes:" with data resuming now FIRES.
+2. **`_prose_like` removed.** Width plus word count classified a 5-word heading spanning 4 lanes as
+   prose. Inside the span nothing is exempt. Counterexample test: a full-width genuine heading dropped
+   from the grid fires. Prose is instead kept out of the CORE set by positive evidence (below).
+3. **Outward scan.** `prev` no longer advances on every row. Only a full-width numeric row extends the
+   span, measured from the current edge, so prose in between cannot bridge to a distant numeric line.
+   Must-not-fire test: 11 prose rows at the table's pitch lead to a numeric line 12 pitches out.
+4. **Shared rowizer change kept and pinned.** `starts_a_number` (leading decimal) stays in
+   `_reattach_detached_signs`, now with direct output tests in `test_gh887_reattach_detached_signs.py`:
+   leading-decimal merge WITH contact, the same shape without contact (unchanged), a tail sign with a gap
+   before it (merged), a tail sign flush against its label (a hyphen, unchanged). Mutation: reverting only
+   the merge condition fails 2 of them.
+5. **`_PANEL_GAP_ROWS` derived.** On the 35 rotated and 92 upright pages: 1822 gaps between consecutive
+   core paired rows, each divided by its block's median gap: median 1.0, p90 2.0, p95 2.25, p99 4.83,
+   max 28.45 (the tail is index pages of doc woodford, which are not tables; counts above 2, 3, 4
+   pitches: 131, 42, 21). The constant is 5 (p99 rounded up), was 2. Test at the limit: a full-width row
+   exactly 5 pitches out is in, 6 is out.
+6. **Two more core rules (needed to keep the Fable false fire quiet once the Notes rule was gone).**
+   A paired row is core only if its non-numeric word count in the lane region is within this table's own
+   median plus one word per lane (a Note line carrying numerals is prose, not a row). A source word whose
+   number ends in `, . ; :` ("for 7, 5,") is not numeric for the gate. Tests for both.
+
+### Re-measurement
+
+| set | measure | round 2 | round 3 |
+|---|---|---|---|
+| upright SHIP (92 pages) | pages firing | 22 | 20 |
+| | data_row_missing | 7 | 4 |
+| | label_row_missing | 16 | 17 |
+| | sign_detached / row_order / cell_order | 0 | 0 |
+| rotated (35 pages) | wrong pages stopped | 12 / 14 | 12 / 14 |
+| | other pages stopped | 6 / 21 | 4 / 21 |
+| | label_row_missing wrong / other | 8 / 6 | 8 / 4 |
+| | data_row_missing wrong | 2 | 2 |
+| | sign_detached wrong | 2 | 2 |
+
+Pages whose upright verdict flipped (round 2 to round 3):
+- Stopped firing: woodford 787 and 802 (index pages emitted as tables; they fired only on
+  section-number-like rows "3.1.", now excluded as sentence-punctuated numerals), ljungvist 7 (table of
+  contents, same), bybee 67 (numbered prose list). These four are non-tables that still ship as tables;
+  the gate no longer defers them. Say so rather than count it as a clean result.
+- Started firing: cieslak 63 (header words fragmented across cells, the "Staff Rev." lines that round 2 had
+  treated as prose) and theodoridis 1203 (not looked at).
+- new7 (Fable): the two false fires (gomez-cram p10, piller p33) stay quiet. True: hack p38, wang p11,
+  bugel p11, jiang p44 still fire; fernandez-fuertes p73 does not fire (Notes below the table; unchanged
+  from round 2, a known lost true positive).
+- new8 (all 8 true per Fable): all 8 still fire.
+- Rotated flips, against round 1: pages 11, 23 and 31 (cosmetic, not wrong) no longer fire (two of the three already stopped in round 2); the 12 of 14 wrong pages are
+  the same set (0 and 17 are the residuals).
+
+### Pages that fire (upright SHIP, round 3): basename, page, predicates
+
+| basename | page | predicates |
+|---|---|---|
+| 2006__boukus_rosenber__information_content_fomc_minutes__WP.pdf | 46 | label_row_missing |
+| 2008__faust_wright__efficient_prediction_of_excess_returns.pdf | 44 | label_row_missing |
+| 2016__ramey__shocks.pdf | 104 | data_row_missing, label_row_missing |
+| 2018__brochet_kolev_lerman__information_transfer_conference_calls__RAS.pdf | 21 | data_row_missing |
+| 2020__cieslak_vissing-jorgensen__the_economics_of_fed_put__WP.pdf | 63 | label_row_missing |
+| 2021__gow_larcker_zakolyukina__non_answers_during_conference_calls__JAR.pdf | 48 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 10 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 78 | label_row_missing |
+| 2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf | 83 | label_row_missing |
+| 2023__cook_kazinnik_hansen_mcadam__local_language_models_financial_earnings_calls.pdf | 21 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 29 | label_row_missing |
+| 2023__hansen_kazinnik__fedspeak_decipher__WP.pdf | 30 | label_row_missing |
+| 2023__segal.pdf | 66 | data_row_missing |
+| 2025__barry_bruns_kandemir_klose_smirnov_tillmann__emotions_monetary_policy__WP.pdf | 19 | label_row_missing |
+| 2025__hack_istrefi_meier__systematic_origins_of_monetary_policy_shocks__WP.pdf | 38 | label_row_missing |
+| 2025__wang_liu_chen__current_stance_vs_future_guidance_llm_evidence_on_how_pbc_communication_shapes_the_yield_curve__EL.pdf | 11 | label_row_missing |
+| 2026__bugel_hidalgo_luetticke__unconventional_unified_narrative_mp_shocks__WP.pdf | 11 | data_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 44 | label_row_missing |
+| 2026__jiang_krishnamurthy_lustig_richmond__dollar_erosion_loss_of_reserve_currency_status__WP.pdf | 50 | label_row_missing |
+| 2026__theodoridis__machine_learning_classics_to_deep_networks_transformers_diffusion__academic_press.pdf | 1203 | label_row_missing |
+
+### Mutation
+
+All killed, canary on `socr.__file__`, uncapped `count == 1`: prior set unchanged, plus new:
+reach walks only on full-width rows (prose-bridging mutant, 1), Notes opener hides the rest (1), width
+makes prose (1), constant 2 instead of 5 (1; the first version of this test read the constant from the
+module and the mutant survived, it now hard-codes 5), prose-with-numerals is core (1), sentence-punctuated
+numeral counts (1), rowizer merge condition reverted (2 in the #887 file).
+
+### Results
+
+Focused: 40 tests in the gate file, 15 in the #887 file. Full suite: 5963 passed, 2 skipped, 4 xfailed (default OLLAMA_HOST, 943 s). `uvx ruff@0.16.0 format --check .` clean.
