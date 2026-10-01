@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -17,6 +18,30 @@ import httpx
 TAGS_CHECK_TIMEOUT_SEC = 10.0
 
 _UNREACHABLE_MSG = "Ollama is not running or not installed"
+_TIMEOUT_MSG = "Ollama did not respond (timeout)"
+
+
+def _call_within(fn: Callable[[], object], timeout: float) -> tuple[bool, object]:
+    """Run *fn* in a daemon thread joined with *timeout*: ``(finished, value_or_exc)``.
+
+    An overrun is abandoned, not waited on, and cannot keep the process alive.
+    Anything *fn* raises comes back as the value (an exception instance) for the
+    caller to re-raise or map; ``finished`` is False when the deadline expired.
+    """
+    box: list[object] = []
+
+    def _work() -> None:
+        try:
+            box.append(fn())
+        except BaseException as exc:  # handed to the caller
+            box.append(exc)
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if not box:
+        return False, None
+    return True, box[0]
 
 
 def _get_tags(host: str, timeout: float) -> httpx.Response | None:
@@ -28,22 +53,30 @@ def _get_tags(host: str, timeout: float) -> httpx.Response | None:
     and cannot keep the process alive. No process is spawned. Transport errors
     propagate as ``httpx.HTTPError`` / ``OSError``.
     """
-    box: list = []
-
-    def _work() -> None:
-        try:
-            box.append(httpx.get(f"{host}/api/tags", timeout=timeout))
-        except BaseException as exc:  # handed to the caller, re-raised there
-            box.append(exc)
-
-    thread = threading.Thread(target=_work, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    if not box:
+    finished, value = _call_within(lambda: httpx.get(f"{host}/api/tags", timeout=timeout), timeout)
+    if not finished:
         return None
-    if isinstance(box[0], BaseException):
-        raise box[0]
-    return box[0]
+    if isinstance(value, BaseException):
+        raise value
+    return value  # type: ignore[return-value]
+
+
+def _listed_model_names(resp: httpx.Response) -> set[str]:
+    """Every ``name`` / ``model`` string listed by an ``/api/tags`` response."""
+    # ``null`` is how older Ollama reports an empty store: nothing pulled,
+    # so "not found", not "unreadable".
+    models = resp.json()["models"]
+    if models is None:
+        models = []
+    if not isinstance(models, list):
+        raise TypeError(f"/api/tags 'models' is {type(models).__name__}, not a list")
+    names: set[str] = set()
+    for entry in models:
+        for key in ("name", "model"):
+            value = entry.get(key)
+            if isinstance(value, str):
+                names.add(value)
+    return names
 
 
 def check_ollama_model(model_name: str) -> str | None:
@@ -68,24 +101,12 @@ def check_ollama_model(model_name: str) -> str | None:
     try:
         resp = _get_tags(host, TAGS_CHECK_TIMEOUT_SEC)
         if resp is None:
-            return "Ollama did not respond (timeout)"
+            return _TIMEOUT_MSG
         if resp.status_code != 200:
             return f"{_UNREACHABLE_MSG} (HTTP {resp.status_code} from /api/tags)"
-        # ``null`` is how older Ollama reports an empty store: nothing pulled,
-        # so "not found", not "unreadable".
-        models = resp.json()["models"]
-        if models is None:
-            models = []
-        if not isinstance(models, list):
-            raise TypeError(f"/api/tags 'models' is {type(models).__name__}, not a list")
-        names: set[str] = set()
-        for entry in models:
-            for key in ("name", "model"):
-                value = entry.get(key)
-                if isinstance(value, str):
-                    names.add(value)
+        names = _listed_model_names(resp)
     except httpx.TimeoutException:
-        return "Ollama did not respond (timeout)"
+        return _TIMEOUT_MSG
     except (httpx.HTTPError, OSError):
         return _UNREACHABLE_MSG
     except (ValueError, KeyError, TypeError, AttributeError):
@@ -95,24 +116,23 @@ def check_ollama_model(model_name: str) -> str | None:
     return None
 
 
-#: GH-903 round 4 (CI slowdown, cubic P2); moved here by GH-905 so the qwen
-#: cloud-rung probe shares it: a per-candidate ``run_killable``
-#: spawn is a real ``multiprocessing.spawn`` -- tens of milliseconds even to
-#: fail fast -- and CI (no Ollama daemon at all) pays that on EVERY candidate
-#: in the ladder, on every run. A plain, short-timeout connect is enough to
-#: tell "nothing is listening here" apart from "something is, slowly", and
-#: unlike the generation probe's own budget (which must accommodate a cold
-#: MODEL load, ~46s measured), an unreachable HOST does not get any more
-#: reachable the longer you wait -- so this budget is small and fixed, not
-#: derived from ``self.timeout``. This is NOT a model-availability claim: the
-#: daemon can be up with the wrong model pulled, or none at all -- the check
-#: below only ever short-circuits to unavailable, never to available, and a
-#: reachable host still gets the full killable generation probe.
+#: TCP-connect budget for ``host_reachable``: small and fixed, since an
+#: unreachable host does not become reachable by waiting. It only ever
+#: short-circuits to unavailable and never proves a model is available.
 CONNECT_PROBE_TIMEOUT_SEC = 1.0
 
-#: GH-903 / GH-905: probes send ``think: false``. A thinking model otherwise
-#: puts its answer in ``thinking`` and leaves ``response`` empty, so a probe
-#: (one token) could pass or fail for reasons unrelated to availability.
+#: The ``think`` flag every judge/probe generation sends. A thinking model
+#: (e.g. ``qwen3.8:27b``) with ``think`` unset and ``format=json`` puts its
+#: answer in ``thinking`` and leaves ``response`` empty, which reads as "no JSON
+#: object found" or a timeout rather than a real answer. ``False`` was measured
+#: (2026-09-26, GH-903) to return correct JSON in ~8s warm and is harmless on
+#: non-thinking models (``qwen3-vl:30b-a3b-instruct``), so it is sent
+#: unconditionally rather than per-model. The probe MUST send the same flag as
+#: the real page-judge call (``_post_generate``) or a thinking candidate could
+#: pass the probe and still fail every judge call. Only the PAGE judge and the
+#: probes send it: the table judge ladder and the cell adjudicator use cloud
+#: thinking models whose measured accuracy depends on their reasoning traces
+#: (see ``table_rung_ollama.py`` and the GH-903 log).
 PROBE_THINK = False
 
 #: Wall-clock budget for a generation probe. A cold-loaded model was measured
@@ -129,16 +149,12 @@ _PROBE_PROMPT = "hi"
 
 
 def probe_failure_reason(exc: Exception) -> str:
-    """A short, human-readable reason a judge candidate's probe answered "no".
+    """A short, human-readable reason a probe answered "no".
 
-    Only reached for a DEFINITIVE answer -- the daemon actually responded
-    (an HTTP error status, e.g. 410 retired / 404 never pulled) or refused
-    the connection outright. A timeout is never classified here: it is not
-    proof of unavailability (the probe's budget may simply have been too
-    short for a candidate that is cold-loading, measured ~46s for an unloaded
-    ``qwen3.8:27b``), and `the caller` reports it distinctly, from the
-    ``run_killable`` boundary's own ``TimeoutError`` (see below), before this
-    function is ever called.
+    Only for a DEFINITIVE answer: an HTTP error status (410 retired, 404 never
+    pulled) or a refused connection. A timeout is never classified here (it is
+    not proof of unavailability); ``probe_model_generation`` reports it from
+    ``run_killable``'s own ``TimeoutError`` before this is called.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         body_detail = ""
@@ -154,27 +170,17 @@ def probe_failure_reason(exc: Exception) -> str:
 
 
 def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> bool:
-    """Cheap "is anything listening at all" check -- never spawns a process,
-    never sends an HTTP request, never generates a token (GH-903 round 4,
-    cubic P2).
+    """Cheap "is anything listening at all" check: a raw TCP connect.
 
-    A raw TCP connect, deliberately -- NOT an ``httpx`` request. An HTTP
-    round trip has to read a response, and a peer that trickles the BODY
-    (this module's own killable-boundary tests use exactly such a server)
-    would defeat an ``httpx`` timeout the same way it defeats
-    ``probe_generate``'s, hanging this "cheap" check indefinitely with
-    nothing bounding it (unlike the generation probe, this check does not run
-    behind ``run_killable``, on purpose -- it exists to AVOID that spawn). A
-    bare socket connect only waits on the TCP handshake, which a trickling
-    peer cannot stall -- the handshake either completes or the OS refuses it,
-    both fast. Any failure to connect (refused, DNS failure, this timeout)
-    means "no daemon here": that is the one case a caller may treat
-    as definitive without ever calling ``probe_generate``.
+    Never spawns a process, sends an HTTP request or generates a token. Not an
+    ``httpx`` request on purpose: a peer that trickles the response body defeats
+    an httpx timeout, while a bare connect only waits on the TCP handshake. This
+    check does not run behind ``run_killable`` (it exists to avoid that spawn).
+    Any failure to connect (refused, DNS failure, timeout) means "no daemon
+    here", which a caller may treat as definitive.
 
     A host string that does not parse (a malformed ``OLLAMA_HOST``, e.g. a
-    non-numeric port -- ``resolve_ollama_host`` returns such values
-    unchanged) is also "no daemon here": ``urlsplit`` / ``.port`` raise
-    ``ValueError`` on it, and that must degrade the judge, not abort the run.
+    non-numeric port) is also "no daemon here" and degrades, never aborts.
     """
     try:
         parts = urlsplit(host)
@@ -216,7 +222,7 @@ def host_reachable(host: str, timeout: float = CONNECT_PROBE_TIMEOUT_SEC) -> boo
     return False
 
 
-def _resolve_within(hostname: str, port: int, timeout: float) -> list | None:
+def _resolve_within(hostname: str, port: int, timeout: float) -> list[tuple] | None:
     """``getaddrinfo`` bounded by *timeout* seconds; ``None`` on failure or expiry.
 
     A lookup that outlives *timeout* leaves its daemon thread running until the
@@ -226,44 +232,28 @@ def _resolve_within(hostname: str, port: int, timeout: float) -> list | None:
     handful of short-lived threads per run, never one per page, and a daemon
     thread cannot keep the process alive (GH-905 round 4, cubic P2).
     """
-    box: list = []
 
-    def _work() -> None:
+    def _lookup() -> list[tuple] | None:
         try:
-            box.append(socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM))
+            return socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
         except OSError:
-            box.append(None)
+            return None
 
-    thread = threading.Thread(target=_work, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    return box[0] if box else None
+    finished, value = _call_within(_lookup, timeout)
+    if not finished or isinstance(value, BaseException):
+        return None
+    return value  # type: ignore[return-value]
 
 
 def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
-    """Top-level, picklable probe body run through ``run_killable`` (GH-903
-    round 3, P2-b). Reached only via ``probe_model_generation``; callers never
-    invoke it directly.
+    """Top-level, picklable probe body run through ``run_killable``.
 
-    ``httpx``'s ``timeout=`` is a per-READ inactivity timeout, not a total
-    wall-clock deadline (the same gap #172 closed for ``judge()`` itself): a
-    peer that keeps the connection open and trickles a byte before every read
-    interval never trips it. ``run_killable`` is what actually bounds this
-    call now, by killing the child's process group past ``timeout`` -- so
-    THIS function must not classify a timeout itself; it returns a plain,
-    picklable outcome for anything it CAN classify (an HTTP status, a refused
-    connection), and re-raises a timeout so ``run_killable``'s own
-    reclassification (``KillableTimeoutError``, a ``TimeoutError`` subclass)
-    is what the parent sees -- exactly the same path ``judge()`` already
-    relies on for ``is_page_judge_timeout``.
-
-    A caught exception is returned, not raised, for every non-timeout case:
-    ``run_killable`` collapses ANY child exception that crosses the pipe into
-    a generic ``RuntimeError`` carrying only the original type name and
-    message (it cannot safely pickle arbitrary exception instances, e.g. an
-    ``httpx.HTTPStatusError`` holding a live ``Response``), which would lose
-    the response body ``probe_failure_reason`` needs. Classifying HERE, then
-    crossing the pipe as a plain dict, keeps that detail.
+    Reached only via ``probe_model_generation``. ``httpx``'s ``timeout=`` is a
+    per-read inactivity timeout, so ``run_killable`` is what bounds the call;
+    a timeout is therefore re-raised for ``run_killable`` to reclassify.
+    Every other failure is returned as a plain dict, not raised: ``run_killable``
+    collapses any child exception into a bare ``RuntimeError`` and would lose
+    the response body ``probe_failure_reason`` needs.
     """
     try:
         resp = httpx.post(
@@ -290,8 +280,8 @@ def probe_model_generation(
     model: str,
     timeout: float,
     *,
-    reachable=None,
-    runner=None,
+    reachable: Callable[[str], bool] | None = None,
+    runner: Callable[..., dict] | None = None,
 ) -> tuple[bool, str]:
     """Whether a real 1-token generation on THIS EXACT *model* succeeds.
 

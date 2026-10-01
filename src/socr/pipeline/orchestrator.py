@@ -10561,41 +10561,48 @@ class UnifiedPipeline:
         silent: a console line plus a document-level ``qwen_cloud_pin_refused``
         audit event (page 0), the same surface ``judge_degraded_to_heuristic`` uses.
         """
-        from socr.core.audit_log import AuditEvent
-
         unavailable = self._qwen_cloud_pin_unavailable
         if unavailable:
             self._qwen_cloud_pin_unavailable = ""
-            logger.warning("agentic: pinned cloud qwen model unavailable: %s", unavailable)
-            if not self.config.quiet:
-                console.print(f"  [yellow]qwen rung unavailable: {unavailable}[/yellow]")
-            state.events.append(
-                AuditEvent(
-                    page_num=0,
-                    kind="qwen_cloud_pin_unavailable",
-                    engine="qwen",
-                    detail=unavailable,
-                    data={"qwen_model": self.config.qwen_model, "reason": unavailable},
-                )
+            self._surface_doc_event(
+                state,
+                "qwen_cloud_pin_unavailable",
+                unavailable,
+                log_label="pinned cloud qwen model unavailable",
+                console_label="qwen rung unavailable",
             )
         if not any(p.engine is EngineType.QWEN for p in available):
             return available
         reason = cloud_pinned_qwen_refusal(self.config)
         if not reason:
             return available
-        logger.warning("agentic: qwen rung refused: %s", reason)
+        self._surface_doc_event(
+            state,
+            "qwen_cloud_pin_refused",
+            reason,
+            log_label="qwen rung refused",
+            console_label="qwen rung refused",
+        )
+        return [p for p in available if p.engine is not EngineType.QWEN]
+
+    def _surface_doc_event(
+        self, state, kind: str, reason: str, *, log_label: str, console_label: str
+    ) -> None:
+        """Warn, print and record a document-level (page 0) qwen-rung audit event."""
+        from socr.core.audit_log import AuditEvent
+
+        logger.warning("agentic: %s: %s", log_label, reason)
         if not self.config.quiet:
-            console.print(f"  [yellow]qwen rung refused: {reason}[/yellow]")
+            console.print(f"  [yellow]{console_label}: {reason}[/yellow]")
         state.events.append(
             AuditEvent(
                 page_num=0,
-                kind="qwen_cloud_pin_refused",
+                kind=kind,
                 engine="qwen",
                 detail=reason,
                 data={"qwen_model": self.config.qwen_model, "reason": reason},
             )
         )
-        return [p for p in available if p.engine is not EngineType.QWEN]
 
     def _report_unservable_engines(self, unservable: list) -> None:
         """Say so, once per pipeline, when the operator ASKED for a rung that cannot run.
@@ -10643,6 +10650,19 @@ class UnifiedPipeline:
     # zero-cap-pinned policy check below).
     _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b", "qwen3-vl:8b"]
 
+    @staticmethod
+    def _probe_judge_candidate(model: str) -> tuple[bool, str]:
+        """Probe one Ollama judge candidate: ``(available, "<model>: <reason>")``.
+
+        The reason is "" when available. Exceptions propagate to the caller.
+        """
+        from socr.judge.ollama_judge import OllamaVisionJudge
+
+        candidate = OllamaVisionJudge(model=model)
+        if candidate.is_available():
+            return True, ""
+        return False, f"{model}: {candidate.unavailable_reason}"
+
     def _resolve_judge_model(self) -> str | None:
         """Pick an available vision model for judging, or None if none usable.
 
@@ -10655,45 +10675,29 @@ class UnifiedPipeline:
         own reason recorded, the same as any ladder candidate, rather than
         being treated as an active judge that then fails on every page.
 
-        GH-154 round 5: the explicit-override short-circuit, the memoized
-        cache, and the candidate ladder's own default order were all three
-        cloud-first with no policy check at the time -- ``_JUDGE_MODEL_CANDIDATES[0]``
-        was ``qwen3.5:cloud`` -- so a local-only OCR rung under an EXPLICIT
-        ``--max-cost-per-page 0`` still shipped its page image to the cloud
-        for judging. (GH-903: that default candidate was Ollama Cloud's
-        retirement of ``qwen3.5:cloud`` on 2026-09-25; ``_JUDGE_MODEL_CANDIDATES[0]``
-        is now ``JUDGE_MODEL_DEFAULT`` = ``qwen3.8:27b``, local, with no cloud
-        entry left in the default ladder at all.) A forbidden cloud identity,
-        whether explicit, cached, or the next candidate in line, is treated
-        as absent here; ``_build_page_judge`` already degrades to the
-        heuristic judge when this returns None, so no separate change is
-        needed there.
+        A cloud identity that strict-local / zero-cap-pinned policy forbids
+        (explicit, cached, or a ladder candidate) is treated as absent
+        (GH-154); ``_build_page_judge`` then degrades to the heuristic judge.
         """
         from socr.core.providers import zero_cap_pinned_forbids_cloud
-        from socr.judge.ollama_judge import OllamaVisionJudge
 
         forbid_cloud = self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
 
         def _permitted(model: str) -> bool:
             return not is_cloud_model(model) or not forbid_cloud
 
-        # GH-873: an operator-named vLLM server replaces the Ollama candidate
-        # ladder, exactly as ``--judge-model`` names a model -- the operator has
-        # named the thing, so probing for something else would discard their
-        # setting. A run that sets both gets the vLLM pair, because that names a
-        # server as well as a model and is the more specific instruction.
-        #
-        # It IS probed, and the answer is memoized. This value feeds
-        # ``_run_fingerprint``'s ``judge_model``, which is availability-dependent
-        # by design: a page judged by heuristics because the server was down must
-        # not fingerprint as VLM-judged, or the resume gate would later skip it
-        # as up to date once the server is back -- the resume half of #133.
-        # ``_judge_model_cache`` bounds the cost to one probe per run.
-        #
-        # An unreachable named server resolves to None and does NOT fall through
-        # to the Ollama ladder: ``_build_page_judge`` builds the vLLM judge
-        # whenever the pair is set, so naming an Ollama model here would record a
-        # judge that never ran.
+        def _cached() -> tuple[bool, str | None]:
+            """``(hit, value)`` for the memo; a cached cloud identity that policy now
+            forbids is a miss, so it is re-resolved rather than returned stale."""
+            if self._judge_model_cache is not False:
+                cached = self._judge_model_cache
+                if cached is None or _permitted(cached):
+                    return True, cached  # type: ignore[return-value]
+            return False, None
+
+        # GH-873: an operator-named vLLM server replaces the Ollama ladder. It is
+        # probed and memoized (the resume fingerprint is availability-dependent,
+        # #133); an unreachable server resolves to None, never to the ladder.
         if self.config.judge_vllm_url and self.config.judge_vllm_model:
             if self._judge_model_cache is not False:
                 return self._judge_model_cache  # type: ignore[return-value]
@@ -10711,61 +10715,35 @@ class UnifiedPipeline:
 
         if self.config.judge_model:
             if _permitted(self.config.judge_model):
-                # GH-903 round 3 (P2-a): an explicit override still bypasses
-                # the candidate LADDER -- an operator named the exact model,
-                # so trying a different one on failure would discard their
-                # setting -- but NOT the availability probe. Round 1 removed
-                # ``_build_page_judge``'s own second ``is_available()`` call
-                # as a redundant re-probe of an already-verified ladder
-                # candidate; that reasoning never covered this branch, which
-                # never probed at all, so an unpulled or retired override
-                # started being treated as an active judge and failing on
-                # every page instead of degrading to heuristics with a
-                # reason. Memoized on the SAME ``_judge_model_cache`` as the
-                # ladder, so the per-page ``_run_fingerprint`` call still
-                # costs one probe per run, not one per page.
-                if self._judge_model_cache is not False:
-                    cached = self._judge_model_cache
-                    if cached is None or _permitted(cached):
-                        return cached  # type: ignore[return-value]
-                candidate = OllamaVisionJudge(model=self.config.judge_model)
-                if candidate.is_available():
-                    self._judge_model_cache = self.config.judge_model
-                    self._judge_unavailable_reason = ""
-                else:
-                    self._judge_model_cache = None
-                    self._judge_unavailable_reason = (
-                        f"{self.config.judge_model}: {candidate.unavailable_reason}"
-                    )
+                # GH-903: an explicit override skips the ladder but not the
+                # availability probe (memoized, one probe per run).
+                hit, cached = _cached()
+                if hit:
+                    return cached
+                available, reason = self._probe_judge_candidate(self.config.judge_model)
+                self._judge_model_cache = self.config.judge_model if available else None
+                self._judge_unavailable_reason = reason
                 return self._judge_model_cache
             # Forbidden explicit override: fall through to the same
             # local-first auto-resolution an unset judge_model gets, rather
             # than silently honoring an operator setting that violates the
             # run's own cost/locality policy.
-        if self._judge_model_cache is not False:
-            cached = self._judge_model_cache
-            if cached is None or _permitted(cached):
-                return cached  # type: ignore[return-value]
-            # A memoized cloud identity that policy now forbids: re-resolve
-            # instead of returning stale cloud provenance.
+        hit, cached = _cached()
+        if hit:
+            return cached
         resolved: str | None = None
-        # GH-903 round 2: every candidate's failure, not just the last one --
-        # a run where the FIRST (default) candidate merely timed out on a
-        # cold load looked identical, from the last-reason-only surface, to
-        # one where it was flat-out retired; an operator needs to see BOTH
-        # "qwen3.8:27b timed out" (probably just needs a warm-up) and
-        # "qwen3-vl:8b: HTTP 404" (never pulled) to diagnose which.
+        # GH-903: record every candidate's failure, not just the last one.
         reasons: list[str] = []
         for model in self._JUDGE_MODEL_CANDIDATES:
             if not _permitted(model):
                 continue
             try:
-                candidate = OllamaVisionJudge(model=model)
-                if candidate.is_available():
+                available, reason = self._probe_judge_candidate(model)
+                if available:
                     resolved = model
                     reasons = []
                     break
-                reasons.append(f"{model}: {candidate.unavailable_reason}")
+                reasons.append(reason)
             except Exception as exc:
                 reasons.append(f"{model}: {type(exc).__name__}: {exc}")
                 continue
@@ -11490,29 +11468,12 @@ class UnifiedPipeline:
             try:
                 from socr.judge.ollama_judge import OllamaVisionJudge
 
-                # Build the judge from the RESOLVED model, not the module
-                # default. Constructing bare fell back to ``qwen2-vl:7b`` — a
-                # model that is not even in ``_JUDGE_MODEL_CANDIDATES`` — so on
-                # any machine without that exact pull the judge silently became
-                # the heuristic checker while the manifest still named a VLM
-                # (#133).
+                # Build from the RESOLVED model, not the module default (#133).
                 resolved_model = self._resolve_judge_model()
                 if resolved_model:
-                    # GH-873: an operator-named OpenAI-compatible server takes
-                    # precedence over the Ollama candidate ladder. Without this
-                    # branch a box with no Ollama daemon -- the HPC nodes, where
-                    # vLLM already serves the vision model in the same job --
-                    # has no reachable judge at all and falls through to
-                    # heuristics, shipping tables no judge ever saw.
-                    #
-                    # GH-903: ``resolved_model`` already means "the availability
-                    # probe for this exact model just succeeded" -- either the
-                    # vLLM reachability check or the Ollama generation probe
-                    # inside ``_resolve_judge_model``, both memoized on
-                    # ``_judge_model_cache``. Re-probing here would be a SECOND
-                    # real generation per run for no reason the memoization
-                    # comment does not already forbid; the judge is built
-                    # directly from the resolved identity instead.
+                    # GH-873: an operator-named vLLM server takes precedence over
+                    # the Ollama ladder. ``resolved_model`` already means the
+                    # availability probe succeeded (memoized), so do not re-probe.
                     vj: object
                     if self.config.judge_vllm_url and self.config.judge_vllm_model:
                         from socr.judge.vllm_judge import VLLMVisionJudge
@@ -11528,16 +11489,8 @@ class UnifiedPipeline:
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
             if inner_judge is None:
-                # Surface REGARDLESS of backend. ``judge_backend`` defaults to
-                # "auto", and warning only under an explicit "vlm" meant the
-                # default path degraded in total silence — the one place this
-                # repo's "failures surface at every level" rule was not applied
-                # to the judge itself.
-                #
-                # GH-903: name WHY, not just that nothing resolved -- a 410
-                # (retired) or 404 (never pulled) reads very differently to an
-                # operator, and ``_judge_unavailable_reason`` (set by the same
-                # resolution call above) already carries that detail.
+                # Surface regardless of backend (the default is "auto"), and
+                # name WHY (``_judge_unavailable_reason``: 410 vs 404).
                 if resolved_model:
                     detail = f"requested judge model {resolved_model!r} is not available"
                 elif self._judge_unavailable_reason:
@@ -11563,20 +11516,12 @@ class UnifiedPipeline:
                             "judge_backend": backend,
                             "requested_model": resolved_model or "",
                             "candidates": list(self._JUDGE_MODEL_CANDIDATES),
-                            # GH-903: the last candidate's probe failure (e.g.
-                            # "qwen3.8:27b: HTTP 410: ... retired ..."), so a
-                            # retirement/misconfiguration is machine-readable
-                            # from the existing per-page audit trail rather
-                            # than only from ``detail``'s prose. "" when
-                            # resolution never got as far as a probe (e.g.
-                            # ``judge_backend=heuristic`` never reaches here).
+                            # Machine-readable probe failures; "" if no probe ran.
                             "unavailable_reason": self._judge_unavailable_reason,
                         },
                     )
                 )
-        # Provenance records the judge that ACTUALLY ran (#133): the previous
-        # value came from ``_resolve_judge_model`` regardless of what was built,
-        # so metadata.json could name a VLM for pages heuristics had judged.
+        # Provenance records the judge that ACTUALLY ran (#133).
         state.agentic_judge_model = judge_identity
         if inner_judge is None:
             # Sparse-aware at the DECISION point: without this, the heuristic
