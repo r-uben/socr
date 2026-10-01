@@ -8629,6 +8629,8 @@ class UnifiedPipeline:
         # marked MODEL_UNAVAILABLE just because the whole-page ladder is empty.
         # Mixed chart+table pages are left in ``ocr_pages`` on purpose.
         native_table_plans: dict = {}
+        #: GH-917: markdown of a CELLS plan whose repair re-planned to SHIP, by page.
+        native_cell_repairs: dict[int, str] = {}
         for page_num in list(ocr_pages):
             if page_num in chart_mixed_pages:
                 continue
@@ -8892,6 +8894,46 @@ class UnifiedPipeline:
             clock = _PageStageClock()
             self._page_clock = clock
             try:
+                # GH-917 / GH-916: a CELLS plan is repaired HERE so that a re-plan which
+                # DEFERs (gate fault, plumbing fault, ordinary DEFER) can still reach
+                # route_page. The ship gate is DEFER-only: it must never become a
+                # REFUSE through the repair path.
+                if (
+                    page_num in native_table_plans
+                    and native_table_plans[page_num].plan.action == "cells"
+                    and not is_native
+                    and page_num not in math_recovery_pages
+                    and page_num not in chart_winner_pages
+                    and page_num not in equation_lane_pages
+                ):
+                    with clock.span("tables"):
+                        _cell_md, _replan = self._repair_native_table_cells(
+                            state, page_num, ps, native_table_plans[page_num].plan
+                        )
+                    if _cell_md is not None:
+                        native_cell_repairs[page_num] = _cell_md
+                    elif _replan is not None and _replan.action == "defer":
+                        self._record_native_ship_gate(state, page_num, _replan)
+                        del native_table_plans[page_num]
+                        if not ladder:
+                            # Same outcome an upright DEFER has at plan time with no
+                            # provider: native text as the fallback, never a REFUSE.
+                            no_ocr_provider_pages.add(page_num)
+                            if ps.best_output is None:
+                                if self._page_has_tables(page_num, ps):
+                                    ps.native_table_structure_failed = True
+                                _fallback = PageOutput(
+                                    page_num=page_num,
+                                    text=ps.native_text or "",
+                                    status=PageStatus.WARNING,
+                                    engine="native",
+                                    failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                                    error="no OCR providers available; native text used as fallback",
+                                    audit_passed=False,
+                                    cost_usd=0.0,
+                                )
+                                ps.attempts.append(_fallback)
+                                ps.best_output = _fallback
                 # GH-271: region-only corrupt-equation lane. It owns the page before
                 # whole-page OCR and keeps surrounding native prose untouched.
                 if page_num in math_recovery_pages:
@@ -8934,6 +8976,7 @@ class UnifiedPipeline:
                             ps,
                             native_table_plans[page_num],
                             _chart_figures_dir,
+                            cell_repair=native_cell_repairs.get(page_num),
                         )
                 else:
                     _route_span = clock.span("route")
@@ -10207,10 +10250,15 @@ class UnifiedPipeline:
         if not self._is_native_table_first_candidate(page_num, ps):
             return None
         from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
 
         try:
             with open_pdf(state.handle.path) as doc:
                 words = list(doc[page_num - 1].get_text("words"))
+                # GH-917: never raises. A failed extraction travels as a fault the gate
+                # DEFERs on; it must not inherit this block's REFUSE (an unreadable
+                # direction map is not an unreadable text layer).
+                line_dirs = line_directions_for_page(doc[page_num - 1])
         except Exception as exc:
             logger.warning(
                 "native table first: text layer unreadable on p%d (%s)",
@@ -10234,6 +10282,7 @@ class UnifiedPipeline:
             header_unattributed=bool(ps.native_table_header_unattributed),
             unverifiable=bool(ps.native_table_unverifiable),
             orphan_words=orphans,
+            line_dirs=line_dirs,
         )
         self._record_native_ship_gate(state, page_num, plan)
         if plan.action == DEFER:
@@ -10265,8 +10314,12 @@ class UnifiedPipeline:
         ps: PageState,
         work,
         figures_dir: Path | None,
+        cell_repair: str | None = None,
     ) -> None:
         """Ship an exact-pass grid, repair named cells, or refuse the table.
+
+        ``cell_repair`` is the repaired markdown of a CELLS plan, resolved by the
+        caller (``_phase_agentic``) so a DEFER from the re-plan can reach route_page.
 
         A repair is written into ``ps.native_text`` before the native attempt
         is recorded. Selection ships that snapshot; a mid-string edit on the
@@ -10323,7 +10376,7 @@ class UnifiedPipeline:
             )
             return
         if plan.action == CELLS:
-            repaired = self._repair_native_table_cells(state, page_num, ps, plan)
+            repaired = cell_repair
             if repaired is not None:
                 if ps.native_text_raw is None:
                     ps.native_text_raw = ps.native_text
@@ -10346,7 +10399,11 @@ class UnifiedPipeline:
         self._refuse_native_table_first(state, page_num, ps, plan, figures_dir)
 
     def _repair_native_table_cells(self, state: DocumentState, page_num: int, ps: PageState, plan):
-        """Splice text-layer spellings for cells a model confirms, or None.
+        """``(markdown, replan)``: spliced text-layer spellings a model confirms, or None.
+
+        ``replan`` is the re-plan of the spliced grid when one was made (None when the
+        repair failed before that). A non-SHIP re-plan is returned, not discarded: a
+        DEFER carries the ship gate's faults and must reach route_page with them recorded.
 
         The model is evidence, not the spelling that ships. A transcription
         is kept only when it normalizes to the text-layer token and does not
@@ -10354,6 +10411,7 @@ class UnifiedPipeline:
         then exact-pass on its own; a partial repair does not ship.
         """
         from socr.core.pdf import open_pdf
+        from socr.tables.ship_gate import line_directions_for_page
         from socr.tables.native_first import (
             SHIP,
             plan_native_table,
@@ -10373,29 +10431,30 @@ class UnifiedPipeline:
             if not token or not transcription_matches_native(
                 str(token), cell.native_token, cell.grid_token
             ):
-                return None
+                return None, None
             replacements.append(
                 (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
             )
         spliced = splice_cell_tokens(ps.native_text or "", replacements)
         if spliced is None:
-            return None
+            return None, None
         try:
             with open_pdf(state.handle.path) as doc:
                 words = list(doc[page_num - 1].get_text("words"))
+                line_dirs = line_directions_for_page(doc[page_num - 1])
         except Exception as exc:
             logger.warning(
                 "native table first: re-read failed on p%d (%s)",
                 page_num,
                 exc,
             )
-            return None
+            return None, None
         # Blocking flags stay false: this pass asks only whether the spliced
         # grid exact-passes the words. The flags already decided the first plan.
-        again = plan_native_table(words, spliced)
+        again = plan_native_table(words, spliced, line_dirs=line_dirs)
         if again.action != SHIP:
-            return None
-        return spliced
+            return None, again
+        return spliced, again
 
     @staticmethod
     def _refresh_native_table_identities(ps: PageState, markdown: str) -> None:

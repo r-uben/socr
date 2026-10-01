@@ -25,6 +25,7 @@ from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
+from socr.tables.ship_gate import LineDirections
 from socr.tables import native_first as nf
 from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, SHIP, plan_native_table
@@ -44,6 +45,8 @@ ROWS = [
     ["CB", "0.180", "0.171", "0.365", "0.244"],
     ["TR", "0.310", "0.220", "0.410", "0.188"],
 ]
+
+UNCHECKED = LineDirections.unchecked_for_tests()
 
 
 def _word(x: float, y: float, text: str, line: int, no: int) -> tuple:
@@ -72,9 +75,9 @@ def _md(header, rows) -> str:
 
 def _plan(words, markdown, *, gate: bool = True):
     if gate:
-        return plan_native_table(words, markdown)
+        return plan_native_table(words, markdown, line_dirs=UNCHECKED)
     with patch.object(nf, "native_ship_gate", return_value=()):
-        return plan_native_table(words, markdown)
+        return plan_native_table(words, markdown, line_dirs=UNCHECKED)
 
 
 def _predicates(plan) -> set[str]:
@@ -203,7 +206,7 @@ class TestSignDetached:
             + ["| " + " | ".join(r) + " |" for r in md_rows]
         )
         assert ship_gate.SIGN_DETACHED in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md)
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
         }
 
 
@@ -258,7 +261,7 @@ class TestDataRowMissing:
             words.append(_word(560.0, y, f"{3 + i}.5", 20 + i, 1))
             words.append(_word(590.0, y, f"{4 + i}.2", 20 + i, 2))
         # Straight at the gate: the verifier's own row count is not the subject.
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_two_lane_prose_numbers_outside_the_table_do_not_fire(self) -> None:
         words, md = _base()
@@ -317,20 +320,20 @@ class TestSignDetachedRound2:
         rows, words = _sign_rows(sign_dx=0.0, num=".230")
         assert detached_sign_pairs(words), "the shared helper must pair a sign with .230"
         md = self._md_with(rows, 2, [rows[2][0], "-", ".230"] + rows[2][2:])
-        faults = ship_gate.native_ship_gate(words, md)
+        faults = ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
         assert {f["predicate"] for f in faults} == {ship_gate.SIGN_DETACHED}
         # No contact (placeholder a column away): never fires.
         rows, words = _sign_rows(sign_dx=40.0, num=".230")
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_sign_attached_as_a_tail_of_the_label_fires_only_with_contact(self) -> None:
         rows, words = _sign_rows(sign_dx=0.0)
         md = self._md_with(rows, 2, [rows[2][0] + "-"] + rows[2][1:])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.SIGN_DETACHED
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.SIGN_DETACHED}
         rows, words = _sign_rows(sign_dx=40.0)
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_placeholder_row_with_identical_numbers_abstains(self) -> None:
         # Rows 2 and 4 print the same numbers; only row 2's number carries a
@@ -340,12 +343,12 @@ class TestSignDetachedRound2:
         rows[4] = [rows[4][0]] + rows[2][1:]
         words = _words([HEADER] + rows) + [w for w in words if w[4] == "-"]
         md = self._md_with(rows, 4, [rows[4][0], "-"] + rows[4][1:])
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         # The sign cell on the row that really carries the sign: the two identical
         # lines still disagree about it, so the gate abstains there too.
         md2 = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
         assert ship_gate.SIGN_DETACHED not in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md2)
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md2, line_dirs=UNCHECKED)
         }
 
     def test_contact_must_sit_on_the_cells_own_column(self) -> None:
@@ -359,11 +362,12 @@ class TestSignDetachedRound2:
         x = COL_XS[3]
         words.append((x + 0.2 - CHAR_W * 0.7, y, x + 0.2, y + 9.0, "-", 0, 3, 9))
         md_first = self._md_with(rows, 2, [rows[2][0], "-"] + rows[2][1:])
-        assert ship_gate.native_ship_gate(words, md_first) == ()
+        assert ship_gate.native_ship_gate(words, md_first, line_dirs=UNCHECKED) == ()
         md_second = self._md_with(rows, 2, rows[2][:3] + ["-"] + rows[2][3:])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md_second)} == {
-            ship_gate.SIGN_DETACHED
-        }
+        assert {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, md_second, line_dirs=UNCHECKED)
+        } == {ship_gate.SIGN_DETACHED}
 
 
 class TestDataRowRound2:
@@ -373,7 +377,7 @@ class TestDataRowRound2:
         for y in (Y0 - far, Y0 + (len(ROWS) + 1) * PITCH + far):
             for ci in range(1, 5):
                 words.append(_word(COL_XS[ci], y, f"{ci}.5", 60, ci))
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_prose_between_the_table_and_a_distant_numeric_line_does_not_bridge(self) -> None:
         # A paragraph at the table's own row pitch runs from the last row out to
@@ -386,7 +390,7 @@ class TestDataRowRound2:
             words.append(_word(COL_XS[0], last + i * PITCH, "prose", 80 + i, 0))
         for ci in range(1, 5):
             words.append(_word(COL_XS[ci], far, f"{ci}.5", 90, ci))
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_a_full_width_row_at_the_reach_limit_is_in_and_one_pitch_beyond_is_out(self) -> None:
         last = Y0 + len(ROWS) * PITCH
@@ -395,7 +399,9 @@ class TestDataRowRound2:
             words, md = _base()
             for ci in range(1, 5):
                 words.append(_word(COL_XS[ci], last + pitches * PITCH, f"{ci}.5", 70, ci))
-            got = {f["predicate"] for f in ship_gate.native_ship_gate(words, md)}
+            got = {
+                f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+            }
             assert (got == {ship_gate.DATA_ROW_MISSING}) is fires, (pitches, got)
 
     def test_bound_zero_extends_nothing(self) -> None:
@@ -426,11 +432,11 @@ class TestDataRowRound2:
                 md_cells.append(row[ci] + (" (1)" if ri else ""))
             out_rows.append(md_cells)
         md = _md(out_rows[0], out_rows[1:])
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         dropped = _md(out_rows[0], out_rows[1:-1])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, dropped)} == {
-            ship_gate.DATA_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped, line_dirs=UNCHECKED)
+        } == {ship_gate.DATA_ROW_MISSING}
 
     def test_dropped_copy_of_a_repeated_row_fires(self) -> None:
         rows = [list(r) for r in ROWS]
@@ -438,10 +444,10 @@ class TestDataRowRound2:
         words = _words([HEADER] + rows)
         both = _md(HEADER, rows)
         one = _md(HEADER, rows[:3] + rows[4:])
-        assert ship_gate.native_ship_gate(words, both) == ()
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, one)} == {
-            ship_gate.DATA_ROW_MISSING
-        }
+        assert ship_gate.native_ship_gate(words, both, line_dirs=UNCHECKED) == ()
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, one, line_dirs=UNCHECKED)
+        } == {ship_gate.DATA_ROW_MISSING}
 
     def test_a_data_row_equal_to_the_header_numbers_is_not_hidden(self) -> None:
         header = ["Year", "2001", "2002", "2003", "2004"]
@@ -450,9 +456,9 @@ class TestDataRowRound2:
         words = _words([header] + rows)
         kept = _md(header, rows)
         dropped = _md(header, rows[:3] + rows[4:])
-        assert ship_gate.native_ship_gate(words, kept) == ()
+        assert ship_gate.native_ship_gate(words, kept, line_dirs=UNCHECKED) == ()
         assert ship_gate.DATA_ROW_MISSING in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped)
+            f["predicate"] for f in ship_gate.native_ship_gate(words, dropped, line_dirs=UNCHECKED)
         }
 
 
@@ -468,26 +474,26 @@ class TestLabelRowRound2:
 
     def test_dehyphenated_line_break_is_not_missing(self) -> None:
         words, md = self._grid(["Evalu-", "ation"], [["Evaluation"]])
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         words, md = self._grid(["Evalu-", "ation"], [])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.LABEL_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_match_cannot_straddle_two_cells(self) -> None:
         # "bc" is in neither "ab" nor "cd"; it only exists in their concatenation.
         words, md = self._grid(["bc"], [["ab", "cd"]])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.LABEL_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_repeated_label_is_counted(self) -> None:
         words, md_two = self._grid(["Panel B", "Panel B"], [["Panel B"], ["Panel B"]])
         _w, md_one = self._grid(["Panel B", "Panel B"], [["Panel B"]])
-        assert ship_gate.native_ship_gate(words, md_two) == ()
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md_one)} == {
-            ship_gate.LABEL_ROW_MISSING
-        }
+        assert ship_gate.native_ship_gate(words, md_two, line_dirs=UNCHECKED) == ()
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md_one, line_dirs=UNCHECKED)
+        } == {ship_gate.LABEL_ROW_MISSING}
 
     def test_a_full_width_heading_inside_the_span_is_a_missing_label(self) -> None:
         # Five words spanning every lane, between two data rows, dropped from the
@@ -495,11 +501,12 @@ class TestLabelRowRound2:
         rows = [list(r) for r in ROWS]
         heading = ["Averages", "are", "taken", "over", "years"]
         words = _words([HEADER] + rows[:3] + [heading] + rows[3:])
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))} == {
-            ship_gate.LABEL_ROW_MISSING
-        }
+        assert {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED)
+        } == {ship_gate.LABEL_ROW_MISSING}
         kept = [list(r) for r in rows[:3]] + [heading] + [list(r) for r in rows[3:]]
-        assert ship_gate.native_ship_gate(words, _md(HEADER, kept)) == ()
+        assert ship_gate.native_ship_gate(words, _md(HEADER, kept), line_dirs=UNCHECKED) == ()
 
     def test_a_notes_heading_between_panels_does_not_hide_later_labels(self) -> None:
         # "Notes:" sits between two data blocks and numeric rows resume after it,
@@ -510,9 +517,15 @@ class TestLabelRowRound2:
         words = _words([HEADER] + rows[:3] + inserted + rows[3:])
         md_rows = rows[:3] + [["Notes:"] + blank] + rows[3:]
         assert {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows))
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows), line_dirs=UNCHECKED)
         } == {ship_gate.LABEL_ROW_MISSING}
-        assert ship_gate.native_ship_gate(words, _md(HEADER, rows[:3] + inserted + rows[3:])) == ()
+        assert (
+            ship_gate.native_ship_gate(
+                words, _md(HEADER, rows[:3] + inserted + rows[3:]), line_dirs=UNCHECKED
+            )
+            == ()
+        )
 
     def test_a_notes_paragraph_with_numerals_is_a_false_defer_we_accept(self) -> None:
         # The gomez-cram p10 / piller p33 shape: a Notes paragraph swallowed into
@@ -535,7 +548,10 @@ class TestLabelRowRound2:
             words.append(_word(COL_XS[2], y, b, 101 + n, 21))
             out_rows.append([" ".join(filler), a, b, "", ""])
         words.append(_word(95.0, y0 + 2 * PITCH, "between", 110, 0))
-        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, out_rows))}
+        got = {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, out_rows), line_dirs=UNCHECKED)
+        }
         assert got == {ship_gate.LABEL_ROW_MISSING}
 
     @staticmethod
@@ -562,15 +578,15 @@ class TestLabelRowRound2:
         self, heading: str
     ) -> None:
         words, md = self._narrow_section(heading, drop_label=False, drop_row=False)
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
         words, md = self._narrow_section(heading, drop_label=True, drop_row=False)
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.LABEL_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.LABEL_ROW_MISSING}
         words, md = self._narrow_section(heading, drop_label=False, drop_row=True)
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.DATA_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.DATA_ROW_MISSING}
 
     def test_a_neighbouring_columns_notes_opener_does_not_suppress_this_table(self) -> None:
         rows = [list(r) for r in ROWS]
@@ -579,7 +595,10 @@ class TestLabelRowRound2:
         # A second column's paragraph opens with "Notes:" on a row inside this table.
         words.append(_word(520.0, Y0 + 4 * PITCH, "Notes:", 200, 0))
         words.append(_word(560.0, Y0 + 4 * PITCH, "elsewhere", 200, 1))
-        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, rows))}
+        got = {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED)
+        }
         assert ship_gate.LABEL_ROW_MISSING in got
 
     def test_data_resuming_after_an_in_table_notes_heading_is_core_again(self) -> None:
@@ -596,7 +615,10 @@ class TestLabelRowRound2:
             + rows[4:]
         )
         md_rows = rows[:2] + [["Notes:"] + blank] + rows[2:]
-        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows))}
+        got = {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, md_rows), line_dirs=UNCHECKED)
+        }
         assert got == {ship_gate.LABEL_ROW_MISSING}
 
     def test_text_heavy_final_rows_do_not_hide_a_dropped_panel_heading(self) -> None:
@@ -613,9 +635,14 @@ class TestLabelRowRound2:
             for j in range(10):
                 words.append(_word(100.0 + 24.0 * j, y, f"w{j}", 120 + k, 30 + j))
         with_heading = rows[:3] + [["Panel B"] + blank] + heavy
-        assert ship_gate.native_ship_gate(words, _md(HEADER, with_heading)) == ()
+        assert (
+            ship_gate.native_ship_gate(words, _md(HEADER, with_heading), line_dirs=UNCHECKED) == ()
+        )
         without = rows[:3] + heavy
-        got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, without))}
+        got = {
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, without), line_dirs=UNCHECKED)
+        }
         assert ship_gate.LABEL_ROW_MISSING in got
 
 
@@ -629,14 +656,16 @@ class TestPunctuatedValues:
     def test_order_and_sign_checks_stay_active_on_a_punctuated_table(self) -> None:
         rows = self._punct(ROWS)
         words = _words([HEADER] + rows)
-        assert ship_gate.native_ship_gate(words, _md(HEADER, rows)) == ()
+        assert ship_gate.native_ship_gate(words, _md(HEADER, rows), line_dirs=UNCHECKED) == ()
         reversed_rows = _md(HEADER, list(reversed(rows)))
         assert ship_gate.ROW_ORDER in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, reversed_rows)
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, reversed_rows, line_dirs=UNCHECKED)
         }
         swapped = [r[:1] + list(reversed(r[1:])) for r in rows]
         assert ship_gate.CELL_ORDER in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, swapped))
+            f["predicate"]
+            for f in ship_gate.native_ship_gate(words, _md(HEADER, swapped), line_dirs=UNCHECKED)
         }
         # A detached sign before a punctuated number.
         signed = [list(r) for r in rows]
@@ -652,7 +681,7 @@ class TestPunctuatedValues:
             + ["| " + " | ".join(r) + " |" for r in md_rows]
         )
         assert ship_gate.SIGN_DETACHED in {
-            f["predicate"] for f in ship_gate.native_ship_gate(words, md)
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
         }
 
     def test_a_dropped_punctuated_edge_row_fires(self) -> None:
@@ -660,7 +689,10 @@ class TestPunctuatedValues:
         words = _words([HEADER] + rows)
         for drop in (0, -1):
             kept = [r for i, r in enumerate(rows) if i != drop % len(rows)]
-            got = {f["predicate"] for f in ship_gate.native_ship_gate(words, _md(HEADER, kept))}
+            got = {
+                f["predicate"]
+                for f in ship_gate.native_ship_gate(words, _md(HEADER, kept), line_dirs=UNCHECKED)
+            }
             assert got == {ship_gate.DATA_ROW_MISSING}, (drop, got)
 
 
@@ -879,8 +911,8 @@ class TestGateError:
         words, md = _base()
         assert _plan(words, md).action == SHIP
         with patch.object(ship_gate, "sign_detached_faults", side_effect=RuntimeError("boom")):
-            faults = ship_gate.native_ship_gate(words, md)
-            plan = plan_native_table(words, md)
+            faults = ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+            plan = plan_native_table(words, md, line_dirs=UNCHECKED)
         assert [f["predicate"] for f in faults] == [ship_gate.GATE_ERROR]
         assert plan.action == DEFER and plan.action != SHIP
         assert ship_gate.GATE_ERROR in plan.reason
@@ -889,7 +921,7 @@ class TestGateError:
         words, md = _base()
         state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=1))
         with patch.object(ship_gate, "order_faults", side_effect=ValueError("bad")):
-            plan = plan_native_table(words, md)
+            plan = plan_native_table(words, md, line_dirs=UNCHECKED)
         UnifiedPipeline._record_native_ship_gate(state, 1, plan)
         assert [e.kind for e in state.events] == [ship_gate.SHIP_GATE_KIND]
         assert state.events[0].data["predicates"] == [ship_gate.GATE_ERROR]
@@ -943,7 +975,7 @@ class TestSwallowedNotesDoNotStretchTheTable:
                 words.append(_word(300.0, y + n * PITCH, num, 70 + n, 1))
         md_rows = [list(r) for r in ROWS]
         md_rows += [["stars noted", "", "10%", "", ""], ["again", "", "5%", "", ""]]
-        assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows)) == ()
+        assert ship_gate.native_ship_gate(words, _md(HEADER, md_rows), line_dirs=UNCHECKED) == ()
 
 
 class TestBlockInterior:
@@ -991,13 +1023,13 @@ class TestBlockInterior:
         for bound in (0, ship_gate._PANEL_GAP_ROWS):
             got = ship_gate.data_row_missing_faults(blocks, anchors, src, bound)
             assert len(got) == 1 and got[0]["predicate"] == ship_gate.DATA_ROW_MISSING, bound
-        assert {f["predicate"] for f in ship_gate.native_ship_gate(words, md)} == {
-            ship_gate.DATA_ROW_MISSING
-        }
+        assert {
+            f["predicate"] for f in ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED)
+        } == {ship_gate.DATA_ROW_MISSING}
 
     def test_without_the_omitted_row_nothing_fires(self) -> None:
         words, md = self._two_blocks(0.0)
-        assert ship_gate.native_ship_gate(words, md) == ()
+        assert ship_gate.native_ship_gate(words, md, line_dirs=UNCHECKED) == ()
 
     def test_blocks_sharing_only_one_lane_are_not_one_table(self) -> None:
         # One lane coincides, the other three are shifted: not the same columns.

@@ -22,6 +22,7 @@ from socr.core.result import DocumentStatus
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import PageDecision, ProviderAttempt
+from socr.tables.ship_gate import LineDirections
 from socr.tables.native_first import (
     DEFER,
     REFUSE,
@@ -32,6 +33,8 @@ from socr.tables.native_first import (
     attempt_rotated_native_table,
     plan_native_table,
 )
+
+UNCHECKED = LineDirections.unchecked_for_tests()
 
 
 def _place(u: float, v: float, rotation: int, width: float, height: float) -> tuple[float, float]:
@@ -149,6 +152,7 @@ class TestAttemptRotatedNativeTable:
             structure_defective=attempt.structure_defective,
             header_unattributed=attempt.header_unattributed,
             orphan_words=list(attempt.orphan_words),
+            line_dirs=UNCHECKED,
         )
         assert raw.action == SHIP
 
@@ -218,6 +222,7 @@ class TestAgenticRotatedNativeTableFirst:
                 structure_defective=attempt.structure_defective,
                 header_unattributed=attempt.header_unattributed,
                 orphan_words=list(attempt.orphan_words),
+                line_dirs=UNCHECKED,
             )
             return dataclasses.replace(attempt, plan=raw)
 

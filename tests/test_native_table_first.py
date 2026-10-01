@@ -22,6 +22,7 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus
 from socr.pipeline.orchestrator import UnifiedPipeline
+from socr.tables.ship_gate import LineDirections
 from socr.tables.native_first import (
     CELLS,
     DEFER,
@@ -32,6 +33,8 @@ from socr.tables.native_first import (
     splice_cell_tokens,
     transcription_matches_native,
 )
+
+UNCHECKED = LineDirections.unchecked_for_tests()
 
 
 def _dense_forecast_pdf(path: Path) -> None:
@@ -135,7 +138,7 @@ class TestPlanNativeTable:
         pdf_path = tmp_path / "forecast.pdf"
         _dense_forecast_pdf(pdf_path)
         words, text = _page_words_and_text(pdf_path)
-        plan = plan_native_table(words, text)
+        plan = plan_native_table(words, text, line_dirs=UNCHECKED)
         assert plan.action == SHIP
         assert plan.cells == ()
 
@@ -144,7 +147,7 @@ class TestPlanNativeTable:
         _dense_forecast_pdf(pdf_path)
         words, text = _page_words_and_text(pdf_path)
         bad = text.replace("0.253", "9.999", 1)
-        plan = plan_native_table(words, bad)
+        plan = plan_native_table(words, bad, line_dirs=UNCHECKED)
         assert plan.action == CELLS
         assert len(plan.cells) == 1
         cell = plan.cells[0]
@@ -157,7 +160,7 @@ class TestPlanNativeTable:
         pdf_path = tmp_path / "forecast.pdf"
         _dense_forecast_pdf(pdf_path)
         words, text = _page_words_and_text(pdf_path)
-        plan = plan_native_table(words, text, structure_defective=True)
+        plan = plan_native_table(words, text, structure_defective=True, line_dirs=UNCHECKED)
         assert plan.action == REFUSE
         assert plan.cells == ()
 
@@ -165,12 +168,12 @@ class TestPlanNativeTable:
         pdf_path = tmp_path / "forecast.pdf"
         _dense_forecast_pdf(pdf_path)
         words, text = _page_words_and_text(pdf_path)
-        plan = plan_native_table(words, text, orphan_words=["0.999"])
+        plan = plan_native_table(words, text, orphan_words=["0.999"], line_dirs=UNCHECKED)
         assert plan.action == REFUSE
 
     def test_no_words_defers_to_the_existing_route(self) -> None:
         markdown = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
-        plan = plan_native_table([], markdown)
+        plan = plan_native_table([], markdown, line_dirs=UNCHECKED)
         assert plan.action == DEFER
         assert plan.cells == ()
 

@@ -36,6 +36,18 @@ Predicates (each a separate function, each independently disabled in its test):
                     heading between panels is a table label. Rows below the last core
                     row (a swallowed Notes paragraph) are never scanned.
 
+``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
+                    differs from another carried word's, per output table block. Needs the
+                    page's line directions (``LineDirections``).
+``direction_unavailable``  (GH-917) line directions were supplied and cannot be trusted
+                    (extraction failed, empty map, or a carried word has no entry). Always
+                    DEFER and recorded: a production caller never has P7 silently disabled.
+                    ``line_dirs=None`` means "not supplied" and is for unit tests only.
+``header_band_missing``  (GH-917) a numeric-free source row above the table's first core
+                    row, within the same ``_PANEL_GAP_ROWS`` reach, whose in-lane words each
+                    sit over a distinct table lane (>= ``_MIN_LANES_PER_ROW`` of them) and
+                    are not all in the grid: a column-header band the rowizer dropped.
+
 Every tolerance is an existing named rowizer quantity (``_LANE_X_TOL_PT`` x
 ``_LANE_SNAP_MULT``, ``_MIN_LANES_PER_ROW``); nothing here is a new threshold.
 Order checks abstain when a row's multiset is not unique on either side. Coverage
@@ -46,10 +58,12 @@ output-derived y-band the value guard uses.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import statistics
 import unicodedata
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 
 from socr.tables.native_verifier import (
     _MD_SEP_RE,
@@ -81,6 +95,9 @@ ROW_ORDER = "row_order"
 CELL_ORDER = "cell_order"
 DATA_ROW_MISSING = "data_row_missing"
 LABEL_ROW_MISSING = "label_row_missing"
+FOREIGN_DIRECTION = "foreign_direction"
+DIRECTION_UNAVAILABLE = "direction_unavailable"
+HEADER_BAND_MISSING = "header_band_missing"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -571,11 +588,242 @@ def label_row_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict]:
     return faults
 
 
-def native_ship_gate(words: list, markdown: str) -> tuple[dict, ...]:
+@dataclass(frozen=True)
+class LineDirections:
+    """GH-917: the text-line direction of every ``(block, line)`` of one page.
+
+    ``dirs`` maps the ``(block_no, line_no)`` pair a ``get_text("words")`` tuple
+    carries (``word[5]``, ``word[6]``) to the line's direction vector as PyMuPDF
+    reports it. ``fault`` is non-empty when extraction failed; the gate then DEFERs
+    (``direction_unavailable``) instead of skipping P7. Build it with
+    ``line_directions_for_page``.
+    """
+
+    dirs: dict = field(default_factory=dict)
+    fault: str = ""
+    #: True only for ``unchecked_for_tests()``: the gate skips P7. Production code
+    #: never constructs it; ``grep unchecked_for_tests`` finds every use.
+    unchecked: bool = False
+
+    @classmethod
+    def unchecked_for_tests(cls) -> "LineDirections":
+        """A grep-able sentinel for tests that do not exercise P7. Never use in src."""
+        return cls(unchecked=True)
+
+
+def line_directions_for_page(page) -> LineDirections:
+    """Line directions of *page*, aligned to ``page.get_text("words")`` indices.
+
+    ``TEXTFLAGS_WORDS`` is load-bearing: without it ``get_text("dict")`` splits blocks
+    around image blocks, so a dict ``(block, line)`` index lands on a different line
+    from the word's (measured: 19882 of 19997 words misaligned over 60 image pages,
+    0 of 48593 with the flag). Never raises: a failure comes back as
+    ``LineDirections(fault=...)`` so a caller cannot mistake it for "no directions
+    needed".
+    """
+    try:
+        import pymupdf
+
+        dirs: dict = {}
+        for block in page.get_text("dict", flags=pymupdf.TEXTFLAGS_WORDS)["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line_no, line in enumerate(block.get("lines", [])):
+                dirs[(block["number"], line_no)] = tuple(line["dir"])
+        return LineDirections(dirs=dirs)
+    except Exception as exc:
+        logger.warning("line direction extraction failed (%s); the gate will defer", exc)
+        return LineDirections(fault=f"{type(exc).__name__}: {exc}")
+
+
+def _unit_direction(value) -> tuple[float, float] | None:
+    """A finite, non-zero 2-vector, or None."""
+    try:
+        x, y = (float(c) for c in value)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)) or (x == 0.0 and y == 0.0):
+        return None
+    return x, y
+
+
+def _angle_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Angle in radians, 0..pi, between two direction vectors of the SAME page frame.
+
+    A direction is a vector, not an axis: text upside down (pi) is a different
+    direction from text upright (0). Rotating the page rotates both vectors alike, so
+    the angle between two lines of one page is frame-independent.
+    """
+    return math.atan2(abs(a[0] * b[1] - a[1] * b[0]), a[0] * b[0] + a[1] * b[1])
+
+
+#: Largest angle, in radians, between two text lines that are the same text for the
+#: purposes of P7. MEASURED, not derived from table width: on the 35 rotated and 92
+#: upright SHIP pages (160 table blocks on 124 pages, 14913 lines carrying core-row
+#: words; ``docs/log/2026-10-01_917-gate-direction-header.md`` round 2) the lines of one table's
+#: core rows have exactly one direction vector in 159 of 160 blocks, i.e. an observed
+#: maximum deviation of 0 (the 160th, Martens p41, has a genuine 90 degree running head
+#: in a core row's y-band). PyMuPDF reports ``dir`` from float32-precision text matrices,
+#: so the floor is about 1.2e-7; 1e-5 rad (0.0006 degrees) is ~100x that and about 17x
+#: below the smallest deliberate rotation worth the name (0.01 degrees = 1.7e-4 rad).
+#: Width plays no part: a slightly rotated stamp can contaminate a cell without
+#: crossing a lane, so lane displacement is not evidence that two lines are one text.
+_SAME_TEXT_DIRECTION_TOL_RAD = 1e-5
+
+
+def _direction_unavailable(why: str) -> dict:
+    return {
+        "predicate": DIRECTION_UNAVAILABLE,
+        "detail": f"text-line directions could not be used ({why}); deferred, never shipped",
+    }
+
+
+def foreign_direction_faults(words: list, blocks, line_dirs) -> list[dict]:
+    """GH-917 P7: a table block carrying words written in more than one direction.
+
+    ``line_dirs`` is required. ``LineDirections.unchecked_for_tests()`` is the only
+    way to skip the check. ``None``, a non-``LineDirections``, a failed or empty map,
+    or a carried word without a usable entry DEFERs with ``direction_unavailable`` and
+    the reason recorded: a plumbing fault never turns this predicate off.
+
+    Membership is per output block. A source word is carried when its text occurs in
+    some cell of that block (``_CellText.has_word``: substring presence, NOT occurrence
+    attribution). So a short foreign word (a vertical page number, a one-letter word)
+    whose text is a substring of any cell counts as carried: a deliberately
+    conservative over-DEFER, since a false DEFER costs one model read and a missed
+    foreign word can ship a wrong cell.
+
+    Two carried words have the same direction when the angle between them is below
+    ``_SAME_TEXT_DIRECTION_TOL_RAD`` (measured, independent of table width). A fault is
+    any PAIR of carried words that does not (a tie between two directions included).
+    Nothing chains: a ~ b and b ~ c do not make a ~ c.
+    """
+    if isinstance(line_dirs, LineDirections) and line_dirs.unchecked:
+        return []
+    if line_dirs is None:
+        return [_direction_unavailable("line_dirs was not supplied")]
+    if not isinstance(line_dirs, LineDirections):
+        return [_direction_unavailable(f"line_dirs is a {type(line_dirs).__name__}")]
+    if line_dirs.fault:
+        return [_direction_unavailable(f"extraction failed: {line_dirs.fault}")]
+    if not line_dirs.dirs:
+        return [_direction_unavailable("the page's line-direction map is empty")]
+    faults: list[dict] = []
+    for block in blocks:
+        text = _CellText(block)
+        in_grid: dict[str, bool] = {}
+        carried = [w for w in words if in_grid.setdefault(w[4], text.has_word(w[4]))]
+        if not carried:
+            continue
+        resolved = []
+        missing = []
+        for w in carried:
+            key = (w[5], w[6]) if len(w) > 6 else None
+            vec = _unit_direction(line_dirs.dirs[key]) if key in line_dirs.dirs else None
+            if vec is None:
+                missing.append(w[4])
+            else:
+                resolved.append((w, vec))
+        if missing:
+            faults.append(
+                _direction_unavailable(
+                    f"{len(missing)} carried word(s) have no usable line direction "
+                    f"({', '.join(missing[:6])})"
+                )
+            )
+            continue
+        tol = _SAME_TEXT_DIRECTION_TOL_RAD
+        vectors = list(dict.fromkeys(vec for _w, vec in resolved))
+        if not any(
+            _angle_between(a, b) >= tol for i, a in enumerate(vectors) for b in vectors[i + 1 :]
+        ):
+            continue
+        counts = Counter(vec for _w, vec in resolved)
+        body = max(vectors, key=lambda v: counts[v])  # first-listed wins a tie
+        foreign = [w[4] for w, vec in resolved if _angle_between(vec, body) >= tol]
+        faults.append(
+            {
+                "predicate": FOREIGN_DIRECTION,
+                "detail": (
+                    f"the grid carries word(s) written in a different direction from "
+                    f"the rest of the table's text ({', '.join(foreign[:6])})"
+                ),
+            }
+        )
+    return faults
+
+
+def header_band_missing_faults(blocks, anchors: _Anchors, src_rows) -> list[dict]:
+    """GH-917: a column-header band above the first core row that the grid omits.
+
+    The rowizer can drop a header band whose first word is the row stub (Fama p561: 12
+    header words over 12 lanes, none in the grid). ``label_row_missing`` cannot see it:
+    it scans only strictly between the first and last core row.
+
+    A candidate is a source row ``y`` above a block's first core row, no further than
+    ``_PANEL_GAP_ROWS`` row pitches (the outward reach ``data_row_missing`` uses), not
+    itself a paired row, whose words inside the table's x-extent contain no number, with
+    at least one word absent from the block's cells. It fires when its lane-region words
+    (those at or right of the first lane less one snap; the stub column is outside it)
+    number at least ``_MIN_LANES_PER_ROW`` (the rowizer's own minimum for a row of lanes,
+    so a two-word title is not a header) and each has its x-centre within the lane snap
+    of a table lane, no two over the same lane (a header over the columns, not prose that
+    happens to cross them). A page with no such source row cannot fire.
+    """
+    faults: list[dict] = []
+    for block, found in zip(blocks, anchors.per_block):
+        geo = _table_geometry(found, src_rows)
+        if geo is None:
+            continue
+        lanes, core = geo
+        out_tokens = {tok for cells in block for cell in cells for tok in cell.split()}
+        carried = [w for y in core for w in src_rows[y] if w[4] in out_tokens]
+        if not carried:
+            continue
+        x_lo = min(w[0] for w in carried)
+        x_hi = max(w[2] for w in carried)
+        ys = sorted(core)
+        first = ys[0]
+        reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
+        anchor_ys = {y for _i, y in found}
+        text = _CellText(block)
+        for y, ws in sorted(src_rows.items()):
+            if y >= first or first - y > reach or y in anchor_ys:
+                continue
+            inside = [w for w in ws if w[0] >= x_lo and w[2] <= x_hi]
+            if not inside or any(_is_num(w[4]) for w in inside):
+                continue
+            absent = [w[4] for w in inside if not text.has_word(w[4])]
+            if not absent:
+                continue
+            region = [w for w in inside if w[0] >= lanes[0] - _snap()]
+            hits = [_lane_of((w[0] + w[2]) / 2, lanes) for w in region]
+            if (
+                len(region) >= _MIN_LANES_PER_ROW
+                and None not in hits
+                and len(set(hits)) == len(region)
+            ):
+                faults.append(
+                    {
+                        "predicate": HEADER_BAND_MISSING,
+                        "detail": (
+                            f"source row at y={y} above the first data row has {len(region)} "
+                            f"word(s) over {len(set(hits))} distinct table lanes; "
+                            f"{len(absent)} missing from the grid: {', '.join(absent[:6])}"
+                        ),
+                    }
+                )
+    return faults
+
+
+def native_ship_gate(words: list, markdown: str, *, line_dirs) -> tuple[dict, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
     A gate that raises must not ship the grid: it reports ``gate_error`` so the
-    caller defers to normal routing.
+    caller defers to normal routing. ``line_dirs`` (GH-917) is required: a
+    ``LineDirections`` enables ``foreign_direction`` and an unusable one (or ``None``)
+    DEFERs with ``direction_unavailable``; only ``LineDirections.unchecked_for_tests()``
+    skips it.
     """
     try:
         blocks = _output_blocks(markdown)
@@ -589,6 +837,8 @@ def native_ship_gate(words: list, markdown: str) -> tuple[dict, ...]:
         faults += order_faults(blocks, anchors, src_rows, cells=True)
         faults += data_row_missing_faults(blocks, anchors, src_rows)
         faults += label_row_missing_faults(blocks, anchors, src_rows)
+        faults += header_band_missing_faults(blocks, anchors, src_rows)
+        faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
         logger.warning("native ship gate failed (%s); deferring", exc)
