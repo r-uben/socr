@@ -187,3 +187,7 @@ Full suite, default OLLAMA_HOST, nohup, one run on the round-3 head: 6114 passed
 Round 4 full suite, default OLLAMA_HOST, nohup, one run: 6117 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.
 
 Round 5 full suite, default OLLAMA_HOST, nohup, one run: 6118 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.
+
+## Round 6: one coordinate rule
+
+Zone membership used raw `w[1]` while candidates use the rounded row y (`_source_rows`), so lines at y 43.6 (row 44, a candidate) could still calibrate. Zone membership now uses `round(w[1])`. Test `test_zone_membership_uses_the_rows_rounded_y`; mutant M14 (raw y) dies on it; all 14 mutants killed. Gate files plus test_gh936 and test_gh942: 186 passed; ruff format check clean. Census unchanged by construction (no census line sits on a .5 boundary of a zone edge, not re-run). Full suite not re-run (one-line change; CI).

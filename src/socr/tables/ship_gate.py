@@ -1158,7 +1158,7 @@ def _page_word_space(words: list[Word], zones: list[tuple[float, float]]) -> flo
     for w in words:
         if len(w) <= 6:
             continue
-        if any(lo <= w[1] <= hi for lo, hi in zones):
+        if any(lo <= round(w[1]) <= hi for lo, hi in zones):  # the rows' own y (_source_rows)
             continue
         by_line[(w[5], w[6])].append(w)
     gaps: list[float] = []

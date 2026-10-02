@@ -286,3 +286,14 @@ class TestSpacingIsNotCalibratedByHeaderRows:
         # The same run inside the reach is a candidate and fires: the position is the difference.
         words = _grid_words(prose_lines=2) + _caption_words(CAPTION, WORD_SPACE)
         assert _fired(words, _gate_md(SPREAD)) == {PIH}
+
+    def test_zone_membership_uses_the_rows_rounded_y(self) -> None:
+        # The first core row sits at Y0 + PITCH and the reach is 5 pitches, so the zone starts at
+        # 44. Two tight lines at y 43.6 round to 44: they ARE one candidate row, so they must not
+        # also calibrate the yardstick (raw 43.6 would put them outside the zone).
+        y = 43.6
+        a = _line(["Percent", "of"], COL_XS[0], y, 60, WORD_SPACE)
+        b = _line(["aggregate", "values"], a[-1][2] + WORD_SPACE, y, 61, WORD_SPACE)
+        words = _grid_words(prose_lines=0) + a + b
+        md = _gate_md(["Percent of aggregate values", "", "", "", ""])
+        assert _fired(words, md) == set()
