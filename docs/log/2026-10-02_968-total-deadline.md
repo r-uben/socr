@@ -78,4 +78,10 @@ adjudicator stubbed; conftest's `_post_chat` stub is replaced only inside this f
 
 ## Suite
 
-See commit message / report for the full-suite count.
+Commit c587745a: 6349 passed, 2 skipped, 4 xfailed, 1 failed (`test_timings.py::test_native_page_records_extract_not_route`,
+a load-sensitive timing test; passes in isolation, 13 passed).
+Commit a201ae08 (review fixes): 6353 passed, 2 skipped, 4 xfailed, 0 failed. `ruff@0.16.0 format --check .` clean.
+
+Review-fix mutations (external copy, `socr.__file__` canary, anchor count 1): baseline 20 passed;
+fail-fast check removed -> 3 failed; stray never registered -> 3 failed; `is_alive()` dropped
+(no recovery) -> 2 failed.
