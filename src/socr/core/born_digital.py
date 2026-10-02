@@ -2741,18 +2741,33 @@ class BornDigitalDetector:
             # ``len(doc)``; iterating the shrunk count would silently omit the
             # lost pages, which would then enter processing with default state.
             declared = len(doc)
+            # Page IDENTITY, not just count: if the repair drops a MIDDLE page the
+            # survivors shift down, and index i would read another page's text
+            # under page i's number. The page-object xref is stable across the
+            # repair, so each declared page is looked up by it afterwards.
+            xrefs_before = [self._safe_page_xref(doc, i) for i in range(declared)]
             self._recover_symbol_fonts(doc, pdf_path)
+            xref_to_index: dict[int, int] | None = None
+            if len(doc) != declared:
+                xref_to_index = {}
+                for j in range(len(doc)):
+                    x = self._safe_page_xref(doc, j)
+                    if x:
+                        xref_to_index.setdefault(x, j)
             for page_idx in range(declared):
                 # #881: one page MuPDF cannot load costs that page, not the
                 # document. Only the LOAD is guarded -- an error inside
                 # ``_assess_page`` is a bug in socr and must stay loud.
                 try:
-                    if page_idx >= len(doc):
-                        raise IndexError(
-                            f"page {page_idx + 1} missing after repair "
-                            f"(declared {declared}, {len(doc)} remain)"
-                        )
-                    page = doc[page_idx]
+                    source_idx = page_idx
+                    if xref_to_index is not None:
+                        source_idx = xref_to_index.get(xrefs_before[page_idx], -1)
+                        if source_idx < 0:
+                            raise IndexError(
+                                f"page {page_idx + 1} missing after repair "
+                                f"(declared {declared}, {len(doc)} remain)"
+                            )
+                    page = doc[source_idx]
                 except Exception as exc:  # noqa: BLE001 - a damaged page is a finding
                     pages.append(
                         PageAssessment(
@@ -2770,6 +2785,14 @@ class BornDigitalDetector:
             self._mark_unrecovered_glyphs(pages)
 
         return DocumentAssessment(path=pdf_path, pages=pages)
+
+    @staticmethod
+    def _safe_page_xref(doc, index: int) -> int:
+        """The page object's xref, or 0 when it cannot be read (damaged page)."""
+        try:
+            return int(doc.page_xref(index))
+        except Exception:  # noqa: BLE001 - an unreadable page has no identity to keep
+            return 0
 
     def detect_page(self, pdf_path: Path | str, page_num: int) -> PageAssessment:
         """Assess a single page (1-indexed).

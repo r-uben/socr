@@ -117,3 +117,17 @@ Full suite, default `OLLAMA_HOST`, nohup, one complete run: 6103 passed, 2 skipp
 - New mutants, all killed: extractor load before skip (1), extractor load unguarded (1),
   declared count read after repair (1). Earlier mutants re-run: all still killed except the
   documented equivalent one.
+
+## Review round 2 (Astra, 9c3f6b2)
+
+- Skip test records `__getitem__`/`load_page` requests: the skipped page is never requested
+  (control: unskipped, it is). Mutant "guarded load before the skip" killed.
+- Shrink test now removes the last AND a middle page. The middle case exposed a real defect in
+  my round-1 fix: indexing after the shrink read page 3's text under page 2's number. `detect`
+  now records each declared page's xref before recovery and looks pages up by it afterwards
+  (only when the count changed), so survivors keep their identity and exactly the vanished
+  page is FAILED. Mutant "index instead of identity" killed by the middle case.
+- Golden sha256 replaced by a same-process pin: the undamaged fixture through `detect` and
+  through a copy of the pre-#881 `detect`; final .md and every fragment byte-equal. Mutant
+  "catch fires on a healthy page" killed (7 tests). A first mutant (`is_born_digital=False`)
+  survived because the fixture's pages are all OCR-routed: noted, not used.

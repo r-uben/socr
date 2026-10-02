@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fitz
+import pytest
 
 from socr.core import providers
 from socr.core.born_digital import BornDigitalDetector
@@ -300,28 +301,57 @@ def test_a_bad_middle_page_does_not_cost_later_pages_their_figures(tmp_path):
     with _page_load_raises(BAD_INDEX):
         damaged = FigureExtractor().extract(pdf)
     assert [f.page_num for f in damaged.figures] == [f.page_num for f in clean.figures]
-    # and a skipped bad page is never even loaded
-    with _page_load_raises(BAD_INDEX):
-        skipped = FigureExtractor().extract(pdf, skip_pages={BAD_PAGE})
-    assert [f.page_num for f in skipped.figures] == [PAGES]
+    # A skipped bad page is never even REQUESTED. Recording accesses is what
+    # distinguishes "skip, then load" from "load (guarded), then skip", which
+    # return the same figures.
+    requested: list[int] = []
+    real_get, real_load = fitz.Document.__getitem__, fitz.Document.load_page
+
+    def get_spy(self, i):
+        requested.append(i)
+        return real_get(self, i)
+
+    def load_spy(self, page_id=0, *a, **kw):
+        requested.append(page_id)
+        return real_load(self, page_id, *a, **kw)
+
+    with (
+        patch.object(fitz.Document, "__getitem__", get_spy),
+        patch.object(fitz.Document, "load_page", load_spy),
+    ):
+        FigureExtractor().extract(pdf, skip_pages={BAD_PAGE})
+        assert BAD_INDEX not in requested
+        requested.clear()
+        FigureExtractor().extract(pdf)  # control: unskipped, the spy sees the page
+        assert BAD_INDEX in requested
 
 
-def test_a_repair_that_shrinks_the_page_count_fails_the_missing_pages(tmp_path, monkeypatch):
+@pytest.mark.parametrize("removed", [PAGES - 1, BAD_INDEX], ids=["last", "middle"])
+def test_a_repair_that_shrinks_the_page_count_fails_the_missing_page(
+    tmp_path, monkeypatch, removed
+):
     """Glyph recovery touches pages and MuPDF may repair the tree, shrinking
-    ``len(doc)``. The pages that vanished must be FAILED, not omitted (which would
-    hand them to processing with default state)."""
+    ``len(doc)``. The page that vanished must be FAILED -- and it must be THAT page:
+    when a middle page goes, the survivors shift down, and reading by index would
+    put page 3's text under page 2's number."""
     pdf = _pdf(tmp_path / "s.pdf")
     det = BornDigitalDetector()
-
-    def shrinking_recovery(doc, path):
-        doc.delete_page(PAGES - 1)  # the repair loses the last page
-
-    monkeypatch.setattr(det, "_recover_symbol_fonts", shrinking_recovery)
+    monkeypatch.setattr(det, "_recover_symbol_fonts", lambda doc, path: doc.delete_page(removed))
     assessment = det.detect(pdf)
     assert [p.page_num for p in assessment.pages] == list(range(1, PAGES + 1))
-    lost = assessment.pages[-1]
-    assert "missing after repair" in lost.load_error
-    assert all(p.load_error == "" for p in assessment.pages[:-1])
+    for p in assessment.pages:
+        if p.page_num == removed + 1:
+            assert "missing after repair" in p.load_error
+            assert p.native_text == ""
+        else:
+            assert p.load_error == ""
+            # identity: the text on page N came from source page N. The native layer
+            # is tabularised, so compare the page-number tokens, not the raw string.
+            text = " ".join(p.native_text.replace("|", " ").split())
+            assert f"Page {p.page_num} coefficient" in text, text[:80]
+            assert all(
+                f"Page {q} coefficient" not in text for q in range(1, PAGES + 1) if q != p.page_num
+            )
 
     # control: a recovery that keeps the count leaves every page loadable
     det2 = BornDigitalDetector()
@@ -349,16 +379,34 @@ def test_with_an_empty_provider_ladder_the_bad_page_is_still_failed(tmp_path):
     assert results[0][2] == "partial"
 
 
-# sha256 of the undamaged 4-page fixture's final markdown, measured under
-# origin/main (d8dc9b13) AND under this change: the fix must not move a good
-# document by one byte. The fixture and the stubbed engine are deterministic.
-UNDAMAGED_FINAL_MD_SHA256 = "347cb5f3f554fbc7276b5fd56f40fdeddc225d607f762a43362f65e1d2e9b83b"
+def _detect_without_the_catch(self, pdf_path):
+    """``BornDigitalDetector.detect`` exactly as it was before #881: no per-page
+    guard, no declared-count reconciliation."""
+    from socr.core.born_digital import DocumentAssessment
+    from socr.core.pdf import open_pdf
+
+    pdf_path = Path(pdf_path)
+    pages = []
+    with open_pdf(pdf_path, repair=False) as doc:
+        self._recover_symbol_fonts(doc, pdf_path)
+        for page_idx in range(len(doc)):
+            pages.append(self._assess_page(doc[page_idx], page_idx + 1))
+        self._mark_unrecovered_glyphs(pages)
+    return DocumentAssessment(path=pdf_path, pages=pages)
 
 
-def test_an_undamaged_document_is_byte_identical_to_main(tmp_path):
-    import hashlib
-
-    _, pdf, out, result = _run(tmp_path, None, "ok")
-    final = (_doc_dir(out) / "ok.md").read_bytes()
-    assert result.status is DocumentStatus.SUCCESS
-    assert hashlib.sha256(final).hexdigest() == UNDAMAGED_FINAL_MD_SHA256
+def test_an_undamaged_document_is_byte_identical_with_the_catch_inert(tmp_path, monkeypatch):
+    """Same process, same inputs, one variable: the new per-page catch. Frozen
+    hashes would pin formatting that legitimately changes; a difference does not."""
+    _, _, out_new, new = _run(tmp_path, None, "ok")
+    monkeypatch.setattr(BornDigitalDetector, "detect", _detect_without_the_catch)
+    _, _, out_old, old = _run(tmp_path, None, "old")
+    assert new.status is old.status
+    dd_new, dd_old = _doc_dir(out_new), _doc_dir(out_old)
+    assert (dd_new / "ok.md").read_bytes() == (dd_old / "old.md").read_bytes()
+    for n in range(1, PAGES + 1):
+        assert (dd_new / "pages" / f"{n:05d}.md").read_bytes() == (
+            dd_old / "pages" / f"{n:05d}.md"
+        ).read_bytes()
+    # the pin is live: a different document body would show up
+    assert "Page 1" in (dd_new / "ok.md").read_text() or "ocr" in (dd_new / "ok.md").read_text()
