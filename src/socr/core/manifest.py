@@ -919,6 +919,15 @@ def _minus_as_digit_suspect(p) -> bool:
     )
 
 
+def _invisible_text_suspect(p) -> bool:
+    """#961: the page is a scan whose old invisible OCR layer is the native text, or the
+    scan for that failed (unknown is not clean)."""
+    return bool(
+        getattr(p, "invisible_text_over_raster", False)
+        or getattr(p, "invisible_text_scan_failed", False)
+    )
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -3092,6 +3101,7 @@ def _select_page_output_tagged(
             # ship under --native-only, so it falls through to the native fallback below:
             # same text, WARNING, never clean SUCCESS.
             or _minus_as_digit_suspect(p)
+            or _invisible_text_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3668,7 +3678,11 @@ def _select_page_output_tagged(
                 else (
                     FailureMode.NATIVE_MINUS_AS_DIGIT
                     if native_is_fallback and _minus_as_digit_suspect(p)
-                    else FailureMode.NONE
+                    else (
+                        FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
+                        if native_is_fallback and _invisible_text_suspect(p)
+                        else FailureMode.NONE
+                    )
                 )
             ),
         ), (

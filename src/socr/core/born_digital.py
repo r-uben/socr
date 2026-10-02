@@ -2382,6 +2382,12 @@ class PageAssessment:
     #: #913: the scan raised, so whether the page has the defect is UNKNOWN. Treated
     #: exactly as a hit (fail closed): a wrong number is worse than a missing one.
     minus_as_digit_scan_failed: bool = False
+    #: #961: the page is image-dominant (raster coverage >= ``RASTER_DOMINANCE_RATIO``) and
+    #: carries invisible text (render mode 3): a scan with an old baked-in OCR layer, not a
+    #: born-digital page. Routes the page off the trusted-native lane to OCR.
+    invisible_text_over_raster: bool = False
+    #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
+    invisible_text_scan_failed: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: GH-371: zero-based ordinals of separator-bearing table regions whose
     #: per-region geometry verifier hard-failed.  The ordinal is relative to
@@ -2590,6 +2596,34 @@ def _is_lane_stacked(table: object) -> bool:
             if cell and isinstance(cell, str) and "\n" in cell:
                 return True
     return False
+
+
+def _union_area(boxes: list, clip) -> float:
+    """Area of the union of ``boxes`` clipped to ``clip`` (sweep over x, merged y intervals)."""
+    rects = []
+    for b in boxes:
+        r = fitz.Rect(b) & clip
+        if not r.is_empty:
+            rects.append((r.x0, r.y0, r.x1, r.y1))
+    if not rects:
+        return 0.0
+    xs = sorted({v for r in rects for v in (r[0], r[2])})
+    total = 0.0
+    for x_lo, x_hi in zip(xs, xs[1:]):
+        spans = sorted((r[1], r[3]) for r in rects if r[0] <= x_lo and r[2] >= x_hi)
+        covered = 0.0
+        cur_lo = cur_hi = None
+        for lo, hi in spans:
+            if cur_hi is None or lo > cur_hi:
+                if cur_hi is not None:
+                    covered += cur_hi - cur_lo
+                cur_lo, cur_hi = lo, hi
+            else:
+                cur_hi = max(cur_hi, hi)
+        if cur_hi is not None:
+            covered += cur_hi - cur_lo
+        total += covered * (x_hi - x_lo)
+    return total
 
 
 class BornDigitalDetector:
@@ -3312,6 +3346,24 @@ class BornDigitalDetector:
                 + " -> OCR"
             )
 
+        # #961: a scan whose old OCR text layer is invisible (render mode 3) over a page-sized
+        # raster is not born-digital; its text is a past OCR run's, shipped verbatim.
+        invisible_text_over_raster = False
+        invisible_text_scan_failed = False
+        try:
+            invisible_text_over_raster = self._has_invisible_text_over_raster(page)
+        except Exception:
+            # Fail closed: an unreadable page is "unknown", not "clean".
+            logger.warning("#961: invisible-text scan failed", exc_info=True)
+            invisible_text_scan_failed = True
+        if invisible_text_over_raster or invisible_text_scan_failed:
+            needs_ocr_enhancement = True
+            notes.append(
+                "invisible text layer over a full-page raster (scan with baked-in OCR)"
+                + (" (scan failed: unknown)" if invisible_text_scan_failed else "")
+                + " -> OCR"
+            )
+
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
         # suspect so it is never silently relied on.
@@ -3509,6 +3561,8 @@ class BornDigitalDetector:
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             minus_as_digit_hits=minus_as_digit_hits,
             minus_as_digit_scan_failed=minus_as_digit_scan_failed,
+            invisible_text_over_raster=invisible_text_over_raster,
+            invisible_text_scan_failed=invisible_text_scan_failed,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             orphan_word_drops=orphan_word_drops,
@@ -4344,6 +4398,32 @@ class BornDigitalDetector:
         """
         images = page.get_images()
         return len(images) > 0
+
+    def _has_invisible_text_over_raster(self, page: fitz.Page) -> bool:
+        """#961: the page's text is mostly invisible (``get_texttrace`` type 3 / render
+        mode 3, by characters) AND the UNION of its raster images, clipped to the page,
+        covers >= ``RASTER_DOMINANCE_RATIO`` of it.
+
+        A sum of image boxes would let overlapping images inflate coverage, and "any
+        invisible span" would re-route a born-digital page with a background image plus a
+        little invisible accessibility text; a scan's old OCR layer is the page's text.
+        Coverage is computed first and the (costlier) text trace is skipped when there is
+        not enough raster, so a born-digital page pays only ``get_image_info``.
+        Raises on a PyMuPDF failure; the caller fails closed.
+        """
+        page_area = page.rect.get_area()
+        if page_area <= 0:
+            return False
+        boxes = [fitz.Rect(info["bbox"]) for info in page.get_image_info() if info.get("bbox")]
+        if _union_area(boxes, page.rect) / page_area < self.RASTER_DOMINANCE_RATIO:
+            return False
+        invisible = total = 0
+        for span in page.get_texttrace():
+            n = len(span.get("chars") or ())
+            total += n
+            if span.get("type") == 3:
+                invisible += n
+        return invisible * 2 > total
 
     @staticmethod
     def _raster_coverage(page: fitz.Page) -> float:

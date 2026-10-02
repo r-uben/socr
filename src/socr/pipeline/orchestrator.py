@@ -1937,6 +1937,44 @@ class UnifiedPipeline:
                 )
             )
 
+        # #961: a scan with an invisible baked-in OCR layer (render mode 3 over a page-sized
+        # raster), or a failed scan (unknown is not clean). born_digital.py already set
+        # ``needs_ocr_enhancement``. Recomputed from the PDF on every run, so deliberately
+        # NOT in ``_RESUME_REPLAYED`` (same contract as ``minus_extracted_as_digit``).
+        for pa in assessment.pages:
+            hit = bool(getattr(pa, "invisible_text_over_raster", False))
+            scan_failed = bool(getattr(pa, "invisible_text_scan_failed", False))
+            if not (hit or scan_failed):
+                continue
+            if self.config.native_only:
+                outcome = (
+                    "page RETAINED as native text under --native-only and shipped WARNING "
+                    "(native_invisible_text_scan): the old OCR text is not verified"
+                )
+            else:
+                outcome = (
+                    "page routed to OCR, no content dropped (if no OCR rung wins, the "
+                    "native text ships WARNING, never clean SUCCESS)"
+                )
+            what = (
+                "the scan for invisible text over a raster FAILED, so the page is treated as a scan"
+                if scan_failed
+                else "the page is a full-page raster carrying invisible text (an old baked-in "
+                "OCR layer), not born-digital text"
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="invisible_text_scan",
+                    engine="native",
+                    detail=f"{what}; {outcome}",
+                    data={
+                        "error": scan_failed,
+                        "native_only": bool(self.config.native_only),
+                    },
+                )
+            )
+
         # TICKET-A1b (#634): cache native words for every page detection found
         # at least one table on, so S1 selection can call
         # ``row_corroboration.corroborate_rows`` before the structure-class
@@ -2641,6 +2679,11 @@ class UnifiedPipeline:
             and ps.is_born_digital
             and ps.native_text
             and ps.has_corrupt_math
+            # #961: a scan's invisible OCR layer is not native prose to repair around
+            # equations; the whole page goes to OCR (a hybrid would ship that old OCR while
+            # the event claims OCR replaced it).
+            and not ps.invisible_text_over_raster
+            and not ps.invisible_text_scan_failed
             and not ps.native_rotated_text_shredded
             and not self._page_has_tables(page_num, ps)
         )
@@ -10025,8 +10068,15 @@ class UnifiedPipeline:
             getattr(ps, "minus_as_digit_hits", 0)
             or getattr(ps, "minus_as_digit_scan_failed", False)
         )
+        # #961: same for a scan's invisible OCR layer.
+        invisible_suspect = bool(
+            getattr(ps, "invisible_text_over_raster", False)
+            or getattr(ps, "invisible_text_scan_failed", False)
+        )
         chart_status = (
-            PageStatus.WARNING if (chart_render_failed or minus_suspect) else PageStatus.SUCCESS
+            PageStatus.WARNING
+            if (chart_render_failed or minus_suspect or invisible_suspect)
+            else PageStatus.SUCCESS
         )
         chart_out = PageOutput(
             page_num=page_num,
@@ -10037,7 +10087,11 @@ class UnifiedPipeline:
             failure_mode=(
                 FailureMode.NATIVE_MINUS_AS_DIGIT
                 if minus_suspect and not chart_render_failed
-                else FailureMode.NONE
+                else (
+                    FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
+                    if invisible_suspect and not chart_render_failed
+                    else FailureMode.NONE
+                )
             ),
             cost_usd=0.0,
         )
@@ -14235,6 +14289,22 @@ class UnifiedPipeline:
             and p.best_output.audit_passed
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
+        # #961: the same retained-native condition for a scan's invisible OCR layer.
+        invisible_retained_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and (
+                getattr(p, "invisible_text_over_raster", False)
+                or getattr(p, "invisible_text_scan_failed", False)
+            )
+            and n not in native_fallback_pages
+            and n not in failed_pages
+            and p.best_output
+            and p.best_output.audit_passed
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
 
         # A reconstructed or historical state may contain a whole-document
         # attempt (page_num=0) without per-page winners. Treat a passing one as
@@ -14350,6 +14420,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not minus_retained_pages
+        pages_ok = pages_ok and not invisible_retained_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
@@ -14656,6 +14727,7 @@ class UnifiedPipeline:
             or d3_floor_pages
             or native_only_distrust_pages
             or minus_retained_pages
+            or invisible_retained_pages
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_floor_pages
@@ -14757,6 +14829,27 @@ class UnifiedPipeline:
                             else "OCR unavailable or every rung failed"
                         )
                         + "); the text ships WARNING, its negative values are unverified",
+                    )
+                )
+            for n in invisible_retained_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_invisible_text_retained",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages[n].best_output
+                            else "native"
+                        ),
+                        detail="the native text is an invisible baked-in OCR layer over a "
+                        "full-page raster (or the scan for that failed) and no OCR read "
+                        "replaced it ("
+                        + (
+                            "--native-only"
+                            if self.config.native_only
+                            else "OCR unavailable or every rung failed"
+                        )
+                        + "); the text ships WARNING, unverified",
                     )
                 )
             for n in native_only_distrust_pages:
@@ -15023,6 +15116,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(minus_retained_pages)} page(s) shipped native text "
                         "that reads a minus sign as the digit 2 (no OCR read replaced "
                         f"it): {minus_retained_pages}[/yellow]"
+                    )
+                if invisible_retained_pages:
+                    console.print(
+                        f"  [yellow]{len(invisible_retained_pages)} page(s) shipped an "
+                        "invisible baked-in OCR text layer from a scan (no OCR read "
+                        f"replaced it): {invisible_retained_pages}[/yellow]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(
