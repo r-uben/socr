@@ -177,6 +177,7 @@ output/<doc_stem>/
 ├── metadata.json        # document status and notes
 ├── pages/               # NNNNN.md body + NNNNN.json sidecar per page (resume ledger)
 ├── manifest.json        # replay record; blobs in cache/
+├── cache/               # content-addressed blobs for replay (with --write-manifest)
 ├── audit_log.json       # notable events of the run
 ├── tables_trust.json    # pages with doubtful tables (absent = none)
 ├── figures/             # images the text links to
@@ -189,8 +190,8 @@ written the instant its page finishes. A re-run reuses a page only when its
 status is `success` with `audit_passed` true, and the `.md` fragment is readable.
 Otherwise the page is reprocessed.
 
-To judge whether a page can be trusted, start with `status` and `failure_mode` in
-its `pages/NNNNN.json`. Every file, status, failure mode and audit event is
+To judge whether a page can be trusted, start with `status`, `failure_mode` and
+`audit_passed` in its `pages/NNNNN.json`, then read its audit events. Every file, status, failure mode and audit event is
 explained in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ## Configuration
