@@ -1069,3 +1069,22 @@ def test_nested_archive_dir_creation_fsyncs_each_new_parent(tmp_path, monkeypatc
     synced = [p for p, _ in events]
     assert cfg.root / "arch" in synced  # parent of the new archive dir
     assert cfg.root in synced  # parent of the new 'arch'
+
+
+@pytest.mark.parametrize("probe_err", [lib.errno.EACCES, lib.errno.EIO])
+def test_a_probe_failing_for_another_reason_does_not_fall_back(tmp_path, monkeypatch, probe_err):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (src / "f").write_text("keep")
+
+    def native(s, d):
+        # the real call and the probe both fail; the probe with EACCES/EIO
+        lib.ctypes.set_errno(probe_err if b".noreplace-probe." in s else lib.errno.EINVAL)
+        return -1
+
+    monkeypatch.setattr(lib, "_native_noreplace", lambda: native)
+    with pytest.raises(OSError) as ei:
+        lib._rename_noreplace(src, dst)
+    assert ei.value.errno == probe_err and not isinstance(ei.value, lib.LibraryError)
+    assert (src / "f").read_text() == "keep" and not dst.exists()
+    assert not list(tmp_path.glob(".noreplace-probe.*"))

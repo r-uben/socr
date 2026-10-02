@@ -98,3 +98,7 @@ listed ~355 papers. Now:
 - New `_mkdir_durable` fsyncs the PARENT of every directory it creates (archive, text, index, index-file parents).
 - The kernel primitive falls back only on ENOTSUP / EOPNOTSUPP / ENOSYS. EINVAL falls back only if a probe (scratch dir rename inside the same parent, cleaned up with rmdir) shows the primitive unsupported there; otherwise the OSError is raised and the source is untouched.
 - Tests: 89 in the file. Mutants in an external copy, all fail: skip completed-recovery fsyncs; mkdir without parent fsync; archive via plain mkdir (needed a nested-archive test, since the rename fsync of the archive dir hid it); EINVAL always / never falls back; EOPNOTSUPP unrecognised; any errno falls back.
+
+## Amendment 5: probe errno (PR #966 round 5)
+
+The EINVAL probe concluded "unsupported" on ANY failure of its own. Now only ENOTSUP/EOPNOTSUPP/ENOSYS/EINVAL from the probe mean unsupported; any other errno (EACCES, EIO) raises OSError with the source untouched. Regression test for EACCES and EIO; mutant (every probe failure = unsupported) fails 2 tests. File: 91 tests.

@@ -485,13 +485,21 @@ def _primitive_works_in(native: Callable[[bytes, bytes], int], parent: Path) -> 
 
     Renames a scratch directory onto a fresh name inside ``parent``. Success proves
     the primitive is supported here, so an EINVAL on the real call was about the
-    real arguments and must be raised, not papered over.
+    real arguments and must be raised, not papered over. Returns False only when
+    the probe's own errno is ENOTSUP/EOPNOTSUPP/ENOSYS/EINVAL; any other probe
+    failure raises.
     """
     probe = Path(tempfile.mkdtemp(dir=parent, prefix=".noreplace-probe."))
     a, b = probe / "a", probe / "b"
     try:
         a.mkdir()
-        return native(os.fsencode(a), os.fsencode(b)) == 0
+        if native(os.fsencode(a), os.fsencode(b)) == 0:
+            return True
+        err = ctypes.get_errno()
+        if err in _UNSUPPORTED_ERRNOS or err == errno.EINVAL:
+            return False  # the probe itself says: unsupported here
+        # EIO, EACCES, ...: the probe proved nothing; do not fall back on a guess.
+        raise OSError(err, os.strerror(err), str(a))
     finally:
         for p in (a, b, probe):
             try:
