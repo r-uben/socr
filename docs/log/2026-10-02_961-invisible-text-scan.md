@@ -105,3 +105,10 @@ left the two chart mutants alive (no chart test existed); the chart test was add
   `tests/test_timings.py::test_native_page_records_extract_not_route`, a wall-clock tolerance
   (50 ms observed vs 1 ms) tripped while a routing sweep ran alongside; it passes alone (13
   passed).
+
+## Round 3 (Astra on 89603bc)
+- Test gap: the corrupt-math exclusion was pinned only at the predicate. Added a `process()`
+  difference pin (scan page stamped `has_corrupt_math` after analysis, recovery enabled):
+  detector neutralised, the hybrid lane owns the page and the old native prose ships; live, the
+  provider's text ships and the old prose does not. A mutant that bypasses the guard at the
+  routing call site (external copy, uncapped anchor count 1, baseline 29 passed) is killed by it.

@@ -209,7 +209,17 @@ def _chart_pdf(path: Path) -> Path:
     return path
 
 
-def _e2e(tmp_path, tag, monkeypatch, *, provider, native_only=False, detector="live", chart=False):
+def _e2e(
+    tmp_path,
+    tag,
+    monkeypatch,
+    *,
+    provider,
+    native_only=False,
+    detector="live",
+    chart=False,
+    recover_corrupt_math=True,
+):
     """detector: live | neutralised | raising | forced (always fires)."""
     if detector not in {"live", "neutralised", "raising", "forced"}:
         raise ValueError(detector)
@@ -242,6 +252,7 @@ def _e2e(tmp_path, tag, monkeypatch, *, provider, native_only=False, detector="l
                 enabled_engines=[EngineType.QWEN],
                 native_first=True,
                 native_only=native_only,
+                recover_corrupt_math=recover_corrupt_math,
                 write_manifest=False,
                 judge_backend="heuristic",
                 dual_pass_tables=False,
@@ -548,3 +559,37 @@ def test_d3_native_retention_of_a_scan_page_ships_error_not_success(tmp_path) ->
     assert scan.status == base.status
     assert scan.status.value != "success"
     assert scan.failure_mode == base.failure_mode
+
+
+def _e2e_corrupt_math(tmp_path, tag, monkeypatch, *, detector):
+    """process() a scan page that ALSO trips corrupt-math, recovery enabled.
+
+    ``has_corrupt_math`` is stamped after analysis (a synthetic PDF cannot produce it), so
+    the only thing that differs between the runs is whether the scan detector fires.
+    """
+    orig = UnifiedPipeline._phase_analyze
+
+    def analyze(self, state, *a, **k):
+        out = orig(self, state, *a, **k)
+        state.pages[1].has_corrupt_math = True
+        state.pages[1].needs_ocr_enhancement = True
+        return out
+
+    with monkeypatch.context() as m:
+        m.setattr(UnifiedPipeline, "_phase_analyze", analyze)
+        return _e2e(
+            tmp_path, tag, monkeypatch, provider=True, detector=detector, recover_corrupt_math=True
+        )
+
+
+def test_e2e_scan_page_with_corrupt_math_goes_to_whole_page_ocr(tmp_path, monkeypatch) -> None:
+    _, eng_off = _e2e_corrupt_math(tmp_path, "m_off", monkeypatch, detector="neutralised")
+    _, eng_on = _e2e_corrupt_math(tmp_path, "m_on", monkeypatch, detector="live")
+
+    assert "estimated effect" in _page_text(tmp_path, "m_off"), (
+        "main: the hybrid lane owns the page and the old native prose ships"
+    )
+    assert _OCR_MARK not in _page_text(tmp_path, "m_off")
+    assert eng_on.calls == 1
+    assert _OCR_MARK in _page_text(tmp_path, "m_on")
+    assert "estimated effect" not in _page_text(tmp_path, "m_on")
