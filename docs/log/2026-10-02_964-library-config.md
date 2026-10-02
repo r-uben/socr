@@ -91,3 +91,10 @@ listed ~355 papers. Now:
 - Durability: `_atomic_write` fsyncs the file, renames, then fsyncs the directory (so the journal and its dir entry are durable before the first rename). `_rename_durable` fsyncs the parent dir(s) after each rename. The journal is unlinked only after both renames are durable, then its dir is fsynced. Helper `_fsync_dir`.
 - Documentation: the library must be on a local filesystem; locks and atomic renames are not guaranteed on iCloud or network mounts (`~/papers` is local by policy).
 - Tests: 81. Mutants in an external copy (all fail the suite): native primitive disabled, plain os.rename in recovery / install / archive, journal containment, journal symlink check (needed an in-library symlink test; the first test matched its own tmp path name), staged-markdown check, missing fsyncs (journal dir, after renames, after journal delete), journal deleted before the second rename.
+
+## Amendment 4: remaining durability gaps (PR #966 round 4)
+
+- Recovery of an already-completed promotion fsyncs text, staging and archive dirs BEFORE unlinking the journal, then the journal dir.
+- New `_mkdir_durable` fsyncs the PARENT of every directory it creates (archive, text, index, index-file parents).
+- The kernel primitive falls back only on ENOTSUP / EOPNOTSUPP / ENOSYS. EINVAL falls back only if a probe (scratch dir rename inside the same parent, cleaned up with rmdir) shows the primitive unsupported there; otherwise the OSError is raised and the source is untouched.
+- Tests: 89 in the file. Mutants in an external copy, all fail: skip completed-recovery fsyncs; mkdir without parent fsync; archive via plain mkdir (needed a nested-archive test, since the rename fsync of the archive dir hid it); EINVAL always / never falls back; EOPNOTSUPP unrecognised; any errno falls back.

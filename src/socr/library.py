@@ -323,7 +323,7 @@ def staged_stems(cfg: LibraryConfig) -> list[str]:
 
 def _atomic_write(path: Path, content: str) -> None:
     """Unique temp file in the same dir, fsync, then rename over the target."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     if path.is_symlink():
         raise LibraryError(f"refusing to write through a symlink: {path}")
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
@@ -410,7 +410,7 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
 @contextmanager
 def library_lock(cfg: LibraryConfig):
     """Exclusive lock for the whole run (flock: released by the OS if we crash)."""
-    cfg.index_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(cfg.index_dir)
     path = cfg.index_dir / LOCK_NAME
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
@@ -475,6 +475,43 @@ def _native_noreplace() -> Callable[[bytes, bytes], int] | None:
     return None
 
 
+#: errno values that mean "this filesystem/kernel lacks the primitive". EINVAL is
+#: NOT here: on macOS it also means a bad path or flag, so it needs a probe.
+_UNSUPPORTED_ERRNOS = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
+
+
+def _primitive_works_in(native: Callable[[bytes, bytes], int], parent: Path) -> bool:
+    """One-time probe in ``parent``: does the primitive work on this filesystem?
+
+    Renames a scratch directory onto a fresh name inside ``parent``. Success proves
+    the primitive is supported here, so an EINVAL on the real call was about the
+    real arguments and must be raised, not papered over.
+    """
+    probe = Path(tempfile.mkdtemp(dir=parent, prefix=".noreplace-probe."))
+    a, b = probe / "a", probe / "b"
+    try:
+        a.mkdir()
+        return native(os.fsencode(a), os.fsencode(b)) == 0
+    finally:
+        for p in (a, b, probe):
+            try:
+                os.rmdir(p)  # our own empty scratch dirs only
+            except OSError:
+                pass
+
+
+def _mkdir_durable(path: Path) -> None:
+    """mkdir -p, fsyncing the PARENT of every directory this call creates."""
+    missing = []
+    p = path
+    while not p.exists():
+        missing.append(p)
+        p = p.parent
+    for d in reversed(missing):
+        d.mkdir(exist_ok=True)
+        _fsync_dir(d.parent)
+
+
 def _rename_noreplace(src: Path, dst: Path) -> None:
     """Rename a directory atomically, refusing to touch an existing target.
 
@@ -489,7 +526,10 @@ def _rename_noreplace(src: Path, dst: Path) -> None:
         err = ctypes.get_errno()
         if err == errno.EEXIST or err == errno.ENOTEMPTY:
             raise LibraryError(f"refusing to replace existing {dst}")
-        if err not in (errno.ENOTSUP, errno.EINVAL, errno.ENOSYS):
+        unsupported = err in _UNSUPPORTED_ERRNOS or (
+            err == errno.EINVAL and not _primitive_works_in(native, dst.parent)
+        )
+        if not unsupported:
             raise OSError(err, os.strerror(err), str(src))
         # filesystem without the flag: fall through to the guarded fallback
     if os.path.lexists(dst):
@@ -520,7 +560,7 @@ def install_staged(cfg: LibraryConfig, stem: str) -> Path:
     dst = cfg.text_doc_dir(stem)
     if not cfg.markdown_path(src, stem).is_file():
         raise LibraryError(f"{src} has no {cfg.markdown.format(stem=stem)}; not installed")
-    cfg.text_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(cfg.text_dir)
     _rename_durable(src, dst)
     return dst
 
@@ -628,6 +668,11 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
     elif s and t and a is False and archived is not None:
         msg = f"discarded journal of a promotion that had not started ({j.get('stem')})"
     elif t and not s:
+        # The renames may not have reached disk before the crash: make every
+        # directory they touched durable BEFORE the journal that vouches for them goes.
+        for d in (cfg.text_dir, cfg.staging_dir, cfg.archive_dir):
+            if d.is_dir():
+                _fsync_dir(d)
         msg = f"promotion of {j.get('stem')} had completed; cleared its journal"
     else:
         raise LibraryError(
@@ -658,7 +703,7 @@ def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple
         while os.path.lexists(archived):
             n += 1
             archived = cfg.archive_dir / f"{stem}.{stamp}.{n}"
-        cfg.archive_dir.mkdir(parents=True, exist_ok=True)
+        _mkdir_durable(cfg.archive_dir)
     _atomic_write(
         _journal_path(cfg),
         json.dumps(
@@ -673,7 +718,7 @@ def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple
     # The journal (file and directory entry) is durable before the first rename.
     if archived is not None:
         _rename_durable(target, archived)
-    cfg.text_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(cfg.text_dir)
     _rename_durable(staged, target)
     # Only now, with both renames durable, drop the journal and make that durable.
     _journal_path(cfg).unlink()

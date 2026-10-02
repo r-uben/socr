@@ -934,7 +934,8 @@ def test_promote_fsyncs_in_the_durable_order(tmp_path, monkeypatch):
     assert {e[1] for e in after} >= {cfg.text_dir, cfg.staging_dir}
     # the journal is deleted only after that, then its directory is fsynced
     assert events[-1] == ("fsync", cfg.index_dir, False)
-    assert all(e[2] for e in events[: renames[1] + 1 + len(after) - 1])
+    start = events.index(("fsync", cfg.index_dir, True))
+    assert all(e[2] for e in events[start:-1])  # journal present until the last step
 
 
 def test_journal_naming_a_symlink_inside_the_library_is_refused(tmp_path):
@@ -958,3 +959,113 @@ def test_recovery_rename_goes_through_the_no_replace_primitive(tmp_path, monkeyp
     monkeypatch.setattr(lib, "_rename_noreplace", lambda s, d: (calls.append(Path(d)), real(s, d)))
     assert lib.recover_promotion(cfg)
     assert calls == [cfg.text_dir / "a"]
+
+
+# --- GH-964 review round 4: remaining durability gaps ----------------------
+
+
+def _spy_fsync(monkeypatch, cfg):
+    jp = cfg.index_dir / lib.JOURNAL_NAME
+    events = []
+    real = lib._fsync_dir
+    monkeypatch.setattr(
+        lib, "_fsync_dir", lambda p: (events.append((Path(p), jp.exists())), real(p))[1]
+    )
+    return events
+
+
+def test_completed_promotion_recovery_fsyncs_dirs_before_dropping_the_journal(
+    tmp_path, monkeypatch
+):
+    cfg = _staged_promotion(tmp_path)
+    archived, _ = lib.promote(cfg, "a")
+    # crash after both renames, before the journal was removed
+    _write_journal(
+        cfg,
+        target=str(cfg.text_dir / "a"),
+        staged=str(cfg.staging_dir / "a"),
+        archived=str(archived),
+    )
+    events = _spy_fsync(monkeypatch, cfg)
+    assert "completed" in lib.recover_promotion(cfg)
+    with_journal = {p for p, present in events if present}
+    assert {cfg.text_dir, cfg.staging_dir, cfg.archive_dir} <= with_journal
+    assert events[-1] == (cfg.index_dir, False)  # journal's dir fsynced after the unlink
+
+
+def test_creating_archive_and_text_dirs_fsyncs_their_parent(tmp_path, monkeypatch):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    _fake_doc(cfg.staging_dir, "b", body="new")
+    events = _spy_fsync(monkeypatch, cfg)
+    lib.install_staged(cfg, "a")  # creates text_dir under root
+    assert cfg.root in [p for p, _ in events]
+    # promote of a stem with an existing text dir creates archive_dir under root
+    events.clear()
+    _fake_doc(cfg.staging_dir, "a", body="newer")
+    lib.promote(cfg, "a")
+    assert cfg.root in [p for p, _ in events]
+    assert cfg.archive_dir.is_dir()
+
+
+def _fake_native(fail_errno, probe_works):
+    """A kernel-primitive stand-in: fails the real call with fail_errno."""
+
+    def native(s, d):
+        if probe_works and b".noreplace-probe." in s:
+            os.rename(s, d)
+            return 0
+        lib.ctypes.set_errno(fail_errno)
+        return -1
+
+    return native
+
+
+@pytest.mark.parametrize("err", [lib.errno.ENOTSUP, lib.errno.EOPNOTSUPP, lib.errno.ENOSYS])
+def test_unsupported_errnos_fall_back_to_the_guarded_rename(tmp_path, monkeypatch, err):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    monkeypatch.setattr(lib, "_native_noreplace", lambda: _fake_native(err, probe_works=False))
+    lib._rename_noreplace(src, dst)
+    assert dst.is_dir() and not src.exists()
+    # the fallback still refuses an existing target
+    src.mkdir()
+    with pytest.raises(lib.LibraryError, match="refusing to replace"):
+        lib._rename_noreplace(src, dst)
+
+
+def test_einval_is_raised_when_the_probe_shows_the_primitive_works(tmp_path, monkeypatch):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (src / "f").write_text("keep")
+    monkeypatch.setattr(
+        lib, "_native_noreplace", lambda: _fake_native(lib.errno.EINVAL, probe_works=True)
+    )
+    with pytest.raises(OSError) as ei:
+        lib._rename_noreplace(src, dst)
+    assert not isinstance(ei.value, lib.LibraryError) and ei.value.errno == lib.errno.EINVAL
+    assert (src / "f").read_text() == "keep" and not dst.exists()
+    assert not list(tmp_path.glob(".noreplace-probe.*"))  # scratch dirs cleaned up
+
+
+def test_einval_falls_back_only_when_the_probe_proves_it_unsupported(tmp_path, monkeypatch):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    monkeypatch.setattr(
+        lib, "_native_noreplace", lambda: _fake_native(lib.errno.EINVAL, probe_works=False)
+    )
+    lib._rename_noreplace(src, dst)
+    assert dst.is_dir() and not src.exists()
+
+
+def test_nested_archive_dir_creation_fsyncs_each_new_parent(tmp_path, monkeypatch):
+    cfg = lib.load_library_config(
+        _write_cfg(tmp_path, lambda d: d["archive"].update(dir="arch/old"))
+    )
+    _fake_doc(cfg.text_dir, "a", body="old")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    events = _spy_fsync(monkeypatch, cfg)
+    lib.promote(cfg, "a")
+    synced = [p for p, _ in events]
+    assert cfg.root / "arch" in synced  # parent of the new archive dir
+    assert cfg.root in synced  # parent of the new 'arch'
