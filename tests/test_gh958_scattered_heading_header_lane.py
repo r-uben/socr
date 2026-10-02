@@ -155,3 +155,35 @@ class TestHeaderOverEmptyColumn:
     def test_a_column_a_data_row_fills_is_not_empty(self) -> None:
         words, md = _hoec_grid(["Year", "b", "", "s", "h", "q"], filled="note")
         assert HOEC not in _fired(words, md)
+
+
+def _run_line(text: str) -> list[tuple]:
+    return _line(text.split(), COL_XS[0], SENTENCE_Y, 30, WORD_SPACE)
+
+
+class TestAcceptedFires:
+    def test_the_exact_original_row_fires_when_one_source_line_backs_it(self) -> None:
+        # The row of the renamed GH-917 test (fama p782 origin). Markdown-only: exempt. With a
+        # single-run source line it is the scattered heading itself, and it defers.
+        row = ["Big, low-profitability", "growth firms:", "dSM", "< 0", ""]
+        md = _md_with(row)
+        assert _fired(_grid_words(), md) == set()
+        assert _fired(
+            _grid_words() + _run_line("Big, low-profitability growth firms: dSM < 0"), md
+        ) == {TNC}
+
+    def test_label_words_in_numeric_cells_are_the_defect_shape_and_fire(self) -> None:
+        # Intended fire (fama p475 shape): a panel label whose words spill into numeric cells.
+        md = _md_with(["Panel A:", "Small", "firms", "", ""])
+        assert _fired(_grid_words() + _run_line("Panel A: Small firms"), md) == {TNC}
+
+    def test_the_merged_single_cell_label_stays_quiet(self) -> None:
+        md = _md_with(["Panel A: Small firms", "", "", "", ""])
+        assert _fired(_grid_words() + _run_line("Panel A: Small firms"), md) == set()
+
+    def test_a_deliberately_unfilled_column_is_a_known_accepted_false_defer(self) -> None:
+        # Header Year | Forecast | blank | Actual over an always-blank Forecast column with a
+        # headerless neighbour: indistinguishable from the one-lane-off defect by the grid alone.
+        # A false DEFER costs one model read; the rule is not narrowed (GH-958 ruling).
+        words, md = _hoec_grid(["Year", "Forecast", "", "s", "h", "q"])
+        assert HOEC in _fired(words, md)

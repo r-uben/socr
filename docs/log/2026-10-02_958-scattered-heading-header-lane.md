@@ -47,3 +47,16 @@ B never fires: 3 killed. B without adjacent-headerless: 5 killed. B without empt
 
 New file 11 tests; 917 file 38 pass. Full suite, default OLLAMA_HOST, nohup, one run:
 6207 passed, 2 skipped, 4 xfailed. Hermetic: no provider call (gate and `plan_native_table` only).
+
+## Review follow-up (Astra ACCEPT-WITH-FIXES, coordinator ruling; rules not narrowed)
+
+- A: `Panel A: | Small | firms` between data rows with a single-run source line is the defect shape
+  (fama p475), pinned as an intended fire; the merged single-cell label stays quiet.
+- D: the EXACT original row `Big, low-profitability | growth firms: | dSM | < 0` was measured with a
+  single-run source line backing it: it FIRES (`text_in_numeric_column`). Right for fama p782: that
+  row is the sentence scattered over numeric cells, the shape the audit called wrong.
+  Markdown-only it stays exempt (the renamed GH-917 test).
+- B accepted false DEFERs (cost: one model read each): a deliberately unfilled column with a header
+  (`Year | Forecast | [blank] | Actual`, headerless neighbour), and a group heading over a spacer
+  column. Both are indistinguishable from the one-lane-off defect by the grid alone. Pinned for the
+  first; the second is the same grid shape.
