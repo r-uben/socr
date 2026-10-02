@@ -187,3 +187,35 @@ class TestAcceptedFires:
         # A false DEFER costs one model read; the rule is not narrowed (GH-958 ruling).
         words, md = _hoec_grid(["Year", "Forecast", "", "s", "h", "q"])
         assert HOEC in _fired(words, md)
+
+
+class TestScatteredHeadingSourceScope:
+    def test_a_duplicate_line_outside_the_table_does_not_back_the_row(self) -> None:
+        # The same single-run line, far below the table's zone: no source line backs the row itself.
+        md = _md_with(SCATTERED)
+        far = _line(
+            "Big, low-profitability growth firms: dSM".split(),
+            COL_XS[0],
+            Y0 + 14 * PITCH,
+            31,
+            WORD_SPACE,
+        )
+        assert _fired(_grid_words() + far, md) == set()
+        # Difference: the same line inside the zone makes the row fire.
+        assert _fired(_grid_words() + far + _sentence_run(), md) == {TNC}
+
+    def test_a_block_without_geometry_makes_the_check_abstain(self) -> None:
+        # Wide-gutter lines of a table the grid did not pair carry no zone, so they calibrate the
+        # page's word space and make a lane-spread sub-header read as one run. Present as a second
+        # block with no geometry, the check abstains; absent, those lines are indistinguishable
+        # from body text (the exposure that makes abstaining the smaller fix).
+        gutters = []
+        for k in range(6):
+            y = Y0 + (23 + k) * PITCH
+            gutters += [_w(COL_XS[i], y, f"t{k}{i}", 40 + k, 0, i) for i in range(5)]
+        words = _grid_words() + _sentence_over_lanes() + gutters
+        md = _md_with(SCATTERED)
+        assert TNC in _fired(words, md), "polluted word space: the lane-spread line reads as a run"
+        other = "\n\n| t00 | t01 | t02 | t03 | t04 |\n| --- | --- | --- | --- | --- |"
+        other += "\n| t10 | t11 | t12 | t13 | t14 |"
+        assert TNC not in _fired(words, md + other)

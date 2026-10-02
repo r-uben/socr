@@ -45,7 +45,7 @@ B never fires: 3 killed. B without adjacent-headerless: 5 killed. B without empt
 
 ## Tests
 
-New file 11 tests; 917 file 38 pass. Full suite, default OLLAMA_HOST, nohup, one run:
+New file 17 tests (initially logged as 11); 917 file 37 tests (initially logged as 38). Full suite, default OLLAMA_HOST, nohup, one run:
 6207 passed, 2 skipped, 4 xfailed. Hermetic: no provider call (gate and `plan_native_table` only).
 
 ## Review follow-up (Astra ACCEPT-WITH-FIXES, coordinator ruling; rules not narrowed)
@@ -60,3 +60,15 @@ New file 11 tests; 917 file 38 pass. Full suite, default OLLAMA_HOST, nohup, one
   (`Year | Forecast | [blank] | Actual`, headerless neighbour), and a group heading over a spacer
   column. Both are indistinguishable from the one-lane-off defect by the grid alone. Pinned for the
   first; the second is the same grid shape.
+
+## Cubic review (PR #959)
+
+- P2a: the scattered-heading match now only accepts source lines inside the block's own table zone
+  (first/last core row +- `_header_reach`); a duplicate line elsewhere on the page no longer backs a row.
+- P2b: the check abstains for the whole page when any block has no geometry (its rows cannot be excluded
+  from the `_page_word_space` calibration). Chosen over excluding those rows: no zone exists to exclude.
+- Census re-run on `impl/inputs_now.pkl`: unchanged. SHIP 12 -> 10, fama p475 and harren p66 DEFER, 0 removals.
+- Mutations (external copy, canary, anchor count 1, baseline 55 passed): dropping the zone scope is killed by
+  `test_a_duplicate_line_outside_the_table_does_not_back_the_row`; dropping the geometry abstain (skipping
+  geometry-less blocks in calibration) is killed by `test_a_block_without_geometry_makes_the_check_abstain`.
+  The earlier A/B mutants are still killed.

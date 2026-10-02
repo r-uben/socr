@@ -1100,35 +1100,44 @@ def _block_kinds(block: Block, *, canonical: bool) -> list[list[str]]:
 
 def _scattered_heading_judge(
     words: list[Word] | None, src_rows: SourceRows | None, geos: list | None
-) -> Callable[[Block, int], bool] | None:
-    """GH-958: ``(block, row) -> True`` when the row's joined cells equal ONE whole source line
-    and that line is one run (``_is_one_run``, in the page's word-space unit). ``None`` (the
-    exemption stands unchanged) when the page's word space cannot be measured or no source is given.
+) -> Callable[[object], Callable[[Block, int], bool] | None] | None:
+    """GH-958: ``judge_for(geo)`` gives ``(block, row) -> True`` when the row's joined cells equal ONE
+    whole source line INSIDE that block's table zone and that line is one run (``_is_one_run``, in
+    the page's word-space unit). ``None`` (the exemption stands unchanged) when the page's word
+    space cannot be measured, no source is given, or any block on the page has no geometry (its
+    rows would not be excluded from the word-space calibration).
 
     A real spanning panel label or positioned sub-header prints its words over separate lanes, so
     the source line is NOT one run; a heading scattered one word per cell is a sentence the PDF
     prints as one run. Without the run clause a correct positioned sub-header fires (measured on
     the 127-page census, GH-958: fama p469 row 19)."""
-    if not words or src_rows is None or geos is None:
+    if not words or src_rows is None or not geos or any(geo is None for geo in geos):
         return None
     zones = []
     for geo in geos:
-        if geo is not None:
-            ys = sorted(geo[1])
-            reach = _header_reach(ys)
-            zones.append((ys[0] - reach, ys[-1] + reach))
-    word_space = _page_word_space(words, zones) if zones else None
+        ys = sorted(geo[1])
+        reach = _header_reach(ys)
+        zones.append((ys[0] - reach, ys[-1] + reach))
+    word_space = _page_word_space(words, zones)
     if not word_space:
         return None
-    lines: dict[str, list[list[Word]]] = defaultdict(list)
-    for row_words in src_rows.values():
-        lines[_compact("".join(w[4] for w in row_words))].append(row_words)
 
-    def judge(block: Block, i: int) -> bool:
-        same = lines.get(_compact("".join(block[i])))
-        return bool(same) and all(_is_one_run(ws, word_space) for ws in same)
+    def judge_for(geo):
+        ys = sorted(geo[1])
+        reach = _header_reach(ys)
+        lo, hi = ys[0] - reach, ys[-1] + reach
+        lines: dict[str, list[list[Word]]] = defaultdict(list)
+        for y, row_words in src_rows.items():
+            if lo <= y <= hi:
+                lines[_compact("".join(w[4] for w in row_words))].append(row_words)
 
-    return judge
+        def judge(block: Block, i: int) -> bool:
+            same = lines.get(_compact("".join(block[i])))
+            return bool(same) and all(_is_one_run(ws, word_space) for ws in same)
+
+        return judge
+
+    return judge_for
 
 
 def text_in_numeric_column_faults(
@@ -1183,13 +1192,14 @@ def text_in_numeric_column_faults(
     not reported here.
     """
     faults: list[GateFault] = []
-    scattered = _scattered_heading_judge(words, src_rows, geos)
-    for block, found in zip(blocks, pairs):
+    judge_for = _scattered_heading_judge(words, src_rows, geos)
+    for k, (block, found) in enumerate(zip(blocks, pairs)):
         if not any(block):
             # A separator-only or empty block has no cells to judge; skipping it keeps
             # it from raising into ``native_ship_gate``'s handler, which would replace
             # the other blocks' faults with ``gate_error`` (Astra, PR #931).
             continue
+        scattered = judge_for(geos[k]) if judge_for and geos[k] is not None else None
         # MONOTONE by construction (GH-932): the first member is EXACTLY the GH-917 predicate
         # (original classifier, original rule), so every fault it found is still found; the
         # others only add rows. The gate only DEFERs, so a union can add a DEFER and never lose
