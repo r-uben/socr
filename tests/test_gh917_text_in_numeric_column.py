@@ -98,7 +98,11 @@ class TestMustNotFire:
         words, md = _grid(tail=[["Panel B: spreads", "across horizons", "", "", ""]])
         assert _fired(words, md) == {TNC}
 
-    def test_panel_label_spanning_into_numeric_columns_is_exempt(self) -> None:
+    def test_panel_label_spanning_into_numeric_columns_with_no_source_line_is_exempt(self) -> None:
+        # The exemption holds only because this fixture has no source line for the row: GH-917
+        # pinned it on a markdown-only row. The real-world origin (fama p782) is a sentence
+        # scattered one word per cell, which GH-958 now defers when one whole source line backs
+        # it (tests/test_gh958_scattered_heading_header_lane.py pins that difference).
         words, md = _grid(inner={3: ["Big, low-profitability", "growth firms:", "dSM", "< 0", ""]})
         assert _fired(words, md) == set()
 

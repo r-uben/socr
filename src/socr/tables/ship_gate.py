@@ -55,6 +55,9 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     block; header rows above the first data row, panel labels that start in
                     the label columns, number-with-marker cells, placeholders and
                     parenthesised numbers are exempt (see ``text_in_numeric_column_faults``).
+                    GH-958: a panel-label row that spills text into >= ``_MIN_CORE_LANES`` numeric
+                    columns is NOT exempt when its joined cells equal one whole source line that is
+                    one run (a sentence scattered one word per cell).
 ``prose_in_header``  (GH-936) a source row above the table's first core row that the grid
                     absorbed WHOLE into its header rows and that is ONE run of two or more
                     words, with no gap wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word
@@ -69,6 +72,10 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     row's own source line places across that cut (every aligning line must
                     agree), is not a number, and appears nowhere whole in the block: a
                     caption or notes line cut mid-word into cells.
+``header_over_empty_column``  (GH-958) a header cell (a row above the first data row) over a
+                    column that is blank in every data row, next to a numeric column that is blank
+                    in every header row: the values sit one lane off their header. No lane-centre
+                    clause (it misfires on a two-line header spanning a value and its s.e. column).
 ``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
                     differs from another carried word's, per output table block. Needs the
                     page's line directions (``LineDirections``); two directions are the
@@ -97,7 +104,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple, TypedDict
 
@@ -157,6 +164,7 @@ DIRECTION_UNAVAILABLE = "direction_unavailable"
 HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 PROSE_IN_HEADER = "prose_in_header"
+HEADER_OVER_EMPTY_COLUMN = "header_over_empty_column"
 GEOMETRYLESS_BLOCK = "geometryless_block"
 WORD_SPLIT_ACROSS_CELLS = "word_split_across_cells"
 GATE_ERROR = "gate_error"
@@ -1037,9 +1045,17 @@ def _numeric_columns(kinds: list[list[str]], rows: list[int], *, panels: bool) -
 
 
 def _rule_faults(
-    block: Block, kinds: list[list[str]], found: BlockPairs, *, panels: bool
+    block: Block,
+    kinds: list[list[str]],
+    found: BlockPairs,
+    *,
+    panels: bool,
+    scattered: Callable[[Block, int], bool] | None = None,
 ) -> dict[int, dict[int, str]]:
-    """Evidence of one block under one data-row rule: row index -> {column: cell text}."""
+    """Evidence of one block under one data-row rule: row index -> {column: cell text}.
+
+    *scattered* (GH-958) judges a row the panel-label exemption would let through: when it holds,
+    the row is a sentence spread one word per cell, and it is checked like any other row."""
     out: dict[int, dict[int, str]] = {}
     data = _data_rows(kinds, {idx for idx, _y in found}, panels=panels)
     if len(data) < 2:
@@ -1054,9 +1070,11 @@ def _rule_faults(
             continue
         ks = kinds[i]
         lead = next((c for c, k in enumerate(ks) if k != _EMPTY), None)
-        if lead is not None and lead < numeric_cols[0] and i < last:
-            continue  # a panel label starting in the label columns
         hit = [c for c in numeric_cols if c < len(ks) and ks[c] == _TEXT]
+        if lead is not None and lead < numeric_cols[0] and i < last:
+            # a panel label starting in the label columns, unless it is a scattered sentence
+            if not (scattered and len(hit) >= _MIN_CORE_LANES and scattered(block, i)):
+                continue
         if hit:
             out[i] = {c: block[i][c] for c in hit}
     return out
@@ -1080,7 +1098,56 @@ def _block_kinds(block: Block, *, canonical: bool) -> list[list[str]]:
     return kinds
 
 
-def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) -> list[GateFault]:
+def _scattered_heading_judge(
+    words: list[Word] | None, src_rows: SourceRows | None, geos: list | None
+) -> Callable[[object], Callable[[Block, int], bool] | None] | None:
+    """GH-958: ``judge_for(geo)`` gives ``(block, row) -> True`` when the row's joined cells equal ONE
+    whole source line INSIDE that block's table zone and that line is one run (``_is_one_run``, in
+    the page's word-space unit). ``None`` (the exemption stands unchanged) when the page's word
+    space cannot be measured, no source is given, or any block on the page has no geometry (its
+    rows would not be excluded from the word-space calibration).
+
+    A real spanning panel label or positioned sub-header prints its words over separate lanes, so
+    the source line is NOT one run; a heading scattered one word per cell is a sentence the PDF
+    prints as one run. Without the run clause a correct positioned sub-header fires (measured on
+    the 127-page census, GH-958: fama p469 row 19)."""
+    if not words or src_rows is None or not geos or any(geo is None for geo in geos):
+        return None
+    zones = []
+    for geo in geos:
+        ys = sorted(geo[1])
+        reach = _header_reach(ys)
+        zones.append((ys[0] - reach, ys[-1] + reach))
+    word_space = _page_word_space(words, zones)
+    if not word_space:
+        return None
+
+    def judge_for(geo):
+        ys = sorted(geo[1])
+        reach = _header_reach(ys)
+        lo, hi = ys[0] - reach, ys[-1] + reach
+        lines: dict[str, list[list[Word]]] = defaultdict(list)
+        for y, row_words in src_rows.items():
+            if lo <= y <= hi:
+                lines[_compact("".join(w[4] for w in row_words))].append(row_words)
+
+        def judge(block: Block, i: int) -> bool:
+            same = lines.get(_compact("".join(block[i])))
+            return bool(same) and all(_is_one_run(ws, word_space) for ws in same)
+
+        return judge
+
+    return judge_for
+
+
+def text_in_numeric_column_faults(
+    blocks: list[Block],
+    pairs: list[BlockPairs],
+    *,
+    words: list[Word] | None = None,
+    src_rows: SourceRows | None = None,
+    geos: list | None = None,
+) -> list[GateFault]:
     """GH-917: a non-data row carrying letters in a column the data rows establish as numeric.
 
     Per output block, all derived from the block's own rows:
@@ -1112,18 +1179,27 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
     rows sharing another data row's numeric support; it catches disjoint panels (panel A in some
     columns, panel B in others), where the rule above finds no majority and abstains.
 
+    GH-958: the panel-label exemption does not cover a row that spills text into at least
+    ``_MIN_CORE_LANES`` numeric columns when its joined cells equal ONE whole source line that
+    is one run (``_scattered_heading_judge``): a sentence the PDF prints in one piece, emitted
+    one word per cell. It needs the page's words, source rows and geometries (``words`` /
+    ``src_rows`` / ``geos``); without them, or when the page's word space cannot be measured,
+    the exemption stands.
+
     Limit (measured, ``docs/log/2026-10-01_917-text-in-numeric-column.md``): text emitted
     ABOVE the first data row (a caption or equation fragments between the title and the
     column headings) is indistinguishable from a column heading by the grid alone, so it is
     not reported here.
     """
     faults: list[GateFault] = []
-    for block, found in zip(blocks, pairs):
+    judge_for = _scattered_heading_judge(words, src_rows, geos)
+    for k, (block, found) in enumerate(zip(blocks, pairs)):
         if not any(block):
             # A separator-only or empty block has no cells to judge; skipping it keeps
             # it from raising into ``native_ship_gate``'s handler, which would replace
             # the other blocks' faults with ``gate_error`` (Astra, PR #931).
             continue
+        scattered = judge_for(geos[k]) if judge_for and geos[k] is not None else None
         # MONOTONE by construction (GH-932): the first member is EXACTLY the GH-917 predicate
         # (original classifier, original rule), so every fault it found is still found; the
         # others only add rows. The gate only DEFERs, so a union can add a DEFER and never lose
@@ -1131,7 +1207,9 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
         evidence: dict[int, dict[int, str]] = {}
         for canonical, panels in _TNC_MEMBERS:
             kinds = _block_kinds(block, canonical=canonical)
-            for i, cols in _rule_faults(block, kinds, found, panels=panels).items():
+            for i, cols in _rule_faults(
+                block, kinds, found, panels=panels, scattered=scattered
+            ).items():
                 evidence.setdefault(i, {}).update(cols)
         for i in sorted(evidence):
             hit = sorted(evidence[i])
@@ -1273,6 +1351,50 @@ def prose_in_header_faults(
                         "word spaces) and the grid carries all of it in its header rows",
                     )
                 )
+    return faults
+
+
+def header_over_empty_column_faults(
+    blocks: list[Block], pairs: list[BlockPairs]
+) -> list[GateFault]:
+    """GH-958: a header cell over a grid column that no data row fills, next to a numeric column
+    whose header cells are all blank: the values sit under the wrong (blank) header and the
+    header over an empty column, one lane off.
+
+    Output-side, per block, on the original GH-917 data-row rule and classifier: the header rows
+    are the rows above the first data row; a column is *empty* when every data row's cell there is
+    blank; the adjacent column must be numeric and blank in EVERY header row. No lane-centre
+    clause: a two-line header spanning a value column and its standard-error column reads as
+    misplaced by position and is correct (measured on the 127-page census, GH-958:
+    stock_watson p43).
+    """
+    faults: list[GateFault] = []
+    for block, found in zip(blocks, pairs):
+        if not any(block):
+            continue
+        kinds = _block_kinds(block, canonical=False)
+        data = _data_rows(kinds, {idx for idx, _y in found}, panels=False)
+        if len(data) < 2:
+            continue
+        numeric = set(_numeric_columns(kinds, data, panels=False))
+        head = range(data[0])
+
+        def cell(r: int, c: int) -> str:
+            return block[r][c].strip() if c < len(block[r]) else ""
+
+        for h in head:
+            for c in range(len(block[h])):
+                if not cell(h, c) or any(cell(d, c) for d in data):
+                    continue
+                for a in (c - 1, c + 1):
+                    if a in numeric and not any(cell(r, a) for r in head):
+                        faults.append(
+                            _fault(
+                                HEADER_OVER_EMPTY_COLUMN,
+                                f"header row {h} column {c} ({block[h][c].strip()!r}) sits over a "
+                                f"column no data row fills, and numeric column {a} has no header",
+                            )
+                        )
     return faults
 
 
@@ -1471,7 +1593,10 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += data_row_missing_faults(blocks, pairs, src_rows, geos=geos)
         faults += label_row_missing_faults(blocks, pairs, src_rows, geos)
         faults += header_band_missing_faults(blocks, pairs, src_rows, geos)
-        faults += text_in_numeric_column_faults(blocks, pairs)
+        faults += text_in_numeric_column_faults(
+            blocks, pairs, words=words, src_rows=src_rows, geos=geos
+        )
+        faults += header_over_empty_column_faults(blocks, pairs)
         faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
         faults += geometryless_block_faults(blocks, pairs, src_rows, geos)
         faults += word_split_across_cells_faults(blocks, src_rows)
