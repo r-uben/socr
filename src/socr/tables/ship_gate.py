@@ -60,8 +60,8 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     words, with no gap wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word
                     spaces: a caption or notes sentence emitted as column headings.
                     ``text_in_numeric_column`` exempts the header band by design and cannot see it.
-``geometryless_block``  (GH-949) a block for which no table geometry can be built (one
-                    unique pair) whose contiguous source region holds more multi-column
+``geometryless_block``  (GH-949) a block for which ``_table_geometry`` returns None (for
+                    example, only one unique pair) whose contiguous source region holds more multi-column
                     numeric rows than the grid carries: a table shipped as its lone
                     highlight row while the rest fell out as loose words.
 ``word_split_across_cells``  (GH-951) in one grid row, the last token of a cell joined to the
