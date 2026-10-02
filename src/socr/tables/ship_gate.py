@@ -144,6 +144,7 @@ DIRECTION_UNAVAILABLE = "direction_unavailable"
 HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 PROSE_IN_HEADER = "prose_in_header"
+GEOMETRYLESS_BLOCK = "geometryless_block"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -1260,6 +1261,88 @@ def prose_in_header_faults(
     return faults
 
 
+#: Characters a table cell wraps around a number: parentheses (t-statistics), significance
+#: stars, daggers, a percent sign.
+_CELL_WRAP = "()[]*\u2217\u2020\u2021%"
+#: Cell glyphs standing for "no value".
+_PLACEHOLDER_GLYPHS = frozenset("-\u2013\u2014\u2212")
+
+
+def _is_cell_number(text: str) -> bool:
+    """A source word that is a table cell's number: ``0.073***``, ``(-2.19)``, ``-0.028**``."""
+    bare = text.strip(_CELL_WRAP).lstrip("+-\u2212\u2013")
+    return bool(bare) and (_is_source_number(bare) or (bare[:1] == "." and is_numeric_token(bare)))
+
+
+def _is_placeholder(text: str) -> bool:
+    return bool(text) and set(text) <= _PLACEHOLDER_GLYPHS
+
+
+def geometryless_block_faults(
+    blocks: list[Block],
+    pairs: list[BlockPairs],
+    src_rows: SourceRows,
+    geos: list,
+) -> list[GateFault]:
+    """GH-949: a block with no geometry that carries fewer table rows than its source.
+
+    ``_table_geometry`` needs two paired rows, so a grid holding only a table's shaded
+    highlight row (one unique pair) has none and every geometric predicate stays silent
+    while the rest of the table ships as loose lines. For such a block the anchor row's
+    numeric x-clusters are the lanes; the source region is the anchor plus every
+    contiguous row reaching ``_MIN_CORE_LANES`` of them, each within
+    ``_PANEL_GAP_ROWS`` row pitches (the page's median source-row pitch) of the last.
+    The block faults when that region has more such rows than the grid has rows with
+    two or more numbers. Blocks with geometry are untouched, so this only adds faults.
+    """
+    faults: list[GateFault] = []
+    ys = sorted(src_rows)
+    pitch = statistics.median([b - a for a, b in zip(ys, ys[1:])] or [0])
+    reach = _PANEL_GAP_ROWS * pitch
+    for block, found, geo in zip(blocks, pairs, geos):
+        if geo is not None:
+            continue
+        anchors = [(y, _numeric_words(src_rows[y])) for _i, y in found]
+        anchors = [(y, ws) for y, ws in anchors if len(ws) >= 2]
+        if not anchors:
+            continue
+        lanes = _cluster_x_positions([w[0] for _y, ws in anchors for w in ws])
+
+        def table_row(y: int) -> bool:
+            """A multi-column numeric row: only a label may precede the first number."""
+            ws = src_rows[y]
+            first = next((i for i, w in enumerate(ws) if _is_cell_number(w[4])), None)
+            return (
+                first is not None
+                and all(_is_cell_number(w[4]) or _is_placeholder(w[4]) for w in ws[first:])
+                and _lane_count([w for w in ws if _is_cell_number(w[4])], lanes) >= _MIN_CORE_LANES
+            )
+
+        region = {y for y, _ws in anchors}
+        lo, hi = min(region), max(region)
+        for edge, outward in (
+            (lo, sorted((y for y in ys if y < lo), reverse=True)),
+            (hi, sorted(y for y in ys if y > hi)),
+        ):
+            for y in outward:
+                # the region is CONTIGUOUS with the block: the first line that is not a
+                # table row (caption, prose, a blank gap past one reach) ends the walk
+                if abs(y - edge) > reach or not table_row(y):
+                    break
+                region.add(y)
+                edge = y
+        carried = sum(1 for cells in block if len(_row_tokens(cells)) >= _MIN_CORE_LANES)
+        if len(region) > carried:
+            faults.append(
+                _fault(
+                    GEOMETRYLESS_BLOCK,
+                    f"block without table geometry carries {carried} multi-number row(s) "
+                    f"but its source region holds {len(region)}",
+                )
+            )
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -1285,6 +1368,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += header_band_missing_faults(blocks, pairs, src_rows, geos)
         faults += text_in_numeric_column_faults(blocks, pairs)
         faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
+        faults += geometryless_block_faults(blocks, pairs, src_rows, geos)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
