@@ -422,6 +422,10 @@ class PipelineConfig:
     # This field only documents the interaction; TICKET-B1 implements the gate.
     table_judge_timeout_sec: float = TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
 
+    # Typesafe (Jev) systemone model id for vision-table confirmation on pages
+    # whose stored/upright word geometry cannot exact-pass the emitted grid.
+    typesafe_model: str = "jev"
+
     # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):
     # the blind cell-transcription ADJUDICATOR. Not a third reader rung: it never
     # produces a PASS/FAIL verdict and never enters ``run_table_ladder``. It is

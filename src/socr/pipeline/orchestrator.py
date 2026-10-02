@@ -11845,11 +11845,15 @@ class UnifiedPipeline:
         def record_event(event) -> None:
             self._record_judge_event(state, event)
 
+        from socr.tables.typesafe import TYPESAFE_DEFAULT_MODEL, TypesafeGate
+
+        typesafe_model = (self.config.typesafe_model or "").strip() or TYPESAFE_DEFAULT_MODEL
         native_judge = NativeTableVerifierJudge(
             inner=inner_judge,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
+            typesafe_gate=TypesafeGate(model=typesafe_model),
         )
 
         def native_trusted(page_num: int) -> bool | None:
