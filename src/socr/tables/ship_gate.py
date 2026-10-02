@@ -1129,41 +1129,33 @@ def _is_one_run(row_words: list[Word], word_space: float) -> bool:
     return all(b[0] - a[2] <= limit for a, b in zip(row_words, row_words[1:]))
 
 
-def _nfkc(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).strip()
-
-
 #: Text lines outside every table's vertical extent that must contribute a gap before the page's
 #: word space is trusted. A repeat is evidence, one line is not (the ``_PLACEHOLDER_MIN_ROWS`` rule).
 _MIN_SPACING_LINES = _PLACEHOLDER_MIN_ROWS
 
 
-def _page_word_space(
-    words: list[Word], extents: list[tuple[float, float]], carried: frozenset[str] = frozenset()
-) -> float | None:
-    """The page's median same-line word gap, measured ONLY on lines outside every table extent.
+def _page_word_space(words: list[Word], zones: list[tuple[float, float]]) -> float | None:
+    """The page's median same-line word gap, measured ONLY on lines outside every table zone.
 
     Inside a table the only gaps are column gutters (per-cell or whole-row PDF lines alike), which
     would make a real multi-column header read as one run. Body prose, captions and notes outside the
-    extents print the ordinary word space. ``None`` (the caller abstains) when fewer than
+    zones print the ordinary word space. ``None`` (the caller abstains) when fewer than
     ``_MIN_SPACING_LINES`` such lines have a gap, or when the words carry no block/line indices.
 
-    A line whose every word is in *carried* (the NFKC tokens the grid holds) is excluded too: it is
-    a candidate header row, and a header row must not calibrate the yardstick that judges header
-    rows (two wide-gap header lines above the extent would each supply their own gap and pass).
+    The zone is geometric (see ``prose_in_header_faults``), never a token rule: a line the predicate
+    itself scans as a header candidate cannot be evidence about itself, whether or not the grid
+    carries all of its words.
     """
     by_line: dict[tuple, list[Word]] = defaultdict(list)
     for w in words:
         if len(w) <= 6:
             continue
-        if any(lo <= w[1] <= hi for lo, hi in extents):
+        if any(lo <= w[1] <= hi for lo, hi in zones):
             continue
         by_line[(w[5], w[6])].append(w)
     gaps: list[float] = []
     lines = 0
     for line_words in by_line.values():
-        if carried and all(_nfkc(w[4]) in carried for w in line_words):
-            continue
         ordered = sorted(line_words, key=lambda w: w[0])
         line_gaps = [b[0] - a[2] for a, b in zip(ordered, ordered[1:]) if b[0] - a[2] > 0]
         if line_gaps:
@@ -1192,32 +1184,32 @@ def prose_in_header_faults(
     occurs (counted, NFKC) as a token of those header rows. The predicate fires on a carried
     row that is ONE run of at least two words (``_is_one_run``): column headings sit over
     separate lanes and so split into runs at the page's lane gutter, a sentence does not.
-    Measured on the 127-page census (GH-936, after the spacing policy below): +6 DEFERs against
-    main, of which 3 are real, 1 is a broken page, 2 are false (a panel title, an in-table panel
-    label); a false DEFER costs one model read. 59 of the 127 pages abstain for lack of evidence.
+    Measured on the 127-page census (GH-936, with the zone policy below): +2 DEFERs against main,
+    both real (Herskovic 29, Mendoza-Fernandez 60), 0 false; 90 of the 127 pages abstain for lack
+    of evidence, and the zone policy cost one real catch (Fama 733) against a looser yardstick.
 
-    The yardstick is the page's word space measured on lines OUTSIDE every table's extent (core
-    rows less/plus the outward reach of ``_PANEL_GAP_ROWS`` pitches) and not carried by the grid,
-    see ``_page_word_space``; with too little such text the predicate abstains rather than guess from column gutters.
+    The yardstick is the page's word space measured on lines OUTSIDE every table's zone, see
+    ``_page_word_space``. The zone of a table runs from the top of the page (this predicate scans
+    EVERY source row above the first core row as a header candidate, with no reach) down to the last
+    core row plus the outward reach of ``_PANEL_GAP_ROWS`` pitches. A line in that zone is a header
+    candidate or the table itself and cannot calibrate the yardstick that judges it. With too
+    little text below the lowest table the predicate abstains rather than guess from column gutters.
 
-    Known holes, by construction: a page with no text outside its tables (it abstains); a one-word caption (indistinguishable from a one-word
+    Known holes, by construction: a page with no text below its tables (it abstains), including one whose only prose sits above the table; a one-word caption (indistinguishable from a one-word
     heading) and a caption with a gap wider than the bound (reads as lane-shaped). No font
     size clause: the design measured zero census gain and an exact float comparison is brittle.
     No panel-label exemption: it would save one false DEFER and add code.
     """
     if geos is None:
         geos = _block_geometries(pairs, src_rows)
-    extents = []
+    zones = []
     for geo in geos:
         if geo is None:
             continue
         ys = sorted(geo[1])
         reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
-        extents.append((ys[0] - reach, ys[-1] + reach))
-    grid_tokens = frozenset(
-        _nfkc(tok) for block in blocks for row in block for c in row for tok in c.split()
-    )
-    word_space = _page_word_space(words, extents, grid_tokens) if extents else None
+        zones.append((-math.inf, ys[-1] + reach))
+    word_space = _page_word_space(words, zones) if zones else None
     if not word_space:
         return []
     faults: list[GateFault] = []

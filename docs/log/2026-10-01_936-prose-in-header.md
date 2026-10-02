@@ -127,6 +127,33 @@ set identical to main d8dc9b1, SHIP to DEFER the same 6 (real Fama 733, Herskovi
 deferrable Fama 728; false Kim 52, Stock-Watson 44). The page that stopped firing already DEFERs on
 another predicate. The docstring's "+7 / 3 false" is corrected to the measured 6 / 2.
 
+## Round 4 (Astra reject of round 3): geometric zone, token rule dropped
+
+Round 3's all-words-carried rule was bypassed by one uncarried word at the same wide gap on each far
+header line: both lines stayed in the calibration and the carried near row passed WIDE <= 2 WIDE.
+
+Fix: the calibration zone is geometric. This predicate scans EVERY source row above a block's first
+core row as a header candidate (no reach), so the zone of a table is `(-inf, last core row + reach]`
+(`reach` = `_PANEL_GAP_ROWS` pitches, as before). A line in the zone is a header candidate or the table
+and cannot calibrate the yardstick that judges it. Evidence is text below the lowest table; with fewer
+than `_MIN_SPACING_LINES` such lines the predicate abstains. The token rule is dropped: the zone
+subsumes it for every line it excluded (carried lines above or inside the extent); the one thing it
+excluded that the zone does not, a carried line BELOW the table, is real prose and may calibrate.
+
+Tests (23 in the file): Astra's exact bypass abstains; the bypass page with prose below the table uses
+the prose spacing (wide near row quiet, tight near row fires); prose above the table is inside the zone
+and is not evidence; plus round 3's tests. Mutants: M12 (zone starts at the header reach instead of
+the page top) dies on the bypass, the prose-above and the two-far-lines tests; M10 (no zone at all)
+dies; all 13 mutants killed.
+
+Census, same 127 pages (artefacts in scratchpad/g936): evidence 34, abstain 90, no table geometry 3.
+`prose_in_header` fires on 9 pages. 0 removals; every other predicate's set identical to main d8dc9b1.
+SHIP to DEFER: 2 pages, both real: Herskovic 29, Mendoza-Fernandez 60. Lost against round 3: Fama 733
+(real: its prose sits above the table, so there is no independent text below it), Fama 728
+(deferrable), Kim 52 and Stock-Watson 44 (false). Cost of the geometric rule: one of the three
+original real catches, and an abstain rate of 71%. The residual exposure is unchanged in kind: a page
+with too little text below its tables ships a prose header as it did before this ticket.
+
 ## Suite
 
 Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed, 2 skipped,
@@ -134,3 +161,5 @@ Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed
 `uvx ruff@0.16.0 format --check .` clean.
 
 Full suite, default OLLAMA_HOST, nohup, one run on the round-3 head: 6114 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.
+
+Round 4 full suite, default OLLAMA_HOST, nohup, one run: 6117 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.

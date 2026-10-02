@@ -193,15 +193,24 @@ class TestSpacingEvidence:
 
 
 class TestSpacingIsNotCalibratedByHeaderRows:
-    """Header lines the grid carries must not supply the yardstick that judges header lines."""
+    """A line the predicate scans as a header candidate must not supply the yardstick that judges it.
+
+    The zone is geometric: everything above the lowest table's last core row plus the outward reach.
+    """
 
     WIDE = 40.0  # a column-wide gap, far over ALIGNED_RUN_GAP_MAX_WORD_SPACES x any word space here
 
-    def _page(self, *, prose_lines: int):
+    def _page(self, *, prose_lines: int, uncarried_tail: bool = False):
         # Two header lines ABOVE the excluded extent plus the near header row, all with the same
         # wide gap g: unless carried lines are excluded, the median is g and g <= 2g passes.
         far = [
-            _line(["Alpha", "Beta"], COL_XS[0], Y0 - (10 + k) * PITCH, 20 + k, self.WIDE)
+            _line(
+                ["Alpha", "Beta"] + (["Zed"] if uncarried_tail else []),
+                COL_XS[0],
+                Y0 - (10 + k) * PITCH,
+                20 + k,
+                self.WIDE,
+            )
             for k in range(2)
         ]
         near = _caption_words(["Gamma", "Delta"], self.WIDE)
@@ -237,4 +246,30 @@ class TestSpacingIsNotCalibratedByHeaderRows:
             )
         ]
         words = _grid_words(prose_lines=0) + notes + _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == set()
+
+    def test_a_far_header_line_with_one_uncarried_word_still_cannot_calibrate(self) -> None:
+        # Astra's bypass: one extra word the grid does not carry, at the same wide gap, on each far
+        # line. A token rule is escaped; the geometric zone is not.
+        words, md = self._page(prose_lines=0, uncarried_tail=True)
+        assert _fired(words, md) == set()
+
+    def test_the_bypass_page_with_prose_below_the_table_uses_the_prose(self) -> None:
+        words, md = self._page(prose_lines=2, uncarried_tail=True)
+        assert _fired(words, md) == set(), "WIDE is lane-shaped at the prose spacing"
+        tight = [w for w in words if w not in _caption_words(["Gamma", "Delta"], self.WIDE)]
+        tight += _caption_words(["Gamma", "Delta"], WORD_SPACE)
+        assert _fired(tight, md) == {PIH}
+
+    def test_prose_above_the_table_is_inside_the_zone_and_is_not_evidence(self) -> None:
+        # Two tight prose lines at the top of the page, above the header candidates: the predicate
+        # scans every row above the first data row, so the zone starts at the top of the page.
+        above = [
+            w
+            for k in range(2)
+            for w in _line(
+                ["Intro", "prose", "text"], COL_XS[0], 5.0 + k * PITCH, 40 + k, WORD_SPACE
+            )
+        ]
+        words = _grid_words(prose_lines=0) + above + _caption_words(CAPTION, WORD_SPACE)
         assert _fired(words, _gate_md(SPREAD)) == set()
