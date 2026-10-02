@@ -108,8 +108,29 @@ Mutations (external copy of src, tests, pyproject, `socr.__file__` canary, uncap
 `count == 1`, clean baseline): round 1's eight plus M9 no evidence floor, M10 in-table lines count as
 evidence, M11 five-field words not skipped. All 11 killed.
 
+## Round 3 (Astra P2): the yardstick must not be calibrated by header rows
+
+Two carried header lines above the excluded extent could each supply their own gap g. The median
+was g, and a near header row with the same wide gap passed g <= 2g (circular). Raising the line floor
+does not fix that. Fix: a line whose every word is a grid token (NFKC, any block) is excluded from
+the calibration, as is everything inside the extent; with no independent line left the predicate
+abstains (`_page_word_space(words, extents, carried)`).
+
+Tests (20 in the file): two wide-gap header lines outside the extent and no prose abstain (killed by
+M12, carried lines calibrate); the same layout plus two prose lines uses the prose spacing (quiet for
+the wide near row, fires for a tight one); two uncarried note lines inside the extent are not evidence
+(killed by M10, which stopped dying once the carried rule landed, hence the new test). 13 mutants
+now, all killed.
+
+Census, same 127 pages: fires on 15 pages (was 16), 59 abstain, 0 removals, every other predicate's
+set identical to main d8dc9b1, SHIP to DEFER the same 6 (real Fama 733, Herskovic 29, Mendoza 60;
+deferrable Fama 728; false Kim 52, Stock-Watson 44). The page that stopped firing already DEFERs on
+another predicate. The docstring's "+7 / 3 false" is corrected to the measured 6 / 2.
+
 ## Suite
 
 Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed, 2 skipped,
 4 xfailed, 0 failed. Round 1's single failure (`test_gh713_round2...`) did not recur.
 `uvx ruff@0.16.0 format --check .` clean.
+
+Full suite, default OLLAMA_HOST, nohup, one run on the round-3 head: 6114 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.

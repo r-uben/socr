@@ -1129,18 +1129,28 @@ def _is_one_run(row_words: list[Word], word_space: float) -> bool:
     return all(b[0] - a[2] <= limit for a, b in zip(row_words, row_words[1:]))
 
 
+def _nfkc(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).strip()
+
+
 #: Text lines outside every table's vertical extent that must contribute a gap before the page's
 #: word space is trusted. A repeat is evidence, one line is not (the ``_PLACEHOLDER_MIN_ROWS`` rule).
 _MIN_SPACING_LINES = _PLACEHOLDER_MIN_ROWS
 
 
-def _page_word_space(words: list[Word], extents: list[tuple[float, float]]) -> float | None:
+def _page_word_space(
+    words: list[Word], extents: list[tuple[float, float]], carried: frozenset[str] = frozenset()
+) -> float | None:
     """The page's median same-line word gap, measured ONLY on lines outside every table extent.
 
     Inside a table the only gaps are column gutters (per-cell or whole-row PDF lines alike), which
     would make a real multi-column header read as one run. Body prose, captions and notes outside the
     extents print the ordinary word space. ``None`` (the caller abstains) when fewer than
     ``_MIN_SPACING_LINES`` such lines have a gap, or when the words carry no block/line indices.
+
+    A line whose every word is in *carried* (the NFKC tokens the grid holds) is excluded too: it is
+    a candidate header row, and a header row must not calibrate the yardstick that judges header
+    rows (two wide-gap header lines above the extent would each supply their own gap and pass).
     """
     by_line: dict[tuple, list[Word]] = defaultdict(list)
     for w in words:
@@ -1152,6 +1162,8 @@ def _page_word_space(words: list[Word], extents: list[tuple[float, float]]) -> f
     gaps: list[float] = []
     lines = 0
     for line_words in by_line.values():
+        if carried and all(_nfkc(w[4]) in carried for w in line_words):
+            continue
         ordered = sorted(line_words, key=lambda w: w[0])
         line_gaps = [b[0] - a[2] for a, b in zip(ordered, ordered[1:]) if b[0] - a[2] > 0]
         if line_gaps:
@@ -1180,13 +1192,13 @@ def prose_in_header_faults(
     occurs (counted, NFKC) as a token of those header rows. The predicate fires on a carried
     row that is ONE run of at least two words (``_is_one_run``): column headings sit over
     separate lanes and so split into runs at the page's lane gutter, a sentence does not.
-    Measured on the 127-page census (GH-936 design): +7 DEFERs against GH-935, of which 3 are
-    real, 1 is a broken page, 3 are false (a genuine one-run spanning heading, a panel title,
-    an in-table panel label); a false DEFER costs one model read.
+    Measured on the 127-page census (GH-936, after the spacing policy below): +6 DEFERs against
+    main, of which 3 are real, 1 is a broken page, 2 are false (a panel title, an in-table panel
+    label); a false DEFER costs one model read. 59 of the 127 pages abstain for lack of evidence.
 
     The yardstick is the page's word space measured on lines OUTSIDE every table's extent (core
-    rows less/plus the outward reach of ``_PANEL_GAP_ROWS`` pitches), see ``_page_word_space``; with
-    too little such text the predicate abstains rather than guess from column gutters.
+    rows less/plus the outward reach of ``_PANEL_GAP_ROWS`` pitches) and not carried by the grid,
+    see ``_page_word_space``; with too little such text the predicate abstains rather than guess from column gutters.
 
     Known holes, by construction: a page with no text outside its tables (it abstains); a one-word caption (indistinguishable from a one-word
     heading) and a caption with a gap wider than the bound (reads as lane-shaped). No font
@@ -1202,7 +1214,10 @@ def prose_in_header_faults(
         ys = sorted(geo[1])
         reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
         extents.append((ys[0] - reach, ys[-1] + reach))
-    word_space = _page_word_space(words, extents) if extents else None
+    grid_tokens = frozenset(
+        _nfkc(tok) for block in blocks for row in block for c in row for tok in c.split()
+    )
+    word_space = _page_word_space(words, extents, grid_tokens) if extents else None
     if not word_space:
         return []
     faults: list[GateFault] = []

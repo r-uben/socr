@@ -63,11 +63,12 @@ def _caption_words(words: list[str], gap: float) -> list[tuple]:
     return _line(words, COL_XS[0], Y0 - PITCH, 5, gap)
 
 
-def _gate_md(caption_cells: list[str] | None) -> str:
-    """Markdown whose header rows are the caption (when given) then HEADER."""
+def _gate_md(caption_cells: list[str] | list[list[str]] | None) -> str:
+    """Markdown whose header rows are the caption row(s) (when given) then HEADER."""
     rows = [list(HEADER)] + [list(r) for r in ROWS]
     if caption_cells is not None:
-        rows.insert(0, caption_cells)
+        extra = caption_cells if isinstance(caption_cells[0], list) else [caption_cells]
+        rows = [list(r) for r in extra] + rows
     return _md(rows[0], rows[1:])
 
 
@@ -189,3 +190,51 @@ class TestSpacingEvidence:
         words = [w[:5] for w in _grid_words() + _caption_words(CAPTION, WORD_SPACE)]
         fired = _fired(words, _gate_md(SPREAD))
         assert ship_gate.GATE_ERROR not in fired and PIH not in fired
+
+
+class TestSpacingIsNotCalibratedByHeaderRows:
+    """Header lines the grid carries must not supply the yardstick that judges header lines."""
+
+    WIDE = 40.0  # a column-wide gap, far over ALIGNED_RUN_GAP_MAX_WORD_SPACES x any word space here
+
+    def _page(self, *, prose_lines: int):
+        # Two header lines ABOVE the excluded extent plus the near header row, all with the same
+        # wide gap g: unless carried lines are excluded, the median is g and g <= 2g passes.
+        far = [
+            _line(["Alpha", "Beta"], COL_XS[0], Y0 - (10 + k) * PITCH, 20 + k, self.WIDE)
+            for k in range(2)
+        ]
+        near = _caption_words(["Gamma", "Delta"], self.WIDE)
+        words = _grid_words(prose_lines=prose_lines) + sum(far, []) + near
+        md = _gate_md([["Alpha", "Beta", "", "", ""]] * 2 + [["Gamma", "Delta", "", "", ""]])
+        return words, md
+
+    def test_two_wide_gap_header_lines_outside_the_extent_abstain(self) -> None:
+        words, md = self._page(prose_lines=0)
+        assert _fired(words, md) == set()
+
+    def test_the_same_layout_with_independent_prose_uses_the_prose_spacing(self) -> None:
+        words, md = self._page(prose_lines=2)
+        # Prose spacing is WORD_SPACE; a gap of WIDE is two or more runs, so the row is lane-shaped.
+        assert _fired(words, md) == set()
+        # ... and with the near row at the prose spacing the same page DOES fire: the prose is used.
+        near_tight = _caption_words(["Gamma", "Delta"], WORD_SPACE)
+        tight = [w for w in words if w not in _caption_words(["Gamma", "Delta"], self.WIDE)]
+        assert _fired(tight + near_tight, md) == {PIH}
+
+    def test_uncarried_lines_inside_the_extent_are_not_evidence_either(self) -> None:
+        # Two note lines under the data, inside the extent and NOT in the grid, with a tight word
+        # space. The extent rule alone (not the carried rule) must keep them out of the yardstick.
+        notes = [
+            w
+            for k in range(2)
+            for w in _line(
+                ["Source", "and", "notes", "text"],
+                COL_XS[0],
+                Y0 + (8 + k) * PITCH,
+                30 + k,
+                WORD_SPACE,
+            )
+        ]
+        words = _grid_words(prose_lines=0) + notes + _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == set()
