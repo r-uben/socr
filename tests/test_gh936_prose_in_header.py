@@ -202,8 +202,10 @@ class TestSpacingIsNotCalibratedByHeaderRows:
     WIDE = 40.0  # a column-wide gap, far over ALIGNED_RUN_GAP_MAX_WORD_SPACES x any word space here
 
     def _page(self, *, prose_lines: int, uncarried_tail: bool = False):
-        # Two header lines ABOVE the excluded extent plus the near header row, all with the same
-        # wide gap g: unless carried lines are excluded, the median is g and g <= 2g passes.
+        # Two header lines inside the header reach (so inside the calibration zone) plus the near
+        # header row, all with the same wide gap g. If lines in the zone could calibrate, the median
+        # would be g and g <= 2g would pass; the zone excludes them by position (round 4+), so with
+        # no prose outside the zone the page abstains.
         far = [
             _line(
                 ["Alpha", "Beta"] + (["Zed"] if uncarried_tail else []),
