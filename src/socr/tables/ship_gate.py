@@ -145,6 +145,7 @@ HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 PROSE_IN_HEADER = "prose_in_header"
 GEOMETRYLESS_BLOCK = "geometryless_block"
+WORD_SPLIT_ACROSS_CELLS = "word_split_across_cells"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -1344,6 +1345,96 @@ def geometryless_block_faults(
     return faults
 
 
+def _aligned_cuts(tokens: list[tuple[str, int]], line: list[str]) -> set[int] | None:
+    """Indices ``k`` where tokens ``k`` and ``k + 1`` (different cells) form one word of *line*.
+
+    The row's ``(token, cell)`` list must cover *line* exactly, in order: each source word
+    is one token, or two neighbouring tokens of different cells joined. Returns ``None``
+    unless every token and every word is consumed; an empty set means the line holds the
+    row with no cut at all.
+    """
+    cuts: set[int] = set()
+    k, j = 0, 0
+    while k < len(tokens) and j < len(line):
+        if tokens[k][0] == line[j]:
+            k += 1
+        elif (
+            k + 1 < len(tokens)
+            and tokens[k][1] != tokens[k + 1][1]
+            and unicodedata.normalize("NFKC", tokens[k][0] + tokens[k + 1][0]) == line[j]
+        ):
+            cuts.add(k)
+            k += 2
+        else:
+            return None
+        j += 1
+    return cuts if k == len(tokens) and j == len(line) else None
+
+
+def word_split_across_cells_faults(blocks: list[Block], src_rows: SourceRows) -> list[GateFault]:
+    """GH-951: a caption or notes word cut in two across neighbouring cells of one row.
+
+    Fires when, in one grid row, the last token of a non-empty cell plus the first token
+    of the next non-empty cell, NFKC-normalised and joined with no space, equal ONE source
+    word that appears nowhere in the block as a token, and neither fragment is a number
+    (``5`` + ``kg`` never fires, whatever the source holds). The evidence is positional: the
+    row's tokens must cover, in order, one whole source line in which that word sits
+    exactly where the two fragments meet, so the same word elsewhere on the page proves
+    nothing (``Pre`` | ``tax`` over a line reading ``Pre tax`` is quiet). A hyphenated
+    compound cut at its hyphen fires only when the positioned word is ``well-known``.
+    Known hole: a word that also occurs whole elsewhere in the block stays quiet; so does
+    a row wrapped over several source lines. DEFER-only.
+    """
+
+    def norm(text: str) -> str:
+        return unicodedata.normalize("NFKC", text).strip()
+
+    lines = [[norm(w[4]) for w in ws] for ws in src_rows.values()]
+    by_word: dict[str, list[list[str]]] = defaultdict(list)
+    for line in lines:
+        for word in set(line):
+            by_word[word].append(line)
+
+    def is_number(fragment: str) -> bool:
+        return _is_source_number(fragment) or _is_cell_number(fragment)
+
+    def positioned(tokens: list[tuple[str, int]], k: int, joined: str) -> bool:
+        """Do the row's tokens run along a source line with a cut after *k*, and along none without?
+
+        The row's own line is not known, so every line that aligns with it is a candidate.
+        If any candidate holds the row with no cut (``Pre tax`` beside another line
+        ``Pretax``), which line the row sits on is ambiguous and the predicate abstains.
+        """
+        aligned = [cuts for line in lines if (cuts := _aligned_cuts(tokens, line)) is not None]
+        return bool(aligned) and all(k in cuts for cuts in aligned)
+
+    faults: list[GateFault] = []
+    for b, block in enumerate(blocks):
+        present = {norm(t) for row in block for cell in row for t in cell.split()}
+        for i, row in enumerate(block):
+            tokens = [
+                (norm(t), ci)
+                for ci, cell in enumerate(c for c in row if c.strip())
+                for t in cell.split()
+            ]
+            for k, ((a, _a), (c, _c)) in enumerate(zip(tokens, tokens[1:])):
+                joined = norm(a + c)
+                if (
+                    joined in by_word
+                    and joined not in present
+                    and not is_number(a)
+                    and not is_number(c)
+                    and positioned(tokens, k, joined)
+                ):
+                    faults.append(
+                        _fault(
+                            WORD_SPLIT_ACROSS_CELLS,
+                            f"block {b} row {i}: source word {joined!r} is split across two cells",
+                        )
+                    )
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -1370,6 +1461,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += text_in_numeric_column_faults(blocks, pairs)
         faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
         faults += geometryless_block_faults(blocks, pairs, src_rows, geos)
+        faults += word_split_across_cells_faults(blocks, src_rows)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
