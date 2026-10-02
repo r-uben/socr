@@ -3663,7 +3663,21 @@ def _select_page_output_tagged(
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
     # carries real content for this page is not shadowed (the prior ordering left
     # whole-doc recovery dead-coded behind any non-None best_output).
-    if whole_doc and page_num in whole_doc.texts and whole_doc.texts[page_num].strip():
+    #
+    # #881: NOT for a page MuPDF could not load. The section is a split of one blob on
+    # ``## Page N`` headers; for a page whose own load failed, its alignment is not
+    # trustworthy (the blob may have been produced from a repaired tree where page
+    # numbers shifted), so shipping it under this page's number as SUCCESS/WARNING
+    # could misattribute content. The load error takes precedence and the text is
+    # dropped rather than kept under ERROR: kept text would still be reachable by
+    # every reader of the page's output, and "ERROR with content" is not a state
+    # the downstream status buckets distinguish from a winner.
+    if (
+        whole_doc
+        and not getattr(p, "load_error", "")
+        and page_num in whole_doc.texts
+        and whole_doc.texts[page_num].strip()
+    ):
         # A blob that FAILED audit is frozen with audit_passed=False and a
         # non-SUCCESS status (WARNING: content present, audit not passed) so the
         # manifest never fabricates known-bad output as a passing page. An

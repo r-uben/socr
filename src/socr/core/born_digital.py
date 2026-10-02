@@ -2769,6 +2769,16 @@ class BornDigitalDetector:
                             )
                     page = doc[source_idx]
                 except Exception as exc:  # noqa: BLE001 - a damaged page is a finding
+                    # Logged so a regression in the binding (an AttributeError, a
+                    # TypeError) is distinguishable from genuine MuPDF damage.
+                    logger.warning(
+                        "page %d could not be loaded from %s: %s: %s",
+                        page_idx + 1,
+                        pdf_path.name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    logger.debug("page-load traceback", exc_info=True)
                     pages.append(
                         PageAssessment(
                             page_num=page_idx + 1,

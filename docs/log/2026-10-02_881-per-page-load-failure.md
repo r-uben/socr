@@ -131,3 +131,20 @@ Full suite, default `OLLAMA_HOST`, nohup, one complete run: 6103 passed, 2 skipp
   through a copy of the pre-#881 `detect`; final .md and every fragment byte-equal. Mutant
   "catch fires on a healthy page" killed (7 tests). A first mutant (`is_born_digital=False`)
   survived because the fixture's pages are all OCR-routed: noted, not used.
+
+## Review round 3 (cubic on #947)
+
+- P2: `_select_page_output_tagged` returned the whole-document section before the load-error
+  stamp, so a whole-doc engine's split text could win for an unloadable page as SUCCESS/WARNING.
+  The whole-doc branch is now skipped when `load_error` is set; the page ships the failure
+  marker, ERROR / `unreadable_input`. Decision: the section is DROPPED, not kept under ERROR.
+  Its page alignment is untrustworthy (misattribution risk), and ERROR-with-content is not a
+  state the status buckets distinguish from a winner. Pinned as a difference (same state with
+  and without `load_error`).
+- `detect()` now logs the exception (type, message at warning, traceback at debug) before
+  recording the placeholder, so a binding regression is distinguishable from real damage.
+- `_safe_page_xref` returns 0 when the xref cannot be read before repair; such a page is always
+  failed as "missing after repair" if the count changes. Conservative on purpose, kept.
+- Removed a leftover debug `print` from the test.
+- Follow-ups, not in this PR: the cause string in the .md marker; the duplicate page-load probe
+  in `_document_handle_for` (a second probe after `_refuse_unreadable_input`).

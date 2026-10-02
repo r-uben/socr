@@ -190,7 +190,6 @@ def test_the_failure_reaches_document_status_metadata_and_the_final_markdown(tmp
     assert result.status is not DocumentStatus.SUCCESS
 
     meta = json.loads((dd / "metadata.json").read_text())
-    print(json.dumps(meta, indent=1)[:3000])
     assert meta["status"] != "completed"
 
     md = (dd / f"{pdf.stem}.md").read_text()
@@ -410,3 +409,34 @@ def test_an_undamaged_document_is_byte_identical_with_the_catch_inert(tmp_path, 
         ).read_bytes()
     # the pin is live: a different document body would show up
     assert "Page 1" in (dd_new / "ok.md").read_text() or "ocr" in (dd_new / "ok.md").read_text()
+
+
+def test_whole_document_text_never_wins_for_an_unloadable_page():
+    """A whole-doc engine's split section for the bad page is of untrustworthy
+    alignment. Difference: the SAME state with and without ``load_error``."""
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+    from socr.core.state import DocumentState
+
+    def record(load_error: str):
+        state = DocumentState(
+            handle=DocumentHandle(path=Path("x.pdf"), page_count=2, page_count_known=True)
+        )
+        state.whole_doc_attempts.append(
+            PageOutput(
+                page_num=0,
+                text="## Page 1\n\nfirst words\n\n## Page 2\n\nsecond words\n",
+                status=PageStatus.SUCCESS,
+                engine="cli",
+                audit_passed=True,
+            )
+        )
+        state.pages[2].load_error = load_error
+        return finalized_page_record(state, 2, _whole_doc_page_texts(state)).output
+
+    healthy = record("")
+    assert "second words" in healthy.text and healthy.status is PageStatus.SUCCESS  # control
+    bad = record("FzErrorFormat: broken")
+    assert "second words" not in bad.text
+    assert bad.status is PageStatus.ERROR
+    assert bad.failure_mode is FailureMode.UNREADABLE_INPUT
