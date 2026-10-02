@@ -51,6 +51,29 @@ Test hygiene: environment proxies are removed for loopback, timing bounds are
 New pins: repeated overruns leave at most one live worker; calls resume after the stray
 ends; a hung page, then a fail-fast page, then a recovered page.
 
+## Review round 2 (Astra rejected 3eee3b1)
+
+* P1: the worker was registered after `join()`, so concurrent same-label callers all started
+  a thread and overwrote each other's entries; the overwritten strays escaped the cap. Now
+  the check and the registration happen under the lock BEFORE `thread.start()`; a call that
+  finishes in time deregisters itself. Consequence, accepted: two genuinely concurrent calls
+  with the same label are serialized (the second fails fast as "still outstanding"). Ollama
+  serializes per model anyway, and the page loop is sequential.
+* P2: labels now carry host and model at every site (`recover`, `equation_latex`,
+  `gemini_api` x2, canary, tags probes, `_post_chat`, `ollama_rung_reachable`), so a hung
+  endpoint cannot block a different host or model.
+* Tests: 8 concurrent same-label callers start exactly 1 worker and 7 fail fast; endpoint
+  isolation (hung host/model A leaves host/model B working, behaviourally, via a faked
+  `urlopen`); a label-content test over all 8 sites; the recovery pin now runs all three
+  pages through `_run_table_judge_gate` and asserts the fail-fast page carries the
+  `table_ladder_unverified` event naming "still outstanding" and `table_judge_retry_pending`
+  True, no second request, and page 3 reaches the endpoint with no UNVERIFIED event.
+* Mutants (external copy, canary, anchor count 1): baseline 23 passed; register-after-join
+  -> concurrent test fails; recover label without host -> 2 fail; without model -> 2 fail;
+  equation label without host -> 1 fails; gemini label without host -> 1 fails. Survivor:
+  "never deregister on success" (23 passed): equivalent, since `is_alive()` already ignores a
+  finished worker; deregistration only keeps the dict small.
+
 ## Not done (filed as #974)
 
 * Per-page ladder budget and a console line per rung call.

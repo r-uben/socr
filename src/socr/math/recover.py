@@ -247,7 +247,9 @@ def latex_for_image(
                 return json.loads(resp.read().decode())
 
         # GH-968: urlopen's timeout is per socket op, not total.
-        body = call_with_total_deadline(_call, timeout, label="math OCR /api/generate")
+        body = call_with_total_deadline(
+            _call, timeout, label=f"math OCR {host.rstrip('/')}/api/generate ({model})"
+        )
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning("math OCR call failed: %s", exc)
         return ""

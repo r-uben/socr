@@ -445,20 +445,139 @@ def test_next_page_recovers_after_a_hung_page(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(httpx, "post", _fake_post)
-    crop = tmp_path / "crop.png"
-    crop.write_bytes(b"png-bytes")
     rung = build_ollama_rung("glm-test:cloud", "http://fake-host:11434", 0.2)
 
-    state, _ = _gate_run(tmp_path / "p1", rung)
-    assert len([e for e in state.events if e.kind == TABLE_LADDER_UNVERIFIED_KIND]) == 1
+    def _unverified(state):
+        return [e for e in state.events if e.kind == TABLE_LADDER_UNVERIFIED_KIND]
 
-    page2 = rung(crop, _TABLE_MD, None)
-    assert not page2.ok and "still outstanding" in (page2.error or "")
+    # page 1: the call hangs -> UNVERIFIED through the real table gate
+    state1, _ = _gate_run(tmp_path / "p1", rung)
+    assert len(_unverified(state1)) == 1
+    assert state1.pages[1].table_judge_retry_pending is True
+
+    # page 2: also through the gate; fails fast, no second request, still surfaced
+    state2, elapsed2 = _gate_run(tmp_path / "p2", rung)
+    events2 = _unverified(state2)
+    assert len(events2) == 1, "the fail-fast page bypassed the table gate's UNVERIFIED terminal"
+    assert "still outstanding" in repr(events2[0].data) + events2[0].detail
+    assert state2.pages[1].table_judge_retry_pending is True
     assert len(posts) == 1, "page 2 stacked a second request on the unresponsive endpoint"
+    assert elapsed2 < MARGIN * DEADLINE
 
+    # the stray finishes: page 3 reaches the endpoint again and is not UNVERIFIED
     release.set()
     for stray in list(ollama_utils._OUTSTANDING.values()):
         stray.join(5)
-    page3 = rung(crop, _TABLE_MD, None)
-    assert page3.ok and page3.verdict.passed
-    assert len(posts) == 2
+    state3, _ = _gate_run(tmp_path / "p3", rung)
+    assert len(posts) == 2, "recovery: the page-3 request never reached the endpoint"
+    assert _unverified(state3) == []
+    assert state3.pages[1].table_judge_retry_pending is False
+
+
+def test_concurrent_same_label_callers_start_at_most_one_worker():
+    release = threading.Event()
+    started: list[int] = []
+    n = 8
+    barrier = threading.Barrier(n)
+    outcomes: list[str] = []
+
+    def _stuck():
+        started.append(1)
+        release.wait(30)
+
+    def _caller():
+        barrier.wait()
+        try:
+            call_with_total_deadline(_stuck, 0.3, label="ep-C")
+            outcomes.append("returned")
+        except TotalDeadlineExceeded as exc:
+            outcomes.append("outstanding" if "still outstanding" in str(exc) else "overrun")
+
+    before = threading.active_count()
+    callers = [threading.Thread(target=_caller, daemon=True) for _ in range(n)]
+    try:
+        for c in callers:
+            c.start()
+        for c in callers:
+            c.join(BOUND)
+        assert started == [1], f"{len(started)} workers started for one label"
+        assert sorted(outcomes) == ["outstanding"] * (n - 1) + ["overrun"], outcomes
+        assert threading.active_count() - before <= 1
+    finally:
+        release.set()
+
+
+def test_labels_isolate_endpoints_by_host_and_model(monkeypatch):
+    """A hung host/model must not block a different host or model."""
+    import json
+    import urllib.request
+
+    release = threading.Event()
+    calls: list[str] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": "x"}).encode()
+
+    def _fake_urlopen(req, timeout=None):
+        body = json.loads(req.data)
+        key = f"{req.full_url}|{body['model']}"
+        calls.append(key)
+        if key == "http://hosta/api/generate|m1":
+            release.wait(30)
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    try:
+        assert recover.latex_for_image(b"p", model="m1", host="http://hosta", timeout=0.2) == ""
+        # same endpoint again: fails fast, no second request
+        assert recover.latex_for_image(b"p", model="m1", host="http://hosta", timeout=0.2) == ""
+        assert calls == ["http://hosta/api/generate|m1"]
+        # other model, same host / other host, same model: both unaffected
+        assert recover.latex_for_image(b"p", model="m2", host="http://hosta", timeout=0.2) != ""
+        assert recover.latex_for_image(b"p", model="m1", host="http://hostb", timeout=0.2) != ""
+        assert len(calls) == 3
+    finally:
+        release.set()
+
+
+def test_every_site_label_carries_host_and_model(monkeypatch, tmp_path):
+    labels: list[str] = []
+
+    def _spy(fn, timeout, *, label=""):
+        labels.append(label)
+        raise TotalDeadlineExceeded(label)
+
+    monkeypatch.setattr(recover, "call_with_total_deadline", _spy)
+    monkeypatch.setattr(ollama_utils, "call_with_total_deadline", _spy)
+    monkeypatch.setattr(gemini_api, "call_with_total_deadline", _spy)
+    monkeypatch.setattr(extract, "call_with_total_deadline", _spy)
+    monkeypatch.setattr(table_rung_ollama, "call_with_total_deadline", _spy)
+
+    recover.latex_for_image(b"p", model="MODEL", host="http://HOST")
+    crop = tmp_path / "c.png"
+    crop.write_bytes(b"p")
+    equation_latex.latex_for_crop(crop, model="MODEL", host="http://HOST")
+    engine = gemini_api.OllamaFigureEngine(model="MODEL", host="http://HOST")
+    engine.is_available()
+    from PIL import Image
+
+    engine.describe_figure(Image.new("RGB", (2, 2)))
+    extract._ollama_generation_canary("http://HOST", "MODEL", 1.0)
+    extract.probe_ollama_idle("http://HOST", timeout=1.0, model="MODEL")
+    ollama_rung_reachable("MODEL", "http://HOST", timeout=1.0)
+    with pytest.raises(TotalDeadlineExceeded):
+        REAL_POST_CHAT("http://HOST", {"model": "MODEL"}, 1.0)
+
+    assert len(labels) == 8, labels
+    for label in labels:
+        assert "HOST" in label, f"label lacks the host: {label!r}"
+    # the model-specific calls name the model too
+    for label in (labels[0], labels[1], labels[3], labels[4], labels[7]):
+        assert "MODEL" in label, f"label lacks the model: {label!r}"

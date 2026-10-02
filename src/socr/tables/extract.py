@@ -228,7 +228,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
                 timeout=timeout,
             ),
             timeout,
-            label=f"ollama generation canary ({model})",
+            label=f"ollama {host.rstrip('/')} generation canary ({model})",
         )
         resp.raise_for_status()
         return True
@@ -342,7 +342,7 @@ def probe_ollama_idle(
         resp = call_with_total_deadline(
             lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
             timeout,
-            label="ollama /api/tags probe",
+            label=f"ollama {resolved.rstrip('/')}/api/tags probe",
         )
         resp.raise_for_status()
     except _PROBE_ERRORS:

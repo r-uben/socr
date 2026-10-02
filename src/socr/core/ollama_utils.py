@@ -73,13 +73,18 @@ def call_with_total_deadline(fn: Callable[[], Any], timeout: float, *, label: st
         stray = _OUTSTANDING.get(what)
         if stray is not None and stray.is_alive():
             raise TotalDeadlineExceeded(f"{what}: previous call still outstanding; not retried")
-        _OUTSTANDING.pop(what, None)
+        # Register BEFORE starting: a concurrent same-label caller must see this
+        # worker as outstanding, or all of them would start one and overwrite
+        # each other's entries (untracked strays escape the cap).
         thread = threading.Thread(target=_work, daemon=True)
+        _OUTSTANDING[what] = thread
         thread.start()
     thread.join(timeout)
-    if not box:
+    if box:
         with _OUTSTANDING_LOCK:
-            _OUTSTANDING[what] = thread
+            if _OUTSTANDING.get(what) is thread:
+                del _OUTSTANDING[what]
+    else:
         logger.warning("%s exceeded its total deadline of %ss; abandoned", what, timeout)
         raise TotalDeadlineExceeded(f"{what} exceeded total deadline of {timeout}s")
     if isinstance(box[0], BaseException):

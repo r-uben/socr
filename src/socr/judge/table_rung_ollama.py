@@ -88,7 +88,7 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
         resp = call_with_total_deadline(
             lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
             timeout,
-            label="table judge /api/tags",
+            label=f"table judge {resolved.rstrip('/')}/api/tags",
         )
         resp.raise_for_status()
         names = {_with_implicit_tag(m.get("name", "")) for m in resp.json().get("models", [])}

@@ -195,7 +195,7 @@ class OllamaFigureEngine:
             resp = call_with_total_deadline(
                 lambda: httpx.get(f"{self.host}/api/tags", timeout=3.0),
                 3.0,
-                label="ollama figure /api/tags",
+                label=f"ollama figure {self.host}/api/tags",
             )
             if resp.status_code != 200:
                 return False
@@ -234,7 +234,7 @@ class OllamaFigureEngine:
             resp = call_with_total_deadline(
                 lambda: httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0),
                 120.0,
-                label=f"ollama figure /api/chat ({self.model})",
+                label=f"ollama figure {self.host}/api/chat ({self.model})",
             )
             resp.raise_for_status()
             raw = resp.json()["message"]["content"].strip()
