@@ -65,9 +65,11 @@ A page is clean only when `status` is `success`, `failure_mode` is `none` and
   exists because table flags in the audit log were invisible to readers of the
   Markdown.
 - Some non-table warnings leave all three fields clean. Unrecovered symbol glyphs
-  (`native_unrecovered_symbol_glyphs`, raised in `_phase_agentic`) and math-font
-  damage (`native_math_font_unrecovered`, `core/manifest.py`) are recorded only as
-  audit events and notes. Also read the page's `audit_events` and `audit_notes`.
+  (audit event `native_unrecovered_symbol_glyphs`, raised in `_agentic_native_page`;
+  no code demotes the page for it) and math-font damage (event
+  `native_math_font_unrecovered` plus an audit note; `_apply_math_font_unrecovered_guard`
+  in `core/manifest.py` never touches `status`) are reported only that way. Also
+  read the page's `audit_events` and `audit_notes`.
 
 Then read the details:
 
@@ -123,7 +125,7 @@ without opening `audit_log.json`.
 
 ## 4. Failure modes
 
-Defined by `FailureMode` in `src/socr/core/result.py` (31 members). The sidecar
+Defined by `FailureMode` in `src/socr/core/result.py` (32 members). The sidecar
 carries the value as `failure_mode`. "Ships" below describes what the reader gets
 in the Markdown.
 
@@ -154,6 +156,7 @@ in the Markdown.
 | `table_emission_invalid` | The chosen page text still held table syntax that cannot be valid GFM, or its delimiter row disagreed with the grid. For a malformed-markup defect, final validation replaced the page with a failure marker. For a content defect (such as an empty table), the original text or table is kept and the page is demoted to `error` (`_apply_table_emission_guard` in `core/manifest.py`). | Check the page text. The table may be absent (marker) or present but defective (kept). Use the PDF. |
 | `native_text_shredded` | A rotated page whose native text came back as one glyph run per line. The fragments are not a reading of the page. | The page ships a marker and an image of the page. Read the image. |
 | `native_minus_as_digit` | The native layer encodes a minus sign as the digit `2` (or the scan for this could not run). A negative number can read as a different positive one. The text is kept and ships `warning`. Added in #913. | Check every signed number on the page against the PDF. Audit kind `minus_extracted_as_digit` says how many hits. |
+| `native_invisible_text_scan` | The page is a scan whose invisible baked-in OCR text layer (render mode 3 over a page-sized raster) is what ships, or the scan for that failed. The text is kept and ships `warning`. Added in #961. | The text is an old OCR layer that nothing verified. Check the page against the PDF. Audit kind `invisible_text_scan` has `data.error`: true means the scan failed, not that the layer was found. |
 
 ### Table judging and fail-closed floors
 
@@ -221,6 +224,8 @@ This list is the kinds present at the time of writing; the code is the authority
 - `native_unrecovered_symbol_glyphs`: a symbol font had no ToUnicode map and some glyphs have no verified recovery.
 - `minus_extracted_as_digit`: minus signs extracted as the digit 2 (`data.hits` is the count). If `data.error` is true, the scan itself failed and the page is treated as affected; the count is not a finding.
 - `native_minus_as_digit_retained`: the page shipped `native_minus_as_digit`.
+- `invisible_text_scan`: the page is a full-page raster carrying invisible text (an old baked-in OCR layer), or the scan failed (`data.error`). The page is routed to OCR unless `--native-only`.
+- `native_invisible_text_retained`: no OCR read replaced the invisible layer, so it shipped `native_invisible_text_scan` (`warning`).
 - `native_math_unrecovered`: math-glyph damage survived into the shipped page.
 - `native_math_font_unrecovered`: math-font typesetting that extracts unreliably, not covered by an equation lane.
 - `rotated_text_shredded`: rotated page whose native lines are fragments; native text refused.
