@@ -423,7 +423,7 @@ def count_minus_as_digit_hits(page: fitz.Page) -> int:
         for line in block.get("lines", ()):
             spans = line["spans"]
             for a, b in zip(spans, spans[1:]):
-                if a["text"].strip() != "2" or a["font"] == b["font"]:
+                if a["text"] != "2" or a["font"] == b["font"]:
                     continue
                 if abs(a["size"] - b["size"]) > MINUS_AS_DIGIT_SIZE_TOLERANCE_PT:
                     continue

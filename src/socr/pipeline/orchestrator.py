@@ -10016,13 +10016,29 @@ class UnifiedPipeline:
         if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
             ps.rotated_shred_png_ref = chart_png_ref
 
-        chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
+        # #913: this lane ships the native text layer, so a minus read as "2" (or a
+        # failed scan) is shipped here too. Demote by status/failure_mode and keep
+        # ``audit_passed``: it selects the winner, so flipping it would discard the page.
+        # (Reachable only under --native-only: otherwise the hit sets
+        # ``needs_ocr_enhancement`` and the page is not chart-eligible.)
+        minus_suspect = bool(
+            getattr(ps, "minus_as_digit_hits", 0)
+            or getattr(ps, "minus_as_digit_scan_failed", False)
+        )
+        chart_status = (
+            PageStatus.WARNING if (chart_render_failed or minus_suspect) else PageStatus.SUCCESS
+        )
         chart_out = PageOutput(
             page_num=page_num,
             text=chart_body,
             status=chart_status,
             engine="chart_asset",
             audit_passed=not chart_render_failed,
+            failure_mode=(
+                FailureMode.NATIVE_MINUS_AS_DIGIT
+                if minus_suspect and not chart_render_failed
+                else FailureMode.NONE
+            ),
             cost_usd=0.0,
         )
         ps.attempts.append(chart_out)
@@ -14217,7 +14233,7 @@ class UnifiedPipeline:
             and n not in failed_pages
             and p.best_output
             and p.best_output.audit_passed
-            and (p.best_output.engine or "").startswith("native")
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
 
         # A reconstructed or historical state may contain a whole-document
@@ -14730,8 +14746,13 @@ class UnifiedPipeline:
                         kind="native_minus_as_digit_retained",
                         engine="native",
                         detail="native text reads a minus sign as the digit 2 (or the scan "
-                        "for that failed) and no OCR read replaced it (--native-only); "
-                        "the text ships WARNING, its negative values are unverified",
+                        "for that failed) and no OCR read replaced it ("
+                        + (
+                            "--native-only"
+                            if self.config.native_only
+                            else "OCR unavailable or every rung failed"
+                        )
+                        + "); the text ships WARNING, its negative values are unverified",
                     )
                 )
             for n in native_only_distrust_pages:
@@ -14996,8 +15017,8 @@ class UnifiedPipeline:
                 if minus_retained_pages:
                     console.print(
                         f"  [yellow]{len(minus_retained_pages)} page(s) shipped native text "
-                        "that reads a minus sign as the digit 2 (--native-only, no OCR "
-                        f"read): {minus_retained_pages}[/yellow]"
+                        "that reads a minus sign as the digit 2 (no OCR read replaced "
+                        f"it): {minus_retained_pages}[/yellow]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(

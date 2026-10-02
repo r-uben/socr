@@ -44,11 +44,21 @@ def _page_pdf(path: Path, draw) -> Path:
     return path
 
 
-def _pair(page, y, first, first_font, first_size, rest, rest_font="helv", first_color=(0, 0, 0)):
+def _pair(
+    page,
+    y,
+    first,
+    first_font,
+    first_size,
+    rest,
+    rest_font="helv",
+    first_color=(0, 0, 0),
+    rest_size=10,
+):
     """``first`` then ``rest`` on one baseline, flush against each other (no space span)."""
     page.insert_text((72, y), first, fontname=first_font, fontsize=first_size, color=first_color)
     x = 72 + fitz.get_text_length(first, fontname=first_font, fontsize=first_size)
-    page.insert_text((x, y), rest + _TAIL, fontname=rest_font, fontsize=10)
+    page.insert_text((x, y), rest + _TAIL, fontname=rest_font, fontsize=rest_size)
 
 
 def _fake_minus_symbol_font(page, y):
@@ -140,8 +150,26 @@ def test_detector_ignores_controls(tmp_path: Path, name: str) -> None:
     assert _open_hits(_page_pdf(tmp_path / "p.pdf", CONTROL_SHAPES[name])) == 0
 
 
-def test_size_tolerance_is_a_named_constant() -> None:
-    assert MINUS_AS_DIGIT_SIZE_TOLERANCE_PT > 0
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [(0.0, 1), (MINUS_AS_DIGIT_SIZE_TOLERANCE_PT, 1), (MINUS_AS_DIGIT_SIZE_TOLERANCE_PT + 0.25, 0)],
+)
+def test_size_tolerance_boundary(tmp_path: Path, delta: float, expected: int) -> None:
+    """At the tolerance the pair still counts; past it, it does not."""
+
+    def draw(page, y):
+        _pair(page, y, "2", "symb", 10, "0.12", rest_size=10 + delta)
+
+    assert _open_hits(_page_pdf(tmp_path / "p.pdf", draw)) == expected
+
+
+def test_padded_two_span_is_not_a_hit(tmp_path: Path) -> None:
+    """A whitespace-padded span is not the lone mis-mapped glyph."""
+
+    def draw(page, y):
+        _pair(page, y, "2 ", "symb", 10, "0.12")
+
+    assert _open_hits(_page_pdf(tmp_path / "p.pdf", draw)) == 0
 
 
 def test_loaded_source_is_this_checkout() -> None:
@@ -221,6 +249,14 @@ class _AcceptingJudge:
         return AcceptDecision(accept=True, reason="stub accepts all")
 
 
+def _chart_page(page, y):
+    """The fake-minus line plus a large embedded raster: ``has_chart_marks`` fires."""
+    _fake_minus_symbol_font(page, y)
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 300, 300), False)
+    pix.set_rect(pix.irect, (200, 30, 30))
+    page.insert_image(fitz.Rect(72, y + 20, 372, y + 320), pixmap=pix)
+
+
 def _e2e(
     tmp_path: Path,
     tag: str,
@@ -229,8 +265,11 @@ def _e2e(
     provider: bool,
     native_only: bool = False,
     detector: str = "live",
+    chart: bool = False,
 ):
     """Run process() once. ``detector``: live | neutralised | raising."""
+    if detector not in {"live", "neutralised", "raising"}:
+        raise ValueError(f"unknown detector mode {detector!r}")
     from socr.core.providers import PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
 
@@ -245,7 +284,7 @@ def _e2e(
                 raise RuntimeError("detector exploded")
 
             m.setattr(born_digital, "count_minus_as_digit_hits", _boom)
-        pdf = _page_pdf(tmp_path / f"{tag}.pdf", _fake_minus_symbol_font)
+        pdf = _page_pdf(tmp_path / f"{tag}.pdf", _chart_page if chart else _fake_minus_symbol_font)
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
@@ -381,3 +420,49 @@ def test_e2e_native_only_with_a_raising_detector_is_demoted_too(tmp_path, monkey
     assert side["status"] == "warning"
     assert side["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert on.status is not DocumentStatus.SUCCESS
+
+
+def test_e2e_chart_asset_page_with_a_hit_is_demoted_too(tmp_path, monkeypatch) -> None:
+    """The chart lane ships retained native prose; it must not bypass the demotion."""
+    off, _ = _e2e(
+        tmp_path,
+        "f_off",
+        monkeypatch,
+        provider=True,
+        native_only=True,
+        chart=True,
+        detector="neutralised",
+    )
+    side_off = _sidecar(tmp_path, "f_off")
+    assert side_off["engine"] == "chart_asset", "setup: the page must take the chart lane"
+    assert side_off["status"] == "success" and off.status is DocumentStatus.SUCCESS
+
+    on, _ = _e2e(tmp_path, "f_on", monkeypatch, provider=True, native_only=True, chart=True)
+    side_on = _sidecar(tmp_path, "f_on")
+    assert side_on["engine"] == "chart_asset"
+    assert side_on["status"] == "warning"
+    assert side_on["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert on.status is not DocumentStatus.SUCCESS
+    assert "0.12" in _page_text(tmp_path, "f_on")
+
+
+def test_retained_event_names_the_real_reason(tmp_path, monkeypatch) -> None:
+    """Native-only and OCR-unavailable are different reasons for the same bucket."""
+    import json
+
+    def detail(tag, **kw):
+        _e2e(tmp_path, tag, monkeypatch, **kw)
+        text = "".join(
+            f.read_text() for f in sorted((tmp_path / f"out-{tag}").rglob("*audit*.json"))
+        )
+        events = json.loads(text)["events"] if text.strip().startswith("{") else []
+        return [e["detail"] for e in events if e["kind"] == "native_minus_as_digit_retained"]
+
+    only = detail("g_only", provider=True, native_only=True)
+    assert only and "--native-only" in only[0]
+
+    # Same bucket without --native-only: force the trusted-native lane (main's routing) so
+    # an audit-passed native winner with a hit reaches assemble in a normal run.
+    monkeypatch.setattr(UnifiedPipeline, "_is_agentic_trusted_native", lambda self, n, ps: True)
+    normal = detail("g_normal", provider=True)
+    assert normal and "--native-only" not in normal[0] and "OCR" in normal[0]
