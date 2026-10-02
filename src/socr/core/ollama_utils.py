@@ -35,6 +35,15 @@ class TotalDeadlineExceeded(httpx.ReadTimeout, TimeoutError):
     """
 
 
+#: GH-968 review: abandoned calls still running, one per label (endpoint). An
+#: abandoned worker keeps its thread, socket and buffered response alive, so a
+#: wedged endpoint hit repeatedly would pile them up. While one is outstanding a
+#: new call to the same label fails fast instead of starting another (the #851
+#: rule: never stack a second call on an unresponsive peer).
+_OUTSTANDING: dict[str, threading.Thread] = {}
+_OUTSTANDING_LOCK = threading.Lock()
+
+
 def call_with_total_deadline(fn: Callable[[], Any], timeout: float, *, label: str = "") -> Any:
     """Run *fn* under a TOTAL wall-clock deadline of *timeout* seconds (GH-968).
 
@@ -45,15 +54,37 @@ def call_with_total_deadline(fn: Callable[[], Any], timeout: float, *, label: st
     process alive. Returns *fn*'s value; re-raises what *fn* raised; on overrun
     raises :class:`TotalDeadlineExceeded` naming *label* so the failure that
     surfaces (``RungResult.error``, a logged warning) identifies the call.
+
+    At most ONE abandoned call per *label* is ever alive: while it is still
+    running, a new call with the same label raises ``TotalDeadlineExceeded``
+    ("previous call still outstanding") without starting a thread. Once the stray
+    finishes, calls are allowed again.
     """
-    finished, value = _call_within(fn, timeout)
-    if not finished:
-        what = label or "Ollama call"
+    what = label or "Ollama call"
+    box: list[object] = []
+
+    def _work() -> None:
+        try:
+            box.append(fn())
+        except BaseException as exc:  # handed to the caller
+            box.append(exc)
+
+    with _OUTSTANDING_LOCK:
+        stray = _OUTSTANDING.get(what)
+        if stray is not None and stray.is_alive():
+            raise TotalDeadlineExceeded(f"{what}: previous call still outstanding; not retried")
+        _OUTSTANDING.pop(what, None)
+        thread = threading.Thread(target=_work, daemon=True)
+        thread.start()
+    thread.join(timeout)
+    if not box:
+        with _OUTSTANDING_LOCK:
+            _OUTSTANDING[what] = thread
         logger.warning("%s exceeded its total deadline of %ss; abandoned", what, timeout)
         raise TotalDeadlineExceeded(f"{what} exceeded total deadline of {timeout}s")
-    if isinstance(value, BaseException):
-        raise value
-    return value
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return box[0]
 
 
 def _call_within(fn: Callable[[], object], timeout: float) -> tuple[bool, object]:
@@ -62,7 +93,8 @@ def _call_within(fn: Callable[[], object], timeout: float) -> tuple[bool, object
     An overrun is abandoned, not waited on, and cannot keep the process alive.
     Anything *fn* raises comes back as the value (an exception instance) for the
     caller to re-raise or map; ``finished`` is False when the deadline expired.
-    Prefer :func:`call_with_total_deadline`; this is its primitive.
+    Untracked primitive (``_get_tags``); other callers use
+    :func:`call_with_total_deadline`.
     """
     box: list[object] = []
 

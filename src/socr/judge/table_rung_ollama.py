@@ -160,7 +160,7 @@ def _post_chat(host: str, payload: dict[str, Any], timeout: float) -> str:
     resp = call_with_total_deadline(
         lambda: httpx.post(f"{host.rstrip('/')}/api/chat", json=payload, timeout=timeout),
         timeout,
-        label=f"ollama /api/chat ({payload.get('model', '?')})",
+        label=f"ollama {host.rstrip('/')}/api/chat ({payload.get('model', '?')})",
     )
     resp.raise_for_status()
     body = resp.json()

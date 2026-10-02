@@ -20,7 +20,10 @@ A peer that trickles a byte (or keepalive) never trips them, so a call configure
   catch `httpx.HTTPError`; the urllib callers (`latex_for_image`, `latex_for_crop`) catch
   `(URLError, TimeoutError, ValueError, OSError)`. One class that is both needs zero caller
   changes. `is_availability_exception` treats it as an outage (`httpx.TransportError` /
-  `TimeoutError`), so a hung rung latches exactly as a read timeout did.
+  `TimeoutError`), so a hung rung gets `unavailable=True` exactly as a read timeout did.
+  That sets the page's retry marker (`table_judge_retry_pending`, orchestrator.py
+  ~7585-7599). It does NOT disable later rung calls: only `refusal=True` trips the
+  per-run breaker, so later pages still try the rung (bounded by the rule below).
 * Wrapped sites, deadline = the call's existing configured timeout, no new number:
   `table_rung_ollama._post_chat` (covers rung 1, adjudicator, cell transcribe) and
   `ollama_rung_reachable`; `extract._ollama_generation_canary` and the `/api/tags` probe in
@@ -33,6 +36,20 @@ A peer that trickles a byte (or keepalive) never trips them, so a call configure
 * Each site fails as it did on a timeout: rung -> `ok=False, unavailable`, ladder moves on or
   ends UNVERIFIED; canary/probe -> False; equation lanes -> `""`; figure engine -> error
   description.
+
+## Review fix: abandoned workers are bounded (Astra, P1)
+
+An abandoned call keeps its thread, socket and buffered response. `call_with_total_deadline`
+now records the abandoned thread per label (label = endpoint; `_post_chat` labels include
+host and model). While it is alive, a new call with the same label raises
+`TotalDeadlineExceeded("... previous call still outstanding; not retried")` and starts no
+thread (the #851 rule: never stack a second call on an unresponsive peer). When the stray
+finishes the label is free again, so later pages recover. Cap = one per label, no new
+constant. `_get_tags` keeps the untracked primitive (single short probe).
+Test hygiene: environment proxies are removed for loopback, timing bounds are
+`MARGIN`x the deadline (4x) with the raw-call-still-running-at-3x difference pin kept.
+New pins: repeated overruns leave at most one live worker; calls resume after the stray
+ends; a hung page, then a fail-fast page, then a recovered page.
 
 ## Not done (filed as #974)
 

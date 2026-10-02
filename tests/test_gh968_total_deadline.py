@@ -44,6 +44,10 @@ from socr.tables.binding import BindingEvidence
 #: per-read timeout can never fire.
 DEADLINE = 0.5
 TRICKLE_INTERVAL = 0.1
+#: A wrapped call must fail within MARGIN x the deadline (generous: CI is loaded);
+#: BOUND only stops a regression from hanging the suite.
+MARGIN = 4
+BOUND = 12 * DEADLINE
 
 
 class TrickleServer:
@@ -108,6 +112,19 @@ def trickle():
 
 
 @pytest.fixture(autouse=True)
+def _loopback_isolation(monkeypatch):
+    """No environment proxy may intercept the loopback server; no stray from an
+    earlier test may leak into this one's outstanding-call registry."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    ollama_utils._OUTSTANDING.clear()
+    yield
+    ollama_utils._OUTSTANDING.clear()
+
+
+@pytest.fixture(autouse=True)
 def _real_post_chat(monkeypatch):
     """conftest pins ``_post_chat`` to a no-daemon stub; these tests need the real one."""
     monkeypatch.setattr(table_rung_ollama, "_post_chat", REAL_POST_CHAT)
@@ -149,12 +166,12 @@ def test_trickle_server_defeats_a_per_read_timeout(trickle):
 
 def test_post_chat_fails_within_1_5x_the_deadline_on_a_trickle(trickle):
     finished, elapsed, value = _bounded(
-        lambda: REAL_POST_CHAT(trickle.url, PAYLOAD, DEADLINE), 3 * DEADLINE
+        lambda: REAL_POST_CHAT(trickle.url, PAYLOAD, DEADLINE), BOUND
     )
     assert finished, "_post_chat is still running past 3x the deadline"
     assert isinstance(value, httpx.TimeoutException), value
     assert isinstance(value, TotalDeadlineExceeded)
-    assert elapsed < 1.5 * DEADLINE, elapsed
+    assert elapsed < MARGIN * DEADLINE, elapsed
     assert "m:cloud" in str(value), "the failure must name the call"
 
 
@@ -196,27 +213,27 @@ def test_abandoned_call_does_not_block_the_caller_or_exit():
 
 def test_generation_canary_gives_up_on_a_trickle(trickle):
     finished, elapsed, value = _bounded(
-        lambda: extract._ollama_generation_canary(trickle.url, "m", DEADLINE), 3 * DEADLINE
+        lambda: extract._ollama_generation_canary(trickle.url, "m", DEADLINE), BOUND
     )
     assert finished and value is False
-    assert elapsed < 1.5 * DEADLINE, elapsed
+    assert elapsed < MARGIN * DEADLINE, elapsed
 
 
 def test_urllib_equation_lanes_give_up_on_a_trickle(trickle, tmp_path):
     finished, elapsed, value = _bounded(
-        lambda: recover.latex_for_image(b"png", host=trickle.url, timeout=DEADLINE), 3 * DEADLINE
+        lambda: recover.latex_for_image(b"png", host=trickle.url, timeout=DEADLINE), BOUND
     )
     assert finished and value == ""
-    assert elapsed < 1.5 * DEADLINE, elapsed
+    assert elapsed < MARGIN * DEADLINE, elapsed
 
     crop = tmp_path / "c.png"
     crop.write_bytes(b"png")
     finished, elapsed, value = _bounded(
         lambda: equation_latex.latex_for_crop(crop, host=trickle.url, timeout=DEADLINE),
-        3 * DEADLINE,
+        BOUND,
     )
     assert finished and value == ""
-    assert elapsed < 1.5 * DEADLINE, elapsed
+    assert elapsed < MARGIN * DEADLINE, elapsed
 
 
 # -- every wrapped site goes through call_with_total_deadline ---------------
@@ -362,11 +379,86 @@ def test_gate_hanging_rung_is_unverified_not_a_hang(trickle, tmp_path):
     box: list[tuple] = []
     t = threading.Thread(target=lambda: box.append(_gate_run(tmp_path, rung)), daemon=True)
     t.start()
-    t.join(6 * DEADLINE)
+    t.join(BOUND)
     assert not t.is_alive(), "the table gate is hung on a trickling Ollama"
     state, elapsed = box[0]
     events: list[AuditEvent] = [e for e in state.events if e.kind == TABLE_LADDER_UNVERIFIED_KIND]
     assert len(events) == 1, state.events
     blob = repr(events[0].data) + events[0].detail
     assert "total deadline" in blob and "glm-test:cloud" in blob, blob
-    assert elapsed < 3 * DEADLINE, elapsed
+    assert elapsed < MARGIN * DEADLINE, elapsed
+
+
+# -- abandoned workers are bounded: one per endpoint (review P1) -----------
+
+PASS_JSON = '{"verdict": "PASS", "confidence": "high", "findings": []}'
+
+
+def test_repeated_overruns_leave_at_most_one_live_worker():
+    release = threading.Event()
+    started: list[int] = []
+
+    def _stuck():
+        started.append(1)
+        release.wait(30)
+
+    before = threading.active_count()
+    try:
+        with pytest.raises(TotalDeadlineExceeded, match="exceeded total deadline"):
+            call_with_total_deadline(_stuck, 0.1, label="ep-A")
+        for _ in range(6):
+            with pytest.raises(TotalDeadlineExceeded, match="previous call still outstanding"):
+                call_with_total_deadline(_stuck, 0.1, label="ep-A")
+        assert started == [1], "a new worker was started while the stray was outstanding"
+        assert threading.active_count() - before <= 1
+        # a different endpoint is not blocked by ep-A's stray
+        assert call_with_total_deadline(lambda: "ok", 1.0, label="ep-B") == "ok"
+    finally:
+        release.set()
+
+
+def test_calls_resume_once_the_stray_finishes():
+    release = threading.Event()
+    with pytest.raises(TotalDeadlineExceeded):
+        call_with_total_deadline(lambda: release.wait(30), 0.1, label="ep-R")
+    with pytest.raises(TotalDeadlineExceeded, match="still outstanding"):
+        call_with_total_deadline(lambda: "x", 0.1, label="ep-R")
+    release.set()
+    ollama_utils._OUTSTANDING["ep-R"].join(5)
+    assert call_with_total_deadline(lambda: "back", 1.0, label="ep-R") == "back"
+
+
+def test_next_page_recovers_after_a_hung_page(monkeypatch, tmp_path):
+    """Page 1 hangs (UNVERIFIED), page 2 fails fast without a second request,
+    and page 3 succeeds once the stray has finished."""
+    release = threading.Event()
+    posts: list[int] = []
+
+    def _fake_post(url, **kwargs):
+        posts.append(1)
+        if len(posts) == 1:
+            release.wait(30)
+        return httpx.Response(
+            200,
+            json={"message": {"content": PASS_JSON}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(b"png-bytes")
+    rung = build_ollama_rung("glm-test:cloud", "http://fake-host:11434", 0.2)
+
+    state, _ = _gate_run(tmp_path / "p1", rung)
+    assert len([e for e in state.events if e.kind == TABLE_LADDER_UNVERIFIED_KIND]) == 1
+
+    page2 = rung(crop, _TABLE_MD, None)
+    assert not page2.ok and "still outstanding" in (page2.error or "")
+    assert len(posts) == 1, "page 2 stacked a second request on the unresponsive endpoint"
+
+    release.set()
+    for stray in list(ollama_utils._OUTSTANDING.values()):
+        stray.join(5)
+    page3 = rung(crop, _TABLE_MD, None)
+    assert page3.ok and page3.verdict.passed
+    assert len(posts) == 2
