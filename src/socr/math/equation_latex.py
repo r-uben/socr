@@ -193,6 +193,7 @@ def latex_for_crop(
     import urllib.error
     import urllib.request
 
+    from socr.core.ollama_utils import call_with_total_deadline
     from socr.math.recover import clean_latex
 
     payload = json.dumps(
@@ -211,8 +212,13 @@ def latex_for_crop(
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode())
+
+        def _call() -> object:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+
+        # GH-968: urlopen's timeout is per socket op, not total.
+        body = call_with_total_deadline(_call, timeout, label="equation LaTeX engine /api/generate")
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning("equation LaTeX engine call failed: %s", exc)
         return ""

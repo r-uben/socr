@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
+from socr.core.ollama_utils import call_with_total_deadline
 from socr.core.result import FigureInfo
 from socr.engines._figure_prompt import (
     CAPTION_MARKER as _CAPTION_MARKER,  # noqa: F401  re-exported for tests
@@ -191,7 +192,11 @@ class OllamaFigureEngine:
     def is_available(self) -> bool:
         """Return True if Ollama is reachable and this model is in its tag list."""
         try:
-            resp = httpx.get(f"{self.host}/api/tags", timeout=3.0)
+            resp = call_with_total_deadline(
+                lambda: httpx.get(f"{self.host}/api/tags", timeout=3.0),
+                3.0,
+                label="ollama figure /api/tags",
+            )
             if resp.status_code != 200:
                 return False
             data = resp.json()
@@ -226,7 +231,11 @@ class OllamaFigureEngine:
                 ],
                 "stream": False,
             }
-            resp = httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0)
+            resp = call_with_total_deadline(
+                lambda: httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0),
+                120.0,
+                label=f"ollama figure /api/chat ({self.model})",
+            )
             resp.raise_for_status()
             raw = resp.json()["message"]["content"].strip()
 

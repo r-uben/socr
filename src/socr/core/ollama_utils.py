@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+logger = logging.getLogger(__name__)
 
 #: GH-910: total wall-clock budget for the ``/api/tags`` listing. The retired
 #: ``ollama list`` subprocess used 10s; kept so a slow-but-alive daemon is
@@ -21,12 +24,45 @@ _UNREACHABLE_MSG = "Ollama is not running or not installed"
 _TIMEOUT_MSG = "Ollama did not respond (timeout)"
 
 
+class TotalDeadlineExceeded(httpx.ReadTimeout, TimeoutError):
+    """A call outlived its TOTAL wall-clock deadline (GH-968).
+
+    Subclasses BOTH ``httpx.ReadTimeout`` (so every httpx caller's existing
+    ``except httpx.TimeoutException`` / ``httpx.HTTPError`` classification keeps
+    working: a rung maps it to ``RungResult(ok=False)``) and the builtin
+    ``TimeoutError`` (so the urllib callers' ``except (URLError, TimeoutError,
+    OSError)`` also catches it). No caller needed to change.
+    """
+
+
+def call_with_total_deadline(fn: Callable[[], Any], timeout: float, *, label: str = "") -> Any:
+    """Run *fn* under a TOTAL wall-clock deadline of *timeout* seconds (GH-968).
+
+    httpx/urllib timeouts are per-read/per-socket-op inactivity limits: a peer
+    that trickles a byte (or a keepalive) every few seconds never trips them and
+    the calling thread hangs indefinitely. *fn* runs in a daemon thread joined
+    with *timeout*; an overrun is abandoned, not waited on, and cannot keep the
+    process alive. Returns *fn*'s value; re-raises what *fn* raised; on overrun
+    raises :class:`TotalDeadlineExceeded` naming *label* so the failure that
+    surfaces (``RungResult.error``, a logged warning) identifies the call.
+    """
+    finished, value = _call_within(fn, timeout)
+    if not finished:
+        what = label or "Ollama call"
+        logger.warning("%s exceeded its total deadline of %ss; abandoned", what, timeout)
+        raise TotalDeadlineExceeded(f"{what} exceeded total deadline of {timeout}s")
+    if isinstance(value, BaseException):
+        raise value
+    return value
+
+
 def _call_within(fn: Callable[[], object], timeout: float) -> tuple[bool, object]:
     """Run *fn* in a daemon thread joined with *timeout*: ``(finished, value_or_exc)``.
 
     An overrun is abandoned, not waited on, and cannot keep the process alive.
     Anything *fn* raises comes back as the value (an exception instance) for the
     caller to re-raise or map; ``finished`` is False when the deadline expired.
+    Prefer :func:`call_with_total_deadline`; this is its primitive.
     """
     box: list[object] = []
 
