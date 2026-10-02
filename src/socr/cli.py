@@ -995,6 +995,141 @@ def batch(
 
 
 @cli.command()
+@click.option(
+    "--config",
+    "library_config",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Papers library config (default: ~/papers/config.yaml)",
+)
+@click.option("--dry-run", is_flag=True, help="Print what would be processed; write nothing")
+@click.option("--rerun", "rerun_stem", metavar="STEM", help="Re-process STEM into staging")
+@click.option("--promote", "promote_stem", metavar="STEM", help="Archive old STEM, install staged")
+@click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")
+@click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml pipeline profile")
+def library(
+    library_config: Path | None,
+    dry_run: bool,
+    rerun_stem: str | None,
+    promote_stem: str | None,
+    primary: str | None,
+    profile: str | None,
+) -> None:
+    """Process the papers library described by its own config (GH-964).
+
+    New PDFs (no text directory yet) are written straight into the library.
+    An existing text directory is never overwritten: --rerun STEM processes
+    into staging and lists the paper as awaiting approval; --promote STEM
+    moves the old copy into the archive (never deleting) and installs the
+    staged one. The index files are refreshed after every run.
+
+    Example:
+        socr library --dry-run
+        socr library --rerun some-paper
+        socr library --promote some-paper
+    """
+    from socr import library as lib
+
+    if rerun_stem and promote_stem:
+        raise click.UsageError("--rerun and --promote are separate steps; give one")
+    try:
+        cfg = lib.load_library_config(library_config or lib.DEFAULT_CONFIG_PATH)
+    except lib.LibraryConfigError as e:
+        raise click.ClickException(str(e))
+
+    def make_process(reprocess: bool):
+        config = build_config(primary=primary, profile=profile, reprocess=reprocess)
+        if config.hpc.enabled:
+            raise click.UsageError(
+                "hpc.enabled is set; 'socr library' uses the batch pipeline, which has no HPC lane"
+            )
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        _report_strict_local_ladder_diagnostic(config)
+        _report_no_reader_ladder_diagnostic(config)
+        pipeline = UnifiedPipeline(config)
+        return lambda pdf, out_root: pipeline.process(pdf, out_root, scan_root=pdf.parent)
+
+    def failed(result) -> bool:
+        from socr.core.result import DocumentStatus
+
+        return result.status is not DocumentStatus.SKIPPED and not result.success
+
+    failures: list[str] = []
+    processed: set[str] = set()
+    try:
+        lib.check_stem_collisions(cfg)
+        if dry_run:
+            # Read-only: no lock, no recovery, no index.
+            if promote_stem:
+                console.print(f"[dim]would promote {promote_stem} from {cfg.staging_dir}[/dim]")
+            elif rerun_stem:
+                console.print(f"[dim]would re-process {rerun_stem} into {cfg.staging_dir}[/dim]")
+            else:
+                todo, blocked = lib.pending_pdfs(cfg)
+                for pdf in blocked:
+                    console.print(f"[yellow]blocked {pdf.stem}:[/yellow] text dir has no markdown")
+                for pdf in todo:
+                    console.print(f"would process {pdf}")
+                console.print(f"[dim]{len(todo)} to process, {len(blocked)} blocked[/dim]")
+            return
+        with lib.library_lock(cfg):
+            note = lib.recover_promotion(cfg)
+            if note:
+                console.print(f"[yellow]{note}[/yellow]")
+            try:
+                if promote_stem:
+                    archived, installed = lib.promote(cfg, promote_stem)
+                    processed.add(promote_stem)
+                    console.print(f"Installed {installed}")
+                    if archived:
+                        console.print(f"Old copy archived at {archived}")
+                elif rerun_stem:
+                    result = lib.rerun(cfg, make_process(True), rerun_stem)
+                    if failed(result):
+                        failures.append(rerun_stem)
+                    console.print(
+                        f"{rerun_stem} awaiting approval: socr library --promote {rerun_stem}"
+                    )
+                else:
+                    todo, blocked = lib.pending_pdfs(cfg)
+                    for pdf in blocked:
+                        console.print(
+                            f"[yellow]Skipped {pdf.stem}:[/yellow] text directory exists without "
+                            f"{cfg.markdown.format(stem=pdf.stem)}; use --rerun {pdf.stem}"
+                        )
+                    if todo:
+                        for stem, state, detail in lib.process_new(cfg, make_process(False), todo):
+                            if state == lib.INSTALLED:
+                                processed.add(stem)
+                                if failed(detail):
+                                    failures.append(stem)
+                            else:
+                                failures.append(stem)
+                                console.print(
+                                    f"[red]{state} {stem}:[/red] {detail} "
+                                    "(text/ untouched; leftovers stay in staging)"
+                                )
+            finally:
+                # Reflects what is on disk even after a partial run. A failure
+                # here (e.g. an unreadable curated list) aborts loudly.
+                summary = lib.refresh_index(cfg, frozenset(processed))
+                console.print(
+                    f"Index refreshed: {summary['documents']} documents, "
+                    f"{len(summary['missing_text'])} missing text, "
+                    f"{len(summary['unverified'])} unverified. "
+                    f"Run backup-gdrive to push ({cfg.rclone_remote})."
+                )
+    except lib.LibraryError as e:
+        raise click.ClickException(str(e))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        raise click.Abort()
+    if failures:
+        raise SystemExit(1)
+
+
+@cli.command()
 def engines() -> None:
     """Show available OCR engines and their status."""
     from socr.engines.registry import get_engine, resolve_auto_engine

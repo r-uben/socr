@@ -167,7 +167,65 @@ socr batch <DIR> [OPTIONS]
 socr replay <MANIFEST> [-o OUT]  Rebuild a document from cache (no model calls)
 socr judge-benchmark <DATASET>   Score the judge against labeled good/mangled pages
 socr engines                     Show available engines
+socr library [--config PATH] [--dry-run] [--rerun STEM | --promote STEM]
+                                 Process the papers library from its own config
 ```
+
+### Papers library (`socr library`)
+
+Reads the library's config (default `~/papers/config.yaml`) instead of taking
+paths on the command line. Every path comes from the config: `~` is expanded,
+relative paths resolve against `root`, and a missing key or a path that escapes
+`root` is an error, never a default. The `output.document.*` names must match
+what the pipeline writes (`{stem}.md`, `figures`, `metadata.json`) or the load
+fails.
+
+```
+socr library --dry-run             # list PDFs under input.pdf that have no text yet
+socr library                       # process them into output.text/{stem}/
+socr library --rerun STEM          # re-process an existing paper into staging
+socr library --promote STEM        # archive the old copy, install the staged one
+```
+
+- A PDF whose text directory exists is never written into. A text directory
+  without its markdown is reported and skipped; use `--rerun`.
+- New papers are processed into the staging directory first and moved into
+  `output.text` with a no-replace rename only after the pipeline produced
+  `{stem}.md`. A crash or failure leaves its leftovers in staging (reported, never
+  overwritten) and `output.text` untouched. A finished run with status
+  `partial`/`failed` is installed (best available text) and listed as unverified.
+- One run at a time: an exclusive lock (`.library.lock` in `index.dir`) is held for the
+  whole run; a second run refuses.
+- `--rerun` writes to the staging directory (optional top-level config key
+  `staging`; default `<root>/.socr-staging`) and the stem is recorded as
+  `awaiting_approval` in the manifest. A staged run is never overwritten.
+- `--promote` renames the old text directory to `<archive.dir>/<stem>.<YYYY-MM-DD>`
+  (a numeric suffix avoids a clash) and the staged one into place. Nothing is
+  deleted. It refuses when nothing is staged. A journal (`.promote.journal.json` in
+  `index.dir`) brackets the two renames; the next run finishes an interrupted
+  promotion before doing anything else.
+- The config is refused if index file names collide (case-insensitively), if the
+  pdf/text/index/archive/staging directories are equal or nested (compared after
+  symlink resolution), or if two PDFs share a stem case-insensitively.
+- The library must live on a local filesystem. File locking and atomic renames are
+  not guaranteed on iCloud or network mounts (`~/papers` is local by policy).
+- Renames use the kernel no-replace primitive (macOS `renamex_np(RENAME_EXCL)`,
+  Linux `renameat2(RENAME_NOREPLACE)`); only where that is unavailable does it fall
+  back to check-then-rename. A promotion journal naming paths outside the configured
+  text/staging/archive dirs (or a symlink) is refused and left untouched.
+- An unreadable `unverified.txt` aborts the index refresh; it is never read as empty.
+- After each run (not `--dry-run`) the index is rewritten atomically:
+  `documents` (absolute PDF paths), `missing_text` (stems), `unverified` and
+  `manifest` (per-stem `state`: `verified`, `unverified` or `unknown`).
+  A document is `unverified` only on evidence: an explicit non-`completed`
+  metadata status, a page `warning`/`error`, or a hand-placed `UNVERIFIED.txt` in
+  its text dir (read, never written or deleted). Legacy metadata with no `status`
+  is `unknown` and is not listed. `unverified.txt` is the union of its existing
+  entries and the computed ones; a stem leaves it only when this run processed
+  it and it came out `verified`.
+- `backup.rclone_remote` is never read or written. The summary ends with
+  "Run backup-gdrive to push".
+- Exit code is nonzero if any processed document failed or was partial.
 
 ## Output
 
