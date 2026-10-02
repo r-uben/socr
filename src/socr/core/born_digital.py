@@ -2473,6 +2473,12 @@ class PageAssessment:
     #: cells legitimately tile along the reading axis, which is the geometry
     #: the shred predicate reads as damage.
     native_rotated_text_shredded: bool = False
+    #: #881: MuPDF could not LOAD this page (``doc[i]`` raised), so nothing about
+    #: it was assessed. Non-empty is the ONLY signal that the page is a
+    #: placeholder: every other field is its inert default, which would otherwise
+    #: read as "an empty scanned page". The pipeline fails this page, not the
+    #: document.
+    load_error: str = ""
     #: Backward-compatible aggregate set ONLY inside the non-rotated,
     #: has_tables branch of ``_assess_page_signals`` (the structured-extraction
     #: branch, not the refusal branch, and never for non-table pages). It
@@ -2730,14 +2736,73 @@ class BornDigitalDetector:
         # repair=False: the report is needed here, so recovery is applied
         # explicitly below rather than silently inside the open.
         with open_pdf(pdf_path, repair=False) as doc:
+            # #881: the DECLARED count, taken before recovery. Recovery touches
+            # pages, which lets MuPDF repair a damaged tree and can shrink
+            # ``len(doc)``; iterating the shrunk count would silently omit the
+            # lost pages, which would then enter processing with default state.
+            declared = len(doc)
+            # Page IDENTITY, not just count: if the repair drops a MIDDLE page the
+            # survivors shift down, and index i would read another page's text
+            # under page i's number. The page-object xref is stable across the
+            # repair, so each declared page is looked up by it afterwards.
+            xrefs_before = [self._safe_page_xref(doc, i) for i in range(declared)]
             self._recover_symbol_fonts(doc, pdf_path)
-            for page_idx in range(len(doc)):
-                assessment = self._assess_page(doc[page_idx], page_idx + 1)
+            xref_to_index: dict[int, int] | None = None
+            if len(doc) != declared:
+                xref_to_index = {}
+                for j in range(len(doc)):
+                    x = self._safe_page_xref(doc, j)
+                    if x:
+                        xref_to_index.setdefault(x, j)
+            for page_idx in range(declared):
+                # #881: one page MuPDF cannot load costs that page, not the
+                # document. Only the LOAD is guarded -- an error inside
+                # ``_assess_page`` is a bug in socr and must stay loud.
+                try:
+                    source_idx = page_idx
+                    if xref_to_index is not None:
+                        source_idx = xref_to_index.get(xrefs_before[page_idx], -1)
+                        if source_idx < 0:
+                            raise IndexError(
+                                f"page {page_idx + 1} missing after repair "
+                                f"(declared {declared}, {len(doc)} remain)"
+                            )
+                    page = doc[source_idx]
+                except Exception as exc:  # noqa: BLE001 - a damaged page is a finding
+                    # Logged so a regression in the binding (an AttributeError, a
+                    # TypeError) is distinguishable from genuine MuPDF damage.
+                    logger.warning(
+                        "page %d could not be loaded from %s: %s: %s",
+                        page_idx + 1,
+                        pdf_path.name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    logger.debug("page-load traceback", exc_info=True)
+                    pages.append(
+                        PageAssessment(
+                            page_num=page_idx + 1,
+                            is_born_digital=False,
+                            native_text="",
+                            confidence=0.0,
+                            load_error=f"{type(exc).__name__}: {exc}",
+                        )
+                    )
+                    continue
+                assessment = self._assess_page(page, page_idx + 1)
                 pages.append(assessment)
 
             self._mark_unrecovered_glyphs(pages)
 
         return DocumentAssessment(path=pdf_path, pages=pages)
+
+    @staticmethod
+    def _safe_page_xref(doc, index: int) -> int:
+        """The page object's xref, or 0 when it cannot be read (damaged page)."""
+        try:
+            return int(doc.page_xref(index))
+        except Exception:  # noqa: BLE001 - an unreadable page has no identity to keep
+            return 0
 
     def detect_page(self, pdf_path: Path | str, page_num: int) -> PageAssessment:
         """Assess a single page (1-indexed).

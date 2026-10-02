@@ -68,6 +68,10 @@ class PageState:
     """Per-page processing state (1-indexed)."""
 
     page_num: int
+    #: #881: why MuPDF could not load this page; empty for every loadable page.
+    #: A non-empty value means the page was never read and ships as a FAILED
+    #: ``UNREADABLE_INPUT`` page -- it must never be routed, rendered or judged.
+    load_error: str = ""
     is_born_digital: bool = False
     native_text: str | None = None
     #: #688: the extractor's bytes before label canonicalisation. Provenance
@@ -638,6 +642,7 @@ class DocumentState:
         for pa in assessment.pages:
             if pa.page_num in self.pages:
                 ps = self.pages[pa.page_num]
+                ps.load_error = getattr(pa, "load_error", "") or ""
                 ps.is_born_digital = pa.is_born_digital
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures

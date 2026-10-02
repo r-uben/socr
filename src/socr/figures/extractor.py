@@ -260,9 +260,19 @@ class FigureExtractor:
                         cap_page = page_index + 1
                         break
 
-                    page = pdf[page_index]
                     page_num = page_index + 1
                     if skip_pages and page_num in skip_pages:
+                        continue
+                    # #881: load AFTER the skip check, and per page. A page MuPDF
+                    # cannot load costs that page's figures, not every later page's
+                    # (the document-wide catch below would otherwise end the loop).
+                    try:
+                        page = pdf[page_index]
+                    except Exception as e:
+                        logger.warning(
+                            f"Figure extraction could not load page {page_num} "
+                            f"of {pdf_path.name}: {type(e).__name__}: {e}"
+                        )
                         continue
                     per_page = 0
                     processed: set[tuple[int, int, int, int]] = set()

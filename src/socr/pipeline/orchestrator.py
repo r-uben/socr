@@ -1645,7 +1645,7 @@ class UnifiedPipeline:
         if unreadable is not None:
             return unreadable
 
-        doc = DocumentHandle.from_path(pdf_path)
+        doc = self._document_handle_for(pdf_path)
         state = DocumentState(handle=doc)
 
         if not self.config.quiet:
@@ -1926,7 +1926,10 @@ class UnifiedPipeline:
             pages_needing_words = [
                 pa.page_num
                 for pa in assessment.pages
-                if pa.detected_table_count > 0 or not pa.is_born_digital
+                # #881: a page that never loaded has no words to cache, and
+                # reading it would raise and cost every later page its words.
+                if not getattr(pa, "load_error", "")
+                and (pa.detected_table_count > 0 or not pa.is_born_digital)
             ]
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)
@@ -8497,10 +8500,16 @@ class UnifiedPipeline:
         # The corrupt-math guardrail is a separate region lane, not a whole-page
         # OCR rung. Remove its pages before provider/resume setup so an empty
         # provider ladder cannot suppress a crop recovery that does not use it.
+        #
+        # #881: pages MuPDF could not load are held out of EVERY lane below. They
+        # are failed at the top of the page loop and never routed, rendered,
+        # planned or judged -- each of those would open the page and raise.
+        unloadable_pages = {pn for pn, ps in state.pages.items() if ps.load_error}
         math_recovery_pages = {
             page_num
             for page_num, ps in sorted(state.pages.items())
-            if self._is_corrupt_math_recovery_page(page_num, ps)
+            if page_num not in unloadable_pages
+            and self._is_corrupt_math_recovery_page(page_num, ps)
         }
         # P4-R: the equation-region lane is likewise a region lane, not a
         # whole-page OCR rung. Built here, beside the corrupt-math set and
@@ -8511,6 +8520,7 @@ class UnifiedPipeline:
             page_num
             for page_num, ps in sorted(state.pages.items())
             if page_num not in math_recovery_pages
+            and page_num not in unloadable_pages
             and self._is_equation_region_lane_page(page_num, ps)
         }
         ocr_pages: list[int] = []
@@ -8518,6 +8528,7 @@ class UnifiedPipeline:
             if (
                 page_num not in math_recovery_pages
                 and page_num not in equation_lane_pages
+                and page_num not in unloadable_pages
                 and not self._is_agentic_trusted_native(page_num, ps)
             ):
                 ocr_pages.append(page_num)
@@ -8573,7 +8584,7 @@ class UnifiedPipeline:
         chart_only_pages: set[int] = set()
         chart_mixed_pages: set[int] = set()
         for pn, ps in sorted(state.pages.items()):
-            if pn in resumed_pages:
+            if pn in resumed_pages or pn in unloadable_pages:
                 continue
             try:
                 if not self._is_chart_asset_page(pn, ps, state.handle.path):
@@ -8925,6 +8936,13 @@ class UnifiedPipeline:
                         "(PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
                     )
                 break
+
+            # #881: a page MuPDF could not load is failed HERE, before the resume
+            # gate and every lane. It is never skipped as terminal (the ledger only
+            # accepts SUCCESS, and this page is ERROR), so a re-run retries it.
+            if page_num in unloadable_pages:
+                self._fail_unloadable_page(state, page_num, ps, output_dir)
+                continue
 
             # ----------------------------------------------------------------
             # PP-5: per-page resume gate (INNER ledger; doc-level RootIndex gate
@@ -10004,6 +10022,49 @@ class UnifiedPipeline:
                 data={"png_saved": not chart_render_failed, "png_path": chart_png_ref},
             )
         )
+
+    def _fail_unloadable_page(
+        self, state: DocumentState, page_num: int, ps: PageState, output_dir: Path
+    ) -> None:
+        """Record a page MuPDF could not load as FAILED and flush its fragment (#881).
+
+        The page has no text and no engine ran, so there is nothing to select: the
+        ordinary no-text ending ships the explicit ``[page N failed: ...]`` marker
+        with ``failure_mode=UNREADABLE_INPUT`` and ``status=ERROR`` (read from
+        ``ps.load_error`` in ``manifest._select_page_output_tagged``), which is what
+        the sidecar, the document status buckets, ``metadata.json`` and the CLI all
+        read. The flush mirrors the end of the page loop so the page leaves the same
+        fragment + sidecar pair as any other.
+        """
+        from ocr_output_contract import PAGE_MARKER_RE
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="page_unloadable",
+                engine="none",
+                detail=f"page could not be loaded and was not processed: {ps.load_error}",
+                data={"error": ps.load_error},
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                f"  p{page_num}: [red]unreadable_input -- page could not be loaded "
+                f"({ps.load_error})[/red]"
+            )
+        try:
+            record = finalized_page_record(state, page_num, _whole_doc_page_texts(state))
+            raw = record.output.text or ""
+            stripped = raw.lstrip()
+            m = PAGE_MARKER_RE.match(stripped)
+            body = stripped[m.end() :].lstrip("\n") if m else raw
+            self._flush_page_fragment(state, page_num, body, output_dir)
+            self._flush_page_sidecar(state, page_num, output_dir, terminal=False, record=record)
+        except Exception as exc:
+            logger.warning("p%d: unloadable-page flush failed (%s); continuing", page_num, exc)
 
     def _agentic_no_provider_page(self, page_num: int, ps: PageState) -> None:
         """Stamp a page that had no OCR provider available.
@@ -13894,6 +13955,12 @@ class UnifiedPipeline:
                 )
 
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
+        # #881: of those, the pages MuPDF could not load. Named separately at every
+        # surface (audit event, CLI line, document error) so an unreadable input is
+        # not reported as an engine that "produced no usable output".
+        unloadable_failed_pages = [
+            n for n in failed_pages if n in state.pages and state.pages[n].load_error
+        ]
 
         # P6: derive the six selection-shaped buckets from the pre-computed records in one pass.
         disposition_buckets = _derive_disposition_buckets(state, pre_records)
@@ -14530,7 +14597,12 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="page_failed",
                         engine="",
-                        detail="no usable OCR output; failure marker shipped",
+                        detail=(
+                            f"{FailureMode.UNREADABLE_INPUT.value}: page could not be "
+                            f"loaded ({state.pages[n].load_error}); failure marker shipped"
+                            if n in unloadable_failed_pages
+                            else "no usable OCR output; failure marker shipped"
+                        ),
                     )
                 )
             for n in native_fallback_pages:
@@ -14780,6 +14852,12 @@ class UnifiedPipeline:
                     console.print(
                         f"  [red]{len(failed_pages)} page(s) produced no usable "
                         f"output: {failed_pages}[/red]"
+                    )
+                if unloadable_failed_pages:
+                    console.print(
+                        f"  [red]{FailureMode.UNREADABLE_INPUT.value}: "
+                        f"{len(unloadable_failed_pages)} page(s) could not be loaded "
+                        f"from the PDF: {unloadable_failed_pages}[/red]"
                     )
                 # #658: printed right after the failed-page line because it
                 # explains part of it -- these pages failed closed for a missing
@@ -15099,6 +15177,12 @@ class UnifiedPipeline:
             final_result.error = (
                 f"page(s) {', '.join(str(n) for n in failed_pages)} {LOST_CONTENT_NOTE}"
             )
+            if unloadable_failed_pages:
+                final_result.error += (
+                    f"; {FailureMode.UNREADABLE_INPUT.value}: page(s) "
+                    f"{', '.join(str(n) for n in unloadable_failed_pages)} "
+                    "could not be loaded from the PDF"
+                )
         if corrupt_math_hybrid_pages:
             _math_note = "corrupt equation candidate unverified on page(s) " + ", ".join(
                 str(n) for n in corrupt_math_hybrid_pages
@@ -15519,6 +15603,23 @@ class UnifiedPipeline:
         self._write_audit_log(state, doc_dir, records=final_records)
 
         return final_result
+
+    def _document_handle_for(self, pdf_path: Path) -> DocumentHandle:
+        """Build the handle, trusting the DECLARED page count on a damaged document (#881).
+
+        ``DocumentHandle`` counts through ``open_pdf(repair=True)``, which touches
+        pages and lets MuPDF run its own xref repair: on a damaged page tree that
+        can report fewer pages than the file declares (a measured file went 64 -> 0
+        with no exception). For a partially damaged document that would silently
+        drop the unloadable pages from ``state.pages``, so they could never be
+        recorded as failed. An undamaged document keeps the ordinary path.
+        """
+        from socr.core.pdf import probe_page_loads
+
+        probe = probe_page_loads(pdf_path)
+        if 0 < probe.loadable < probe.declared:
+            return DocumentHandle(path=pdf_path, page_count=probe.declared, page_count_known=True)
+        return DocumentHandle.from_path(pdf_path)
 
     def _refuse_unreadable_input(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
         """Refuse, and RECORD, a PDF none of whose pages can be loaded (#871).
