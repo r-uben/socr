@@ -2679,6 +2679,11 @@ class UnifiedPipeline:
             and ps.is_born_digital
             and ps.native_text
             and ps.has_corrupt_math
+            # #961: a scan's invisible OCR layer is not native prose to repair around
+            # equations; the whole page goes to OCR (a hybrid would ship that old OCR while
+            # the event claims OCR replaced it).
+            and not ps.invisible_text_over_raster
+            and not ps.invisible_text_scan_failed
             and not ps.native_rotated_text_shredded
             and not self._page_has_tables(page_num, ps)
         )

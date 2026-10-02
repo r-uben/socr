@@ -2598,6 +2598,34 @@ def _is_lane_stacked(table: object) -> bool:
     return False
 
 
+def _union_area(boxes: list, clip) -> float:
+    """Area of the union of ``boxes`` clipped to ``clip`` (sweep over x, merged y intervals)."""
+    rects = []
+    for b in boxes:
+        r = fitz.Rect(b) & clip
+        if not r.is_empty:
+            rects.append((r.x0, r.y0, r.x1, r.y1))
+    if not rects:
+        return 0.0
+    xs = sorted({v for r in rects for v in (r[0], r[2])})
+    total = 0.0
+    for x_lo, x_hi in zip(xs, xs[1:]):
+        spans = sorted((r[1], r[3]) for r in rects if r[0] <= x_lo and r[2] >= x_hi)
+        covered = 0.0
+        cur_lo = cur_hi = None
+        for lo, hi in spans:
+            if cur_hi is None or lo > cur_hi:
+                if cur_hi is not None:
+                    covered += cur_hi - cur_lo
+                cur_lo, cur_hi = lo, hi
+            else:
+                cur_hi = max(cur_hi, hi)
+        if cur_hi is not None:
+            covered += cur_hi - cur_lo
+        total += covered * (x_hi - x_lo)
+    return total
+
+
 class BornDigitalDetector:
     """Detect born-digital pages and extract native text from PDFs.
 
@@ -4372,22 +4400,30 @@ class BornDigitalDetector:
         return len(images) > 0
 
     def _has_invisible_text_over_raster(self, page: fitz.Page) -> bool:
-        """#961: invisible text (``get_texttrace`` type 3 / render mode 3) on a page whose
-        raster coverage is >= ``RASTER_DOMINANCE_RATIO``.
+        """#961: the page's text is mostly invisible (``get_texttrace`` type 3 / render
+        mode 3, by characters) AND the UNION of its raster images, clipped to the page,
+        covers >= ``RASTER_DOMINANCE_RATIO`` of it.
 
-        Raster coverage is computed first and the (costlier) text trace is skipped when
-        there is not enough raster, so a born-digital page pays only ``get_image_info``.
+        A sum of image boxes would let overlapping images inflate coverage, and "any
+        invisible span" would re-route a born-digital page with a background image plus a
+        little invisible accessibility text; a scan's old OCR layer is the page's text.
+        Coverage is computed first and the (costlier) text trace is skipped when there is
+        not enough raster, so a born-digital page pays only ``get_image_info``.
         Raises on a PyMuPDF failure; the caller fails closed.
         """
         page_area = page.rect.get_area()
         if page_area <= 0:
             return False
-        image_area = sum(
-            fitz.Rect(info["bbox"]).get_area() for info in page.get_image_info() if info.get("bbox")
-        )
-        if min(image_area / page_area, 1.0) < self.RASTER_DOMINANCE_RATIO:
+        boxes = [fitz.Rect(info["bbox"]) for info in page.get_image_info() if info.get("bbox")]
+        if _union_area(boxes, page.rect) / page_area < self.RASTER_DOMINANCE_RATIO:
             return False
-        return any(span.get("type") == 3 and span.get("chars") for span in page.get_texttrace())
+        invisible = total = 0
+        for span in page.get_texttrace():
+            n = len(span.get("chars") or ())
+            total += n
+            if span.get("type") == 3:
+                invisible += n
+        return invisible * 2 > total
 
     @staticmethod
     def _raster_coverage(page: fitz.Page) -> float:

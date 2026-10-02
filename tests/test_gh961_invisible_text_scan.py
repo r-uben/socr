@@ -18,7 +18,7 @@ import pytest
 from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.result import DocumentStatus, FailureMode
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -353,3 +353,198 @@ def test_e2e_chart_asset_page_with_a_hit_is_demoted_too(tmp_path, monkeypatch) -
     assert side_on["status"] == "warning"
     assert side_on["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
     assert on.status is not DocumentStatus.SUCCESS
+
+
+def _run_twice(tmp_path, monkeypatch, *, detector="live"):
+    """process() the SAME pdf into the SAME output dir twice (a resume), fresh pipeline each."""
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+
+    pdf = _make(tmp_path / "r.pdf", image="full", render_mode=3)
+    out = tmp_path / "out-r"
+    engines = []
+    for _ in range(2):
+        engine = _StubEngine()
+        engines.append(engine)
+        with monkeypatch.context() as m:
+            m.setattr(orch, "get_engine", lambda engine_type, e=engine: e)
+            pipe = UnifiedPipeline(
+                PipelineConfig(
+                    agentic=True,
+                    quiet=True,
+                    primary_engine=EngineType.QWEN,
+                    local_engine=EngineType.QWEN,
+                    enabled_engines=[EngineType.QWEN],
+                    native_first=True,
+                    write_manifest=False,
+                    judge_backend="heuristic",
+                    dual_pass_tables=False,
+                    detect_equations=False,
+                    save_figures=False,
+                )
+            )
+            pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+            pipe._build_page_judge = lambda state: _AcceptingJudge()
+            pipe._resolve_crop_vlm_model = lambda: None
+            pipe._resolve_judge_model = lambda *a, **k: ""
+            pipe.process(pdf, output_dir=out)
+    return out, engines
+
+
+def _audit_kinds(out: Path) -> list[str]:
+    kinds = []
+    for f in sorted(out.rglob("*audit*.json")):
+        text = f.read_text()
+        if text.strip().startswith("{"):
+            kinds += [e["kind"] for e in json.loads(text).get("events", [])]
+    return kinds
+
+
+def test_resume_run_recomputes_the_event_once_and_keeps_the_ocr_page(tmp_path, monkeypatch) -> None:
+    out, engines = _run_twice(tmp_path, monkeypatch)
+    assert engines[0].calls == 1, "first run: the scan page goes to OCR"
+    assert engines[1].calls == 0, "second run: the finished page is resumed, not re-read"
+    kinds = _audit_kinds(out)
+    assert kinds.count("invisible_text_scan") == 1, (
+        "the second run recomputes the event; replaying it as well would double it"
+    )
+    found = sorted(out.rglob("pages/00001.md"))
+    assert len(found) == 1 and _OCR_MARK in found[0].read_text()
+
+
+# ---------------------------------------------------------------------------
+# Astra fixes on #963: union coverage, majority-invisible, corrupt-math lane, D3
+# ---------------------------------------------------------------------------
+
+
+def _mixed_pdf(path: Path, *, visible_lines: int, invisible_lines: int, images) -> Path:
+    doc = fitz.open()
+    page = doc.new_page()
+    for rect in images:
+        page.insert_image(rect, pixmap=_pixmap())
+    y = 72
+    for mode, n in ((0, visible_lines), (3, invisible_lines)):
+        for _ in range(n):
+            page.insert_text((72, y), _PROSE, fontname="helv", fontsize=10, render_mode=mode)
+            y += 14
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_background_image_with_mostly_visible_text_and_a_little_invisible_is_quiet(tmp_path):
+    """A born-digital page with a full-page background image plus invisible accessibility text."""
+    rect = fitz.Rect(0, 0, 595, 842)
+    pdf = _mixed_pdf(tmp_path / "p.pdf", visible_lines=8, invisible_lines=1, images=[rect])
+    assert _detect(pdf) is False
+    # Control: the same page with the text mostly invisible fires.
+    pdf = _mixed_pdf(tmp_path / "q.pdf", visible_lines=1, invisible_lines=8, images=[rect])
+    assert _detect(pdf) is True
+
+
+def test_invisible_majority_boundary(tmp_path):
+    """Exactly half invisible is not a majority; one more invisible line is."""
+    rect = fitz.Rect(0, 0, 595, 842)
+    half = _mixed_pdf(tmp_path / "h.pdf", visible_lines=4, invisible_lines=4, images=[rect])
+    more = _mixed_pdf(tmp_path / "m.pdf", visible_lines=4, invisible_lines=5, images=[rect])
+    assert _detect(half) is False
+    assert _detect(more) is True
+
+
+def test_overlapping_images_do_not_inflate_coverage(tmp_path):
+    """Two images stacked on the same 60% of the page: summed area 1.2 passes the ratio,
+    the union (0.6) does not."""
+    r = fitz.Rect(0, 0, 595, 505)
+    pdf = _mixed_pdf(tmp_path / "o.pdf", visible_lines=0, invisible_lines=8, images=[r, r])
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        summed = sum(fitz.Rect(i["bbox"]).get_area() for i in page.get_image_info())
+        assert summed / page.rect.get_area() >= BornDigitalDetector.RASTER_DOMINANCE_RATIO
+        assert BornDigitalDetector()._has_invisible_text_over_raster(page) is False
+
+
+def test_union_coverage_boundary(tmp_path):
+    """Two side-by-side images whose union is just under / just over the ratio."""
+    ratio = BornDigitalDetector.RASTER_DOMINANCE_RATIO
+    w, h = 595.0, 842.0
+
+    def build(frac, name):
+        top = fitz.Rect(0, 0, w, h * frac / 2)
+        bottom = fitz.Rect(0, h * frac / 2, w, h * frac)
+        return _mixed_pdf(tmp_path / name, visible_lines=0, invisible_lines=8, images=[top, bottom])
+
+    assert _detect(build(ratio - 0.02, "under.pdf")) is False
+    assert _detect(build(ratio + 0.02, "over.pdf")) is True
+
+
+def test_union_area_helper() -> None:
+    from socr.core.born_digital import _union_area
+
+    clip = fitz.Rect(0, 0, 100, 100)
+    a = fitz.Rect(0, 0, 60, 100)
+    b = fitz.Rect(40, 0, 100, 100)
+    assert _union_area([a, b], clip) == pytest.approx(10000.0)
+    assert _union_area([a, a], clip) == pytest.approx(6000.0)
+    assert _union_area([fitz.Rect(-50, -50, 50, 50)], clip) == pytest.approx(2500.0)
+    assert _union_area([], clip) == 0.0
+
+
+def _scan_state(tmp_path, monkeypatch, *, detector_live=True):
+    pdf = _make(tmp_path / "s.pdf", image="full", render_mode=3)
+    with monkeypatch.context() as m:
+        if not detector_live:
+            m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", lambda s, p: False)
+        pipe, state = _analyze(pdf)
+    return pipe, state.pages[1]
+
+
+def test_scan_page_never_enters_the_corrupt_math_lane(tmp_path, monkeypatch) -> None:
+    """Native prose must not survive a corrupt-math hybrid on a scan page: whole-page OCR."""
+    pipe_off, ps_off = _scan_state(tmp_path, monkeypatch, detector_live=False)
+    pipe_on, ps_on = _scan_state(tmp_path, monkeypatch)
+    for pipe, ps in ((pipe_off, ps_off), (pipe_on, ps_on)):
+        ps.has_corrupt_math = True
+        pipe.config.recover_corrupt_math = True
+    assert pipe_off._is_corrupt_math_recovery_page(1, ps_off), "main: the hybrid lane owns it"
+    assert not pipe_on._is_corrupt_math_recovery_page(1, ps_on)
+    # A failed scan is unknown, and treated as a scan.
+    ps_off.invisible_text_scan_failed = True
+    assert not pipe_off._is_corrupt_math_recovery_page(1, ps_off)
+
+
+def test_d3_native_retention_of_a_scan_page_ships_error_not_success(tmp_path) -> None:
+    """The D3 floor (unverifiable native table) on a scan page ships the failure marker."""
+    from socr.core.manifest import _select_page_output_tagged
+
+    def ship(scan: bool):
+        pdf = tmp_path / f"d3-{scan}.pdf"
+        doc = fitz.open()
+        doc.new_page().insert_text((54, 72), "text layer long enough to count as native here.")
+        doc.save(pdf)
+        doc.close()
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        p = state.pages[1]
+        p.is_born_digital = True
+        p.native_text = "native body"
+        p.native_table_structure_failed = True
+        p.native_table_unverifiable = True
+        p.has_tables = True
+        p.needs_ocr_enhancement = True
+        p.d3_floor_png_ref = "![p1](figures/p001.png)"
+        p.invisible_text_over_raster = scan
+        native = PageOutput(
+            page_num=1,
+            text="native body",
+            status=PageStatus.WARNING,
+            engine="native",
+            audit_passed=False,
+        )
+        p.attempts.append(native)
+        p.best_output = native
+        return _select_page_output_tagged(state, 1)[0]
+
+    base, scan = ship(False), ship(True)
+    assert base.status.value == "error", "setup: the D3 conjunction ships ERROR on main"
+    assert scan.status == base.status
+    assert scan.status.value != "success"
+    assert scan.failure_mode == base.failure_mode
