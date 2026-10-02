@@ -444,6 +444,13 @@ def test_e2e_chart_asset_page_with_a_hit_is_demoted_too(tmp_path, monkeypatch) -
     assert side_on["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert on.status is not DocumentStatus.SUCCESS
     assert "0.12" in _page_text(tmp_path, "f_on")
+    # The audit event names the lane that actually shipped (cubic P3 on #946).
+    import json
+
+    audit = "".join(f.read_text() for f in sorted((tmp_path / "out-f_on").rglob("*audit*.json")))
+    events = json.loads(audit)["events"] if audit.strip().startswith("{") else []
+    retained = [e for e in events if e["kind"] == "native_minus_as_digit_retained"]
+    assert retained and all(e["engine"] == "chart_asset" for e in retained)
 
 
 def test_retained_event_names_the_real_reason(tmp_path, monkeypatch) -> None:

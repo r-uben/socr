@@ -14744,7 +14744,11 @@ class UnifiedPipeline:
                     AuditEvent(
                         page_num=n,
                         kind="native_minus_as_digit_retained",
-                        engine="native",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages[n].best_output
+                            else "native"
+                        ),
                         detail="native text reads a minus sign as the digit 2 (or the scan "
                         "for that failed) and no OCR read replaced it ("
                         + (
