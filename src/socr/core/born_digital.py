@@ -2379,6 +2379,9 @@ class PageAssessment:
     #: repair (``glyph_recovery.count_minus_as_digit_hits``). Non-zero routes the page
     #: off the trusted-native lane to OCR; nothing is dropped.
     minus_as_digit_hits: int = 0
+    #: #913: the scan raised, so whether the page has the defect is UNKNOWN. Treated
+    #: exactly as a hit (fail closed): a wrong number is worse than a missing one.
+    minus_as_digit_scan_failed: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: GH-371: zero-based ordinals of separator-bearing table regions whose
     #: per-region geometry verifier hard-failed.  The ordinal is relative to
@@ -3293,14 +3296,21 @@ class BornDigitalDetector:
         # different positive number. Route the page to a model read. "2" must occur in
         # the text for a hit to exist, so the span walk is skipped on pages without one.
         minus_as_digit_hits = 0
+        minus_as_digit_scan_failed = False
         if "2" in raw_text:
             try:
                 minus_as_digit_hits = count_minus_as_digit_hits(page)
             except Exception:
+                # Fail closed: an unreadable span walk is "unknown", not "clean".
                 logger.warning("#913: minus-as-digit scan failed", exc_info=True)
-        if minus_as_digit_hits:
+                minus_as_digit_scan_failed = True
+        if minus_as_digit_hits or minus_as_digit_scan_failed:
             needs_ocr_enhancement = True
-            notes.append(f"{minus_as_digit_hits} minus sign(s) extracted as the digit 2 -> OCR")
+            notes.append(
+                f"{minus_as_digit_hits} minus sign(s) extracted as the digit 2"
+                + (" (scan failed: unknown)" if minus_as_digit_scan_failed else "")
+                + " -> OCR"
+            )
 
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
@@ -3498,6 +3508,7 @@ class BornDigitalDetector:
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             minus_as_digit_hits=minus_as_digit_hits,
+            minus_as_digit_scan_failed=minus_as_digit_scan_failed,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             orphan_word_drops=orphan_word_drops,
