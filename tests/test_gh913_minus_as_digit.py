@@ -370,6 +370,12 @@ def test_detector_counts_a_two_followed_by_dot_five(tmp_path: Path) -> None:
 
 def test_e2e_native_only_with_a_raising_detector_is_demoted_too(tmp_path, monkeypatch) -> None:
     """Unknown is not clean: a failed scan under --native-only demotes like a hit."""
+    off, _ = _e2e(
+        tmp_path, "e_off", monkeypatch, provider=True, native_only=True, detector="neutralised"
+    )
+    assert (
+        _sidecar(tmp_path, "e_off")["status"] == "success" and off.status is DocumentStatus.SUCCESS
+    )
     on, _ = _e2e(tmp_path, "e_on", monkeypatch, provider=True, native_only=True, detector="raising")
     side = _sidecar(tmp_path, "e_on")
     assert side["status"] == "warning"
