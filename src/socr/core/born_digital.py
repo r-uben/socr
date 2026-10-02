@@ -25,7 +25,7 @@ from pathlib import Path
 
 import fitz
 
-from socr.core.glyph_recovery import GlyphRepairReport
+from socr.core.glyph_recovery import GlyphRepairReport, count_minus_as_digit_hits
 from socr.core.pdf import apply_glyph_recovery, open_pdf
 
 logger = logging.getLogger(__name__)
@@ -2375,6 +2375,10 @@ class PageAssessment:
     #: cannot be clean while its font is not. A log line alone reaches nothing
     #: that ships, which is the same gap #136 was filed for.
     has_unrecovered_symbol_glyphs: bool = False
+    #: #913: places where a minus sign still extracts as the digit ``2`` after #217's
+    #: repair (``glyph_recovery.count_minus_as_digit_hits``). Non-zero routes the page
+    #: off the trusted-native lane to OCR; nothing is dropped.
+    minus_as_digit_hits: int = 0
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: GH-371: zero-based ordinals of separator-bearing table regions whose
     #: per-region geometry verifier hard-failed.  The ordinal is relative to
@@ -3285,6 +3289,19 @@ class BornDigitalDetector:
         has_complex_content = has_tables or has_figures or has_equations
         needs_ocr_enhancement = has_corrupt_math
 
+        # #913: a minus read as "2" survives #217's repair on some fonts and ships as a
+        # different positive number. Route the page to a model read. "2" must occur in
+        # the text for a hit to exist, so the span walk is skipped on pages without one.
+        minus_as_digit_hits = 0
+        if "2" in raw_text:
+            try:
+                minus_as_digit_hits = count_minus_as_digit_hits(page)
+            except Exception:
+                logger.warning("#913: minus-as-digit scan failed", exc_info=True)
+        if minus_as_digit_hits:
+            needs_ocr_enhancement = True
+            notes.append(f"{minus_as_digit_hits} minus sign(s) extracted as the digit 2 -> OCR")
+
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
         # suspect so it is never silently relied on.
@@ -3480,6 +3497,7 @@ class BornDigitalDetector:
             needs_ocr_enhancement=needs_ocr_enhancement,
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
+            minus_as_digit_hits=minus_as_digit_hits,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             orphan_word_drops=orphan_word_drops,

@@ -1895,6 +1895,28 @@ class UnifiedPipeline:
                     )
                 )
 
+        # #913: a minus sign still extracted as the digit "2" after #217's repair.
+        # born_digital.py already set ``needs_ocr_enhancement``, which routes the page
+        # to a model read; this makes the reason visible. Recomputed from the PDF on
+        # every run (analyze always runs), so it is deliberately NOT in
+        # ``_RESUME_REPLAYED``: replaying it as well would double-count.
+        for pa in assessment.pages:
+            n_minus = int(getattr(pa, "minus_as_digit_hits", 0) or 0)
+            if n_minus:
+                state.events.append(
+                    AuditEvent(
+                        page_num=pa.page_num,
+                        kind="minus_extracted_as_digit",
+                        engine="native",
+                        detail=(
+                            f"{n_minus} minus sign(s) in the native text layer extract as "
+                            "the digit 2 (a negative value would read as a different "
+                            "positive one); page routed to OCR, no content dropped"
+                        ),
+                        data={"hits": n_minus},
+                    )
+                )
+
         # TICKET-A1b (#634): cache native words for every page detection found
         # at least one table on, so S1 selection can call
         # ``row_corroboration.corroborate_rows`` before the structure-class
