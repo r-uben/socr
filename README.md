@@ -177,7 +177,7 @@ output/<doc_stem>/
 ├── metadata.json        # document status and notes
 ├── pages/               # NNNNN.md body + NNNNN.json sidecar per page (resume ledger)
 ├── manifest.json        # replay record; blobs in cache/
-├── cache/               # content-addressed blobs for replay (with --write-manifest)
+├── cache/               # content-addressed blobs the manifest points to
 ├── audit_log.json       # notable events of the run
 ├── tables_trust.json    # pages with doubtful tables (absent = none)
 ├── figures/             # images the text links to
