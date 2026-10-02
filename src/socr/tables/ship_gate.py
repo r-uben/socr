@@ -104,6 +104,7 @@ from socr.tables.reconstruct import (
     _NUM_TOKEN_RE,
     _NUMERIC_RE,
     _SIGN_GLYPHS,
+    _median_word_gap,
     detached_sign_pairs,
 )
 
@@ -824,8 +825,6 @@ def _run_count(inside: list[Word], unit: float | None) -> int:
     in the page's own ``_median_word_gap`` unit): words closer than that belong to one
     heading, wider gaps separate headings. ``0`` when the page has no measurable word gap.
     """
-    from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
-
     if unit is None or not inside:
         return 0
     return 1 + sum(

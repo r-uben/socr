@@ -48,20 +48,68 @@ counted to presence, M4 K unbounded, M5 K halved, M6 wiring dropped, M7 rows at/
 row scanned, M8 run test inverted. All 8 killed. M3 and M7 first survived and prompted two tests
 (a word printed twice, a run below the data).
 
-## Existing gate fixtures (deviation)
+## Round 2 (Astra, PR #944): spacing-evidence policy
 
-First full run: 88 failures in `test_gh916_native_ship_gate`, `test_gh917_gate_direction_header`,
-`test_gh917_text_in_numeric_column`. Those synthetic pages put each row on one text line and carry no
-prose, so the column pitch is the only gap `_median_word_gap` can measure and every header row reads as
-one run. A real page's word space comes from its body text (the 127-page census confirms the
-predicate behaves on real pages). Giving every cell its own line broke the sign tests (they pair by
-`(block, line)`). Fix: a `no_prose_in_header` fixture in `tests/native_table_fixtures.py`, applied
-through `pytestmark` to those three modules; `prose_in_header` has its own file with a prose baseline.
+Round 1 took the page's median same-line gap from every word on the page. That is wrong twice over.
+A PDF that prints whole table rows as one line, or a table-only page, makes the column pitch the
+"word space", so a real multi-column header reads as one run. And the gh916/gh917 synthetic grids
+(no prose) fired on 88 tests, which round 1 hid behind a blanket opt-out fixture. Round 1's claim
+that a real page gets its word space from body prose was an assumption, not a measurement. It is
+removed.
+
+Policy (`_page_word_space`, a helper any predicate can use for the page's ordinary word space):
+- the median same-line gap is measured ONLY on text lines outside every table's vertical extent
+  (core rows less/plus the outward reach of `_PANEL_GAP_ROWS` pitches, the reach `data_row_missing`
+  and `header_band_missing` already use);
+- ABSTAIN unless at least `_MIN_SPACING_LINES` such lines carry a gap. That constant is
+  `_PLACEHOLDER_MIN_ROWS` (2): a repeat is evidence, one line is not. No new empirical constant;
+- words without block/line indices (5-tuples) are skipped, so the predicate abstains and never turns
+  a page into `gate_error` (round 1 had replaced `direction_unavailable` with `gate_error` there).
+
+The blanket `no_prose_in_header` fixture is deleted and no test opts out of the predicate. The
+gh916/gh917 modules pass UNMOCKED (162 passed with `test_gh936`), because those grids have no text
+outside the table.
+
+### Measured exposure (frozen inputs.pkl, 127 pages; trees extracted from the commits)
+
+- Spacing evidence on 65 pages; 59 abstain for lack of it; 3 have no table geometry. The abstain
+  rate is large: most of the census is table-heavy extracts or the Fama appendix.
+- `prose_in_header` fires on 16 pages (round 1: 31). Every other predicate's set is identical to
+  main on all 127 pages, so 0 removals, and identical to main d8dc9b1 (#942's
+  `header_band_missing` included).
+- SHIP to DEFER, same 6 against main 0567718 and d8dc9b1 (round 1: 11):
+  - real, kept: Fama 733, Herskovic 29, Mendoza-Fernandez 60;
+  - deferrable, kept: Fama 728;
+  - false, kept: Kim-Muhn-Nikolaev 52, Stock-Watson 44.
+- Lost versus round 1: Binsbergen 57 (false); Fama lift pages 368, 562, 782, 792 (already
+  `action=defer`, not gate decisions); ten pages that already DEFER on another predicate (Fama
+  46/427/561/570/590/592/780, Bybee 67, Theodoridis 371/1203). All lost for lack of evidence.
+- The policy keeps the three real catches and drops one false DEFER. The exposure it accepts: a
+  defective header on a page with fewer than two outside-table text lines ships, as it did before
+  this ticket.
+
+### #942 composition
+
+Rebased onto d8dc9b1. #942's `header_band_missing` is untouched: it keeps its all-words
+`_median_word_gap` (the first commit had dropped that import in a silent merge; restored). Its census
+set is identical. Moving its run clause to `_page_word_space` would stop whole-row-line pages from
+over-splitting there, but that changes #942's behaviour and is not done here.
+
+### Tests (`tests/test_gh936_prose_in_header.py`, 17)
+
+Round 1's 12 plus `TestSpacingEvidence`: a table-only page with a caption run abstains, and the same
+page with prose fires; whole-row-line layout is quiet with and without a caption, and is judged by the
+outside prose when there is some; one prose line is not evidence and two are; 5-field words abstain
+without `gate_error`. Rotated integration case: NOT added. The existing rotated native-table tests in
+gh916 run unmocked and pass (table-only words, so the abstain path), but no test drives a rotated
+page with prose plus a header caption through `plan_native_table`.
+
+Mutations (external copy of src, tests, pyproject, `socr.__file__` canary, uncapped anchor
+`count == 1`, clean baseline): round 1's eight plus M9 no evidence floor, M10 in-table lines count as
+evidence, M11 five-field words not skipped. All 11 killed.
 
 ## Suite
 
-Full suite, default OLLAMA_HOST, one run: 6089 passed, 2 skipped, 4 xfailed, 1 failed
-(`test_gh713_round2_credential_lifecycle::test_restored_credentialed_page_reassembles_byte_identically`,
-`assert None is not None`). It passes alone (11 passed) and the file does not touch the ship gate;
-treated as an order/time flake of the 75-minute run, not rerun in full. `uvx ruff@0.16.0 format
---check .` clean.
+Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed, 2 skipped,
+4 xfailed, 0 failed. Round 1's single failure (`test_gh713_round2...`) did not recur.
+`uvx ruff@0.16.0 format --check .` clean.
