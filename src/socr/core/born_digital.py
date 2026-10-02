@@ -2473,6 +2473,12 @@ class PageAssessment:
     #: cells legitimately tile along the reading axis, which is the geometry
     #: the shred predicate reads as damage.
     native_rotated_text_shredded: bool = False
+    #: #881: MuPDF could not LOAD this page (``doc[i]`` raised), so nothing about
+    #: it was assessed. Non-empty is the ONLY signal that the page is a
+    #: placeholder: every other field is its inert default, which would otherwise
+    #: read as "an empty scanned page". The pipeline fails this page, not the
+    #: document.
+    load_error: str = ""
     #: Backward-compatible aggregate set ONLY inside the non-rotated,
     #: has_tables branch of ``_assess_page_signals`` (the structured-extraction
     #: branch, not the refusal branch, and never for non-table pages). It
@@ -2732,7 +2738,23 @@ class BornDigitalDetector:
         with open_pdf(pdf_path, repair=False) as doc:
             self._recover_symbol_fonts(doc, pdf_path)
             for page_idx in range(len(doc)):
-                assessment = self._assess_page(doc[page_idx], page_idx + 1)
+                # #881: one page MuPDF cannot load costs that page, not the
+                # document. Only the LOAD is guarded -- an error inside
+                # ``_assess_page`` is a bug in socr and must stay loud.
+                try:
+                    page = doc[page_idx]
+                except Exception as exc:  # noqa: BLE001 - a damaged page is a finding
+                    pages.append(
+                        PageAssessment(
+                            page_num=page_idx + 1,
+                            is_born_digital=False,
+                            native_text="",
+                            confidence=0.0,
+                            load_error=f"{type(exc).__name__}: {exc}",
+                        )
+                    )
+                    continue
+                assessment = self._assess_page(page, page_idx + 1)
                 pages.append(assessment)
 
             self._mark_unrecovered_glyphs(pages)

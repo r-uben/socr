@@ -3720,11 +3720,17 @@ def _select_page_output_tagged(
     # so both outcomes share ONE return, differing only in which values they carry
     # -- not two returns tagged with the same SelectionProvenance member.
     prose_kept = floor_text != whole_page_marker and bool(native_text.strip())
+    # #881: a page MuPDF could not load has no text because it was never read,
+    # which is a different fact from "every engine failed" and must say so on
+    # the page itself, not only in a log.
+    _load_error = getattr(p, "load_error", "") or ""
     return PageOutput(
         page_num=page_num,
         text=floor_text if prose_kept else whole_page_marker,
         status=PageStatus.ERROR,
         engine="native" if prose_kept else "",
+        failure_mode=FailureMode.UNREADABLE_INPUT if _load_error else FailureMode.NONE,
+        error=f"page could not be loaded: {_load_error}" if _load_error else "",
         audit_passed=False,
     ), SelectionProvenance.NO_TEXT_MARKER
 

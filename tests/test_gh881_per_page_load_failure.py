@@ -1,0 +1,276 @@
+"""GH-881: one page MuPDF cannot load costs that page, not the document.
+
+#871 refuses a PDF none of whose pages load. A PARTIALLY damaged one -- some pages
+load, some raise -- still died with a raw MuPDF traceback out of
+``BornDigitalDetector.detect`` and recorded nothing: every readable page was lost
+along with the bad one.
+
+No real damaged file is available (the one measured corpus file loads no pages and
+is copyrighted), and MuPDF repairs hand-authored page-tree damage differently
+across versions. So page loads are made to raise the exact exception the real file
+produced, for one chosen index, on a real PDF. Everything else is the real
+pipeline.
+
+Pins are DIFFERENCES: the same document run damaged and undamaged, so no
+provider-dependent outcome (the status of a page that needs OCR, the document
+status of a no-provider run) is pinned as an absolute.
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+
+import fitz
+
+from socr.core import providers
+from socr.core.born_digital import BornDigitalDetector
+from socr.core.config import EngineType, PipelineConfig
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
+from socr.pipeline.agentic import AcceptDecision
+from socr.pipeline.orchestrator import UnifiedPipeline
+
+PAGES = 4
+BAD_INDEX = 1  # zero-based: page 2
+BAD_PAGE = BAD_INDEX + 1
+
+
+def _pdf(path: Path) -> Path:
+    doc = fitz.open()
+    for p in range(PAGES):
+        page = doc.new_page()
+        y = 80
+        for _ in range(14):
+            page.insert_text(
+                (60, y), f"Page {p + 1} coefficient 0.082 significant at 1 percent", fontsize=9
+            )
+            y += 16
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@contextmanager
+def _page_load_raises(index: int | None):
+    """Make loading page ``index`` raise MuPDF's format error; ``None`` is a no-op."""
+    if index is None:
+        yield
+        return
+    real_load = fitz.Document.load_page
+    real_get = fitz.Document.__getitem__
+
+    def load_page(self, page_id=0, *a, **kw):
+        if page_id == index:
+            raise fitz.mupdf.FzErrorFormat("format error: non-page object in page tree")
+        return real_load(self, page_id, *a, **kw)
+
+    def getitem(self, i):
+        if i == index:
+            raise fitz.mupdf.FzErrorFormat("format error: non-page object in page tree")
+        return real_get(self, i)
+
+    with (
+        patch.object(fitz.Document, "load_page", load_page),
+        patch.object(fitz.Document, "__getitem__", getitem),
+    ):
+        yield
+
+
+class _YesJudge:
+    def assess(self, output, provider):
+        return AcceptDecision(accept=True, reason="stub")
+
+
+def _pipeline(**overrides) -> UnifiedPipeline:
+    cfg = PipelineConfig(
+        agentic=True,
+        quiet=True,
+        **overrides,
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
+    )
+    pipe = UnifiedPipeline(cfg)
+    # CI has no ollama and no provider: pin every ambient dependency.
+    pipe._available_engines_for_agentic = lambda: [providers.PROFILE_QWEN_LOCAL]
+    pipe._build_page_judge = lambda state: _YesJudge()
+    pipe._resolve_judge_model = lambda: ""
+    pipe._resolve_crop_vlm_model = lambda: None
+    pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase, profile=None, **kw: [
+        PageOutput(page_num=p, text=f"ocr {p}", status=PageStatus.SUCCESS, engine="qwen")
+        for p in nums
+    ]
+    return pipe
+
+
+def _run(tmp_path: Path, damaged: int | None, name: str):
+    pdf = _pdf(tmp_path / f"{name}.pdf")
+    out = tmp_path / f"out_{name}"
+    pipe = _pipeline()
+    with _page_load_raises(damaged):
+        result = pipe.process(pdf, output_dir=out)
+    return pipe, pdf, out, result
+
+
+def _doc_dir(out: Path) -> Path:
+    cands = [p for p in out.rglob("pages") if p.is_dir()]
+    assert len(cands) == 1, cands
+    return cands[0].parent
+
+
+def _sidecar(doc_dir: Path, n: int) -> dict:
+    return json.loads((doc_dir / "pages" / f"{n:05d}.json").read_text())
+
+
+# --------------------------------------------------------------------------
+# detection
+# --------------------------------------------------------------------------
+
+
+def test_detect_assesses_every_other_page_and_marks_the_bad_one(tmp_path):
+    pdf = _pdf(tmp_path / "d.pdf")
+    with _page_load_raises(BAD_INDEX):
+        assessment = BornDigitalDetector().detect(pdf)
+    assert [p.page_num for p in assessment.pages] == list(range(1, PAGES + 1))
+    bad = assessment.pages[BAD_INDEX]
+    assert "non-page object in page tree" in bad.load_error
+    others = [p for i, p in enumerate(assessment.pages) if i != BAD_INDEX]
+    assert all(p.load_error == "" for p in others)
+    assert all(p.is_born_digital and p.native_text for p in others)
+    # The placeholder is inert: it must not read as a real (empty scanned) page.
+    assert not bad.is_born_digital and bad.native_text == ""
+
+
+def test_detect_on_an_undamaged_document_sets_no_load_error(tmp_path):
+    assessment = BornDigitalDetector().detect(_pdf(tmp_path / "ok.pdf"))
+    assert all(p.load_error == "" for p in assessment.pages)
+
+
+# --------------------------------------------------------------------------
+# the document survives, the page fails, and it says so at every level
+# --------------------------------------------------------------------------
+
+
+def test_the_other_pages_are_processed_and_the_bad_page_is_failed(tmp_path):
+    _, _, out_bad, bad = _run(tmp_path, BAD_INDEX, "bad")
+    _, _, out_ok, ok = _run(tmp_path, None, "ok")
+    dd_bad, dd_ok = _doc_dir(out_bad), _doc_dir(out_ok)
+
+    # The difference: the same document, damaged or not. Without the per-page
+    # catch the damaged run raised out of _phase_analyze and wrote nothing.
+    assert bad.status is not DocumentStatus.SUCCESS
+    assert bad.status is not ok.status
+
+    # Every undamaged page is byte-for-byte what the undamaged run produced.
+    for n in range(1, PAGES + 1):
+        if n == BAD_PAGE:
+            continue
+        assert (dd_bad / "pages" / f"{n:05d}.md").read_bytes() == (
+            dd_ok / "pages" / f"{n:05d}.md"
+        ).read_bytes()
+
+    # The bad page: FAILED, with the specific mode, on its own sidecar.
+    side = _sidecar(dd_bad, BAD_PAGE)
+    assert side["status"] == PageStatus.ERROR.value
+    assert side["failure_mode"] == FailureMode.UNREADABLE_INPUT.value
+    assert "non-page object in page tree" in json.dumps(side)
+    assert f"[page {BAD_PAGE} failed:" in (dd_bad / "pages" / f"{BAD_PAGE:05d}.md").read_text()
+
+    # Control: the same page, undamaged, is not failed.
+    assert _sidecar(dd_ok, BAD_PAGE)["failure_mode"] != FailureMode.UNREADABLE_INPUT.value
+
+
+def test_the_failure_reaches_document_status_metadata_and_the_final_markdown(tmp_path):
+    _, pdf, out, result = _run(tmp_path, BAD_INDEX, "bad")
+    dd = _doc_dir(out)
+
+    assert result.status is not DocumentStatus.SUCCESS
+
+    meta = json.loads((dd / "metadata.json").read_text())
+    print(json.dumps(meta, indent=1)[:3000])
+    assert meta["status"] != "completed"
+
+    md = (dd / f"{pdf.stem}.md").read_text()
+    assert md.count("## Page ") == PAGES  # marker balance: no page header lost
+    assert f"[page {BAD_PAGE} failed:" in md
+
+    # document-level error and audit trail name the CAUSE, not just "no output"
+    assert FailureMode.UNREADABLE_INPUT.value in (result.error or "")
+    assert FailureMode.UNREADABLE_INPUT.value in (meta.get("error") or "")
+    audit = (dd / "audit_log.json").read_text()
+    assert "page_unloadable" in audit and "page_failed" in audit
+
+
+def test_an_undamaged_document_is_unchanged(tmp_path):
+    """Control: no load error anywhere means no unreadable_input anywhere."""
+    _, pdf, out, result = _run(tmp_path, None, "ok")
+    dd = _doc_dir(out)
+    for n in range(1, PAGES + 1):
+        assert _sidecar(dd, n)["failure_mode"] != FailureMode.UNREADABLE_INPUT.value
+    md = (dd / f"{pdf.stem}.md").read_text()
+    assert md.count("## Page ") == PAGES
+    assert "failed:" not in md
+
+
+# --------------------------------------------------------------------------
+# resume: a FAILED page is never terminal-skipped
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_page_is_never_restored_from_the_ledger(tmp_path):
+    """The per-page ledger accepts only SUCCESS. Control: a good page of the same
+    run IS restored, so "not restored" cannot pass because the ledger is inert."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pipe, pdf, out, _ = _run(tmp_path, BAD_INDEX, "bad")
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=PAGES, page_count_known=True))
+    # Same pipeline instance: the ledger compares the run fingerprint it wrote.
+    assert pipe._load_terminal_page(state, BAD_PAGE, out) is None
+    restored = [n for n in range(1, PAGES + 1) if pipe._load_terminal_page(state, n, out)]
+    assert restored, "control: no page at all was restorable, so the check above is vacuous"
+    assert BAD_PAGE not in restored
+
+
+def test_a_repaired_page_is_re_read_on_a_forced_rerun(tmp_path):
+    _, pdf, out, first = _run(tmp_path, BAD_INDEX, "bad")
+    dd = _doc_dir(out)
+    assert first.status is not DocumentStatus.SUCCESS
+
+    # The same bytes fail identically, so the document gate treats a PARTIAL result
+    # as final (``_resume_skippable``); a forced rerun with the page now loading must
+    # re-read it rather than restore its FAILED sidecar.
+    _pipeline(reprocess=True).process(pdf, output_dir=out)
+    assert _sidecar(dd, BAD_PAGE)["failure_mode"] != FailureMode.UNREADABLE_INPUT.value
+    assert "failed:" not in (dd / f"{pdf.stem}.md").read_text()
+
+
+def test_the_native_word_cache_does_not_trip_over_the_bad_page(tmp_path, caplog):
+    """The words cache opens every non-born-digital page. The placeholder is one,
+    and reading it raised -- costing every later page its words, logged only."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _run(tmp_path, BAD_INDEX, "bad")
+    assert not [r for r in caplog.records if "failed to cache native words" in r.getMessage()]
+
+
+def test_partial_damage_keeps_the_declared_page_count(tmp_path, monkeypatch):
+    """``DocumentHandle`` counts through a repairing open that can report FEWER pages
+    than declared on a damaged tree, which would drop the bad pages from the state
+    so they could never be recorded as failed. Control: an undamaged document keeps
+    the ordinary path."""
+    from socr.core.document import DocumentHandle
+
+    pdf = _pdf(tmp_path / "p.pdf")
+    monkeypatch.setattr(
+        DocumentHandle,
+        "from_path",
+        classmethod(lambda cls, path: cls(path=path, page_count=1, page_count_known=True)),
+    )
+    pipe = _pipeline()
+    with _page_load_raises(BAD_INDEX):
+        assert pipe._document_handle_for(pdf).page_count == PAGES
+    assert pipe._document_handle_for(pdf).page_count == 1
