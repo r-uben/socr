@@ -130,26 +130,29 @@ class TestRunClause:
         assert two.action == SHIP and two.faults == ()
         assert three.action == DEFER
 
-    def test_run_gap_is_the_aligned_run_constant_in_word_spaces(self) -> None:
-        # Widen each heading's inner gap to just under / just over K word spaces.
-        def page(inner_gap: float):
-            words = _words(ROWS, y_start=FIRST) + _prose()
-            for i in range(3):
-                first = _word(COL_XS[1 + i], BAND_Y, "Net", 300 + i, 0)
-                words += [first, _word(first[2] + inner_gap, BAND_Y, "Sales", 300 + i, 1)]
-            return words
+    @pytest.mark.parametrize(
+        ("inner_gap", "action"),
+        [(0.5, SHIP), (WORD_SPACE, SHIP), (ALIGNED_RUN_GAP_MAX_WORD_SPACES * WORD_SPACE, SHIP)]
+        + [(ALIGNED_RUN_GAP_MAX_WORD_SPACES * WORD_SPACE + 0.5, DEFER)],
+    )
+    def test_run_gap_bound_is_exclusive_at_k_median_word_gaps(
+        self, inner_gap: float, action: str
+    ) -> None:
+        # Two two-word headings: one run each while the inner gap is within K x median word
+        # gap (2 runs, below the floor: ships), two runs each once it is wider (4 runs: fires).
+        words = _words(ROWS, y_start=FIRST) + _prose()
+        for i in range(2):
+            first = _word(COL_XS[1 + i], BAND_Y, "Net", 300 + i, 0)
+            words += [first, _word(first[2] + inner_gap, BAND_Y, "Sales", 300 + i, 1)]
+        assert ship_gate._median_word_gap(words) == WORD_SPACE
+        assert _plan(words).action == action
 
-        # a heading whose two words are K word spaces apart is 2 runs per heading: 6 runs
-        wide = _plan(page(ALIGNED_RUN_GAP_MAX_WORD_SPACES * WORD_SPACE + 1.0))
-        assert wide.action == DEFER
-        # inner gap at the bound is still one heading: 3 runs, which fires too, so the
-        # difference is carried by the floor test above; here pin the split count itself.
-        row = sorted(
-            (w for w in page(WORD_SPACE) if round(w[1]) == round(BAND_Y)), key=lambda w: w[0]
-        )
-        assert ship_gate._run_count(row, WORD_SPACE) == 3
-        loose = ship_gate._run_count(row, WORD_SPACE / 100)
-        assert loose == len(row)
+    def test_run_count_splits_only_strictly_above_the_bound(self) -> None:
+        row = [_word(0.0, 0.0, "ab", 0, 0), _word(10.0 + CHAR_W * 2, 0.0, "cd", 0, 1)]
+        bound = ALIGNED_RUN_GAP_MAX_WORD_SPACES * WORD_SPACE
+        assert row[1][0] - row[0][2] == bound
+        assert ship_gate._run_count(row, WORD_SPACE) == 1
+        assert ship_gate._run_count(row, WORD_SPACE - 0.01) == 2
 
 
 class TestControls:
@@ -162,7 +165,7 @@ class TestControls:
     def test_a_caption_left_out_is_one_run_and_stays_quiet(self) -> None:
         words = _words(ROWS, y_start=FIRST) + _prose()
         x = COL_XS[0]
-        for i, text in enumerate(["Table", "3.", "Forecast", "errors", "by", "horizon"]):
+        for i, text in enumerate(["Table", "Forecast", "errors", "by", "horizon"]):
             w = _word(x, BAND_Y, text, 310, i)
             words.append(w)
             x = w[2] + WORD_SPACE
