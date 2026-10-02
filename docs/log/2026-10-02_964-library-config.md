@@ -72,3 +72,14 @@ listed ~355 papers. Now:
 - tests: legacy fixture (no status + curated entry + marker), clear-only-when-processed-clean,
   processed-but-still-partial. Mutants in an external copy (all fail the suite): drop the union
   (2 failed), clear every curated entry (2), legacy->unverified (2), ignore marker (1).
+
+## Amendment 2: data-safety review (PR #966)
+
+- Lock: `flock` (LOCK_EX|LOCK_NB) on `<index.dir>/.library.lock` for the whole non-dry run; released by the OS on a crash, so no stale-lock cleanup. Dry-run takes no lock and writes nothing.
+- Index writes: `mkstemp` in the same dir, fsync, `os.replace`; refuse a symlinked target or temp.
+- `unverified.txt` unreadable (I/O or non-UTF-8) raises before any index file is written. Absent is empty.
+- Config: index file names (plus the lock and journal names) distinct case-insensitively. pdf/text/index/archive/staging pairwise equal-or-nested is rejected after `resolve()` (symlink aliases count). This forced the default staging out of `index.dir` (nesting is now rejected): default is `<root>/.socr-staging` (named constant `DEFAULT_STAGING_NAME`), validated like every other dir.
+- New papers: process into staging, then `install_staged` (no-replace rename, requires `{stem}.md`). Exception, missing markdown or existing leftovers => FAILED/BLOCKED, text/ untouched, exit 1. A completed run with status partial/failed IS installed and shows up in unverified.txt via its metadata status (a run whose metadata carries no status would be `unknown`; the pipeline always writes one).
+- Promotion: journal written before the two renames, removed after; `recover_promotion` runs first under the lock and rolls forward (never leaves text absent); unreadable or inconsistent journal aborts. Archive name is chosen under the lock.
+- Stem collisions: `check_stem_collisions` (casefold) refuses before any work, including dry-run.
+- Tests: 72 in `tests/test_gh964_library.py`. Mutants in an external copy, each fails the suite: lock, curated-read abort, symlink checks (individually redundant, both removed: 1 failed), unique temp, distinct names, case-insensitive names, dir overlap, resolve-before-compare, staging-first, install requires markdown, journal recovery, journal written, no-replace rename, collision preflight, never-overwrite, archive rmtree, promote refusal, curated union.

@@ -115,7 +115,7 @@ def test_load_resolves_relative_to_root_and_expands_tilde(tmp_path, monkeypatch)
     assert cfg.text_dir == tmp_path / "lib" / "text"
     assert cfg.manifest == tmp_path / "lib" / "index" / "manifest.json"
     assert cfg.archive_dir == tmp_path / "lib" / "archive"
-    assert cfg.staging_dir == tmp_path / "lib" / "index" / lib.DEFAULT_STAGING_NAME
+    assert cfg.staging_dir == tmp_path / "lib" / lib.DEFAULT_STAGING_NAME
     assert cfg.rclone_remote == "gdrive:papers"
 
 
@@ -199,9 +199,11 @@ def test_new_pdf_is_processed_into_text(tmp_path):
     todo, blocked = lib.pending_pdfs(cfg)
     assert [p.stem for p in todo] == ["a"] and blocked == []
     calls: list = []
-    lib.process_new(cfg, _fake_process(calls), todo)
-    assert calls == [("a", cfg.text_dir)]
+    out = lib.process_new(cfg, _fake_process(calls), todo)
+    assert calls == [("a", cfg.staging_dir)]  # processed in staging, then moved
+    assert [(s, st) for s, st, _ in out] == [("a", lib.INSTALLED)]
     assert (cfg.text_dir / "a" / "a.md").is_file()
+    assert not (cfg.staging_dir / "a").exists()
 
 
 def test_existing_text_dir_is_not_even_listed(tmp_path):
@@ -414,7 +416,7 @@ def test_index_write_is_atomic(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         lib.refresh_index(cfg)
     assert cfg.missing_text.read_text() == "old\n"
-    assert ("missing_text.txt.tmp", "missing_text.txt") in seen
+    assert seen and not list(cfg.index_dir.glob("*.tmp"))  # no stray temp files
 
 
 # --- CLI, real pipeline with a pinned engine -----------------------------
@@ -562,4 +564,252 @@ def test_cli_uses_the_batch_pipeline_entry(tmp_path, hermetic, monkeypatch):
 
     monkeypatch.setattr(UnifiedPipeline, "process", spy)
     assert _run("--config", str(cfg_path)).exit_code == 0
-    assert seen == [("a.pdf", cfg.text_dir, cfg.pdf_dir)]
+    assert seen == [("a.pdf", cfg.staging_dir, cfg.pdf_dir)]
+
+
+# --- GH-964 review: data-safety guards ------------------------------------
+
+
+def test_second_instance_refuses(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _pdf(cfg.pdf_dir / "a.pdf")
+    with lib.library_lock(cfg):
+        with pytest.raises(lib.LibraryError, match="another"):
+            with lib.library_lock(cfg):
+                pass
+        res = _run("--config", str(cfg_path))
+        assert res.exit_code != 0 and "another" in res.output
+        assert not cfg.text_dir.exists()
+    assert _run("--config", str(cfg_path)).exit_code == 0  # released on exit
+
+
+def test_unreadable_curated_list_aborts_the_refresh(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    cfg.index_dir.mkdir(parents=True)
+    cfg.unverified.write_bytes(b"\xff\xfe not utf-8 \x80")
+    with pytest.raises(lib.LibraryError, match="curated list"):
+        lib.refresh_index(cfg)
+    assert not cfg.documents.exists() and not cfg.manifest.exists()
+    assert cfg.unverified.read_bytes() == b"\xff\xfe not utf-8 \x80"
+
+
+def test_unreadable_curated_list_aborts_via_cli(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _pdf(cfg.pdf_dir / "a.pdf")
+    cfg.unverified.parent.mkdir(parents=True)
+    cfg.unverified.mkdir()  # a directory where the file should be: unreadable
+    res = _run("--config", str(cfg_path))
+    assert res.exit_code != 0 and "curated list" in res.output
+
+
+def test_index_write_refuses_a_symlink_target(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    cfg.index_dir.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    cfg.missing_text.symlink_to(victim)
+    with pytest.raises(lib.LibraryError, match="symlink"):
+        lib.refresh_index(cfg)
+    assert victim.read_text() == "keep"
+
+
+def test_temp_names_are_unique(tmp_path, monkeypatch):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    names = []
+    real = os.replace
+    monkeypatch.setattr(lib.os, "replace", lambda a, b: (names.append(Path(a).name), real(a, b)))
+    lib.refresh_index(cfg)
+    lib.refresh_index(cfg)
+    assert len(names) == len(set(names)) == 8
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["index"].update(manifest="Same.txt", documents="same.TXT"),
+        lambda d: d["index"].update(documents="a.txt", missing_text="a.txt"),
+        lambda d: d["index"].update(manifest=lib.LOCK_NAME.upper()),
+        lambda d: d["index"].update(unverified=lib.JOURNAL_NAME),
+    ],
+)
+def test_duplicate_or_aliased_index_names_are_rejected(tmp_path, mutate):
+    with pytest.raises(lib.LibraryConfigError, match="same file name"):
+        lib.load_library_config(_write_cfg(tmp_path, mutate))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["archive"].update(dir="text/archive"),  # archive inside text
+        lambda d: d["output"].update(text="index/text"),  # text inside index
+        lambda d: d.update(staging="index/stage"),  # staging inside index
+        lambda d: d.update(staging="text"),  # staging IS text
+        lambda d: d["index"].update(dir=lib.DEFAULT_STAGING_NAME),  # default staging == index
+        lambda d: d["input"].update(pdf="text/pdf"),
+        lambda d: d["archive"].update(dir="."),  # archive is root: contains everything
+    ],
+)
+def test_overlapping_dirs_are_rejected(tmp_path, mutate):
+    with pytest.raises(lib.LibraryConfigError, match="same directory or nest"):
+        lib.load_library_config(_write_cfg(tmp_path, mutate))
+
+
+def test_symlink_alias_overlap_is_rejected(tmp_path):
+    root = tmp_path / "lib"
+    (root / "text").mkdir(parents=True)
+    (root / "alias").symlink_to(root / "text")
+    with pytest.raises(lib.LibraryConfigError, match="same directory or nest"):
+        lib.load_library_config(_write_cfg(tmp_path, lambda d: d["archive"].update(dir="alias")))
+
+
+def test_crash_mid_process_leaves_text_untouched(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    for stem in ("boom", "empty", "ok", "old"):
+        _pdf(cfg.pdf_dir / f"{stem}.pdf")
+    _fake_doc(cfg.text_dir, "old", body="precious")
+    old = _snapshot(cfg.text_dir / "old")
+    good = _fake_process()
+
+    def process(pdf, out_root):
+        if pdf.stem == "boom":
+            _fake_doc(out_root, "boom", body="half")
+            raise RuntimeError("pipeline crashed")
+        if pdf.stem == "empty":  # finished without producing markdown
+            (out_root / "empty").mkdir(parents=True)
+            return good(pdf, out_root / "elsewhere")
+        return good(pdf, out_root)
+
+    todo, _ = lib.pending_pdfs(cfg)
+    out = {s: st for s, st, _ in lib.process_new(cfg, process, todo)}
+    assert out == {"boom": lib.FAILED, "empty": lib.FAILED, "ok": lib.INSTALLED}
+    assert not (cfg.text_dir / "boom").exists() and not (cfg.text_dir / "empty").exists()
+    assert (cfg.staging_dir / "boom" / "boom.md").read_text() == "half"  # leftovers kept
+    assert _snapshot(cfg.text_dir / "old") == old
+    # a retry reports the leftovers instead of overwriting them
+    again = {s: st for s, st, _ in lib.process_new(cfg, process, [cfg.pdf_dir / "boom.pdf"])}
+    assert again == {"boom": lib.BLOCKED}
+
+
+def test_partial_run_is_installed_and_listed_unverified(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "p.pdf")
+    out = lib.process_new(cfg, _fake_process(status="partial"), [cfg.pdf_dir / "p.pdf"])
+    assert out[0][1] == lib.INSTALLED
+    lib.refresh_index(cfg, frozenset({"p"}))
+    assert cfg.unverified.read_text() == "p\n"
+
+
+def test_cli_crash_mid_process_exits_nonzero_text_untouched(tmp_path, hermetic, monkeypatch):
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _pdf(cfg.pdf_dir / "a.pdf")
+
+    def crash(self, *a, **k):
+        raise RuntimeError("model wedged")
+
+    monkeypatch.setattr(UnifiedPipeline, "process", crash)
+    res = _run("--config", str(cfg_path))
+    assert res.exit_code != 0 and "failed a" in res.output
+    assert not (cfg.text_dir / "a").exists()
+    assert cfg.missing_text.read_text() == "a\n"
+
+
+def _staged_promotion(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.text_dir, "a", body="old")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    return cfg
+
+
+def _crash_on_nth_rename(monkeypatch, n):
+    real = lib._rename_noreplace
+    count = {"n": 0}
+
+    def flaky(src, dst):
+        count["n"] += 1
+        if count["n"] == n:
+            raise RuntimeError("simulated crash")
+        return real(src, dst)
+
+    monkeypatch.setattr(lib, "_rename_noreplace", flaky)
+
+
+def test_crash_between_the_two_renames_recovers_from_the_journal(tmp_path, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    _crash_on_nth_rename(monkeypatch, 2)
+    with pytest.raises(RuntimeError):
+        lib.promote(cfg, "a")
+    assert not (cfg.text_dir / "a").exists()  # the dangerous window
+    assert (cfg.index_dir / lib.JOURNAL_NAME).exists()
+    monkeypatch.undo()
+    msg = lib.recover_promotion(cfg)
+    assert msg and "recovered" in msg
+    assert (cfg.text_dir / "a" / "a.md").read_text() == "new"
+    assert len(list(cfg.archive_dir.iterdir())) == 1
+    assert (next(cfg.archive_dir.iterdir()) / "a.md").read_text() == "old"
+    assert not (cfg.index_dir / lib.JOURNAL_NAME).exists()
+    assert lib.recover_promotion(cfg) is None
+
+
+def test_crash_before_any_rename_discards_the_journal(tmp_path, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    _crash_on_nth_rename(monkeypatch, 1)
+    with pytest.raises(RuntimeError):
+        lib.promote(cfg, "a")
+    monkeypatch.undo()
+    assert lib.recover_promotion(cfg)
+    assert (cfg.text_dir / "a" / "a.md").read_text() == "old"
+    assert (cfg.staging_dir / "a" / "a.md").read_text() == "new"
+    assert not (cfg.index_dir / lib.JOURNAL_NAME).exists()
+
+
+def test_cli_recovers_a_journal_before_doing_anything_else(tmp_path, hermetic, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    cfg_path = tmp_path / "config.yaml"
+    _crash_on_nth_rename(monkeypatch, 2)
+    with pytest.raises(RuntimeError):
+        lib.promote(cfg, "a")
+    monkeypatch.undo()
+    res = _run("--config", str(cfg_path))
+    assert res.exit_code == 0, res.output
+    assert "recovered" in res.output
+    assert (cfg.text_dir / "a" / "a.md").read_text() == "new"
+
+
+def test_unreadable_journal_aborts(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    cfg.index_dir.mkdir(parents=True)
+    (cfg.index_dir / lib.JOURNAL_NAME).write_text("{not json")
+    with pytest.raises(lib.LibraryError, match="journal"):
+        lib.recover_promotion(cfg)
+
+
+def test_rename_refuses_an_existing_target(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    with pytest.raises(lib.LibraryError, match="refusing to replace"):
+        lib._rename_noreplace(a, b)
+    assert a.exists() and b.exists()
+
+
+def test_stem_collisions_are_refused(tmp_path, hermetic, monkeypatch):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    # A case-insensitive filesystem cannot hold both files; fake the listing.
+    fake = [cfg.pdf_dir / "Paper.pdf", cfg.pdf_dir / "paper.PDF", cfg.pdf_dir / "z.pdf"]
+    monkeypatch.setattr(lib, "list_pdfs", lambda c: fake)
+    with pytest.raises(lib.LibraryError, match="Paper.pdf / paper.PDF"):
+        lib.check_stem_collisions(cfg)
+    res = _run("--config", str(cfg_path))
+    assert res.exit_code != 0 and "collide" in res.output
+    assert not cfg.text_dir.exists() and not cfg.staging_dir.exists()
+    assert not cfg.index_dir.exists()

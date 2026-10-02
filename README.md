@@ -189,12 +189,25 @@ socr library --promote STEM        # archive the old copy, install the staged on
 
 - A PDF whose text directory exists is never written into. A text directory
   without its markdown is reported and skipped; use `--rerun`.
+- New papers are processed into the staging directory first and moved into
+  `output.text` with a no-replace rename only after the pipeline produced
+  `{stem}.md`. A crash or failure leaves its leftovers in staging (reported, never
+  overwritten) and `output.text` untouched. A finished run with status
+  `partial`/`failed` is installed (best available text) and listed as unverified.
+- One run at a time: an exclusive lock (`.library.lock` in `index.dir`) is held for the
+  whole run; a second run refuses.
 - `--rerun` writes to the staging directory (optional top-level config key
-  `staging`; default `<index.dir>/staging`) and the stem is recorded as
+  `staging`; default `<root>/.socr-staging`) and the stem is recorded as
   `awaiting_approval` in the manifest. A staged run is never overwritten.
 - `--promote` renames the old text directory to `<archive.dir>/<stem>.<YYYY-MM-DD>`
   (a numeric suffix avoids a clash) and the staged one into place. Nothing is
-  deleted. It refuses when nothing is staged.
+  deleted. It refuses when nothing is staged. A journal (`.promote.journal.json` in
+  `index.dir`) brackets the two renames; the next run finishes an interrupted
+  promotion before doing anything else.
+- The config is refused if index file names collide (case-insensitively), if the
+  pdf/text/index/archive/staging directories are equal or nested (compared after
+  symlink resolution), or if two PDFs share a stem case-insensitively.
+- An unreadable `unverified.txt` aborts the index refresh; it is never read as empty.
 - After each run (not `--dry-run`) the index is rewritten atomically:
   `documents` (absolute PDF paths), `missing_text` (stems), `unverified` and
   `manifest` (per-stem `state`: `verified`, `unverified` or `unknown`).

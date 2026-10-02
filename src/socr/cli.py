@@ -1058,55 +1058,73 @@ def library(
     failures: list[str] = []
     processed: set[str] = set()
     try:
-        if promote_stem:
-            if dry_run:
+        lib.check_stem_collisions(cfg)
+        if dry_run:
+            # Read-only: no lock, no recovery, no index.
+            if promote_stem:
                 console.print(f"[dim]would promote {promote_stem} from {cfg.staging_dir}[/dim]")
-                return
-            archived, installed = lib.promote(cfg, promote_stem)
-            processed.add(promote_stem)
-            console.print(f"Installed {installed}")
-            if archived:
-                console.print(f"Old copy archived at {archived}")
-        elif rerun_stem:
-            if dry_run:
+            elif rerun_stem:
                 console.print(f"[dim]would re-process {rerun_stem} into {cfg.staging_dir}[/dim]")
-                return
-            result = lib.rerun(cfg, make_process(True), rerun_stem)
-            if failed(result):
-                failures.append(rerun_stem)
-            console.print(f"{rerun_stem} awaiting approval: socr library --promote {rerun_stem}")
-        else:
-            todo, blocked = lib.pending_pdfs(cfg)
-            for pdf in blocked:
-                console.print(
-                    f"[yellow]Skipped {pdf.stem}:[/yellow] text directory exists without "
-                    f"{cfg.markdown.format(stem=pdf.stem)}; use --rerun {pdf.stem}"
-                )
-            if dry_run:
+            else:
+                todo, blocked = lib.pending_pdfs(cfg)
+                for pdf in blocked:
+                    console.print(f"[yellow]blocked {pdf.stem}:[/yellow] text dir has no markdown")
                 for pdf in todo:
                     console.print(f"would process {pdf}")
                 console.print(f"[dim]{len(todo)} to process, {len(blocked)} blocked[/dim]")
-                return
-            if todo:
-                for stem, result in lib.process_new(cfg, make_process(False), todo):
-                    processed.add(stem)
+            return
+        with lib.library_lock(cfg):
+            note = lib.recover_promotion(cfg)
+            if note:
+                console.print(f"[yellow]{note}[/yellow]")
+            try:
+                if promote_stem:
+                    archived, installed = lib.promote(cfg, promote_stem)
+                    processed.add(promote_stem)
+                    console.print(f"Installed {installed}")
+                    if archived:
+                        console.print(f"Old copy archived at {archived}")
+                elif rerun_stem:
+                    result = lib.rerun(cfg, make_process(True), rerun_stem)
                     if failed(result):
-                        failures.append(stem)
+                        failures.append(rerun_stem)
+                    console.print(
+                        f"{rerun_stem} awaiting approval: socr library --promote {rerun_stem}"
+                    )
+                else:
+                    todo, blocked = lib.pending_pdfs(cfg)
+                    for pdf in blocked:
+                        console.print(
+                            f"[yellow]Skipped {pdf.stem}:[/yellow] text directory exists without "
+                            f"{cfg.markdown.format(stem=pdf.stem)}; use --rerun {pdf.stem}"
+                        )
+                    if todo:
+                        for stem, state, detail in lib.process_new(cfg, make_process(False), todo):
+                            if state == lib.INSTALLED:
+                                processed.add(stem)
+                                if failed(detail):
+                                    failures.append(stem)
+                            else:
+                                failures.append(stem)
+                                console.print(
+                                    f"[red]{state} {stem}:[/red] {detail} "
+                                    "(text/ untouched; leftovers stay in staging)"
+                                )
+            finally:
+                # Reflects what is on disk even after a partial run. A failure
+                # here (e.g. an unreadable curated list) aborts loudly.
+                summary = lib.refresh_index(cfg, frozenset(processed))
+                console.print(
+                    f"Index refreshed: {summary['documents']} documents, "
+                    f"{len(summary['missing_text'])} missing text, "
+                    f"{len(summary['unverified'])} unverified. "
+                    f"Run backup-gdrive to push ({cfg.rclone_remote})."
+                )
     except lib.LibraryError as e:
         raise click.ClickException(str(e))
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         raise click.Abort()
-    finally:
-        # Refresh the index even after a partial run: it reflects what is on disk.
-        if not dry_run:
-            summary = lib.refresh_index(cfg, frozenset(processed))
-            console.print(
-                f"Index refreshed: {summary['documents']} documents, "
-                f"{len(summary['missing_text'])} missing text, "
-                f"{len(summary['unverified'])} unverified. "
-                f"Run backup-gdrive to push ({cfg.rclone_remote})."
-            )
     if failures:
         raise SystemExit(1)
 

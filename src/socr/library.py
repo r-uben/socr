@@ -14,8 +14,11 @@ Safety rules, each enforced in code rather than by convention:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,8 +33,12 @@ DEFAULT_CONFIG_PATH = Path("~/papers/config.yaml")
 #: Optional top-level config key naming the staging directory for ``--rerun``.
 STAGING_KEY = "staging"
 #: Used only when the config has no ``staging`` key: a directory of this name
-#: inside ``index.dir``. Documented in the README; a config key overrides it.
-DEFAULT_STAGING_NAME = "staging"
+#: directly under ``root`` (a sibling of the other library dirs, never nested in
+#: them). Documented in the README; a config key overrides it.
+DEFAULT_STAGING_NAME = ".socr-staging"
+#: Control files kept in ``index.dir``. Index filenames may not collide with them.
+LOCK_NAME = ".library.lock"
+JOURNAL_NAME = ".promote.journal.json"
 
 #: Page statuses that make a document unverified. Anything else (including an
 #: absent or unreadable status) is not evidence of a problem.
@@ -172,7 +179,7 @@ def load_library_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LibraryConfig
     if STAGING_KEY in data:
         staging_dir = _resolve(root, _require_str(data, STAGING_KEY), STAGING_KEY)
     else:
-        staging_dir = index_dir / DEFAULT_STAGING_NAME
+        staging_dir = _resolve(root, DEFAULT_STAGING_NAME, STAGING_KEY)
     remote = _require_str(data, "backup.rclone_remote")
 
     dirs = {
@@ -182,20 +189,33 @@ def load_library_config(path: Path | str = DEFAULT_CONFIG_PATH) -> LibraryConfig
         "archive.dir": archive_dir,
         "staging": staging_dir,
     }
+    # Compare after resolve(): a symlink alias inside root is an overlap too.
+    real = {k: v.resolve() for k, v in dirs.items()}
     names = list(dirs)
     for i, a in enumerate(names):
         for b in names[i + 1 :]:
-            if dirs[a] == dirs[b]:
+            if real[a].is_relative_to(real[b]) or real[b].is_relative_to(real[a]):
                 raise LibraryConfigError(
-                    f"library config: '{a}' and '{b}' resolve to the same directory {dirs[a]}"
+                    f"library config: '{a}' ({dirs[a]}) and '{b}' ({dirs[b]}) are the same "
+                    "directory or nest inside each other"
                 )
-    for inner in ("staging",):
-        for outer in ("input.pdf", "output.text", "archive.dir"):
-            if dirs[inner].is_relative_to(dirs[outer]):
-                raise LibraryConfigError(
-                    f"library config: '{inner}' ({dirs[inner]}) lies inside '{outer}' "
-                    f"({dirs[outer]})"
-                )
+    files = {
+        "index.manifest": manifest,
+        "index.missing_text": missing_text,
+        "index.documents": documents,
+        "index.unverified": unverified,
+        "(lock file)": index_dir / LOCK_NAME,
+        "(promotion journal)": index_dir / JOURNAL_NAME,
+    }
+    seen: dict[str, str] = {}
+    for key, f in files.items():
+        folded = f.name.casefold()
+        if folded in seen:
+            raise LibraryConfigError(
+                f"library config: '{key}' and '{seen[folded]}' resolve to the same file name "
+                f"{f.name!r} (compared case-insensitively)"
+            )
+        seen[folded] = key
 
     return LibraryConfig(
         root=root,
@@ -300,10 +320,23 @@ def staged_stems(cfg: LibraryConfig) -> list[str]:
 
 
 def _atomic_write(path: Path, content: str) -> None:
+    """Unique temp file in the same dir, fsync, then rename over the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    if path.is_symlink():
+        raise LibraryError(f"refusing to write through a symlink: {path}")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if tmp.is_symlink() or path.is_symlink():
+            raise LibraryError(f"refusing to write through a symlink: {path}")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _lines(items: list[str]) -> str:
@@ -311,10 +344,16 @@ def _lines(items: list[str]) -> str:
 
 
 def _read_entries(path: Path) -> set[str]:
+    """Entries of the curated list. Absent is empty; unreadable ABORTS the refresh."""
     try:
-        return {ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()}
-    except OSError:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return set()
+    except (OSError, UnicodeDecodeError) as e:
+        raise LibraryError(
+            f"cannot read the curated list {path} ({e}); index refresh aborted, nothing written"
+        ) from None
+    return {ln.strip() for ln in text.splitlines() if ln.strip()}
 
 
 def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -> dict[str, Any]:
@@ -362,6 +401,44 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
     return {"documents": len(pdfs), "missing_text": missing, "unverified": unverified}
 
 
+# --- locking, preflight --------------------------------------------------
+
+
+@contextmanager
+def library_lock(cfg: LibraryConfig):
+    """Exclusive lock for the whole run (flock: released by the OS if we crash)."""
+    cfg.index_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg.index_dir / LOCK_NAME
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    except OSError as e:
+        raise LibraryError(f"cannot open lock file {path}: {e}") from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LibraryError(
+                f"another 'socr library' run holds {path}; wait for it to finish"
+            ) from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def check_stem_collisions(cfg: LibraryConfig) -> None:
+    """Refuse when two PDFs map to the same stem, case-insensitively."""
+    by_stem: dict[str, list[str]] = {}
+    for pdf in list_pdfs(cfg):
+        by_stem.setdefault(pdf.stem.casefold(), []).append(pdf.name)
+    clashes = sorted(sorted(v) for v in by_stem.values() if len(v) > 1)
+    if clashes:
+        listing = "; ".join(" / ".join(c) for c in clashes)
+        raise LibraryError(
+            f"PDFs collide on the same stem (compared case-insensitively): {listing}. "
+            "Rename one; nothing was processed."
+        )
+
+
 # --- processing ---------------------------------------------------------
 
 #: ``process(pdf, out_root)``: runs one PDF through the pipeline into ``out_root``,
@@ -369,17 +446,64 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
 #: ``UnifiedPipeline.process`` that ``socr batch`` uses.
 ProcessFn = Callable[[Path, Path], Any]
 
+INSTALLED, FAILED, BLOCKED = "installed", "failed", "blocked"
 
-def process_new(cfg: LibraryConfig, process: ProcessFn, pdfs: list[Path]) -> list[tuple[str, Any]]:
-    results = []
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Rename a directory, refusing to touch an existing target.
+
+    Correct only under ``library_lock``: POSIX rename would silently replace an
+    empty directory, and the check-then-rename gap is closed by the lock.
+    """
+    if os.path.lexists(dst):
+        raise LibraryError(f"refusing to replace existing {dst}")
+    os.rename(src, dst)
+
+
+def install_staged(cfg: LibraryConfig, stem: str) -> Path:
+    """Move a finished staged document into text/. Never replaces an existing dir."""
+    src = cfg.staging_dir / stem
+    dst = cfg.text_doc_dir(stem)
+    if not cfg.markdown_path(src, stem).is_file():
+        raise LibraryError(f"{src} has no {cfg.markdown.format(stem=stem)}; not installed")
+    cfg.text_dir.mkdir(parents=True, exist_ok=True)
+    _rename_noreplace(src, dst)
+    return dst
+
+
+def process_new(
+    cfg: LibraryConfig, process: ProcessFn, pdfs: list[Path]
+) -> list[tuple[str, str, Any]]:
+    """Process each new PDF into staging, then move it into text/ if it produced markdown.
+
+    Returns (stem, state, detail) with state INSTALLED / FAILED / BLOCKED. A crash or
+    exception in one paper leaves its leftovers in staging and never touches text/.
+    A run that finishes with status partial/failed but produced markdown IS
+    installed (best available text); the index lists it as unverified.
+    """
+    out: list[tuple[str, str, Any]] = []
     for pdf in pdfs:
-        doc_dir = cfg.text_doc_dir(pdf.stem)
-        # NEVER-OVERWRITE guard: re-checked immediately before the write, not only
-        # when the work list was built.
-        if doc_dir.exists():
-            raise LibraryError(f"refusing to write into existing text directory {doc_dir}")
-        results.append((pdf.stem, process(pdf, cfg.text_dir)))
-    return results
+        stem = pdf.stem
+        # NEVER-OVERWRITE guard, re-checked immediately before processing.
+        if cfg.text_doc_dir(stem).exists():
+            raise LibraryError(
+                f"refusing to write into existing text directory {cfg.text_doc_dir(stem)}"
+            )
+        if (cfg.staging_dir / stem).exists():
+            out.append((stem, BLOCKED, f"leftovers in {cfg.staging_dir / stem}; inspect them"))
+            continue
+        try:
+            result = process(pdf, cfg.staging_dir)
+        except Exception as e:  # leftovers stay in staging
+            out.append((stem, FAILED, f"{type(e).__name__}: {e}"))
+            continue
+        try:
+            install_staged(cfg, stem)
+        except LibraryError as e:
+            out.append((stem, FAILED, str(e)))
+            continue
+        out.append((stem, INSTALLED, result))
+    return out
 
 
 def rerun(cfg: LibraryConfig, process: ProcessFn, stem: str) -> Any:
@@ -395,12 +519,53 @@ def rerun(cfg: LibraryConfig, process: ProcessFn, stem: str) -> Any:
     return process(pdf, cfg.staging_dir)
 
 
+# --- promotion, with a crash journal ---------------------------------------
+
+
+def _journal_path(cfg: LibraryConfig) -> Path:
+    return cfg.index_dir / JOURNAL_NAME
+
+
+def recover_promotion(cfg: LibraryConfig) -> str | None:
+    """Finish an interrupted promotion before anything else. Call under the lock.
+
+    The journal is written before the two renames and removed after. Recovery
+    rolls FORWARD so the live text dir is never left absent. Returns a message
+    when it acted, None when there was no journal.
+    """
+    jp = _journal_path(cfg)
+    if not os.path.lexists(jp):
+        return None
+    try:
+        j = json.loads(jp.read_text(encoding="utf-8"))
+        target, staged = Path(j["target"]), Path(j["staged"])
+        archived = Path(j["archived"]) if j.get("archived") else None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise LibraryError(f"unreadable promotion journal {jp} ({e}); resolve it by hand") from None
+    t, s = os.path.lexists(target), os.path.lexists(staged)
+    a = archived is not None and os.path.lexists(archived)
+    if s and not t and (a or archived is None):
+        os.rename(staged, target)  # the interrupted step: finish it
+        msg = f"recovered interrupted promotion of {j.get('stem')}: installed {target}"
+    elif s and t and a is False and archived is not None:
+        msg = f"discarded journal of a promotion that had not started ({j.get('stem')})"
+    elif t and not s:
+        msg = f"promotion of {j.get('stem')} had completed; cleared its journal"
+    else:
+        raise LibraryError(
+            f"promotion journal {jp} does not match the disk (target={t}, staged={s}, "
+            f"archived={a}); resolve it by hand"
+        )
+    jp.unlink()
+    return msg
+
+
 def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple[Path | None, Path]:
     """Archive the current text dir under a dated name, then install the staged one.
 
-    Returns (archived_path_or_None, installed_path). Nothing is deleted: both
-    steps are renames. If the install fails after the archive step, the old
-    directory is renamed back.
+    Call under ``library_lock`` after ``recover_promotion``. Both steps are renames
+    (nothing is deleted) bracketed by a journal so a crash between them is
+    finished by the next run instead of leaving the text dir absent.
     """
     staged = cfg.staging_dir / stem
     if not (staged.is_dir() and cfg.markdown_path(staged, stem).is_file()):
@@ -411,16 +576,24 @@ def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple
         stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         archived = cfg.archive_dir / f"{stem}.{stamp}"
         n = 1
-        while archived.exists():
+        while os.path.lexists(archived):
             n += 1
             archived = cfg.archive_dir / f"{stem}.{stamp}.{n}"
         cfg.archive_dir.mkdir(parents=True, exist_ok=True)
-        os.rename(target, archived)
-    try:
-        cfg.text_dir.mkdir(parents=True, exist_ok=True)
-        os.rename(staged, target)
-    except OSError:
-        if archived is not None:
-            os.rename(archived, target)
-        raise
+    _atomic_write(
+        _journal_path(cfg),
+        json.dumps(
+            {
+                "stem": stem,
+                "target": str(target),
+                "staged": str(staged),
+                "archived": str(archived) if archived else None,
+            }
+        ),
+    )
+    if archived is not None:
+        _rename_noreplace(target, archived)
+    cfg.text_dir.mkdir(parents=True, exist_ok=True)
+    _rename_noreplace(staged, target)
+    _journal_path(cfg).unlink()
     return archived, target
