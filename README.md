@@ -167,7 +167,41 @@ socr batch <DIR> [OPTIONS]
 socr replay <MANIFEST> [-o OUT]  Rebuild a document from cache (no model calls)
 socr judge-benchmark <DATASET>   Score the judge against labeled good/mangled pages
 socr engines                     Show available engines
+socr library [--config PATH] [--dry-run] [--rerun STEM | --promote STEM]
+                                 Process the papers library from its own config
 ```
+
+### Papers library (`socr library`)
+
+Reads the library's config (default `~/papers/config.yaml`) instead of taking
+paths on the command line. Every path comes from the config: `~` is expanded,
+relative paths resolve against `root`, and a missing key or a path that escapes
+`root` is an error, never a default. The `output.document.*` names must match
+what the pipeline writes (`{stem}.md`, `figures`, `metadata.json`) or the load
+fails.
+
+```
+socr library --dry-run             # list PDFs under input.pdf that have no text yet
+socr library                       # process them into output.text/{stem}/
+socr library --rerun STEM          # re-process an existing paper into staging
+socr library --promote STEM        # archive the old copy, install the staged one
+```
+
+- A PDF whose text directory exists is never written into. A text directory
+  without its markdown is reported and skipped; use `--rerun`.
+- `--rerun` writes to the staging directory (optional top-level config key
+  `staging`; default `<index.dir>/staging`) and the stem is recorded as
+  `awaiting_approval` in the manifest. A staged run is never overwritten.
+- `--promote` renames the old text directory to `<archive.dir>/<stem>.<YYYY-MM-DD>`
+  (a numeric suffix avoids a clash) and the staged one into place. Nothing is
+  deleted. It refuses when nothing is staged.
+- After each run (not `--dry-run`) the index is rewritten atomically:
+  `documents` (absolute PDF paths), `missing_text` (stems), `unverified` (stems
+  whose metadata status is not `completed`, or with any page not `success`/`skipped`)
+  and `manifest` (per-stem status).
+- `backup.rclone_remote` is never read or written. The summary ends with
+  "Run backup-gdrive to push".
+- Exit code is nonzero if any processed document failed or was partial.
 
 ## Output
 
