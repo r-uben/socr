@@ -1261,6 +1261,23 @@ def prose_in_header_faults(
     return faults
 
 
+#: Characters a table cell wraps around a number: parentheses (t-statistics), significance
+#: stars, daggers, a percent sign.
+_CELL_WRAP = "()[]*\u2217\u2020\u2021%"
+#: Cell glyphs standing for "no value".
+_PLACEHOLDER_GLYPHS = frozenset("-\u2013\u2014\u2212")
+
+
+def _is_cell_number(text: str) -> bool:
+    """A source word that is a table cell's number: ``0.073***``, ``(-2.19)``, ``-0.028**``."""
+    bare = text.strip(_CELL_WRAP).lstrip("+-\u2212\u2013")
+    return bool(bare) and (_is_source_number(bare) or (bare[:1] == "." and is_numeric_token(bare)))
+
+
+def _is_placeholder(text: str) -> bool:
+    return bool(text) and set(text) <= _PLACEHOLDER_GLYPHS
+
+
 def geometryless_block_faults(
     blocks: list[Block],
     pairs: list[BlockPairs],
@@ -1290,15 +1307,27 @@ def geometryless_block_faults(
         if not anchors:
             continue
         lanes = _cluster_x_positions([w[0] for _y, ws in anchors for w in ws])
-        wide = [y for y in ys if _lane_count(_numeric_words(src_rows[y]), lanes) >= _MIN_CORE_LANES]
+
+        def table_row(y: int) -> bool:
+            """A multi-column numeric row: only a label may precede the first number."""
+            ws = src_rows[y]
+            first = next((i for i, w in enumerate(ws) if _is_cell_number(w[4])), None)
+            return (
+                first is not None
+                and all(_is_cell_number(w[4]) or _is_placeholder(w[4]) for w in ws[first:])
+                and _lane_count([w for w in ws if _is_cell_number(w[4])], lanes) >= _MIN_CORE_LANES
+            )
+
         region = {y for y, _ws in anchors}
         lo, hi = min(region), max(region)
         for edge, outward in (
-            (lo, sorted((y for y in wide if y < lo), reverse=True)),
-            (hi, sorted(y for y in wide if y > hi)),
+            (lo, sorted((y for y in ys if y < lo), reverse=True)),
+            (hi, sorted(y for y in ys if y > hi)),
         ):
             for y in outward:
-                if abs(y - edge) > reach:
+                # the region is CONTIGUOUS with the block: the first line that is not a
+                # table row (caption, prose, a blank gap past one reach) ends the walk
+                if abs(y - edge) > reach or not table_row(y):
                     break
                 region.add(y)
                 edge = y

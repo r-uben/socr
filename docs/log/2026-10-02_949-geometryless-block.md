@@ -51,3 +51,26 @@ uncapped `count == 1` anchor asserted before every edit, baseline control green:
 ## Follow-up
 
 Beckmann p79 (7 of 39 table lines in the grid, geometry present) is a separate defect.
+
+## Review round (Astra, ACCEPT-WITH-FIXES)
+
+- Region bound: the walk used to extend one reach per hop and count any lane-wide row, so a
+  neighbouring same-column table or a prose line holding years could count. It now walks every
+  source line outward and stops at the first that is not a multi-column numeric row (a label may
+  precede the first number; after it only cell numbers or no-value dashes) or lies beyond one
+  reach. Cell numbers tolerate `(...)`, significance stars, a leading sign (`_is_cell_number`);
+  the first cut without that lost p49 and p50 because the starred and parenthesised rows ended the walk.
+- Census re-run: the 3 liu pages still fire, 0 other fires, 0 removals (append-only).
+- Tests: neighbour-table-behind-a-caption control and prose-with-years control (both quiet, each
+  paired with the firing twin); starred/parenthesised cells extend the region; the monotonicity
+  test now has a pre-existing fault (`direction_unavailable`) and asserts it is kept; the label
+  padding test is renamed to say it pads the OUTPUT.
+- Mutations of the new rule (external copy, baseline 12 green): drop the stop rule 4 failed, drop
+  the reach term 1, accept prose after the first number 1, plain numbers only (no star/paren
+  tolerance) 1; earlier mutants still killed.
+
+## Known limits
+
+- A lone numeric row plus many omitted label-only SOURCE rows stays quiet (region = carried = 1).
+- A neighbouring table with no line between it and the block (gap under one reach, no caption)
+  still counts.
