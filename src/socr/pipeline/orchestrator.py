@@ -1895,6 +1895,48 @@ class UnifiedPipeline:
                     )
                 )
 
+        # #913: a minus sign still extracted as the digit "2" after #217's repair (or the
+        # scan could not run, which is treated the same: unknown is not clean).
+        # born_digital.py already set ``needs_ocr_enhancement``; this records the reason
+        # and what actually happens to the page. Recomputed from the PDF on every run
+        # (analyze always runs), so it is deliberately NOT in ``_RESUME_REPLAYED``:
+        # replaying it as well would double-count.
+        for pa in assessment.pages:
+            n_minus = int(getattr(pa, "minus_as_digit_hits", 0) or 0)
+            scan_failed = bool(getattr(pa, "minus_as_digit_scan_failed", False))
+            if not (n_minus or scan_failed):
+                continue
+            if self.config.native_only:
+                outcome = (
+                    "page RETAINED as native text under --native-only and shipped WARNING "
+                    "(native_minus_as_digit): the values are not verified"
+                )
+            else:
+                outcome = (
+                    "page routed to OCR, no content dropped (if no OCR rung wins, the "
+                    "native text ships WARNING, never clean SUCCESS)"
+                )
+            what = (
+                "the scan for minus signs extracted as the digit 2 FAILED, so the page is "
+                "treated as affected"
+                if scan_failed
+                else f"{n_minus} minus sign(s) in the native text layer extract as the digit "
+                "2 (a negative value reads as a different positive one)"
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="minus_extracted_as_digit",
+                    engine="native",
+                    detail=f"{what}; {outcome}",
+                    data={
+                        "hits": n_minus,
+                        "error": scan_failed,
+                        "native_only": bool(self.config.native_only),
+                    },
+                )
+            )
+
         # TICKET-A1b (#634): cache native words for every page detection found
         # at least one table on, so S1 selection can call
         # ``row_corroboration.corroborate_rows`` before the structure-class
@@ -9974,13 +10016,29 @@ class UnifiedPipeline:
         if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
             ps.rotated_shred_png_ref = chart_png_ref
 
-        chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
+        # #913: this lane ships the native text layer, so a minus read as "2" (or a
+        # failed scan) is shipped here too. Demote by status/failure_mode and keep
+        # ``audit_passed``: it selects the winner, so flipping it would discard the page.
+        # (Reachable only under --native-only: otherwise the hit sets
+        # ``needs_ocr_enhancement`` and the page is not chart-eligible.)
+        minus_suspect = bool(
+            getattr(ps, "minus_as_digit_hits", 0)
+            or getattr(ps, "minus_as_digit_scan_failed", False)
+        )
+        chart_status = (
+            PageStatus.WARNING if (chart_render_failed or minus_suspect) else PageStatus.SUCCESS
+        )
         chart_out = PageOutput(
             page_num=page_num,
             text=chart_body,
             status=chart_status,
             engine="chart_asset",
             audit_passed=not chart_render_failed,
+            failure_mode=(
+                FailureMode.NATIVE_MINUS_AS_DIGIT
+                if minus_suspect and not chart_render_failed
+                else FailureMode.NONE
+            ),
             cost_usd=0.0,
         )
         ps.attempts.append(chart_out)
@@ -14156,6 +14214,28 @@ class UnifiedPipeline:
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
+        # #913: a page whose native text layer reads a minus as the digit "2" (or whose
+        # scan failed) but whose NATIVE text is what ships anyway, with no OCR attempt
+        # to blame -- ``--native-only``. ``native_fallback_pages`` cannot hold it (its
+        # contract is "OCR was tried and never passed", and the native winner here is
+        # still ``audit_passed``, which must stay True: it selects the winner), so the
+        # document would otherwise report SUCCESS over a page the manifest demoted.
+        minus_retained_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and (
+                getattr(p, "minus_as_digit_hits", 0)
+                or getattr(p, "minus_as_digit_scan_failed", False)
+            )
+            and n not in native_fallback_pages
+            and n not in failed_pages
+            and p.best_output
+            and p.best_output.audit_passed
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
+
         # A reconstructed or historical state may contain a whole-document
         # attempt (page_num=0) without per-page winners. Treat a passing one as
         # covering the document for status calculation.
@@ -14269,6 +14349,7 @@ class UnifiedPipeline:
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
+        pages_ok = pages_ok and not minus_retained_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
@@ -14574,6 +14655,7 @@ class UnifiedPipeline:
             or native_fallback_pages
             or d3_floor_pages
             or native_only_distrust_pages
+            or minus_retained_pages
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_floor_pages
@@ -14657,6 +14739,26 @@ class UnifiedPipeline:
             # reader scanning the tail of the audit log (or the CLI summary
             # below) is not left with only the misleading native_fallback
             # phrasing for these pages.
+            for n in minus_retained_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_minus_as_digit_retained",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages[n].best_output
+                            else "native"
+                        ),
+                        detail="native text reads a minus sign as the digit 2 (or the scan "
+                        "for that failed) and no OCR read replaced it ("
+                        + (
+                            "--native-only"
+                            if self.config.native_only
+                            else "OCR unavailable or every rung failed"
+                        )
+                        + "); the text ships WARNING, its negative values are unverified",
+                    )
+                )
             for n in native_only_distrust_pages:
                 state.events.append(
                     AuditEvent(
@@ -14915,6 +15017,12 @@ class UnifiedPipeline:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
+                    )
+                if minus_retained_pages:
+                    console.print(
+                        f"  [yellow]{len(minus_retained_pages)} page(s) shipped native text "
+                        "that reads a minus sign as the digit 2 (no OCR read replaced "
+                        f"it): {minus_retained_pages}[/yellow]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(

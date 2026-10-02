@@ -100,6 +100,11 @@ class PageState:
     #: CAN be a digit or an operator -- an unrecovered minus is a sign flip -- so
     #: the page must never be silently trusted.
     has_unrecovered_symbol_glyphs: bool = False
+    #: #913: minus signs still extracted as the digit "2" after #217's repair, and
+    #: whether that scan failed (unknown, treated as a hit). See
+    #: ``glyph_recovery.count_minus_as_digit_hits``.
+    minus_as_digit_hits: int = 0
+    minus_as_digit_scan_failed: bool = False
     #: GH-64: this page fell to native (``has_tables`` False, no lane reuse
     #: across data rows) but the restored pre-PP-6 heuristic
     #: (``_detect_columnar_numbers``) still recognises the borderless
@@ -654,6 +659,8 @@ class DocumentState:
                 ps.has_unrecovered_symbol_glyphs = getattr(
                     pa, "has_unrecovered_symbol_glyphs", False
                 )
+                ps.minus_as_digit_hits = getattr(pa, "minus_as_digit_hits", 0)
+                ps.minus_as_digit_scan_failed = getattr(pa, "minus_as_digit_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(
                     pa, "possible_table_structure_not_reconstructed", False
                 )

@@ -73,6 +73,10 @@ class FailureMode(str, Enum):
     #: came back as one glyph run per line. The fragments are not a reading of
     #: the page, so the page ships a failure marker plus an image ref instead.
     NATIVE_TEXT_SHREDDED = "native_text_shredded"
+    #: #913: the native text layer encodes a minus sign as the digit "2" (or the scan
+    #: for that could not run), so a negative value reads as a different positive
+    #: one. The page's text is retained and shipped WARNING, never clean SUCCESS.
+    NATIVE_MINUS_AS_DIGIT = "native_minus_as_digit"
     #: Deprecated / deserialization-only: historically assigned when a
     #: structure-class page had no grid-authoring model attempt. Pre-P2 sidecars
     #: in old caches may still contain this string; modern runs fail closed to

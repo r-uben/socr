@@ -390,3 +390,44 @@ def repair_symbol_font_text(doc: fitz.Document) -> GlyphRepairReport:
 
     report.unmapped_glyphs = sorted(unmapped)
     return report
+
+
+#: #913: two spans count as the same size when their font sizes differ by at most this
+#: many points. Measured on the #913 hit set (134 pages): a fake minus is typeset at the
+#: size of the number it precedes, to the sub-point; a superscript 2 is smaller by whole
+#: points, so this separates them without a ratio.
+MINUS_AS_DIGIT_SIZE_TOLERANCE_PT = 0.5
+
+
+def count_minus_as_digit_hits(page: fitz.Page) -> int:
+    """Count places where a minus sign was extracted as the digit ``2`` (#913).
+
+    #217 repairs a symbol font whose CMap it can rebuild. A font it cannot repair
+    still hands back the raw byte, so ``-0.12`` ships as ``20.12`` under SUCCESS.
+    Run this on the page AFTER that repair: it counts what is still wrong.
+
+    A hit is a one-character span ``2`` followed, on the same line, by a span that
+    starts with a digit (or ``.`` and a digit) in a DIFFERENT font at the same size
+    (``MINUS_AS_DIGIT_SIZE_TOLERANCE_PT``). A real ``2`` is typeset in its number's
+    own font and span; a mis-mapped minus is its own span, drawn from a symbol font.
+    A superscript ``2`` is a smaller size and an ordinary ``2.5`` is one span.
+    """
+    hits = 0
+    # The default flags also decode every image on the page (~16x the cost of the text
+    # alone, measured on a 411-page book); spans are all that is read here.
+    # Only the image flag is dropped. Dropping the others changes which glyphs come
+    # back as "2" (measured: Orphanides p14 lost its hit without
+    # TEXT_CID_FOR_UNKNOWN_UNICODE), so the detector must keep the measured extraction.
+    flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
+    for block in page.get_text("dict", flags=flags)["blocks"]:
+        for line in block.get("lines", ()):
+            spans = line["spans"]
+            for a, b in zip(spans, spans[1:]):
+                if a["text"] != "2" or a["font"] == b["font"]:
+                    continue
+                if abs(a["size"] - b["size"]) > MINUS_AS_DIGIT_SIZE_TOLERANCE_PT:
+                    continue
+                nxt = b["text"].lstrip()
+                if nxt[:1].isdigit() or (nxt[:1] == "." and nxt[1:2].isdigit()):
+                    hits += 1
+    return hits

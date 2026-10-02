@@ -911,6 +911,14 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     )
 
 
+def _minus_as_digit_suspect(p) -> bool:
+    """#913: the native text layer reads a minus as the digit "2", or the scan for that
+    failed (unknown is not clean)."""
+    return bool(
+        getattr(p, "minus_as_digit_hits", 0) or getattr(p, "minus_as_digit_scan_failed", False)
+    )
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -3079,6 +3087,11 @@ def _select_page_output_tagged(
             or getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_structure_defective", False)
             or getattr(p, "native_table_header_unattributed", False)
+            # #913: a native winner whose text layer reads a minus as "2" (or whose scan
+            # failed) must not short-circuit to a clean pass. There is no other text to
+            # ship under --native-only, so it falls through to the native fallback below:
+            # same text, WARNING, never clean SUCCESS.
+            or _minus_as_digit_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3652,7 +3665,11 @@ def _select_page_output_tagged(
             failure_mode=(
                 FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                 if native_table_defect and native_is_fallback
-                else FailureMode.NONE
+                else (
+                    FailureMode.NATIVE_MINUS_AS_DIGIT
+                    if native_is_fallback and _minus_as_digit_suspect(p)
+                    else FailureMode.NONE
+                )
             ),
         ), (
             SelectionProvenance.NATIVE_FALLBACK
