@@ -105,6 +105,10 @@ class PageState:
     #: ``glyph_recovery.count_minus_as_digit_hits``.
     minus_as_digit_hits: int = 0
     minus_as_digit_scan_failed: bool = False
+    #: #961: invisible text over a page-sized raster (scan with baked-in OCR), and whether
+    #: that scan failed (unknown, treated as a hit). See ``BornDigitalDetector``.
+    invisible_text_over_raster: bool = False
+    invisible_text_scan_failed: bool = False
     #: GH-64: this page fell to native (``has_tables`` False, no lane reuse
     #: across data rows) but the restored pre-PP-6 heuristic
     #: (``_detect_columnar_numbers``) still recognises the borderless
@@ -661,6 +665,8 @@ class DocumentState:
                 )
                 ps.minus_as_digit_hits = getattr(pa, "minus_as_digit_hits", 0)
                 ps.minus_as_digit_scan_failed = getattr(pa, "minus_as_digit_scan_failed", False)
+                ps.invisible_text_over_raster = getattr(pa, "invisible_text_over_raster", False)
+                ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(
                     pa, "possible_table_structure_not_reconstructed", False
                 )
