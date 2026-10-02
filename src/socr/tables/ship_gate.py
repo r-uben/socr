@@ -56,6 +56,10 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     words, with no gap wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word
                     spaces: a caption or notes sentence emitted as column headings.
                     ``text_in_numeric_column`` exempts the header band by design and cannot see it.
+``split_phrase``    (GH-924) on a paired source row, a word with letters is immediately followed by a
+                    number at no more than the page's ordinary word space (``March 2001``) and the
+                    shipped row holds the two in DIFFERENT cells: the phrase was split and the
+                    number sits in a row-dependent lane. DEFER-only; the rowizer is not changed.
 ``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
                     differs from another carried word's, per output table block. Needs the
                     page's line directions (``LineDirections``); two directions are the
@@ -144,6 +148,7 @@ DIRECTION_UNAVAILABLE = "direction_unavailable"
 HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 PROSE_IN_HEADER = "prose_in_header"
+SPLIT_PHRASE = "split_phrase"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -1260,6 +1265,65 @@ def prose_in_header_faults(
     return faults
 
 
+def split_phrase_faults(
+    words: list[Word],
+    blocks: list[Block],
+    pairs: list[BlockPairs],
+    src_rows: SourceRows,
+    geos: list | None = None,
+) -> list[GateFault]:
+    """GH-924: a phrase the source prints as ``word number`` that the grid split across cells.
+
+    The rowizer puts the word in the label cell and snaps the number to the nearest numeric lane,
+    so ``March 2001`` lands in a lane that depends on the row. On a paired source row, a word with a
+    letter that is immediately followed by a number at a gap no wider than the page's ordinary word
+    space (``_page_word_space``, measured outside every table zone; the page abstains without that
+    evidence, as ``prose_in_header`` does) is a phrase. When the shipped row carries both words but no
+    single cell holds the two, the grid split it: DEFER (one model read). No vocabulary: any word and
+    number joined by word spacing that the grid separates.
+
+    A value that really is a cell (``Model 2`` at column spacing, a gap over the word space) is quiet.
+    A label whose number is a real value printed at word spacing in the next lane would fire; that
+    is a false DEFER and is measured, not exempted. Bare 5-tuple words abstain.
+    """
+    if geos is None:
+        geos = _block_geometries(pairs, src_rows)
+    zones = []
+    for geo in geos:
+        if geo is None:
+            continue
+        ys = sorted(geo[1])
+        reach = _header_reach(ys)
+        zones.append((ys[0] - reach, ys[-1] + reach))
+    word_space = _page_word_space(words, zones) if zones else None
+    if not word_space:
+        return []
+    faults: list[GateFault] = []
+    for block, found in zip(blocks, pairs):
+        for idx, y in found:
+            row_words = src_rows[y]
+            cells = [set(unicodedata.normalize("NFKC", c).split()) for c in block[idx]]
+            for a, b in zip(row_words, row_words[1:]):
+                if not _is_source_number(b[4]) or _is_source_number(a[4]):
+                    continue
+                if not any(ch.isalpha() for ch in a[4]) or not 0 < b[0] - a[2] <= word_space:
+                    continue
+                ta = unicodedata.normalize("NFKC", a[4]).strip()
+                tb = unicodedata.normalize("NFKC", b[4]).strip()
+                if any(ta in c and tb in c for c in cells):
+                    continue
+                if any(ta in c for c in cells) and any(tb in c for c in cells):
+                    faults.append(
+                        _fault(
+                            SPLIT_PHRASE,
+                            f"source row at y={y} prints a word and a number within one word "
+                            "space and the grid puts them in different cells",
+                        )
+                    )
+                    break
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -1285,6 +1349,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += header_band_missing_faults(blocks, pairs, src_rows, geos)
         faults += text_in_numeric_column_faults(blocks, pairs)
         faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
+        faults += split_phrase_faults(words, blocks, pairs, src_rows, geos)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
