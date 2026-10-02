@@ -173,20 +173,23 @@ socr engines                     Show available engines
 
 ```
 output/<doc_stem>/
-├── <doc_stem>.md        # final OCR text (stitched from pages/)
-├── metadata.json        # processing stats + status
-├── pages/               # agentic mode: per-page progressive save + resume ledger
-│   ├── 00001.md         #   one fragment per page (stitches to <doc_stem>.md, byte-identical)
-│   ├── 00001.json       #   sidecar: status, terminal flag, engine, run-fingerprint
-│   └── ...
-├── figures/             # with --save-figures
-│   └── figure_1_page3.png
-└── audit_log.json       # per-page audit events (timeouts, chart-asset pages, failures)
+├── <doc_stem>.md        # final text, stitched from pages/
+├── metadata.json        # document status and notes
+├── pages/               # NNNNN.md body + NNNNN.json sidecar per page (resume ledger)
+├── manifest.json        # replay record; blobs in cache/
+├── audit_log.json       # notable events of the run
+├── tables_trust.json    # pages with doubtful tables (absent = none)
+├── figures/             # images the text links to
+└── equations/           # equation crops
 ```
 
-The `pages/` directory is what makes a run **crash-safe and resumable**: each
-`NNN.md` is written the instant its page finishes, and re-running reuses the ones
-whose `NNN.json` is `terminal` with a matching fingerprint.
+The `pages/` directory makes a run crash-safe and resumable: each `NNNNN.md` is
+written the instant its page finishes, and a re-run reuses the pages whose
+`NNNNN.json` is `terminal` with a matching fingerprint.
+
+To judge whether a page can be trusted, start with `status` and `failure_mode` in
+its `pages/NNNNN.json`. Every file, status, failure mode and audit event is
+explained in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ## Configuration
 
