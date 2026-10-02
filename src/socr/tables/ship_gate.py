@@ -51,6 +51,11 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     block; header rows above the first data row, panel labels that start in
                     the label columns, number-with-marker cells, placeholders and
                     parenthesised numbers are exempt (see ``text_in_numeric_column_faults``).
+``prose_in_header``  (GH-936) a source row above the table's first core row that the grid
+                    absorbed WHOLE into its header rows and that is ONE run of two or more
+                    words, with no gap wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word
+                    spaces: a caption or notes sentence emitted as column headings.
+                    ``text_in_numeric_column`` exempts the header band by design and cannot see it.
 ``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
                     differs from another carried word's, per output table block. Needs the
                     page's line directions (``LineDirections``); two directions are the
@@ -83,6 +88,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple, TypedDict
 
+from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
 from socr.tables.native_verifier import (
     _MD_SEP_RE,
     _cluster_x_positions,
@@ -137,6 +143,7 @@ FOREIGN_DIRECTION = "foreign_direction"
 DIRECTION_UNAVAILABLE = "direction_unavailable"
 HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
+PROSE_IN_HEADER = "prose_in_header"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -1117,6 +1124,79 @@ def text_in_numeric_column_faults(blocks: list[Block], pairs: list[BlockPairs]) 
     return faults
 
 
+def _is_one_run(row_words: list[Word], word_space: float) -> bool:
+    """True when no gap between x-sorted neighbours exceeds ``ALIGNED_RUN_GAP_MAX_WORD_SPACES``
+    word spaces (the #934 R1 / ``_detect_column_gutter`` yardstick, reused)."""
+    limit = ALIGNED_RUN_GAP_MAX_WORD_SPACES * word_space
+    return all(b[0] - a[2] <= limit for a, b in zip(row_words, row_words[1:]))
+
+
+def prose_in_header_faults(
+    words: list[Word],
+    blocks: list[Block],
+    pairs: list[BlockPairs],
+    src_rows: SourceRows,
+    geos: list | None = None,
+) -> list[GateFault]:
+    """GH-936: a caption or notes sentence absorbed whole into a grid's header rows.
+
+    ``text_in_numeric_column`` exempts every row above the first data row, and
+    ``header_band_missing`` only looks for header words the grid dropped. Neither sees a
+    source row the grid KEPT but that is prose, not a column heading.
+
+    Per block with geometry: the header rows are the output rows above the first CORE paired
+    row. A source row above the first core row is *carried* when every one of its words
+    occurs (counted, NFKC) as a token of those header rows. The predicate fires on a carried
+    row that is ONE run of at least two words (``_is_one_run``): column headings sit over
+    separate lanes and so split into runs at the page's lane gutter, a sentence does not.
+    Measured on the 127-page census (GH-936 design): +7 DEFERs against GH-935, of which 3 are
+    real, 1 is a broken page, 3 are false (a genuine one-run spanning heading, a panel title,
+    an in-table panel label); a false DEFER costs one model read.
+
+    Known holes, by construction: a one-word caption (indistinguishable from a one-word
+    heading) and a caption with a gap wider than the bound (reads as lane-shaped). No font
+    size clause: the design measured zero census gain and an exact float comparison is brittle.
+    No panel-label exemption: it would save one false DEFER and add code.
+    """
+    word_space = _median_word_gap(words)
+    if not word_space:
+        return []
+    if geos is None:
+        geos = _block_geometries(pairs, src_rows)
+    faults: list[GateFault] = []
+    for block, found, geo in zip(blocks, pairs, geos):
+        if geo is None:
+            continue
+        _lanes, core = geo
+        core_set = set(core)
+        first_idx = min(i for i, y in found if y in core_set)
+        header = Counter(
+            unicodedata.normalize("NFKC", tok).strip()
+            for row in block[:first_idx]
+            for cell in row
+            for tok in cell.split()
+        )
+        if not header:
+            continue
+        for y in sorted(src_rows):
+            if y >= min(core):
+                break
+            row_words = src_rows[y]
+            if len(row_words) < 2 or not _is_one_run(row_words, word_space):
+                continue
+            need = Counter(unicodedata.normalize("NFKC", w[4]).strip() for w in row_words)
+            if all(header[tok] >= n for tok, n in need.items()):
+                faults.append(
+                    _fault(
+                        PROSE_IN_HEADER,
+                        f"source row at y={y} above the first data row is one run of "
+                        f"{len(row_words)} words (no gap over {ALIGNED_RUN_GAP_MAX_WORD_SPACES:g} "
+                        "word spaces) and the grid carries all of it in its header rows",
+                    )
+                )
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -1141,6 +1221,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += label_row_missing_faults(blocks, pairs, src_rows, geos)
         faults += header_band_missing_faults(blocks, pairs, src_rows, geos)
         faults += text_in_numeric_column_faults(blocks, pairs)
+        faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
