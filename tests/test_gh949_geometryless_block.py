@@ -100,12 +100,15 @@ def test_prose_line_holding_years_is_not_a_row() -> None:
     assert GEOMETRYLESS in _gate(_after_lone_row(numbers, []), LONE_ROW_MD)
 
 
-def test_starred_and_parenthesised_cells_are_table_cells() -> None:
-    """Rows of ``0.073***`` and ``(-2.19)`` extend the region, as in the liu pages."""
-    rows = [
-        ["EC", "0.073***", "0.075***", "0.075***", "0.077***"],
-        ["", "(-2.19)", "(-2.06)", "(1.4)", "-"],
-    ]
+def test_starred_cells_alone_extend_the_region() -> None:
+    """A row of ``0.073***`` (no parentheses anywhere) extends the region, as in the liu pages."""
+    rows = [["EC", "0.073***", "0.075***", "0.075***", "0.077***"]]
+    assert GEOMETRYLESS in _gate(_after_lone_row([], rows), LONE_ROW_MD)
+
+
+def test_parenthesised_cells_alone_extend_the_region() -> None:
+    """A row of ``(-2.19)`` (no stars anywhere) extends the region, as in the liu pages."""
+    rows = [["", "(-2.19)", "(-2.06)", "(1.40)", "(-2.03)"]]
     assert GEOMETRYLESS in _gate(_after_lone_row([], rows), LONE_ROW_MD)
 
 

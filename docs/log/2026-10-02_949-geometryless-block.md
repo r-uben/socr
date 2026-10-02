@@ -74,3 +74,7 @@ Beckmann p79 (7 of 39 table lines in the grid, geometry present) is a separate d
 - A lone numeric row plus many omitted label-only SOURCE rows stays quiet (region = carried = 1).
 - A neighbouring table with no line between it and the block (gap under one reach, no caption)
   still counts.
+
+## Second review round: split pins
+
+The starred/parenthesised test is now two independent pins (starred-only row, parenthesised-only row). Mutants in an external copy (baseline 13 green): `_is_cell_number` with the stars removed from its strip set fails 1; `_is_cell_number` rejecting any text containing `(` fails 1. Finding: `()[]` in `_CELL_WRAP` is redundant, because `_is_source_number` already accepts `(-2.19)` and `(1.40)`; a mutant that only removes `()[]` from the strip set survives and is equivalent. The parenthesis pin guards the behaviour (parenthesised rows extend the region), not that constant.
