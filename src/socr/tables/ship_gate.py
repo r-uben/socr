@@ -868,7 +868,8 @@ def header_band_missing_faults(
     GH-942: the lane clause misses a real header in two shapes, a multi-word heading (two
     words over one lane) and a right-aligned or centred one (no x-centre on a lane), so it
     ships grids that lost their column labels. The row also fires when its in-extent words
-    split into at least ``_MIN_LANES_PER_ROW`` runs (``_run_count``); the absence test, the
+    split into at least ``_MIN_CORE_LANES`` runs (``_run_count``; GH-945 lowered the floor
+    from ``_MIN_LANES_PER_ROW``, which missed a two-run header); the absence test, the
     reach and the numeric-free test are shared, and the absence stays per block. The run
     clause is OR-ed with the lane clause, never a replacement: the lane clause alone catches
     rows the run clause does not.
@@ -911,7 +912,7 @@ def header_band_missing_faults(
                 and len(set(hits)) == len(region)
             )
             runs = _run_count(inside, unit)
-            if on_lanes or runs >= _MIN_LANES_PER_ROW:
+            if on_lanes or runs >= _MIN_CORE_LANES:
                 shape = (
                     f"{len(region)} word(s) over {len(set(hits))} distinct table lanes"
                     if on_lanes
