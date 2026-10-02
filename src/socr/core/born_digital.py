@@ -2736,12 +2736,22 @@ class BornDigitalDetector:
         # repair=False: the report is needed here, so recovery is applied
         # explicitly below rather than silently inside the open.
         with open_pdf(pdf_path, repair=False) as doc:
+            # #881: the DECLARED count, taken before recovery. Recovery touches
+            # pages, which lets MuPDF repair a damaged tree and can shrink
+            # ``len(doc)``; iterating the shrunk count would silently omit the
+            # lost pages, which would then enter processing with default state.
+            declared = len(doc)
             self._recover_symbol_fonts(doc, pdf_path)
-            for page_idx in range(len(doc)):
+            for page_idx in range(declared):
                 # #881: one page MuPDF cannot load costs that page, not the
                 # document. Only the LOAD is guarded -- an error inside
                 # ``_assess_page`` is a bug in socr and must stay loud.
                 try:
+                    if page_idx >= len(doc):
+                        raise IndexError(
+                            f"page {page_idx + 1} missing after repair "
+                            f"(declared {declared}, {len(doc)} remain)"
+                        )
                     page = doc[page_idx]
                 except Exception as exc:  # noqa: BLE001 - a damaged page is a finding
                     pages.append(

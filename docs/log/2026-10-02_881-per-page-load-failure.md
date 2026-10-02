@@ -101,3 +101,19 @@ Undamaged 4-page fixture run under origin/main's `src` and under this branch's `
 
 Full suite, default `OLLAMA_HOST`, nohup, one complete run: 6103 passed, 2 skipped,
 4 xfailed (1157 s). `uvx ruff@0.16.0 format --check .` clean (807 files).
+
+## Review round 1 (Astra, PR #947)
+
+- P1a: `FigureExtractor.extract` loaded the page before the `skip_pages` check, and its
+  document-wide catch ended the loop, so every later page lost its figures with
+  `figure_phase_failed` unset. The skip now precedes the load and the load is guarded per
+  page. Test: bad middle page, figure on the last page, damaged vs undamaged runs agree.
+- P1b: glyph recovery runs before `range(len(doc))` and can shrink the count. `detect` now
+  fixes the declared count first and records every page missing after repair as
+  `unreadable_input` ("missing after repair"). Test shrinks the doc inside a patched recovery.
+- New tests: empty provider ladder vs full ladder (difference pin on bad-page status, mode and
+  document status `partial`); committed sha256 of the undamaged fixture's final markdown
+  (measured identical under origin/main and the change), replacing the "no markers" proxy.
+- New mutants, all killed: extractor load before skip (1), extractor load unguarded (1),
+  declared count read after repair (1). Earlier mutants re-run: all still killed except the
+  documented equivalent one.

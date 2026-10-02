@@ -203,17 +203,6 @@ def test_the_failure_reaches_document_status_metadata_and_the_final_markdown(tmp
     assert "page_unloadable" in audit and "page_failed" in audit
 
 
-def test_an_undamaged_document_is_unchanged(tmp_path):
-    """Control: no load error anywhere means no unreadable_input anywhere."""
-    _, pdf, out, result = _run(tmp_path, None, "ok")
-    dd = _doc_dir(out)
-    for n in range(1, PAGES + 1):
-        assert _sidecar(dd, n)["failure_mode"] != FailureMode.UNREADABLE_INPUT.value
-    md = (dd / f"{pdf.stem}.md").read_text()
-    assert md.count("## Page ") == PAGES
-    assert "failed:" not in md
-
-
 # --------------------------------------------------------------------------
 # resume: a FAILED page is never terminal-skipped
 # --------------------------------------------------------------------------
@@ -274,3 +263,102 @@ def test_partial_damage_keeps_the_declared_page_count(tmp_path, monkeypatch):
     with _page_load_raises(BAD_INDEX):
         assert pipe._document_handle_for(pdf).page_count == PAGES
     assert pipe._document_handle_for(pdf).page_count == 1
+
+
+# --------------------------------------------------------------------------
+# review round 1 (Astra, PR #947)
+# --------------------------------------------------------------------------
+
+
+def _figure_pdf(path: Path) -> Path:
+    """Four pages; the LAST carries a large embedded image (a figure)."""
+    import io
+
+    from PIL import Image
+
+    doc = fitz.open()
+    for p in range(PAGES - 1):
+        doc.new_page().insert_text((72, 72), f"text page {p + 1}")
+    page = doc.new_page()
+    page.insert_text((72, 72), "Figure 1")
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 500), color=(200, 200, 255)).save(buf, format="PNG")
+    page.insert_image(fitz.Rect(72, 110, 472, 610), stream=buf.getvalue())
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_a_bad_middle_page_does_not_cost_later_pages_their_figures(tmp_path):
+    """The extractor used to load the page BEFORE its skip check, and its
+    document-wide catch ended the loop: every later page lost its figures."""
+    from socr.figures.extractor import FigureExtractor
+
+    pdf = _figure_pdf(tmp_path / "f.pdf")
+    clean = FigureExtractor().extract(pdf)
+    assert [f.page_num for f in clean.figures] == [PAGES], "control: the figure page yields"
+    with _page_load_raises(BAD_INDEX):
+        damaged = FigureExtractor().extract(pdf)
+    assert [f.page_num for f in damaged.figures] == [f.page_num for f in clean.figures]
+    # and a skipped bad page is never even loaded
+    with _page_load_raises(BAD_INDEX):
+        skipped = FigureExtractor().extract(pdf, skip_pages={BAD_PAGE})
+    assert [f.page_num for f in skipped.figures] == [PAGES]
+
+
+def test_a_repair_that_shrinks_the_page_count_fails_the_missing_pages(tmp_path, monkeypatch):
+    """Glyph recovery touches pages and MuPDF may repair the tree, shrinking
+    ``len(doc)``. The pages that vanished must be FAILED, not omitted (which would
+    hand them to processing with default state)."""
+    pdf = _pdf(tmp_path / "s.pdf")
+    det = BornDigitalDetector()
+
+    def shrinking_recovery(doc, path):
+        doc.delete_page(PAGES - 1)  # the repair loses the last page
+
+    monkeypatch.setattr(det, "_recover_symbol_fonts", shrinking_recovery)
+    assessment = det.detect(pdf)
+    assert [p.page_num for p in assessment.pages] == list(range(1, PAGES + 1))
+    lost = assessment.pages[-1]
+    assert "missing after repair" in lost.load_error
+    assert all(p.load_error == "" for p in assessment.pages[:-1])
+
+    # control: a recovery that keeps the count leaves every page loadable
+    det2 = BornDigitalDetector()
+    monkeypatch.setattr(det2, "_recover_symbol_fonts", lambda doc, path: None)
+    assert all(p.load_error == "" for p in det2.detect(pdf).pages)
+
+
+def test_with_an_empty_provider_ladder_the_bad_page_is_still_failed(tmp_path):
+    """CI has no provider. Parametrised by difference: the bad page's outcome and
+    the document verdict must not depend on the ladder."""
+    results = {}
+    for ladder in ([providers.PROFILE_QWEN_LOCAL], []):
+        pdf = _pdf(tmp_path / f"l{len(ladder)}.pdf")
+        out = tmp_path / f"out_l{len(ladder)}"
+        pipe = _pipeline()
+        pipe._available_engines_for_agentic = lambda ladder=ladder: ladder
+        with _page_load_raises(BAD_INDEX):
+            res = pipe.process(pdf, output_dir=out)
+        side = _sidecar(_doc_dir(out), BAD_PAGE)
+        meta = json.loads((_doc_dir(out) / "metadata.json").read_text())
+        results[len(ladder)] = (side["status"], side["failure_mode"], meta["status"])
+    assert results[0] == results[1]
+    assert results[0][0] == PageStatus.ERROR.value
+    assert results[0][1] == FailureMode.UNREADABLE_INPUT.value
+    assert results[0][2] == "partial"
+
+
+# sha256 of the undamaged 4-page fixture's final markdown, measured under
+# origin/main (d8dc9b13) AND under this change: the fix must not move a good
+# document by one byte. The fixture and the stubbed engine are deterministic.
+UNDAMAGED_FINAL_MD_SHA256 = "347cb5f3f554fbc7276b5fd56f40fdeddc225d607f762a43362f65e1d2e9b83b"
+
+
+def test_an_undamaged_document_is_byte_identical_to_main(tmp_path):
+    import hashlib
+
+    _, pdf, out, result = _run(tmp_path, None, "ok")
+    final = (_doc_dir(out) / "ok.md").read_bytes()
+    assert result.status is DocumentStatus.SUCCESS
+    assert hashlib.sha256(final).hexdigest() == UNDAMAGED_FINAL_MD_SHA256
