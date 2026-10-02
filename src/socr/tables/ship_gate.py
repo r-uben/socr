@@ -44,6 +44,10 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     row, within the same ``_PANEL_GAP_ROWS`` reach, whose in-lane words each
                     sit over a distinct table lane (>= ``_MIN_LANES_PER_ROW`` of them) and
                     are not all in the grid: a column-header band the rowizer dropped.
+                    OR (GH-942/GH-945) the row splits into >= ``_MIN_CORE_LANES`` runs at
+                    gaps wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` x the page's median
+                    word gap and those words are absent from the grid (multi-word and
+                    right-aligned headings the lane clause cannot see).
 ``text_in_numeric_column``  (GH-917) a shipped grid row below the table's first data row that
                     is not itself a data row and carries alphabetic text in a column the
                     data rows establish as numeric (a caption, footnote paragraph, equation
@@ -56,6 +60,15 @@ Predicates (each has its own function; ``direction_unavailable`` is reported by
                     words, with no gap wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` page word
                     spaces: a caption or notes sentence emitted as column headings.
                     ``text_in_numeric_column`` exempts the header band by design and cannot see it.
+``geometryless_block``  (GH-949) a block for which no table geometry can be built (one
+                    unique pair) whose contiguous source region holds more multi-column
+                    numeric rows than the grid carries: a table shipped as its lone
+                    highlight row while the rest fell out as loose words.
+``word_split_across_cells``  (GH-951) in one grid row, the last token of a cell joined to the
+                    first token of the next non-empty cell equals ONE source word that the
+                    row's own source line places across that cut (every aligning line must
+                    agree), is not a number, and appears nowhere whole in the block: a
+                    caption or notes line cut mid-word into cells.
 ``foreign_direction``  (GH-917) the grid carries a source word whose text-line direction
                     differs from another carried word's, per output table block. Needs the
                     page's line directions (``LineDirections``); two directions are the
