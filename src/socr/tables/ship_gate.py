@@ -818,6 +818,14 @@ def foreign_direction_faults(words: list[Word], blocks: list[Block], line_dirs) 
     return faults
 
 
+def _header_reach(core: list[int]) -> float:
+    """How far above a table's first core row a header candidate may sit: ``_PANEL_GAP_ROWS`` row
+    pitches (the outward reach ``data_row_missing`` uses). Shared by ``header_band_missing`` and
+    ``prose_in_header`` so both predicates scan the same rows."""
+    ys = sorted(core)
+    return _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
+
+
 def _run_count(inside: list[Word], unit: float | None) -> int:
     """GH-942: how many runs *inside* (x-sorted) split into at gaps wider than a run gap.
 
@@ -882,7 +890,7 @@ def header_band_missing_faults(
         x_hi = max(w[2] for w in carried)
         ys = sorted(core)
         first = ys[0]
-        reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
+        reach = _header_reach(ys)
         anchor_ys = {y for _i, y in found}
         text = _CellText(block)
         for y, ws in sorted(src_rows.items()):
@@ -1184,18 +1192,21 @@ def prose_in_header_faults(
     occurs (counted, NFKC) as a token of those header rows. The predicate fires on a carried
     row that is ONE run of at least two words (``_is_one_run``): column headings sit over
     separate lanes and so split into runs at the page's lane gutter, a sentence does not.
-    Measured on the 127-page census (GH-936, with the zone policy below): +2 DEFERs against main,
-    both real (Herskovic 29, Mendoza-Fernandez 60), 0 false; 90 of the 127 pages abstain for lack
-    of evidence, and the zone policy cost one real catch (Fama 733) against a looser yardstick.
+    Measured on the 127-page census (GH-936): +6 DEFERs against main, of which 3 are real, 1 is a
+    broken page, 2 are false (a panel title, an in-table panel label); 59 pages abstain for lack of
+    spacing evidence. A false DEFER costs one model read.
+
+    Candidates are the source rows above the first core row within ``_header_reach`` (the reach
+    ``header_band_missing`` scans); rows above it are not header candidates.
 
     The yardstick is the page's word space measured on lines OUTSIDE every table's zone, see
-    ``_page_word_space``. The zone of a table runs from the top of the page (this predicate scans
-    EVERY source row above the first core row as a header candidate, with no reach) down to the last
-    core row plus the outward reach of ``_PANEL_GAP_ROWS`` pitches. A line in that zone is a header
-    candidate or the table itself and cannot calibrate the yardstick that judges it. With too
-    little text below the lowest table the predicate abstains rather than guess from column gutters.
+    ``_page_word_space``. The zone of a table is the candidate reach plus the table's extent (first
+    core row less the reach down to the last core row plus the reach). A line in the zone is a
+    header candidate or the table and cannot calibrate the yardstick that judges it; a line above the
+    reach (body prose above the table) is never a candidate and is independent evidence. With too
+    little such text the predicate abstains rather than guess from column gutters.
 
-    Known holes, by construction: a page with no text below its tables (it abstains), including one whose only prose sits above the table; a one-word caption (indistinguishable from a one-word
+    Known holes, by construction: a page with no independent text outside its table zones (it abstains); a one-word caption (indistinguishable from a one-word
     heading) and a caption with a gap wider than the bound (reads as lane-shaped). No font
     size clause: the design measured zero census gain and an exact float comparison is brittle.
     No panel-label exemption: it would save one false DEFER and add code.
@@ -1207,8 +1218,8 @@ def prose_in_header_faults(
         if geo is None:
             continue
         ys = sorted(geo[1])
-        reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
-        zones.append((-math.inf, ys[-1] + reach))
+        reach = _header_reach(ys)
+        zones.append((ys[0] - reach, ys[-1] + reach))
     word_space = _page_word_space(words, zones) if zones else None
     if not word_space:
         return []
@@ -1227,9 +1238,12 @@ def prose_in_header_faults(
         )
         if not header:
             continue
+        first, reach = min(core), _header_reach(core)
         for y in sorted(src_rows):
-            if y >= min(core):
+            if y >= first:
                 break
+            if first - y > reach:
+                continue  # above the reach: not a header candidate (it may calibrate the spacing)
             row_words = src_rows[y]
             if len(row_words) < 2 or not _is_one_run(row_words, word_space):
                 continue

@@ -154,6 +154,28 @@ SHIP to DEFER: 2 pages, both real: Herskovic 29, Mendoza-Fernandez 60. Lost agai
 original real catches, and an abstain rate of 71%. The residual exposure is unchanged in kind: a page
 with too little text below its tables ships a prose header as it did before this ticket.
 
+## Round 5: bounded candidate scan, zone = reach plus extent (supersedes round 4's page-top zone)
+
+Round 4's zone ran to the top of the page because the predicate scanned every row above the first
+core row. That discarded body prose above the table, the commonest evidence, and cost Fama 733. Root
+cause: the predicate had no reach. Fix, both together:
+- header candidates are the source rows within `_header_reach(core)` above the first core row, the
+  same reach `header_band_missing` scans (#942 had it inline; it is now one shared helper, behaviour
+  identical, its census set unchanged). Rows above the reach are not candidates.
+- the calibration zone is the reach plus the table extent (first core row less the reach down to the
+  last core row plus the reach). Text above the reach is independent: it is never a candidate, so it
+  cannot calibrate itself. The abstain rule (`_MIN_SPACING_LINES`) stays.
+
+Tests (24 in the file): Astra's bypass with the far header lines now INSIDE the reach abstains; prose
+above the reach counts as evidence and makes a caption run inside the reach fire; a carried one-run row
+above the reach is never a candidate (the same row inside the reach fires). Mutants, 13, all killed
+(`mut936.py`): M12 zone extended to the page top loses the prose-above case; M13 no candidate reach dies
+on the never-a-candidate test.
+
+Census, same 127 pages: evidence 65, abstain 59, no table geometry 3; fires on 15 pages; 0 removals;
+every other predicate's set identical to main d8dc9b1. SHIP to DEFER 6, as in round 3: real Fama 733
+(it returns), Herskovic 29, Mendoza-Fernandez 60; deferrable Fama 728; false Kim 52 and Stock-Watson 44.
+
 ## Suite
 
 Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed, 2 skipped,
@@ -163,3 +185,5 @@ Full suite, default OLLAMA_HOST, nohup, one run on the rebased head: 6111 passed
 Full suite, default OLLAMA_HOST, nohup, one run on the round-3 head: 6114 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.
 
 Round 4 full suite, default OLLAMA_HOST, nohup, one run: 6117 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.
+
+Round 5 full suite, default OLLAMA_HOST, nohup, one run: 6118 passed, 2 skipped, 4 xfailed, 0 failed. Ruff format check clean.

@@ -195,7 +195,8 @@ class TestSpacingEvidence:
 class TestSpacingIsNotCalibratedByHeaderRows:
     """A line the predicate scans as a header candidate must not supply the yardstick that judges it.
 
-    The zone is geometric: everything above the lowest table's last core row plus the outward reach.
+    The zone is geometric: the header reach above the first core row down to the last core row plus
+    the outward reach. Text above the reach is never a candidate, so it is independent evidence.
     """
 
     WIDE = 40.0  # a column-wide gap, far over ALIGNED_RUN_GAP_MAX_WORD_SPACES x any word space here
@@ -207,7 +208,7 @@ class TestSpacingIsNotCalibratedByHeaderRows:
             _line(
                 ["Alpha", "Beta"] + (["Zed"] if uncarried_tail else []),
                 COL_XS[0],
-                Y0 - (10 + k) * PITCH,
+                Y0 - (2 + k) * PITCH,
                 20 + k,
                 self.WIDE,
             )
@@ -218,7 +219,7 @@ class TestSpacingIsNotCalibratedByHeaderRows:
         md = _gate_md([["Alpha", "Beta", "", "", ""]] * 2 + [["Gamma", "Delta", "", "", ""]])
         return words, md
 
-    def test_two_wide_gap_header_lines_outside_the_extent_abstain(self) -> None:
+    def test_two_wide_gap_header_lines_inside_the_reach_abstain(self) -> None:
         words, md = self._page(prose_lines=0)
         assert _fired(words, md) == set()
 
@@ -256,20 +257,32 @@ class TestSpacingIsNotCalibratedByHeaderRows:
 
     def test_the_bypass_page_with_prose_below_the_table_uses_the_prose(self) -> None:
         words, md = self._page(prose_lines=2, uncarried_tail=True)
-        assert _fired(words, md) == set(), "WIDE is lane-shaped at the prose spacing"
+        # (the uncarried "Zed" makes the far lines a header_band_missing matter, not this predicate's)
+        assert PIH not in _fired(words, md), "WIDE is lane-shaped at the prose spacing"
         tight = [w for w in words if w not in _caption_words(["Gamma", "Delta"], self.WIDE)]
         tight += _caption_words(["Gamma", "Delta"], WORD_SPACE)
-        assert _fired(tight, md) == {PIH}
+        assert PIH in _fired(tight, md)
 
-    def test_prose_above_the_table_is_inside_the_zone_and_is_not_evidence(self) -> None:
-        # Two tight prose lines at the top of the page, above the header candidates: the predicate
-        # scans every row above the first data row, so the zone starts at the top of the page.
-        above = [
+    ABOVE = 5.0  # above the reach of the first core row (Y0 + PITCH less _PANEL_GAP_ROWS pitches)
+
+    def _prose_above(self) -> list[tuple]:
+        return [
             w
             for k in range(2)
             for w in _line(
-                ["Intro", "prose", "text"], COL_XS[0], 5.0 + k * PITCH, 40 + k, WORD_SPACE
+                ["Intro", "prose", "text"], COL_XS[0], self.ABOVE + k * PITCH, 40 + k, WORD_SPACE
             )
         ]
-        words = _grid_words(prose_lines=0) + above + _caption_words(CAPTION, WORD_SPACE)
+
+    def test_prose_above_the_reach_is_evidence_and_a_caption_run_fires(self) -> None:
+        words = _grid_words(prose_lines=0) + self._prose_above()
+        words += _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == {PIH}
+
+    def test_a_line_above_the_reach_is_never_a_candidate(self) -> None:
+        # The carried tight run sits above the reach: it is not scanned, however prose-like.
+        words = _grid_words(prose_lines=2) + _line(CAPTION, COL_XS[0], self.ABOVE, 50, WORD_SPACE)
         assert _fired(words, _gate_md(SPREAD)) == set()
+        # The same run inside the reach is a candidate and fires: the position is the difference.
+        words = _grid_words(prose_lines=2) + _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == {PIH}
