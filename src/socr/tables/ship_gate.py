@@ -145,6 +145,7 @@ HEADER_BAND_MISSING = "header_band_missing"
 TEXT_IN_NUMERIC_COLUMN = "text_in_numeric_column"
 PROSE_IN_HEADER = "prose_in_header"
 GEOMETRYLESS_BLOCK = "geometryless_block"
+WORD_SPLIT_ACROSS_CELLS = "word_split_across_cells"
 GATE_ERROR = "gate_error"
 
 _LEADING_NUMBER_RE = re.compile(r"^\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
@@ -1344,6 +1345,37 @@ def geometryless_block_faults(
     return faults
 
 
+def word_split_across_cells_faults(blocks: list[Block], src_rows: SourceRows) -> list[GateFault]:
+    """GH-951: a caption or notes word cut in two across neighbouring cells of one row.
+
+    Fires when, in one grid row, the last token of a non-empty cell plus the first token
+    of the next non-empty cell, NFKC-normalised and joined with no space, equal a source
+    word that appears nowhere in the block as a token and is not a number. A hyphenated
+    compound cut at its hyphen (``well-`` + ``known``) is such a join and fires. Known
+    hole: a word that also occurs whole elsewhere in the block stays quiet. DEFER-only.
+    """
+
+    def norm(text: str) -> str:
+        return unicodedata.normalize("NFKC", text).strip()
+
+    source = {norm(w[4]) for ws in src_rows.values() for w in ws}
+    faults: list[GateFault] = []
+    for b, block in enumerate(blocks):
+        present = {norm(t) for row in block for cell in row for t in cell.split()}
+        for i, row in enumerate(block):
+            cells = [c.split() for c in row if c.strip()]
+            for left, right in zip(cells, cells[1:]):
+                joined = norm(left[-1] + right[0])
+                if joined in source and joined not in present and not _is_source_number(joined):
+                    faults.append(
+                        _fault(
+                            WORD_SPLIT_ACROSS_CELLS,
+                            f"block {b} row {i}: source word {joined!r} is split across two cells",
+                        )
+                    )
+    return faults
+
+
 def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[GateFault, ...]:
     """Faults found by the ship gate, or ``()`` when the grid may ship.
 
@@ -1370,6 +1402,7 @@ def native_ship_gate(words: list[Word], markdown: str, *, line_dirs) -> tuple[Ga
         faults += text_in_numeric_column_faults(blocks, pairs)
         faults += prose_in_header_faults(words, blocks, pairs, src_rows, geos)
         faults += geometryless_block_faults(blocks, pairs, src_rows, geos)
+        faults += word_split_across_cells_faults(blocks, src_rows)
         faults += foreign_direction_faults(words, blocks, line_dirs)
         return tuple(faults)
     except Exception as exc:
