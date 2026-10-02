@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from socr.core.born_digital import clean_native_text, line_has_corrupt_math
+from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.math.validate_latex import validate_latex_structure
 
 logger = logging.getLogger(__name__)
@@ -240,8 +241,15 @@ def latex_for_image(
         f"{host}/api/generate", data=payload, headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode())
+
+        def _call() -> object:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+
+        # GH-968: urlopen's timeout is per socket op, not total.
+        body = call_with_total_deadline(
+            _call, timeout, label=f"math OCR {safe_host_label(host)}/api/generate ({model})"
+        )
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning("math OCR call failed: %s", exc)
         return ""

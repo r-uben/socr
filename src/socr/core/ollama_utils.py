@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
 from collections.abc import Callable
-from urllib.parse import urlsplit
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+logger = logging.getLogger(__name__)
 
 #: GH-910: total wall-clock budget for the ``/api/tags`` listing. The retired
 #: ``ollama list`` subprocess used 10s; kept so a slow-but-alive daemon is
@@ -21,12 +24,101 @@ _UNREACHABLE_MSG = "Ollama is not running or not installed"
 _TIMEOUT_MSG = "Ollama did not respond (timeout)"
 
 
+class TotalDeadlineExceeded(httpx.ReadTimeout, TimeoutError):
+    """A call outlived its TOTAL wall-clock deadline (GH-968).
+
+    Subclasses BOTH ``httpx.ReadTimeout`` (so every httpx caller's existing
+    ``except httpx.TimeoutException`` / ``httpx.HTTPError`` classification keeps
+    working: a rung maps it to ``RungResult(ok=False)``) and the builtin
+    ``TimeoutError`` (so the urllib callers' ``except (URLError, TimeoutError,
+    OSError)`` also catches it). No caller needed to change.
+    """
+
+
+def safe_host_label(host: str) -> str:
+    """*host* with URL userinfo removed, for log lines, errors and labels.
+
+    Keeps scheme, host and port (and a path, minus a trailing slash); drops
+    ``user:password@``, the query and the fragment, any of which may carry a
+    credential. Two hosts differing only in userinfo give the same string, so it
+    is also a valid endpoint key.
+    """
+    host = host.strip().rstrip("/")
+    try:
+        parts = urlsplit(host)
+    except ValueError:
+        parts = None
+    if parts is None or not parts.netloc:
+        return host.rsplit("@", 1)[-1]
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))
+
+
+#: GH-968 review: abandoned calls still running, one per label (endpoint). An
+#: abandoned worker keeps its thread, socket and buffered response alive, so a
+#: wedged endpoint hit repeatedly would pile them up. While one is outstanding a
+#: new call to the same label fails fast instead of starting another (the #851
+#: rule: never stack a second call on an unresponsive peer).
+_OUTSTANDING: dict[str, threading.Thread] = {}
+_OUTSTANDING_LOCK = threading.Lock()
+
+
+def call_with_total_deadline(fn: Callable[[], Any], timeout: float, *, label: str = "") -> Any:
+    """Run *fn* under a TOTAL wall-clock deadline of *timeout* seconds (GH-968).
+
+    httpx/urllib timeouts are per-read/per-socket-op inactivity limits: a peer
+    that trickles a byte (or a keepalive) every few seconds never trips them and
+    the calling thread hangs indefinitely. *fn* runs in a daemon thread joined
+    with *timeout*; an overrun is abandoned, not waited on, and cannot keep the
+    process alive. Returns *fn*'s value; re-raises what *fn* raised; on overrun
+    raises :class:`TotalDeadlineExceeded` naming *label* so the failure that
+    surfaces (``RungResult.error``, a logged warning) identifies the call.
+
+    At most ONE abandoned call per *label* is ever alive: while it is still
+    running, a new call with the same label raises ``TotalDeadlineExceeded``
+    ("previous call still outstanding") without starting a thread. Once the stray
+    finishes, calls are allowed again.
+    """
+    what = label or "Ollama call"
+    box: list[object] = []
+
+    def _work() -> None:
+        try:
+            box.append(fn())
+        except BaseException as exc:  # handed to the caller
+            box.append(exc)
+
+    with _OUTSTANDING_LOCK:
+        stray = _OUTSTANDING.get(what)
+        if stray is not None and stray.is_alive():
+            raise TotalDeadlineExceeded(f"{what}: previous call still outstanding; not retried")
+        # Register BEFORE starting: a concurrent same-label caller must see this
+        # worker as outstanding, or all of them would start one and overwrite
+        # each other's entries (untracked strays escape the cap).
+        thread = threading.Thread(target=_work, daemon=True)
+        _OUTSTANDING[what] = thread
+        thread.start()
+    thread.join(timeout)
+    if box:
+        with _OUTSTANDING_LOCK:
+            if _OUTSTANDING.get(what) is thread:
+                del _OUTSTANDING[what]
+    else:
+        logger.warning("%s exceeded its total deadline of %ss; abandoned", what, timeout)
+        raise TotalDeadlineExceeded(f"{what} exceeded total deadline of {timeout}s")
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return box[0]
+
+
 def _call_within(fn: Callable[[], object], timeout: float) -> tuple[bool, object]:
     """Run *fn* in a daemon thread joined with *timeout*: ``(finished, value_or_exc)``.
 
     An overrun is abandoned, not waited on, and cannot keep the process alive.
     Anything *fn* raises comes back as the value (an exception instance) for the
     caller to re-raise or map; ``finished`` is False when the deadline expired.
+    Untracked primitive (``_get_tags``); other callers use
+    :func:`call_with_total_deadline`.
     """
     box: list[object] = []
 

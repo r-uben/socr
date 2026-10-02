@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 
+from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.judge.table_prompt import build_table_judge_prompt
 from socr.judge.table_verdict import (
     RUNG_KIND_CELL_ADJUDICATOR,
@@ -84,7 +85,11 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
     """
     resolved = resolve_ollama_host(host)
     try:
-        resp = httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout)
+        resp = call_with_total_deadline(
+            lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
+            timeout,
+            label=f"table judge {safe_host_label(resolved)}/api/tags",
+        )
         resp.raise_for_status()
         names = {_with_implicit_tag(m.get("name", "")) for m in resp.json().get("models", [])}
     except (httpx.HTTPError, OSError, ValueError) as exc:
@@ -150,7 +155,13 @@ def _post_chat(host: str, payload: dict[str, Any], timeout: float) -> str:
     than being coerced into a string that would then fail to parse for a
     misleading reason.
     """
-    resp = httpx.post(f"{host.rstrip('/')}/api/chat", json=payload, timeout=timeout)
+    # GH-968: ``timeout`` is httpx's per-read limit; a peer that trickles bytes
+    # never trips it. The same value is also the TOTAL deadline.
+    resp = call_with_total_deadline(
+        lambda: httpx.post(f"{host.rstrip('/')}/api/chat", json=payload, timeout=timeout),
+        timeout,
+        label=f"ollama {safe_host_label(host)}/api/chat ({payload.get('model', '?')})",
+    )
     resp.raise_for_status()
     body = resp.json()
     if not isinstance(body, dict):

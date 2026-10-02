@@ -22,6 +22,7 @@ from typing import Protocol
 
 import httpx
 
+from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
 
@@ -214,16 +215,20 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     while the vision path stays wedged.
     """
     try:
-        resp = httpx.post(
-            f"{host.rstrip('/')}/api/generate",
-            json={
-                "model": model,
-                "prompt": "ok",
-                "images": [_CANARY_IMAGE_B64],
-                "stream": False,
-                "options": {"num_predict": 1},
-            },
-            timeout=timeout,
+        resp = call_with_total_deadline(
+            lambda: httpx.post(
+                f"{host.rstrip('/')}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "ok",
+                    "images": [_CANARY_IMAGE_B64],
+                    "stream": False,
+                    "options": {"num_predict": 1},
+                },
+                timeout=timeout,
+            ),
+            timeout,
+            label=f"ollama {safe_host_label(host)} generation canary ({model})",
         )
         resp.raise_for_status()
         return True
@@ -334,7 +339,11 @@ def probe_ollama_idle(
     """
     resolved = resolve_ollama_host(host)
     try:
-        resp = httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout)
+        resp = call_with_total_deadline(
+            lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
+            timeout,
+            label=f"ollama {safe_host_label(resolved)}/api/tags probe",
+        )
         resp.raise_for_status()
     except _PROBE_ERRORS:
         return False
