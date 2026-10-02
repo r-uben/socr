@@ -59,16 +59,22 @@ Open `pages/NNNNN.json` and read three fields, in this order.
    text but nothing better replaced it.
 
 A page is clean only when `status` is `success`, `failure_mode` is `none` and
-`audit_passed` is `true`. Do not stop there for tables: a page can pass all three
-and still be listed in `tables_trust.json`, which exists because flags in the audit
-log were invisible to readers of the Markdown.
+`audit_passed` is `true`. Those three fields are not the whole answer:
+
+- A page can pass all three and still be listed in `tables_trust.json`, which
+  exists because table flags in the audit log were invisible to readers of the
+  Markdown.
+- Some non-table warnings leave all three fields clean. Unrecovered symbol glyphs
+  (`native_unrecovered_symbol_glyphs`, raised in `_phase_agentic`) and math-font
+  damage (`native_math_font_unrecovered`, `core/manifest.py`) are recorded only as
+  audit events and notes. Also read the page's `audit_events` and `audit_notes`.
 
 Then read the details:
 
 | Question | Where to look |
 | --- | --- |
 | What shipped on this page, and why? | `disposition.ending` and `disposition.primary_reason` in the sidecar (also in `manifest.json`). Endings: `native_prose`, `model_output`, `fail_closed_marker`, `demoted_native`. Defined by `PageEnding` and `PagePrimaryReason` in `core/manifest.py`. |
-| What happened during the run? | `audit_events` in the sidecar (this page only) or `audit_log.json` (whole document). Kinds are in section 5. |
+| What happened during the run? | `audit_events` in the sidecar (this page's events from the run state) or `audit_log.json` (whole document). The log also adds events derived at write time: `escalation`, `recitation_escalation` and `structure_floor_overrode_ladder`, which the sidecar does not carry. Kinds are in section 5. |
 | Which tables are in doubt? | `tables_trust.json`: `untrusted_pages`, and per page `reasons`, `details`, `patch_eligible`. `resolved_by_escalation` lists pages whose table was replaced by a measured better one. |
 | Which engine and what cost? | `engine`, `provider`, `cost_usd` (the winner), `page_cost_usd` (everything the page spent). |
 | Which socr produced it? | `socr_version`, `socr_source_digest`, `run_fingerprint`, `input_checksum`. |
@@ -93,7 +99,7 @@ winning output's status.
 | --- | --- |
 | `success` | The page produced text. Not proof it is right: check `failure_mode` and `audit_passed`. |
 | `warning` | The page shipped with a flag. The text is kept, but it is not clean. Read `failure_mode`. |
-| `error` | The page failed. It ships a failure marker, not content. |
+| `error` | The page failed. It usually ships a failure marker, but surviving native prose can ship beside the marker (`core/manifest.py`, no-output ending). Read the text, not just the status. |
 | `pending` | Default value of a page output that has no outcome yet. |
 | `skipped` | Defined but not set anywhere in `src/socr` at the time of writing. |
 | `missing` | Sidecar-only value: no winning output exists for the page. |
@@ -127,7 +133,7 @@ in the Markdown.
 | --- | --- | --- |
 | `none` | No failure recorded. | Nothing from this field. |
 | `timeout` | An engine timed out and produced no text. | Re-run the page. If it is the final state, the page has no content. |
-| `cli_error` | An engine subprocess failed. | Re-run; read `error` in the sidecar. |
+| `cli_error` | An engine subprocess failed. | Re-run; read `winning_output.error` in the sidecar. |
 | `empty_output` | An engine returned no text. | Treat the page as empty unless another engine's text shipped. |
 | `api_error` | A provider API call failed. | Re-run later. |
 | `model_unavailable` | The needed model or engine was not reachable. | Start the model or fix the provider, then re-run. |
@@ -138,14 +144,14 @@ in the Markdown.
 | `garbage` | Output had a high share of non-text characters. | Do not use the text. |
 | `low_word_count` | Too few words for the page. | Check whether the page is really sparse. |
 | `truncated` | Output stopped early. | The text is incomplete. |
-| `unreadable_input` | The PDF opened but a page (or every page) could not be loaded. No engine ran. The document is recorded failed and the next run retries it. | Repair or replace the PDF. |
+| `unreadable_input` | A page could not be loaded. No engine ran for that page, which ships an `error` marker. If no page loads, the document is recorded failed and the next run retries it. If other pages produced text, the document is `audit_failed` (`partial` in `metadata.json`). | Repair or replace the PDF. |
 
 ### Native text and table structure
 
 | Value | What happened | What the reader should do |
 | --- | --- | --- |
 | `native_table_structure_failed` | The native text layer lost the table's grid. | Treat table numbers as unverified. |
-| `table_emission_invalid` | The chosen page text still held table syntax that cannot be valid GFM, or its delimiter row disagreed with the grid. Final validation replaced it with a failure marker. | The table is not in the Markdown. Use the PDF. |
+| `table_emission_invalid` | The chosen page text still held table syntax that cannot be valid GFM, or its delimiter row disagreed with the grid. For a malformed-markup defect, final validation replaced the page with a failure marker. For a content defect (such as an empty table), the original text or table is kept and the page is demoted to `error` (`_apply_table_emission_guard` in `core/manifest.py`). | Check the page text. The table may be absent (marker) or present but defective (kept). Use the PDF. |
 | `native_text_shredded` | A rotated page whose native text came back as one glyph run per line. The fragments are not a reading of the page. | The page ships a marker and an image of the page. Read the image. |
 | `native_minus_as_digit` | The native layer encodes a minus sign as the digit `2` (or the scan for this could not run). A negative number can read as a different positive one. The text is kept and ships `warning`. Added in #913. | Check every signed number on the page against the PDF. Audit kind `minus_extracted_as_digit` says how many hits. |
 
@@ -213,7 +219,7 @@ This list is the kinds present at the time of writing; the code is the authority
 
 - `native_encoding_hygiene_suspect`: cosmetic text-layer damage (fused words); content kept.
 - `native_unrecovered_symbol_glyphs`: a symbol font had no ToUnicode map and some glyphs have no verified recovery.
-- `minus_extracted_as_digit`: minus signs extracted as the digit 2 (count in `data`).
+- `minus_extracted_as_digit`: minus signs extracted as the digit 2 (`data.hits` is the count). If `data.error` is true, the scan itself failed and the page is treated as affected; the count is not a finding.
 - `native_minus_as_digit_retained`: the page shipped `native_minus_as_digit`.
 - `native_math_unrecovered`: math-glyph damage survived into the shipped page.
 - `native_math_font_unrecovered`: math-font typesetting that extracts unreliably, not covered by an equation lane.
@@ -239,9 +245,9 @@ This list is the kinds present at the time of writing; the code is the authority
 - `table_ditto_unresolved`: a ditto mark was kept verbatim, not expanded.
 - `possible_table_structure_not_reconstructed`: a borderless label|value shape was seen and not rebuilt.
 
-### Scanned-table evidence (`tables/source_evidence.py`)
+### Scanned-table evidence (`pipeline/agentic.py`, `tables/source_evidence.py`)
 
-- `source_evidence_table_reject`: a witness read the page and the model's numbers were not there.
+- `source_evidence_table_reject`: the evidence gate failed the table. Either a witness read the page and the model's numbers were not there, or no witness backend existed (then `source_evidence_no_witness_backend` is also emitted). Read `data.cause`.
 - `source_evidence_no_witness_backend`: no OCR backend, so no witness.
 - `source_evidence_table_label_unverified`: numbers are supported, at least one label is not.
 

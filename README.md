@@ -184,8 +184,10 @@ output/<doc_stem>/
 ```
 
 The `pages/` directory makes a run crash-safe and resumable: each `NNNNN.md` is
-written the instant its page finishes, and a re-run reuses the pages whose
-`NNNNN.json` is `terminal` with a matching fingerprint.
+written the instant its page finishes. A re-run reuses a page only when its
+`NNNNN.json` is `terminal`, the run fingerprint and input checksum match, the
+status is `success` with `audit_passed` true, and the `.md` fragment is readable.
+Otherwise the page is reprocessed.
 
 To judge whether a page can be trusted, start with `status` and `failure_mode` in
 its `pages/NNNNN.json`. Every file, status, failure mode and audit event is
