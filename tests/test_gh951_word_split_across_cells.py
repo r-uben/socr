@@ -14,6 +14,8 @@ from socr.tables import ship_gate
 SPLIT = ship_gate.WORD_SPLIT_ACROSS_CELLS
 #: The source: the table, then a notes line below it.
 NOTES = ["Notes", "Standard", "errors", "in", "brackets"]
+#: The same line with the word "Standard" cut across two cells.
+CUT = ["Notes", "Standa", "rd", "errors", "in", "brackets"]
 SOURCE = _words([HEADER] + ROWS + [NOTES])
 
 
@@ -27,8 +29,8 @@ def _grid(notes: list[str]) -> str:
 
 
 def test_caption_split_mid_word_fires_and_whole_words_are_quiet() -> None:
-    assert _faults([["Notes", "Standa", "rd", "errors"]])
-    assert not _faults([["Notes", "Standard", "errors"]])
+    assert _faults([CUT])
+    assert not _faults([NOTES])
 
 
 def test_end_to_end_difference_on_a_full_grid() -> None:
@@ -58,9 +60,8 @@ def test_numeric_split_is_quiet() -> None:
 def test_word_present_elsewhere_in_the_grid_is_quiet_known_hole() -> None:
     """Known hole: a split word that also occurs whole in the block cannot be told from a
     correct cell pair, so the predicate abstains. Pinned so widening it is deliberate."""
-    cut = ["Notes", "Standa", "rd", "errors"]
-    assert _faults([cut])
-    assert not _faults([["Standard", "errors"], cut])
+    assert _faults([CUT])
+    assert not _faults([["Standard", "errors"], CUT])
 
 
 def test_ligature_in_the_source_is_folded() -> None:
@@ -72,11 +73,73 @@ def test_ligature_in_the_source_is_folded() -> None:
 
 def test_cells_of_different_rows_never_join() -> None:
     assert not _faults([["Notes", "Standa"], ["rd", "errors"]])
+    # positive counterpart: the same cells in ONE row, over the line that holds the word
+    assert _faults([CUT])
+
+
+def _lines(*rows: list[str]) -> list:
+    """A source with each row of words on a line of its own."""
+    return _words(list(rows))
+
+
+def test_word_elsewhere_on_the_page_is_not_evidence() -> None:
+    """Fixed-source control: the header's own line reads ``Pre tax``; ``Pretax`` sits on
+    another line. Only the source line the row sits on may vouch for the join."""
+    header = [["Pre", "tax", "Income"]]
+    collision = _lines(["Pre", "tax", "Income"], ["Pretax", "profit", "grew"])
+    assert not _faults(header, collision)
+    # control: the SAME row over a line that really holds one word `Pretax` fires
+    assert _faults(header, _lines(["Pretax", "Income"], ["Pretax", "profit", "grew"]))
+    # unrelated perturbation of the source leaves the verdict unchanged
+    perturbed = collision + _words([["Zebra", "stripes"]], start_line=9, y_start=900.0)
+    assert not _faults(header, perturbed)
+    assert _faults(
+        header, _lines(["Pretax", "Income"]) + _words([["Zebra"]], start_line=9, y_start=900.0)
+    )
+
+
+def test_a_word_spanning_an_empty_cell_fires_only_when_one_word_spans_it() -> None:
+    row = [["non", "", "linear"]]
+    assert _faults(row, _lines(["nonlinear"]))
+    assert not _faults(row, _lines(["non", "linear"], ["x", "nonlinear"]))
+
+
+def test_number_plus_unit_never_fires() -> None:
+    assert not _faults([["5", "kg"]], _lines(["5kg"]))
+    assert _faults([["ab", "cd"]], _lines(["abcd"]))
+
+
+def test_number_as_right_fragment_never_fires() -> None:
+    assert not _faults([["kg", "5"]], _lines(["kg5"]))
+
+
+def test_tokens_inside_one_cell_are_not_a_cell_split() -> None:
+    assert not _faults([["ab cd"]], _lines(["abcd"]))
+    assert _faults([["ab", "cd"]], _lines(["abcd"]))
+
+
+def test_only_the_cut_the_line_places_fires() -> None:
+    """Row ``ab|cd|ab|cd`` over the line ``ab cd abcd``: the join sits at the third and
+    fourth cells only, so exactly one fault, not one per pair that spells ``abcd``."""
+    row = [["ab", "cd", "ab", "cd"]]
+    assert len(_faults(row, _lines(["ab", "cd", "abcd"]))) == 1
+
+
+def test_a_row_must_cover_its_whole_source_line() -> None:
+    """The cut word on a line that continues past the row is not that row's evidence."""
+    assert not _faults([["Standa", "rd"]], _lines(["Standard", "x"]))
+    assert _faults([["Standa", "rd"]], _lines(["Standard"]))
+
+
+def test_hyphen_split_needs_the_positioned_word_to_be_the_compound() -> None:
+    row = [["A", "well-", "known"]]
+    assert _faults(row, _lines(["A", "well-known"]))
+    assert not _faults(row, _lines(["A", "well-", "known"], ["well-known"]))
 
 
 def test_short_tuples_and_empty_input_abstain_and_never_raise() -> None:
     short = [(0.0, 0.0, 1.0, 1.0, "Standard"), (0.0, 0.0, 1.0, 1.0, "x")]
-    assert _faults([["Standa", "rd"]], short)
+    assert _faults([["Standa", "rd", "x"]], short)
     assert _faults([["only"]], short) == []
     assert ship_gate.word_split_across_cells_faults([], {}) == []
     assert ship_gate.word_split_across_cells_faults([[[]]], {0: [(0, 0, 1, 1, "a")]}) == []

@@ -53,3 +53,28 @@ inside the copy, uncapped `count == 1` asserted before each edit, baseline 10 pa
 | drop `in source` | 7 failed |
 | drop NFKC | 1 failed (first run survived; ligature test added) |
 | join last cell to first cell of the same row | 1 failed |
+
+## Review round (Astra, ACCEPT-WITH-FIXES): the source-word lookup was page-wide
+
+Blocking point: `Pre | tax`, `In | come`, `non | linear` fired whenever `Pretax`, `Income`,
+`nonlinear` occurred anywhere else on the page. Fixed by making the evidence positional:
+
+- the row's tokens must cover ONE whole source line in order (`_aligned_cuts`): each source
+  word is one token, or two tokens of different cells joined. A cut fires only at a join the
+  line itself places. So `non | | linear` fires only if one source word `nonlinear` is where
+  the cells meet, and `well- | known` only if that word is `well-known`.
+- either fragment being a number disqualifies the pair (`5 | kg` over source `5kg` is quiet).
+  The old check on the joined word is gone: it was redundant (its mutant survived).
+- a row wrapped over several source lines now abstains (documented hole).
+
+Census re-run (same data, `/Users/rubenffuertes/.local/state/socr-housekeeping/gh951/inputs_now.pkl`):
+12 fire pages, 0 removals; faust 46, levy 105 and sr99 p12 still DEFER (3 new DEFERs). The
+12 are a subset of the 13 judged real earlier: 12 real, 0 false. Lost: cook_kazinnik p21,
+whose notes paragraph wraps over several source lines (a true split, now abstained).
+
+Tests: 17 in the file, adding fixed-source controls (collision, number+unit both sides,
+unrelated source perturbation, cross-row positive counterpart, hyphen compound,
+whole-line coverage, one-cut-per-line). Mutations in an external copy (src+tests+pyproject,
+canary, uncapped count 1, baseline 18 passed): unwire, drop not-present, drop left/right
+fragment number guard, drop positional rule (5 failed), any-cut, partial line coverage,
+drop NFKC: all 8 caught.

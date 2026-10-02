@@ -1345,28 +1345,83 @@ def geometryless_block_faults(
     return faults
 
 
+def _aligned_cuts(tokens: list[tuple[str, int]], line: list[str]) -> set[int]:
+    """Indices ``k`` where tokens ``k`` and ``k + 1`` (different cells) form one word of *line*.
+
+    The row's ``(token, cell)`` list must cover *line* exactly, in order: each source word
+    is one token, or two neighbouring tokens of different cells joined. Returns the empty
+    set unless every token and every word is consumed.
+    """
+    cuts: set[int] = set()
+    k, j = 0, 0
+    while k < len(tokens) and j < len(line):
+        if tokens[k][0] == line[j]:
+            k += 1
+        elif (
+            k + 1 < len(tokens)
+            and tokens[k][1] != tokens[k + 1][1]
+            and unicodedata.normalize("NFKC", tokens[k][0] + tokens[k + 1][0]) == line[j]
+        ):
+            cuts.add(k)
+            k += 2
+        else:
+            return set()
+        j += 1
+    return cuts if k == len(tokens) and j == len(line) else set()
+
+
 def word_split_across_cells_faults(blocks: list[Block], src_rows: SourceRows) -> list[GateFault]:
     """GH-951: a caption or notes word cut in two across neighbouring cells of one row.
 
     Fires when, in one grid row, the last token of a non-empty cell plus the first token
-    of the next non-empty cell, NFKC-normalised and joined with no space, equal a source
-    word that appears nowhere in the block as a token and is not a number. A hyphenated
-    compound cut at its hyphen (``well-`` + ``known``) is such a join and fires. Known
-    hole: a word that also occurs whole elsewhere in the block stays quiet. DEFER-only.
+    of the next non-empty cell, NFKC-normalised and joined with no space, equal ONE source
+    word that appears nowhere in the block as a token, and neither fragment is a number
+    (``5`` + ``kg`` never fires, whatever the source holds). The evidence is positional: the
+    row's tokens must cover, in order, one whole source line in which that word sits
+    exactly where the two fragments meet, so the same word elsewhere on the page proves
+    nothing (``Pre`` | ``tax`` over a line reading ``Pre tax`` is quiet). A hyphenated
+    compound cut at its hyphen fires only when the positioned word is ``well-known``.
+    Known hole: a word that also occurs whole elsewhere in the block stays quiet; so does
+    a row wrapped over several source lines. DEFER-only.
     """
 
     def norm(text: str) -> str:
         return unicodedata.normalize("NFKC", text).strip()
 
-    source = {norm(w[4]) for ws in src_rows.values() for w in ws}
+    lines = [[norm(w[4]) for w in ws] for ws in src_rows.values()]
+    by_word: dict[str, list[list[str]]] = defaultdict(list)
+    for line in lines:
+        for word in set(line):
+            by_word[word].append(line)
+
+    def is_number(fragment: str) -> bool:
+        return _is_source_number(fragment) or _is_cell_number(fragment)
+
+    def positioned(tokens: list[tuple[str, int]], k: int, joined: str) -> bool:
+        """Do the row's tokens run along some source line with *joined* at the cut after *k*?"""
+        for line in by_word[joined]:
+            if k in _aligned_cuts(tokens, line):
+                return True
+        return False
+
     faults: list[GateFault] = []
     for b, block in enumerate(blocks):
         present = {norm(t) for row in block for cell in row for t in cell.split()}
         for i, row in enumerate(block):
-            cells = [c.split() for c in row if c.strip()]
-            for left, right in zip(cells, cells[1:]):
-                joined = norm(left[-1] + right[0])
-                if joined in source and joined not in present and not _is_source_number(joined):
+            tokens = [
+                (norm(t), ci)
+                for ci, cell in enumerate(c for c in row if c.strip())
+                for t in cell.split()
+            ]
+            for k, ((a, _a), (c, _c)) in enumerate(zip(tokens, tokens[1:])):
+                joined = norm(a + c)
+                if (
+                    joined in by_word
+                    and joined not in present
+                    and not is_number(a)
+                    and not is_number(c)
+                    and positioned(tokens, k, joined)
+                ):
                     faults.append(
                         _fault(
                             WORD_SPLIT_ACROSS_CELLS,
