@@ -98,6 +98,16 @@ def test_word_elsewhere_on_the_page_is_not_evidence() -> None:
     )
 
 
+def test_another_line_that_would_make_it_a_split_is_ambiguous_and_abstains() -> None:
+    """Astra's case: the header's own line reads ``Pre tax Income`` and a different line reads
+    ``Pretax Income``. The row aligns with both, one with no cut, so which line it sits on is
+    ambiguous and the predicate stays quiet. Control: without the whole-word line it fires."""
+    header = [["Pre", "tax", "Income"]]
+    assert not _faults(header, _lines(["Pre", "tax", "Income"], ["Pretax", "Income"]))
+    assert not _faults(header, _lines(["Pretax", "Income"], ["Pre", "tax", "Income"]))
+    assert _faults(header, _lines(["Pretax", "Income"], ["Unrelated", "line"]))
+
+
 def test_a_word_spanning_an_empty_cell_fires_only_when_one_word_spans_it() -> None:
     row = [["non", "", "linear"]]
     assert _faults(row, _lines(["nonlinear"]))

@@ -1345,12 +1345,13 @@ def geometryless_block_faults(
     return faults
 
 
-def _aligned_cuts(tokens: list[tuple[str, int]], line: list[str]) -> set[int]:
+def _aligned_cuts(tokens: list[tuple[str, int]], line: list[str]) -> set[int] | None:
     """Indices ``k`` where tokens ``k`` and ``k + 1`` (different cells) form one word of *line*.
 
     The row's ``(token, cell)`` list must cover *line* exactly, in order: each source word
-    is one token, or two neighbouring tokens of different cells joined. Returns the empty
-    set unless every token and every word is consumed.
+    is one token, or two neighbouring tokens of different cells joined. Returns ``None``
+    unless every token and every word is consumed; an empty set means the line holds the
+    row with no cut at all.
     """
     cuts: set[int] = set()
     k, j = 0, 0
@@ -1365,9 +1366,9 @@ def _aligned_cuts(tokens: list[tuple[str, int]], line: list[str]) -> set[int]:
             cuts.add(k)
             k += 2
         else:
-            return set()
+            return None
         j += 1
-    return cuts if k == len(tokens) and j == len(line) else set()
+    return cuts if k == len(tokens) and j == len(line) else None
 
 
 def word_split_across_cells_faults(blocks: list[Block], src_rows: SourceRows) -> list[GateFault]:
@@ -1398,11 +1399,14 @@ def word_split_across_cells_faults(blocks: list[Block], src_rows: SourceRows) ->
         return _is_source_number(fragment) or _is_cell_number(fragment)
 
     def positioned(tokens: list[tuple[str, int]], k: int, joined: str) -> bool:
-        """Do the row's tokens run along some source line with *joined* at the cut after *k*?"""
-        for line in by_word[joined]:
-            if k in _aligned_cuts(tokens, line):
-                return True
-        return False
+        """Do the row's tokens run along a source line with a cut after *k*, and along none without?
+
+        The row's own line is not known, so every line that aligns with it is a candidate.
+        If any candidate holds the row with no cut (``Pre tax`` beside another line
+        ``Pretax``), which line the row sits on is ambiguous and the predicate abstains.
+        """
+        aligned = [cuts for line in lines if (cuts := _aligned_cuts(tokens, line)) is not None]
+        return bool(aligned) and all(k in cuts for cuts in aligned)
 
     faults: list[GateFault] = []
     for b, block in enumerate(blocks):

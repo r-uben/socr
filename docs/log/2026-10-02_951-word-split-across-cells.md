@@ -78,3 +78,19 @@ whole-line coverage, one-cut-per-line). Mutations in an external copy (src+tests
 canary, uncapped count 1, baseline 18 passed): unwire, drop not-present, drop left/right
 fragment number guard, drop positional rule (5 failed), any-cut, partial line coverage,
 drop NFKC: all 8 caught.
+
+## Second review round (Astra on 402ad4e): any matching line was accepted
+
+`positioned()` accepted ANY source line that aligned with a cut, so a header `Pre | tax | Income`
+fired when another line on the page read `Pretax Income`, although its own line read
+`Pre tax Income`. Fix: `_aligned_cuts` returns `None` (no alignment) vs an empty set (the line
+holds the row with no cut). `positioned` collects every line that aligns with the row and fires
+only if ALL of them place the cut at that position; one candidate without it makes the row's own
+line ambiguous and the predicate abstains. No new constant.
+
+Census (`/Users/rubenffuertes/.local/state/socr-housekeeping/gh951/inputs_now.pkl`): unchanged,
+12 fire pages (12 real, 0 false), 3 new DEFERs (faust 46, levy 105, sr99 p12), 0 removals.
+Tests: 18; Astra's exact case pinned in both line orders plus a control that fires. Mutants in
+an external copy (canary, count 1, baseline green): `all` -> `any` over aligned lines fails the
+new test; cut ignored, unwire, drop not-present, fragment-number guards, positional rule,
+line coverage, NFKC all fail as before.
