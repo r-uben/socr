@@ -98,6 +98,7 @@ from socr.tables.reconstruct import (
     _NUM_TOKEN_RE,
     _NUMERIC_RE,
     _SIGN_GLYPHS,
+    _median_word_gap,
     detached_sign_pairs,
 )
 
@@ -810,6 +811,24 @@ def foreign_direction_faults(words: list[Word], blocks: list[Block], line_dirs) 
     return faults
 
 
+def _run_count(inside: list[Word], unit: float | None) -> int:
+    """GH-942: how many runs *inside* (x-sorted) split into at gaps wider than a run gap.
+
+    The run split is the aligned-run one (``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` word spaces,
+    in the page's own ``_median_word_gap`` unit): words closer than that belong to one
+    heading, wider gaps separate headings. ``0`` when the page has no measurable word gap.
+    """
+    from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
+
+    if unit is None or not inside:
+        return 0
+    return 1 + sum(
+        1
+        for a, b in zip(inside, inside[1:])
+        if b[0] - a[2] > ALIGNED_RUN_GAP_MAX_WORD_SPACES * unit
+    )
+
+
 def header_band_missing_faults(
     blocks: list[Block],
     pairs: list[BlockPairs],
@@ -831,10 +850,21 @@ def header_band_missing_faults(
     so a two-word title is not a header) and each has its x-centre within the lane snap
     of a table lane, no two over the same lane (a header over the columns, not prose that
     happens to cross them). A page with no such source row cannot fire.
+
+    GH-942: the lane clause misses a real header in two shapes, a multi-word heading (two
+    words over one lane) and a right-aligned or centred one (no x-centre on a lane), so it
+    ships grids that lost their column labels. The row also fires when its in-extent words
+    split into at least ``_MIN_LANES_PER_ROW`` runs (``_run_count``); the absence test, the
+    reach and the numeric-free test are shared, and the absence stays per block. The run
+    clause is OR-ed with the lane clause, never a replacement: the lane clause alone catches
+    rows the run clause does not.
     """
     if geos is None:
         geos = _block_geometries(pairs, src_rows)
     faults: list[GateFault] = []
+    # The gap unit needs each word's (block, line) indices; a bare 5-tuple word has none
+    # and is reported by ``foreign_direction`` (``direction_unavailable``), not here.
+    unit = _median_word_gap([w for ws in src_rows.values() for w in ws if len(w) > 6])
     for block, found, geo in zip(blocks, pairs, geos):
         if geo is None:
             continue
@@ -861,16 +891,22 @@ def header_band_missing_faults(
                 continue
             region = [w for w in inside if w[0] >= lanes[0] - _SNAP_PT]
             hits = [_lane_of((w[0] + w[2]) / 2, lanes) for w in region]
-            if (
+            on_lanes = (
                 len(region) >= _MIN_LANES_PER_ROW
                 and None not in hits
                 and len(set(hits)) == len(region)
-            ):
+            )
+            runs = _run_count(inside, unit)
+            if on_lanes or runs >= _MIN_LANES_PER_ROW:
+                shape = (
+                    f"{len(region)} word(s) over {len(set(hits))} distinct table lanes"
+                    if on_lanes
+                    else f"{len(inside)} word(s) in {runs} runs"
+                )
                 faults.append(
                     _fault(
                         HEADER_BAND_MISSING,
-                        f"source row at y={y} above the first data row has {len(region)} "
-                        f"word(s) over {len(set(hits))} distinct table lanes; "
+                        f"source row at y={y} above the first data row has {shape}; "
                         f"{len(absent)} missing from the grid: {', '.join(absent[:6])}",
                     )
                 )
