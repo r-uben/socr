@@ -329,14 +329,14 @@ def test_index_files_are_correct(tmp_path):
         str((cfg.pdf_dir / f"{s}.pdf").resolve()) for s in ("absent", "clean", "partial", "warned")
     ]
     docs = json.loads(cfg.manifest.read_text())["documents"]
-    assert docs["clean"]["status"] == "completed" and docs["clean"]["verified"] is True
+    assert docs["clean"]["status"] == "completed" and docs["clean"]["state"] == "verified"
     assert docs["warned"]["bad_pages"] == ["00001"]
     assert docs["partial"]["status"] == "partial"
     assert docs["absent"]["status"] == "missing_text"
     assert not list(cfg.index_dir.glob("*.tmp"))
 
 
-def test_page_error_and_missing_metadata_are_unverified(tmp_path):
+def test_page_error_is_unverified_missing_metadata_is_unknown(tmp_path):
     cfg = lib.load_library_config(_write_cfg(tmp_path))
     for stem in ("err", "nometa"):
         _pdf(cfg.pdf_dir / f"{stem}.pdf")
@@ -344,7 +344,55 @@ def test_page_error_and_missing_metadata_are_unverified(tmp_path):
     _fake_doc(cfg.text_dir, "nometa")
     (cfg.text_dir / "nometa" / "metadata.json").unlink()
     lib.refresh_index(cfg)
-    assert cfg.unverified.read_text() == "err\nnometa\n"
+    assert cfg.unverified.read_text() == "err\n"
+    assert json.loads(cfg.manifest.read_text())["documents"]["nometa"]["state"] == "unknown"
+
+
+def _legacy_library(tmp_path):
+    """Legacy metadata (no status), a curated unverified.txt entry, a marker dir."""
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    for stem in ("legacy", "curated", "marked", "fresh", "gone"):
+        _pdf(cfg.pdf_dir / f"{stem}.pdf")
+    for stem in ("legacy", "curated", "marked"):
+        _fake_doc(cfg.text_dir, stem)
+        (cfg.text_dir / stem / "metadata.json").write_text(json.dumps({"model": "old"}))
+    (cfg.text_dir / "marked" / "UNVERIFIED.txt").write_text("hand placed")
+    cfg.index_dir.mkdir(parents=True)
+    cfg.unverified.write_text("curated\nnot-in-library\n")
+    return cfg
+
+
+def test_legacy_status_is_unknown_and_curated_entries_survive(tmp_path):
+    cfg = _legacy_library(tmp_path)
+    marker_before = _snapshot(cfg.text_dir / "marked")
+    lib.refresh_index(cfg)
+    entries = cfg.unverified.read_text().split()
+    assert entries == ["curated", "marked", "not-in-library"]  # legacy NOT listed
+    docs = json.loads(cfg.manifest.read_text())["documents"]
+    assert docs["legacy"]["state"] == "unknown" and docs["legacy"]["status"] == "unknown"
+    assert docs["curated"]["state"] == "unknown"
+    assert docs["marked"]["state"] == "unverified"
+    assert _snapshot(cfg.text_dir / "marked") == marker_before  # marker never touched
+
+
+def test_curated_entry_leaves_only_when_socr_processed_it_clean(tmp_path):
+    cfg = _legacy_library(tmp_path)
+    lib.refresh_index(cfg, frozenset({"legacy"}))  # processed, but was never listed
+    assert "curated" in cfg.unverified.read_text().split()
+    # socr re-processed 'curated' and it came out completed: it leaves the list
+    (cfg.text_dir / "curated" / "metadata.json").write_text(json.dumps({"status": "completed"}))
+    lib.refresh_index(cfg)  # not processed this run: curated entry stays
+    assert "curated" in cfg.unverified.read_text().split()
+    lib.refresh_index(cfg, frozenset({"curated"}))
+    assert "curated" not in cfg.unverified.read_text().split()
+    assert "not-in-library" in cfg.unverified.read_text().split()
+
+
+def test_processed_but_still_bad_stays_listed(tmp_path):
+    cfg = _legacy_library(tmp_path)
+    (cfg.text_dir / "curated" / "metadata.json").write_text(json.dumps({"status": "partial"}))
+    lib.refresh_index(cfg, frozenset({"curated"}))
+    assert "curated" in cfg.unverified.read_text().split()
 
 
 def test_index_write_is_atomic(tmp_path, monkeypatch):

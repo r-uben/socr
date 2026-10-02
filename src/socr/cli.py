@@ -1056,12 +1056,14 @@ def library(
         return result.status is not DocumentStatus.SKIPPED and not result.success
 
     failures: list[str] = []
+    processed: set[str] = set()
     try:
         if promote_stem:
             if dry_run:
                 console.print(f"[dim]would promote {promote_stem} from {cfg.staging_dir}[/dim]")
                 return
             archived, installed = lib.promote(cfg, promote_stem)
+            processed.add(promote_stem)
             console.print(f"Installed {installed}")
             if archived:
                 console.print(f"Old copy archived at {archived}")
@@ -1087,6 +1089,7 @@ def library(
                 return
             if todo:
                 for stem, result in lib.process_new(cfg, make_process(False), todo):
+                    processed.add(stem)
                     if failed(result):
                         failures.append(stem)
     except lib.LibraryError as e:
@@ -1097,7 +1100,7 @@ def library(
     finally:
         # Refresh the index even after a partial run: it reflects what is on disk.
         if not dry_run:
-            summary = lib.refresh_index(cfg)
+            summary = lib.refresh_index(cfg, frozenset(processed))
             console.print(
                 f"Index refreshed: {summary['documents']} documents, "
                 f"{len(summary['missing_text'])} missing text, "

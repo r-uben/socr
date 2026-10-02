@@ -33,10 +33,18 @@ STAGING_KEY = "staging"
 #: inside ``index.dir``. Documented in the README; a config key overrides it.
 DEFAULT_STAGING_NAME = "staging"
 
-#: Page statuses that do not make a document unverified.
-_CLEAN_PAGE_STATUSES = frozenset({"success", "skipped"})
-#: The only document status that is trusted (ocr_output_contract.Status.COMPLETED).
+#: Page statuses that make a document unverified. Anything else (including an
+#: absent or unreadable status) is not evidence of a problem.
+_BAD_PAGE_STATUSES = frozenset({"warning", "error"})
+#: The document status that is trusted (ocr_output_contract.Status.COMPLETED).
 _CLEAN_DOC_STATUS = "completed"
+#: Hand-placed marker in a text dir (named in the library config's comments).
+#: Read as evidence only; socr never writes or deletes it.
+UNVERIFIED_MARKER = "UNVERIFIED.txt"
+
+#: Three states. A legacy run has no ``status`` in its metadata: that is
+#: UNKNOWN, never UNVERIFIED (the real library has 342 such documents).
+VERIFIED, UNVERIFIED, UNKNOWN = "verified", "unverified", "unknown"
 #: Filename pattern the pipeline writes; the config must agree with it.
 _MARKDOWN_PATTERN = "{stem}.md"
 
@@ -260,12 +268,20 @@ def doc_status(cfg: LibraryConfig, doc_dir: Path) -> dict[str, Any]:
         for sidecar in sorted(pages_dir.glob("*.json")):
             rec = _read_json(sidecar)
             page_status = rec.get("status") if isinstance(rec, dict) else None
-            if page_status not in _CLEAN_PAGE_STATUSES:
+            if page_status in _BAD_PAGE_STATUSES:
                 bad_pages.append(sidecar.stem)
-    verified = status == _CLEAN_DOC_STATUS and not bad_pages
+    has_status = isinstance(status, str) and bool(status)
+    marker = (doc_dir / UNVERIFIED_MARKER).exists()
+    if marker or bad_pages or (has_status and status != _CLEAN_DOC_STATUS):
+        state = UNVERIFIED
+    elif has_status:
+        state = VERIFIED
+    else:
+        state = UNKNOWN
     return {
-        "status": status if isinstance(status, str) else "unknown",
-        "verified": verified,
+        "status": status if has_status else UNKNOWN,
+        "state": state,
+        "marker": marker,
         "bad_pages": bad_pages,
     }
 
@@ -294,27 +310,48 @@ def _lines(items: list[str]) -> str:
     return "".join(f"{i}\n" for i in items)
 
 
-def refresh_index(cfg: LibraryConfig) -> dict[str, Any]:
+def _read_entries(path: Path) -> set[str]:
+    try:
+        return {ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    except OSError:
+        return set()
+
+
+def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Rewrite the index files.
+
+    ``processed`` are stems whose text dir socr itself wrote in this run. The
+    unverified list is curated by hand as well: it is the UNION of the existing
+    file and the newly computed entries, and a stem leaves it only when it is in
+    ``processed`` and came out ``verified``.
+    """
     pdfs = list_pdfs(cfg)
     stems = sorted({p.stem for p in pdfs})
     awaiting = set(staged_stems(cfg))
     manifest: dict[str, Any] = {}
     missing: list[str] = []
-    unverified: list[str] = []
+    computed: set[str] = set()
+    cleared: set[str] = set()
     for stem in stems:
         if not has_text(cfg, stem):
             missing.append(stem)
             manifest[stem] = {"status": "missing_text", "awaiting_approval": stem in awaiting}
             continue
         info = doc_status(cfg, cfg.text_doc_dir(stem))
-        if not info["verified"]:
-            unverified.append(stem)
+        if info["state"] == UNVERIFIED:
+            computed.add(stem)
+        elif info["state"] == VERIFIED and stem in processed:
+            cleared.add(stem)
         manifest[stem] = {
             "status": info["status"],
-            "verified": info["verified"],
+            "state": info["state"],
             "bad_pages": info["bad_pages"],
             "awaiting_approval": stem in awaiting,
         }
+    unverified = sorted((_read_entries(cfg.unverified) - cleared) | computed)
+    for stem in unverified:
+        if stem in manifest and manifest[stem].get("state") != UNVERIFIED:
+            manifest[stem]["curated_unverified"] = True
     _atomic_write(cfg.documents, _lines([str(p.resolve()) for p in pdfs]))
     _atomic_write(cfg.missing_text, _lines(missing))
     _atomic_write(cfg.unverified, _lines(unverified))

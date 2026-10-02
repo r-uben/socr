@@ -196,9 +196,14 @@ socr library --promote STEM        # archive the old copy, install the staged on
   (a numeric suffix avoids a clash) and the staged one into place. Nothing is
   deleted. It refuses when nothing is staged.
 - After each run (not `--dry-run`) the index is rewritten atomically:
-  `documents` (absolute PDF paths), `missing_text` (stems), `unverified` (stems
-  whose metadata status is not `completed`, or with any page not `success`/`skipped`)
-  and `manifest` (per-stem status).
+  `documents` (absolute PDF paths), `missing_text` (stems), `unverified` and
+  `manifest` (per-stem `state`: `verified`, `unverified` or `unknown`).
+  A document is `unverified` only on evidence: an explicit non-`completed`
+  metadata status, a page `warning`/`error`, or a hand-placed `UNVERIFIED.txt` in
+  its text dir (read, never written or deleted). Legacy metadata with no `status`
+  is `unknown` and is not listed. `unverified.txt` is the union of its existing
+  entries and the computed ones; a stem leaves it only when this run processed
+  it and it came out `verified`.
 - `backup.rclone_remote` is never read or written. The summary ends with
   "Run backup-gdrive to push".
 - Exit code is nonzero if any processed document failed or was partial.

@@ -56,3 +56,19 @@ Logic in `src/socr/library.py`; thin command in `src/socr/cli.py`; tests in
   redundant with the resolved check, mutating only it survives by design), non-atomic index
   write (1). Unmutated: 43 passed.
 - Full suite and format result: see the commit report.
+
+## Amendment: three states, curated unverified list (coordinator review of the real library)
+
+The real library has 342/362 legacy `metadata.json` with no `status`, a curated `unverified.txt`,
+and 19 hand-placed `UNVERIFIED.txt`. The first version (non-completed => unverified) would have
+listed ~355 papers. Now:
+- state is `verified` / `unverified` / `unknown`. Unverified only on explicit evidence: status
+  present and not `completed`, a page `warning`/`error`, or an `UNVERIFIED.txt` marker. Missing
+  status => `unknown` (recorded in the manifest, never in `unverified.txt`). Pages with unreadable
+  or absent status no longer count.
+- `unverified.txt` = existing entries union computed ones; an entry leaves only for a stem socr
+  processed this run (new PDF or promote; not rerun, which leaves text untouched) that is `verified`.
+- markers are never written or deleted.
+- tests: legacy fixture (no status + curated entry + marker), clear-only-when-processed-clean,
+  processed-but-still-partial. Mutants in an external copy (all fail the suite): drop the union
+  (2 failed), clear every curated entry (2), legacy->unverified (2), ignore marker (1).
