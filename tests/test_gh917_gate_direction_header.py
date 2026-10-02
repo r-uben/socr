@@ -29,7 +29,6 @@ from native_table_fixtures import (
     dense_pdf,
     forecast_pdf,
     native_first_config,
-    no_prose_in_header,  # noqa: F401  (fixture, used through pytestmark)
     place,
 )
 from test_gh916_native_ship_gate import _base, _md, _predicates, _word, _words
@@ -43,9 +42,6 @@ from socr.tables import native_first as nf
 from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, SHIP, plan_native_table
 from socr.tables.ship_gate import LineDirections, line_directions_for_page
-
-#: These synthetic pages carry no prose, see ``no_prose_in_header``; GH-936 has its own file.
-pytestmark = pytest.mark.usefixtures("no_prose_in_header")
 
 HORIZONTAL = (1.0, 0.0)
 UP = (0.0, -1.0)

@@ -14,8 +14,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-from native_table_fixtures import HEADER, ROWS, UNCHECKED, no_prose_in_header  # noqa: F401
+from native_table_fixtures import HEADER, ROWS, UNCHECKED
 from test_gh916_native_ship_gate import _md, _plan, _predicates, _words
 
 from socr.tables import native_first as nf
@@ -23,9 +22,6 @@ from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, SHIP, plan_native_table
 
 TNC = ship_gate.TEXT_IN_NUMERIC_COLUMN
-
-#: These synthetic pages carry no prose, see ``no_prose_in_header``; GH-936 has its own file.
-pytestmark = pytest.mark.usefixtures("no_prose_in_header")
 NO_CELLS = ["", "", "", "", ""]
 
 

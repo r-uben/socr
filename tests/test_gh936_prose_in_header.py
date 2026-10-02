@@ -20,8 +20,8 @@ from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, SHIP
 
 PIH = ship_gate.PROSE_IN_HEADER
-#: The page's word space. Every grid cell sits on its own text line, so the only measurable
-#: gaps are the body sentence's and the caption's, and this is their median.
+#: The page's word space, printed by the body prose outside the table. Every grid cell sits on its
+#: own text line, so these (and the caption) are the only same-line gaps on the page.
 WORD_SPACE = 3.0
 CAPTION = ["Percent", "of", "aggregate", "values"]
 SPREAD = ["Percent of", "aggregate values", "", "", ""]
@@ -39,16 +39,24 @@ def _line(words: list[str], x: float, y: float, block: int, gap: float) -> list[
     return out
 
 
-def _grid_words() -> list[tuple]:
-    """HEADER at ``Y0`` and ROWS below it, one text line per cell, plus a body sentence far
-    below the table that fixes the page's word space."""
+def _grid_words(*, prose_lines: int = 2, whole_row_lines: bool = False) -> list[tuple]:
+    """HEADER at ``Y0`` and ROWS below it, plus *prose_lines* body sentences far below the table.
+
+    ``whole_row_lines=False``: one text line per cell. ``True``: one text line per table row, as a
+    PDF that sets whole rows prints them (the gaps are then the column gutters).
+    """
     out, line = [], 0
     for ri, row in enumerate([HEADER] + ROWS):
         for ci, cell in enumerate(row):
-            out.append(_w(COL_XS[ci], Y0 + ri * PITCH, cell, 0, line, 0))
+            if whole_row_lines:
+                out.append(_w(COL_XS[ci], Y0 + ri * PITCH, cell, 0, ri, ci))
+            else:
+                out.append(_w(COL_XS[ci], Y0 + ri * PITCH, cell, 0, line, 0))
             line += 1
     body = "Prose elsewhere on the page sets the word space".split()
-    return out + _line(body, COL_XS[0], Y0 + 20 * PITCH, 9, WORD_SPACE)
+    for k in range(prose_lines):
+        out += _line(body, COL_XS[0], Y0 + (20 + k) * PITCH, 9 + k, WORD_SPACE)
+    return out
 
 
 def _caption_words(words: list[str], gap: float) -> list[tuple]:
@@ -136,7 +144,48 @@ class TestMustNotFire:
 
     def test_a_page_with_no_measurable_word_space_abstains(self) -> None:
         # Single-word lines only: no gap to measure, so the yardstick is undefined.
-        words = [w for w in _grid_words() if w[5] != 9]
+        words = _grid_words(prose_lines=0)
         words += [_w(COL_XS[0], Y0 - PITCH, "Percent", 5, 0, 0)]
         words += [_w(COL_XS[1], Y0 - PITCH, "of", 5, 1, 0)]
         assert PIH not in _fired(words, _gate_md(SPREAD))
+
+
+class TestSpacingEvidence:
+    """The word space is measured only on text outside the table's extent (GH-936 round 2)."""
+
+    def test_table_only_page_with_a_caption_run_abstains(self) -> None:
+        # Per-cell lines: the caption's own gaps are INSIDE the extent, so they are not evidence.
+        words = _grid_words(prose_lines=0) + _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == set()
+        # The same page with prose elsewhere fires: the evidence is the only difference.
+        words = _grid_words(prose_lines=2) + _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == {PIH}
+
+    def test_whole_row_lines_make_a_real_header_quiet(self) -> None:
+        # Whole-row PDF lines: the column pitch is the only same-line gap. The real header row
+        # (one run at that pitch) must not read as prose, with or without a caption above it.
+        words = _grid_words(prose_lines=0, whole_row_lines=True)
+        assert _fired(words, _gate_md(None)) == set()
+        words += _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == set()
+
+    def test_whole_row_lines_with_prose_outside_still_judge_by_the_prose(self) -> None:
+        words = _grid_words(prose_lines=2, whole_row_lines=True)
+        assert _fired(words, _gate_md(None)) == set(), "the real header is lane-shaped"
+        words += _caption_words(CAPTION, WORD_SPACE)
+        assert _fired(words, _gate_md(SPREAD)) == {PIH}
+
+    def test_one_prose_line_is_not_enough_evidence(self) -> None:
+        words = _grid_words(prose_lines=ship_gate._MIN_SPACING_LINES - 1)
+        words += _caption_words(CAPTION, WORD_SPACE)
+        assert PIH not in _fired(words, _gate_md(SPREAD))
+        words = _grid_words(prose_lines=ship_gate._MIN_SPACING_LINES)
+        words += _caption_words(CAPTION, WORD_SPACE)
+        assert PIH in _fired(words, _gate_md(SPREAD))
+
+    def test_words_without_line_indices_abstain_and_never_raise(self) -> None:
+        # A five-field word has no block/line: it cannot give a gap. The predicate must not turn
+        # the page into a gate_error and hide the other faults.
+        words = [w[:5] for w in _grid_words() + _caption_words(CAPTION, WORD_SPACE)]
+        fired = _fired(words, _gate_md(SPREAD))
+        assert ship_gate.GATE_ERROR not in fired and PIH not in fired

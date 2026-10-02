@@ -104,7 +104,6 @@ from socr.tables.reconstruct import (
     _NUM_TOKEN_RE,
     _NUMERIC_RE,
     _SIGN_GLYPHS,
-    _median_word_gap,
     detached_sign_pairs,
 )
 
@@ -1131,6 +1130,39 @@ def _is_one_run(row_words: list[Word], word_space: float) -> bool:
     return all(b[0] - a[2] <= limit for a, b in zip(row_words, row_words[1:]))
 
 
+#: Text lines outside every table's vertical extent that must contribute a gap before the page's
+#: word space is trusted. A repeat is evidence, one line is not (the ``_PLACEHOLDER_MIN_ROWS`` rule).
+_MIN_SPACING_LINES = _PLACEHOLDER_MIN_ROWS
+
+
+def _page_word_space(words: list[Word], extents: list[tuple[float, float]]) -> float | None:
+    """The page's median same-line word gap, measured ONLY on lines outside every table extent.
+
+    Inside a table the only gaps are column gutters (per-cell or whole-row PDF lines alike), which
+    would make a real multi-column header read as one run. Body prose, captions and notes outside the
+    extents print the ordinary word space. ``None`` (the caller abstains) when fewer than
+    ``_MIN_SPACING_LINES`` such lines have a gap, or when the words carry no block/line indices.
+    """
+    by_line: dict[tuple, list[Word]] = defaultdict(list)
+    for w in words:
+        if len(w) <= 6:
+            continue
+        if any(lo <= w[1] <= hi for lo, hi in extents):
+            continue
+        by_line[(w[5], w[6])].append(w)
+    gaps: list[float] = []
+    lines = 0
+    for line_words in by_line.values():
+        ordered = sorted(line_words, key=lambda w: w[0])
+        line_gaps = [b[0] - a[2] for a, b in zip(ordered, ordered[1:]) if b[0] - a[2] > 0]
+        if line_gaps:
+            lines += 1
+            gaps.extend(line_gaps)
+    if lines < _MIN_SPACING_LINES:
+        return None
+    return statistics.median(gaps)
+
+
 def prose_in_header_faults(
     words: list[Word],
     blocks: list[Block],
@@ -1153,16 +1185,27 @@ def prose_in_header_faults(
     real, 1 is a broken page, 3 are false (a genuine one-run spanning heading, a panel title,
     an in-table panel label); a false DEFER costs one model read.
 
-    Known holes, by construction: a one-word caption (indistinguishable from a one-word
+    The yardstick is the page's word space measured on lines OUTSIDE every table's extent (core
+    rows less/plus the outward reach of ``_PANEL_GAP_ROWS`` pitches), see ``_page_word_space``; with
+    too little such text the predicate abstains rather than guess from column gutters.
+
+    Known holes, by construction: a page with no text outside its tables (it abstains); a one-word caption (indistinguishable from a one-word
     heading) and a caption with a gap wider than the bound (reads as lane-shaped). No font
     size clause: the design measured zero census gain and an exact float comparison is brittle.
     No panel-label exemption: it would save one false DEFER and add code.
     """
-    word_space = _median_word_gap(words)
-    if not word_space:
-        return []
     if geos is None:
         geos = _block_geometries(pairs, src_rows)
+    extents = []
+    for geo in geos:
+        if geo is None:
+            continue
+        ys = sorted(geo[1])
+        reach = _PANEL_GAP_ROWS * statistics.median([b - a for a, b in zip(ys, ys[1:])])
+        extents.append((ys[0] - reach, ys[-1] + reach))
+    word_space = _page_word_space(words, extents) if extents else None
+    if not word_space:
+        return []
     faults: list[GateFault] = []
     for block, found, geo in zip(blocks, pairs, geos):
         if geo is None:

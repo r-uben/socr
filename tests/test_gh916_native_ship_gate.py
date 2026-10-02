@@ -24,7 +24,6 @@ from native_table_fixtures import (
     PITCH,
     ROWS,
     UNCHECKED,
-    no_prose_in_header,  # noqa: F401  (fixture, used through pytestmark)
     WORD_H,
     Y0,
     dense_pdf,
@@ -43,9 +42,6 @@ from socr.tables import native_first as nf
 from socr.tables import ship_gate
 from socr.tables.native_first import DEFER, ROTATED_QUARANTINE_KIND, SHIP, plan_native_table
 from socr.tables.reconstruct import detached_sign_pairs
-
-#: These synthetic pages carry no prose, see ``no_prose_in_header``; GH-936 has its own file.
-pytestmark = pytest.mark.usefixtures("no_prose_in_header")
 
 #: Four empty cells: a label-only row under HEADER.
 BLANK = ["", "", "", ""]

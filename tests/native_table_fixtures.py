@@ -10,14 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import fitz
-import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.agentic import PageDecision, ProviderAttempt
-from socr.tables import ship_gate
 from socr.tables.ship_gate import LineDirections
 
 COL_XS = [90.0, 180.0, 270.0, 360.0, 450.0]
@@ -38,17 +36,6 @@ ROWS = [
 ]
 
 UNCHECKED = LineDirections.unchecked_for_tests()
-
-
-@pytest.fixture
-def no_prose_in_header(monkeypatch):
-    """Switch ``prose_in_header`` (GH-936) off for a grid fixture that has no prose on the page.
-
-    These synthetic pages put a whole row on one text line, so the column pitch is the only gap
-    ``_median_word_gap`` can measure and every header row reads as one run. A real page's word
-    space comes from its body text. The predicate has its own file (``test_gh936_prose_in_header``).
-    """
-    monkeypatch.setattr(ship_gate, "prose_in_header_faults", lambda *a, **k: [])
 
 
 def native_first_config() -> PipelineConfig:
