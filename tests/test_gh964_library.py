@@ -813,3 +813,148 @@ def test_stem_collisions_are_refused(tmp_path, hermetic, monkeypatch):
     assert res.exit_code != 0 and "collide" in res.output
     assert not cfg.text_dir.exists() and not cfg.staging_dir.exists()
     assert not cfg.index_dir.exists()
+
+
+# --- GH-964 review round 3: atomic rename, journal validation, durability ---
+
+
+def test_noreplace_rename_refuses_an_empty_target_and_keeps_the_source(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (src / "f.txt").write_text("data")
+    dst.mkdir()  # plain os.rename() would silently replace an EMPTY directory
+    with pytest.raises(lib.LibraryError, match="refusing to replace"):
+        lib._rename_noreplace(src, dst)
+    assert (src / "f.txt").read_text() == "data" and dst.exists() and not any(dst.iterdir())
+
+
+@pytest.mark.skipif(lib._native_noreplace() is None, reason="no kernel no-replace rename here")
+def test_noreplace_is_atomic_not_check_then_rename(tmp_path, monkeypatch):
+    """Simulate the race: the pre-check sees 'absent', the target appears anyway."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (src / "f.txt").write_text("data")
+    dst.mkdir()
+    monkeypatch.setattr(lib.os.path, "lexists", lambda p: False)
+    with pytest.raises(lib.LibraryError, match="refusing to replace"):
+        lib._rename_noreplace(src, dst)
+    assert (src / "f.txt").read_text() == "data" and not any(dst.iterdir())
+
+
+def test_install_never_replaces_an_empty_text_dir(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    (cfg.text_dir / "a").mkdir(parents=True)  # empty dir appeared meanwhile
+    with pytest.raises(lib.LibraryError, match="refusing to replace"):
+        lib.install_staged(cfg, "a")
+    assert (cfg.staging_dir / "a" / "a.md").read_text() == "new"
+
+
+def _write_journal(cfg, **fields):
+    cfg.index_dir.mkdir(parents=True, exist_ok=True)
+    j = {"stem": "a", "target": None, "staged": None, "archived": None}
+    j.update(fields)
+    (cfg.index_dir / lib.JOURNAL_NAME).write_text(json.dumps(j))
+
+
+def test_journal_naming_paths_outside_the_library_is_refused(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    outside = tmp_path / "outside"
+    _fake_doc(outside, "a", body="not yours")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    before = _snapshot(outside)
+    for fields in (
+        {"target": str(outside / "a"), "staged": str(cfg.staging_dir / "a")},
+        {"target": str(cfg.text_dir / "a"), "staged": str(outside / "a")},
+        {
+            "target": str(cfg.text_dir / "a"),
+            "staged": str(cfg.staging_dir / "a"),
+            "archived": str(outside / "a.2026-10-02"),
+        },
+        {"target": str(cfg.text_dir / ".." / ".." / "a"), "staged": str(cfg.staging_dir / "a")},
+    ):
+        _write_journal(cfg, **fields)
+        with pytest.raises(lib.LibraryError, match=lib.JOURNAL_NAME):
+            lib.recover_promotion(cfg)
+        assert (cfg.index_dir / lib.JOURNAL_NAME).exists()  # left for a human
+    assert _snapshot(outside) == before
+    assert (cfg.staging_dir / "a" / "a.md").read_text() == "new"
+    assert not (cfg.text_dir / "a").exists()
+
+
+def test_journal_naming_a_symlink_is_refused(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    outside = tmp_path / "outside"
+    _fake_doc(outside, "a", body="not yours")
+    cfg.staging_dir.mkdir(parents=True)
+    (cfg.staging_dir / "a").symlink_to(outside / "a")
+    _write_journal(cfg, target=str(cfg.text_dir / "a"), staged=str(cfg.staging_dir / "a"))
+    with pytest.raises(lib.LibraryError, match="which is a symlink"):
+        lib.recover_promotion(cfg)
+    assert not (cfg.text_dir / "a").exists()
+    assert (outside / "a" / "a.md").read_text() == "not yours"
+
+
+def test_journal_with_a_staged_dir_missing_its_markdown_is_refused(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    (cfg.staging_dir / "a").mkdir(parents=True)
+    (cfg.staging_dir / "a" / "junk.txt").write_text("x")
+    _write_journal(cfg, target=str(cfg.text_dir / "a"), staged=str(cfg.staging_dir / "a"))
+    with pytest.raises(lib.LibraryError, match="a.md"):
+        lib.recover_promotion(cfg)
+    assert not (cfg.text_dir / "a").exists()
+
+
+def test_promote_fsyncs_in_the_durable_order(tmp_path, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    jp = cfg.index_dir / lib.JOURNAL_NAME
+    events = []
+    real_fsync_dir, real_rename = lib._fsync_dir, lib._rename_noreplace
+    monkeypatch.setattr(
+        lib,
+        "_fsync_dir",
+        lambda p: (events.append(("fsync", Path(p), jp.exists())), real_fsync_dir(p))[1],
+    )
+    monkeypatch.setattr(
+        lib,
+        "_rename_noreplace",
+        lambda s, d: (events.append(("rename", Path(d), jp.exists())), real_rename(s, d))[1],
+    )
+    lib.promote(cfg, "a")
+    kinds = [e[0] for e in events]
+    first_rename = kinds.index("rename")
+    # journal directory fsynced (with the journal present) before the first rename
+    assert ("fsync", cfg.index_dir, True) in events[:first_rename]
+    # after each rename the parent dirs are fsynced before the next rename
+    renames = [i for i, k in enumerate(kinds) if k == "rename"]
+    assert len(renames) == 2
+    between = events[renames[0] + 1 : renames[1]]
+    assert {e[1] for e in between} >= {cfg.archive_dir, cfg.text_dir}
+    after = events[renames[1] + 1 :]
+    assert {e[1] for e in after} >= {cfg.text_dir, cfg.staging_dir}
+    # the journal is deleted only after that, then its directory is fsynced
+    assert events[-1] == ("fsync", cfg.index_dir, False)
+    assert all(e[2] for e in events[: renames[1] + 1 + len(after) - 1])
+
+
+def test_journal_naming_a_symlink_inside_the_library_is_refused(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _fake_doc(cfg.staging_dir, "b", body="other paper")
+    (cfg.staging_dir / "a").symlink_to(cfg.staging_dir / "b")  # resolves inside staging
+    _write_journal(cfg, target=str(cfg.text_dir / "a"), staged=str(cfg.staging_dir / "a"))
+    with pytest.raises(lib.LibraryError, match="which is a symlink"):
+        lib.recover_promotion(cfg)
+    assert not (cfg.text_dir / "a").exists()
+
+
+def test_recovery_rename_goes_through_the_no_replace_primitive(tmp_path, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    _crash_on_nth_rename(monkeypatch, 2)
+    with pytest.raises(RuntimeError):
+        lib.promote(cfg, "a")
+    monkeypatch.undo()
+    calls = []
+    real = lib._rename_noreplace
+    monkeypatch.setattr(lib, "_rename_noreplace", lambda s, d: (calls.append(Path(d)), real(s, d)))
+    assert lib.recover_promotion(cfg)
+    assert calls == [cfg.text_dir / "a"]

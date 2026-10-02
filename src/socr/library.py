@@ -14,6 +14,8 @@ Safety rules, each enforced in code rather than by convention:
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import fcntl
 import json
 import os
@@ -337,6 +339,7 @@ def _atomic_write(path: Path, content: str) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_dir(path.parent)
 
 
 def _lines(items: list[str]) -> str:
@@ -449,15 +452,66 @@ ProcessFn = Callable[[Path, Path], Any]
 INSTALLED, FAILED, BLOCKED = "installed", "failed", "blocked"
 
 
-def _rename_noreplace(src: Path, dst: Path) -> None:
-    """Rename a directory, refusing to touch an existing target.
+_RENAME_EXCL_DARWIN = 0x4  # <stdio.h> RENAME_EXCL
+_RENAME_NOREPLACE_LINUX = 1  # <linux/fs.h> RENAME_NOREPLACE
+_AT_FDCWD = -100
 
-    Correct only under ``library_lock``: POSIX rename would silently replace an
-    empty directory, and the check-then-rename gap is closed by the lock.
+
+def _native_noreplace() -> Callable[[bytes, bytes], int] | None:
+    """The OS primitive for an atomic no-replace rename, or None on this platform.
+
+    macOS ``renamex_np(RENAME_EXCL)``, Linux ``renameat2(RENAME_NOREPLACE)``. The
+    check and the rename are one kernel operation, so a target created at any
+    moment (even an empty directory, which plain rename() would replace) wins.
     """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if hasattr(libc, "renamex_np"):
+            return lambda s, d: libc.renamex_np(s, d, _RENAME_EXCL_DARWIN)
+        if hasattr(libc, "renameat2"):
+            return lambda s, d: libc.renameat2(_AT_FDCWD, s, _AT_FDCWD, d, _RENAME_NOREPLACE_LINUX)
+    except OSError:
+        pass
+    return None
+
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Rename a directory atomically, refusing to touch an existing target.
+
+    Uses the kernel primitive where available. Only on a platform (or filesystem)
+    without it does it fall back to check-then-rename, which is safe solely under
+    ``library_lock`` against other socr runs, not against other programs.
+    """
+    native = _native_noreplace()
+    if native is not None:
+        if native(os.fsencode(src), os.fsencode(dst)) == 0:
+            return
+        err = ctypes.get_errno()
+        if err == errno.EEXIST or err == errno.ENOTEMPTY:
+            raise LibraryError(f"refusing to replace existing {dst}")
+        if err not in (errno.ENOTSUP, errno.EINVAL, errno.ENOSYS):
+            raise OSError(err, os.strerror(err), str(src))
+        # filesystem without the flag: fall through to the guarded fallback
     if os.path.lexists(dst):
         raise LibraryError(f"refusing to replace existing {dst}")
     os.rename(src, dst)
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory so a rename or create inside it survives a crash."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _rename_durable(src: Path, dst: Path) -> None:
+    """No-replace rename, then fsync the parent dir(s) involved."""
+    _rename_noreplace(src, dst)
+    _fsync_dir(dst.parent)
+    if src.parent != dst.parent:
+        _fsync_dir(src.parent)
 
 
 def install_staged(cfg: LibraryConfig, stem: str) -> Path:
@@ -467,7 +521,7 @@ def install_staged(cfg: LibraryConfig, stem: str) -> Path:
     if not cfg.markdown_path(src, stem).is_file():
         raise LibraryError(f"{src} has no {cfg.markdown.format(stem=stem)}; not installed")
     cfg.text_dir.mkdir(parents=True, exist_ok=True)
-    _rename_noreplace(src, dst)
+    _rename_durable(src, dst)
     return dst
 
 
@@ -540,12 +594,36 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
         j = json.loads(jp.read_text(encoding="utf-8"))
         target, staged = Path(j["target"]), Path(j["staged"])
         archived = Path(j["archived"]) if j.get("archived") else None
+        stem = j["stem"]
+        if not isinstance(stem, str):
+            raise TypeError("stem")
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise LibraryError(f"unreadable promotion journal {jp} ({e}); resolve it by hand") from None
+
+    def refuse(why: str) -> LibraryError:
+        return LibraryError(
+            f"promotion journal {jp} {why}; nothing was touched, resolve it by hand"
+        )
+
+    # Never act on a path the CURRENT config does not own.
+    named = [("target", target, cfg.text_dir), ("staged", staged, cfg.staging_dir)]
+    if archived is not None:
+        named.append(("archived", archived, cfg.archive_dir))
+    for label, path, allowed in named:
+        if path.is_symlink():
+            raise refuse(f"names {label} {path}, which is a symlink")
+        if not path.resolve().is_relative_to(allowed.resolve()) or path.parent.resolve() != (
+            allowed.resolve()
+        ):
+            raise refuse(f"names {label} {path}, which is not directly inside {allowed}")
+    if target.name != stem or staged.name != stem:
+        raise refuse("names paths that do not match its stem")
     t, s = os.path.lexists(target), os.path.lexists(staged)
+    if s and not cfg.markdown_path(staged, stem).is_file():
+        raise refuse(f"names a staged dir {staged} without {cfg.markdown.format(stem=stem)}")
     a = archived is not None and os.path.lexists(archived)
     if s and not t and (a or archived is None):
-        os.rename(staged, target)  # the interrupted step: finish it
+        _rename_durable(staged, target)  # the interrupted step: finish it
         msg = f"recovered interrupted promotion of {j.get('stem')}: installed {target}"
     elif s and t and a is False and archived is not None:
         msg = f"discarded journal of a promotion that had not started ({j.get('stem')})"
@@ -557,6 +635,7 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
             f"archived={a}); resolve it by hand"
         )
     jp.unlink()
+    _fsync_dir(cfg.index_dir)
     return msg
 
 
@@ -591,9 +670,12 @@ def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple
             }
         ),
     )
+    # The journal (file and directory entry) is durable before the first rename.
     if archived is not None:
-        _rename_noreplace(target, archived)
+        _rename_durable(target, archived)
     cfg.text_dir.mkdir(parents=True, exist_ok=True)
-    _rename_noreplace(staged, target)
+    _rename_durable(staged, target)
+    # Only now, with both renames durable, drop the journal and make that durable.
     _journal_path(cfg).unlink()
+    _fsync_dir(cfg.index_dir)
     return archived, target

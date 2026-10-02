@@ -207,6 +207,12 @@ socr library --promote STEM        # archive the old copy, install the staged on
 - The config is refused if index file names collide (case-insensitively), if the
   pdf/text/index/archive/staging directories are equal or nested (compared after
   symlink resolution), or if two PDFs share a stem case-insensitively.
+- The library must live on a local filesystem. File locking and atomic renames are
+  not guaranteed on iCloud or network mounts (`~/papers` is local by policy).
+- Renames use the kernel no-replace primitive (macOS `renamex_np(RENAME_EXCL)`,
+  Linux `renameat2(RENAME_NOREPLACE)`); only where that is unavailable does it fall
+  back to check-then-rename. A promotion journal naming paths outside the configured
+  text/staging/archive dirs (or a symlink) is refused and left untouched.
 - An unreadable `unverified.txt` aborts the index refresh; it is never read as empty.
 - After each run (not `--dry-run`) the index is rewritten atomically:
   `documents` (absolute PDF paths), `missing_text` (stems), `unverified` and
