@@ -238,3 +238,23 @@ class TestControls:
         hb = [f for f in faults if f["predicate"] == ship_gate.HEADER_BAND_MISSING]
         assert len(hb) == 1
         assert f"y={round(BAND_Y)}" in hb[0]["detail"]
+
+
+class TestAcceptedFalseDefer:
+    def test_known_accepted_false_defer_two_run_caption_costs_one_model_read(self) -> None:
+        # GH-945 ACCEPTED COST: a numeric-free, two-run caption ("Panel A:" ... "Returns", wide
+        # gap) left out of the grid is indistinguishable from a two-run header, so the lowered
+        # floor DEFERs a page that would otherwise SHIP. The price is one model read. Pinned as a
+        # difference: quiet at the old floor (3), fires at the new one (2).
+        words = _words(ROWS, y_start=FIRST) + _prose()
+        panel = _word(COL_XS[0], BAND_Y, "Panel", 330, 0)
+        a = _word(panel[2] + WORD_SPACE, BAND_Y, "A:", 330, 1)
+        words += [panel, a, _word(COL_XS[2], BAND_Y, "Returns", 330, 2)]
+        row = sorted((w for w in words if round(w[1]) == round(BAND_Y)), key=lambda w: w[0])
+        runs = ship_gate._run_count(row, ship_gate._median_word_gap(words))
+        assert runs == 2
+        assert runs < ship_gate._MIN_LANES_PER_ROW  # old floor: quiet
+        assert not _lane_clause_only(words)
+        plan = _plan(words)
+        assert plan.action == DEFER  # new floor: fires
+        assert _predicates(plan) == {ship_gate.HEADER_BAND_MISSING}
