@@ -188,7 +188,10 @@ The `pages/` directory makes a run crash-safe and resumable: each `NNNNN.md` is
 written the instant its page finishes. A re-run reuses a page only when its
 `NNNNN.json` is `terminal`, the run fingerprint and input checksum match, the
 status is `success` with `audit_passed` true, and the `.md` fragment is readable.
-Otherwise the page is reprocessed.
+Three adjudicated outcomes are also reused although they are `warning`: a table the
+ladder rejected (`table_rejected`) or withheld (`table_withheld`), and a page accepted on
+a credentialed judge-timeout ladder (`judge_timeout_ladder_accepted`); see
+`_load_terminal_page` in `pipeline/orchestrator.py`. Otherwise the page is reprocessed.
 
 To judge whether a page can be trusted, start with `status`, `failure_mode` and
 `audit_passed` in its `pages/NNNNN.json`, then read its audit events. Every file, status, failure mode and audit event is
