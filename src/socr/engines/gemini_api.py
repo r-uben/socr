@@ -13,7 +13,11 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
-from socr.core.ollama_utils import call_with_total_deadline
+from socr.core.ollama_utils import (
+    TotalDeadlineExceeded,
+    call_with_total_deadline,
+    safe_host_label,
+)
 from socr.core.result import FigureInfo
 from socr.engines._figure_prompt import (
     CAPTION_MARKER as _CAPTION_MARKER,  # noqa: F401  re-exported for tests
@@ -184,6 +188,7 @@ class OllamaFigureEngine:
     ) -> None:
         self.model = model
         self.host = host.rstrip("/")
+        self._last_available = False
 
     @property
     def name(self) -> str:
@@ -195,15 +200,25 @@ class OllamaFigureEngine:
             resp = call_with_total_deadline(
                 lambda: httpx.get(f"{self.host}/api/tags", timeout=3.0),
                 3.0,
-                label=f"ollama figure {self.host}/api/tags",
+                label=f"ollama figure {safe_host_label(self.host)}/api/tags",
             )
             if resp.status_code != 200:
-                return False
+                return self._remember_availability(False)
             data = resp.json()
             models = data.get("models", [])
-            return any(m.get("name", "") == self.model for m in models)
+            return self._remember_availability(any(m.get("name", "") == self.model for m in models))
+        except TotalDeadlineExceeded:
+            # GH-968: a deadline overrun, or a fail-fast because an earlier probe
+            # is still draining, says nothing about the daemon (the same way a
+            # timeout is never "unavailable" in ``probe_failure_reason``). Report
+            # the last DEFINITIVE answer rather than a fresh False.
+            return self._last_available
         except Exception:
-            return False
+            return self._remember_availability(False)
+
+    def _remember_availability(self, value: bool) -> bool:
+        self._last_available = value
+        return value
 
     def describe_figure(
         self,
@@ -234,7 +249,7 @@ class OllamaFigureEngine:
             resp = call_with_total_deadline(
                 lambda: httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0),
                 120.0,
-                label=f"ollama figure {self.host}/api/chat ({self.model})",
+                label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
             resp.raise_for_status()
             raw = resp.json()["message"]["content"].strip()

@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -33,6 +33,25 @@ class TotalDeadlineExceeded(httpx.ReadTimeout, TimeoutError):
     ``TimeoutError`` (so the urllib callers' ``except (URLError, TimeoutError,
     OSError)`` also catches it). No caller needed to change.
     """
+
+
+def safe_host_label(host: str) -> str:
+    """*host* with URL userinfo removed, for log lines, errors and labels.
+
+    Keeps scheme, host and port (and a path, minus a trailing slash); drops
+    ``user:password@``, the query and the fragment, any of which may carry a
+    credential. Two hosts differing only in userinfo give the same string, so it
+    is also a valid endpoint key.
+    """
+    host = host.strip().rstrip("/")
+    try:
+        parts = urlsplit(host)
+    except ValueError:
+        parts = None
+    if parts is None or not parts.netloc:
+        return host.rsplit("@", 1)[-1]
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))
 
 
 #: GH-968 review: abandoned calls still running, one per label (endpoint). An

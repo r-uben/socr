@@ -193,7 +193,7 @@ def latex_for_crop(
     import urllib.error
     import urllib.request
 
-    from socr.core.ollama_utils import call_with_total_deadline
+    from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
     from socr.math.recover import clean_latex
 
     payload = json.dumps(
@@ -219,7 +219,7 @@ def latex_for_crop(
 
         # GH-968: urlopen's timeout is per socket op, not total.
         body = call_with_total_deadline(
-            _call, timeout, label=f"equation LaTeX {host.rstrip('/')}/api/generate ({model})"
+            _call, timeout, label=f"equation LaTeX {safe_host_label(host)}/api/generate ({model})"
         )
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning("equation LaTeX engine call failed: %s", exc)

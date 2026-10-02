@@ -22,7 +22,7 @@ from typing import Protocol
 
 import httpx
 
-from socr.core.ollama_utils import call_with_total_deadline
+from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
 
@@ -228,7 +228,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
                 timeout=timeout,
             ),
             timeout,
-            label=f"ollama {host.rstrip('/')} generation canary ({model})",
+            label=f"ollama {safe_host_label(host)} generation canary ({model})",
         )
         resp.raise_for_status()
         return True
@@ -342,7 +342,7 @@ def probe_ollama_idle(
         resp = call_with_total_deadline(
             lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
             timeout,
-            label=f"ollama {resolved.rstrip('/')}/api/tags probe",
+            label=f"ollama {safe_host_label(resolved)}/api/tags probe",
         )
         resp.raise_for_status()
     except _PROBE_ERRORS:

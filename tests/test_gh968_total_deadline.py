@@ -26,7 +26,11 @@ from socr.core import ollama_utils
 from socr.core.audit_log import AuditEvent
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.ollama_utils import TotalDeadlineExceeded, call_with_total_deadline
+from socr.core.ollama_utils import (
+    TotalDeadlineExceeded,
+    call_with_total_deadline,
+    safe_host_label,
+)
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.engines import gemini_api
@@ -581,3 +585,86 @@ def test_every_site_label_carries_host_and_model(monkeypatch, tmp_path):
     # the model-specific calls name the model too
     for label in (labels[0], labels[1], labels[3], labels[4], labels[7]):
         assert "MODEL" in label, f"label lacks the model: {label!r}"
+
+
+# -- labels never carry URL userinfo (cubic P2) -----------------------------
+
+
+def _site_labels(monkeypatch, tmp_path, host: str) -> list[str]:
+    labels: list[str] = []
+
+    def _spy(fn, timeout, *, label=""):
+        labels.append(label)
+        raise TotalDeadlineExceeded(label)
+
+    for mod in (recover, ollama_utils, gemini_api, extract, table_rung_ollama):
+        monkeypatch.setattr(mod, "call_with_total_deadline", _spy)
+    recover.latex_for_image(b"p", model="MODEL", host=host)
+    crop = tmp_path / "c.png"
+    crop.write_bytes(b"p")
+    equation_latex.latex_for_crop(crop, model="MODEL", host=host)
+    from PIL import Image
+
+    engine = gemini_api.OllamaFigureEngine(model="MODEL", host=host)
+    engine.is_available()
+    engine.describe_figure(Image.new("RGB", (2, 2)))
+    extract._ollama_generation_canary(host, "MODEL", 1.0)
+    extract.probe_ollama_idle(host, timeout=1.0, model="MODEL")
+    ollama_rung_reachable("MODEL", host, timeout=1.0)
+    with pytest.raises(TotalDeadlineExceeded):
+        REAL_POST_CHAT(host, {"model": "MODEL"}, 1.0)
+    return labels
+
+
+def test_safe_host_label_strips_userinfo_keeps_scheme_host_port():
+    assert safe_host_label("http://alice:s3cret@gpu1:11434/") == "http://gpu1:11434"
+    assert safe_host_label("https://tok@h.example") == "https://h.example"
+    assert safe_host_label("http://h:11434?token=abc#frag") == "http://h:11434"
+    assert safe_host_label("http://h:11434") == "http://h:11434"
+    assert safe_host_label("alice:s3cret@gpu1:11434") == "gpu1:11434"
+
+
+def test_no_site_label_leaks_credentials_and_userinfo_does_not_split_endpoints(
+    monkeypatch, tmp_path
+):
+    with_creds = _site_labels(monkeypatch, tmp_path, "http://alice:s3cret@HOST:11434")
+    other_creds = _site_labels(monkeypatch, tmp_path, "http://bob:hunter2@HOST:11434")
+    plain = _site_labels(monkeypatch, tmp_path, "http://HOST:11434")
+    assert len(with_creds) == 8
+    for label in with_creds + other_creds:
+        for secret in ("alice", "s3cret", "bob", "hunter2", "@"):
+            assert secret not in label, f"{secret!r} leaked into {label!r}"
+    # Sites 5 and 6 go through ``resolve_ollama_host``, which (pre-existing,
+    # unrelated to this ticket) mangles a userinfo host before the label is built;
+    # the userinfo-invariance claim is for the label helper's own sites.
+    own = [0, 1, 2, 3, 4, 7]
+    assert [with_creds[i] for i in own] == [other_creds[i] for i in own]
+    assert [with_creds[i] for i in own] == [plain[i] for i in own]
+
+
+def test_figure_is_available_is_inconclusive_when_the_probe_fails_fast(monkeypatch):
+    """A still-draining earlier probe must not turn a healthy daemon into False."""
+    tags = httpx.Response(
+        200,
+        json={"models": [{"name": "MODEL"}]},
+        request=httpx.Request("GET", "http://h/api/tags"),
+    )
+    gets: list[int] = []
+
+    def _get(url, **kw):
+        gets.append(1)
+        return tags
+
+    monkeypatch.setattr(httpx, "get", _get)
+    engine = gemini_api.OllamaFigureEngine(model="MODEL", host="http://u:p@h")
+    assert engine.is_available() is True
+
+    release = threading.Event()
+    stray = threading.Thread(target=lambda: release.wait(30), daemon=True)
+    stray.start()
+    ollama_utils._OUTSTANDING["ollama figure http://h/api/tags"] = stray
+    try:
+        assert engine.is_available() is True, "fail-fast was read as 'daemon unavailable'"
+        assert len(gets) == 1, "a second probe was stacked on the draining one"
+    finally:
+        release.set()

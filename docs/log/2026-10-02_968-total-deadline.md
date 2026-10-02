@@ -22,7 +22,7 @@ A peer that trickles a byte (or keepalive) never trips them, so a call configure
   changes. `is_availability_exception` treats it as an outage (`httpx.TransportError` /
   `TimeoutError`), so a hung rung gets `unavailable=True` exactly as a read timeout did.
   That sets the page's retry marker (`table_judge_retry_pending`, orchestrator.py
-  ~7585-7599). It does NOT disable later rung calls: only `refusal=True` trips the
+  ~7585-7599) when the ladder stays UNVERIFIED; an accepted fallback rung does not set it. It does NOT disable later rung calls: only `refusal=True` trips the
   per-run breaker, so later pages still try the rung (bounded by the rule below).
 * Wrapped sites, deadline = the call's existing configured timeout, no new number:
   `table_rung_ollama._post_chat` (covers rung 1, adjudicator, cell transcribe) and
@@ -73,6 +73,28 @@ ends; a hung page, then a fail-fast page, then a recovered page.
   equation label without host -> 1 fails; gemini label without host -> 1 fails. Survivor:
   "never deregister on success" (23 passed): equivalent, since `is_alive()` already ignores a
   finished worker; deregistration only keeps the dict small.
+
+## Review round 3 (cubic)
+
+* P2 security: labels carried the configured host verbatim, so `http://user:pass@host`
+  would leak credentials into timeout warnings and `RungResult.error`. New helper
+  `ollama_utils.safe_host_label` keeps scheme, host, port and path, drops userinfo, query
+  and fragment; every site label uses it. Pinned: no label contains the user, password or
+  `@`; hosts differing only in userinfo give identical labels at the six sites that build
+  the label from the configured host.
+  Pre-existing, NOT fixed here: `resolve_ollama_host` mangles a userinfo host (a bare-IPv6
+  bracket heuristic fires on the extra colons), so the two sites that resolve first
+  (`probe_ollama_idle`, `ollama_rung_reachable`) get a garbled but credential-free label,
+  and a userinfo host likely does not work for requests there either.
+* P3: `OllamaFigureEngine.is_available` treated any exception as "daemon unavailable". A
+  `TotalDeadlineExceeded` (overrun, or fail-fast behind a draining probe) now returns the
+  last DEFINITIVE answer instead of a fresh False (timeouts are never proof of
+  unavailability, as in `probe_failure_reason`). Limit: before any definitive answer the
+  remembered value is False, so a first-ever probe that times out still reads False (same as
+  before this ticket).
+* Mutants: helper keeps userinfo -> 3 fail; gemini chat label uses the raw host -> 1 fails;
+  fail-fast returns False -> 1 fails. A `fail_fast` flag on the exception had no consumer,
+  survived its mutant, and was removed.
 
 ## Not done (filed as #974)
 

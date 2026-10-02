@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from socr.core.born_digital import clean_native_text, line_has_corrupt_math
-from socr.core.ollama_utils import call_with_total_deadline
+from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.math.validate_latex import validate_latex_structure
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,7 @@ def latex_for_image(
 
         # GH-968: urlopen's timeout is per socket op, not total.
         body = call_with_total_deadline(
-            _call, timeout, label=f"math OCR {host.rstrip('/')}/api/generate ({model})"
+            _call, timeout, label=f"math OCR {safe_host_label(host)}/api/generate ({model})"
         )
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning("math OCR call failed: %s", exc)
