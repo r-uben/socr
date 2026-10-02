@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1088,3 +1089,21 @@ def test_a_probe_failing_for_another_reason_does_not_fall_back(tmp_path, monkeyp
     assert ei.value.errno == probe_err and not isinstance(ei.value, lib.LibraryError)
     assert (src / "f").read_text() == "keep" and not dst.exists()
     assert not list(tmp_path.glob(".noreplace-probe.*"))
+
+
+def test_recovery_creates_a_missing_text_dir_before_rolling_forward(tmp_path):
+    # cubic on #966: promote writes its journal before creating text_dir, so a crash in
+    # between leaves a journal whose target parent does not exist yet. Recovery must
+    # create it (durably) rather than fail the roll-forward.
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    if cfg.text_dir.exists():
+        shutil.rmtree(cfg.text_dir)
+    _write_journal(
+        cfg, target=str(cfg.text_dir / "a"), staged=str(cfg.staging_dir / "a"), archived=None
+    )
+    msg = lib.recover_promotion(cfg)
+    assert msg and "recovered" in msg
+    assert (cfg.text_dir / "a" / "a.md").read_text() == "new"
+    assert not (cfg.index_dir / lib.JOURNAL_NAME).exists()

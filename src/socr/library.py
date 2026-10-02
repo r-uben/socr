@@ -671,6 +671,7 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
         raise refuse(f"names a staged dir {staged} without {cfg.markdown.format(stem=stem)}")
     a = archived is not None and os.path.lexists(archived)
     if s and not t and (a or archived is None):
+        _mkdir_durable(cfg.text_dir)  # the crash may have preceded promote's own mkdir
         _rename_durable(staged, target)  # the interrupted step: finish it
         msg = f"recovered interrupted promotion of {j.get('stem')}: installed {target}"
     elif s and t and a is False and archived is not None:
