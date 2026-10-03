@@ -73,9 +73,10 @@ class FailureMode(str, Enum):
     #: came back as one glyph run per line. The fragments are not a reading of
     #: the page, so the page ships a failure marker plus an image ref instead.
     NATIVE_TEXT_SHREDDED = "native_text_shredded"
-    #: #913: the native text layer encodes a minus sign as the digit "2" (or the scan
-    #: for that could not run), so a negative value reads as a different positive
-    #: one. The page's text is retained and shipped WARNING, never clean SUCCESS.
+    #: #913/#990: a sign or symbol in the native text layer is unreliable: a minus sign
+    #: encoded as the digit "2", or a control character directly before a number (or the
+    #: scan for either could not run), so a negative value reads as a different or
+    #: positive one. The page's text is retained and shipped WARNING, never clean SUCCESS.
     NATIVE_MINUS_AS_DIGIT = "native_minus_as_digit"
     #: #961: a scan whose invisible baked-in OCR text layer is what ships (the page is
     #: image-dominant with render-mode-3 text), or the scan for that failed. The text is

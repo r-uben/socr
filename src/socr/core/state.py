@@ -105,6 +105,9 @@ class PageState:
     #: ``glyph_recovery.count_minus_as_digit_hits``.
     minus_as_digit_hits: int = 0
     minus_as_digit_scan_failed: bool = False
+    #: #990: control characters before a digit in the native text; see ``PageAssessment``.
+    control_byte_digit_hits: int = 0
+    control_byte_scan_failed: bool = False
     #: #961: invisible text over a page-sized raster (scan with baked-in OCR), and whether
     #: that scan failed (unknown, treated as a hit). See ``BornDigitalDetector``.
     invisible_text_over_raster: bool = False
@@ -665,6 +668,8 @@ class DocumentState:
                 )
                 ps.minus_as_digit_hits = getattr(pa, "minus_as_digit_hits", 0)
                 ps.minus_as_digit_scan_failed = getattr(pa, "minus_as_digit_scan_failed", False)
+                ps.control_byte_digit_hits = getattr(pa, "control_byte_digit_hits", 0)
+                ps.control_byte_scan_failed = getattr(pa, "control_byte_scan_failed", False)
                 ps.invisible_text_over_raster = getattr(pa, "invisible_text_over_raster", False)
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(

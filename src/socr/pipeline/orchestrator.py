@@ -38,6 +38,7 @@ from socr.core.manifest import (
     PageDisposition,
     PageEnding,
     PagePrimaryReason,
+    minus_as_digit_suspect,
     coerce_page_timings,
     rollup_page_timings,
 )
@@ -2004,6 +2005,47 @@ class UnifiedPipeline:
                     data={
                         "hits": n_minus,
                         "error": scan_failed,
+                        "native_only": bool(self.config.native_only),
+                    },
+                )
+            )
+
+        # #990: a control character directly before a number in the native text (a minus or
+        # another symbol the extractor could not decode). Same route and same demotion as
+        # #913, with its own kind so a reader can tell the two apart. Recomputed from the
+        # PDF on every run, so deliberately NOT in ``_RESUME_REPLAYED``.
+        for pa in assessment.pages:
+            n_ctrl = int(getattr(pa, "control_byte_digit_hits", 0) or 0)
+            ctrl_failed = bool(getattr(pa, "control_byte_scan_failed", False))
+            if not (n_ctrl or ctrl_failed):
+                continue
+            if self.config.native_only:
+                outcome = (
+                    "page RETAINED as native text under --native-only and shipped WARNING "
+                    "(native_minus_as_digit): the signs and symbols are not verified"
+                )
+            else:
+                outcome = (
+                    "page routed to OCR, no content dropped (if no OCR rung wins, the "
+                    "native text ships WARNING, never clean SUCCESS)"
+                )
+            what = (
+                "the scan for control characters before a number FAILED, so the page is "
+                "treated as affected"
+                if ctrl_failed
+                else f"{n_ctrl} control character(s) sit directly before a number in the "
+                "native text layer (an undecoded minus or symbol; a negative value can "
+                "read as positive)"
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="control_byte_before_digit",
+                    engine="native",
+                    detail=f"{what}; {outcome}",
+                    data={
+                        "hits": n_ctrl,
+                        "error": ctrl_failed,
                         "native_only": bool(self.config.native_only),
                     },
                 )
@@ -10159,10 +10201,7 @@ class UnifiedPipeline:
         # ``audit_passed``: it selects the winner, so flipping it would discard the page.
         # (Reachable only under --native-only: otherwise the hit sets
         # ``needs_ocr_enhancement`` and the page is not chart-eligible.)
-        minus_suspect = bool(
-            getattr(ps, "minus_as_digit_hits", 0)
-            or getattr(ps, "minus_as_digit_scan_failed", False)
-        )
+        minus_suspect = minus_as_digit_suspect(ps)
         # #961: same for a scan's invisible OCR layer.
         invisible_suspect = bool(
             getattr(ps, "invisible_text_over_raster", False)
@@ -14386,10 +14425,7 @@ class UnifiedPipeline:
             for n, p in sorted(state.pages.items())
             if p.is_born_digital
             and p.native_text
-            and (
-                getattr(p, "minus_as_digit_hits", 0)
-                or getattr(p, "minus_as_digit_scan_failed", False)
-            )
+            and minus_as_digit_suspect(p)
             and n not in native_fallback_pages
             and n not in failed_pages
             and p.best_output
