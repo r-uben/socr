@@ -572,6 +572,9 @@ class DocumentState:
     # backend went unresponsive (e.g. "PARTIAL_SAVE_VLM_TIMEOUT"). Set by
     # _phase_agentic, read by _phase_assemble to propagate into EngineResult.error.
     pp2_halt_reason: str = ""
+    # GH-1001: the previous run in this output dir left ``halt_retry_pending`` on the
+    # root index entry. Read once at the start of THIS run; never cached across runs.
+    prior_halt_pending: bool = False
     # GH-993: readable-table counts (``TableCounts.to_dict()``) derived at assemble from
     # the finalized page outputs; ``None`` until then, and left ``None`` when they could
     # not be derived (metadata then omits the block: "not recorded", never zero).

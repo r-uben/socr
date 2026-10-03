@@ -24,3 +24,12 @@ in-progress marker) and the no-provider branch re-flags the pages it leaves unpr
 it reuses `not_processed_after_halt`. Test sequence on one dir: halt (latch) -> providerless re-run (latch kept,
 not skipped) -> recovered re-run (processed, latch cleared) -> plain re-run skipped. Mutant (latch only on
 `pp2_halt_reason`, external copy, canary, anchor count 1) fails that test.
+
+**Review fix 2 (Astra, cubic): no cross-run cache.** The class-level `_prior_halt_pending` set is gone. `process()`
+reads the prior latch from the current output dir's root index (`_prior_halt_latch`, False when the entry is
+missing or unreadable) before invalidation and hands it to `DocumentState.prior_halt_pending`; the in-progress
+marker keeps the latch for the crash case. Re-flag scope: with a prior latch and an empty ladder, every page
+the run did not restore from the ledger is flagged, whatever lane takes it (a native page past the halt is
+pinned). `result.py` note qualifies that older unlatched PARTIAL entries still need `--reprocess`.
+Mutants (external copies, canary, anchor count 1): (a) cache the latch on the pipeline across runs -> the
+fresh-output-dir test fails; (b) flag only the OCR no-provider branch -> the outcome test fails.

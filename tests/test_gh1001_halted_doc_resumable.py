@@ -20,13 +20,15 @@ from test_gh995_post_halt_not_terminal import PAGES, NATIVE, _decision, _pdf
 from test_pp2_agentic_fuse import EngineType, _make_bd_assessment, _make_config, _make_pipeline
 
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus
+from socr.core.result import DocumentStatus, FailureMode
 
 HALT_PAGE = 3  # p1 (OCR) and p2 (native) finish; p3 times out; p4 is never reached
 
 
-def _run(pdf: Path, out: Path, *, halt: bool, providers=(PROFILE_QWEN_LOCAL,)):
-    pipeline = _make_pipeline(_make_config(agentic=True, enabled_engines=[EngineType.QWEN]))
+def _run(pdf: Path, out: Path, *, halt: bool, providers=(PROFILE_QWEN_LOCAL,), pipeline=None):
+    pipeline = pipeline or _make_pipeline(
+        _make_config(agentic=True, enabled_engines=[EngineType.QWEN])
+    )
     pipeline.bd_detector = MagicMock()
     pipeline.bd_detector.detect.return_value = _make_bd_assessment(PAGES, born_digital_pages=NATIVE)
     routed: list[int] = []
@@ -98,6 +100,10 @@ def _latch(out: Path) -> bool:
     return next(iter(entries.values())).get("halt_retry_pending") is True
 
 
+def _entry(out: Path) -> dict:
+    return next(iter(json.loads((out / "metadata.json").read_text())["files"].values()))
+
+
 def test_latch_follows_the_outcome_not_the_halt_event(tmp_path: Path) -> None:
     pdf = _pdf(tmp_path)
     out = tmp_path / "out"
@@ -112,14 +118,44 @@ def test_latch_follows_the_outcome_not_the_halt_event(tmp_path: Path) -> None:
     assert _latch(out)
     again, routed_again, _ = _run(pdf, out, halt=False, providers=())
     assert again.status is not DocumentStatus.SKIPPED  # not skippable: it ran again
+    assert routed_again == []
+    assert _latch(out)
+
+    # The native page past the halt is taken by the NATIVE lane, not the OCR no-provider
+    # branch; it was not processed in any run, so it must stay flagged and non-terminal.
+    sidecars = {
+        int(f.stem): json.loads(f.read_text()) for f in (out / "doc" / "pages").glob("*.json")
+    }
+    assert sidecars[4]["terminal"] is not True
+    assert sidecars[4]["failure_mode"] == FailureMode.PAGE_NOT_PROCESSED_AFTER_HALT.value
+    assert sidecars[2]["terminal"] is True  # finished before the halt: restored, not flagged
 
     # 3. recovered re-run processes the pages and clears the latch.
     recovered, routed_ok, _ = _run(pdf, out, halt=False)
     assert recovered.status is not DocumentStatus.SKIPPED
     assert HALT_PAGE in routed_ok
-    assert not _latch(out)
+    assert "halt_retry_pending" not in _entry(out)
 
     # 4. a further plain re-run is skipped as usual.
     final, routed_final, _ = _run(pdf, out, halt=False)
     assert final.status is DocumentStatus.SKIPPED
     assert routed_final == []
+
+
+def test_prior_latch_is_not_inherited_by_a_fresh_output_dir(tmp_path: Path) -> None:
+    """Same pipeline instance, same input, fresh output dir: nothing carries over."""
+    pdf = _pdf(tmp_path)
+    pipeline = _make_pipeline(_make_config(agentic=True, enabled_engines=[EngineType.QWEN]))
+
+    _run(pdf, tmp_path / "a", halt=True, pipeline=pipeline)
+    assert _latch(tmp_path / "a")
+    # A second run in "a" READS the latch, which is what a cross-run cache would keep.
+    _run(pdf, tmp_path / "a", halt=False, providers=(), pipeline=pipeline)
+    assert _latch(tmp_path / "a")
+
+    fresh = tmp_path / "b"
+    _run(pdf, fresh, halt=False, providers=(), pipeline=pipeline)
+    assert "halt_retry_pending" not in _entry(fresh)
+    sidecars = (fresh / "doc" / "pages").glob("*.json")
+    modes = {json.loads(f.read_text())["failure_mode"] for f in sidecars}
+    assert FailureMode.PAGE_NOT_PROCESSED_AFTER_HALT.value not in modes
