@@ -18,6 +18,7 @@ freshly spawned child can resolve ``tests.test_gh172_killable_boundary:name``.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import signal
 import socket
@@ -170,29 +171,33 @@ def test_plain_httpx_trickle_defeat_measured_in_a_child(trickle_server) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _spawn_roundtrip_sec() -> float:
-    """Wall time of one no-op ``run_killable`` call: spawn + child import + exit.
+def _bare_spawn_roundtrip_sec() -> float:
+    """Wall time of a bare ``multiprocessing`` spawn child that imports this module.
 
-    Measured on the machine, under its current load (GH-991): process start-up is
-    the part of ``run_killable``'s wall time that scales with load, so a bound
-    that ignores it is a coin flip on a busy host. A trickling call is unbounded
-    (the peer never ends), so a bound that is generous by one measured start-up
-    still separates "bounded" from "not bounded" by orders of magnitude.
+    Deliberately NOT routed through ``run_killable`` (GH-991 review): calibrating
+    with the code under test would let an overhead regression inflate its own
+    allowance. Process start-up is the load-dependent part of the wall time, so a
+    bound that ignores it is a coin flip on a busy host.
     """
+    ctx = multiprocessing.get_context("spawn")
     start = time.monotonic()
-    run_killable(CallSpec(func=f"{__name__}:_sleep_forever", args=(0.0,)), timeout=60.0)
+    proc = ctx.Process(target=_sleep_forever, args=(0.0,))
+    proc.start()
+    proc.join()
     return time.monotonic() - start
 
 
 def test_run_killable_bounds_a_trickling_call(trickle_server) -> None:
     spec = CallSpec(func=f"{__name__}:_get", args=(trickle_server.url, _OUTER_TIMEOUT_SEC + 60.0))
     # run_killable's documented worst case: the deadline, then SIGTERM and SIGKILL
-    # each given their full grace; plus one measured process start-up.
+    # each given their full grace; plus one independently measured process start-up.
+    # This is the broad integration bound (an unbounded trickle never returns). The
+    # exactness of the deadline itself is pinned by the test below, deterministically.
     bound = (
         _OUTER_TIMEOUT_SEC
         + DEFAULT_TERM_GRACE_SEC
         + DEFAULT_KILL_GRACE_SEC
-        + _spawn_roundtrip_sec()
+        + _bare_spawn_roundtrip_sec()
     )
     start = time.monotonic()
     with pytest.raises(KillableTimeoutError):
@@ -203,6 +208,24 @@ def test_run_killable_bounds_a_trickling_call(trickle_server) -> None:
         f"({_OUTER_TIMEOUT_SEC}s) plus its own term/kill grace and one process "
         f"start-up ({bound:.2f}s in all) should bound it"
     )
+
+
+def test_run_killable_hands_the_requested_deadline_to_poll_unchanged(monkeypatch) -> None:
+    """Deterministic pin on the deadline (GH-991 review): the wide wall-clock bound
+    above tolerates a deadline stretched a few times over, so check the value that
+    reaches ``Connection.poll`` instead of timing it."""
+    seen: list[float] = []
+    real_poll = mp_connection.Connection.poll
+
+    def spy(self, timeout=0.0):
+        seen.append(timeout)
+        return real_poll(self, timeout)
+
+    monkeypatch.setattr(mp_connection.Connection, "poll", spy)
+    requested = 37.25  # distinctive, so a scaled or substituted value cannot match
+    spec = CallSpec(func=f"{__name__}:_sleep_forever", args=(0.0,))
+    assert run_killable(spec, timeout=requested) == "done"
+    assert seen == [requested], f"run_killable polled with {seen}, requested {requested}"
 
 
 def test_run_killable_returns_promptly_on_success() -> None:
@@ -267,8 +290,15 @@ def test_kill_is_process_group_wide(trickle_server, tmp_path, monkeypatch) -> No
     # for the pidfile first, then runs unchanged. The kill path is untouched.
     real_poll = mp_connection.Connection.poll
 
+    pidfile_appeared: list[bool] = []
+
     def poll_once_grandchild_exists(self, timeout=0.0):
-        _wait_for(pidfile.exists, what=f"grandchild pidfile {pidfile}")
+        # Never raise from here: that would skip run_killable's kill path and leak
+        # the child. If the pidfile never shows, run the real poll anyway so
+        # run_killable still kills the group, and fail below with a clear message.
+        pidfile_appeared.append(
+            _wait_for(pidfile.exists, what=f"grandchild pidfile {pidfile}", fail=False)
+        )
         return real_poll(self, timeout)
 
     monkeypatch.setattr(mp_connection.Connection, "poll", poll_once_grandchild_exists)
@@ -277,6 +307,10 @@ def test_kill_is_process_group_wide(trickle_server, tmp_path, monkeypatch) -> No
     try:
         with pytest.raises(KillableTimeoutError):
             run_killable(spec, timeout=_OUTER_TIMEOUT_SEC)
+        assert pidfile_appeared == [True], (
+            f"grandchild pidfile {pidfile} did not appear within {_EVENT_DEADLINE_SEC:g}s; "
+            "the child never reached the point under test"
+        )
         grandchild_pid = int(pidfile.read_text().strip())
 
         def gone() -> bool:
