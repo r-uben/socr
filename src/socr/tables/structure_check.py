@@ -374,8 +374,8 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
 
     Main's counting is: every labelled row, blank-stub rows dropped,
     ``row_shape_min`` the minimum width over those. It is kept EXACTLY unless
-    the page proves a safe superset: every labelled row binds to its own
-    native baseline band (``match_rows_monotonic``; a band credits at most one
+    the page proves a safe superset: every labelled row reproduces, in full,
+    the numeric sequence of its own native baseline band (``match_rows_monotonic``; a band credits at most one
     row on the page, bands consumed by one block are blanked for the next) and
     each of those bands is one ``table_shaped_native_row_count`` would count
     (at least ``row_shape_min`` numbers, not a column-index legend). Only then
@@ -418,15 +418,19 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
 
     row_shape_min = min((len(r) for r in labelled), default=0)
 
-    def native_countable(idx: int | None) -> bool:
+    def binds_fully(tokens: tuple[str, ...], idx: int | None) -> bool:
+        """The row reproduces its band's FULL numeric sequence (matching is by
+        contiguous run, so a row with whole columns dropped would otherwise bind)
+        and the band is one the native count would count."""
         return (
             idx is not None
+            and tokens == band_tokens[idx]
             and len(band_tokens[idx]) >= row_shape_min
             and not is_column_index_row(band_tokens[idx])
         )
 
-    if labelled and all(native_countable(idx) for idx in labelled_bands):
-        credited = [tokens for tokens, idx in blank if native_countable(idx)]
+    if labelled and all(binds_fully(t, idx) for t, idx in zip(labelled, labelled_bands)):
+        credited = [tokens for tokens, idx in blank if binds_fully(tokens, idx)]
         return [*labelled, *credited], row_shape_min
     return labelled, row_shape_min
 

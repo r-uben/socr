@@ -145,3 +145,13 @@ page. Pin: Astra's r6 case plus the r5 / earlier reproducers.
 Census (40): 12 clear (of the previous 13; bybee p37 drops), 28 refuse, 0 new vs main.
 Mutants: drop "every labelled row bound" 3 killed; blank band need not be countable 1; blank
 unbound credited 3; bands reusable 4; never credit 1. Baseline 62 passed.
+
+## Round 8 -- full-sequence binding
+
+Astra: `match_rows_monotonic` binds a contiguous SUBSET of a band, so a candidate with whole columns
+dropped (only column (1); 20 rows, 40 of 60 values missing) bound all 20 rows and was accepted while
+main refuses. On the superset path only, a row now binds to a band only if its numeric tokens equal
+the band's FULL token sequence (same count, same order, same normaliser); anything partial sends the
+page to main's count. Main's path is untouched. Pin: Astra's r7 case.
+Census (40): 11 clear (of the previous 12; Giroud p10 drops), 29 refuse, 0 new vs main.
+Mutants: subset binding allowed 1 killed; every-row-bound dropped 3; never credit 1. Baseline 63.

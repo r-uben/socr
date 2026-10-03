@@ -234,3 +234,16 @@ def test_unbound_repeats_before_the_first_match_are_refused(pre_988) -> None:
     assert table_truncated(md, words) is True
     pre_988()
     assert table_truncated(md, words) is True
+
+
+def test_dropped_columns_do_not_bind(pre_988) -> None:
+    """Astra's round-7 case: only column (1) emitted. Every row is a contiguous
+    SUBSET of its band, so all 20 would bind; 40 of 60 values are missing.
+    """
+    words = _page()
+    md = "| Variable | (1) |\n|---|---|\n"
+    for label, coef, se in _regression_rows():
+        md += f"| {label} | {coef[0]} |\n| | {se[0]} |\n"
+    assert table_truncated(md, words) is True
+    pre_988()
+    assert table_truncated(md, words) is True
