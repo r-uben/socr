@@ -15,3 +15,12 @@ rewritten without it once the document finishes without a halt.
 same halted dir with the latch key stripped from the root index (the pre-fix index shape) is skipped whole.
 Mutant (external src+tests copy, `socr.__file__` canary, anchor count 1): the gate line replaced; the test
 fails. The `--reprocess` caveat in `result.py` and the #995 log was removed.
+
+**Review fix (Astra): latch follows the outcome.** Clearing the latch on "no halt this run" let a providerless
+re-run (OCR pages left unprocessed again) make the document skippable for good. Now `halt_retry_pending` is
+set when the run halted OR any page is still `not_processed_after_halt`. The root entry is invalidated at run
+start, so `_invalidate_root_entry_for_rerun` remembers a prior latch (`_prior_halt_pending`, also kept on the
+in-progress marker) and the no-provider branch re-flags the pages it leaves unprocessed. No new page signal:
+it reuses `not_processed_after_halt`. Test sequence on one dir: halt (latch) -> providerless re-run (latch kept,
+not skipped) -> recovered re-run (processed, latch cleared) -> plain re-run skipped. Mutant (latch only on
+`pp2_halt_reason`, external copy, canary, anchor count 1) fails that test.

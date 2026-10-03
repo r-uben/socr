@@ -25,7 +25,7 @@ from socr.core.result import DocumentStatus
 HALT_PAGE = 3  # p1 (OCR) and p2 (native) finish; p3 times out; p4 is never reached
 
 
-def _run(pdf: Path, out: Path, *, halt: bool):
+def _run(pdf: Path, out: Path, *, halt: bool, providers=(PROFILE_QWEN_LOCAL,)):
     pipeline = _make_pipeline(_make_config(agentic=True, enabled_engines=[EngineType.QWEN]))
     pipeline.bd_detector = MagicMock()
     pipeline.bd_detector.detect.return_value = _make_bd_assessment(PAGES, born_digital_pages=NATIVE)
@@ -46,7 +46,7 @@ def _run(pdf: Path, out: Path, *, halt: bool):
         return _decision(page_num, ladder, timeout=halt and page_num == HALT_PAGE)
 
     with (
-        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=list(providers)),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=not halt),
@@ -90,3 +90,36 @@ def test_plain_rerun_of_halted_doc_resumes_via_ledger_but_unlatched_is_skipped(
     assert HALT_PAGE in routed_fixed
     assert {1, 2} <= set(hits_fixed)
     assert HALT_PAGE not in hits_fixed and 4 not in hits_fixed
+
+
+def _latch(out: Path) -> bool:
+    entries = json.loads((out / "metadata.json").read_text())["files"]
+    assert len(entries) == 1
+    return next(iter(entries.values())).get("halt_retry_pending") is True
+
+
+def test_latch_follows_the_outcome_not_the_halt_event(tmp_path: Path) -> None:
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+
+    _run(pdf, out, halt=True)
+    assert _latch(out)  # 1. halt run
+
+    # 2. providerless re-run: no new halt, but p3/p4 are still unprocessed.
+    providerless, routed, _ = _run(pdf, out, halt=False, providers=())
+    assert routed == []
+    assert providerless.status is not DocumentStatus.SKIPPED
+    assert _latch(out)
+    again, routed_again, _ = _run(pdf, out, halt=False, providers=())
+    assert again.status is not DocumentStatus.SKIPPED  # not skippable: it ran again
+
+    # 3. recovered re-run processes the pages and clears the latch.
+    recovered, routed_ok, _ = _run(pdf, out, halt=False)
+    assert recovered.status is not DocumentStatus.SKIPPED
+    assert HALT_PAGE in routed_ok
+    assert not _latch(out)
+
+    # 4. a further plain re-run is skipped as usual.
+    final, routed_final, _ = _run(pdf, out, halt=False)
+    assert final.status is DocumentStatus.SKIPPED
+    assert routed_final == []

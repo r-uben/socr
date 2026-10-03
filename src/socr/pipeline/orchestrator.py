@@ -1003,6 +1003,11 @@ class UnifiedPipeline:
     # constructor, and a fingerprint call must not explode on a missing attribute.
     _caption_engine_identity_cache: str | bool = False
     _final_records: dict[int, FinalizedPageRecord] | None = None
+    #: GH-1001: inputs whose root entry carried ``halt_retry_pending`` when this run
+    #: invalidated it. The latch must survive a run that leaves the halted pages
+    #: unprocessed again (no provider), so it is keyed on the outcome, not the event.
+    #: Class-level for the same reason as the fields above.
+    _prior_halt_pending: frozenset[Path] = frozenset()
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
@@ -1241,8 +1246,13 @@ class UnifiedPipeline:
             scan_root = self._scan_root or pdf_path.parent
             rel_key = relative_key(pdf_path, scan_root)
             index = RootIndex(out_dir)
-            if index.files.get(rel_key) is None:
+            prior_entry = index.files.get(rel_key)
+            if prior_entry is None:
                 return None
+            if prior_entry.get("halt_retry_pending") is True:
+                self._prior_halt_pending = self._prior_halt_pending | {pdf_path}
+            else:
+                self._prior_halt_pending = self._prior_halt_pending - {pdf_path}
         except Exception as exc:
             # Reading the index is not the write this guard protects; a broken
             # read leaves the run to the ordinary metadata path.
@@ -1261,6 +1271,10 @@ class UnifiedPipeline:
             error="run in progress; the previous record was invalidated before reprocessing",
             fingerprint=self._run_fingerprint(),
         )
+        # GH-1001: keep the halt latch on the in-progress marker, so a run that dies
+        # before assemble does not erase it.
+        if pdf_path in self._prior_halt_pending:
+            marker = _LatchedDocMetadata(marker, {"halt_retry_pending": True})
         try:
             index.record(rel_key, marker)
         except Exception as exc:
@@ -9354,6 +9368,10 @@ class UnifiedPipeline:
                 elif page_num in no_ocr_provider_pages:
                     with clock.span("route"):
                         self._agentic_no_provider_page(page_num, ps)
+                    # GH-1001: a halted document re-run with no provider leaves the
+                    # same pages unprocessed. They stay flagged, so the latch stays.
+                    if state.handle.path in self._prior_halt_pending:
+                        ps.not_processed_after_halt = True
                 elif is_native:
                     with clock.span("extract"):
                         self._agentic_native_page(state, page_num, ps)
@@ -16391,7 +16409,11 @@ class UnifiedPipeline:
             # Fail-closed: if that save raises, NOTHING is recorded, the outer
             # handler logs it, and the next run reprocesses the document.
             pending: dict = {}
-            if state.pp2_halt_reason:
+            # Keyed on the OUTCOME: a halt this run, or any page still left unprocessed
+            # because of one (including a providerless re-run of a halted document).
+            if state.pp2_halt_reason or any(
+                p.not_processed_after_halt for p in state.pages.values()
+            ):
                 pending["halt_retry_pending"] = True
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
                 pending["equation_lane_retry_pending"] = True
