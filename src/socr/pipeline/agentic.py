@@ -41,6 +41,7 @@ from socr.core.result import (
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
+    FailureMode,
     PageOutput,
     PageStatus,
 )
@@ -149,6 +150,16 @@ def _error_output(page_num: int, msg: str) -> PageOutput:
     )
 
 
+def is_failed_candidate(output: PageOutput) -> bool:
+    """True for an ERROR / CLI_ERROR output: a provider failure, never page content.
+
+    GH-1020: such an output must not be picked by ``_best_effort`` and must not reach
+    the table ladder or a table-escalation rung, which read ``output.text`` without a
+    status check.
+    """
+    return output.status == PageStatus.ERROR or output.failure_mode == FailureMode.CLI_ERROR
+
+
 def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAttempt:
     """When nothing was accepted, keep the most trustworthy attempt.
 
@@ -156,7 +167,7 @@ def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAtte
     most words, then the last (most-escalated) attempt. Never return empty if a
     non-empty attempt exists.
     """
-    usable = [a for a in attempts if a.output.text.strip()]
+    usable = [a for a in attempts if a.output.text.strip() and not is_failed_candidate(a.output)]
     pool = usable or attempts
     if not pool:
         return ProviderAttempt(

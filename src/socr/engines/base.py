@@ -38,8 +38,8 @@ _normalizer = OutputNormalizer()
 
 
 #: Placeholders an engine CLI writes INSTEAD of text when it failed a page (GH-1020).
-#: Each is matched against the WHOLE stripped page text, never as a substring, so a
-#: page that merely quotes the marker is not touched. Sources (sibling repos):
+#: Each is matched against a whole stripped LINE, never as a substring, so a
+#: page that quotes the marker inside a sentence is not touched. Sources (sibling repos):
 #:  - qwen-ocr-cli ``qwen_ocr/processor.py::_ocr_pages`` writes
 #:    ``*[OCR failed for page {idx}]*`` (``idx`` = 1-based position in the image dir) and
 #:    records the real reason in ``DocResult.page_errors`` / metadata.json ``error``.
@@ -54,11 +54,19 @@ CLI_FAILURE_PLACEHOLDERS: tuple[re.Pattern[str], ...] = (
 
 
 def is_cli_failure_placeholder(text: str | None) -> bool:
-    """True when ``text`` is exactly a CLI per-page failure marker, nothing else."""
+    """True when ``text`` carries a CLI failure marker on a line of its own.
+
+    A marker line anywhere means part of the page is missing (the CLI failed the page, or
+    one section of an aggregate), so the whole page is a failure, never a partial SUCCESS.
+    A marker quoted inside a sentence is not a line of its own and is left alone. A page
+    whose entire text is a marker string is classed as a failure too; that is not a
+    plausible real page.
+    """
     if not text:
         return False
-    stripped = text.strip()
-    return any(p.fullmatch(stripped) for p in CLI_FAILURE_PLACEHOLDERS)
+    return any(
+        p.fullmatch(line.strip()) for line in text.splitlines() for p in CLI_FAILURE_PLACEHOLDERS
+    )
 
 
 def sanitize_filename(name: str) -> str:

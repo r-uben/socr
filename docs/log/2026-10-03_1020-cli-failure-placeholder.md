@@ -49,3 +49,31 @@ Mutant (external copy of src+tests, `socr.__file__` canary, anchor count 1): neu
 ## Follow-up (not done, other repo)
 
 qwen-ocr-cli `backends/base.py`: include `resp.text[:300]` in the 5xx error and retry once.
+
+## Review fixes (Astra: ACCEPT-WITH-FIXES)
+
+1. **Embedded markers.** The matcher is now per LINE: a marker alone on a line anywhere in a
+   page means part of it is missing, so the whole page is ERROR / CLI_ERROR with no text (the
+   readable remainder is not shipped as a partial SUCCESS). `process_pages` checks each page
+   (aggregate sections are split per page first, so one bad section fails only that page);
+   `process_document` fails an exit-0 aggregate that contains a marker line.
+2. **Best-effort.** `agentic.is_failed_candidate()` (status ERROR or failure_mode CLI_ERROR).
+   `_best_effort` excludes such attempts from its usable pool. If every attempt failed it still
+   returns a failure (unchanged contract), never a promoted one. VLM path: `VLMPageJudge` and
+   `HeuristicPageJudge` refuse non-SUCCESS before any render or model call; the test uses the
+   real classes and asserts the model/renderer/checker were never touched.
+3. **Table rungs.** The rungs read raw markdown with no status check, so the gate is where the
+   candidate is handed over: `_run_table_judge_gate` returns early, and the
+   `_escalate_table_page` call site skips, on `is_failed_candidate`. A failed output normally has
+   empty text (already skipped by `not bo.text`); the gate makes that independent of the text.
+   The escalation call-site gate is not covered by a mutant (needs a full-loop fixture).
+   **Correction:** the earlier claim that "every judge refuses such output" was too broad. The
+   page judges (Heuristic, VLM, the table-verifier wrappers when delegating) refuse non-SUCCESS;
+   the table ladder and its rungs do not, which is why they are gated above.
+4. **Known false positive.** A page whose entire text is a marker string is classed as a CLI
+   failure. A real paper will not consist solely of that string. A marker quoted inside a
+   sentence is not a line of its own and is untouched (pinned).
+5. **Mutants** (external copies, canary, uncapped anchor count 1 each): per-line matching
+   reverted to whole-text fails 6 tests; dropping the `_best_effort` exclusion fails
+   `test_best_effort_never_selects_a_failed_candidate`; dropping the table-gate check fails
+   `test_table_ladder_is_never_entered_for_a_failed_candidate`.

@@ -99,6 +99,10 @@ def _pdf(path: pathlib.Path) -> pathlib.Path:
         "*[OCR failed for page 1]*",
         "*[OCR failed for page 17]*\n",
         "\n  *[OCR Failed]*  \n",
+        # A marker line anywhere means part of the page is missing.
+        "Real text.\n\n*[OCR failed for page 1]*",
+        "*[OCR failed for page 1]*\n\nReal text after it.",
+        "## Page 1\n\nfine\n\n## Page 2\n\n*[OCR failed for page 2]*",
     ],
 )
 def test_exact_cli_markers_are_recognised(text: str) -> None:
@@ -110,7 +114,6 @@ def test_exact_cli_markers_are_recognised(text: str) -> None:
     [
         "",
         None,
-        "Real text.\n\n*[OCR failed for page 1]*",
         "The CLI prints *[OCR failed for page 1]* on error.",
         "*[OCR failed]*",
         "[OCR failed for page 1]",
@@ -233,3 +236,178 @@ def test_placeholder_is_not_judged_and_next_rung_runs(tmp_path, monkeypatch) -> 
     assert not any("OCR failed" in t for t in bad_judge.seen), bad_judge.seen
     assert "OCR failed" not in bad_md
     assert bad_next.calls == 1
+
+
+# --- GH-1020 review fixes ----------------------------------------------------------
+
+MIXED = f"{REAL_TEXT}\n\n{PLACEHOLDER}\n\nmore real text"
+
+
+def test_mixed_content_page_is_a_failure_not_a_partial_success(tmp_path, monkeypatch) -> None:
+    page = _engine_page(tmp_path, monkeypatch, MIXED, 1)
+    assert page.status == PageStatus.ERROR
+    assert page.failure_mode == FailureMode.CLI_ERROR
+    assert not page.audit_passed
+    assert not page.text  # the readable part is not shipped as if it were the page
+
+
+def test_quoted_marker_inside_a_sentence_stays_success(tmp_path, monkeypatch) -> None:
+    quoted = f"The CLI prints {PLACEHOLDER} when it fails."
+    page = _engine_page(tmp_path, monkeypatch, quoted, 0)
+    assert page.status == PageStatus.SUCCESS and quoted in page.text
+
+
+def _two_page_pdf(path: pathlib.Path) -> pathlib.Path:
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page().insert_text((60, 80), REAL_TEXT, fontsize=9)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_aggregate_section_failure_fails_only_that_page(tmp_path, monkeypatch) -> None:
+    """qwen folds a dir of images into ONE '## Page N' doc: one bad section, one bad page."""
+
+    def _run(cmd, *args, **kwargs):
+        if "-o" not in cmd:
+            probe = MagicMock()
+            probe.returncode = 0
+            probe.stdout = probe.stderr = ""
+            return probe
+        images_dir = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(images_dir, images_dir.parent)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text(
+            assemble_pages([REAL_TEXT, "*[OCR failed for page 2]*"]), encoding="utf-8"
+        )
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "Ollama 500"
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = _two_page_pdf(tmp_path / "two.pdf")
+    p1, p2 = _QwenLikeEngine().process_pages(pdf, [1, 2], PipelineConfig(timeout=30))
+    assert p1.status == PageStatus.SUCCESS and REAL_TEXT in p1.text
+    assert p2.status == PageStatus.ERROR and p2.failure_mode == FailureMode.CLI_ERROR
+    assert "OCR failed" not in (p2.text or "")
+
+
+def test_exit_zero_aggregate_document_with_a_failed_section_is_an_error(
+    tmp_path, monkeypatch
+) -> None:
+    def _run(cmd, *args, **kwargs):
+        input_path = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(input_path, input_path.parent)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text(
+            assemble_pages([REAL_TEXT, "*[OCR failed for page 2]*"]), encoding="utf-8"
+        )
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = result.stderr = ""
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    result = _QwenLikeEngine().process_document(pdf, tmp_path / "out", PipelineConfig(timeout=30))
+    assert result.failure_mode == FailureMode.CLI_ERROR
+    assert not result.pages
+
+
+# --- the real judges: the marker never reaches a model -----------------------------
+
+
+def test_real_judges_refuse_a_failed_page_without_calling_a_model(tmp_path, monkeypatch) -> None:
+    from socr.pipeline.agentic import HeuristicPageJudge, VLMPageJudge
+
+    bad = _engine_page(tmp_path, monkeypatch, MIXED, 1)
+    model = MagicMock()
+    render = MagicMock()
+    vlm = VLMPageJudge(model, render)
+
+    decision = vlm.assess(bad, PROFILE_QWEN_LOCAL)
+    assert not decision.accept
+    model.judge.assert_not_called()  # no model call
+    render.assert_not_called()  # not even a page render
+    checker = MagicMock()
+    assert not HeuristicPageJudge(checker).assess(bad, PROFILE_QWEN_LOCAL).accept
+    checker.check.assert_not_called()
+
+    # Control: the same judge DOES call the model for a good page.
+    ok = _engine_page(tmp_path, monkeypatch, REAL_TEXT, 0)
+    model.judge.return_value = MagicMock(faithful=True, issues=[], confidence=0.9)
+    vlm.assess(ok, PROFILE_QWEN_LOCAL)
+    model.judge.assert_called_once()
+
+
+# --- _best_effort and the table ladder ----------------------------------------------
+
+
+def test_best_effort_never_selects_a_failed_candidate() -> None:
+    from socr.pipeline.agentic import ProviderAttempt, _best_effort
+
+    failed = PageOutput(
+        page_num=1,
+        text=PLACEHOLDER,
+        status=PageStatus.ERROR,
+        failure_mode=FailureMode.CLI_ERROR,
+        engine="qwen",
+        audit_passed=True,  # the strongest selection key, still must lose
+        confidence=1.0,
+    )
+    weak = PageOutput(
+        page_num=1, text="a", status=PageStatus.SUCCESS, engine="gemini", audit_passed=False
+    )
+    attempts = [
+        ProviderAttempt(engine=EngineType.QWEN, output=failed, cost_usd=0.0, accepted=False),
+        ProviderAttempt(engine=EngineType.GEMINI, output=weak, cost_usd=0.0, accepted=False),
+    ]
+    assert _best_effort(attempts, 1).output is weak
+    # Only failures: whatever is returned is still a failure, never promoted.
+    only = _best_effort(attempts[:1], 1).output
+    assert only.status == PageStatus.ERROR
+
+
+def test_table_ladder_is_never_entered_for_a_failed_candidate(monkeypatch) -> None:
+    import contextlib
+
+    from socr.judge import table_ladder
+    from socr.tables import witness
+
+    entered: list[str] = []
+
+    @contextlib.contextmanager
+    def _witnesses(*a, **k):
+        entered.append("witnesses")
+        yield []
+
+    monkeypatch.setattr(witness, "prepare_table_witnesses", _witnesses)
+    monkeypatch.setattr(table_ladder, "run_table_ladder", lambda *a, **k: entered.append("ladder"))
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, agentic=True))
+    table_md = "| a | b |\n|---|---|\n| 1 | 2 |\n"
+    state = MagicMock()
+
+    def _gate(output: PageOutput) -> None:
+        pipe._run_table_judge_gate(state, 1, MagicMock(), output, [MagicMock()])
+
+    failed = PageOutput(
+        page_num=1,
+        text=table_md,
+        status=PageStatus.ERROR,
+        failure_mode=FailureMode.CLI_ERROR,
+        engine="qwen",
+    )
+    _gate(failed)
+    assert entered == []  # no rung, and no witness preparation, for a failed candidate
+
+    # Control: the same text as a SUCCESS page does reach the ladder machinery.
+    _gate(PageOutput(page_num=1, text=table_md, status=PageStatus.SUCCESS, engine="qwen"))
+    assert entered, "control: a good page must reach the table ladder, or this test proves nothing"
