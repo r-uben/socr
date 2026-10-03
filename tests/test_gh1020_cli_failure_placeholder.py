@@ -32,7 +32,7 @@ from ocr_output_contract import (  # noqa: E402
 
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL  # noqa: E402
-from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.engines.base import BaseEngine, is_cli_failure_placeholder  # noqa: E402
 from socr.pipeline.agentic import AcceptDecision  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
@@ -225,7 +225,7 @@ def _run_agentic(tmp_path, monkeypatch, leg: str, cli_text: str, returncode: int
 
 def test_placeholder_is_not_judged_and_next_rung_runs(tmp_path, monkeypatch) -> None:
     ok_judge, ok_next, ok_md = _run_agentic(tmp_path, monkeypatch, "ok", REAL_TEXT, 0)
-    bad_judge, bad_next, bad_md = _run_agentic(tmp_path, monkeypatch, "bad", PLACEHOLDER, 1)
+    bad_judge, bad_next, bad_md = _run_agentic(tmp_path, monkeypatch, "bad", PLACEHOLDER, 0)
 
     # Control leg: rung one's real text was judged, the second rung never needed.
     assert any(REAL_TEXT in t for t in ok_judge.seen)
@@ -249,6 +249,34 @@ def test_mixed_content_page_is_a_failure_not_a_partial_success(tmp_path, monkeyp
     assert page.failure_mode == FailureMode.CLI_ERROR
     assert not page.audit_passed
     assert not page.text  # the readable part is not shipped as if it were the page
+
+
+def test_fenced_marker_example_is_not_a_failure() -> None:
+    fenced = f"Example output:\n\n```\n{PLACEHOLDER}\n```\n\nafter"
+    assert not is_cli_failure_placeholder(fenced)
+    assert is_cli_failure_placeholder(f"{fenced}\n\n{PLACEHOLDER}")
+
+
+def test_exit_zero_whole_document_marker_is_an_error(tmp_path, monkeypatch) -> None:
+    def _run(cmd, *args, **kwargs):
+        input_path = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(input_path, input_path.parent)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text("*[OCR Failed]*\n", encoding="utf-8")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = result.stderr = ""
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    result = _QwenLikeEngine().process_document(pdf, tmp_path / "out", PipelineConfig(timeout=30))
+    assert result.status == DocumentStatus.ERROR
+    assert result.failure_mode == FailureMode.CLI_ERROR
+    assert not result.pages
 
 
 def test_quoted_marker_inside_a_sentence_stays_success(tmp_path, monkeypatch) -> None:
@@ -411,3 +439,109 @@ def test_table_ladder_is_never_entered_for_a_failed_candidate(monkeypatch) -> No
     # Control: the same text as a SUCCESS page does reach the ladder machinery.
     _gate(PageOutput(page_num=1, text=table_md, status=PageStatus.SUCCESS, engine="qwen"))
     assert entered, "control: a good page must reach the table ladder, or this test proves nothing"
+
+
+def _pre_pr_best_effort(attempts, page_num):
+    """The selection exactly as it was on main before GH-1020."""
+    from socr.pipeline.agentic import ProviderAttempt, _error_output
+
+    usable = [a for a in attempts if a.output.text.strip()]
+    pool = usable or attempts
+    if not pool:
+        return ProviderAttempt(
+            engine=EngineType.AUTO,
+            output=_error_output(page_num, "no provider produced output"),
+            cost_usd=0.0,
+            accepted=False,
+            reason="all providers failed",
+        )
+    return max(
+        pool,
+        key=lambda a: (a.output.audit_passed, a.output.confidence, a.output.word_count),
+    )
+
+
+def _attempt(text, status, mode, passed, conf, engine=EngineType.QWEN):
+    from socr.pipeline.agentic import ProviderAttempt
+
+    out = PageOutput(
+        page_num=1,
+        text=text,
+        status=status,
+        failure_mode=mode,
+        engine=engine.value,
+        audit_passed=passed,
+        confidence=conf,
+    )
+    return ProviderAttempt(engine=engine, output=out, cost_usd=0.0, accepted=False)
+
+
+def test_best_effort_all_failed_matches_the_pre_pr_selection() -> None:
+    """With no healthy candidate the choice is the one main made, ranking and all."""
+    from socr.pipeline.agentic import _best_effort
+
+    err, cli = PageStatus.ERROR, FailureMode.CLI_ERROR
+    cases = [
+        # every attempt empty: audit_passed / confidence decide, as on main
+        [_attempt("", err, cli, False, 0.1), _attempt("", err, None, True, 0.2)],
+        [_attempt("", err, cli, True, 0.9), _attempt("", err, cli, False, 0.99)],
+        # only failed candidates carry text
+        [_attempt("one two", err, cli, False, 0.5), _attempt("", err, None, True, 0.9)],
+        [],
+    ]
+    for attempts in cases:
+        assert _best_effort(attempts, 1) is not None
+        got, want = _best_effort(attempts, 1), _pre_pr_best_effort(attempts, 1)
+        assert (got.output.text, got.engine, got.reason) == (
+            want.output.text,
+            want.engine,
+            want.reason,
+        )
+        if attempts:
+            assert got is want
+
+
+def test_best_effort_differs_from_pre_pr_only_by_dropping_failed_for_healthy() -> None:
+    from socr.pipeline.agentic import _best_effort
+
+    err, cli, ok = PageStatus.ERROR, FailureMode.CLI_ERROR, PageStatus.SUCCESS
+    failed = _attempt(PLACEHOLDER, err, cli, True, 1.0)
+    weak = _attempt("a", ok, None, False, 0.0, EngineType.GEMINI)
+    attempts = [failed, weak]
+    assert _pre_pr_best_effort(attempts, 1) is failed  # main would have shipped it
+    assert _best_effort(attempts, 1) is weak
+    # Among healthy candidates the ranking is untouched.
+    strong = _attempt("a b c", ok, None, True, 0.9, EngineType.MARKER)
+    assert _best_effort([failed, weak, strong], 1) is strong
+    assert _best_effort([weak, strong], 1) is _pre_pr_best_effort([weak, strong], 1)
+
+
+def test_per_page_file_with_fenced_marker_is_judged_on_raw_text(tmp_path, monkeypatch) -> None:
+    """A per-page file (no aggregate) is checked RAW: ``_clean_output`` unwraps the fence,
+    which would turn a quoted example into a bare marker line."""
+    text = f"```markdown\n{PLACEHOLDER}\n```\n"
+    assert is_cli_failure_placeholder(BaseEngine._clean_output(text, "qwen")), (
+        "setup: cleaning must expose the marker, or this test cannot tell raw from cleaned"
+    )
+
+    def _run(cmd, *args, **kwargs):
+        if "-o" not in cmd:
+            probe = MagicMock()
+            probe.returncode = 0
+            probe.stdout = probe.stderr = ""
+            return probe
+        images_dir = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(images_dir / "page_0001.png", images_dir)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text(text, encoding="utf-8")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = result.stderr = ""
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = _pdf(tmp_path / "d.pdf")
+    page = _QwenLikeEngine().process_pages(pdf, [1], PipelineConfig(timeout=30))[0]
+    assert page.status == PageStatus.SUCCESS

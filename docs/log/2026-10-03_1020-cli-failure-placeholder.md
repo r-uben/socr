@@ -77,3 +77,26 @@ qwen-ocr-cli `backends/base.py`: include `resp.text[:300]` in the 5xx error and 
    reverted to whole-text fails 6 tests; dropping the `_best_effort` exclusion fails
    `test_best_effort_never_selects_a_failed_candidate`; dropping the table-gate check fails
    `test_table_ladder_is_never_entered_for_a_failed_candidate`.
+
+## Round 3
+
+- **Decision (coordinator): a page with a marker line stays a whole-page CLI_ERROR.** Astra asked
+  to keep the readable remainder as WARNING. Overruled: the rung failed, so the ladder moves on
+  and the next rung re-reads the whole page. A partial read is never better than a full re-read,
+  and if every rung fails the existing floor/fallback applies.
+- **`_best_effort`.** The correction to round 2: the earlier "unchanged contract" claim was not
+  true (all-failed fell back to every attempt even when a non-empty failed one existed). Now the
+  pre-PR selection (`usable` = non-empty, else all attempts, same `max` key) is kept verbatim and
+  the single change is that a healthy (non-failed) non-empty candidate always wins over a failed
+  one. `test_best_effort_all_failed_matches_the_pre_pr_selection` compares to a copy of the main
+  implementation on all-failed inputs; the other test pins the one intended difference and that
+  ranking among healthy candidates is untouched.
+- **Raw text.** The marker is matched on the page text as read, before `_clean_output` (one check,
+  not two). Lines inside a fenced block are skipped. Limit: the aggregate read-back (qwen) is
+  cleaned before it is split into sections, so there the check necessarily sees cleaned text; the
+  raw guarantee holds for per-page files, where `_clean_output` would unwrap a whole-page fence
+  into a bare marker (pinned).
+- Tests: agentic legs now both use exit 0, so the marker alone triggers the next rung; added an
+  exit-0 whole-document `*[OCR Failed]*` case.
+- Mutants (external copies, canary, anchor count 1): dropping the healthy-preference fails 2 tests;
+  removing the fence skip fails 2; checking cleaned instead of raw text fails 1.

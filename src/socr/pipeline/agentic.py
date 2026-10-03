@@ -167,8 +167,13 @@ def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAtte
     most words, then the last (most-escalated) attempt. Never return empty if a
     non-empty attempt exists.
     """
-    usable = [a for a in attempts if a.output.text.strip() and not is_failed_candidate(a.output)]
+    # The pre-GH-1020 selection, byte for byte: non-empty attempts, else all attempts.
+    usable = [a for a in attempts if a.output.text.strip()]
     pool = usable or attempts
+    # GH-1020: the only change. A failed candidate can never beat a usable one; when
+    # every attempt failed, ``pool`` above is exactly what it always was.
+    healthy = [a for a in usable if not is_failed_candidate(a.output)]
+    pool = healthy or pool
     if not pool:
         return ProviderAttempt(
             engine=EngineType.AUTO,
