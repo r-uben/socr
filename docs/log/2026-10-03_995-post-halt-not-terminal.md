@@ -24,3 +24,5 @@ assignment replaced by `pass`): both tests fail (ledger hits [2, 4]). Full suite
 
 **Note.** A PARTIAL doc with an unchanged fingerprint is still skipped whole by the document gate unless
 `--reprocess` is passed; that rule is unchanged and out of scope here.
+
+**Review follow-up (cubic P3s).** Comment wording narrowed to the per-page passes and notes the plain-re-run limitation (#1001). Trusted-native pages past the halt are flagged even if an earlier run left them terminal: this run never restored or processed them (the pre-pass is OCR-only), so flagging is conservative and correct; pinned by test_native_pages_past_halt_flagged_even_if_previously_terminal. The halt test now asserts the page list in result.error.

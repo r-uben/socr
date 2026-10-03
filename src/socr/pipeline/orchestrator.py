@@ -9223,6 +9223,10 @@ class UnifiedPipeline:
                 # GH-995: every page from here on was never processed. Mark it so it
                 # ships demoted and non-terminal; a resumed page (restored by the
                 # pre-pass) and an unloadable one already carry their own truth.
+                # The pre-pass covers OCR pages only: a trusted-native page past the
+                # halt is flagged even if an earlier run left it terminal, because THIS
+                # run never restored or processed it. Conservative: it is redone on
+                # the next run, which is cheap for native text.
                 for _skipped in sorted(state.pages):
                     if (
                         _skipped >= page_num

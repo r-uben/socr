@@ -114,6 +114,7 @@ def test_halt_leaves_unprocessed_pages_non_terminal_and_not_success(tmp_path: Pa
     result, halted_routed, _ = _run(_pdf(tmp_path / "h"), halted_out, halt=True)
 
     assert result.error and "PARTIAL_SAVE_VLM_TIMEOUT" in result.error
+    assert "3 page(s) not processed: 2, 3, 4" in result.error
     assert halted_routed == [HALT_AT]  # the halt really cut the loop
     assert control_routed == [1, 3]
 
@@ -146,3 +147,25 @@ def test_resume_reprocesses_pages_the_halt_skipped(tmp_path: Path) -> None:
     for n in range(HALT_AT + 1, PAGES + 1):
         assert resumed[n]["terminal"] is True
         assert resumed[n]["status"] == "success"
+
+
+def test_native_pages_past_halt_flagged_even_if_previously_terminal(tmp_path: Path) -> None:
+    """Pin: the OCR pre-pass resumes p3 (not flagged); native p2/p4 are flagged.
+
+    A trusted-native page is not covered by the pre-pass, so a halt before it means this
+    run never restored or processed it, even though an earlier run left it terminal.
+    """
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    _run(pdf, out, halt=False)
+    assert all(s["terminal"] is True for s in _sidecars(out).values())
+
+    # Drop p1's ledger entry so it is reprocessed (and times out); p3 stays resumable.
+    (out / "doc" / "pages" / "00001.json").unlink()
+    _, routed, _ = _run(pdf, out, halt=True, reprocess=True)
+    assert routed == [HALT_AT]
+    after = _sidecars(out)
+    assert after[3]["terminal"] is True  # resumed by the OCR pre-pass
+    for n in sorted(NATIVE):
+        assert after[n]["terminal"] is not True
+        assert after[n]["failure_mode"] == FailureMode.PAGE_NOT_PROCESSED_AFTER_HALT.value
