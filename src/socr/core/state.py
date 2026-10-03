@@ -72,6 +72,10 @@ class PageState:
     #: A non-empty value means the page was never read and ships as a FAILED
     #: ``UNREADABLE_INPUT`` page -- it must never be routed, rendered or judged.
     load_error: str = ""
+    #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page.
+    #: Set by ``_phase_agentic``; the page ships demoted and non-terminal so a re-run
+    #: reprocesses it. Not persisted: a resumed page is, by definition, one that ran.
+    not_processed_after_halt: bool = False
     is_born_digital: bool = False
     native_text: str | None = None
     #: #688: the extractor's bytes before label canonicalisation. Provenance
