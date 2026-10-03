@@ -442,3 +442,26 @@ def test_flagged_page_with_no_winner_and_no_attempts_is_demoted_not_clean(tmp_pa
     assert flag.status.value == "warning"
     assert flag.failure_mode == FailureMode.TABLE_NOT_RECONSTRUCTED
     assert flag_tag is SelectionProvenance.NATIVE_FALLBACK
+
+
+def test_e2e_flagged_page_with_no_winner_makes_the_document_not_success(
+    tmp_path, monkeypatch
+) -> None:
+    """Assemble sees a flagged page with no best_output and no attempts: page WARNING, document not SUCCESS."""
+    orig = UnifiedPipeline._phase_assemble
+
+    def assemble(self, state, output_dir):
+        for ps in state.pages.values():
+            ps.best_output = None
+            ps.attempts.clear()
+        return orig(self, state, output_dir)
+
+    kw = dict(provider=True, shape="caption_plus_rules")
+    with monkeypatch.context() as m:
+        m.setattr(UnifiedPipeline, "_phase_assemble", assemble)
+        off, _ = _process(tmp_path, "woff", monkeypatch, neutralised=True, **kw)
+        on, _ = _process(tmp_path, "won", monkeypatch, neutralised=False, **kw)
+    assert _sidecar(tmp_path, "woff")["status"] == "success"
+    assert off.status is DocumentStatus.SUCCESS, "setup: unflagged no-winner page is clean"
+    assert _sidecar(tmp_path, "won")["status"] == "warning"
+    assert on.status is not DocumentStatus.SUCCESS

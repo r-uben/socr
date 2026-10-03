@@ -14633,9 +14633,15 @@ class UnifiedPipeline:
             and table_not_reconstructed_suspect(p)
             and n not in native_fallback_pages
             and n not in failed_pages
-            and p.best_output
-            and p.best_output.audit_passed
-            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+            # No selected winner at all ships the synthetic native fallback, which the
+            # manifest demotes too; a selected winner counts only when it is native/chart.
+            and (
+                not p.best_output
+                or (
+                    p.best_output.audit_passed
+                    and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+                )
+            )
         ]
 
         # A reconstructed or historical state may contain a whole-document

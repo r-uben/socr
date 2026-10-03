@@ -90,3 +90,19 @@ native text, no `best_output` and no attempts returned NATIVE_CLEAN / SUCCESS. R
 (`table_flattened` in `native_demoted` and the failure-mode chain; `audit_passed` is left to the
 other causes, so the demotion is status-only). Regression test builds exactly that state; two
 mutants (demotion, failure mode) are killed by it.
+
+## Review fix 3: document bucket and clarifications
+
+- `flattened_table_pages` (assemble) no longer requires a `best_output`: a flagged page with no
+  selected winner ships the synthetic WARNING fallback, so the document must not stay SUCCESS.
+  A selected winner still counts only when it is passing and native/chart. Pinned through
+  `process()` with the winner and attempts cleared before assemble.
+- Only the SELECTED `best_output.audit_passed` is left untouched. The emitted WARNING page and
+  its sidecar can show `audit_passed` false (the synthetic fallback path leaves it to the other
+  causes; the in-place path keeps the winner's True).
+- The flag adds no route. `needs_ocr_enhancement` from some other cause can still send the page to
+  the ladder.
+- A page with two defects can emit two retained events (e.g. `native_minus_as_digit_retained` and
+  `table_not_reconstructed_retained`). Accepted.
+- The caption regex is capitalised (`Table`/`TABLE`) on purpose. A lowercase "table 3" is
+  usually prose in running text, so matching it would raise the false-positive rate; left as is.
