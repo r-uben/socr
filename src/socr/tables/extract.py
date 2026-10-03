@@ -23,8 +23,12 @@ from typing import Protocol
 import httpx
 
 from socr.core.daemon_call import submit_daemon
-from socr.core.ollama_utils import raise_for_status_redacted
-from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
+from socr.core.ollama_utils import (
+    call_with_total_deadline,
+    ollama_endpoint,
+    raise_for_status_redacted,
+    safe_host_label,
+)
 from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
 
@@ -226,9 +230,11 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     while the vision path stays wedged.
     """
     try:
+        url, extra = ollama_endpoint(host, "/api/generate")
         resp = call_with_total_deadline(
             lambda: httpx.post(
-                f"{host.rstrip('/')}/api/generate",
+                url,
+                **extra,
                 json={
                     "model": model,
                     "prompt": "ok",
@@ -349,9 +355,10 @@ def probe_ollama_idle(
     ``None`` now means "resolve it" rather than "assume localhost".
     """
     resolved = resolve_ollama_host(host)
+    url, extra = ollama_endpoint(resolved, "/api/tags")
     try:
         resp = call_with_total_deadline(
-            lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
+            lambda: httpx.get(url, **extra, timeout=timeout),
             timeout,
             label=f"ollama {safe_host_label(resolved)}/api/tags probe",
         )
@@ -400,8 +407,10 @@ def _ollama_read_crop(host: str, model: str, prompt: str, image_b64: str, timeou
     defence-in-depth only; the caller's ``run_killable`` deadline is what
     actually bounds that case, by killing the process making the call.
     """
+    url, extra = ollama_endpoint(host, "/api/generate")
     resp = httpx.post(
-        f"{host}/api/generate",
+        url,
+        **extra,
         json={
             "model": model,
             "prompt": prompt,

@@ -74,3 +74,37 @@ Process note: a stale script of another agent in the shared scratchpad
 (`e2.py`) was run by mistake and rewrote the `call_with_total_deadline` region of
 `ollama_utils.py` in worktree agent-a995e88e5bffc276f before aborting. It
 re-applied that script's own `new` text; the owner should `git diff` that file.
+
+## Review round 3 (Astra on 0488083): two more leaks
+
+1. **Regex character class.** `[^/\s'"]*@` let a password holding `'` (which httpx
+   keeps) pass through. `redact_credentials` is now structural: per `scheme://`,
+   the authority runs to the first `/` (bounded by the next scheme or the end of
+   the text) and everything up to the LAST `@` in it is dropped. Pinned for
+   `' " % ! $ ; space @ : & ( * ~ #`, several URLs in one message, the path
+   boundary (a later `ops@example.com` survives), and the no-path case (errs
+   towards removing).
+2. **httpx logs `request.url` at INFO** (`HTTP Request: POST http://user:pass@...`),
+   before any helper runs. Credentials are now kept out of every Ollama request
+   URL: `split_userinfo` -> `ollama_endpoint(host, path) -> (url, httpx.BasicAuth|None)`
+   for httpx and `urllib_auth_headers(host)` for urllib. `resolve_ollama_host`
+   output is unchanged (it still carries userinfo); no request URL is built from
+   it directly any more. Sites converted: `core/ollama_utils.py` (`_get_tags`,
+   `probe_generate`), `tables/extract.py` (generation canary, `probe_ollama_idle`,
+   `_ollama_read_crop`), `judge/ollama_judge.py` (`_post_generate`),
+   `judge/table_rung_ollama.py` (rung probe, `_post_chat`), `engines/gemini_api.py`
+   (tags, chat), `math/recover.py` and `math/equation_latex.py` (urllib; these
+   previously failed outright on a userinfo URL). Not converted: vLLM
+   (`base_url`, `/chat/completions`) which takes its own API key and is not an
+   Ollama path. Percent-encoded userinfo is decoded (as httpx does) before it is
+   sent as Basic auth.
+
+Pin: real loopback `ThreadingHTTPServer`, real `httpx` (conftest's global
+`httpx.get` stub is undone with `httpx._api.get`), DEBUG capture; asserts httpx
+did log a request, the server got the exact `Authorization: Basic ...`, the path
+holds no userinfo, and neither user, password fragments nor the base64 token
+appear in any captured record. Same for the two urllib paths. Mutants (external
+copy, canary, uncapped anchor count): first-`@`, no slash boundary, first-URL-only,
+endpoint keeps userinfo, endpoint drops auth, urllib no header, ollama_judge and
+rung sites bypassing the helper, unredacted status error, raw host in log: all
+killed (the slash-boundary one needed a new test).

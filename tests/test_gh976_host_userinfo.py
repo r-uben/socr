@@ -175,3 +175,135 @@ def test_exception_that_embeds_the_url_is_redacted_in_the_log(monkeypatch, caplo
     assert "cannot reach http://gpu:9" in caplog.text
     assert "hunter2" not in caplog.text
     assert "sekretuser" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Round 3: structural redaction, and credentials kept out of the request URL.
+# ---------------------------------------------------------------------------
+
+PASSWORD_CHARS = ["'", '"', "%", "!", "$", ";", " ", "@", ":", "&", "(", "*", "~", "#"]
+
+
+@pytest.mark.parametrize("ch", PASSWORD_CHARS)
+def test_redaction_is_structural_not_a_character_class(ch) -> None:
+    text = f"Client error for url 'http://us{ch}er:p{ch}ss{ch}@gpu:9/api/chat'"
+    assert redact_credentials(text) == "Client error for url 'http://gpu:9/api/chat'"
+
+
+def test_redaction_covers_every_url_in_a_message() -> None:
+    text = "a http://u:p'1@h1:1/x then https://v:q\"2@h2/y end"
+    assert redact_credentials(text) == "a http://h1:1/x then https://h2/y end"
+
+
+def test_redaction_stops_at_the_path_boundary() -> None:
+    text = "for url 'http://u:p@h:9/api/tags' (contact ops@example.com)"
+    assert redact_credentials(text) == "for url 'http://h:9/api/tags' (contact ops@example.com)"
+
+
+def test_redaction_without_a_path_errs_towards_removing_not_leaking() -> None:
+    assert "secret" not in redact_credentials("failed: http://u:secret@gpu:9")
+    assert redact_credentials("plain text a@b, no url") == "plain text a@b, no url"
+    assert redact_credentials("http://gpu:9/x") == "http://gpu:9/x"
+
+
+def test_split_userinfo_and_endpoint() -> None:
+    import base64
+
+    from socr.core.ollama_utils import ollama_endpoint, split_userinfo, urllib_auth_headers
+
+    assert split_userinfo("http://h:9") == ("http://h:9", None)
+    assert split_userinfo("http://u:p%41@h:9/x") == ("http://h:9/x", ("u", "pA"))
+    assert split_userinfo("http://u:p@w@h:9") == ("http://h:9", ("u", "p@w"))
+    url, extra = ollama_endpoint("http://u:p@h:9/", "/api/tags")
+    assert url == "http://h:9/api/tags" and isinstance(extra["auth"], httpx.BasicAuth)
+    assert ollama_endpoint("http://h:9", "/api/tags") == ("http://h:9/api/tags", {})
+    assert urllib_auth_headers("http://u:p@h") == {
+        "Authorization": "Basic " + base64.b64encode(b"u:p").decode()
+    }
+    assert urllib_auth_headers("http://h") == {}
+
+
+@pytest.fixture
+def loopback():
+    """A real HTTP server on 127.0.0.1 recording each request's Authorization."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: list[tuple[str, str, str | None]] = []
+    status = {"code": 200}
+
+    class H(BaseHTTPRequestHandler):
+        def _reply(self):
+            seen.append((self.command, self.path, self.headers.get("Authorization")))
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            body = json.dumps({"models": [{"name": "m:latest"}], "response": "x"}).encode()
+            self.send_response(status["code"])
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _reply
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv.server_address[1], seen, status
+    srv.shutdown()
+    srv.server_close()
+
+
+USER = "sekretuser"
+PW = "p'a\"ss!$;w@rd"  # keeps ' " ! $ ; and a raw @
+
+
+def _basic() -> str:
+    import base64
+
+    return "Basic " + base64.b64encode(f"{USER}:{PW}".encode()).decode()
+
+
+def _assert_clean(caplog) -> None:
+    for secret in (USER, "p'a", 'a"ss', "ss!$;w", "w@rd", _basic().split()[1]):
+        assert secret not in caplog.text, secret
+
+
+def test_real_request_keeps_credentials_out_of_url_and_logs(loopback, caplog, monkeypatch) -> None:
+    from socr.core.ollama_utils import _get_tags
+    from socr.judge import table_rung_ollama as rung
+    from socr.judge.ollama_judge import _post_generate
+
+    # conftest stubs httpx.get/_post_chat for hermeticity; this test needs the real thing.
+    monkeypatch.setattr(httpx, "get", httpx._api.get)
+    port, seen, status = loopback
+    host = f"http://{USER}:{PW}@127.0.0.1:{port}"
+    with caplog.at_level(logging.DEBUG):
+        assert rung.ollama_rung_reachable("m", host) is True
+        assert _get_tags(host, 5.0).status_code == 200
+        assert _post_generate(host, "m", "p", "aW1n", 5.0) == "x"
+        status["code"] = 404
+        assert rung.ollama_rung_reachable("m", host) is False
+    assert len(seen) == 4
+    assert all(auth == _basic() for _, _, auth in seen)  # the server got the credentials
+    assert all(path.startswith("/api/") for _, path, _ in seen)  # none rode in the path
+    assert any("HTTP Request" in r.getMessage() for r in caplog.records), "httpx logged"
+    _assert_clean(caplog)
+
+
+def test_urllib_equation_paths_send_basic_auth_not_url_userinfo(loopback, caplog, tmp_path) -> None:
+    from socr.math import equation_latex, recover
+
+    port, seen, _ = loopback
+    host = f"http://{USER}:{PW}@127.0.0.1:{port}"
+    with caplog.at_level(logging.DEBUG):
+        assert recover.latex_for_image(b"png", host=host, timeout=5.0) == "x"
+        crop = tmp_path / "c.png"
+        crop.write_bytes(b"png")
+        equation_latex.latex_for_crop(crop, host=host, timeout=5.0)
+    assert seen and all(auth == _basic() for _, _, auth in seen)
+    _assert_clean(caplog)

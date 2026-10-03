@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import socket
@@ -9,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 
@@ -55,18 +56,82 @@ def safe_host_label(host: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))
 
 
-#: URL userinfo: everything between ``scheme://`` and the LAST ``@`` before the
-#: first ``/`` (a password may hold a raw ``@``). Greedy on purpose.
-_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/\s'\"]*@")
+_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 def redact_credentials(text: str) -> str:
-    """*text* with every ``scheme://user:pass@`` userinfo removed (GH-976).
+    """*text* with the userinfo of every URL in it removed (GH-976).
+
+    Structural, not a character class: for each ``scheme://``, the authority runs
+    to the first ``/`` (or the next ``scheme://``, or the end of the text), and
+    everything up to the LAST ``@`` inside it is userinfo. A password may hold any
+    character httpx keeps (``'``, ``"``, ``%``, ``!``, a space, a raw ``@``), so
+    no character may be assumed to end it. When the URL has no path the authority
+    runs to the end of the text, so the redaction errs towards removing too much
+    of the tail, never towards leaving a credential.
 
     For free text that may embed a request URL, notably ``str(httpx exception)``:
     ``raise_for_status`` writes ``... for url 'http://user:pass@host/api'``.
     """
-    return _USERINFO_RE.sub(r"\g<scheme>", text)
+    starts = [m for m in _SCHEME_RE.finditer(text)]
+    out: list[str] = []
+    pos = 0
+    for i, m in enumerate(starts):
+        if m.start() < pos:
+            continue
+        auth_start = m.end()
+        limit = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+        slash = text.find("/", auth_start, limit)
+        auth_end = slash if slash != -1 else limit
+        at = text.rfind("@", auth_start, auth_end)
+        if at == -1:
+            continue
+        out.append(text[pos:auth_start])
+        pos = at + 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def split_userinfo(host: str) -> tuple[str, tuple[str, str] | None]:
+    """``(host_without_userinfo, (user, password) | None)`` (GH-976).
+
+    Credentials must not travel inside a request URL: httpx logs ``request.url``
+    verbatim at INFO and puts it in error messages. Callers build the URL from
+    the first element and send the second as HTTP Basic auth
+    (:func:`ollama_endpoint`, :func:`urllib_auth_headers`). Userinfo is read
+    structurally (up to the last ``@`` of the authority) and percent-decoded, the
+    way httpx reads it from a URL. A host with no userinfo comes back unchanged.
+    """
+    scheme, sep, rest = host.partition("://")
+    if not sep:
+        return host, None
+    slash = rest.find("/")
+    authority, tail = (rest, "") if slash == -1 else (rest[:slash], rest[slash:])
+    userinfo, at, hostpart = authority.rpartition("@")
+    if not at:
+        return host, None
+    user, _, password = unquote(userinfo).partition(":")
+    return f"{scheme}://{hostpart}{tail}", (user, password)
+
+
+def ollama_endpoint(host: str, path: str) -> tuple[str, dict[str, httpx.BasicAuth]]:
+    """``(url, extra_kwargs)`` for ``httpx``: *host* + *path* without userinfo.
+
+    ``extra_kwargs`` is ``{"auth": BasicAuth(...)}`` when *host* carried userinfo
+    and ``{}`` otherwise, so a call is ``httpx.get(url, **extra, timeout=...)`` and
+    a host without credentials makes exactly the call it always did.
+    """
+    clean, creds = split_userinfo(host)
+    return f"{clean.rstrip('/')}{path}", ({"auth": httpx.BasicAuth(*creds)} if creds else {})
+
+
+def urllib_auth_headers(host: str) -> dict[str, str]:
+    """``{"Authorization": "Basic ..."}`` for *host*'s userinfo, else ``{}``."""
+    creds = split_userinfo(host)[1]
+    if creds is None:
+        return {}
+    token = base64.b64encode(f"{creds[0]}:{creds[1]}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
 
 def raise_for_status_redacted(resp: httpx.Response) -> None:
@@ -175,7 +240,8 @@ def _get_tags(host: str, timeout: float) -> httpx.Response | None:
     and cannot keep the process alive. No process is spawned. Transport errors
     propagate as ``httpx.HTTPError`` / ``OSError``.
     """
-    finished, value = _call_within(lambda: httpx.get(f"{host}/api/tags", timeout=timeout), timeout)
+    url, extra = ollama_endpoint(host, "/api/tags")
+    finished, value = _call_within(lambda: httpx.get(url, **extra, timeout=timeout), timeout)
     if not finished:
         return None
     if isinstance(value, BaseException):
@@ -378,8 +444,10 @@ def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
     the response body ``probe_failure_reason`` needs.
     """
     try:
+        url, extra = ollama_endpoint(host, "/api/generate")
         resp = httpx.post(
-            f"{host}/api/generate",
+            url,
+            **extra,
             json={
                 "model": model,
                 "prompt": _PROBE_PROMPT,
