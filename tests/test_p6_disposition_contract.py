@@ -143,12 +143,12 @@ def test_selection_provenance_keeps_all_sixteen_members() -> None:
     ``STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR``); #713 round 2 added a 20th
     (``STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED``); #714 round 2 added a 21st
     (``STRUCTURE_CLASS_TEXT_TABLE_FLOOR``); #1004 a 22nd
-    (``NATIVE_UNTRUSTED_JUDGE_TIMEOUT``). The "16" in the test name is
+    (``NATIVE_UNTRUSTED_JUDGE_TIMEOUT``); #1027 a 23rd (``INVISIBLE_SCAN_UNREAD``). The "16" in the test name is
     historical, not current -- see ``tests/test_r7_winner_kind_tags.py`` for the
     live, AST-derived count that tracks the cascade itself.
     """
     SelectionProvenance = manifest.SelectionProvenance
-    assert len(list(SelectionProvenance)) == 22, (
+    assert len(list(SelectionProvenance)) == 23, (
         "the selector's endings must not be silently merged in this task -- Stage "
         "A/B is behaviour-preserving; merging is S3/S4 of the design doc, out of "
         "scope. A count change is only legitimate when a real ending was added "

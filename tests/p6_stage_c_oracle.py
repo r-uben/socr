@@ -106,6 +106,9 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
         "run_fingerprint",
         "input_checksum",
         "pdf_file_hash",
+        # #1027: additive diagnostic record of which rungs ran (sidecar only); pinned by
+        # tests/test_gh1027_invisible_scan_floor.py, not by the byte-identity oracles.
+        "attempts_summary",
     }
 )
 

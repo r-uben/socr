@@ -171,6 +171,13 @@ def _shape(sidecar: dict) -> dict:
     shape = {k: v for k, v in sidecar.items() if k not in _VOLATILE}
     # The breaker's own event rides the trigger page's sidecar (so a resume replays it);
     # it is the one intended difference from the slow-judge run.
+    # #1027: the attempts summary carries the free-text rejection reason, which names the
+    # breaker (and the elapsed deadline) on a circuit-open page. That wording is the other
+    # intended difference; engine / accepted / judge_outcome stay pinned equal.
+    shape["attempts_summary"] = [
+        {k: v for k, v in a.items() if k != "rejection_reason"}
+        for a in sidecar.get("attempts_summary", [])
+    ]
     shape["audit_events"] = [
         e for e in sidecar.get("audit_events", []) if e.get("kind") != BREAKER_EVENT
     ]
