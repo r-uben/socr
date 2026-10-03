@@ -99,3 +99,30 @@ uncapped anchor count == 1 asserted before each edit; baseline 22 passed):
 
 Full suite, default OLLAMA_HOST, nohup: 6419 passed, 2 skipped, 4 xfailed, 0 failed.
 `uvx ruff@0.16.0 format --check .`: 832 files already formatted.
+
+## Review round 1 (Astra, PR #978: ACCEPT-WITH-FIXES)
+
+* **Resume (P2).** I earlier left the budget out of the run fingerprint. That was wrong for an
+  EXPLICIT budget: a cached terminal (e.g. a WITHHELD page whose sibling table hit the budget)
+  would survive a raised budget. Now `table_judge_page_budget_sec` joins the fingerprint extras
+  only when the ladder is on AND it is explicitly set; the default (None) adds no key, so existing
+  fingerprints and resumes are byte-for-byte unchanged, and the derived default is covered by
+  `table_judge_timeout_sec` (already fingerprinted) and the source digest.
+* **Pins (P2)**, `tests/test_gh974_review_pins.py` (8), each a difference between two runs that
+  change only the budget:
+  multi-table page (two ruled grids on one page: calls `[r0, r1]` total at 0.5 s, `[r0,r1,r2]*2`
+  at 60 s, 2 unverified events, 1 budget event); same page with equal rung counts (4 vs 4)
+  replaces the old 4-versus-3 comparison, which is deleted; exhausted adjudicator (guard chain asked
+  with budget, not asked without; page UNVERIFIED, one event); `process()` on the committed fixture:
+  tight budget gives page 1 WARNING (sidecar `winning_output.status`), document AUDIT_FAILED naming
+  page 1, page 2 unaffected, one budget event on page 1 only, versus SUCCESS/SUCCESS when loose;
+  exhausted cell transcriber (shifted table + high PASS: `transcribe_cell` not called, table stays
+  UNVERIFIED, page WARNING, document AUDIT_FAILED; control reaches the transcriber); resume: a
+  changed explicit budget reprocesses, the same budget and the default both still resume; the
+  fingerprint extra has no budget key by default, has it when set, and not with the ladder off.
+* **Mutants** (external copy, canary, uncapped anchor count 1; baseline 29 passed): fingerprint
+  clause removed 3 failed; key always present 2 failed; ignores the ladder flag 2 failed;
+  adjudicator unwrapped 2 failed; transcriber unbudgeted 2 failed; budget never exhausted 7 failed;
+  per-table budget reset 3 failed.
+
+* **Structure fix found by the suite.** The first review-round suite run failed 4 tests: the new config field was unclassified in test_cli_flag_agentic_status_gh142 (now classified); and tests that call `UnifiedPipeline._run_table_judge_gate(MagicMock(), ...)` or inspect its source broke because it had become a thin wrapper. The budget is now a decorator (`_under_page_ladder_budget`) on the original method, which keeps its name and body, and `_ladder_budget = None` is a class-level default. Final suite: 6379 passed, 2 skipped, 4 xfailed, 0 failed; ruff format clean (833 files).

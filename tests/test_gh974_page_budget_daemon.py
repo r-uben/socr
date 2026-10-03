@@ -251,15 +251,8 @@ def test_budget_exhausted_page_is_unverified_one_event_next_page_normal(tmp_path
     assert len([e for e in state.events if e.kind == TABLE_LADDER_BUDGET_EXHAUSTED_KIND]) == 1
 
 
-def test_difference_pin_same_page_without_a_tight_budget_runs_every_rung(tmp_path):
-    """Only the budget differs: the loose run calls all three rungs, no budget event."""
-    pipeline, state = _pipeline(tmp_path, table_judge_page_budget_sec=60.0)
-    calls: list[str] = []
-    slow = [_rung(f"r{i}", f"m{i}", sleep=SLOW, passes=False, calls=calls) for i in range(3)]
-    _gate(pipeline, state, 1, slow)
-    assert calls == ["r0", "r1", "r2"]
-    assert TABLE_LADDER_BUDGET_EXHAUSTED_KIND not in _kinds(state, 1)
-    assert _kinds(state, 1).count(TABLE_LADDER_UNVERIFIED_KIND) == 1
+#: The same-page loose-versus-tight comparison (equal rung counts, only the budget
+#: differs) lives in test_gh974_review_pins.py::test_same_page_only_the_budget_differs.
 
 
 def test_default_budget_is_timeout_times_stages(tmp_path):

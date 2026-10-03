@@ -7,6 +7,7 @@ structured loop that operates on the DocumentState blackboard.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import re
@@ -888,6 +889,52 @@ def _derive_orthogonal_assemble_buckets(state: DocumentState) -> dict[str, list[
     }
 
 
+def _under_page_ladder_budget(gate):
+    """GH-974: run the table-judge gate under a fresh per-page wall-clock budget.
+
+    A decorator, not a wrapper method, so ``UnifiedPipeline._run_table_judge_gate``
+    stays the single name callers, tests and source-inspection pins already use.
+    A fresh budget per page: an exhausted one never leaks into the next page.
+    """
+
+    @functools.wraps(gate)
+    def _budgeted(self, state, page_num, ps, bo, rungs):
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.ladder_budget import (
+            TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+            PageLadderBudget,
+        )
+
+        def _exhausted(message: str) -> None:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+                    engine=bo.engine or "",
+                    detail=message,
+                )
+            )
+            if not self.config.quiet:
+                console.print(f"  [yellow]p{page_num}: {message}[/yellow]")
+
+        def _report(name: str, model: str, elapsed: float) -> None:
+            logger.info("p%d table ladder %s (%s) %.1fs", page_num, name, model, elapsed)
+            if not self.config.quiet:
+                console.print(
+                    f"  [dim]p{page_num}: table ladder {name} ({model or '-'}) {elapsed:.1f}s[/dim]"
+                )
+
+        self._ladder_budget = PageLadderBudget(
+            self._page_ladder_budget_sec(rungs), on_exhausted=_exhausted, report=_report
+        )
+        try:
+            return gate(self, state, page_num, ps, bo, rungs)
+        finally:
+            self._ladder_budget = None
+
+    return _budgeted
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -897,6 +944,9 @@ class UnifiedPipeline:
         result = pipeline.process(pdf_path, output_dir)
         results = pipeline.process_batch(input_dir, output_dir)
     """
+
+    #: GH-974: the CURRENT page's table-ladder budget; None outside the gate.
+    _ladder_budget = None
 
     # Memoized judge-model resolution (#133). ``_resolve_judge_model`` probes
     # Ollama over HTTP once per entry in ``_JUDGE_MODEL_CANDIDATES``, and it is
@@ -1425,6 +1475,17 @@ class UnifiedPipeline:
             ),
             "table_judge_timeout_sec": (
                 cfg.table_judge_timeout_sec if cfg.table_judge_ladder else None
+            ),
+            # GH-974: an EXPLICIT page budget changes which tables get a verdict
+            # (a sibling table can exhaust it), so a cached terminal must not
+            # outlive a changed one. Present only when set: the key's absence is
+            # the default, so existing fingerprints (and resumes) are unchanged,
+            # and the derived default tracks ``table_judge_timeout_sec`` above
+            # and the formula in the source digest.
+            **(
+                {"table_judge_page_budget_sec": cfg.table_judge_page_budget_sec}
+                if cfg.table_judge_ladder and cfg.table_judge_page_budget_sec is not None
+                else {}
             ),
             "table_judge_prompt_digest": (
                 _table_judge_prompt_digest() if cfg.table_judge_ladder else None
@@ -7299,52 +7360,8 @@ class UnifiedPipeline:
             return float(configured)
         return float(self.config.table_judge_timeout_sec) * (len(rungs) + 1)
 
+    @_under_page_ladder_budget
     def _run_table_judge_gate(
-        self,
-        state: DocumentState,
-        page_num: int,
-        ps: PageState,
-        bo: PageOutput,
-        rungs: list,
-    ) -> None:
-        """Run the gate under a per-page wall-clock budget (GH-974).
-
-        A fresh budget per page: an exhausted one never leaks into the next page.
-        """
-        from socr.core.audit_log import AuditEvent
-        from socr.judge.ladder_budget import (
-            TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
-            PageLadderBudget,
-        )
-
-        def _exhausted(message: str) -> None:
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind=TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
-                    engine=bo.engine or "",
-                    detail=message,
-                )
-            )
-            if not self.config.quiet:
-                console.print(f"  [yellow]p{page_num}: {message}[/yellow]")
-
-        def _report(name: str, model: str, elapsed: float) -> None:
-            logger.info("p%d table ladder %s (%s) %.1fs", page_num, name, model, elapsed)
-            if not self.config.quiet:
-                console.print(
-                    f"  [dim]p{page_num}: table ladder {name} ({model or '-'}) {elapsed:.1f}s[/dim]"
-                )
-
-        self._ladder_budget = PageLadderBudget(
-            self._page_ladder_budget_sec(rungs), on_exhausted=_exhausted, report=_report
-        )
-        try:
-            self._run_table_judge_gate_unbudgeted(state, page_num, ps, bo, rungs)
-        finally:
-            self._ladder_budget = None
-
-    def _run_table_judge_gate_unbudgeted(
         self,
         state: DocumentState,
         page_num: int,
