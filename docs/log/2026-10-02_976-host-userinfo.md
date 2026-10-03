@@ -30,3 +30,47 @@ no userinfo split, split on first `@`, drop userinfo on restore, leaky warning.
 Each fails at least one test.
 
 Scope note: touched `tables/extract.py` (small), not orchestrator/agentic.
+
+## Review round (Astra on #977): the "no other unrouted host logging" claim was wrong
+
+Corrected. Two leaks remained:
+1. `judge/table_rung_ollama.py` `ollama_rung_reachable` logged the raw `resolved`
+   host and raw `exc` at debug. Now `safe_host_label(resolved)` and
+   `redact_credentials(str(exc))`.
+2. `httpx.Response.raise_for_status()` writes `... for url 'http://u:p@h/api'`
+   into the `HTTPStatusError` message (verified; connect/DNS errors do not embed
+   the URL). That text reaches `str(exc)` loggers and audit events downstream
+   (`pipeline/agentic.py:362,382`, `orchestrator.py:~3135,~4240,~4492,~8695,
+   ~11082,~15641`, `source_evidence`, ...). Rather than patch each consumer
+   (orchestrator is under edit by #974), the source is fixed: every Ollama/vLLM
+   `raise_for_status()` call now goes through
+   `core.ollama_utils.raise_for_status_redacted`, which re-raises the same
+   `HTTPStatusError` type with a redacted message and `from None`.
+   Sites switched: `tables/extract.py` (6), `core/ollama_utils.py` (1),
+   `engines/gemini_api.py` (1), `judge/table_rung_ollama.py` (2),
+   `judge/vllm_judge.py` (2), `judge/ollama_judge.py` (1).
+
+### Audit: logger/print/audit calls interpolating a host, URL or exception from an Ollama call
+- Host: all `label=`/log sites in `extract.py`, `equation_latex.py`, `recover.py`,
+  `gemini_api.py`, `table_rung_ollama.py` use `safe_host_label` (checked by grep
+  for `host|resolved|base_url` inside logger/raise/print calls: none raw).
+- Exceptions logged or stored via `str(exc)`: the consumers above. They receive
+  either non-URL text (httpx connect/timeout errors) or the now-redacted
+  `HTTPStatusError`. `table_rung_ollama.py:96` additionally redacts at the site.
+- Not covered: urllib (`URLError`) paths carry no URL in their text; an exception
+  from a non-socr library embedding a URL in a different shape would not be caught.
+
+### Added
+`redact_credentials` (greedy to the last `@` before the first `/`, so a raw `@`
+in the password is handled), `raise_for_status_redacted`. Tests: raw `@` and IPv6
+zone-id resolution pins; failed request to a userinfo host leaves no credentials
+in captured logs (both a 404 and a ConnectError that embeds the URL).
+Mutants (external copy, canary, uncapped anchor count): unredacted status error,
+no-op redact, raw host in log, raw exc in log: all killed. `rung uses plain
+raise_for_status` survives and is an equivalent mutant (the log site redacts on
+its own); the status-error text itself is pinned by the helper test.
+
+Process note: a stale script of another agent in the shared scratchpad
+(`e2.py`) was run by mistake and rewrote the `call_with_total_deadline` region of
+`ollama_utils.py` in worktree agent-a995e88e5bffc276f before aborting. It
+re-applied that script's own `new` text; the owner should `git diff` that file.

@@ -23,6 +23,7 @@ from typing import Protocol
 import httpx
 
 from socr.core.daemon_call import submit_daemon
+from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
 from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
@@ -240,7 +241,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
             timeout,
             label=f"ollama {safe_host_label(host)} generation canary ({model})",
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         return True
     except _PROBE_ERRORS:
         return False
@@ -276,7 +277,7 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
             },
             timeout=timeout,
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         return True
     except _PROBE_ERRORS:
         return False
@@ -305,7 +306,7 @@ def probe_openai_server_idle(
     """
     try:
         resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
     except _PROBE_ERRORS:
         return False
     return _openai_generation_canary(
@@ -354,7 +355,7 @@ def probe_ollama_idle(
             timeout,
             label=f"ollama {safe_host_label(resolved)}/api/tags probe",
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
     except _PROBE_ERRORS:
         return False
     return _ollama_generation_canary(
@@ -410,7 +411,7 @@ def _ollama_read_crop(host: str, model: str, prompt: str, image_b64: str, timeou
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     return _clean_markdown(resp.json().get("response", ""))
 
 
@@ -441,7 +442,7 @@ def _vllm_read_crop(
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     choices = resp.json().get("choices") or [{}]
     return _clean_markdown(choices[0].get("message", {}).get("content", ""))
 

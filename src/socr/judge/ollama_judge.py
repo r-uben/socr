@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 
+from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.killable import CallSpec, run_killable
 from socr.core.ollama_utils import (  # noqa: F401 -- CONNECT_PROBE_TIMEOUT_SEC re-exported
     CONNECT_PROBE_TIMEOUT_SEC,
@@ -67,7 +68,7 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     return resp.json().get("response", "")
 
 

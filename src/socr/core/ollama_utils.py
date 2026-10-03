@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import threading
 import time
@@ -52,6 +53,35 @@ def safe_host_label(host: str) -> str:
         return host.rsplit("@", 1)[-1]
     netloc = parts.netloc.rsplit("@", 1)[-1]
     return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))
+
+
+#: URL userinfo: everything between ``scheme://`` and the LAST ``@`` before the
+#: first ``/`` (a password may hold a raw ``@``). Greedy on purpose.
+_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/\s'\"]*@")
+
+
+def redact_credentials(text: str) -> str:
+    """*text* with every ``scheme://user:pass@`` userinfo removed (GH-976).
+
+    For free text that may embed a request URL, notably ``str(httpx exception)``:
+    ``raise_for_status`` writes ``... for url 'http://user:pass@host/api'``.
+    """
+    return _USERINFO_RE.sub(r"\g<scheme>", text)
+
+
+def raise_for_status_redacted(resp: httpx.Response) -> None:
+    """``resp.raise_for_status()`` whose error text carries no URL credentials.
+
+    Re-raises an ``httpx.HTTPStatusError`` of the same type (so every caller's
+    ``except httpx.HTTPError`` still matches) with a redacted message, and drops
+    the original from the chain, whose message holds the raw URL.
+    """
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise httpx.HTTPStatusError(
+            redact_credentials(str(exc)), request=exc.request, response=exc.response
+        ) from None
 
 
 #: GH-968 review: abandoned calls still running, one per label (endpoint). An
@@ -359,7 +389,7 @@ def probe_generate(host: str, model: str, timeout: float) -> dict[str, object]:
             },
             timeout=timeout,
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         return {"available": True, "reason": ""}
     except httpx.TimeoutException:
         raise

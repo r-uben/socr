@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
+from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.ollama_utils import (
     TotalDeadlineExceeded,
     call_with_total_deadline,
@@ -251,7 +252,7 @@ class OllamaFigureEngine:
                 120.0,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
-            resp.raise_for_status()
+            raise_for_status_redacted(resp)
             raw = resp.json()["message"]["content"].strip()
 
             detected_type = _detect_figure_type(raw, figure_type)

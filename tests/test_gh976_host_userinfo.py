@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import pytest
 
-from socr.core.ollama_utils import safe_host_label
+from socr.core.ollama_utils import (
+    raise_for_status_redacted,
+    redact_credentials,
+    safe_host_label,
+)
 from socr.tables.extract import resolve_ollama_host
 
 #: (input, expected). Every one of these was wrong before the fix.
@@ -103,3 +108,70 @@ def test_unparseable_host_warning_does_not_leak_credentials(caplog) -> None:
 def test_label_of_a_resolved_userinfo_host_is_credential_free() -> None:
     label = safe_host_label(resolve_ollama_host("http://u:hunter2@h:9"))
     assert label == "http://h:9"
+
+
+#: Raw (unencoded) ``@`` in the password and IPv6 zone ids.
+RAW_AT_AND_ZONE = [
+    ("u:p@w@h:9", "http://u:p@w@h:9"),
+    ("http://u:p@w@h", "http://u:p@w@h:11434"),
+    ("u:p@w@[::1]:9", "http://u:p@w@[::1]:9"),
+    ("fe80::1%eth0", "http://[fe80::1%eth0]:11434"),
+    ("[fe80::1%25eth0]:9", "http://[fe80::1%25eth0]:9"),
+    ("http://u:p@[fe80::1%25eth0]:9", "http://u:p@[fe80::1%25eth0]:9"),
+    ("u:p@fe80::1%eth0", "http://u:p@[fe80::1%eth0]:11434"),
+]
+
+
+@pytest.mark.parametrize(("raw", "expected"), RAW_AT_AND_ZONE)
+def test_raw_at_in_password_and_ipv6_zone_id(raw, expected) -> None:
+    assert resolve_ollama_host(raw) == expected
+
+
+def test_redact_credentials_handles_raw_at_and_several_urls() -> None:
+    text = "for url 'http://u:p@w@h:9/api/tags' and https://a:b@c/x"
+    assert redact_credentials(text) == "for url 'http://h:9/api/tags' and https://c/x"
+    assert redact_credentials("no url here: a@b") == "no url here: a@b"
+
+
+def _status_404(url: str) -> httpx.Response:
+    return httpx.Response(404, request=httpx.Request("GET", url))
+
+
+@pytest.mark.parametrize("password", ["hunter2", "h@nter2"])
+def test_failed_request_to_a_userinfo_host_leaves_no_credentials_in_logs(
+    password, monkeypatch, caplog
+) -> None:
+    from socr.judge import table_rung_ollama as rung
+
+    host = f"http://sekretuser:{password}@gpu:9"
+    monkeypatch.setattr(rung.httpx, "get", lambda url, **kw: _status_404(url))
+    with caplog.at_level(logging.DEBUG):
+        assert rung.ollama_rung_reachable("m", host) is False
+    assert "unreachable" in caplog.text  # the failure really was logged
+    assert password not in caplog.text
+    assert "sekretuser" not in caplog.text
+
+
+def test_status_error_text_carries_no_credentials() -> None:
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        raise_for_status_redacted(_status_404("http://sekretuser:hunter2@gpu:9/api/chat"))
+    assert "hunter2" not in str(ei.value)
+    assert "sekretuser" not in str(ei.value)
+    assert "http://gpu:9/api/chat" in str(ei.value)
+    assert ei.value.response.status_code == 404  # still a usable HTTPStatusError
+    assert ei.value.__cause__ is None and ei.value.__suppress_context__
+
+
+def test_exception_that_embeds_the_url_is_redacted_in_the_log(monkeypatch, caplog) -> None:
+    """The log site redacts on its own, independent of ``raise_for_status``."""
+    from socr.judge import table_rung_ollama as rung
+
+    def _boom(url, **kw):
+        raise httpx.ConnectError(f"cannot reach {url}")
+
+    monkeypatch.setattr(rung.httpx, "get", _boom)
+    with caplog.at_level(logging.DEBUG):
+        assert rung.ollama_rung_reachable("m", "http://sekretuser:hunter2@gpu:9") is False
+    assert "cannot reach http://gpu:9" in caplog.text
+    assert "hunter2" not in caplog.text
+    assert "sekretuser" not in caplog.text

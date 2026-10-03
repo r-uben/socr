@@ -31,7 +31,12 @@ from typing import Any
 
 import httpx
 
-from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
+from socr.core.ollama_utils import (
+    call_with_total_deadline,
+    raise_for_status_redacted,
+    redact_credentials,
+    safe_host_label,
+)
 from socr.judge.table_prompt import build_table_judge_prompt
 from socr.judge.table_verdict import (
     RUNG_KIND_CELL_ADJUDICATOR,
@@ -90,10 +95,14 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
             timeout,
             label=f"table judge {safe_host_label(resolved)}/api/tags",
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         names = {_with_implicit_tag(m.get("name", "")) for m in resp.json().get("models", [])}
     except (httpx.HTTPError, OSError, ValueError) as exc:
-        logger.debug("table judge rung 1 unreachable at %s: %s", resolved, exc)
+        logger.debug(
+            "table judge rung 1 unreachable at %s: %s",
+            safe_host_label(resolved),
+            redact_credentials(str(exc)),
+        )
         return False
     return _with_implicit_tag(model) in names
 
@@ -162,7 +171,7 @@ def _post_chat(host: str, payload: dict[str, Any], timeout: float) -> str:
         timeout,
         label=f"ollama {safe_host_label(host)}/api/chat ({payload.get('model', '?')})",
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     body = resp.json()
     if not isinstance(body, dict):
         raise ValueError(f"ollama response is not a JSON object: {type(body).__name__}")
