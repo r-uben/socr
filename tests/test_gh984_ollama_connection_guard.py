@@ -71,3 +71,67 @@ def test_swallowed_refusal_still_leaves_a_record():
         except OSError:
             pass
     assert violations
+
+
+# --- coverage: allowed loopback use, and both in-process HTTP clients are caught ---
+
+
+@pytest.fixture
+def loopback_server():
+    import http.server
+    import threading
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield srv
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_fixture_loopback_server_works_under_the_autouse_guard(loopback_server):
+    """No explicit guard here: the suite-wide autouse guard is what is active."""
+    import urllib.request
+
+    port = loopback_server.server_address[1]
+    assert urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read() == b"ok"
+
+
+def test_test_may_point_ollama_host_at_its_own_server(loopback_server, monkeypatch):
+    import urllib.request
+
+    port = loopback_server.server_address[1]
+    monkeypatch.setenv("OLLAMA_HOST", f"127.0.0.1:{port}")
+    # The suite-wide autouse guard captured the ambient host before this env
+    # change, so it must allow this server (it would fail the test at teardown).
+    assert urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read() == b"ok"
+
+
+def test_httpx_connection_to_ambient_host_is_caught():
+    import httpx
+
+    with ollama_connection_guard() as violations:
+        with pytest.raises(httpx.ConnectError):
+            # Client, not httpx.get: conftest stubs the module-level httpx.get.
+            with httpx.Client() as client:
+                client.get("http://127.0.0.1:11434/api/tags", timeout=2)
+    assert violations
+
+
+def test_urllib_connection_to_ambient_host_is_caught():
+    import urllib.error
+    import urllib.request
+
+    with ollama_connection_guard() as violations:
+        with pytest.raises(urllib.error.URLError):
+            urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2)
+    assert violations

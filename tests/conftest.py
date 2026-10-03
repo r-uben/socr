@@ -369,6 +369,13 @@ def _table_judge_rungs_are_absent(monkeypatch):
 # captured BEFORE the test body runs, is refused. Tests that stand up their own
 # loopback server -- and point ``OLLAMA_HOST`` at it from inside the test -- keep
 # working, as does any other loopback port.
+#
+# LIMITS (what this guard does NOT see):
+# * Child processes. Exec'd subprocess engines (qwen-ocr, deepseek, ...) do not
+#   inherit these monkeypatches, so a real subprocess launch can reach Ollama
+#   unobserved. Unit tests must stub the subprocess launch boundary.
+# * Proxies. A connection routed through an HTTP(S) proxy connects to the proxy
+#   address, not the Ollama endpoint, so endpoint matching is bypassed.
 # ---------------------------------------------------------------------------
 
 
@@ -459,6 +466,11 @@ def _no_live_ollama():
 # NEW test file that reaches the probe fails the guard above instead of being
 # silently hidden, and the modules that exercise ``_resolve_judge_model`` itself
 # (e.g. test_gh873, test_gh903) are not on it.
+#
+# RISK: the pin is MODULE-WIDE, so it also silently covers every FUTURE test added
+# to a listed module. A new test there that is meant to exercise the judge probe
+# will see "" and never reach it, and the guard cannot flag what no longer
+# connects. Put such a test in its own module, off these lists.
 _JUDGE_PROBE_PINNED_MODULES = frozenset(
     (
         "test_a1c_header_binding_unverified_surfacing.py",

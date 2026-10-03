@@ -44,3 +44,18 @@ pinned, 16 more (3 files) surfaced behind it via `_available_engines_for_agentic
 ## Tests fixed
 The 53 modules in `_JUDGE_PROBE_PINNED_MODULES` (277 tests), the 3 in
 `_ENGINES_PINNED_MODULES` (16 tests), and the one test in test_table_judge_gate.py.
+
+## Review follow-up (Astra, ACCEPT-WITH-FIXES)
+Limits of the guard, also stated in the conftest comment:
+- Child processes are not covered. Exec'd subprocess engines do not inherit monkeypatches,
+  so unit tests must stub the subprocess launch boundary.
+- A proxy connection reaches the proxy address, not the Ollama endpoint, so endpoint
+  matching can be bypassed.
+- The module-wide pins also silently cover FUTURE tests added to a listed module. A new
+  test meant to exercise the judge probe would see "" and never reach it; put such a test
+  in its own module. Named at the 53-module list in tests/conftest.py.
+
+Added guard tests (10 total): fixture loopback server works under the autouse guard; a
+test pointing OLLAMA_HOST at its own server is allowed; httpx (via Client, because
+conftest stubs module-level `httpx.get`) and urllib connections to the ambient host are
+each caught. origin/main had not moved (3498cb2), so no rebase was needed.
