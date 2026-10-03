@@ -43,6 +43,9 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 #: VERIFIED by `test_live_flags_are_actually_live`; do not add by inspection.
 _LIVE = {
     "agentic",
+    # GH-974: per-page ladder budget. The default fixture reads it (cubic on #978), so
+    # the live-observation test pins that it stays wired into the agentic path.
+    "table_judge_page_budget_sec",
     "audit_min_words",
     "cost_budget",
     "detect_equations",
@@ -198,8 +201,6 @@ _UNEXERCISED = {
     "table_judge_rung1_host",
     "table_judge_rung2_binary",
     "table_judge_timeout_sec",
-    # GH-974: total per-page ladder budget; read only inside the ladder gate.
-    "table_judge_page_budget_sec",
     # P1: the blind-cell adjudicator's identity and per-call cost. Same
     # classification and the same reason as the rung fields above -- read and
     # fingerprinted only when the ladder flag is on, and only on the two ruled
