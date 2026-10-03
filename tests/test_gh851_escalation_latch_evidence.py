@@ -18,7 +18,6 @@ and the engine call are all patched; nothing needs ollama or a provider.
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -44,7 +43,7 @@ from test_gh855_scoring_independent_of_lane_health import (  # noqa: E402
 _DEADLINE = 0.2
 
 
-def _run(root: Path, *, mode: str, stub_available: bool = True):
+def _run(root: Path, *, mode: str):
     """Two-page document; page 1's escalation call outlives the deadline.
 
     ``mode``: ``slow_done`` (page 1's abandoned call finishes before page 2
@@ -99,15 +98,17 @@ def _run(root: Path, *, mode: str, stub_available: bool = True):
     try:
         with (
             patch.object(orch, "submit_daemon", _recording_submit),
-            # GH-940: ``stub_available=False`` leaves the real wrapper in place so a
-            # caller can stub the probe beneath it and count how often it runs.
             patch.object(
                 pipeline,
                 "_available_engines_for_agentic",
                 return_value=[PROFILE_QWEN_LOCAL, PROFILE_GEMINI],
-            )
-            if stub_available
-            else contextlib.nullcontext(),
+            ),
+            # GH-940: the resume gate asks the pure probe beneath the wrapper.
+            patch.object(
+                pipeline,
+                "_probe_engines_for_agentic",
+                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], ""),
+            ),
             patch.object(UnifiedPipeline, "_page_has_tables", return_value=False),
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
             patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),

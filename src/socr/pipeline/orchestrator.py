@@ -978,11 +978,6 @@ class UnifiedPipeline:
     #: generation probe ("" when it was not, or none is pinned); surfaced by
     #: ``_refuse_cloud_pinned_qwen_rung``.
     _qwen_cloud_pin_unavailable: str = ""
-    #: GH-940: the engine probe the resume gate already ran for a document it
-    #: refused to skip, as ``(available, unservable, pin_reason)``. The next
-    #: ``_available_engines_for_agentic`` consumes it instead of probing again.
-    #: ``None`` (also the class default, for ``object.__new__`` pipelines) = none held.
-    _gate_engine_probe: tuple | None = None
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -1176,19 +1171,15 @@ class UnifiedPipeline:
             return False
         # GH-940: a pure probe. ``_available_engines_for_agentic`` also resets the
         # pin-failure flag and emits the once-per-pipeline unservable report; a
-        # skip DECISION must do neither. When the gate refuses the skip, the
-        # document goes straight to ``_phase_agentic``, which reuses this result
-        # rather than sampling reachability a second time.
-        available = self._available_engines_for_agentic(decision_only=True)
+        # skip DECISION must do neither. A refused skip means ``_phase_agentic``
+        # probes again; that is accepted (the probes are cheap), side effects are not.
+        available = self._probe_engines_for_agentic()[0]
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
             available = [p for p in available if p.tier == TIER_LOCAL]
         _, profile = self._build_ladder_and_escalation_profile(available)
-        blocks = profile is not None
-        if not blocks:
-            self._gate_engine_probe = None
-        return blocks
+        return profile is not None
 
     def _table_judge_retry_blocks_resume(self, rung_kinds: list[str] | None = None) -> bool:
         """Whether a recorded table-judge pending retry should refuse a document skip.
@@ -10897,7 +10888,7 @@ class UnifiedPipeline:
         )
         self._agentic_native_page(state, page_num, ps)
 
-    def _available_engines_for_agentic(self, *, decision_only: bool = False) -> list:
+    def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
         Returns a list of ``ProviderProfile`` objects (not EngineType values), the
@@ -10918,16 +10909,8 @@ class UnifiedPipeline:
         policy. This function reports reachability, not eligibility.
 
         Applies the probe's side effects (pin-failure flag, unservable report).
-        A probe the resume gate already ran (GH-940) is consumed, not repeated.
-        ``decision_only=True`` (the resume gate) probes and HOLDS the result with
-        no side effect; the gate drops it if it does not refuse the skip.
         """
-        if decision_only:
-            self._gate_engine_probe = self._probe_engines_for_agentic()
-            return self._gate_engine_probe[0]
-        probe, self._gate_engine_probe = self._gate_engine_probe, None
-        if probe is None:
-            probe = self._probe_engines_for_agentic()
+        probe = self._probe_engines_for_agentic()
         available, unservable, pin_reason = probe
         self._qwen_cloud_pin_unavailable = pin_reason
         self._report_unservable_engines(unservable)
