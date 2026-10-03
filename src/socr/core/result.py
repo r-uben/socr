@@ -90,8 +90,9 @@ class FailureMode(str, Enum):
     #: so none of the per-page passes (route, extract, tables, equations) ran on it. The
     #: document-level figure phase may still touch it. Whatever text ships is the
     #: unprocessed native layer: it is retained, never clean SUCCESS, never terminal, and
-    #: a `--reprocess` run reprocesses the page. A plain re-run currently skips a PARTIAL
-    #: document whole, so `--reprocess` is needed until #1001 is fixed.
+    #: a re-run reprocesses the page (the halted document is recorded not-skippable, #1001; that applies only
+    #: to entries written by this version, an older unlatched PARTIAL entry still needs
+    #: `--reprocess`).
     PAGE_NOT_PROCESSED_AFTER_HALT = "page_not_processed_after_halt"
     #: Deprecated / deserialization-only: historically assigned when a
     #: structure-class page had no grid-authoring model attempt. Pre-P2 sidecars

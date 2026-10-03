@@ -703,6 +703,12 @@ def _resume_skippable(
     """
     entry = index.files.get(rel_key)
     if entry:
+        if entry.get("halt_retry_pending") is True:
+            # GH-1001: the last run halted (PARTIAL_SAVE_VLM_TIMEOUT) and left pages
+            # unprocessed. A wedged backend is transient, so the "re-running cannot
+            # improve a partial result" rule below does not hold. Reopen the document;
+            # the per-page ledger then reuses only the pages that finished.
+            return False
         if entry.get("equation_lane_retry_pending") is True:
             blocks = (
                 equation_lane_retry_blocks()
@@ -1200,8 +1206,24 @@ class UnifiedPipeline:
         """
         return bool(self._table_judge_rung_available_now(rung_kinds))
 
+    def _prior_halt_latch(self, pdf_path: Path, out_dir: Path) -> bool:
+        """GH-1001: did the previous run in THIS output dir leave ``halt_retry_pending``?
+
+        Read from the root index at the start of the run, before
+        ``_invalidate_root_entry_for_rerun`` overwrites the entry. Never cached: it is
+        handed to the run's ``DocumentState``. A missing or unreadable entry is False.
+        """
+        try:
+            from ocr_output_contract import RootIndex, relative_key
+
+            scan_root = self._scan_root or pdf_path.parent
+            entry = RootIndex(out_dir).files.get(relative_key(pdf_path, scan_root))
+            return bool(entry) and entry.get("halt_retry_pending") is True
+        except Exception:
+            return False
+
     def _invalidate_root_entry_for_rerun(
-        self, pdf_path: Path, out_dir: Path
+        self, pdf_path: Path, out_dir: Path, *, keep_halt_latch: bool = False
     ) -> EngineResult | None:
         """Mark an existing root entry non-resumable before this run rewrites it.
 
@@ -1255,6 +1277,10 @@ class UnifiedPipeline:
             error="run in progress; the previous record was invalidated before reprocessing",
             fingerprint=self._run_fingerprint(),
         )
+        # GH-1001: keep the halt latch on the in-progress marker, so a run that dies
+        # before assemble does not erase it.
+        if keep_halt_latch:
+            marker = _LatchedDocMetadata(marker, {"halt_retry_pending": True})
         try:
             index.record(rel_key, marker)
         except Exception as exc:
@@ -1717,7 +1743,10 @@ class UnifiedPipeline:
         # it becomes resumable again with no latch and the next run skips the
         # document whole. Invalidating that record first means a failure
         # anywhere in the run leaves an entry the gate refuses.
-        refused = self._invalidate_root_entry_for_rerun(pdf_path, out_dir)
+        prior_halt_latch = self._prior_halt_latch(pdf_path, out_dir)
+        refused = self._invalidate_root_entry_for_rerun(
+            pdf_path, out_dir, keep_halt_latch=prior_halt_latch
+        )
         if refused is not None:
             return refused
 
@@ -1727,6 +1756,7 @@ class UnifiedPipeline:
 
         doc = self._document_handle_for(pdf_path)
         state = DocumentState(handle=doc)
+        state.prior_halt_pending = prior_halt_latch
 
         if not self.config.quiet:
             console.print(f"[blue]Processing:[/blue] {doc.filename}")
@@ -9274,6 +9304,13 @@ class UnifiedPipeline:
                     console.print(f"  p{page_num}: [dim]resumed (terminal ledger hit)[/dim]")
                 continue
 
+            # GH-1001: re-running a halted document with no provider cannot finish the
+            # pages the halt left behind. Whatever lane takes a page here (OCR, native,
+            # chart, equation, math), nothing a model would add ran on it, and it was not
+            # restored from the ledger above: it stays flagged so the latch survives.
+            if state.prior_halt_pending and not ladder:
+                ps.not_processed_after_halt = True
+
             clock = _PageStageClock()
             self._page_clock = clock
             try:
@@ -16385,6 +16422,12 @@ class UnifiedPipeline:
             # Fail-closed: if that save raises, NOTHING is recorded, the outer
             # handler logs it, and the next run reprocesses the document.
             pending: dict = {}
+            # Keyed on the OUTCOME: a halt this run, or any page still left unprocessed
+            # because of one (including a providerless re-run of a halted document).
+            if state.pp2_halt_reason or any(
+                p.not_processed_after_halt for p in state.pages.values()
+            ):
+                pending["halt_retry_pending"] = True
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
                 pending["equation_lane_retry_pending"] = True
             if any(
