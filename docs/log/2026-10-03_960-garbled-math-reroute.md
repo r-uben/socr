@@ -15,13 +15,19 @@ garbled native text as its floor.
 ## Detector (the measured union)
 `born_digital.detect_garbled_math(page, text)` returns four counts. A non-zero count is a hit:
 - `private_use`: private-use codepoints (`count_pua_chars`; catches Hameed);
-- `math_alphanumeric`: characters whose Unicode name starts `MATHEMATICAL`;
+- `math_alphanumeric`: characters in the Mathematical Alphanumeric Symbols block,
+  U+1D400–U+1D7FF (not a Unicode-name prefix, which also caught U+27E8 and similar);
 - `misdecoded_script_letters`: letters of a script in `MISDECODED_MATH_SCRIPTS` (Syriac,
   Tamil, and further non-Latin scripts the English-language corpus is not written in; catches
   coibion and ramey). Latin, Greek, Cyrillic, CJK and modifier letters are excluded;
 - `unlisted_math_font_chars`: characters in spans whose font matches `_MATH_FAMILY_FONT_RE`
-  (`math`, anchored MathTime `R?MT(MI|SYN?|EX)B?`, `MnSymbol`) but not `_MATH_FONT_RE`
-  (MathTime, UniMath, LibertinusT1Math, MathematicalPi, Fourier-Math, "Cambria Math").
+  but not `_MATH_FONT_RE`. The regex is anchored at the start of the name (after a subset
+  prefix) with no bare `math`: MathTime `R?MT(MI|SYN?|EX)B?`, MathematicalPi, UniMath,
+  MnSymbol, Universal-GreekwithMath, Libertine/Libertinus ... Math, EuclidMath, XCharterMath,
+  Fourier-Math, MathDesign, "Cambria Math", MathTechnical, LucidaMath, AdvMathPack, TeX-math.
+
+The private-use signal exempts glyphs in dingbat fonts (`_DINGBAT_FONT_RE`), and exempts
+Symbol-encoding non-math codes only in `Symbol` / `SymbolMT` (`_SYMBOL_ENCODED_FONT_RE`).
 
 There is no count threshold. Any one character is a hit, as in the measurement; the regexes
 and the script set are named constants with their derivation documented in the code.
@@ -136,6 +142,8 @@ Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeepi
   documents with fewer; measured with the rule at ebe76b53). The detector also fires on 271 of the 1,493
   chart-lane pages. The whole-page re-route volume is therefore about 1,817 + 531 + 271 ≈
   2,619 pages, not 1,849: the population behind 1,849 excluded table and chart pages.
+  All of these numbers (1,817, 531, 271, 2,619) were measured on ebe76b53. The final rule
+  moved the base count by +1 (1,818); the table and chart counts were not re-measured.
 - Not changed. A native-first SHIP ships the whole page's native text through
   `_agentic_native_page`: the structured grid AND the prose. Keeping that lane on these pages
   would ship the garbled prose maths again, which is the defect #960 fixes. It would be
