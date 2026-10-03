@@ -27,6 +27,7 @@ EXPECTED_RESUME_KINDS = frozenset(
         "equation_region_reading_unverifiable",
         "equation_sidecar_refused",
         "equation_sidecar_skipped_no_page_output",
+        "judge_wedged_circuit_open",
         "native_encoding_hygiene_suspect",
         "native_math_font_unrecovered",
         "native_math_unrecovered",
@@ -59,4 +60,4 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    assert len(EXPECTED_RESUME_KINDS) == 40
+    assert len(EXPECTED_RESUME_KINDS) == 41

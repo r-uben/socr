@@ -260,7 +260,10 @@ def test_generation_canary_timeout_is_derived_not_invented(monkeypatch) -> None:
 
     probe_ollama_idle("http://gpu-node:11434")
 
-    assert seen_timeouts == [extract_mod._CROP_DEADLINE_FLOOR_S], seen_timeouts
+    # #987: floor plus a cold-load allowance, both existing constants.
+    assert seen_timeouts == [
+        extract_mod._CROP_DEADLINE_FLOOR_S + extract_mod.CANARY_LOAD_ALLOWANCE_S
+    ], seen_timeouts
 
 
 def test_generation_timeout_override_is_still_honoured(monkeypatch) -> None:

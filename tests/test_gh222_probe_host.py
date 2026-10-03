@@ -550,12 +550,14 @@ def test_a_timed_out_attempt_arms_the_halt_from_any_position(position) -> None:
     ]
     assert UnifiedPipeline._attempts_show_timeout(clean) is False
 
-    # Reason wording deliberately carries NO "timeout": only the typed outcome
-    # separates this attempt from the refusals around it.
-    timed_out = _attempt(JUDGE_OUTCOME_TIMEOUT, "judge raised: timed out")
+    # #987: a typed JUDGE timeout no longer arms the halt, whatever its wording
+    # and wherever it sits; it is a different model from the OCR VLM.
+    for reason in ("judge raised: timed out", "judge raised: page judge timeout after 120s"):
+        timed_out = _attempt(JUDGE_OUTCOME_TIMEOUT, reason)
+        slot = {"first": 0, "middle": 1, "last": 3}[position]
+        mixed = clean[:slot] + [timed_out] + clean[slot:]
+        assert UnifiedPipeline._attempts_show_timeout(mixed) is False
     slot = {"first": 0, "middle": 1, "last": 3}[position]
-    mixed = clean[:slot] + [timed_out] + clean[slot:]
-    assert UnifiedPipeline._attempts_show_timeout(mixed) is True
 
     # The provider half of the trigger, same list shape, no typed outcome at all.
     provider = clean[:slot] + [_attempt("", "provider timeout after 120s")] + clean[slot:]

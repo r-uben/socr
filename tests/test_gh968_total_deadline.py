@@ -168,6 +168,31 @@ def test_trickle_server_defeats_a_per_read_timeout(trickle):
     assert trickle.accepted == 1
 
 
+def test_openai_generation_canary_fails_within_the_deadline_on_a_trickle(trickle):
+    """#987 (cubic P2): the vLLM/SGLang liveness canary ran a bare ``httpx.post``, so a
+    trickling server held the calling (document) loop. The raw-httpx control above shows
+    the trickle really defeats a per-read timeout."""
+    finished, elapsed, value = _bounded(
+        lambda: extract._openai_generation_canary(trickle.url, "m", DEADLINE), BOUND
+    )
+    assert finished, "the openai canary is still running past 12x the deadline"
+    assert value is False
+    assert elapsed < MARGIN * DEADLINE, elapsed
+
+
+def test_site_openai_models_precondition_and_canary(monkeypatch, spy):
+    """#987 (cubic P2): the openai ``/models`` precondition runs under the total
+    deadline too. (Not a trickle test: the suite's hermetic stub replaces
+    ``httpx.get``, so a GET cannot reach a loopback server; ``httpx.post`` can.)"""
+    monkeypatch.setattr(extract, "call_with_total_deadline", spy)
+    assert extract.probe_openai_server_idle("http://h/v1", timeout=2.5, model="m") is False
+    assert [c[0] for c in spy.calls] == [2.5]
+    assert "models" in spy.calls[0][1]
+    assert extract._openai_generation_canary("http://h/v1", "m", 3.5) is False
+    assert [c[0] for c in spy.calls] == [2.5, 3.5]
+    assert "canary" in spy.calls[1][1]
+
+
 def test_post_chat_fails_within_1_5x_the_deadline_on_a_trickle(trickle):
     finished, elapsed, value = _bounded(
         lambda: REAL_POST_CHAT(trickle.url, PAYLOAD, DEADLINE), BOUND

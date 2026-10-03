@@ -65,6 +65,16 @@ class PageJudgeTimeoutError(TimeoutError):
     """
 
 
+class PageJudgeCircuitOpenError(PageJudgeTimeoutError):
+    """#987: the page-judge circuit breaker is open; no call was made.
+
+    A subclass, so routing (``is_page_judge_timeout``, ``JUDGE_OUTCOME_TIMEOUT``)
+    treats it exactly as a judge timeout and the page fails closed as it does
+    today. A separate type so the log can say what happened: the judge was not
+    asked, it failed a liveness probe earlier in this document.
+    """
+
+
 def is_page_judge_timeout(exc: BaseException) -> bool:
     """Whether ``exc`` means the page judge TIMED OUT rather than misbehaved.
 
