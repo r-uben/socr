@@ -211,6 +211,9 @@ def _e2e(
     native_only: bool = False,
     detector: str = "live",
     chart: bool = False,
+    reprocess: bool = False,
+    line: str = HITS["stx_before_digit"],
+    minus_raising: bool = False,
 ):
     """Run process() once. ``detector``: live | neutralised | raising."""
     if detector not in {"live", "neutralised", "raising"}:
@@ -229,7 +232,15 @@ def _e2e(
                 raise RuntimeError("detector exploded")
 
             m.setattr(born_digital, "count_control_byte_before_digit_hits", _boom)
-        pdf = _page_pdf(tmp_path / f"{tag}.pdf", HITS["stx_before_digit"], chart=chart)
+        if minus_raising:  # #913's scan failing on the second run
+
+            def _boom913(page):
+                raise RuntimeError("913 scan exploded")
+
+            m.setattr(born_digital, "count_minus_as_digit_hits", _boom913)
+        pdf = tmp_path / f"{tag}.pdf"
+        if not pdf.exists():  # a second run on the same tag must see the same bytes (checksum)
+            _page_pdf(pdf, line, chart=chart)
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
@@ -239,6 +250,7 @@ def _e2e(
                 enabled_engines=[EngineType.QWEN],
                 native_first=True,
                 native_only=native_only,
+                reprocess=reprocess,
                 write_manifest=False,
                 judge_backend="heuristic",
                 dual_pass_tables=False,
@@ -373,3 +385,74 @@ def test_chart_asset_lane_demotes_on_a_control_byte(tmp_path, monkeypatch) -> No
     assert side["status"] == "warning"
     assert side["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert on.status is not DocumentStatus.SUCCESS
+
+
+# ----------------------------------------------------------------------------
+# Resume: the CURRENT analysis wins over a cached native-text terminal page.
+# A clean first run caches SUCCESS; a later (--reprocess, so the doc-level skip is off and the
+# per-page ledger gate is what decides) run whose scan hits or fails must not restore it.
+# ----------------------------------------------------------------------------
+
+
+def _spy_restores(monkeypatch) -> list:
+    """Record every non-None return of the per-page ledger gate."""
+    restored: list = []
+    orig = UnifiedPipeline._load_terminal_page
+
+    def spy(self, *a, **kw):
+        out = orig(self, *a, **kw)
+        if out is not None:
+            restored.append(out)
+        return out
+
+    monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", spy)
+    return restored
+
+
+@pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
+@pytest.mark.parametrize("second", ["live", "raising"])
+def test_resume_does_not_restore_a_cached_clean_page_when_the_scan_now_fires(
+    tmp_path, monkeypatch, chart, second
+) -> None:
+    kw = dict(provider=True, native_only=True, chart=chart)
+    _e2e(tmp_path, "r", monkeypatch, detector="neutralised", **kw)
+    first = _sidecar(tmp_path, "r")
+    assert first["status"] == "success", "setup: the clean first run caches SUCCESS"
+    assert first["engine"] == ("chart_asset" if chart else "native"), first["engine"]
+
+    restored = _spy_restores(monkeypatch)
+    res, _ = _e2e(tmp_path, "r", monkeypatch, detector=second, reprocess=True, **kw)
+    again = _sidecar(tmp_path, "r")
+    assert restored == [], "the cached native page must not be restored"
+    assert again["status"] == "warning", "must be demoted, never restored as SUCCESS"
+    assert again["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert res.status is not DocumentStatus.SUCCESS
+
+
+@pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
+def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, chart) -> None:
+    """Control for the pin above: the same two runs with the detector neutralised both times
+    DO restore the cached page, so the refusal is caused by the fresh flag and nothing else."""
+    kw = dict(provider=True, native_only=True, chart=chart, detector="neutralised")
+    _e2e(tmp_path, "c", monkeypatch, **kw)
+    restored = _spy_restores(monkeypatch)
+    res, _ = _e2e(tmp_path, "c", monkeypatch, reprocess=True, **kw)
+    assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
+    assert _sidecar(tmp_path, "c")["status"] == "success"
+    assert res.status is DocumentStatus.SUCCESS
+
+
+@pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
+def test_resume_hole_is_shared_by_913s_scan(tmp_path, monkeypatch, chart) -> None:
+    """#913 uses the same predicate, so its failing scan had the same resume hole."""
+    kw = dict(provider=True, native_only=True, chart=chart, line="the coefficient is 0.47 and 2.5")
+    _e2e(tmp_path, "m", monkeypatch, detector="neutralised", **kw)
+    assert _sidecar(tmp_path, "m")["status"] == "success", "setup: clean first run"
+    restored = _spy_restores(monkeypatch)
+    res, _ = _e2e(
+        tmp_path, "m", monkeypatch, detector="neutralised", reprocess=True, minus_raising=True, **kw
+    )
+    assert restored == []
+    assert _sidecar(tmp_path, "m")["status"] == "warning"
+    assert _sidecar(tmp_path, "m")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert res.status is not DocumentStatus.SUCCESS

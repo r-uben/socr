@@ -83,3 +83,6 @@ skips a failed scan.
 
 ## Suite
 Full suite, default OLLAMA_HOST: 6562 passed, 2 skipped, 4 xfailed. Format gate clean (`uvx ruff@0.16.0 format --check .`). The layering test caught a cross-package private import (`_minus_as_digit_suspect`); the predicate is now public as `minus_as_digit_suspect`.
+
+## Round 2 (Astra on #992): resume hole
+A cached native/chart SUCCESS page from a run with a clean sign scan was restored by `_load_terminal_page` on a later run whose scan hit or failed (the restore overwrote the fresh `needs_ocr_enhancement`; the chart winner is excluded from distrust). #913 had the same hole through the shared predicate. Fix: `_load_terminal_page` returns None when `minus_as_digit_suspect(current PageState)` and the cached winner engine starts with `native` or `chart_asset`. Tests (first run clean, second run `--reprocess` so the per-page gate decides): native and chart lane, scan live and raising, and #913 raising; a spy asserts nothing was restored; a control with the scan clean both times asserts the page IS restored. Mutations: 25 of 25 killed (3 new: refusal removed, chart lane ignored, native lane ignored). Suite 6570 passed, 2 skipped, 4 xfailed; format clean.

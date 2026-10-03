@@ -12796,6 +12796,24 @@ class UnifiedPipeline:
             if not isinstance(winning, dict) or not winning:
                 return None
 
+            # #913/#990: the CURRENT analysis wins over the cached page. A cached
+            # native-text winner (native or chart lane) written by a run whose sign scan
+            # was clean must not be restored as SUCCESS when this run's scan hits or
+            # fails: the fresh flag is not in the run fingerprint, and the restore below
+            # would otherwise overwrite it with the cached ``needs_ocr_enhancement``.
+            ps_fresh = state.pages.get(page_num)
+            if (
+                ps_fresh is not None
+                and minus_as_digit_suspect(ps_fresh)
+                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+            ):
+                logger.debug(
+                    "PP-5: p%d not resumed; its cached native text is suspect under the "
+                    "current sign scan",
+                    page_num,
+                )
+                return None
+
             disposition_raw = meta.get("table_ladder_disposition")
             # GH-359 (cubic P1): the exception is for a page whose tables were
             # ALL adjudicated. If assemble had to backfill a terminal for any
