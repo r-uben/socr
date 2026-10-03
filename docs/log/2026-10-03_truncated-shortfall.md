@@ -131,3 +131,17 @@ another candidate row already consumed is a repeat and is not counted; a labelle
 nothing at all still counts, as on main (OCR drift). Pin: Astra's case as separate blocks and as one
 block. Mutants: repeat rule off 2 killed (3-copy + Astra); bands reusable 4; shape condition 1.
 Census: 13 clear / 27 refuse / 0 new vs main (same 13 cleared pages as round 5).
+
+## Round 7 -- keep only the provably safe subset
+
+Astra: unbound labelled repeats whose band lies before the block's first match stay unconsumed and
+inflate the count (14 repeats of row 0, plus bound SE rows -> 20; main 15). Repeat detection (rounds
+5/6: label dedupe, then consumed-band matching) is removed. Rule now: main's counting EXACTLY, unless
+every labelled candidate row binds to its own native band (unique across the page) and each band
+passes the native countability test (>= row_shape_min numbers, not a legend); only then are
+blank-stub rows credited, each under the same bound-and-countable rule. Any unbound or shared-band
+labelled row falls back to main's count, so the branch is never more permissive than main on that
+page. Pin: Astra's r6 case plus the r5 / earlier reproducers.
+Census (40): 12 clear (of the previous 13; bybee p37 drops), 28 refuse, 0 new vs main.
+Mutants: drop "every labelled row bound" 3 killed; blank band need not be countable 1; blank
+unbound credited 3; bands reusable 4; never credit 1. Baseline 62 passed.

@@ -372,26 +372,23 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     """#988: the candidate's numeric body rows that count toward the shortfall,
     and ``row_shape_min``.
 
-    A labelled row counts as it always has, except that one which does not bind
-    yet reproduces a native band another candidate row already credits is a
-    repeat (under whatever label) and is not counted. A blank-stub row -- a standard-error / t-stat
-    line, which the native side always counted -- counts only if it binds to a
-    native baseline band (``match_rows_monotonic``), and a native band credits
-    at most ONE candidate row on the page: matching is monotonic within a
-    block and the bands a block consumed are blanked for the next. The band
-    must also be one ``table_shaped_native_row_count`` would count (at least
-    ``row_shape_min`` numbers, not a column-index legend), so a one-number SE
-    line cannot stand in for a three-number coefficient row. Invented or
-    repeated SE rows therefore cannot make up a shortfall.
-
-    ``row_shape_min`` is the minimum width over LABELLED counted rows, as it
-    always was (a blank-stub row can be a sparse SE line or a numeric header and
-    would widen the native count); it falls back to all counted rows only when
-    there is no labelled counted row.
+    Main's counting is: every labelled row, blank-stub rows dropped,
+    ``row_shape_min`` the minimum width over those. It is kept EXACTLY unless
+    the page proves a safe superset: every labelled row binds to its own
+    native baseline band (``match_rows_monotonic``; a band credits at most one
+    row on the page, bands consumed by one block are blanked for the next) and
+    each of those bands is one ``table_shaped_native_row_count`` would count
+    (at least ``row_shape_min`` numbers, not a column-index legend). Only then
+    are the blank-stub rows (standard-error / t-stat lines, which the native
+    side always counted) credited, each under the same rule: it binds to its
+    own band and that band is native-countable. An unbound or shared-band
+    labelled row, a repeat, or an invented row makes the whole page fall back
+    to main's count, so the result is never more permissive than main there.
+    Repeat detection beyond this was tried and each variant left a hole
+    (docs/log/2026-10-03_truncated-shortfall.md).
     """
     from socr.tables.row_corroboration import (
         baseline_bands,
-        _contiguous_run,
         is_column_index_row,
         match_rows_monotonic,
         numeric_body_rows,
@@ -400,10 +397,9 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
 
     band_tokens = [band.tokens for band in baseline_bands(words)]
     token_lists = list(band_tokens)
-    counted: list[tuple[str, ...]] = []
     labelled: list[tuple[str, ...]] = []
-    bound_blank: list[tuple[tuple[str, ...], int]] = []
-    consumed: set[int] = set()
+    labelled_bands: list[int | None] = []
+    blank: list[tuple[tuple[str, ...], int | None]] = []
     for rows in table_blocks(markdown):
         entries = []
         for row in rows:
@@ -414,26 +410,25 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
         for (label, tokens), idx in zip(entries, matches):
             if idx is not None:
                 token_lists[idx] = ()
-                consumed.add(idx)
             if label:
-                if idx is None and any(_contiguous_run(tokens, band_tokens[i]) for i in consumed):
-                    # reproduces a band another candidate row already credits:
-                    # a repeat under a different label, not a second row
-                    continue
-                counted.append(tokens)
                 labelled.append(tokens)
-            elif idx is not None:
-                bound_blank.append((tokens, idx))
-    shape_rows = labelled or [tokens for tokens, _ in bound_blank]
-    row_shape_min = min((len(r) for r in shape_rows), default=0)
-    # a blank-stub row is credited only if its native band is one the native
-    # count itself would count (same width / legend test as
-    # ``table_shaped_native_row_count``): both sides count the same kinds of rows
-    for tokens, idx in bound_blank:
-        native = band_tokens[idx]
-        if len(native) >= row_shape_min and not is_column_index_row(native):
-            counted.append(tokens)
-    return counted, row_shape_min
+                labelled_bands.append(idx)
+            else:
+                blank.append((tokens, idx))
+
+    row_shape_min = min((len(r) for r in labelled), default=0)
+
+    def native_countable(idx: int | None) -> bool:
+        return (
+            idx is not None
+            and len(band_tokens[idx]) >= row_shape_min
+            and not is_column_index_row(band_tokens[idx])
+        )
+
+    if labelled and all(native_countable(idx) for idx in labelled_bands):
+        credited = [tokens for tokens, idx in blank if native_countable(idx)]
+        return [*labelled, *credited], row_shape_min
+    return labelled, row_shape_min
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:

@@ -219,3 +219,18 @@ def test_repeats_under_different_labels_are_refused(pre_988) -> None:
     pre_988()
     for md in ("\n".join(blocks), one_block):
         assert table_truncated(md, words) is True
+
+
+def test_unbound_repeats_before_the_first_match_are_refused(pre_988) -> None:
+    """Astra's round-6 case: 14 repeats of a row whose band lies BEFORE the block's
+    first match (so it is never consumed), padded with bound SE rows.
+    """
+    words = _page()
+    label, coef, _ = _regression_rows()[0]
+    md = _markdown(1, skip=4)
+    md += (f"| {label} | {' | '.join(coef)} |\n") * 14
+    md += "\n| Variable | (1) | (2) | (3) |\n|---|---|---|---|\n"
+    md += "".join(f"| | {' | '.join(se)} |\n" for _, _, se in _regression_rows(4))
+    assert table_truncated(md, words) is True
+    pre_988()
+    assert table_truncated(md, words) is True
