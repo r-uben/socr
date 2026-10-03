@@ -117,6 +117,7 @@ from socr.pipeline.agentic import (
     REJUDGE_EVENT_KINDS,
     PageDecision,
     ProviderAttempt,
+    is_failed_candidate,
     rejudge_candidate,
     route_page,
 )
@@ -7580,7 +7581,7 @@ class UnifiedPipeline:
         and not native). An ordinary PASS never lifts it. A failed or
         partial adjudication leaves the clamp in place.
         """
-        if bo.engine == "chart_asset" or not bo.text:
+        if bo.engine == "chart_asset" or not bo.text or is_failed_candidate(bo):
             return
 
         from socr.core.audit_log import AuditEvent
@@ -9930,7 +9931,12 @@ class UnifiedPipeline:
                     # except when the crop reread changed the shipped bytes, where the
                     # stale score describes text that no longer ships and the page is
                     # re-scored on what does.
-                    if _lane_live and bo.text and bo.engine != "chart_asset":
+                    if (
+                        _lane_live
+                        and bo.text
+                        and bo.engine != "chart_asset"
+                        and not is_failed_candidate(bo)
+                    ):
                         # A page this lane already settled must not be handed
                         # back to a whole-page escalation rung. The cell read,
                         # when there was one, already happened.

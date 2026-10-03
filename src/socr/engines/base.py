@@ -6,6 +6,7 @@ Two engine families:
 """
 
 import logging
+import re
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,42 @@ from socr.core.result import (
 logger = logging.getLogger(__name__)
 
 _normalizer = OutputNormalizer()
+
+
+#: Placeholders an engine CLI writes INSTEAD of text when it failed a page (GH-1020).
+#: Each is matched against a whole stripped LINE, never as a substring, so a
+#: page that quotes the marker inside a sentence is not touched. Sources (sibling repos):
+#:  - qwen-ocr-cli ``qwen_ocr/processor.py::_ocr_pages`` writes
+#:    ``*[OCR failed for page {idx}]*`` (``idx`` = 1-based position in the image dir) and
+#:    records the real reason in ``DocResult.page_errors`` / metadata.json ``error``.
+#:  - qwen-ocr-cli ``processor.py::_write_document`` and mistral-ocr-cli
+#:    ``mistral_ocr/processor.py`` write ``*[OCR Failed]*`` for a document with no pages.
+#: Other CLIs (gemini, marker, glm, deepseek, nougat) write no placeholder: they
+#: skip the page file and exit non-zero, already handled as CLI_ERROR/EMPTY_OUTPUT.
+CLI_FAILURE_PLACEHOLDERS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\*\[OCR failed for page \d+\]\*"),
+    re.compile(r"\*\[OCR Failed\]\*"),
+)
+
+
+def is_cli_failure_placeholder(text: str | None) -> bool:
+    """True when ``text`` carries a CLI failure marker on a line of its own.
+
+    A marker line anywhere means part of the page is missing (the CLI failed the page, or
+    one section of an aggregate), so the whole page is a failure, never a partial SUCCESS.
+    A marker quoted inside a sentence is not a line of its own and is left alone. A page
+    whose entire text is a marker string is classed as a failure too; that is not a
+    plausible real page.
+    There is deliberately no code-fence exemption: fence tracking can be fooled (a toggled
+    fence hides a real marker), and a paper whose content is itself a literal marker line
+    is effectively impossible, so this fails closed. Callers check the raw text AND the
+    cleaned text and fail if either matches.
+    """
+    if not text:
+        return False
+    return any(
+        p.fullmatch(line.strip()) for line in text.splitlines() for p in CLI_FAILURE_PLACEHOLDERS
+    )
 
 
 def sanitize_filename(name: str) -> str:
@@ -178,6 +215,17 @@ class BaseEngine(ABC):
                         status=DocumentStatus.ERROR,
                         failure_mode=FailureMode.EMPTY_OUTPUT,
                         error="CLI produced no output markdown",
+                        processing_time=time.time() - start_time,
+                        model_version=self.resolved_model_version(config),
+                    )
+
+                if is_cli_failure_placeholder(markdown):
+                    return EngineResult(
+                        document_path=pdf_path,
+                        engine=self.name,
+                        status=DocumentStatus.ERROR,
+                        failure_mode=FailureMode.CLI_ERROR,
+                        error="CLI wrote a failure placeholder instead of text",
                         processing_time=time.time() - start_time,
                         model_version=self.resolved_model_version(config),
                     )
@@ -359,7 +407,31 @@ class BaseEngine(ABC):
                 if not text and aggregate is not None:
                     text = aggregate.get(page_num)
 
-                if text:
+                if text and (
+                    is_cli_failure_placeholder(text)
+                    or is_cli_failure_placeholder(self._clean_output(text, self.name))
+                ):
+                    # GH-1020: the CLI reported this page as failed and wrote a marker
+                    # instead of text. It is a failure, not content: no judge call, the
+                    # ladder moves on, and the marker never reaches the output.
+                    logger.warning(
+                        f"[{self.name}] page {page_num}: CLI wrote a failure placeholder"
+                        + (f" ({cli_error_note})" if cli_error_note else "")
+                    )
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.CLI_ERROR,
+                            audit_passed=False,
+                            error=(
+                                f"CLI reported OCR failure for page {page_num}"
+                                + (f" ({cli_error_note})" if cli_error_note else "")
+                            ),
+                        )
+                    )
+                elif text:
                     text = self._clean_output(text, self.name)
                     outputs.append(
                         PageOutput(
@@ -538,6 +610,18 @@ class BaseEngine(ABC):
             return None, f"aggregate read failed: {exc}"
 
         sections = split_native_pages(self._clean_output(blob, self.name))
+        if is_cli_failure_placeholder(blob):
+            # GH-1020: check the RAW file before cleaning, which strips frontmatter and
+            # can hide a marker. Keep the raw section wherever it carries one so the
+            # caller's check sees it; if the sections no longer line up, fail every page.
+            raw_sections = split_native_pages(blob)
+            if len(raw_sections) == len(sections):
+                sections = [
+                    raw if is_cli_failure_placeholder(raw) else clean
+                    for raw, clean in zip(raw_sections, sections, strict=True)
+                ]
+            else:
+                sections = [blob] * len(sections)
         # Engine-saw order: the SAME filename sort the canon engine applies to the
         # image dir. Each rendered image stem is page_{orig:04d}, so a filename
         # sort yields ascending original page order — robust to a non-ascending
@@ -587,12 +671,20 @@ class BaseEngine(ABC):
         doc_dir = doc_dir_for(output_dir, rel_key)
         md_path = markdown_path_for(doc_dir, rel_key)
         if md_path.exists():
-            return self._clean_output(md_path.read_text(encoding="utf-8"), self.name)
+            return self._clean_unless_failed(md_path.read_text(encoding="utf-8"))
 
         legacy = self._legacy_page_md(pdf_path.stem, output_dir, expected=md_path)
         if legacy is not None:
-            return self._clean_output(legacy.read_text(encoding="utf-8"), self.name)
+            return self._clean_unless_failed(legacy.read_text(encoding="utf-8"))
         return None
+
+    def _clean_unless_failed(self, raw: str) -> str:
+        """Clean ``raw`` -- but hand back the RAW text when it carries a failure marker.
+
+        GH-1020: ``_clean_output`` strips frontmatter, which can hide a marker line, so the
+        check runs on the raw file and its verdict rides on the returned text.
+        """
+        return raw if is_cli_failure_placeholder(raw) else self._clean_output(raw, self.name)
 
     @staticmethod
     def _clean_output(text: str, engine: str = "") -> str:
@@ -604,8 +696,6 @@ class BaseEngine(ABC):
           - Engine-specific artifact cleanup (via OutputNormalizer)
           - Generic markdown normalization (line endings, whitespace, unicode)
         """
-        import re
-
         # Strip YAML frontmatter
         if text.startswith("---"):
             parts = text.split("---", 2)
