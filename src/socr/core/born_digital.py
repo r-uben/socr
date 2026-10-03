@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 #
 # Uses re.search (not re.match) to handle subset-prefixed names like
 # "ABCDEF+CMMI10".
+# GH-994: a "Table N" / "TABLE IV" caption at the start of a line.
+_TABLE_CAPTION_RE = re.compile(r"^\s*(Table|TABLE)\s+([0-9]+[A-Za-z]?|[IVXLC]+)\b")
+# GH-994: a horizontal stroke is a drawn line within this many pt of level, or a filled
+# rect thinner than the second bound. Booktabs rules are hairlines; both are the cut-offs
+# the GH-994 census measured with.
+_HRULE_LINE_SLOPE_PT = 1.0
+_HRULE_RECT_MAX_HEIGHT_PT = 2.0
+
 _MATH_FONT_RE = re.compile(
     r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"  # Computer Modern + AMS math
     r"STIXMath|STIXSize|STIXNonUnicode|XITSMath|LatinModernMath|LMMath|"  # STIX/OpenType math
@@ -2476,6 +2484,12 @@ class PageAssessment:
     #: would re-widen the gate PP-6 deliberately narrowed); it exists so the grid
     #: structure loss on these pages is visible instead of silent.
     possible_table_structure_not_reconstructed: bool = False
+    #: GH-994: a table detection missed (``has_tables`` False) that the page's own
+    #: caption and structure say is there, so native extraction flattened it to prose.
+    #: Fires on a "Table N" caption line AND (ruled-table geometry OR recurring numeric
+    #: columns OR the GH-64 flag above). Consumed: the page ships WARNING with
+    #: ``FailureMode.TABLE_NOT_RECONSTRUCTED``, text unchanged. Never routes.
+    table_not_reconstructed: bool = False
     #: GH-147 A2: set ONLY by the refusal branch in ``_assess_page_signals`` when
     #: the native table lane is actually refused (rotated text direction + table
     #: detected on a born-digital page). ``has_tables and text_is_rotated`` alone
@@ -3419,6 +3433,15 @@ class BornDigitalDetector:
                 "reconstructed, native prose shipped instead"
             )
 
+        table_not_reconstructed = self._detect_flattened_table(
+            page, raw_text, has_tables, possible_table_structure_not_reconstructed
+        )
+        if table_not_reconstructed:
+            notes.append(
+                "born-digital: a 'Table N' caption plus table structure, but detection "
+                "found no table; the grid was flattened to prose -> WARNING"
+            )
+
         # GH-195: same side-channel shape as the TR-3 flag above — reset per
         # page so a rejection on page 7 is never attributed to page 8.
         self._last_extraction_grid_rejections: list[dict] = []
@@ -3596,6 +3619,7 @@ class BornDigitalDetector:
             orphan_word_drops=orphan_word_drops,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             possible_table_structure_not_reconstructed=possible_table_structure_not_reconstructed,
+            table_not_reconstructed=table_not_reconstructed,
             native_table_lane_refused=native_table_lane_refused,
             native_rotated_text_shredded=native_rotated_text_shredded,
             native_table_structure_defective=native_table_structure_defective,
@@ -3650,6 +3674,68 @@ class BornDigitalDetector:
         from socr.tables.reconstruct import has_numeric_columns
 
         return has_numeric_columns(page)
+
+    @staticmethod
+    def _horizontal_rule_extents(page: fitz.Page) -> Counter:
+        """GH-994: count distinct-y horizontal strokes per shared (rounded) x-extent.
+
+        A stroke is a near-level drawn line or a thin filled rect (booktabs rules are
+        drawn either way). Never raises.
+        """
+        rows: dict[tuple[int, int], set[int]] = {}
+        try:
+            drawings = page.get_drawings()
+        except Exception:
+            return Counter()
+        for d in drawings:
+            for it in d.get("items", []):
+                if it[0] == "l":
+                    p1, p2 = it[1], it[2]
+                    if abs(p1.y - p2.y) >= _HRULE_LINE_SLOPE_PT or p1.x == p2.x:
+                        continue
+                    x0, x1, y = min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2
+                elif it[0] == "re":
+                    r = it[1]
+                    if r.height >= _HRULE_RECT_MAX_HEIGHT_PT or r.width <= 0:
+                        continue
+                    x0, x1, y = r.x0, r.x1, (r.y0 + r.y1) / 2
+                else:
+                    continue
+                rows.setdefault((round(x0), round(x1)), set()).add(round(y))
+        return Counter({k: len(v) for k, v in rows.items()})
+
+    @classmethod
+    def _detect_flattened_table(
+        cls, page: fitz.Page, raw_text: str, has_tables: bool, gh64_flag: bool
+    ) -> bool:
+        """GH-994: a table that detection missed, evidenced by caption plus structure.
+
+        Fires only when ``has_tables`` is False, the page has a "Table N" caption line,
+        AND at least one structural signal holds: ``_MIN_TABLE_ROWS`` horizontal rules
+        sharing an x-extent, recurring numeric columns (``_MIN_COLS`` lanes per row), or
+        the GH-64 flag. Measured in docs/log/2026-10-03_994-flattened-table-demote.md.
+        Status only; never used for routing. Never raises.
+        """
+        if has_tables:
+            return False
+        if not any(_TABLE_CAPTION_RE.match(ln) for ln in raw_text.splitlines()):
+            return False
+        if gh64_flag:
+            return True
+        from socr.tables.reconstruct import (
+            MIN_COLS,
+            MIN_TABLE_ROWS,
+            has_recurring_numeric_columns,
+        )
+
+        try:
+            extents = cls._horizontal_rule_extents(page)
+            if extents and max(extents.values()) >= MIN_TABLE_ROWS:
+                return True
+            return has_recurring_numeric_columns(page.get_text("words"), MIN_COLS)
+        except Exception:
+            logger.warning("GH-994: flattened-table scan failed", exc_info=True)
+            return False
 
     @staticmethod
     def _detect_columnar_numbers(page: fitz.Page) -> bool:

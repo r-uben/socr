@@ -119,6 +119,9 @@ class PageState:
     #: (one numeric lane per row, gate requires >= 3). Audit-only, reports
     #: never demotes -- see ``PageAssessment.possible_table_structure_not_reconstructed``.
     possible_table_structure_not_reconstructed: bool = False
+    #: GH-994: caption plus table structure on a page detection found no table on; see
+    #: ``PageAssessment.table_not_reconstructed``. Recomputed each run, not replayed.
+    table_not_reconstructed: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
     #: actually ran on this page, recorded AFTER the splice so it describes what
     #: went into the body rather than what a model returned. Read only by
@@ -679,6 +682,7 @@ class DocumentState:
                 ps.possible_table_structure_not_reconstructed = getattr(
                     pa, "possible_table_structure_not_reconstructed", False
                 )
+                ps.table_not_reconstructed = getattr(pa, "table_not_reconstructed", False)
                 if pa.is_born_digital:
                     # #688 round 2: the native reading is a CANDIDATE -- it is
                     # what ``manifest._winning_page_output`` ships when no
