@@ -377,7 +377,10 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     line, which the native side always counted -- counts only if it binds to a
     native baseline band (``match_rows_monotonic``), and a native band credits
     at most ONE candidate row on the page: matching is monotonic within a
-    block and the bands a block consumed are blanked for the next. Invented or
+    block and the bands a block consumed are blanked for the next. The band
+    must also be one ``table_shaped_native_row_count`` would count (at least
+    ``row_shape_min`` numbers, not a column-index legend), so a one-number SE
+    line cannot stand in for a three-number coefficient row. Invented or
     repeated SE rows therefore cannot make up a shortfall.
 
     ``row_shape_min`` is the minimum width over LABELLED counted rows, as it
@@ -387,14 +390,17 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     """
     from socr.tables.row_corroboration import (
         baseline_bands,
+        is_column_index_row,
         match_rows_monotonic,
         numeric_body_rows,
         table_blocks,
     )
 
-    token_lists = [band.tokens for band in baseline_bands(words)]
+    band_tokens = [band.tokens for band in baseline_bands(words)]
+    token_lists = list(band_tokens)
     counted: list[tuple[str, ...]] = []
     labelled: list[tuple[str, ...]] = []
+    bound_blank: list[tuple[tuple[str, ...], int]] = []
     seen_labelled: set[tuple[str, tuple[str, ...]]] = set()
     for rows in table_blocks(markdown):
         entries = []
@@ -415,9 +421,17 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
                 counted.append(tokens)
                 labelled.append(tokens)
             elif idx is not None:
-                counted.append(tokens)
-    shape_rows = labelled or counted
-    return counted, (min(len(r) for r in shape_rows) if shape_rows else 0)
+                bound_blank.append((tokens, idx))
+    shape_rows = labelled or [tokens for tokens, _ in bound_blank]
+    row_shape_min = min((len(r) for r in shape_rows), default=0)
+    # a blank-stub row is credited only if its native band is one the native
+    # count itself would count (same width / legend test as
+    # ``table_shaped_native_row_count``): both sides count the same kinds of rows
+    for tokens, idx in bound_blank:
+        native = band_tokens[idx]
+        if len(native) >= row_shape_min and not is_column_index_row(native):
+            counted.append(tokens)
+    return counted, row_shape_min
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:

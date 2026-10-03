@@ -108,3 +108,16 @@ Cleared-and-incomplete: 0.
 Mutations (external copy, canary): blank-stub never counts 1 killed; unbound blank-stub counts 3;
 bands reusable across blocks 2; no labelled dedupe 1. Baseline 59 passed.
 `tests/tables/test_gh703_text_table_dominance.py` is back to origin/main (no edits needed).
+
+## Round 5 -- the symmetry applied to the SE credit
+
+Astra: 10 coefficient rows of three numbers, each followed by a one-number SE row; candidate emits
+five pairs. `row_shape_min` is 3, so native counts the 10 coefficient bands only, while the
+candidate counted 5 + 5 bound SE rows = 10 and passed (main refuses). Fix: a bound blank-stub row is
+credited only if its native band passes the test `table_shaped_native_row_count` applies (>=
+`row_shape_min` numbers, not a column-index legend). `row_shape_min` is computed first (labelled rows,
+else the bound blank rows). Pin: Astra's exact page. Mutants: shape condition removed 1 killed;
+width test dropped 1 killed; baseline 60 passed.
+Census: 13 clear / 27 refuse / 0 new vs main (huynh p32 no longer clears: its SE rows have fewer
+numbers than its coefficient rows). Cleared pages are a subset of those viewed before
+(ghost p13, bybee p31 etc.): all complete; cleared-and-incomplete 0.

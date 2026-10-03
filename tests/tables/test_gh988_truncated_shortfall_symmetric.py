@@ -177,3 +177,21 @@ def test_se_rows_repeated_in_a_second_block_do_not_count(pre_988) -> None:
     assert table_truncated(md, words) is True
     pre_988()
     assert table_truncated(md, words) is True
+
+
+def test_one_number_se_rows_cannot_stand_in_for_coefficient_rows(pre_988) -> None:
+    """Astra's reproducer: 10 coefficient rows of three numbers, each followed by a
+    ONE-number SE row. The candidate emits the first five pairs. ``row_shape_min``
+    is 3, so native counts the 10 coefficient rows only; the 5 bound SE rows are
+    not rows the native count would count and must not be credited.
+    """
+    words: list[tuple] = []
+    for i, (label, coef, se) in enumerate(_regression_rows()):
+        words += _band(100.0 + i * 40.0, label, coef)
+        words += _band(120.0 + i * 40.0, None, se[:1])
+    md = "| Variable | (1) | (2) | (3) |\n|---|---|---|---|\n"
+    for label, coef, se in _regression_rows(COEFS // 2):
+        md += f"| {label} | {' | '.join(coef)} |\n| | {se[0]} | | |\n"
+    assert table_truncated(md, words) is True
+    pre_988()
+    assert table_truncated(md, words) is True
