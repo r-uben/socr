@@ -265,6 +265,13 @@ class PageState:
     #: the image lane", and a consumer must be able to tell the two floors
     #: apart.
     rotated_shred_png_ref: str = ""
+    #: #1027: image ref for the invisible-OCR-layer floor. Not persisted to the sidecar:
+    #: that floor ships ``audit_passed=False``, so a resume never restores the page.
+    invisible_scan_png_ref: str = ""
+    #: #1027: the per-rung summary a skipped (resumed) page's sidecar carried. A skipped page
+    #: ran no rung this run, so re-flushing must keep the original record instead of
+    #: replacing it with the single restored winner.
+    attempts_summary_restored: list | None = None
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
     #: GH-318: chart ELIGIBILITY detection raised and the page fell through to
     #: the non-chart route. Distinct from ``chart_asset_render_failed`` above,

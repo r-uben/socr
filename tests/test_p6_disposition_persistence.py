@@ -312,6 +312,8 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "binding_adjudication",
         "audit_events",
         "figure_refs",
+        # #1027: compact per-rung attempt record (diagnostic; never read back for routing).
+        "attempts_summary",
     }
     assert set(without_disp.keys()) == expected_pre_keys
     assert set(meta.keys()) - expected_pre_keys == {"disposition"}

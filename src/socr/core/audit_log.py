@@ -179,6 +179,8 @@ def build_run_audit(state) -> RunAudit:
         # while another candidate for the page does not.
         "candidate_truncated": 6,
         "structure_floor_overrode_ladder": 6,
+        # #1027: a disposition of the same rank as the other fail-closed floors above.
+        "invisible_scan_unread": 6,
         "page_failed": 7,
     }
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))

@@ -79,7 +79,7 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     # an already-finalized body verbatim. It cannot share the fresh ending's
     # return -- that one appends the disclosure notes, and appending them to a
     # restored body would duplicate them on every resume.
-    assert len(_returns(fn)) == 18
+    assert len(_returns(fn)) == 19
 
 
 def test_every_ending_carries_a_tag() -> None:
@@ -97,9 +97,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 22, "two endings share a tag or tag count != 22"
+    assert len(used) == len(set(used)) == 23, "two endings share a tag or tag count != 23"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 22
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 23
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -188,16 +188,16 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 22
-    assert len(list(SelectionProvenance)) == 22
+    # 1. Total count of mapped provenance members must be exactly 23
+    assert len(list(SelectionProvenance)) == 23
 
-    # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
+    # 2. Check full disposition equivalence groups (exactly 15 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
     #    the credentialed timeout ending is a structure-class MODEL_OUTPUT, and the
     #    timeout floor is a structure-class FAIL_CLOSED_MARKER -- deliberately, so
     #    the floor keeps every document-level surface it already had. #714 round 2's
     #    text-table floor joins that same floor group on the same reasoning.
-    assert len(by_disposition) == 14
+    assert len(by_disposition) == 15
 
     expected_multi_dispositions = {
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS): {
@@ -231,10 +231,10 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
 
     single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
-    assert single_disposition_count == 10
+    assert single_disposition_count == 11
 
-    # 3. Check primary reason equivalence groups (exactly 12 distinct primary reasons)
-    assert len(by_reason) == 12
+    # 3. Check primary reason equivalence groups (exactly 13 distinct primary reasons)
+    assert len(by_reason) == 13
 
     expected_multi_reasons = {
         PagePrimaryReason.STRUCTURE_CLASS: {
@@ -265,4 +265,4 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_reason[reason] == members, f"mismatch for multi-member reason {reason}"
 
     single_reason_count = sum(1 for members in by_reason.values() if len(members) == 1)
-    assert single_reason_count == 8
+    assert single_reason_count == 9

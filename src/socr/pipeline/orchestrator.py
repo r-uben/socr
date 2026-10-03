@@ -416,6 +416,31 @@ def _derive_disposition_buckets(
     }
 
 
+#: #1027: the rejection reason kept per attempt in the page sidecar's ``attempts_summary``.
+#: The full reason lives on the attempt in the audit log; the sidecar carries a compact
+#: pointer, so a reasoning-heavy judge cannot bloat every page file.
+ATTEMPT_SUMMARY_REASON_MAX_CHARS = 200
+
+
+def _attempts_summary(ps) -> list[dict]:
+    """#1027: compact per-rung attempt record for the page sidecar (additive; never read back)."""
+    restored = getattr(ps, "attempts_summary_restored", None)
+    if restored is not None and len(getattr(ps, "attempts", None) or []) <= 1:
+        return restored  # a skipped page: nothing ran this time, keep the original record
+    out: list[dict] = []
+    for a in getattr(ps, "attempts", None) or []:
+        reason = " ".join(str(a.judge_reason or "").split())
+        out.append(
+            {
+                "engine": a.engine or "",
+                "accepted": bool(a.audit_passed),
+                "judge_outcome": a.judge_outcome or "",
+                "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
+            }
+        )
+    return out
+
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -9813,6 +9838,23 @@ class UnifiedPipeline:
                                     label="Shredded rotated page",
                                 )
 
+                        # #1027: invisible-OCR-layer floor PNG. The layer is known garbage
+                        # and no model reading was accepted, so the marker that ships in its
+                        # place carries the page image. Same render-only-if-nothing-accepted
+                        # rule as the shredded floor above.
+                        if (
+                            getattr(ps, "invisible_text_over_raster", False)
+                            and not decision.accepted
+                            and _chart_figures_dir is not None
+                        ):
+                            ps.invisible_scan_png_ref = self._render_d3_floor_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                stem="invisible_scan_page",
+                                label="Scanned page with unread invisible OCR layer",
+                            )
+
                         # Provenance guard: when the judge rejected ALL ladder rungs for a
                         # born-digital table page or a page where table structure failed,
                         # mark the page so _assemble_result treats any native-text fallback as
@@ -10627,11 +10669,11 @@ class UnifiedPipeline:
             engine="chart_asset",
             audit_passed=not chart_render_failed,
             failure_mode=(
-                FailureMode.NATIVE_MINUS_AS_DIGIT
-                if minus_suspect and not chart_render_failed
+                FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
+                if invisible_suspect and not chart_render_failed
                 else (
-                    FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
-                    if invisible_suspect and not chart_render_failed
+                    FailureMode.NATIVE_MINUS_AS_DIGIT
+                    if minus_suspect and not chart_render_failed
                     else (
                         FailureMode.NATIVE_GARBLED_MATH
                         if garbled_suspect and not chart_render_failed
@@ -12044,6 +12086,7 @@ class UnifiedPipeline:
             ps.scanned_table_no_witness = False
             ps.d3_floor_png_ref = ""
             ps.rotated_shred_png_ref = ""
+            ps.invisible_scan_png_ref = ""
             state.events.extend(judge_events)
             state.events.append(
                 AuditEvent(
@@ -12876,6 +12919,9 @@ class UnifiedPipeline:
             # resumed run spend it a second time. ``None`` when any attempt was
             # unmetered: an unknown subtotal must never restore as zero.
             "page_cost_usd": self._page_total_cost(state.pages.get(page_num)),
+            # #1027: which rungs ran and what became of each, so a reader of a page that
+            # shipped native/floor sees the attempts instead of "no attempts".
+            "attempts_summary": _attempts_summary(state.pages.get(page_num)),
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -14139,6 +14185,8 @@ class UnifiedPipeline:
             # floor ships marker + image exactly as the first run did instead of
             # silently degrading to a bare marker.
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
+            _summary = meta.get("attempts_summary")
+            ps.attempts_summary_restored = _summary if isinstance(_summary, list) else None
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             # GH-318: OR, never assign. OCR pages can resume BEFORE chart
             # eligibility runs, while native pages detect first and only then
@@ -15000,6 +15048,16 @@ class UnifiedPipeline:
             for r in pre_records
             if r.output.failure_mode is FailureMode.HEADER_BINDING_UNVERIFIED
         )
+        # #1027: scans whose invisible OCR layer was NOT shipped because no model reading
+        # was accepted; the page ships the marker (so it is also in ``failed_pages``,
+        # which keeps the document out of SUCCESS). Read off the shipped record's own
+        # failure mode, like the sets above, and given its OWN event and CLI line below
+        # rather than the generic "no usable OCR output" one.
+        invisible_scan_unread_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.failure_mode is FailureMode.INVISIBLE_SCAN_UNREAD
+        )
 
         # The six orthogonal bucket groups (native-only distrust, value drift,
         # fabrication, text-grid rejection, chart-detection failure, and
@@ -15692,7 +15750,26 @@ class UnifiedPipeline:
         ):
             from socr.core.audit_log import AuditEvent
 
+            for n in invisible_scan_unread_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="invisible_scan_unread",
+                        engine="native",
+                        detail=(
+                            "the native text is an invisible OCR layer over a raster scan "
+                            "(known unreliable) and no model reading was accepted; neither "
+                            "the layer nor a rejected reading was shipped, the page image "
+                            "marker was selected instead "
+                            f"({FailureMode.INVISIBLE_SCAN_UNREAD.value}); a re-run "
+                            "re-OCRs this page"
+                        ),
+                        data={"invisible_scan_unread": True},
+                    )
+                )
             for n in failed_pages:
+                if n in invisible_scan_unread_pages:
+                    continue
                 state.events.append(
                     AuditEvent(
                         page_num=n,
@@ -16034,10 +16111,20 @@ class UnifiedPipeline:
                     )
                 )
             if not self.config.quiet:
-                if failed_pages:
+                _plain_failed_pages = [
+                    n for n in failed_pages if n not in invisible_scan_unread_pages
+                ]
+                if _plain_failed_pages:
                     console.print(
-                        f"  [red]{len(failed_pages)} page(s) produced no usable "
-                        f"output: {failed_pages}[/red]"
+                        f"  [red]{len(_plain_failed_pages)} page(s) produced no usable "
+                        f"output: {_plain_failed_pages}[/red]"
+                    )
+                if invisible_scan_unread_pages:
+                    console.print(
+                        f"  [red]{len(invisible_scan_unread_pages)} scanned page(s) carry only "
+                        f"an invisible OCR layer and no model reading was accepted; the page "
+                        f"image marker shipped ({FailureMode.INVISIBLE_SCAN_UNREAD.value}): "
+                        f"{invisible_scan_unread_pages}[/red]"
                     )
                 if unloadable_failed_pages:
                     console.print(

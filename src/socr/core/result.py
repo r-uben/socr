@@ -82,6 +82,12 @@ class FailureMode(str, Enum):
     #: image-dominant with render-mode-3 text), or the scan for that failed. The text is
     #: retained and shipped WARNING, never clean SUCCESS.
     NATIVE_INVISIBLE_TEXT_SCAN = "native_invisible_text_scan"
+    #: #1027: a scan whose native text is an invisible baked-in OCR layer (known garbage:
+    #: one letter per line, stray axis ticks) and whose model ladder ran but accepted no
+    #: reading. Neither the rejected model reading nor the layer ships; the page ships the
+    #: fail-closed floor (marker + page image). WARNING, ``audit_passed`` False so a resume
+    #: re-OCRs it, and the document cannot be SUCCESS.
+    INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     #: #960: the native text layer garbled the page's mathematics (private-use glyphs,
     #: math-alphanumeric codepoints, letters of a script the corpus is not written in, or a
     #: math font the region lane does not list), or the scan for that failed, and no OCR read

@@ -931,6 +931,15 @@ def _invisible_text_suspect(p) -> bool:
     )
 
 
+def _model_attempt_ran(p) -> bool:
+    """#1027: a non-native reading was attempted on this page (accepted or not).
+
+    The native and chart lanes exist without any model rung ever running, so their
+    attempts do not count.
+    """
+    return any(not (a.engine or "").startswith(_NATIVE_TEXT_LANES) for a in p.attempts)
+
+
 def garbled_math_suspect(p) -> bool:
     """#960: the native text layer garbled the page's mathematics, or the scan for that
     failed (unknown is not clean)."""
@@ -2805,6 +2814,9 @@ class PagePrimaryReason(str, Enum):
     SCANNED_TABLE_UNVERIFIABLE = "scanned_table_unverifiable"
     NATIVE_TABLE_UNVERIFIABLE = "native_table_unverifiable"
     ROTATED_NATIVE_TEXT_SHREDDED = "rotated_native_text_shredded"
+    #: #1027: a scan whose only native text is an invisible OCR layer, and no model
+    #: reading was accepted: fail-closed marker plus page image.
+    INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
     DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
@@ -2892,6 +2904,9 @@ class SelectionProvenance(str, Enum):
     UNVERIFIABLE_TABLE_NATIVE = "unverifiable_table_native"
     #: rotated-text extraction shredded the native layer: fail-closed marker
     ROTATED_TEXT_SHREDDED = "rotated_text_shredded"
+    #: #1027: invisible OCR layer over a raster scan, model ladder accepted nothing:
+    #: fail-closed marker (neither the layer nor the rejected reading ships)
+    INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     #: #259: ladder accepted nothing but the model produced a table -- kept flagged
     FLAGGED_MODEL_KEPT = "flagged_model_kept"
     #: TICKET-A1c (#641): the winner came from A1b's row-corroboration fallback
@@ -2987,6 +3002,9 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     ),
     SelectionProvenance.ROTATED_TEXT_SHREDDED: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED
+    ),
+    SelectionProvenance.INVISIBLE_SCAN_UNREAD: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.INVISIBLE_SCAN_UNREAD
     ),
     SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
@@ -3442,6 +3460,38 @@ def _select_page_output_tagged(
                 failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
             ), SelectionProvenance.ROTATED_TEXT_SHREDDED
 
+        # #1027: invisible-OCR-layer floor. A scan whose native text is an invisible
+        # baked-in OCR layer (render mode 3 over a page-sized raster) is known garbage:
+        # words one letter per line, axis ticks scattered as stray numbers. When the
+        # model ladder RAN and accepted no reading, shipping either the rejected
+        # reading (below, as a flagged model output) or the layer (the native fallback
+        # further down) ships a wrong number where a missing one is the honest outcome.
+        # So the page ships the marker plus the page image, exactly like the rotated
+        # floor above. ``audit_passed`` stays False, so a resume re-OCRs it.
+        #
+        # Scoped, on purpose: (a) ``invisible_text_over_raster`` only -- a FAILED scan
+        # means "unknown", not "known garbage", and keeps the native fallback; (b) a
+        # non-native attempt must exist -- with no provider or under --native-only the
+        # layer is the only text and #961 documents it as retained WARNING; (c) a
+        # structure-class page is S1's to decide.
+        if (
+            getattr(p, "invisible_text_over_raster", False)
+            and _model_attempt_ran(p)
+            and not _reaches_structure_class_branch(p)
+        ):
+            invisible_marker = f"[page {page_num} failed: invisible OCR layer unread — see image]"
+            invisible_png = getattr(p, "invisible_scan_png_ref", "")
+            return PageOutput(
+                page_num=page_num,
+                text=f"{invisible_marker}\n\n{invisible_png}"
+                if invisible_png
+                else invisible_marker,
+                status=PageStatus.WARNING,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.INVISIBLE_SCAN_UNREAD,
+            ), SelectionProvenance.INVISIBLE_SCAN_UNREAD
+
         # #259: a flagged-but-PRESENT model output stays the winner. Placed
         # AFTER the D3 floor above so a hard-fail still fails closed, and before
         # the native fallback below, which is the substitution being fixed.
@@ -3776,12 +3826,15 @@ def _select_page_output_tagged(
                 if judge_timeout_native
                 else FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                 if native_table_defect and native_is_fallback
+                # #1027: the invisible-scan cause outranks the minus-as-digit one;
+                # the "2"-for-minus scan fires on that same garbage layer, so
+                # naming it first misreports why the page is not trusted.
                 else (
-                    FailureMode.NATIVE_MINUS_AS_DIGIT
-                    if native_is_fallback and minus_as_digit_suspect(p)
+                    FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
+                    if native_is_fallback and _invisible_text_suspect(p)
                     else (
-                        FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
-                        if native_is_fallback and _invisible_text_suspect(p)
+                        FailureMode.NATIVE_MINUS_AS_DIGIT
+                        if native_is_fallback and minus_as_digit_suspect(p)
                         else (
                             FailureMode.NATIVE_GARBLED_MATH
                             if garbled_math
@@ -4106,6 +4159,7 @@ def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
 _MARKER_FAMILY_REASONS: tuple[tuple[str, "PagePrimaryReason"], ...] = (
     ("invalid table emission", PagePrimaryReason.INVALID_TABLE_EMISSION),
     ("rotated text extraction shredded", PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED),
+    ("invisible OCR layer unread", PagePrimaryReason.INVISIBLE_SCAN_UNREAD),
     ("no usable OCR output", PagePrimaryReason.NO_USABLE_OUTPUT),
     # The unverifiable-table family is DELIBERATELY absent. Its marker prose does
     # not say which lane distrusted the table, and every path that authors it --
