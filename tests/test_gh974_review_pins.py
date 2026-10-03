@@ -240,6 +240,10 @@ def _process(tmp_path, name, text_by_page, rungs, **cfg):
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
             patch.object(pipeline, "_plan_native_table_first", return_value=None),
             patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs),
         ):

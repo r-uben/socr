@@ -256,6 +256,7 @@ def _run(
     ladder_on: bool,
     text_by_page: dict[int, str],
     rungs: list | None,
+    contradiction_check: bool = False,
 ):
     cfg = _make_config(table_judge_ladder=ladder_on)
     pipeline = UnifiedPipeline(cfg)
@@ -272,6 +273,14 @@ def _run(
     ]
     if ladder_on:
         patches.append(patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs or []))
+    if not contradiction_check:
+        # These scenarios pin the LADDER's own terminals and wording. The shifted page is a
+        # genuine row-label shift, which the PDF's own text contradicts, so with the
+        # native-contradiction withhold live it ends WITHHELD instead of UNVERIFIED; that
+        # delta is pinned once, below, in ``TestContradictedShiftIsWithheld``.
+        patches.append(
+            patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None)
+        )
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
@@ -526,3 +535,41 @@ class TestClampedUnverifiedTerminal:
         assert any(
             "mechanical binding check found a contradiction" in e.detail for e in unverified_events
         )
+
+
+class TestContradictedShiftIsWithheld:
+    """The same shifted table, ladder unchanged, with and without the native-contradiction
+    withhold: UNVERIFIED (bytes ship, flagged) becomes WITHHELD (no bytes) and nothing else
+    on the document moves. The clean page is untouched in both runs."""
+
+    def test_the_withhold_is_the_only_difference(self, tmp_path: Path) -> None:
+        text_by_page = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_SHIFTED_MD}
+        rung = _ScriptedRung(
+            {
+                CLEAN_MD.strip(): RungResult(rung="fake1", ok=True, verdict=_pass_verdict("high")),
+                SHIFT_SHIFTED_MD.strip(): RungResult(
+                    rung="fake1", ok=True, verdict=_pass_verdict("high")
+                ),
+            }
+        )
+        runs = {}
+        for name, live in (("without", False), ("with", True)):
+            pdf = _fixture_copy(tmp_path, name)
+            _pipe, result, state = _run(
+                pdf,
+                tmp_path / f"{name}_out",
+                ladder_on=True,
+                text_by_page=text_by_page,
+                rungs=[rung],
+                contradiction_check=live,
+            )
+            runs[name] = (result, state)
+
+        without, with_ = runs["without"][1], runs["with"][1]
+        assert without.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert with_.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_WITHHELD
+        assert without.pages[CLEAN_PAGE].table_ladder_disposition is None
+        assert with_.pages[CLEAN_PAGE].table_ladder_disposition is None
+        assert "table_withheld" in (runs["with"][0].error or "")
+        assert "contradicts" in (runs["with"][0].error or "")
+        assert "table_withheld" not in (runs["without"][0].error or "")
