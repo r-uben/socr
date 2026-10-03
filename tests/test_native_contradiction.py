@@ -752,10 +752,15 @@ class TestMalformedSidecarEvents:
 
         good = [{"kind": "table_ladder_withheld", "data": {"table_id": "p1-t0"}}]
         assert count_from_sidecars(self._doc(tmp_path / "good", good)).withheld == 1
+        # absent or null events are a legacy sidecar: the markers alone count
+        assert count_from_sidecars(self._doc(tmp_path / "none", None)).withheld == 1
         for bad in (
             [{"kind": "table_ladder_withheld", "data": "oops"}],
             ["not an object"],
             "not a list",
+            {},
+            "",
+            0,
         ):
             assert (
                 count_from_sidecars(self._doc(tmp_path / f"bad{abs(hash(str(bad)))}", bad)) is None

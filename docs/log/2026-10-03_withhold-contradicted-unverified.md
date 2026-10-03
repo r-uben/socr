@@ -183,3 +183,14 @@ rows convict, thousands separator not folded, sibling gets no record, metric ign
 - Phase 1 re-run: sign 5/5 sign-lost, 0 of 12 CORRECT flagged by any check; row shift 2 of 5, wrong number 1;
   all 75: sign 15 / row_shift 3 / number_absent 1, union 18. Mutants killed: stated-minus bracket absorbed, row
   shift without coverage gate, regions by index, ambiguous pairing not abstained.
+
+## Known false positive (not fixed, by decision)
+
+Mixed bracket notation on one page: the page prints `(-0.12)` and `-0.12`, the table prints `(-0.12)` and `(0.12)`.
+The stated-minus bracket rule convicts it although the table's second cell is arguably a bracketed rendering of the
+second printed value. Contrived, and the only consequence is a withhold, which is the safe direction. Left as is.
+
+## Round 4
+
+`count_from_sidecars` defaults `audit_events` to `[]` only when the key is absent or null; any other non-list
+(`{}`, `""`, `0`) makes the count unknown. Pinned in `TestMalformedSidecarEvents`.

@@ -229,7 +229,9 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
         if num not in wanted:
             continue
         seen.add(num)
-        raw_events = rec.get("audit_events") or []
+        raw_events = rec.get("audit_events")
+        if raw_events is None:
+            raw_events = []  # absent or null: a legacy sidecar with no events
         try:
             if not isinstance(raw_events, list):
                 raise ValueError("audit_events is not a list")
