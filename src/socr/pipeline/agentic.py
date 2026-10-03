@@ -25,6 +25,7 @@ winning provider and the total cost is known.
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,7 +44,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.judge.judge import PageJudgeCircuitOpenError, is_page_judge_timeout
+from socr.judge.judge import JudgeVerdict, PageJudgeCircuitOpenError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,82 @@ def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAtte
             a.output.word_count,
         ),
     )
+
+
+#: #1013: the outcomes of re-judging a timed-out candidate on resume, and the audit-event
+#: kind each is surfaced under. Only ``accepted`` ships the candidate.
+REJUDGE_ACCEPTED = "accepted"
+REJUDGE_REJECTED = "rejected"
+REJUDGE_TIMEOUT = "timeout"
+REJUDGE_ERROR = "error"
+REJUDGE_EVENT_KINDS = tuple(
+    f"rejudge_{o}" for o in (REJUDGE_ACCEPTED, REJUDGE_REJECTED, REJUDGE_TIMEOUT, REJUDGE_ERROR)
+)
+
+
+def rejudge_candidate(
+    make_candidate: Callable[[], PageOutput],
+    prof: ProviderProfile,
+    judge: PageJudge,
+    *,
+    attempts: int,
+) -> tuple[str, str, PageOutput | None]:
+    """#1013: ask ``judge`` about the kept bytes at most ``attempts`` times.
+
+    ``make_candidate`` returns a FRESH ``PageOutput`` each call: every attempt judges
+    its own snapshot, because a deadline worker can outlive its attempt and the table
+    verifier can rewrite ``text`` in place. Acceptance binds to the sha256 of the bytes
+    first judged: a snapshot whose text no longer hashes to it was rewritten, so its
+    verdict is not a verdict on the kept bytes.
+
+    ACCEPTED requires an explicit COMPLETED acceptance: ``accept``, no ``judge_outcome``
+    (a verifier crash wears a verdict's shape), and a ``JudgeVerdict`` the judge itself
+    produced in ``raw_verdict`` (a heuristic decision carries none). Anything else is
+    ``REJUDGE_ERROR``. Only a TIMEOUT is retried (a missing verdict); an accept, a
+    completed rejection or any other failure ends the loop. Returns ``(outcome, reason, shipped)``;
+    ``shipped`` is a deep copy of the judged snapshot on ACCEPTED, else ``None``.
+    """
+    from socr.core.page_credential import sha256_text
+
+    outcome, reason = REJUDGE_ERROR, "no re-judge attempt was allowed"
+    judged_sha = sha256_text(make_candidate().text)
+    for _ in range(max(attempts, 0)):
+        snapshot = make_candidate()
+        try:
+            decision = judge.assess(snapshot, prof)
+        except Exception as exc:
+            outcome = REJUDGE_TIMEOUT if is_page_judge_timeout(exc) else REJUDGE_ERROR
+            reason = f"judge raised: {exc}"
+            if outcome == REJUDGE_TIMEOUT:
+                continue
+            break
+        reason = decision.reason
+        if decision.judge_outcome:
+            outcome = REJUDGE_ERROR
+            reason = f"decision carries a judge_outcome ({decision.judge_outcome}), not a verdict"
+            break
+        if sha256_text(snapshot.text) != judged_sha:
+            outcome, reason = REJUDGE_ERROR, "the judge chain rewrote the kept bytes"
+            break
+        if decision.accept:
+            if isinstance(decision.raw_verdict, JudgeVerdict):
+                # Ship a COPY OF THE JUDGED snapshot, never a rebuild: verification sets
+                # fields on it in place (``table_label_unverified``, corroboration, audit
+                # notes, status, failure mode) that the manifest guards read. The copy
+                # is taken now, so nothing that still holds ``snapshot`` can alter it.
+                shipped = copy.deepcopy(snapshot)
+                if sha256_text(shipped.text) != judged_sha:
+                    return (
+                        REJUDGE_ERROR,
+                        "the accepted snapshot no longer hashes to the kept bytes",
+                        None,
+                    )
+                return REJUDGE_ACCEPTED, reason, shipped
+            outcome, reason = REJUDGE_ERROR, "acceptance is not a completed VLM verdict"
+            break
+        outcome = REJUDGE_REJECTED
+        break
+    return outcome, reason, None
 
 
 def route_page(

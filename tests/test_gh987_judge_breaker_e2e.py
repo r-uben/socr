@@ -241,7 +241,9 @@ def test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healt
 
     CONTROL in the same process: a run whose judge accepts leaves SUCCESS pages,
     and the identical second run skips every one (0 OCR calls). The wedged run's
-    second run, with a healthy judge, re-reads all four pages.
+    second run, with a healthy judge, does NOT skip them: each page's kept timed-out
+    candidate is re-judged (#1013, no OCR), or all four are re-OCRed when re-judging is
+    disabled (`rejudge_attempts=0`).
     """
     control = _run(tmp_path / "c", monkeypatch, ALIVE, judge="accept")
     assert control["judge_calls"] == _PAGES
@@ -254,11 +256,27 @@ def test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healt
     wedged = _run(tmp_path / "w", monkeypatch, WEDGED)
     assert wedged["events"].count(BREAKER_EVENT) == 1
     wedged["pipe"].ocr_calls.clear()
+    # #1013 changed HOW they are re-read, not WHETHER: the kept timed-out candidates are
+    # re-judged first, and an accepting healthy judge ships them without OCR. DIFFERENCE
+    # on one directory state: with re-judge disabled (the pre-#1013 behaviour) the same
+    # resume re-OCRs every page.
+    import shutil
+
+    legacy_out = tmp_path / "legacy_out"
+    shutil.copytree(wedged["out"], legacy_out)
+    legacy = _make_pipeline(
+        monkeypatch, probe=ALIVE, judge_calls=[], judge="accept", reprocess=True
+    )
+    legacy.config.rejudge_attempts = 0
+    legacy.process(wedged["pdf"], output_dir=legacy_out)
+    assert sorted(n for call in legacy.ocr_calls for n in call) == list(range(1, _PAGES + 1))
+    assert all(_passed(sc) for sc in _sidecars(legacy_out).values())
+
     resumed = _make_pipeline(
         monkeypatch, probe=ALIVE, judge_calls=[], judge="accept", reprocess=True
     )
     resumed.process(wedged["pdf"], output_dir=wedged["out"])
-    assert sorted(n for call in resumed.ocr_calls for n in call) == list(range(1, _PAGES + 1))
+    assert resumed.ocr_calls == [], "every kept candidate is re-judged, not re-OCRed"
     assert all(_passed(sc) for sc in _sidecars(wedged["out"]).values())
 
 

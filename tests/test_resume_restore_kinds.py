@@ -50,6 +50,10 @@ EXPECTED_RESUME_KINDS = frozenset(
         "table_ladder_withheld",
         "table_spacer_rows_dropped",
         "table_wrapped_label_merged",
+        "rejudge_accepted",
+        "rejudge_error",
+        "rejudge_rejected",
+        "rejudge_timeout",
         "visual_values_not_transcribed",
     }
 )
@@ -60,4 +64,4 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    assert len(EXPECTED_RESUME_KINDS) == 41
+    assert len(EXPECTED_RESUME_KINDS) == 45

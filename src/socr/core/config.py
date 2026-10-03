@@ -428,6 +428,17 @@ class PipelineConfig:
     # adjudicator/transcriber stage). Once spent, remaining calls are skipped and
     # the page ends UNVERIFIED with a ``table_ladder_budget_exhausted`` event.
     table_judge_page_budget_sec: float | None = None
+    # #1013: how many times, per page per run, the page judge is asked about a model
+    # candidate it TIMED OUT on in a previous run, before the page is re-routed. One
+    # retry by default: a timeout is a missing verdict, and the judge that timed out
+    # is the one most likely still wedged, so more attempts mostly burn the deadline.
+    # 0 disables the step (the page is re-OCRed, as before #1013). Only an ACCEPTING
+    # verdict ships the candidate; a rejection or another timeout runs the normal
+    # ladder. Deliberately not in the run fingerprint: it changes no byte on a page
+    # that has no kept candidate, and the kept candidate is checked against the
+    # fingerprint itself. Consequence: changing this value alone does NOT invalidate
+    # cached results. Only an ACCEPT by the same VLM judge that timed out ships.
+    rejudge_attempts: int = 1
 
     # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):
     # the blind cell-transcription ADJUDICATOR. Not a third reader rung: it never
