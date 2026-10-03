@@ -90,6 +90,10 @@ _MIN_DATA_ROW_FRAC = 0.5
 _LANE_X_TOL_PT = 6.0  # numeric tokens within this x distance share a lane
 _MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes
 _MIN_TABLE_ROWS = 3  # and there must be this many such rows
+# GH-994: public names for the two table-evidence minimums, so ``core.born_digital`` can
+# apply the same thresholds without importing private symbols across packages.
+MIN_TABLE_ROWS = _MIN_TABLE_ROWS
+MIN_COLS = _MIN_COLS
 
 # Width of the bin that ``round`` maps an x into: adjacent quantised positions
 # differ by exactly this, so two raw coordinates further apart than this were

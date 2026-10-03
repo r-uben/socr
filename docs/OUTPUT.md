@@ -152,7 +152,7 @@ without opening `audit_log.json`.
 
 ## 4. Failure modes
 
-Defined by `FailureMode` in `src/socr/core/result.py` (32 members). The sidecar
+Defined by `FailureMode` in `src/socr/core/result.py` (33 members). The sidecar
 carries the value as `failure_mode`. "Ships" below describes what the reader gets
 in the Markdown.
 
@@ -184,6 +184,7 @@ in the Markdown.
 | `native_text_shredded` | A rotated page whose native text came back as one glyph run per line. The fragments are not a reading of the page. | The page ships a marker and an image of the page. Read the image. |
 | `native_minus_as_digit` | A sign or symbol in the native layer is unreliable: a minus sign is encoded as the digit `2` (#913), or an undecoded control character sits directly before a number (#990), or the scan for either could not run. A negative number can read as a different or a positive one. The text is kept and ships `warning`. | Check every signed number on the page against the PDF. Audit kind `minus_extracted_as_digit` (the `2` case) or `control_byte_before_digit` (the control-character case) says how many hits. |
 | `native_invisible_text_scan` | The page is a scan whose invisible baked-in OCR text layer (render mode 3 over a page-sized raster) is what ships, or the scan for that failed. The text is kept and ships `warning`. Added in #961. | The text is an old OCR layer that nothing verified. Check the page against the PDF. Audit kind `invisible_text_scan` has `data.error`: true means the scan failed, not that the layer was found. |
+| `table_not_reconstructed` | A page has a `Table N` caption line and table structure (at least three horizontal rules of one width, recurring numeric columns, or the label-and-value shape), but table detection found no table. Native extraction flattened the grid to prose. The text is kept unchanged and ships `warning`; nothing is re-routed (#994). The document is not `success`. | Treat table numbers as unverified and read the table from the PDF. About one in five fires is a false positive (a figure page or a prose page that starts a line with `Table N`). |
 
 ### Table judging and fail-closed floors
 
@@ -276,7 +277,9 @@ This list is the kinds present at the time of writing; the code is the authority
 - `table_not_scorable`, `table_unexplained_lanes`: the native table could not be scored, or has lanes with no column.
 - `table_row_repetition_truncated`: consecutive duplicate rows were dropped.
 - `table_ditto_unresolved`: a ditto mark was kept verbatim, not expanded.
-- `possible_table_structure_not_reconstructed`: a borderless label|value shape was seen and not rebuilt.
+- `possible_table_structure_not_reconstructed`: a borderless label|value shape was seen and not rebuilt. Report only on its own; with a `Table N` caption it also raises `table_not_reconstructed`.
+- `table_not_reconstructed`: a caption plus table structure on a page where detection found no table (#994). The page ships `warning` / `table_not_reconstructed`. Recomputed from the PDF every run.
+- `table_not_reconstructed_retained`: the document-level mirror, emitted at assemble when the native text of such a page is what shipped.
 
 ### Scanned-table evidence (`pipeline/agentic.py`, `tables/source_evidence.py`)
 

@@ -931,6 +931,11 @@ def _invisible_text_suspect(p) -> bool:
     )
 
 
+def table_not_reconstructed_suspect(p) -> bool:
+    """GH-994: a caption plus table structure on a page detection found no table on."""
+    return bool(getattr(p, "table_not_reconstructed", False))
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -3105,6 +3110,9 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
+            # GH-994: same contradiction -- a restored SUCCESS native winner must not
+            # outrank a flattened-table flag raised by this run's analysis.
+            or table_not_reconstructed_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3652,7 +3660,10 @@ def _select_page_output_tagged(
         # page; by this point selection is settled and this synthetic output is
         # what ships either way.
         grid_rejected = bool(getattr(p, "text_grid_rejected", False))
-        native_demoted = native_is_fallback or grid_rejected
+        # GH-994: likewise status-only and not gated on ``p.attempts``: the page ships its
+        # native text unchanged, because detection found no table to re-read.
+        table_flattened = table_not_reconstructed_suspect(p)
+        native_demoted = native_is_fallback or grid_rejected or table_flattened
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3684,7 +3695,11 @@ def _select_page_output_tagged(
                     else (
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)
-                        else FailureMode.NONE
+                        else (
+                            FailureMode.TABLE_NOT_RECONSTRUCTED
+                            if table_flattened
+                            else FailureMode.NONE
+                        )
                     )
                 )
             ),

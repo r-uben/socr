@@ -39,6 +39,7 @@ from socr.core.manifest import (
     PageEnding,
     PagePrimaryReason,
     minus_as_digit_suspect,
+    table_not_reconstructed_suspect,
     coerce_page_timings,
     rollup_page_timings,
 )
@@ -2090,6 +2091,33 @@ class UnifiedPipeline:
                     detail=f"{what}; {outcome}",
                     data={
                         "error": scan_failed,
+                        "native_only": bool(self.config.native_only),
+                    },
+                )
+            )
+
+        # GH-994: a "Table N" caption plus table structure on a page detection found no table
+        # on. The page keeps its native text and ships WARNING (``table_not_reconstructed``);
+        # nothing is re-routed. Recomputed from the PDF every run, so deliberately NOT in
+        # ``_RESUME_REPLAYED`` (same contract as ``invisible_text_scan``).
+        for pa in assessment.pages:
+            if not getattr(pa, "table_not_reconstructed", False):
+                continue
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="table_not_reconstructed",
+                    engine="native",
+                    detail=(
+                        "the page has a 'Table N' caption and table structure (ruled lines, "
+                        "aligned numeric columns, or the GH-64 label|value shape) but table "
+                        "detection found no table, so the grid was flattened to prose; the "
+                        "text is unchanged and the page ships WARNING (table_not_reconstructed)"
+                    ),
+                    data={
+                        "gh64_columnar_shape": bool(
+                            getattr(pa, "possible_table_structure_not_reconstructed", False)
+                        ),
                         "native_only": bool(self.config.native_only),
                     },
                 )
@@ -10249,9 +10277,11 @@ class UnifiedPipeline:
             getattr(ps, "invisible_text_over_raster", False)
             or getattr(ps, "invisible_text_scan_failed", False)
         )
+        # GH-994: and for a flattened table the detector found nothing to re-read.
+        flattened_suspect = table_not_reconstructed_suspect(ps)
         chart_status = (
             PageStatus.WARNING
-            if (chart_render_failed or minus_suspect or invisible_suspect)
+            if (chart_render_failed or minus_suspect or invisible_suspect or flattened_suspect)
             else PageStatus.SUCCESS
         )
         chart_out = PageOutput(
@@ -10266,7 +10296,11 @@ class UnifiedPipeline:
                 else (
                     FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                     if invisible_suspect and not chart_render_failed
-                    else FailureMode.NONE
+                    else (
+                        FailureMode.TABLE_NOT_RECONSTRUCTED
+                        if flattened_suspect and not chart_render_failed
+                        else FailureMode.NONE
+                    )
                 )
             ),
             cost_usd=0.0,
@@ -12923,6 +12957,14 @@ class UnifiedPipeline:
                     page_num,
                 )
                 return None
+            # GH-994: same for a flattened table flagged by THIS run's analysis: a cached
+            # SUCCESS written before the detector existed must not be restored.
+            if ps_fresh is not None and table_not_reconstructed_suspect(ps_fresh):
+                logger.debug(
+                    "GH-994: p%d not resumed; the current analysis flags a flattened table",
+                    page_num,
+                )
+                return None
 
             disposition_raw = meta.get("table_ladder_disposition")
             # GH-359 (cubic P1): the exception is for a page whose tables were
@@ -14577,6 +14619,21 @@ class UnifiedPipeline:
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
 
+        # GH-994: same retained-native condition for a flattened table. The page ships its
+        # native text WARNING, so the document must not report SUCCESS over it.
+        flattened_table_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and table_not_reconstructed_suspect(p)
+            and n not in native_fallback_pages
+            and n not in failed_pages
+            and p.best_output
+            and p.best_output.audit_passed
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
+
         # A reconstructed or historical state may contain a whole-document
         # attempt (page_num=0) without per-page winners. Treat a passing one as
         # covering the document for status calculation.
@@ -14692,6 +14749,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not minus_retained_pages
         pages_ok = pages_ok and not invisible_retained_pages
+        pages_ok = pages_ok and not flattened_table_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
@@ -14999,6 +15057,7 @@ class UnifiedPipeline:
             or native_only_distrust_pages
             or minus_retained_pages
             or invisible_retained_pages
+            or flattened_table_pages
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_floor_pages
@@ -15122,6 +15181,17 @@ class UnifiedPipeline:
                             else "OCR unavailable or every rung failed"
                         )
                         + "); the text ships WARNING, unverified",
+                    )
+                )
+            for n in flattened_table_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="table_not_reconstructed_retained",
+                        engine="native",
+                        detail="a table the detector missed was flattened to prose; the "
+                        "native text ships WARNING (table_not_reconstructed), its table "
+                        "numbers are unverified",
                     )
                 )
             for n in native_only_distrust_pages:
@@ -15395,6 +15465,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(invisible_retained_pages)} page(s) shipped an "
                         "invisible baked-in OCR text layer from a scan (no OCR read "
                         f"replaced it): {invisible_retained_pages}[/yellow]"
+                    )
+                if flattened_table_pages:
+                    console.print(
+                        f"  [yellow]{len(flattened_table_pages)} page(s) have a table that "
+                        "detection missed and native text flattened to prose "
+                        f"(shipped WARNING): {flattened_table_pages}[/yellow]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(
