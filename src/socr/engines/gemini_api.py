@@ -16,6 +16,8 @@ from PIL import Image
 from socr.core.ollama_utils import (
     TotalDeadlineExceeded,
     call_with_total_deadline,
+    ollama_endpoint,
+    raise_for_status_redacted,
     safe_host_label,
 )
 from socr.core.result import FigureInfo
@@ -197,8 +199,9 @@ class OllamaFigureEngine:
     def is_available(self) -> bool:
         """Return True if Ollama is reachable and this model is in its tag list."""
         try:
+            url, extra = ollama_endpoint(self.host, "/api/tags")
             resp = call_with_total_deadline(
-                lambda: httpx.get(f"{self.host}/api/tags", timeout=3.0),
+                lambda: httpx.get(url, **extra, timeout=3.0),
                 3.0,
                 label=f"ollama figure {safe_host_label(self.host)}/api/tags",
             )
@@ -246,12 +249,13 @@ class OllamaFigureEngine:
                 ],
                 "stream": False,
             }
+            url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
-                lambda: httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0),
+                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
                 120.0,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
-            resp.raise_for_status()
+            raise_for_status_redacted(resp)
             raw = resp.json()["message"]["content"].strip()
 
             detected_type = _detect_figure_type(raw, figure_type)

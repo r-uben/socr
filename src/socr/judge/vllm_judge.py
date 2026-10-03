@@ -37,6 +37,7 @@ from pathlib import Path
 
 import httpx
 
+from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.killable import CallSpec, run_killable
 from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
 
@@ -102,7 +103,7 @@ def _post_chat(
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     payload = resp.json()
     choices = payload.get("choices") or []
     if not choices:
@@ -138,7 +139,7 @@ class VLLMVisionJudge:
             return False
         try:
             resp = httpx.get(f"{self.base_url}/models", timeout=5.0)
-            resp.raise_for_status()
+            raise_for_status_redacted(resp)
             served = {m.get("id", "") for m in resp.json().get("data", [])}
             return self.model in served
         except (httpx.HTTPError, ValueError):

@@ -193,7 +193,12 @@ def latex_for_crop(
     import urllib.error
     import urllib.request
 
-    from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
+    from socr.core.ollama_utils import (
+        call_with_total_deadline,
+        ollama_endpoint,
+        safe_host_label,
+        urllib_auth_headers,
+    )
     from socr.math.recover import clean_latex
 
     payload = json.dumps(
@@ -207,10 +212,13 @@ def latex_for_crop(
         }
     ).encode()
     req = urllib.request.Request(
-        f"{host}/api/generate",
+        ollama_endpoint(host, "/api/generate")[0],
         data=payload,
         headers={"Content-Type": "application/json"},
     )
+    # GH-976: unredirected, so a cross-origin 30x does not forward the credentials.
+    for _name, _value in urllib_auth_headers(host).items():
+        req.add_unredirected_header(_name, _value)
     try:
 
         def _call() -> object:

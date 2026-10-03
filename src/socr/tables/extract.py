@@ -23,7 +23,12 @@ from typing import Protocol
 import httpx
 
 from socr.core.daemon_call import submit_daemon
-from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
+from socr.core.ollama_utils import (
+    call_with_total_deadline,
+    ollama_endpoint,
+    raise_for_status_redacted,
+    safe_host_label,
+)
 from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
 from socr.tables.locate import TableBox
 
@@ -117,8 +122,14 @@ def _bracket_bare_ipv6(candidate: str) -> str:
     if not sep:
         scheme, rest = "http", candidate
     hostpart, slash, tail = rest.partition("/")
+    # GH-976: ``user:pass@`` is not part of the host token. Its colon is not a
+    # port separator, so counting it would bracket the credentials as if they
+    # were an IPv6 literal. Set it aside, bracket only what follows the last
+    # ``@``, and put it back untouched.
+    userinfo, at, hostpart = hostpart.rpartition("@")
     if not hostpart.startswith("[") and hostpart.count(":") > 1:
         hostpart = f"[{hostpart}]"
+    hostpart = f"{userinfo}{at}{hostpart}"
     return f"{scheme}://{hostpart}{slash}{tail}" if slash else f"{scheme}://{hostpart}"
 
 
@@ -159,7 +170,10 @@ def resolve_ollama_host(host: str | None = None) -> str:
         parts = urlsplit(candidate)
         has_port = parts.port is not None
     except ValueError:  # malformed host or port — leave the value exactly as given
-        logger.warning("GH-222: cannot parse backend host %r; using it verbatim", candidate)
+        # Never the raw value: it may carry URL userinfo (GH-976).
+        logger.warning(
+            "GH-222: cannot parse backend host %r; using it verbatim", safe_host_label(candidate)
+        )
         return candidate
     if not has_port and parts.hostname:
         default_port = urlsplit(DEFAULT_OLLAMA_HOST).port
@@ -216,9 +230,11 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     while the vision path stays wedged.
     """
     try:
+        url, extra = ollama_endpoint(host, "/api/generate", strip_slash=True)
         resp = call_with_total_deadline(
             lambda: httpx.post(
-                f"{host.rstrip('/')}/api/generate",
+                url,
+                **extra,
                 json={
                     "model": model,
                     "prompt": "ok",
@@ -231,7 +247,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
             timeout,
             label=f"ollama {safe_host_label(host)} generation canary ({model})",
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         return True
     except _PROBE_ERRORS:
         return False
@@ -267,7 +283,7 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
             },
             timeout=timeout,
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
         return True
     except _PROBE_ERRORS:
         return False
@@ -296,7 +312,7 @@ def probe_openai_server_idle(
     """
     try:
         resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
     except _PROBE_ERRORS:
         return False
     return _openai_generation_canary(
@@ -339,13 +355,14 @@ def probe_ollama_idle(
     ``None`` now means "resolve it" rather than "assume localhost".
     """
     resolved = resolve_ollama_host(host)
+    url, extra = ollama_endpoint(resolved, "/api/tags", strip_slash=True)
     try:
         resp = call_with_total_deadline(
-            lambda: httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout),
+            lambda: httpx.get(url, **extra, timeout=timeout),
             timeout,
             label=f"ollama {safe_host_label(resolved)}/api/tags probe",
         )
-        resp.raise_for_status()
+        raise_for_status_redacted(resp)
     except _PROBE_ERRORS:
         return False
     return _ollama_generation_canary(
@@ -390,8 +407,10 @@ def _ollama_read_crop(host: str, model: str, prompt: str, image_b64: str, timeou
     defence-in-depth only; the caller's ``run_killable`` deadline is what
     actually bounds that case, by killing the process making the call.
     """
+    url, extra = ollama_endpoint(host, "/api/generate")
     resp = httpx.post(
-        f"{host}/api/generate",
+        url,
+        **extra,
         json={
             "model": model,
             "prompt": prompt,
@@ -401,7 +420,7 @@ def _ollama_read_crop(host: str, model: str, prompt: str, image_b64: str, timeou
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     return _clean_markdown(resp.json().get("response", ""))
 
 
@@ -432,7 +451,7 @@ def _vllm_read_crop(
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     choices = resp.json().get("choices") or [{}]
     return _clean_markdown(choices[0].get("message", {}).get("content", ""))
 

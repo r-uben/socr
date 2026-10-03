@@ -27,7 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from socr.core.born_digital import clean_native_text, line_has_corrupt_math
-from socr.core.ollama_utils import call_with_total_deadline, safe_host_label
+from socr.core.ollama_utils import (
+    call_with_total_deadline,
+    ollama_endpoint,
+    safe_host_label,
+    urllib_auth_headers,
+)
 from socr.math.validate_latex import validate_latex_structure
 
 logger = logging.getLogger(__name__)
@@ -238,8 +243,13 @@ def latex_for_image(
         }
     ).encode()
     req = urllib.request.Request(
-        f"{host}/api/generate", data=payload, headers={"Content-Type": "application/json"}
+        ollama_endpoint(host, "/api/generate")[0],
+        data=payload,
+        headers={"Content-Type": "application/json"},
     )
+    # GH-976: unredirected, so a cross-origin 30x does not forward the credentials.
+    for _name, _value in urllib_auth_headers(host).items():
+        req.add_unredirected_header(_name, _value)
     try:
 
         def _call() -> object:

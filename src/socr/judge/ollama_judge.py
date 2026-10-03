@@ -21,7 +21,9 @@ from socr.core.ollama_utils import (  # noqa: F401 -- CONNECT_PROBE_TIMEOUT_SEC 
     CONNECT_PROBE_TIMEOUT_SEC,
     DEFAULT_PROBE_TIMEOUT_SEC,
     PROBE_THINK,
+    ollama_endpoint,
     probe_model_generation,
+    raise_for_status_redacted,
 )
 from socr.core.ollama_utils import host_reachable as _host_reachable
 from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
@@ -54,8 +56,10 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
     keeps the response stream open and trickles bytes, which defeats this
     per-chunk read timeout (measured in ``docs/log/2026-09-17_172-design.md``).
     """
+    url, extra = ollama_endpoint(host, "/api/generate")
     resp = httpx.post(
-        f"{host}/api/generate",
+        url,
+        **extra,
         json={
             "model": model,
             "prompt": prompt,
@@ -67,7 +71,7 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    raise_for_status_redacted(resp)
     return resp.json().get("response", "")
 
 
