@@ -40,6 +40,7 @@ from socr.core.manifest import (
     PagePrimaryReason,
     garbled_math_suspect,
     minus_as_digit_suspect,
+    native_untrusted_judge_timeout,
     table_not_reconstructed_suspect,
     coerce_page_timings,
     rollup_page_timings,
@@ -14712,6 +14713,17 @@ class UnifiedPipeline:
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
+        # #1004: a page whose model read was never judged (page judge TIMEOUT) and whose
+        # native layer is known bad ships native WARNING under its OWN failure mode. It
+        # is PARTITIONED out of ``native_fallback_pages`` so it is counted once, with its
+        # own event and CLI line (the #293 double-count shape).
+        judge_timeout_native_pages = [
+            n for n in native_fallback_pages if native_untrusted_judge_timeout(state.pages[n])
+        ]
+        native_fallback_pages = [
+            n for n in native_fallback_pages if n not in judge_timeout_native_pages
+        ]
+
         # #913: a page whose native text layer reads a minus as the digit "2" (or whose
         # scan failed) but whose NATIVE text is what ships anyway, with no OCR attempt
         # to blame -- ``--native-only``. ``native_fallback_pages`` cannot hold it (its
@@ -14725,6 +14737,7 @@ class UnifiedPipeline:
             and p.native_text
             and minus_as_digit_suspect(p)
             and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
             and n not in failed_pages
             and p.best_output
             and p.best_output.audit_passed
@@ -14741,6 +14754,7 @@ class UnifiedPipeline:
                 or getattr(p, "invisible_text_scan_failed", False)
             )
             and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
             and n not in failed_pages
             and p.best_output
             and p.best_output.audit_passed
@@ -14754,6 +14768,7 @@ class UnifiedPipeline:
             and p.native_text
             and garbled_math_suspect(p)
             and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
             and n not in failed_pages
             and p.best_output
             and p.best_output.audit_passed
@@ -14769,6 +14784,7 @@ class UnifiedPipeline:
             and p.native_text
             and table_not_reconstructed_suspect(p)
             and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
             and n not in failed_pages
             # No selected winner at all ships the synthetic native fallback, which the
             # manifest demotes too; a selected winner counts only when it is native/chart.
@@ -14893,6 +14909,7 @@ class UnifiedPipeline:
 
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
+        pages_ok = pages_ok and not judge_timeout_native_pages
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not minus_retained_pages
         pages_ok = pages_ok and not invisible_retained_pages
@@ -15201,6 +15218,7 @@ class UnifiedPipeline:
         if (
             failed_pages
             or native_fallback_pages
+            or judge_timeout_native_pages
             or d3_floor_pages
             or native_only_distrust_pages
             or minus_retained_pages
@@ -15247,6 +15265,18 @@ class UnifiedPipeline:
                         detail="structured/enhancement page did not ship a passing OCR "
                         "result (OCR failed, was skipped, or ran under --native-only); "
                         "native text shipped flagged",
+                    )
+                )
+            for n in judge_timeout_native_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_untrusted_judge_timeout",
+                        engine="native",
+                        detail="the native text layer of this page is known bad and the page "
+                        "judge TIMED OUT on the model read, so that read has no verdict and "
+                        "was not shipped; the untrusted native text shipped WARNING "
+                        f"({FailureMode.NATIVE_UNTRUSTED_JUDGE_TIMEOUT.value})",
                     )
                 )
             for n in corrupt_math_hybrid_pages:
@@ -15621,6 +15651,12 @@ class UnifiedPipeline:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
+                    )
+                if judge_timeout_native_pages:
+                    console.print(
+                        f"  [yellow]{len(judge_timeout_native_pages)} page(s) shipped UNTRUSTED "
+                        "native text: the page judge timed out on the model read, so it was "
+                        f"never judged: {judge_timeout_native_pages}[/yellow]"
                     )
                 if minus_retained_pages:
                     console.print(

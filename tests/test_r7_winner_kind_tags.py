@@ -97,9 +97,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 21, "two endings share a tag or tag count != 21"
+    assert len(used) == len(set(used)) == 22, "two endings share a tag or tag count != 22"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 21
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 22
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -188,8 +188,8 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 21
-    assert len(list(SelectionProvenance)) == 21
+    # 1. Total count of mapped provenance members must be exactly 22
+    assert len(list(SelectionProvenance)) == 22
 
     # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
@@ -218,13 +218,20 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
             SelectionProvenance.BEST_ATTEMPT_FLAGGED,
         },
+        # #1004: the untrusted-judge-timeout native ending joins the native fallback group.
+        PageDisposition(
+            PageEnding.DEMOTED_NATIVE, PagePrimaryReason.DEMOTED_NATIVE_RECOVERY_EXHAUSTION
+        ): {
+            SelectionProvenance.NATIVE_FALLBACK,
+            SelectionProvenance.NATIVE_UNTRUSTED_JUDGE_TIMEOUT,
+        },
     }
 
     for disp, members in expected_multi_dispositions.items():
         assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
 
     single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
-    assert single_disposition_count == 11
+    assert single_disposition_count == 10
 
     # 3. Check primary reason equivalence groups (exactly 12 distinct primary reasons)
     assert len(by_reason) == 12
@@ -248,10 +255,14 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
             SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
             SelectionProvenance.BEST_ATTEMPT_FLAGGED,
         },
+        PagePrimaryReason.DEMOTED_NATIVE_RECOVERY_EXHAUSTION: {
+            SelectionProvenance.NATIVE_FALLBACK,
+            SelectionProvenance.NATIVE_UNTRUSTED_JUDGE_TIMEOUT,
+        },
     }
 
     for reason, members in expected_multi_reasons.items():
         assert by_reason[reason] == members, f"mismatch for multi-member reason {reason}"
 
     single_reason_count = sum(1 for members in by_reason.values() if len(members) == 1)
-    assert single_reason_count == 9
+    assert single_reason_count == 8

@@ -939,6 +939,47 @@ def garbled_math_suspect(p) -> bool:
     )
 
 
+def judge_timeout_candidate(p) -> PageOutput | None:
+    """#1004: the model candidate whose PAGE judge TIMED OUT, if one exists on ``p``.
+
+    Reads the TYPED ``judge_outcome`` of the candidate only (never reason text), and
+    only a non-native reading that carries text. A candidate whose bytes some attempt
+    COMPLETED a refusal of is not a timeout case: the refusal is the applicable answer
+    and a completed rejection is never reinterpreted as a missing verdict.
+    """
+    for out in reversed(list(getattr(p, "attempts", None) or [])):
+        if out is None or not (out.text or "").strip():
+            continue
+        if (out.engine or "").startswith(("native", "chart_asset")):
+            continue
+        if getattr(out, "judge_outcome", "") != JUDGE_OUTCOME_TIMEOUT:
+            continue
+        if superseding_rejection(p, out) is not None:
+            continue
+        return out
+    return None
+
+
+def native_untrusted_judge_timeout(p) -> bool:
+    """#1004: native text ships because the judge timed out on the model read of a page
+    whose native layer is known bad.
+
+    Table-defect and structure-class pages are excluded: they own other endings (the
+    #713 credential path, D3, the table-distrust modes) and keep them unchanged.
+    """
+    return bool(
+        getattr(p, "needs_ocr_enhancement", False)
+        and not p.is_structure_class()
+        and not (
+            p.native_table_structure_failed
+            or getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_structure_defective", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and judge_timeout_candidate(p) is not None
+    )
+
+
 def table_not_reconstructed_suspect(p) -> bool:
     """GH-994: a caption plus table structure on a page detection found no table on."""
     return bool(getattr(p, "table_not_reconstructed", False))
@@ -2904,6 +2945,10 @@ class SelectionProvenance(str, Enum):
     #: different operator actions (here: a completed page acceptance, or a
     #: table-acceptance credential).
     STRUCTURE_CLASS_TEXT_TABLE_FLOOR = "structure_class_text_table_floor"
+    #: #1004: the SAME native-as-fallback ending for a page whose model read was never
+    #: judged (page judge timeout) and whose native layer is known bad. Split from
+    #: NATIVE_FALLBACK so it has its own bucket, event and CLI line and is counted once.
+    NATIVE_UNTRUSTED_JUDGE_TIMEOUT = "native_untrusted_judge_timeout"
     #: native layer deficient, recovery tried and never passed: native as FALLBACK,
     #: shipped WARNING / audit_passed=False
     NATIVE_FALLBACK = "native_fallback"
@@ -2985,6 +3030,11 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
     ),
     SelectionProvenance.NATIVE_FALLBACK: PageDisposition(
+        PageEnding.DEMOTED_NATIVE, PagePrimaryReason.DEMOTED_NATIVE_RECOVERY_EXHAUSTION
+    ),
+    # #1004: same public disposition as NATIVE_FALLBACK (native demoted); the new fact
+    # rides on the page's ``failure_mode`` and this provenance tag.
+    SelectionProvenance.NATIVE_UNTRUSTED_JUDGE_TIMEOUT: PageDisposition(
         PageEnding.DEMOTED_NATIVE, PagePrimaryReason.DEMOTED_NATIVE_RECOVERY_EXHAUSTION
     ),
     SelectionProvenance.NATIVE_CLEAN: PageDisposition(
@@ -3695,6 +3745,10 @@ def _select_page_output_tagged(
         # providerless run, or a ladder that never started, leaves no attempts).
         garbled_math = garbled_math_suspect(p)
         native_demoted = native_is_fallback or grid_rejected or table_flattened or garbled_math
+        # #1004: the model read was never judged (page judge timeout) and the native layer
+        # is known bad. Demote by status and failure mode only: ``audit_passed`` selects
+        # the winner and is left exactly as the fallback leaves it.
+        judge_timeout_native = native_is_fallback and native_untrusted_judge_timeout(p)
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3718,7 +3772,9 @@ def _select_page_output_tagged(
             # rather than silently defaulting to NONE, so the shipped page
             # matches the ticket's doneWhen at the surface that actually ships.
             failure_mode=(
-                FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                FailureMode.NATIVE_UNTRUSTED_JUDGE_TIMEOUT
+                if judge_timeout_native
+                else FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                 if native_table_defect and native_is_fallback
                 else (
                     FailureMode.NATIVE_MINUS_AS_DIGIT
@@ -3739,9 +3795,13 @@ def _select_page_output_tagged(
                 )
             ),
         ), (
-            SelectionProvenance.NATIVE_FALLBACK
-            if native_demoted
-            else SelectionProvenance.NATIVE_CLEAN
+            SelectionProvenance.NATIVE_UNTRUSTED_JUDGE_TIMEOUT
+            if judge_timeout_native
+            else (
+                SelectionProvenance.NATIVE_FALLBACK
+                if native_demoted
+                else SelectionProvenance.NATIVE_CLEAN
+            )
         )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that

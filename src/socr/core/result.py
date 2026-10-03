@@ -87,6 +87,11 @@ class FailureMode(str, Enum):
     #: math font the region lane does not list), or the scan for that failed, and no OCR read
     #: replaced it. The text is retained and shipped WARNING, never clean SUCCESS.
     NATIVE_GARBLED_MATH = "native_garbled_math"
+    #: #1004: the native text layer is known bad (``needs_ocr_enhancement``), the model read
+    #: of the page was never judged because the page judge TIMED OUT on it, so native ships.
+    #: A timeout is a missing verdict, not evidence: the unjudged model bytes are not shipped
+    #: and the native text is not trusted either. WARNING, document AUDIT_FAILED.
+    NATIVE_UNTRUSTED_JUDGE_TIMEOUT = "native_untrusted_judge_timeout"
     #: GH-994: a "Table N" caption plus table structure on a page detection found no table
     #: on, so the grid was flattened to prose. The text is retained unchanged and ships
     #: WARNING, never clean SUCCESS. Not re-routed.
