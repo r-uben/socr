@@ -29,6 +29,7 @@ from socr.audit.scorer import FailureModeScorer
 from socr.core.audit_log import VISUAL_VALUES_NOT_TRANSCRIBED_KIND
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
+from socr.core.daemon_call import submit_daemon
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
     FinalizedPageRecord,
@@ -127,6 +128,10 @@ _RESUME_REPLAYED: dict[str, str] = {
     "table_escalation_timeout": (
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
+    ),
+    "table_ladder_budget_exhausted": (
+        "GH-974: the page's ladder budget ran out; the page is UNVERIFIED and this event "
+        "is the record of WHY (the per-table unverified events only say rungs gave no verdict)"
     ),
     "table_escalation_withheld": (
         "GH-851: a page that lost its escalation because the provider was wedged; the "
@@ -976,6 +981,8 @@ class UnifiedPipeline:
         #: Only used to resolve the historical positional executing identity
         #: for a rung that advertises nothing; see ``_executing_identity``.
         self._table_judge_gate_rungs: list = []
+        #: GH-974: the CURRENT page's table-ladder budget; None outside the gate.
+        self._ladder_budget = None
         #: True while ``process_batch`` is driving ``process`` per file, so the
         #: batch counts as ONE reachability epoch rather than one per file.
         self._in_batch_run = False
@@ -6044,14 +6051,13 @@ class UnifiedPipeline:
                 # rather than joined: the subprocess may outlive us, but the loop
                 # must not.
                 deadline = float(getattr(self.config, "escalation_timeout_sec", 120.0))
-                ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                 started = time.monotonic()
-                future = ex.submit(run_provider, profile, page_num)
+                # GH-974: a daemon thread, so an abandoned call cannot hold the
+                # interpreter open at exit. The Future is what #851 inspects.
+                future = submit_daemon(run_provider, profile, page_num)
                 try:
                     out = future.result(timeout=deadline)
-                    ex.shutdown(wait=False)
                 except concurrent.futures.TimeoutError:
-                    ex.shutdown(wait=False)
                     # GH-851: ONE slow call is not evidence of a wedge. Remember
                     # the abandoned future; the next qualifying page decides
                     # from whether it has finished (see above).
@@ -6078,9 +6084,8 @@ class UnifiedPipeline:
                     # call was still launched -- and may have partially billed
                     # before failing -- so it is billable the same way a timeout
                     # is; only the OUTER function-level handler is left to log
-                    # and keep the incumbent, so shut the executor down and
-                    # record the attempt here before re-raising into it.
-                    ex.shutdown(wait=False)
+                    # and keep the incumbent, so record the attempt here before
+                    # re-raising into it.
                     _record_attempt_cost()
                     raise
 
@@ -7287,7 +7292,59 @@ class UnifiedPipeline:
         guard_cleared_ids.add(witness.table_id)
         return replace(result, outcome=TableLadderOutcome.ACCEPTED)
 
+    def _page_ladder_budget_sec(self, rungs: list) -> float:
+        """GH-974: the page's total ladder budget (see the config field)."""
+        configured = self.config.table_judge_page_budget_sec
+        if configured is not None:
+            return float(configured)
+        return float(self.config.table_judge_timeout_sec) * (len(rungs) + 1)
+
     def _run_table_judge_gate(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+        rungs: list,
+    ) -> None:
+        """Run the gate under a per-page wall-clock budget (GH-974).
+
+        A fresh budget per page: an exhausted one never leaks into the next page.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.ladder_budget import (
+            TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+            PageLadderBudget,
+        )
+
+        def _exhausted(message: str) -> None:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+                    engine=bo.engine or "",
+                    detail=message,
+                )
+            )
+            if not self.config.quiet:
+                console.print(f"  [yellow]p{page_num}: {message}[/yellow]")
+
+        def _report(name: str, model: str, elapsed: float) -> None:
+            logger.info("p%d table ladder %s (%s) %.1fs", page_num, name, model, elapsed)
+            if not self.config.quiet:
+                console.print(
+                    f"  [dim]p{page_num}: table ladder {name} ({model or '-'}) {elapsed:.1f}s[/dim]"
+                )
+
+        self._ladder_budget = PageLadderBudget(
+            self._page_ladder_budget_sec(rungs), on_exhausted=_exhausted, report=_report
+        )
+        try:
+            self._run_table_judge_gate_unbudgeted(state, page_num, ps, bo, rungs)
+        finally:
+            self._ladder_budget = None
+
+    def _run_table_judge_gate_unbudgeted(
         self,
         state: DocumentState,
         page_num: int,
@@ -7390,6 +7447,8 @@ class UnifiedPipeline:
         #: UNVERIFIED event's data, never consulted for outcome or latch.
         guard_decision_by_table: dict[str, dict] = {}
         adjudicator = self._build_table_cell_adjudicator()
+        if self._ladder_budget is not None:
+            adjudicator = self._ladder_budget.wrap_adjudicator(adjudicator)
         markdown_by_table: dict[str, str] = {}
         scope_by_table: dict[str, str] = {}
         #: #713: table_id -> {witness_sha256, witness_scope, markdown_sha256}.
@@ -7473,8 +7532,15 @@ class UnifiedPipeline:
                     try:
                         prompt_scope = "page" if witness.scope is WitnessScope.PAGE else "located"
                         with table_judge_prompt_scope(prompt_scope):
+                            # GH-974: the budget wraps the CALL; refusal and
+                            # identity bookkeeping below keep the originals.
+                            budgeted = (
+                                [self._ladder_budget.wrap_rung(r) for r in live_rungs]
+                                if self._ladder_budget is not None
+                                else live_rungs
+                            )
                             ladder_result = run_table_ladder(
-                                live_rungs, witness.crop_path, witness.markdown, witness.table_id
+                                budgeted, witness.crop_path, witness.markdown, witness.table_id
                             )
                         executed_rungs_by_table[witness.table_id] = list(live_rungs)
                         self._record_table_rung_refusals(live_rungs, ladder_result)
@@ -8214,13 +8280,24 @@ class UnifiedPipeline:
             return None
         from socr.judge.cell_transcribe import transcribe_cell
 
-        try:
+        def _call() -> str | None:
             return transcribe_cell(
                 crop_path,
                 model=self.config.table_judge_rung1_model,
                 host=self.config.table_judge_rung1_host,
                 timeout=self.config.table_judge_timeout_sec,
             )
+
+        try:
+            if self._ladder_budget is not None:
+                # GH-974: a skipped transcription is "no token", not a disproof.
+                return self._ladder_budget.call(
+                    "cell_transcribe",
+                    self.config.table_judge_rung1_model,
+                    _call,
+                    lambda _msg: None,
+                )
+            return _call()
         except Exception as exc:
             logger.warning(
                 "cell transcribe failed (%s: %s); not a disproof",
@@ -8454,11 +8531,9 @@ class UnifiedPipeline:
 
             if owner is not None:
                 owner._enter_judge_call()
-            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = ex.submit(_run)
+            future = submit_daemon(_run)  # GH-974: daemon, abandonable
             try:
                 result = future.result(timeout=self._timeout_sec)
-                ex.shutdown(wait=False)
                 return result
             except concurrent.futures.TimeoutError as exc:
                 # ``concurrent.futures.TimeoutError`` IS builtin ``TimeoutError``
@@ -8469,7 +8544,6 @@ class UnifiedPipeline:
                 # leave as an exception so ``route_page`` types it.
                 inner_raised = future.done()
                 future.cancel()
-                ex.shutdown(wait=False)
                 if inner_raised:
                     # #713 round 3 (Astra P2): WRAPPED, not re-raised unchanged.
                     # Both branches are the same outcome -- a page judge that

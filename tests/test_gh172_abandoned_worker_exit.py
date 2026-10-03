@@ -1,5 +1,10 @@
 """GH-172: what an abandoned timeout worker actually does to process exit.
 
+GH-974 UPDATE: the deadline sites no longer use ThreadPoolExecutor; they use
+`socr.core.daemon_call.submit_daemon` (daemon threads), pinned in
+`test_gh974_page_budget_daemon.py`. This file keeps measuring the STDLIB behaviour
+(the reason the sites were changed); the prose below describes the pre-GH-974 sites.
+
 `route_page` and `_read_with_deadline` both abandon a stalled
 `ThreadPoolExecutor` worker with `shutdown(wait=False)`, and both used to
 describe it as a *daemon* thread that the interpreter would discard. It is not,

@@ -421,6 +421,13 @@ class PipelineConfig:
     # UNVERIFIED (never a silent PASS, never an exception) rather than call out.
     # This field only documents the interaction; TICKET-B1 implements the gate.
     table_judge_timeout_sec: float = TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
+    # GH-974: TOTAL wall-clock budget for one page's table ladder (rung calls,
+    # adjudicator and cell transcription, across all of the page's tables).
+    # ``None`` derives it: ``table_judge_timeout_sec`` x (reader rungs + 1), i.e.
+    # one worst-case call per ladder stage (each reader rung, plus the
+    # adjudicator/transcriber stage). Once spent, remaining calls are skipped and
+    # the page ends UNVERIFIED with a ``table_ladder_budget_exhausted`` event.
+    table_judge_page_budget_sec: float | None = None
 
     # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):
     # the blind cell-transcription ADJUDICATOR. Not a third reader rung: it never

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from socr.core.config import EngineType
+from socr.core.daemon_call import submit_daemon
 from socr.core.providers import ProviderProfile
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
@@ -255,38 +256,14 @@ def route_page(
         )
         try:
             if timeout_sec is not None:
-                ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = ex.submit(run_provider, prof, page_num)
+                # GH-974: a DAEMON thread (GH-172 showed ThreadPoolExecutor workers
+                # are not, and hold the interpreter open while a wedged socket
+                # never returns). The abandoned call is discarded at exit.
+                future = submit_daemon(run_provider, prof, page_num)
                 try:
                     output = future.result(timeout=timeout_sec)
                 except concurrent.futures.TimeoutError:
                     future.cancel()
-                    # Abandon the executor without waiting for the stalled
-                    # thread: wait=False lets us escalate immediately.
-                    #
-                    # GH-172: the thread is NOT a daemon. `ThreadPoolExecutor`
-                    # workers never are, and they cannot be made so after they
-                    # start -- `t.daemon = True` raises on a running thread, and
-                    # forcing `_daemonic` does not help either, because
-                    # `threading._shutdown` joins on `_shutdown_locks` captured
-                    # when the thread STARTED. Measured: a process whose only
-                    # remaining work is one wedged worker exits when that worker
-                    # returns, not before.
-                    #
-                    # So the CLI can outlive this timeout, and how far depends
-                    # on WHY the deadline fired. A merely slow provider unblocks
-                    # at its own httpx timeout -- every provider, judge and crop
-                    # call passes one -- so that residual wait is bounded. A
-                    # WEDGED socket does not: the read-timeout never fires when
-                    # the server holds the response stream open, which is the
-                    # case this soft timeout exists for and the case #172 is
-                    # about. Bounded in the easy case, unbounded in the one that
-                    # matters.
-                    #
-                    # Closing it means bounding the client timeout by the soft
-                    # one, or moving the call to a killable process boundary --
-                    # tracked on #172, not done here.
-                    ex.shutdown(wait=False)
                     logger.warning(
                         "provider %s timed out on page %s (%.2fs) — escalating",
                         prof.engine.value,
@@ -315,8 +292,6 @@ def route_page(
                         )
                     )
                     continue
-                else:
-                    ex.shutdown(wait=False)
             else:
                 output = run_provider(prof, page_num)
         except Exception as exc:  # a provider blowing up must not kill the page
