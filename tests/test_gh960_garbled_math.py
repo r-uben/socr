@@ -107,8 +107,6 @@ class _NoSpans:
 @pytest.mark.parametrize(
     ("text", "field"),
     [
-        ("a  b", "private_use"),
-        ("a \U000f0001 b", "private_use"),
         ("a \U0001d465 b", "math_alphanumeric"),
         ("a க b", "misdecoded_script_letters"),  # Tamil
         ("a ܐ b", "misdecoded_script_letters"),  # Syriac
@@ -158,6 +156,37 @@ def test_math_font_names(font: str, fires: bool) -> None:
             return {"blocks": [{"lines": [{"spans": [{"font": font, "text": "xy"}]}]}]}
 
     assert (detect_garbled_math(_Page(), "").unlisted_math_font_chars > 0) is fires
+
+
+class _SpanPage:
+    def __init__(self, font: str, text: str) -> None:
+        self._spans = [{"font": font, "text": text}]
+
+    def get_text(self, *a, **k):
+        return {"blocks": [{"lines": [{"spans": self._spans}]}]}
+
+
+@pytest.mark.parametrize(
+    ("font", "code", "counts"),
+    [
+        ("SymbolMT", 0xF8F7, True),  # Hameed p9: bracket piece
+        ("Symbol", 0xF065, True),  # Symbol epsilon
+        ("SymbolMT", 0xF074, True),  # Symbol tau
+        ("txex-bar", 0xED4D, True),  # TeX extension delimiter
+        ("STIXNonUnicode", 0xE14B, True),  # #92's AEA glyph
+        ("Helvetica", 0xF0001, True),  # supplementary PUA, unknown font
+        ("SymbolMT", 0xF0B7, False),  # Symbol bullet
+        ("CIDFont+F6", 0xF0B7, False),  # same bullet code, re-embedded
+        ("Symbol", 0xF0E0, False),  # lozenge footnote mark
+        ("Symbol", 0xF0D3, False),  # copyright
+        ("Wingdings", 0xF06C, False),  # dingbat bullet
+        ("Wingdings3", 0xF075, False),  # dingbat arrow
+        ("ZapfDingbats", 0xE000, False),
+    ],
+)
+def test_private_use_counts_only_math_glyphs(font: str, code: int, counts: bool) -> None:
+    sig = detect_garbled_math(_SpanPage(font, f"a {chr(code)} b"), "")
+    assert (sig.private_use == 1) is counts
 
 
 def test_script_set_excludes_scripts_the_corpus_prints() -> None:

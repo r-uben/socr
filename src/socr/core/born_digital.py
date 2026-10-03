@@ -2302,6 +2302,30 @@ MISDECODED_MATH_SCRIPTS = frozenset(
 #: containing "MT" (e.g. ``TimesNewRomanPSMT``) do not match.
 _MATH_FAMILY_FONT_RE = re.compile(r"(?i)(math|^(?:[A-Z]{6}\+)?R?MT(MI|SYN?|EX)B?$|MnSymbol)")
 
+#: #960 review: a private-use glyph in a dingbat font is a bullet, arrow or check mark, never
+#: math. Measured on the 87 pages the union fired on through private-use glyphs alone: every
+#: Wingdings / Wingdings3 glyph there was a list bullet or arrow (render spot check).
+_DINGBAT_FONT_RE = re.compile(r"(?i)(wingding|webding|dingbat)")
+
+#: #960 review: Word maps a Symbol-font glyph to U+F000 + its Adobe Symbol encoding code. These
+#: codes are the Symbol glyphs that are not mathematics (PDF Reference, Appendix D: club,
+#: diamond, heart, spade, bullet, carriagereturn, registerserif, copyrightserif,
+#: trademarkserif, lozenge, registersans, copyrightsans, trademarksans). The spot check found
+#: bullet (0xB7) list markers and a lozenge (0xE0) footnote mark; every other Symbol glyph on
+#: those pages was a Greek letter, operator or bracket piece.
+SYMBOL_ENCODING_NON_MATH_CODES = frozenset(
+    {0xA7, 0xA8, 0xA9, 0xAA, 0xB7, 0xBF, 0xD2, 0xD3, 0xD4, 0xE0, 0xE2, 0xE3, 0xE4}
+)
+_SYMBOL_PUA_BASE = 0xF000  # Word's Symbol-font PUA convention: U+F000 + encoding code
+
+
+def _is_math_private_use(ch: str, font: str) -> bool:
+    """Whether a private-use glyph in *font* stands for mathematics (#960)."""
+    if not count_pua_chars(ch) or _DINGBAT_FONT_RE.search(font):
+        return False
+    code = ord(ch) - _SYMBOL_PUA_BASE
+    return not (0 <= code <= 0xFF and code in SYMBOL_ENCODING_NON_MATH_CODES)
+
 
 @dataclass(frozen=True)
 class GarbledMathSignals:
@@ -2309,10 +2333,12 @@ class GarbledMathSignals:
 
     Each field counts characters; any non-zero field is a hit. The union of the four is
     the detector measured on the trusted-native population: it fires on all 8 audited
-    pages with wrong math and re-routes 1,849 of 8,398 pages (22%).
+    pages with wrong math and re-routes 1,817 of 8,398 pages (22%; 1,849 before the
+    private-use signal stopped counting bullets and dingbats).
     """
 
-    #: Private-use codepoints: font-private glyphs with no Unicode meaning (Hameed p9).
+    #: Private-use glyphs that stand for mathematics (Hameed p9: SymbolMT bracket pieces);
+    #: dingbat-font glyphs and the non-math Symbol codes (bullets, marks) are not counted.
     private_use: int = 0
     #: Mathematical Alphanumeric Symbols (U+1D400 block): math italics that extract as
     #: codepoints readers and search cannot use, with sub/superscripts flattened.
@@ -2342,14 +2368,19 @@ class GarbledMathSignals:
         return {k: v for k, v in counts.items() if v}
 
 
-def unlisted_math_font_char_count(page) -> int:
-    """Characters on *page* set in a math font that ``_MATH_FONT_RE`` does not list (#960)."""
-    total = 0
+def _garbled_math_span_counts(page) -> tuple[int, int]:
+    """(math private-use glyphs, chars in an unlisted math font) on *page* (#960).
+
+    Both need the span's font, so they share one span walk.
+    """
+    private_use = unlisted = 0
     for span in iter_page_spans(page):
         font = span.get("font") or ""
+        text = span.get("text") or ""
         if _MATH_FAMILY_FONT_RE.search(font) and not _MATH_FONT_RE.search(font):
-            total += len(span.get("text") or "")
-    return total
+            unlisted += len(text)
+        private_use += sum(1 for ch in text if _is_math_private_use(ch, font))
+    return private_use, unlisted
 
 
 def detect_garbled_math(page, text: str) -> GarbledMathSignals:
@@ -2370,11 +2401,12 @@ def detect_garbled_math(page, text: str) -> GarbledMathSignals:
             unicodedata.category(ch)[0] in "LM" and name.split(" ", 1)[0] in MISDECODED_MATH_SCRIPTS
         ):
             scripts += 1
+    private_use, unlisted = _garbled_math_span_counts(page)
     return GarbledMathSignals(
-        private_use=count_pua_chars(text),
+        private_use=private_use,
         math_alphanumeric=malnum,
         misdecoded_script_letters=scripts,
-        unlisted_math_font_chars=unlisted_math_font_char_count(page),
+        unlisted_math_font_chars=unlisted,
     )
 
 

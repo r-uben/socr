@@ -91,3 +91,46 @@ Artefacts: `~/.local/state/socr-housekeeping/gh960/ab/` (`RESULT.md`, `RESULT-po
   off (4), chart demotion off (3), manifest failure mode off (4).
 - Full suite: 6698 passed, 1 failed (that old PUA pin, updated above and rerun green), 2 skipped,
   4 xfailed. `uvx ruff@0.16.0 format --check .` clean.
+
+## Review fixes (Astra, ACCEPT-WITH-FIXES on #1006)
+Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeeping/gh960/fix1/`.
+
+### Benign private-use glyphs
+- Of the 1,849 union pages, 87 (18 documents) fired on the private-use signal alone.
+- Fonts carrying those glyphs, in pages: SymbolMT 45, Symbol 20, Wingdings3 9, txex 6,
+  Wingdings 5, txex-bar 4, NTXEXB 4, CIDFont+F6 1. Symbol/SymbolMT glyphs are mostly
+  Word's U+F000 + Symbol-code mapping of Greek letters, operators and bracket pieces. The
+  exceptions are U+F0B7 (bullet), which is the most frequent code, and U+F0E0 (lozenge).
+- Render spot check of 14 pages, one per document. Math on 7: lorenzoni (brackets),
+  stock_watson 2010 (π, τ), stock_watson 2012 (′, Λ), Hameed (paren pieces), jung (Σ), levy
+  (txex delimiters), acosta (β, α, δ, ε). Benign on 7: forestal, cinia_ferrari, patel_gloor
+  (Symbol bullet), conrad (Wingdings3 arrow bullet), two unknown_author papers (Wingdings
+  bullet and check mark), and bond_edmans (lozenge footnote mark).
+- Rule: a private-use glyph counts only if its span font is not a dingbat font
+  (`_DINGBAT_FONT_RE`). Glyphs in Word's U+F0xx Symbol range also must not carry a code in
+  `SYMBOL_ENCODING_NON_MATH_CODES`, the Adobe Symbol encoding glyphs that are not math
+  (suits, bullet, carriage return, ©®™, lozenge). The detector now reads the glyph's font
+  from the span walk it already did.
+- Result: 32 of the 87 pages stop firing, all benign documents; 55 still fire (stock_watson
+  ×2, levy, jung, lorenzoni, siano, Hameed, acosta). The corpus count is **1,817** of 8,398
+  trusted-native pages. On the 60-page audit the detector still fires on exactly the union's
+  15 pages, including Hameed p9 (SymbolMT U+F8EB–F8F8 bracket pieces), so it fires on 8/8 WRONG.
+- #92's AEA pages (Andrade 2019, Sastry 2026) are not in the corpus, and the AEA papers
+  that are (flynn_sastry) carry no private-use glyph. #92's evidence against whole-page OCR
+  was a pipeline fallback ("native_fallback / page_failed"), not a worse model read. The
+  STIXNonUnicode glyphs it named still count, because they sit in a math font.
+
+### Table pages (native-first)
+- Pages that native-first table handling serves on main (born-digital, table detected, no
+  enhancement flag): 2,564. The #960 detector fires on **531** of them (105 documents; fama
+  49, woodford 36, theodoridis 32, ...). The detector also fires on 271 of the 1,493
+  chart-lane pages. The whole-page re-route volume is therefore about 1,817 + 531 + 271 ≈
+  2,619 pages, not 1,849: the population behind 1,849 excluded table and chart pages.
+- Not changed. A native-first SHIP ships the whole page's native text through
+  `_agentic_native_page`: the structured grid AND the prose. Keeping that lane on these pages
+  would ship the garbled prose maths again, which is the defect #960 fixes. It would be
+  demoted to WARNING, but it would not be repaired. The ask's condition, "no flagged glyph in
+  the table cells", does not help, because the flagged glyphs sit in the prose. A real fix
+  splits the page: native grid for the table regions, a model read for the rest. No lane does
+  that today, so it is left for a follow-up. On these pages the model's table transcription
+  goes through the existing per-page table verification instead.
