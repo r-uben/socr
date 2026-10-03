@@ -681,14 +681,36 @@ def process_new(
     return out
 
 
-def check_rerun(cfg: LibraryConfig, stem: str) -> Path:
-    """The refusals of ``rerun`` without running it; returns the PDF. Read-only."""
+def _journal_rolls_forward_staged(cfg: LibraryConfig, stem: str) -> bool:
+    """Read-only: would ``recover_promotion`` install ``staging/stem`` (roll forward)?"""
+    try:
+        j = json.loads(_journal_path(cfg).read_text(encoding="utf-8"))
+        target, staged = Path(j["target"]), Path(j["staged"])
+        archived = Path(j["archived"]) if j.get("archived") else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if j.get("stem") != stem or staged != cfg.staging_dir / stem:
+        return False
+    if target != cfg.text_doc_dir(stem):
+        return False
+    if os.path.lexists(target) or not os.path.lexists(staged):
+        return False
+    return archived is None or os.path.lexists(archived)
+
+
+def check_rerun(cfg: LibraryConfig, stem: str, *, after_recovery: bool = False) -> Path:
+    """The refusals of ``rerun`` without running it; returns the PDF. Read-only.
+
+    ``after_recovery`` (dry-run only) evaluates the staging check as the live run
+    would see it once ``recover_promotion`` has rolled a journaled promotion forward.
+    """
     _stem(stem)
     pdf = next((p for p in list_pdfs(cfg) if p.stem == stem), None)
     if pdf is None:
         raise LibraryError(f"no PDF with stem {stem!r} under {cfg.pdf_dir}")
     staged = cfg.staging_dir / stem
-    if staged.exists():
+    rolled = after_recovery and _journal_rolls_forward_staged(cfg, stem)
+    if os.path.lexists(staged) and not rolled:
         raise LibraryError(
             f"{staged} already exists: promote it (--promote {stem}) or move it aside; "
             "a staged run is never overwritten"

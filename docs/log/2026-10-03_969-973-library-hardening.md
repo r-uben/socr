@@ -23,3 +23,10 @@ occurrences == 1): drop `_stem` call, drop the `isinstance` gate, drop the CLI
 exactly its own tests; baseline copy 107 passed.
 Mutant for #972 needs both checks disabled: the read-side refusal alone also blocks the
 partial write, the preflight is the belt for symlinked documents/missing_text/manifest.
+
+## Review fixes (Astra, cubic)
+
+- CLI uses `is not None` for --promote/--rerun (empty stem now hits `_stem`, not batch), incl. the mutual-exclusion check.
+- `check_rerun` uses `os.path.lexists` (dangling staging symlink refused).
+- Dry-run `--rerun` passes `after_recovery=True`: a read-only journal read decides whether recovery would roll the staged dir forward; nothing is recovered.
+- Mutants killed for each (external copy, canary, anchor count 1).

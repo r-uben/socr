@@ -1208,3 +1208,55 @@ def test_973_roll_forward_fsyncs_the_archive_dir_before_clearing_the_journal(tmp
     events = _spy_fsync(monkeypatch, cfg)
     assert "recovered" in lib.recover_promotion(cfg)
     assert (cfg.archive_dir, True) in events  # synced while the journal still existed
+
+
+@pytest.mark.parametrize("flag", ["--promote", "--rerun"])
+@pytest.mark.parametrize("dry", [[], ["--dry-run"]])
+def test_empty_stem_is_refused_not_treated_as_batch(tmp_path, hermetic, flag, dry):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _pdf(cfg.pdf_dir / "new.pdf")
+    res = _run("--config", str(cfg_path), *dry, flag, "")
+    assert res.exit_code != 0 and "invalid document stem" in res.output
+    assert not cfg.text_dir.exists()  # no batch processing happened
+
+
+def test_empty_stem_with_the_other_flag_is_mutually_exclusive(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    res = _run("--config", str(cfg_path), "--promote", "", "--rerun", "a")
+    assert res.exit_code != 0 and "separate steps" in res.output
+
+
+def test_rerun_refuses_a_dangling_staging_symlink(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    cfg.staging_dir.mkdir(parents=True)
+    (cfg.staging_dir / "a").symlink_to(tmp_path / "nowhere")
+    with pytest.raises(lib.LibraryError, match="already exists"):
+        lib.check_rerun(cfg, "a")
+
+
+def test_dry_run_rerun_sees_the_journal_as_recovery_would_resolve_it(tmp_path, hermetic):
+    # crash after archiving, before install: live recovery rolls staged/a forward,
+    # so a live --rerun a would then proceed. The dry-run must agree, read-only.
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    archived = cfg.archive_dir / "a.2026-10-03"
+    _fake_doc(cfg.archive_dir, "a.2026-10-03", body="old")
+    _write_journal(
+        cfg,
+        target=str(cfg.text_dir / "a"),
+        staged=str(cfg.staging_dir / "a"),
+        archived=str(archived),
+    )
+    before = _snapshot(tmp_path / "lib")
+    res = _run("--config", str(cfg_path), "--dry-run", "--rerun", "a")
+    assert res.exit_code == 0 and "would re-process" in res.output, res.output
+    assert _snapshot(tmp_path / "lib") == before  # nothing recovered
+    assert (cfg.index_dir / lib.JOURNAL_NAME).exists()
+    # no journal: the same leftovers are still refused
+    (cfg.index_dir / lib.JOURNAL_NAME).unlink()
+    res = _run("--config", str(cfg_path), "--dry-run", "--rerun", "a")
+    assert res.exit_code != 0 and "already exists" in res.output
