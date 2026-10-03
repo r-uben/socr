@@ -2318,11 +2318,19 @@ SYMBOL_ENCODING_NON_MATH_CODES = frozenset(
 )
 _SYMBOL_PUA_BASE = 0xF000  # Word's Symbol-font PUA convention: U+F000 + encoding code
 
+#: #960 review: the fonts whose U+F0xx glyphs follow the Adobe Symbol encoding, so the
+#: non-math codes above mean what the encoding says. Measured: every Symbol-encoded
+#: private-use glyph on the private-use-only pages sat in ``Symbol`` or ``SymbolMT``. Any
+#: other font's glyph at those codepoints is that font's own, possibly math, and still counts.
+_SYMBOL_ENCODED_FONT_RE = re.compile(r"(?i)^(?:[A-Z]{6}\+)?Symbol(?:MT)?$")
+
 
 def _is_math_private_use(ch: str, font: str) -> bool:
     """Whether a private-use glyph in *font* stands for mathematics (#960)."""
     if not count_pua_chars(ch) or _DINGBAT_FONT_RE.search(font):
         return False
+    if not _SYMBOL_ENCODED_FONT_RE.search(font):
+        return True
     code = ord(ch) - _SYMBOL_PUA_BASE
     return not (0 <= code <= 0xFF and code in SYMBOL_ENCODING_NON_MATH_CODES)
 
@@ -2333,7 +2341,7 @@ class GarbledMathSignals:
 
     Each field counts characters; any non-zero field is a hit. The union of the four is
     the detector measured on the trusted-native population: it fires on all 8 audited
-    pages with wrong math and re-routes 1,817 of 8,398 pages (22%; 1,849 before the
+    pages with wrong math and re-routes 1,818 of 8,398 pages (22%; 1,849 before the
     private-use signal stopped counting bullets and dingbats).
     """
 

@@ -120,6 +120,13 @@ Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeepi
   was a pipeline fallback ("native_fallback / page_failed"), not a worse model read. The
   STIXNonUnicode glyphs it named still count, because they sit in a math font.
 
+- Second review (Astra): the Symbol-code exemption applied to every font, so another font's own
+  private glyph at, say, U+F0B7 escaped detection. The exemption now applies only to fonts that
+  match `_SYMBOL_ENCODED_FONT_RE`, i.e. `Symbol` and `SymbolMT` with an optional subset prefix.
+  Those are the only Symbol-encoded fonts measured on the private-use-only pages. With the gate,
+  56 of the 87 pages fire: patel_gloor p5 (a CIDFont glyph at U+F0B7) is back. The corpus count
+  is **1,818**.
+
 ### Table pages (native-first)
 - Pages that native-first table handling serves on main (born-digital, table detected, no
   enhancement flag): 2,564. The #960 detector fires on **531** of them (105 documents; fama

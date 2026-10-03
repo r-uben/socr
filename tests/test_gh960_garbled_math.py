@@ -176,7 +176,9 @@ class _SpanPage:
         ("STIXNonUnicode", 0xE14B, True),  # #92's AEA glyph
         ("Helvetica", 0xF0001, True),  # supplementary PUA, unknown font
         ("SymbolMT", 0xF0B7, False),  # Symbol bullet
-        ("CIDFont+F6", 0xF0B7, False),  # same bullet code, re-embedded
+        ("CIDFont+F6", 0xF0B7, True),  # same code, not a Symbol-encoded font: font-private
+        ("ABCDEF+SymbolMT", 0xF0B7, False),  # subset-prefixed Symbol bullet
+        ("SomeMathFont", 0xF0B7, True),  # a font's own private glyph at the bullet code
         ("Symbol", 0xF0E0, False),  # lozenge footnote mark
         ("Symbol", 0xF0D3, False),  # copyright
         ("Wingdings", 0xF06C, False),  # dingbat bullet
