@@ -1169,7 +1169,11 @@ class UnifiedPipeline:
         """
         if not (self.config.agentic and getattr(self.config, "escalate_ambiguous_tables", False)):
             return False
-        available = self._available_engines_for_agentic()
+        # GH-940: a pure probe. ``_available_engines_for_agentic`` also resets the
+        # pin-failure flag and emits the once-per-pipeline unservable report; a
+        # skip DECISION must do neither. A refused skip means ``_phase_agentic``
+        # probes again; that is accepted (the probes are cheap), side effects are not.
+        available = self._probe_engines_for_agentic()[0]
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -10903,6 +10907,19 @@ class UnifiedPipeline:
         Tier filtering (``--strict-local``) is NOT applied here — it stays in the
         caller (``_phase_agentic``), which is the only place that knows the run's
         policy. This function reports reachability, not eligibility.
+
+        Applies the probe's side effects (pin-failure flag, unservable report).
+        """
+        probe = self._probe_engines_for_agentic()
+        available, unservable, pin_reason = probe
+        self._qwen_cloud_pin_unavailable = pin_reason
+        self._report_unservable_engines(unservable)
+        return available
+
+    def _probe_engines_for_agentic(self) -> tuple[list, list, str]:
+        """Side-effect-free reachability probe: ``(available, unservable, pin_reason)``.
+
+        Touches no pipeline state; the caller decides what to record (GH-940).
         """
         from socr.core.providers import DEFAULT_PROVIDERS
 
@@ -10911,7 +10928,7 @@ class UnifiedPipeline:
 
         available = []
         unservable: list[EngineType] = []
-        self._qwen_cloud_pin_unavailable = ""
+        pin_reason = ""
         for engine_type in self.config.enabled_engines:
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
@@ -10936,7 +10953,7 @@ class UnifiedPipeline:
                         if ok:
                             available.append(prof)
                         else:
-                            self._qwen_cloud_pin_unavailable = reason
+                            pin_reason = reason
                 except Exception:  # availability probe must never crash routing
                     pass
                 continue
@@ -10945,8 +10962,7 @@ class UnifiedPipeline:
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
                 pass
-        self._report_unservable_engines(unservable)
-        return available
+        return available, unservable, pin_reason
 
     #: GH-905: cap on the provider error folded into a journaled ``skip_reason``.
     #: CLI stderr can be long and multi-line, and this string is copied into every

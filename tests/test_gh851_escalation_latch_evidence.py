@@ -103,6 +103,12 @@ def _run(root: Path, *, mode: str):
                 "_available_engines_for_agentic",
                 return_value=[PROFILE_QWEN_LOCAL, PROFILE_GEMINI],
             ),
+            # GH-940: the resume gate asks the pure probe beneath the wrapper.
+            patch.object(
+                pipeline,
+                "_probe_engines_for_agentic",
+                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], ""),
+            ),
             patch.object(UnifiedPipeline, "_page_has_tables", return_value=False),
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
             patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),
