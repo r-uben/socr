@@ -90,7 +90,7 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
     Cheap by construction -- one GET, no generation, no model load.
     """
     resolved = resolve_ollama_host(host)
-    url, extra = ollama_endpoint(resolved, "/api/tags")
+    url, extra = ollama_endpoint(resolved, "/api/tags", strip_slash=True)
     try:
         resp = call_with_total_deadline(
             lambda: httpx.get(url, **extra, timeout=timeout),
@@ -168,7 +168,7 @@ def _post_chat(host: str, payload: dict[str, Any], timeout: float) -> str:
     """
     # GH-968: ``timeout`` is httpx's per-read limit; a peer that trickles bytes
     # never trips it. The same value is also the TOTAL deadline.
-    url, extra = ollama_endpoint(host, "/api/chat")
+    url, extra = ollama_endpoint(host, "/api/chat", strip_slash=True)
     resp = call_with_total_deadline(
         lambda: httpx.post(url, **extra, json=payload, timeout=timeout),
         timeout,

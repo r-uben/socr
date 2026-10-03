@@ -9,6 +9,7 @@ function, so absolute outputs are safe to pin (no provider involved).
 from __future__ import annotations
 
 import logging
+import sys
 
 import httpx
 import pytest
@@ -214,7 +215,7 @@ def test_split_userinfo_and_endpoint() -> None:
     assert split_userinfo("http://h:9") == ("http://h:9", None)
     assert split_userinfo("http://u:p%41@h:9/x") == ("http://h:9/x", ("u", "pA"))
     assert split_userinfo("http://u:p@w@h:9") == ("http://h:9", ("u", "p@w"))
-    url, extra = ollama_endpoint("http://u:p@h:9/", "/api/tags")
+    url, extra = ollama_endpoint("http://u:p@h:9/", "/api/tags", strip_slash=True)
     assert url == "http://h:9/api/tags" and isinstance(extra["auth"], httpx.BasicAuth)
     assert ollama_endpoint("http://h:9", "/api/tags") == ("http://h:9/api/tags", {})
     assert urllib_auth_headers("http://u:p@h") == {
@@ -235,7 +236,8 @@ def loopback():
 
     class H(BaseHTTPRequestHandler):
         def _reply(self):
-            seen.append((self.command, self.path, self.headers.get("Authorization")))
+            raw = self.requestline.split(" ")[1]  # self.path collapses a leading "//"
+            seen.append((self.command, raw, self.headers.get("Authorization")))
             n = int(self.headers.get("Content-Length") or 0)
             if n:
                 self.rfile.read(n)
@@ -293,6 +295,155 @@ def test_real_request_keeps_credentials_out_of_url_and_logs(loopback, caplog, mo
     assert all(path.startswith("/api/") for _, path, _ in seen)  # none rode in the path
     assert any("HTTP Request" in r.getMessage() for r in caplog.records), "httpx logged"
     _assert_clean(caplog)
+
+
+@pytest.mark.parametrize("host", ["http://h:9", "http://h:9/", "http://h:9//", "http://h:9/pre/"])
+def test_credential_free_url_is_byte_identical_to_the_old_construction(host) -> None:
+    from socr.core.ollama_utils import ollama_endpoint
+
+    assert ollama_endpoint(host, "/api/x")[0] == f"{host}/api/x"  # old ``f"{host}/api/x"``
+    assert (
+        ollama_endpoint(host, "/api/x", strip_slash=True)[0] == f"{host.rstrip('/')}/api/x"
+    )  # old ``f"{host.rstrip('/')}/api/x"``
+    assert ollama_endpoint(host, "/api/x")[1] == {}
+
+
+def _fresh(module):
+    """An un-stubbed copy of *module*, executed from its source file."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_gh976_fresh", module.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fresh  # dataclasses look the defining module up here
+    try:
+        spec.loader.exec_module(fresh)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return fresh
+
+
+def test_every_converted_site_keeps_its_previous_slash_behaviour(
+    loopback, monkeypatch, tmp_path
+) -> None:
+    """A trailing-slash host: sites that stripped still strip, the rest still do not."""
+    from socr.core.ollama_utils import _get_tags
+    from socr.judge import table_rung_ollama as rung
+    from socr.judge.ollama_judge import _post_generate
+    from socr.math import equation_latex, recover
+    from socr.tables import extract
+
+    monkeypatch.setattr(httpx, "get", httpx._api.get)  # undo conftest's stub
+    port, seen, _ = loopback
+    host = f"http://127.0.0.1:{port}/"
+    crop = tmp_path / "c.png"
+    crop.write_bytes(b"png")
+    calls = {  # site -> path the ORIGINAL code requested on origin/main
+        "rung.reachable": (lambda: rung.ollama_rung_reachable("m", host), "/api/tags"),
+        "extract.probe_idle": (lambda: extract.probe_ollama_idle(host), "/api/tags"),
+        "extract.canary": (
+            lambda: extract._ollama_generation_canary(host, "m", 5.0),
+            "/api/generate",
+        ),
+        # conftest replaces ``_post_chat`` on the imported module; load a pristine copy.
+        "rung.post_chat": (
+            lambda: _fresh(rung)._post_chat(host, {"model": "m"}, 5.0),
+            "/api/chat",
+        ),
+        "utils.probe_generate": (
+            lambda: __import__("socr.core.ollama_utils", fromlist=["x"]).probe_generate(
+                host, "m", 5.0
+            ),
+            "//api/generate",
+        ),
+        "utils.get_tags": (lambda: _get_tags(host, 5.0), "//api/tags"),
+        "judge.post_generate": (
+            lambda: _post_generate(host, "m", "p", "aQ==", 5.0),
+            "//api/generate",
+        ),
+        "extract.read_crop": (
+            lambda: extract._ollama_read_crop(host, "m", "p", "aQ==", 5.0),
+            "//api/generate",
+        ),
+        "recover": (
+            lambda: recover.latex_for_image(b"png", host=host, timeout=5.0),
+            "//api/generate",
+        ),
+        "equation_latex": (
+            lambda: equation_latex.latex_for_crop(crop, host=host, timeout=5.0),
+            "//api/generate",
+        ),
+    }
+    for name, (call, old_path) in calls.items():
+        before = len(seen)
+        try:
+            call()
+        except Exception:  # only the request path matters here
+            pass
+        assert len(seen) > before, name
+        assert seen[before][1] == old_path, name
+
+
+@pytest.fixture
+def two_origins():
+    """Server A answers every request with a 302 to server B; B records Authorization."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    got_b: list[str | None] = []
+    port_b: list[int] = []
+
+    class B(BaseHTTPRequestHandler):
+        def _reply(self):
+            got_b.append(self.headers.get("Authorization"))
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            body = json.dumps({"response": "x"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _reply
+
+        def log_message(self, *a):
+            pass
+
+    class A(B):
+        def _reply(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port_b[0]}/api/generate")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_POST = _reply
+
+    sb = ThreadingHTTPServer(("127.0.0.1", 0), B)
+    port_b.append(sb.server_address[1])
+    sa = ThreadingHTTPServer(("127.0.0.1", 0), A)
+    for s in (sa, sb):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield sa.server_address[1], got_b
+    for s in (sa, sb):
+        s.shutdown()
+        s.server_close()
+
+
+def test_credentials_are_not_forwarded_across_a_redirect(two_origins, tmp_path) -> None:
+    from socr.math import equation_latex, recover
+
+    port_a, got_b = two_origins
+    host = f"http://{USER}:{PW}@127.0.0.1:{port_a}"
+    assert recover.latex_for_image(b"png", host=host, timeout=5.0) == "x"
+    crop = tmp_path / "c.png"
+    crop.write_bytes(b"png")
+    assert equation_latex.latex_for_crop(crop, host=host, timeout=5.0) == "x"
+    assert len(got_b) == 2, "the redirect must actually have been followed to B"
+    assert got_b == [None, None]
 
 
 def test_urllib_equation_paths_send_basic_auth_not_url_userinfo(loopback, caplog, tmp_path) -> None:

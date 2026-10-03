@@ -230,7 +230,7 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
     while the vision path stays wedged.
     """
     try:
-        url, extra = ollama_endpoint(host, "/api/generate")
+        url, extra = ollama_endpoint(host, "/api/generate", strip_slash=True)
         resp = call_with_total_deadline(
             lambda: httpx.post(
                 url,
@@ -355,7 +355,7 @@ def probe_ollama_idle(
     ``None`` now means "resolve it" rather than "assume localhost".
     """
     resolved = resolve_ollama_host(host)
-    url, extra = ollama_endpoint(resolved, "/api/tags")
+    url, extra = ollama_endpoint(resolved, "/api/tags", strip_slash=True)
     try:
         resp = call_with_total_deadline(
             lambda: httpx.get(url, **extra, timeout=timeout),

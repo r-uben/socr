@@ -245,8 +245,11 @@ def latex_for_image(
     req = urllib.request.Request(
         ollama_endpoint(host, "/api/generate")[0],
         data=payload,
-        headers={"Content-Type": "application/json", **urllib_auth_headers(host)},
+        headers={"Content-Type": "application/json"},
     )
+    # GH-976: unredirected, so a cross-origin 30x does not forward the credentials.
+    for _name, _value in urllib_auth_headers(host).items():
+        req.add_unredirected_header(_name, _value)
     try:
 
         def _call() -> object:

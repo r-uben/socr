@@ -108,3 +108,24 @@ copy, canary, uncapped anchor count): first-`@`, no slash boundary, first-URL-on
 endpoint keeps userinfo, endpoint drops auth, urllib no header, ollama_judge and
 rung sites bypassing the helper, unredacted status error, raw host in log: all
 killed (the slash-boundary one needed a new test).
+
+## Review round 4 (Astra on a46f6389)
+
+1. **Credentials followed cross-origin redirects.** `math/recover.py` and
+   `math/equation_latex.py` passed Authorization via `Request(headers=...)`, which
+   urllib re-sends on a 301/302/303. Now `req.add_unredirected_header(...)`.
+   Test: loopback A answers 302 to loopback B; B must see no Authorization (and
+   the redirect must have been followed). Mutants (`add_header`, `headers=` kwarg
+   in both modules): killed.
+2. **Credential-free URLs were not byte-identical.** `ollama_endpoint` stripped
+   trailing slashes at sites that never did. It now takes `strip_slash` (default
+   False = `host + path`; True = `host.rstrip('/') + path`). Stripping sites, as
+   on origin/main: `extract.py` generation canary and `probe_ollama_idle`,
+   `table_rung_ollama.py` rung probe and `_post_chat`. Everything else keeps the
+   host as given. Pin: against a real loopback server with a trailing-slash host,
+   each of 11 sites must request the exact raw request-target the original code
+   did (`/api/tags` vs `//api/tags`; raw `requestline`, because http.server
+   collapses a leading `//` in `self.path`), plus a parametrised unit pin of the
+   helper. Mutants (always strip, never strip, rung site loses flag, canary site
+   loses flag): killed. The rung `_post_chat` is stubbed by conftest, so the test
+   loads a pristine copy of the module from source.

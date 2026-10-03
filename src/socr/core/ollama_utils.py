@@ -114,15 +114,22 @@ def split_userinfo(host: str) -> tuple[str, tuple[str, str] | None]:
     return f"{scheme}://{hostpart}{tail}", (user, password)
 
 
-def ollama_endpoint(host: str, path: str) -> tuple[str, dict[str, httpx.BasicAuth]]:
+def ollama_endpoint(
+    host: str, path: str, *, strip_slash: bool = False
+) -> tuple[str, dict[str, httpx.BasicAuth]]:
     """``(url, extra_kwargs)`` for ``httpx``: *host* + *path* without userinfo.
 
     ``extra_kwargs`` is ``{"auth": BasicAuth(...)}`` when *host* carried userinfo
     and ``{}`` otherwise, so a call is ``httpx.get(url, **extra, timeout=...)`` and
     a host without credentials makes exactly the call it always did.
+
+    ``strip_slash`` reproduces each call site's previous construction: sites that
+    used ``host.rstrip('/') + path`` pass True, sites that used ``host + path``
+    keep the default, so a credential-free URL is byte-identical to before.
     """
     clean, creds = split_userinfo(host)
-    return f"{clean.rstrip('/')}{path}", ({"auth": httpx.BasicAuth(*creds)} if creds else {})
+    base = clean.rstrip("/") if strip_slash else clean
+    return f"{base}{path}", ({"auth": httpx.BasicAuth(*creds)} if creds else {})
 
 
 def urllib_auth_headers(host: str) -> dict[str, str]:
