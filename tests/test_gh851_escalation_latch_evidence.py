@@ -29,6 +29,7 @@ pytest.importorskip("fitz")
 from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import PageOutput, PageStatus  # noqa: E402
 from socr.pipeline.agentic import AcceptDecision  # noqa: E402
+import socr.pipeline.orchestrator as orch  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 from test_gh855_scoring_independent_of_lane_health import (  # noqa: E402
     _MISSING_COLUMNS_CANDIDATE,
@@ -62,10 +63,10 @@ def _run(root: Path, *, mode: str):
     release = threading.Event()
     calls: list[int] = []
     escalation_futures: list[concurrent.futures.Future] = []
-    real_submit = concurrent.futures.ThreadPoolExecutor.submit
+    real_submit = orch.submit_daemon
 
-    def _recording_submit(self, fn, *args, **kwargs):
-        fut = real_submit(self, fn, *args, **kwargs)
+    def _recording_submit(fn, *args, **kwargs):
+        fut = real_submit(fn, *args, **kwargs)
         if getattr(fn, "__name__", "") == "run_provider":
             escalation_futures.append(fut)
         return fut
@@ -96,7 +97,7 @@ def _run(root: Path, *, mode: str):
 
     try:
         with (
-            patch.object(concurrent.futures.ThreadPoolExecutor, "submit", _recording_submit),
+            patch.object(orch, "submit_daemon", _recording_submit),
             patch.object(
                 pipeline,
                 "_available_engines_for_agentic",

@@ -43,6 +43,9 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 #: VERIFIED by `test_live_flags_are_actually_live`; do not add by inspection.
 _LIVE = {
     "agentic",
+    # GH-974: per-page ladder budget. The default fixture reads it (cubic on #978), so
+    # the live-observation test pins that it stays wired into the agentic path.
+    "table_judge_page_budget_sec",
     "audit_min_words",
     "cost_budget",
     "detect_equations",
