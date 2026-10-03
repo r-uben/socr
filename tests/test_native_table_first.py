@@ -28,7 +28,9 @@ from socr.tables.native_first import (
     DEFER,
     REFUSE,
     SHIP,
+    _markdown_table_tokens,
     plan_native_table,
+    retained_prose_lines_to_keep,
     retained_prose_survives,
     splice_cell_tokens,
     transcription_matches_native,
@@ -209,6 +211,38 @@ class TestPlanNativeTable:
         assert not transcription_matches_native("9.999", "0.253", "9.999")
         assert not transcription_matches_native("1.000", "0.253", "9.999")
         assert not transcription_matches_native("  ", "0.253", "9.999")
+
+
+class TestSharedMarkdownParsing:
+    """GH-928: native_first reads tables with the verifier's separator and cell helpers."""
+
+    def test_aligned_separator_is_not_content(self) -> None:
+        # Difference pin: the old ``startswith("| ---")`` read ``|:---|:---:|`` as a content row.
+        aligned = "| A | B |\n|:---|:---:|\n| x | 1 |"
+        plain = "| A | B |\n| --- | --- |\n| x | 1 |"
+        assert _markdown_table_tokens(aligned) == {"A", "B", "x", "1"}
+        assert _markdown_table_tokens(aligned) == _markdown_table_tokens(plain)
+
+    def test_aligned_separator_does_not_suppress_retained_prose(self) -> None:
+        # A separator fragment must not count as grid content for the retained-prose splice.
+        table = "| A | B |\n|:---|:---|\n| x | 1 |"
+        assert ":---" not in _markdown_table_tokens(table)
+        assert retained_prose_lines_to_keep("Table 1 notes here", table) == ["Table 1 notes here"]
+
+    def test_cell_split_follows_the_verifier_helper(self) -> None:
+        # Pinned shared behaviour: the helper splits on every ``|``, an escaped
+        # ``\|`` included, so native_first has no second reading of a row.
+        row = "| a \\| b | 1 |"
+        md = "| A | B | C |\n| --- | --- | --- |\n" + row
+        spliced = splice_cell_tokens(md, [(row, 2, "1", "2")])
+        assert spliced is not None
+        assert spliced.splitlines()[-1] == "| a \\ | b | 2 |"
+
+    def test_splice_on_aligned_separator_table(self) -> None:
+        row = "| x | 1 |"
+        md = "| A | B |\n|:---|---:|\n" + row
+        spliced = splice_cell_tokens(md, [(row, 1, "1", "2")])
+        assert spliced == "| A | B |\n|:---|---:|\n| x | 2 |"
 
 
 class TestOrphanDropEventIsOutcomeNeutral:
