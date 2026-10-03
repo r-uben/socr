@@ -180,19 +180,39 @@ class _AcceptingJudge:
         return AcceptDecision(accept=True, reason="stub accepts all")
 
 
-def _process(tmp_path, tag, monkeypatch, *, provider, shape, neutralised, native_only=False):
+def _chart_pdf(path: Path) -> Path:
+    """Prose plus a large embedded raster: ``has_chart_marks`` fires and the chart lane owns it."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 72
+    for _ in range(8):
+        page.insert_text((72, y), _PROSE, fontname="helv", fontsize=10)
+        y += 14
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 300, 300), False)
+    pix.set_rect(pix.irect, (235, 235, 235))
+    page.insert_image(fitz.Rect(72, y + 20, 372, y + 320), pixmap=pix)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _process(
+    tmp_path, tag, monkeypatch, *, provider, shape, neutralised, native_only=False, forced=False
+):
     from socr.core.providers import PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
 
     engine = _StubEngine()
-    _, kw = _spec(shape)
+    _, kw = _spec(shape) if shape != "chart" else (None, {})
     pdf = tmp_path / f"{tag}.pdf"
     if not pdf.exists():
-        _make(pdf, **kw)
+        _chart_pdf(pdf) if shape == "chart" else _make(pdf, **kw)
     with monkeypatch.context() as m:
         m.setattr(orch, "get_engine", lambda engine_type: engine)
         if neutralised:
             m.setattr(BornDigitalDetector, "_detect_flattened_table", classmethod(lambda *a: False))
+        if forced:
+            m.setattr(BornDigitalDetector, "_detect_flattened_table", classmethod(lambda *a: True))
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
@@ -304,3 +324,94 @@ def test_resume_does_not_restore_a_cached_success_for_a_flagged_page(tmp_path, m
     assert side["status"] == "warning"
     assert side["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
     assert result.status is not DocumentStatus.SUCCESS
+
+
+def test_chart_asset_lane_demotes_but_keeps_body_and_audit_passed(tmp_path, monkeypatch) -> None:
+    """The chart lane ships retained native prose; a flagged page must not bypass the demotion.
+
+    The synthetic chart page has no caption, so the detector is forced for the live arm; the
+    test is about the lane, not the detector.
+    """
+    kw = dict(provider=True, shape="chart", native_only=True)
+    off, _ = _process(tmp_path, "coff", monkeypatch, neutralised=True, **kw)
+    on, _ = _process(tmp_path, "con", monkeypatch, neutralised=False, forced=True, **kw)
+    a, b = _sidecar(tmp_path, "coff"), _sidecar(tmp_path, "con")
+    assert a["engine"] == "chart_asset", "setup: the page must take the chart lane"
+    assert a["status"] == "success" and off.status is DocumentStatus.SUCCESS
+    assert b["engine"] == "chart_asset"
+    assert b["status"] == "warning"
+    assert b["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
+    assert b["winning_output"]["audit_passed"] is a["winning_output"]["audit_passed"] is True
+    assert _page_text(tmp_path, "con") == _page_text(tmp_path, "coff")
+    assert "estimated effect" in _page_text(tmp_path, "con")
+    assert on.status is not DocumentStatus.SUCCESS
+
+
+def _select(tmp_path, *, engine: str, flagged: bool):
+    from socr.core.manifest import _select_page_output_tagged
+    from socr.core.result import PageOutput, PageStatus
+
+    pdf = tmp_path / f"sel-{engine}-{flagged}.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((54, 72), "text layer long enough to count as native here.")
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = True
+    p.native_text = "native body"
+    p.table_not_reconstructed = flagged
+    # Not a prefix extension of ``native_text``: a re-derived fallback would drop it.
+    out = PageOutput(
+        page_num=1,
+        text="rewritten native body\n\n$$x = 1$$",
+        status=PageStatus.SUCCESS,
+        engine=engine,
+        audit_passed=True,
+    )
+    p.attempts.append(out)
+    p.best_output = out
+    return _select_page_output_tagged(state, 1)[0]
+
+
+@pytest.mark.parametrize("engine", ["native", "native+equations", "chart_asset"])
+def test_selected_native_winner_keeps_exact_bytes_only_status_differs(tmp_path, engine) -> None:
+    base = _select(tmp_path, engine=engine, flagged=False)
+    flag = _select(tmp_path, engine=engine, flagged=True)
+    assert base.text == flag.text == "rewritten native body\n\n$$x = 1$$"
+    assert base.status.value == "success" and flag.status.value == "warning"
+    assert flag.failure_mode == FailureMode.TABLE_NOT_RECONSTRUCTED
+    assert flag.audit_passed is base.audit_passed is True
+    assert flag.engine == base.engine == engine
+
+
+def test_selected_model_winner_is_not_demoted(tmp_path) -> None:
+    base = _select(tmp_path, engine="qwen", flagged=False)
+    flag = _select(tmp_path, engine="qwen", flagged=True)
+    assert (flag.status, flag.failure_mode, flag.text) == (
+        base.status,
+        base.failure_mode,
+        base.text,
+    )
+
+
+def test_resume_restores_a_cached_model_winner_on_a_flagged_page(tmp_path, monkeypatch) -> None:
+    """The refusal is for cached NATIVE/chart text only; a model reading is not suspect."""
+    kw = dict(provider=True, shape="caption_plus_rules")
+    monkeypatch.setattr(UnifiedPipeline, "_resume_skip", lambda self, *a, **k: None)
+    _process(tmp_path, "m", monkeypatch, neutralised=True, **kw)
+    sidecar = next((tmp_path / "out-m").rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+    meta["winning_output"]["engine"] = "qwen"
+    sidecar.write_text(json.dumps(meta))
+    loaded: list = []
+    real = UnifiedPipeline._load_terminal_page
+
+    def spy(self, *a, **k):
+        out = real(self, *a, **k)
+        loaded.append(out)
+        return out
+
+    monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", spy)
+    _process(tmp_path, "m", monkeypatch, neutralised=False, **kw)
+    assert loaded and all(o is not None for o in loaded), "model winner must be restored"

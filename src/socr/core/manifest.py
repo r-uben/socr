@@ -3110,9 +3110,6 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
-            # GH-994: same contradiction -- a restored SUCCESS native winner must not
-            # outrank a flattened-table flag raised by this run's analysis.
-            or table_not_reconstructed_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3135,7 +3132,27 @@ def _select_page_output_tagged(
         # reachability (see that function's docstring).
         best_output_truncated = id(p.best_output) in _truncated_grid_reading_ids(p)
         if not (native_distrusted or native_text_shredded or best_output_truncated):
-            return p.best_output, SelectionProvenance.PASSING_BEST_OUTPUT
+            # GH-994: a flattened-table flag demotes the selected native/chart winner IN
+            # PLACE. Its exact bytes ship (a re-derived fallback would keep only a
+            # prefix-extending append, and could drop e.g. a ``native+equations`` body);
+            # only status and failure mode change. ``audit_passed`` is the winner-selection
+            # flag and stays as it was.
+            winner = p.best_output
+            if (
+                table_not_reconstructed_suspect(p)
+                and winning_engine.startswith(_NATIVE_TEXT_LANES)
+                and winner.status is PageStatus.SUCCESS
+            ):
+                winner = replace(
+                    winner,
+                    status=PageStatus.WARNING,
+                    failure_mode=(
+                        FailureMode.TABLE_NOT_RECONSTRUCTED
+                        if winner.failure_mode is FailureMode.NONE
+                        else winner.failure_mode
+                    ),
+                )
+            return winner, SelectionProvenance.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -3660,10 +3677,7 @@ def _select_page_output_tagged(
         # page; by this point selection is settled and this synthetic output is
         # what ships either way.
         grid_rejected = bool(getattr(p, "text_grid_rejected", False))
-        # GH-994: likewise status-only and not gated on ``p.attempts``: the page ships its
-        # native text unchanged, because detection found no table to re-read.
-        table_flattened = table_not_reconstructed_suspect(p)
-        native_demoted = native_is_fallback or grid_rejected or table_flattened
+        native_demoted = native_is_fallback or grid_rejected
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3695,11 +3709,7 @@ def _select_page_output_tagged(
                     else (
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)
-                        else (
-                            FailureMode.TABLE_NOT_RECONSTRUCTED
-                            if table_flattened
-                            else FailureMode.NONE
-                        )
+                        else FailureMode.NONE
                     )
                 )
             ),

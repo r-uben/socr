@@ -67,3 +67,18 @@ untested. The fixture labels were made two-word and it is killed now.
   real code change but not by a monkeypatch; the test bypasses it and exercises the per-page gate.
 - Collision: #993 edits metadata/library; this touches `born_digital.py`, `state.py`,
   `result.py`, `manifest.py` and `orchestrator.py` only.
+
+## Review fixes (Astra, ACCEPT-WITH-FIXES)
+
+1. Demotion moved into the passing-winner short-circuit in `_winning_page_output`: the selected
+   native/chart winner is `replace`d in place (status WARNING, `TABLE_NOT_RECONSTRUCTED`), so its
+   exact bytes ship (`native+equations` bodies are not re-derived through the prefix-only
+   `_native_text_with_appends`). The flag is no longer in `native_distrusted`, and the now
+   unreachable `table_flattened` terms in the native-fallback branch were removed rather than left
+   unguarded. Pinned by bytes-identical-with-and-without-flag tests for native, native+equations
+   and chart_asset; a model winner is untouched.
+2. Resume refusal is guarded to `native*` / `chart_asset*` cached winners, like #990. A cached
+   model winner on a flagged page is restored (regression test).
+3. Chart-asset lane test: body and `audit_passed` kept, WARNING + failure mode, document not SUCCESS.
+   Honest limit: the lane's own `flattened_suspect` term is backstopped by the manifest demotion,
+   so removing only that term survives; removing both is killed by the chart test.

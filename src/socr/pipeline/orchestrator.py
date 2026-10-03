@@ -12959,7 +12959,11 @@ class UnifiedPipeline:
                 return None
             # GH-994: same for a flattened table flagged by THIS run's analysis: a cached
             # SUCCESS written before the detector existed must not be restored.
-            if ps_fresh is not None and table_not_reconstructed_suspect(ps_fresh):
+            if (
+                ps_fresh is not None
+                and table_not_reconstructed_suspect(ps_fresh)
+                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+            ):
                 logger.debug(
                     "GH-994: p%d not resumed; the current analysis flags a flattened table",
                     page_num,
