@@ -142,8 +142,11 @@ class TestAssessPageWiring:
         # surfaced in notes (never silent)
         assert any("unmapped math glyphs" in n for n in pa.notes)
         assert any("native layer cleaned" in n for n in pa.notes)
-        # the flag must NOT force whole-page OCR (wrong lane)
-        assert pa.needs_ocr_enhancement is False
+        # #960 reversed the old rule ("must NOT force whole-page OCR"): a private-use glyph
+        # is a garbled-math signal and routes the page to a whole-page read, which the #960
+        # GPU A/B found replaced the broken layer (Hameed p9) instead of making it worse.
+        assert pa.needs_ocr_enhancement is True
+        assert pa.garbled_math_signals.get("private_use", 0) >= 1
 
     def test_clean_page_has_no_flag(self, tmp_path: Path) -> None:
         pdf = tmp_path / "clean.pdf"

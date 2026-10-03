@@ -2258,6 +2258,126 @@ def count_pua_chars(text: str) -> int:
     )
 
 
+#: #960: writing systems whose letters a failed ToUnicode map hands back in place of math
+#: glyphs. Measured on the trusted-native population (8,398 pages, 2026-10-02): math set in
+#: plain Cambria extracts as Syriac and Tamil letters (coibion_gorodnichenko p15, ramey p21).
+#: The other entries are further non-Latin writing systems. None is a language of the corpus
+#: (English-language economics and finance), so a letter from one of them on a born-digital
+#: page is a decoding failure, not text. Latin, Greek, Cyrillic, CJK and modifier letters are
+#: excluded because the corpus legitimately prints them. The script is the first word of the
+#: letter's Unicode name, as in the measurement.
+MISDECODED_MATH_SCRIPTS = frozenset(
+    {
+        "ARABIC",
+        "ARMENIAN",
+        "BENGALI",
+        "DEVANAGARI",
+        "ETHIOPIC",
+        "GEORGIAN",
+        "GUJARATI",
+        "GURMUKHI",
+        "HEBREW",
+        "KANNADA",
+        "KHMER",
+        "LAO",
+        "MALAYALAM",
+        "MYANMAR",
+        "NKO",
+        "ORIYA",
+        "SINHALA",
+        "SYRIAC",
+        "TAMIL",
+        "TELUGU",
+        "THAANA",
+        "THAI",
+        "TIBETAN",
+    }
+)
+
+#: #960: font names that set mathematics. ``_MATH_FONT_RE`` lists the families whose text
+#: extracts well enough for the P4-R region lane; a span in a font this matches and that
+#: list misses is math whose text layer the measurement found garbled (MathTime MTMI/MTSY/
+#: MTSYN/MTEX/RMTMI, UniMath, LibertinusT1Math, MathematicalPi, MnSymbol, Fourier-Math,
+#: "Cambria Math" with a space). Anchored MathTime names so that body fonts merely
+#: containing "MT" (e.g. ``TimesNewRomanPSMT``) do not match.
+_MATH_FAMILY_FONT_RE = re.compile(r"(?i)(math|^(?:[A-Z]{6}\+)?R?MT(MI|SYN?|EX)B?$|MnSymbol)")
+
+
+@dataclass(frozen=True)
+class GarbledMathSignals:
+    """#960: evidence that the native text layer garbled the page's mathematics.
+
+    Each field counts characters; any non-zero field is a hit. The union of the four is
+    the detector measured on the trusted-native population: it fires on all 8 audited
+    pages with wrong math and re-routes 1,849 of 8,398 pages (22%).
+    """
+
+    #: Private-use codepoints: font-private glyphs with no Unicode meaning (Hameed p9).
+    private_use: int = 0
+    #: Mathematical Alphanumeric Symbols (U+1D400 block): math italics that extract as
+    #: codepoints readers and search cannot use, with sub/superscripts flattened.
+    math_alphanumeric: int = 0
+    #: Letters of a :data:`MISDECODED_MATH_SCRIPTS` script.
+    misdecoded_script_letters: int = 0
+    #: Characters in spans whose font sets math but is not in ``_MATH_FONT_RE``.
+    unlisted_math_font_chars: int = 0
+
+    @property
+    def fired(self) -> bool:
+        return bool(
+            self.private_use
+            or self.math_alphanumeric
+            or self.misdecoded_script_letters
+            or self.unlisted_math_font_chars
+        )
+
+    def nonzero(self) -> dict[str, int]:
+        """The hit counts, keyed by signal name; empty when nothing fired."""
+        counts = {
+            "private_use": self.private_use,
+            "math_alphanumeric": self.math_alphanumeric,
+            "misdecoded_script_letters": self.misdecoded_script_letters,
+            "unlisted_math_font_chars": self.unlisted_math_font_chars,
+        }
+        return {k: v for k, v in counts.items() if v}
+
+
+def unlisted_math_font_char_count(page) -> int:
+    """Characters on *page* set in a math font that ``_MATH_FONT_RE`` does not list (#960)."""
+    total = 0
+    for span in iter_page_spans(page):
+        font = span.get("font") or ""
+        if _MATH_FAMILY_FONT_RE.search(font) and not _MATH_FONT_RE.search(font):
+            total += len(span.get("text") or "")
+    return total
+
+
+def detect_garbled_math(page, text: str) -> GarbledMathSignals:
+    """Read the #960 signals for one page. ``text`` is the native text that would ship.
+
+    Raises on an unreadable page; the caller treats that as a hit (fail closed).
+    """
+    import unicodedata
+
+    malnum = scripts = 0
+    for ch in text:
+        if ord(ch) < 128 or count_pua_chars(ch):
+            continue
+        name = unicodedata.name(ch, "")
+        if name.startswith("MATHEMATICAL"):
+            malnum += 1
+        elif (
+            unicodedata.category(ch)[0] in "LM" and name.split(" ", 1)[0] in MISDECODED_MATH_SCRIPTS
+        ):
+            scripts += 1
+    return GarbledMathSignals(
+        private_use=count_pua_chars(text),
+        math_alphanumeric=malnum,
+        misdecoded_script_letters=scripts,
+        unlisted_math_font_chars=unlisted_math_font_char_count(page),
+    )
+
+
 #: Glyphs a PDF uses to draw an unordered list marker. Their presence in the text
 #: layer means the page *has* a list; flat text can only render them as literal
 #: characters mid-paragraph, which is the GH-127 symptom.
@@ -2405,6 +2525,11 @@ class PageAssessment:
     invisible_text_over_raster: bool = False
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
+    #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
+    #: routes the page off the trusted-native lane to OCR; nothing is dropped.
+    garbled_math_signals: dict[str, int] = field(default_factory=dict)
+    #: #960: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
+    garbled_math_scan_failed: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: GH-371: zero-based ordinals of separator-bearing table regions whose
     #: per-region geometry verifier hard-failed.  The ordinal is relative to
@@ -3404,6 +3529,30 @@ class BornDigitalDetector:
                 + " -> OCR"
             )
 
+        # #960: math the text layer garbled (private-use glyphs, math-alphanumeric codepoints,
+        # letters of a script no corpus page is written in, or a math font ``_MATH_FONT_RE``
+        # does not list). The P4-R region lane keeps this native text as its floor, so only a
+        # whole-page read replaces it. GPU A/B (docs/log/2026-10-03_960-garbled-math-reroute.md):
+        # a model read fixed 8 of 8 such pages and degraded none of 7 clean ones it also fires on.
+        garbled_math_signals: dict[str, int] = {}
+        garbled_math_scan_failed = False
+        try:
+            garbled_math_signals = detect_garbled_math(page, raw_text).nonzero()
+        except Exception:
+            # Fail closed: an unreadable page is "unknown", not "clean".
+            logger.warning("#960: garbled-math scan failed", exc_info=True)
+            garbled_math_scan_failed = True
+        if garbled_math_signals or garbled_math_scan_failed:
+            needs_ocr_enhancement = True
+            notes.append(
+                "garbled math in the native text layer ("
+                + (
+                    ", ".join(f"{k}={v}" for k, v in garbled_math_signals.items())
+                    or "scan failed: unknown"
+                )
+                + ") -> OCR"
+            )
+
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
         # suspect so it is never silently relied on.
@@ -3580,16 +3729,15 @@ class BornDigitalDetector:
                 "glyphs); equation regions need image-OCR -> LaTeX"
             )
 
-        # Unmapped math glyphs (PUA): the native prose is trustworthy, but math
-        # symbols are font-private and lost outside the embedding font. We do NOT
-        # set needs_ocr_enhancement here — that would route the whole page to OCR,
-        # the lane empirically shown to make these pages worse (it falls back to the
-        # same broken native layer). The flag surfaces via the audit log (and, when
-        # equation recovery is enabled, the region-crop lane), never silently.
+        # Unmapped math glyphs (PUA): math symbols are font-private and lost outside the
+        # embedding font. Since #960 a PUA glyph is one of the garbled-math signals above,
+        # so the page is already routed to a whole-page OCR read (the GPU A/B in the #960
+        # log: the read replaced the broken layer on Hameed p9). This flag still feeds the
+        # audit log for a page whose native text ships anyway.
         if has_unmapped_math_glyphs:
             notes.append(
-                f"unmapped math glyphs ({pua_count} private-use codepoint(s)); native prose "
-                "trusted, math symbols are font-private (weak ToUnicode) -> need region OCR"
+                f"unmapped math glyphs ({pua_count} private-use codepoint(s)); math symbols "
+                "are font-private (weak ToUnicode)"
             )
 
         return PageAssessment(
@@ -3614,6 +3762,8 @@ class BornDigitalDetector:
             control_byte_scan_failed=control_byte_scan_failed,
             invisible_text_over_raster=invisible_text_over_raster,
             invisible_text_scan_failed=invisible_text_scan_failed,
+            garbled_math_signals=garbled_math_signals,
+            garbled_math_scan_failed=garbled_math_scan_failed,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             orphan_word_drops=orphan_word_drops,

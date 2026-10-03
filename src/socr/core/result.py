@@ -82,6 +82,11 @@ class FailureMode(str, Enum):
     #: image-dominant with render-mode-3 text), or the scan for that failed. The text is
     #: retained and shipped WARNING, never clean SUCCESS.
     NATIVE_INVISIBLE_TEXT_SCAN = "native_invisible_text_scan"
+    #: #960: the native text layer garbled the page's mathematics (private-use glyphs,
+    #: math-alphanumeric codepoints, letters of a script the corpus is not written in, or a
+    #: math font the region lane does not list), or the scan for that failed, and no OCR read
+    #: replaced it. The text is retained and shipped WARNING, never clean SUCCESS.
+    NATIVE_GARBLED_MATH = "native_garbled_math"
     #: GH-994: a "Table N" caption plus table structure on a page detection found no table
     #: on, so the grid was flattened to prose. The text is retained unchanged and ships
     #: WARNING, never clean SUCCESS. Not re-routed.

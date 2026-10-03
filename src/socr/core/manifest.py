@@ -931,6 +931,14 @@ def _invisible_text_suspect(p) -> bool:
     )
 
 
+def garbled_math_suspect(p) -> bool:
+    """#960: the native text layer garbled the page's mathematics, or the scan for that
+    failed (unknown is not clean)."""
+    return bool(
+        getattr(p, "garbled_math_signals", None) or getattr(p, "garbled_math_scan_failed", False)
+    )
+
+
 def table_not_reconstructed_suspect(p) -> bool:
     """GH-994: a caption plus table structure on a page detection found no table on."""
     return bool(getattr(p, "table_not_reconstructed", False))
@@ -3110,6 +3118,7 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
+            or garbled_math_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3715,9 +3724,13 @@ def _select_page_output_tagged(
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)
                         else (
-                            FailureMode.TABLE_NOT_RECONSTRUCTED
-                            if table_flattened
-                            else FailureMode.NONE
+                            FailureMode.NATIVE_GARBLED_MATH
+                            if native_is_fallback and garbled_math_suspect(p)
+                            else (
+                                FailureMode.TABLE_NOT_RECONSTRUCTED
+                                if table_flattened
+                                else FailureMode.NONE
+                            )
                         )
                     )
                 )
