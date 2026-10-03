@@ -4171,7 +4171,46 @@ def _apply_halt_unprocessed_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, status=status, failure_mode=mode)
 
 
-def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
+#: Selection endings whose shipped body is a MODEL reading (not the native text layer).
+#: Deliberately excludes CORRUPT_MATH_HYBRID (native text with spliced regions: its
+#: coverage is exactly what the accounting judges) and BEST_OUTPUT_UNVERIFIED /
+#: BEST_ATTEMPT_FLAGGED / WHOLE_DOC_SECTION, whose bytes may be native.
+_MODEL_READING_PROVENANCES = frozenset(
+    {
+        SelectionProvenance.PASSING_BEST_OUTPUT,
+        SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,
+        SelectionProvenance.FLAGGED_MODEL_KEPT,
+        SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
+        SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+        SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+        SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_RESTORED,
+        SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED,
+    }
+)
+
+
+def native_math_damage_ships(output: PageOutput, provenance: SelectionProvenance | None) -> bool:
+    """#1005: does the native text layer's math-glyph damage reach the shipped bytes?
+
+    The native-damage accounting describes the NATIVE text. When a model reading
+    replaced it the page owes the damage no status: it takes that reading's own
+    status. ``None`` (unknown ending) and every ending that may carry native bytes
+    answer True, so the answer errs toward keeping the warning. A model body that
+    still carries private-use codepoints shipped the damage regardless of author.
+    """
+    from socr.core.born_digital import count_pua_chars
+
+    if provenance not in _MODEL_READING_PROVENANCES:
+        return True
+    engine = str(output.engine or "")
+    if engine.startswith("native") or engine == "chart_asset":
+        return True
+    return count_pua_chars(output.text or "") > 0
+
+
+def _apply_unresolved_math_guard(
+    output: PageOutput, p, provenance: SelectionProvenance | None = None
+) -> PageOutput:
     """#165: demote a page whose detected math-glyph damage survived into its body.
 
     A REPORTING guard, not a routing one. It runs after selection because the
@@ -4190,6 +4229,8 @@ def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
     """
     from socr.math.accounting import unresolved_math_detail
 
+    if not native_math_damage_ships(output, provenance):
+        return output
     detail = unresolved_math_detail(
         has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
         evidence=getattr(p, "math_recovery_evidence", None),
@@ -4265,7 +4306,7 @@ def _select_and_finalize_page(
     p = state.pages.get(page_num)
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
-        output = _apply_unresolved_math_guard(output, p)
+        output = _apply_unresolved_math_guard(output, p, provenance)
         output = _apply_math_font_unrecovered_guard(output, p)
     output = _apply_label_unverified_guard(output)
     output = _apply_ditto_guard(output, page_num)

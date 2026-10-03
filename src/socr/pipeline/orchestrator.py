@@ -40,6 +40,7 @@ from socr.core.manifest import (
     PagePrimaryReason,
     garbled_math_suspect,
     minus_as_digit_suspect,
+    native_math_damage_ships,
     native_untrusted_judge_timeout,
     table_not_reconstructed_suspect,
     coerce_page_timings,
@@ -14855,12 +14856,18 @@ class UnifiedPipeline:
         unresolved_math_details = {}
         for r in pre_records:
             _mp = state.pages.get(r.output.page_num)
-            _detail = unresolved_math_detail(
-                has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
-                evidence=getattr(_mp, "math_recovery_evidence", None),
-                text=r.output.text or "",
+            # #1005: a page whose shipped body is a model reading carries no native damage.
+            _native_ships = native_math_damage_ships(r.output, r.selection_provenance)
+            _detail = (
+                unresolved_math_detail(
+                    has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
+                    evidence=getattr(_mp, "math_recovery_evidence", None),
+                    text=r.output.text or "",
+                )
+                if _native_ships
+                else None
             )
-            if _detail is None and has_text:
+            if _detail is None and has_text and _native_ships:
                 # Witnesses only. Re-running the whole reduction against
                 # ``final_text`` would read ANOTHER page's surviving private-use
                 # codepoints as this page's, and attribute the damage to the

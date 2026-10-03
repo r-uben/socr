@@ -481,10 +481,11 @@ def test_math_reporting_never_changes_which_table_ships(tmp_path: Path) -> None:
     assert damaged_out.audit_passed is clean_out.audit_passed is True, (
         "audit_passed selects the winner; a reporting guard must not touch it"
     )
-    # The only difference is the report itself.
+    # #1005: the damage is in the NATIVE layer, which this page does not ship (a clean
+    # model table won), so the report does not apply: the two outputs are identical.
     assert clean_out.status is PageStatus.SUCCESS
-    assert damaged_out.status is PageStatus.WARNING
-    assert any("unmapped math glyphs" in n for n in damaged_out.audit_notes)
+    assert damaged_out.status is PageStatus.SUCCESS
+    assert not any("unmapped math glyphs" in n for n in damaged_out.audit_notes)
 
 
 # ---------------------------------------------------------------------------
