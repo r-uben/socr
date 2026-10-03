@@ -28,7 +28,7 @@ image).
   (`invisible_scan_page_p<N>.png`, needs `--save-figures`, else the marker ships alone); own audit
   event `invisible_scan_unread` and own CLI line, replacing the generic `page_failed` /
   "no usable output" line for these pages. The page still counts in `failed_pages`, so the document
-  is AUDIT_FAILED and `final_result.error` names it. Metadata carries the failure mode and
+  is AUDIT_FAILED (ERROR if every page is a marker) and `final_result.error` names it. Metadata carries the failure mode and
   disposition per page, as for every floor.
 - Sidecar transparency: `attempts_summary` (engine, accepted, judge_outcome, rejection_reason
   truncated to `ATTEMPT_SUMMARY_REASON_MAX_CHARS` = 200). A skipped (resumed) page keeps the original

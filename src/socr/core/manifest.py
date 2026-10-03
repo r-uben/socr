@@ -934,10 +934,12 @@ def _invisible_text_suspect(p) -> bool:
 def _model_attempt_ran(p) -> bool:
     """#1027: a non-native reading was attempted on this page (accepted or not).
 
+    The no-provider sentinel carries an empty engine and is not a reading.
+
     The native and chart lanes exist without any model rung ever running, so their
     attempts do not count.
     """
-    return any(not (a.engine or "").startswith(_NATIVE_TEXT_LANES) for a in p.attempts)
+    return any((a.engine or "") and not a.engine.startswith(_NATIVE_TEXT_LANES) for a in p.attempts)
 
 
 def garbled_math_suspect(p) -> bool:
@@ -3479,8 +3481,14 @@ def _select_page_output_tagged(
             and _model_attempt_ran(p)
             and not _reaches_structure_class_branch(p)
         ):
-            invisible_marker = f"[page {page_num} failed: invisible OCR layer unread — see image]"
             invisible_png = getattr(p, "invisible_scan_png_ref", "")
+            # The image is conditional (needs figure saving and a successful render), so the
+            # marker only points at it when one was written.
+            invisible_marker = (
+                f"[page {page_num} failed: invisible OCR layer unread — see image]"
+                if invisible_png
+                else f"[page {page_num} failed: invisible OCR layer unread — not transcribed, see PDF page {page_num}]"
+            )
             return PageOutput(
                 page_num=page_num,
                 text=f"{invisible_marker}\n\n{invisible_png}"

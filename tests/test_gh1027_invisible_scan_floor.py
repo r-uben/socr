@@ -269,3 +269,25 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
         UnifiedPipeline, "_available_engines_for_agentic", lambda self: [PROFILE_QWEN_LOCAL]
     )
     monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self, *a, **kw: "")
+
+
+def test_empty_engine_sentinel_is_not_a_model_attempt() -> None:
+    """The no-provider sentinel (empty engine) must not trigger the floor."""
+    state = _page(over_raster=True)
+    state.pages[1].attempts = [
+        PageOutput(page_num=1, text="", status=PageStatus.ERROR, engine="", audit_passed=False)
+    ]
+    state.pages[1].best_output = None
+    _, prov = _select_page_output_tagged(state, 1)
+    assert prov is not SelectionProvenance.INVISIBLE_SCAN_UNREAD
+
+
+def test_marker_points_at_image_only_when_one_exists() -> None:
+    with_png = _page(over_raster=True)
+    with_png.pages[1].invisible_scan_png_ref = "![p](figures/x.png)"
+    out_png, _ = _select_page_output_tagged(with_png, 1)
+    out_bare, _ = _select_page_output_tagged(_page(over_raster=True), 1)
+    assert "see image" in out_png.text and "figures/x.png" in out_png.text
+    assert "see image" not in out_bare.text and "see PDF page 1" in out_bare.text
+    assert manifest.is_page_failed_marker(out_bare.text)
+    assert manifest._shipped_marker_reason(out_bare.text) is PagePrimaryReason.INVISIBLE_SCAN_UNREAD
