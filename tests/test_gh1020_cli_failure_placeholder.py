@@ -549,3 +549,65 @@ def test_page_with_a_fenced_marker_line_fails_closed(tmp_path, monkeypatch) -> N
     text = f"{REAL_TEXT}\n\n```markdown\n{PLACEHOLDER}\n```\n"
     page = _engine_page(tmp_path, monkeypatch, text, 0)
     assert page.status == PageStatus.ERROR and page.failure_mode == FailureMode.CLI_ERROR
+
+
+FRONTMATTER_HIDDEN = f"---\n{{marker}}\n---\n{REAL_TEXT}"
+
+
+def test_frontmatter_hidden_marker_fails_the_document(tmp_path, monkeypatch) -> None:
+    """Astra: cleaning strips the frontmatter, so only the RAW file shows the marker."""
+    raw = FRONTMATTER_HIDDEN.format(marker="*[OCR Failed]*")
+    assert not is_cli_failure_placeholder(BaseEngine._clean_output(raw, "qwen")), (
+        "setup: cleaning must hide the marker, or this test cannot tell raw from cleaned"
+    )
+
+    def _run(cmd, *args, **kwargs):
+        input_path = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(input_path, input_path.parent)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text(raw, encoding="utf-8")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = result.stderr = ""
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    result = _QwenLikeEngine().process_document(pdf, tmp_path / "out", PipelineConfig(timeout=30))
+    assert result.status == DocumentStatus.ERROR
+    assert result.failure_mode == FailureMode.CLI_ERROR
+
+
+def test_frontmatter_hidden_marker_fails_the_aggregate_page(tmp_path, monkeypatch) -> None:
+    hidden = f"---\n*[OCR failed for page 1]*\n---\n{assemble_pages([REAL_TEXT, REAL_TEXT])}"
+    assert not is_cli_failure_placeholder(BaseEngine._clean_output(hidden, "qwen")), (
+        "setup: cleaning must hide the marker"
+    )
+
+    def _run(cmd, *args, **kwargs):
+        if "-o" not in cmd:
+            probe = MagicMock()
+            probe.returncode = 0
+            probe.stdout = probe.stderr = ""
+            return probe
+        images_dir = pathlib.Path(cmd[1])
+        out_dir = pathlib.Path(cmd[cmd.index("-o") + 1])
+        rel_key = relative_key(images_dir, images_dir.parent)
+        doc_dir = doc_dir_for(out_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path_for(doc_dir, rel_key).write_text(hidden, encoding="utf-8")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = result.stderr = ""
+        return result
+
+    monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
+    pdf = _two_page_pdf(tmp_path / "two.pdf")
+    pages = _QwenLikeEngine().process_pages(pdf, [1, 2], PipelineConfig(timeout=30))
+    assert any(
+        p.status == PageStatus.ERROR and p.failure_mode == FailureMode.CLI_ERROR for p in pages
+    )
+    assert all("OCR failed" not in (p.text or "") for p in pages)

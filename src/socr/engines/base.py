@@ -610,6 +610,18 @@ class BaseEngine(ABC):
             return None, f"aggregate read failed: {exc}"
 
         sections = split_native_pages(self._clean_output(blob, self.name))
+        if is_cli_failure_placeholder(blob):
+            # GH-1020: check the RAW file before cleaning, which strips frontmatter and
+            # can hide a marker. Keep the raw section wherever it carries one so the
+            # caller's check sees it; if the sections no longer line up, fail every page.
+            raw_sections = split_native_pages(blob)
+            if len(raw_sections) == len(sections):
+                sections = [
+                    raw if is_cli_failure_placeholder(raw) else clean
+                    for raw, clean in zip(raw_sections, sections, strict=True)
+                ]
+            else:
+                sections = [blob] * len(sections)
         # Engine-saw order: the SAME filename sort the canon engine applies to the
         # image dir. Each rendered image stem is page_{orig:04d}, so a filename
         # sort yields ascending original page order — robust to a non-ascending
@@ -659,12 +671,20 @@ class BaseEngine(ABC):
         doc_dir = doc_dir_for(output_dir, rel_key)
         md_path = markdown_path_for(doc_dir, rel_key)
         if md_path.exists():
-            return self._clean_output(md_path.read_text(encoding="utf-8"), self.name)
+            return self._clean_unless_failed(md_path.read_text(encoding="utf-8"))
 
         legacy = self._legacy_page_md(pdf_path.stem, output_dir, expected=md_path)
         if legacy is not None:
-            return self._clean_output(legacy.read_text(encoding="utf-8"), self.name)
+            return self._clean_unless_failed(legacy.read_text(encoding="utf-8"))
         return None
+
+    def _clean_unless_failed(self, raw: str) -> str:
+        """Clean ``raw`` -- but hand back the RAW text when it carries a failure marker.
+
+        GH-1020: ``_clean_output`` strips frontmatter, which can hide a marker line, so the
+        check runs on the raw file and its verdict rides on the returned text.
+        """
+        return raw if is_cli_failure_placeholder(raw) else self._clean_output(raw, self.name)
 
     @staticmethod
     def _clean_output(text: str, engine: str = "") -> str:

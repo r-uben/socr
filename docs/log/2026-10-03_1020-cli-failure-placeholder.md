@@ -118,3 +118,20 @@ a sentence still passes.
 Tests: the "fenced example is accepted" tests are removed; replaced with Astra's fence-toggle case
 and fenced-marker pages expecting CLI_ERROR. Mutant (external copy, canary, anchor count 1)
 restoring the fence skip fails both.
+
+## Round 5
+
+- **Correction.** The round-4 statement that cleaning "never removes a marker line" was wrong:
+  `_clean_output` strips YAML frontmatter, so `---\n*[OCR Failed]*\n---\nhealthy text` cleans to
+  `healthy text` and the marker disappears.
+- **Fix.** The marker check now runs on the RAW file text before any cleaning, and its verdict
+  rides on what the reader returns: `_read_output` (via `_clean_unless_failed`) returns the raw
+  text when it carries a marker, so `process_document` sees it; `_read_aggregated_pages` keeps
+  the raw section wherever a raw section carries a marker (all sections if the raw and cleaned
+  splits no longer line up), so the per-page check sees it. `process_pages` still checks raw and
+  cleaned text for per-page files.
+- **Tests.** `test_exit_zero_whole_document_marker_is_an_error` (exit-0 `*[OCR Failed]*`, through
+  `process_document`) plus Astra's frontmatter case for the document and the aggregate, each with a
+  setup assertion that cleaning really hides the marker. Mutants (external copy, canary, anchor
+  count 1): disabling the aggregate raw check fails the aggregate test; reading cleaned-only in
+  `_read_output` fails the document test.
