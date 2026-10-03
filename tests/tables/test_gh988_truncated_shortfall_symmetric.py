@@ -195,3 +195,27 @@ def test_one_number_se_rows_cannot_stand_in_for_coefficient_rows(pre_988) -> Non
     assert table_truncated(md, words) is True
     pre_988()
     assert table_truncated(md, words) is True
+
+
+def test_repeats_under_different_labels_are_refused(pre_988) -> None:
+    """Astra's case: the first five coefficient/SE pairs three times under
+    different labels (Var0 / Variable0 / VAR0). Counting 15 labelled rows plus 5
+    bound SE rows would be 20 against 20 native; main counts 15 and refuses.
+    """
+    words = _page()
+    head = "| Variable | (1) | (2) | (3) |\n|---|---|---|---|\n"
+    blocks = []
+    for rename in (lambda n: n, lambda n: n.replace("Var", "Variable"), str.upper):
+        blocks.append(
+            head
+            + "".join(
+                f"| {rename(label)} | {' | '.join(coef)} |\n| | {' | '.join(se)} |\n"
+                for label, coef, se in _regression_rows(COEFS // 2)
+            )
+        )
+    one_block = head + "".join(b[len(head) :] for b in blocks)
+    for md in ("\n".join(blocks), one_block):  # separate blocks, and one block
+        assert table_truncated(md, words) is True
+    pre_988()
+    for md in ("\n".join(blocks), one_block):
+        assert table_truncated(md, words) is True

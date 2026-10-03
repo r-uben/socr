@@ -121,3 +121,13 @@ width test dropped 1 killed; baseline 60 passed.
 Census: 13 clear / 27 refuse / 0 new vs main (huynh p32 no longer clears: its SE rows have fewer
 numbers than its coefficient rows). Cleared pages are a subset of those viewed before
 (ghost p13, bybee p31 etc.): all complete; cleared-and-incomplete 0.
+
+## Round 6 -- repeat detection by native band, not label
+
+Astra: the first five pairs three times under different labels (Var0 / Variable0 / VAR0) counted
+15 labelled + 5 bound SE = 20 and passed; main counts 15 and refuses. The exact-label dedupe is
+removed. A labelled row that does not bind but reproduces (contiguous token run) a native band that
+another candidate row already consumed is a repeat and is not counted; a labelled row that binds to
+nothing at all still counts, as on main (OCR drift). Pin: Astra's case as separate blocks and as one
+block. Mutants: repeat rule off 2 killed (3-copy + Astra); bands reusable 4; shape condition 1.
+Census: 13 clear / 27 refuse / 0 new vs main (same 13 cleared pages as round 5).

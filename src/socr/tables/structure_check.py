@@ -372,8 +372,9 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     """#988: the candidate's numeric body rows that count toward the shortfall,
     and ``row_shape_min``.
 
-    A labelled row counts as it always has (once: an exact repeat of a labelled
-    row is not counted again). A blank-stub row -- a standard-error / t-stat
+    A labelled row counts as it always has, except that one which does not bind
+    yet reproduces a native band another candidate row already credits is a
+    repeat (under whatever label) and is not counted. A blank-stub row -- a standard-error / t-stat
     line, which the native side always counted -- counts only if it binds to a
     native baseline band (``match_rows_monotonic``), and a native band credits
     at most ONE candidate row on the page: matching is monotonic within a
@@ -390,6 +391,7 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     """
     from socr.tables.row_corroboration import (
         baseline_bands,
+        _contiguous_run,
         is_column_index_row,
         match_rows_monotonic,
         numeric_body_rows,
@@ -401,7 +403,7 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
     counted: list[tuple[str, ...]] = []
     labelled: list[tuple[str, ...]] = []
     bound_blank: list[tuple[tuple[str, ...], int]] = []
-    seen_labelled: set[tuple[str, tuple[str, ...]]] = set()
+    consumed: set[int] = set()
     for rows in table_blocks(markdown):
         entries = []
         for row in rows:
@@ -412,12 +414,12 @@ def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple
         for (label, tokens), idx in zip(entries, matches):
             if idx is not None:
                 token_lists[idx] = ()
+                consumed.add(idx)
             if label:
-                # a labelled row counts as it always has, once: a repeated
-                # block must not count its copies
-                if (label, tokens) in seen_labelled:
+                if idx is None and any(_contiguous_run(tokens, band_tokens[i]) for i in consumed):
+                    # reproduces a band another candidate row already credits:
+                    # a repeat under a different label, not a second row
                     continue
-                seen_labelled.add((label, tokens))
                 counted.append(tokens)
                 labelled.append(tokens)
             elif idx is not None:
