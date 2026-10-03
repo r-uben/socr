@@ -931,6 +931,14 @@ def _invisible_text_suspect(p) -> bool:
     )
 
 
+def garbled_math_suspect(p) -> bool:
+    """#960: the native text layer garbled the page's mathematics, or the scan for that
+    failed (unknown is not clean)."""
+    return bool(
+        getattr(p, "garbled_math_signals", None) or getattr(p, "garbled_math_scan_failed", False)
+    )
+
+
 def table_not_reconstructed_suspect(p) -> bool:
     """GH-994: a caption plus table structure on a page detection found no table on."""
     return bool(getattr(p, "table_not_reconstructed", False))
@@ -3110,6 +3118,7 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
+            or garbled_math_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
         # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
@@ -3682,7 +3691,10 @@ def _select_page_output_tagged(
         # ``audit_passed`` stays as the other causes leave it, so a flagged page is never
         # NATIVE_CLEAN / SUCCESS here.
         table_flattened = table_not_reconstructed_suspect(p)
-        native_demoted = native_is_fallback or grid_rejected or table_flattened
+        # #960: garbled math ships demoted whether or not a recovery attempt ran (a
+        # providerless run, or a ladder that never started, leaves no attempts).
+        garbled_math = garbled_math_suspect(p)
+        native_demoted = native_is_fallback or grid_rejected or table_flattened or garbled_math
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3715,9 +3727,13 @@ def _select_page_output_tagged(
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)
                         else (
-                            FailureMode.TABLE_NOT_RECONSTRUCTED
-                            if table_flattened
-                            else FailureMode.NONE
+                            FailureMode.NATIVE_GARBLED_MATH
+                            if garbled_math
+                            else (
+                                FailureMode.TABLE_NOT_RECONSTRUCTED
+                                if table_flattened
+                                else FailureMode.NONE
+                            )
                         )
                     )
                 )

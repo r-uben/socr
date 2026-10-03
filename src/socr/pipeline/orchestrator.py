@@ -38,6 +38,7 @@ from socr.core.manifest import (
     PageDisposition,
     PageEnding,
     PagePrimaryReason,
+    garbled_math_suspect,
     minus_as_digit_suspect,
     table_not_reconstructed_suspect,
     coerce_page_timings,
@@ -2126,6 +2127,46 @@ class UnifiedPipeline:
                 )
             )
 
+        # #960: math the native text layer garbled, or a failed scan (unknown is not clean).
+        # born_digital.py already set ``needs_ocr_enhancement``. Recomputed from the PDF on
+        # every run, so deliberately NOT in ``_RESUME_REPLAYED`` (same contract as
+        # ``invisible_text_scan``).
+        for pa in assessment.pages:
+            signals = dict(getattr(pa, "garbled_math_signals", None) or {})
+            scan_failed = bool(getattr(pa, "garbled_math_scan_failed", False))
+            if not (signals or scan_failed):
+                continue
+            if self.config.native_only:
+                outcome = (
+                    "page RETAINED as native text under --native-only and shipped WARNING "
+                    "(native_garbled_math): the mathematics is not verified"
+                )
+            else:
+                outcome = (
+                    "page routed to OCR, no content dropped (if no OCR rung wins, the "
+                    "native text ships WARNING, never clean SUCCESS)"
+                )
+            what = (
+                "the scan for garbled math FAILED, so the page is treated as affected"
+                if scan_failed
+                else "the native text layer garbled the page's mathematics ("
+                + ", ".join(f"{k}={v}" for k, v in signals.items())
+                + ")"
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="garbled_math_native",
+                    engine="native",
+                    detail=f"{what}; {outcome}",
+                    data={
+                        "signals": signals,
+                        "error": scan_failed,
+                        "native_only": bool(self.config.native_only),
+                    },
+                )
+            )
+
         # GH-994: a "Table N" caption plus table structure on a page detection found no table
         # on. The page keeps its native text and ships WARNING (``table_not_reconstructed``);
         # nothing is re-routed. Recomputed from the PDF every run, so deliberately NOT in
@@ -2862,6 +2903,10 @@ class UnifiedPipeline:
             # the event claims OCR replaced it).
             and not ps.invisible_text_over_raster
             and not ps.invisible_text_scan_failed
+            # #960: the hybrid keeps this native prose and patches regions; on a page whose
+            # math the layer garbled, the A/B found the hybrid unreadable and a whole-page
+            # read correct (Pastel p4/p5/p10), so the whole page goes to OCR.
+            and not garbled_math_suspect(ps)
             and not ps.native_rotated_text_shredded
             and not self._page_has_tables(page_num, ps)
         )
@@ -10328,11 +10373,19 @@ class UnifiedPipeline:
             getattr(ps, "invisible_text_over_raster", False)
             or getattr(ps, "invisible_text_scan_failed", False)
         )
+        # #960: and for garbled math.
+        garbled_suspect = garbled_math_suspect(ps)
         # GH-994: and for a flattened table the detector found nothing to re-read.
         flattened_suspect = table_not_reconstructed_suspect(ps)
         chart_status = (
             PageStatus.WARNING
-            if (chart_render_failed or minus_suspect or invisible_suspect or flattened_suspect)
+            if (
+                chart_render_failed
+                or minus_suspect
+                or invisible_suspect
+                or garbled_suspect
+                or flattened_suspect
+            )
             else PageStatus.SUCCESS
         )
         chart_out = PageOutput(
@@ -10348,9 +10401,13 @@ class UnifiedPipeline:
                     FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                     if invisible_suspect and not chart_render_failed
                     else (
-                        FailureMode.TABLE_NOT_RECONSTRUCTED
-                        if flattened_suspect and not chart_render_failed
-                        else FailureMode.NONE
+                        FailureMode.NATIVE_GARBLED_MATH
+                        if garbled_suspect and not chart_render_failed
+                        else (
+                            FailureMode.TABLE_NOT_RECONSTRUCTED
+                            if flattened_suspect and not chart_render_failed
+                            else FailureMode.NONE
+                        )
                     )
                 )
             ),
@@ -13013,6 +13070,17 @@ class UnifiedPipeline:
                     page_num,
                 )
                 return None
+            # #960: same for garbled math flagged by THIS run's analysis.
+            if (
+                ps_fresh is not None
+                and garbled_math_suspect(ps_fresh)
+                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+            ):
+                logger.debug(
+                    "#960: p%d not resumed; the current analysis flags garbled math",
+                    page_num,
+                )
+                return None
             # GH-994: same for a flattened table flagged by THIS run's analysis: a cached
             # SUCCESS written before the detector existed must not be restored.
             if (
@@ -14678,6 +14746,19 @@ class UnifiedPipeline:
             and p.best_output.audit_passed
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
+        # #960: the same retained-native condition for garbled math.
+        garbled_math_retained_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and garbled_math_suspect(p)
+            and n not in native_fallback_pages
+            and n not in failed_pages
+            and p.best_output
+            and p.best_output.audit_passed
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
 
         # GH-994: same retained-native condition for a flattened table. The page ships its
         # native text WARNING, so the document must not report SUCCESS over it.
@@ -14815,6 +14896,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not minus_retained_pages
         pages_ok = pages_ok and not invisible_retained_pages
+        pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
@@ -15123,6 +15205,7 @@ class UnifiedPipeline:
             or native_only_distrust_pages
             or minus_retained_pages
             or invisible_retained_pages
+            or garbled_math_retained_pages
             or flattened_table_pages
             or flagged_model_pages
             or structure_class_model_pages
@@ -15247,6 +15330,26 @@ class UnifiedPipeline:
                             else "OCR unavailable or every rung failed"
                         )
                         + "); the text ships WARNING, unverified",
+                    )
+                )
+            for n in garbled_math_retained_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_garbled_math_retained",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages[n].best_output
+                            else "native"
+                        ),
+                        detail="the native text layer garbled the page's mathematics (or "
+                        "the scan for that failed) and no OCR read replaced it ("
+                        + (
+                            "--native-only"
+                            if self.config.native_only
+                            else "OCR unavailable or every rung failed"
+                        )
+                        + "); the text ships WARNING, its mathematics unverified",
                     )
                 )
             for n in flattened_table_pages:
@@ -15531,6 +15634,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(invisible_retained_pages)} page(s) shipped an "
                         "invisible baked-in OCR text layer from a scan (no OCR read "
                         f"replaced it): {invisible_retained_pages}[/yellow]"
+                    )
+                if garbled_math_retained_pages:
+                    console.print(
+                        f"  [yellow]{len(garbled_math_retained_pages)} page(s) shipped native "
+                        "text whose mathematics the text layer garbled (no OCR read "
+                        f"replaced it): {garbled_math_retained_pages}[/yellow]"
                     )
                 if flattened_table_pages:
                     console.print(

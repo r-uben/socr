@@ -116,6 +116,10 @@ class PageState:
     #: that scan failed (unknown, treated as a hit). See ``BornDigitalDetector``.
     invisible_text_over_raster: bool = False
     invisible_text_scan_failed: bool = False
+    #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
+    #: treated as a hit). See ``born_digital.GarbledMathSignals``.
+    garbled_math_signals: dict[str, int] = field(default_factory=dict)
+    garbled_math_scan_failed: bool = False
     #: GH-64: this page fell to native (``has_tables`` False, no lane reuse
     #: across data rows) but the restored pre-PP-6 heuristic
     #: (``_detect_columnar_numbers``) still recognises the borderless
@@ -686,6 +690,8 @@ class DocumentState:
                 ps.control_byte_scan_failed = getattr(pa, "control_byte_scan_failed", False)
                 ps.invisible_text_over_raster = getattr(pa, "invisible_text_over_raster", False)
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
+                ps.garbled_math_signals = dict(getattr(pa, "garbled_math_signals", None) or {})
+                ps.garbled_math_scan_failed = getattr(pa, "garbled_math_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(
                     pa, "possible_table_structure_not_reconstructed", False
                 )

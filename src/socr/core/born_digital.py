@@ -2258,6 +2258,188 @@ def count_pua_chars(text: str) -> int:
     )
 
 
+#: #960: writing systems whose letters a failed ToUnicode map hands back in place of math
+#: glyphs. Measured on the trusted-native population (8,398 pages, 2026-10-02): math set in
+#: plain Cambria extracts as Syriac and Tamil letters (coibion_gorodnichenko p15, ramey p21).
+#: The other entries are further non-Latin writing systems. None is a language of the corpus
+#: (English-language economics and finance), so a letter from one of them on a born-digital
+#: page is a decoding failure, not text. Latin, Greek, Cyrillic, CJK and modifier letters are
+#: excluded because the corpus legitimately prints them. The script is the first word of the
+#: letter's Unicode name, as in the measurement.
+MISDECODED_MATH_SCRIPTS = frozenset(
+    {
+        "ARABIC",
+        "ARMENIAN",
+        "BENGALI",
+        "DEVANAGARI",
+        "ETHIOPIC",
+        "GEORGIAN",
+        "GUJARATI",
+        "GURMUKHI",
+        "HEBREW",
+        "KANNADA",
+        "KHMER",
+        "LAO",
+        "MALAYALAM",
+        "MYANMAR",
+        "NKO",
+        "ORIYA",
+        "SINHALA",
+        "SYRIAC",
+        "TAMIL",
+        "TELUGU",
+        "THAANA",
+        "THAI",
+        "TIBETAN",
+    }
+)
+
+#: #960: font names that set mathematics. ``_MATH_FONT_RE`` lists the families whose text
+#: extracts well enough for the P4-R region lane; a span in a font this matches and that
+#: list misses is math whose text layer the measurement found garbled. Every alternative is
+#: a family measured on the trusted-native population (each font with at least one span on a
+#: page): MathTime (MTMI, MTSY, MTSYN, MTEX, RMTMI and bold forms), MathematicalPi, UniMath,
+#: MnSymbol, Universal-GreekwithMathPi, Libertine/LibertinusT1 Math, EuclidMath, XCharterMath,
+#: Fourier-Math, MathDesign, "Cambria Math" (with a space), MathTechnicalP, LucidaMath,
+#: AdvMathPack, TeX-math. Anchored at the start of the name (after a subset prefix), so a body
+#: font that merely contains "math" or "MT" (e.g. ``TimesNewRomanPSMT``) does not match.
+_MATH_FAMILY_FONT_RE = re.compile(
+    r"(?i)^(?:[A-Z]{6}\+)?("
+    r"R?MT(?:MI|SYN?|EX)B?$|MathematicalPi|UniMath|MnSymbol|Universal-GreekwithMath|"
+    r"Libertin(?:e|us)\w*Math|EuclidMath|XCharterMath|Fourier-Math|MathDesign|Cambria Math|"
+    r"MathTechnical|LucidaMath|AdvMathPack|TeX-math)"
+)
+
+#: #960 review: a private-use glyph in a dingbat font is a bullet, arrow or check mark, never
+#: math. Measured on the 87 pages the union fired on through private-use glyphs alone: every
+#: Wingdings / Wingdings3 glyph there was a list bullet or arrow (render spot check).
+_DINGBAT_FONT_RE = re.compile(r"(?i)(wingding|webding|dingbat)")
+
+#: #960 review: Word maps a Symbol-font glyph to U+F000 + its Adobe Symbol encoding code. These
+#: codes are the Symbol glyphs that are not mathematics (PDF Reference, Appendix D: club,
+#: diamond, heart, spade, bullet, carriagereturn, registerserif, copyrightserif,
+#: trademarkserif, lozenge, registersans, copyrightsans, trademarksans). The spot check found
+#: bullet (0xB7) list markers and a lozenge (0xE0) footnote mark; every other Symbol glyph on
+#: those pages was a Greek letter, operator or bracket piece.
+SYMBOL_ENCODING_NON_MATH_CODES = frozenset(
+    {0xA7, 0xA8, 0xA9, 0xAA, 0xB7, 0xBF, 0xD2, 0xD3, 0xD4, 0xE0, 0xE2, 0xE3, 0xE4}
+)
+_SYMBOL_PUA_BASE = 0xF000  # Word's Symbol-font PUA convention: U+F000 + encoding code
+
+#: #960 review: the fonts whose U+F0xx glyphs follow the Adobe Symbol encoding, so the
+#: non-math codes above mean what the encoding says. Measured: every Symbol-encoded
+#: private-use glyph on the private-use-only pages sat in ``Symbol`` or ``SymbolMT``. Any
+#: other font's glyph at those codepoints is that font's own, possibly math, and still counts.
+_SYMBOL_ENCODED_FONT_RE = re.compile(r"(?i)^(?:[A-Z]{6}\+)?Symbol(?:MT)?$")
+
+
+def _math_private_use_count(text: str, font: str) -> int:
+    """Private-use glyphs in one span of *font* that stand for mathematics (#960)."""
+    if _DINGBAT_FONT_RE.search(font):
+        return 0
+    symbol_encoded = bool(_SYMBOL_ENCODED_FONT_RE.search(font))
+    n = 0
+    for ch in text:
+        if not count_pua_chars(ch):
+            continue
+        code = ord(ch) - _SYMBOL_PUA_BASE
+        if symbol_encoded and 0 <= code <= 0xFF and code in SYMBOL_ENCODING_NON_MATH_CODES:
+            continue
+        n += 1
+    return n
+
+
+#: #960: the Mathematical Alphanumeric Symbols block. Only these count as math-alphanumeric:
+#: a name prefix would also take ordinary symbols (U+27E8 MATHEMATICAL LEFT ANGLE BRACKET).
+#: Measured: the 34 such out-of-block characters in the population sit on pages that fire on
+#: other signals anyway, so the block bound moves no page.
+_MATH_ALNUM_FIRST = 0x1D400
+_MATH_ALNUM_LAST = 0x1D7FF
+
+
+@dataclass(frozen=True)
+class GarbledMathSignals:
+    """#960: evidence that the native text layer garbled the page's mathematics.
+
+    Each field counts characters; any non-zero field is a hit. The union of the four is
+    the detector measured on the trusted-native population: it fires on all 8 audited
+    pages with wrong math and re-routes 1,818 of 8,398 pages (22%; 1,849 before the
+    private-use signal stopped counting bullets and dingbats).
+    """
+
+    #: Private-use glyphs that stand for mathematics (Hameed p9: SymbolMT bracket pieces);
+    #: dingbat-font glyphs and the non-math Symbol codes (bullets, marks) are not counted.
+    private_use: int = 0
+    #: Mathematical Alphanumeric Symbols (U+1D400-U+1D7FF): math italics that extract as
+    #: codepoints readers and search cannot use, with sub/superscripts flattened.
+    math_alphanumeric: int = 0
+    #: Letters of a :data:`MISDECODED_MATH_SCRIPTS` script.
+    misdecoded_script_letters: int = 0
+    #: Characters in spans whose font sets math but is not in ``_MATH_FONT_RE``.
+    unlisted_math_font_chars: int = 0
+
+    @property
+    def fired(self) -> bool:
+        return bool(
+            self.private_use
+            or self.math_alphanumeric
+            or self.misdecoded_script_letters
+            or self.unlisted_math_font_chars
+        )
+
+    def nonzero(self) -> dict[str, int]:
+        """The hit counts, keyed by signal name; empty when nothing fired."""
+        counts = {
+            "private_use": self.private_use,
+            "math_alphanumeric": self.math_alphanumeric,
+            "misdecoded_script_letters": self.misdecoded_script_letters,
+            "unlisted_math_font_chars": self.unlisted_math_font_chars,
+        }
+        return {k: v for k, v in counts.items() if v}
+
+
+def _garbled_math_span_counts(page) -> tuple[int, int]:
+    """(math private-use glyphs, chars in an unlisted math font) on *page* (#960).
+
+    Both need the span's font, so they share one span walk.
+    """
+    private_use = unlisted = 0
+    for span in iter_page_spans(page):
+        font = span.get("font") or ""
+        text = span.get("text") or ""
+        if _MATH_FAMILY_FONT_RE.search(font) and not _MATH_FONT_RE.search(font):
+            unlisted += len(text)
+        private_use += _math_private_use_count(text, font)
+    return private_use, unlisted
+
+
+def detect_garbled_math(page, text: str) -> GarbledMathSignals:
+    """Read the #960 signals for one page. ``text`` is the native text that would ship.
+
+    Raises on an unreadable page; the caller treats that as a hit (fail closed).
+    """
+    import unicodedata
+
+    malnum = scripts = 0
+    for ch in text:
+        if ord(ch) < 128 or count_pua_chars(ch):
+            continue
+        if _MATH_ALNUM_FIRST <= ord(ch) <= _MATH_ALNUM_LAST:
+            malnum += 1
+        elif (
+            unicodedata.category(ch)[0] in "LM"
+            and unicodedata.name(ch, "").split(" ", 1)[0] in MISDECODED_MATH_SCRIPTS
+        ):
+            scripts += 1
+    private_use, unlisted = _garbled_math_span_counts(page)
+    return GarbledMathSignals(
+        private_use=private_use,
+        math_alphanumeric=malnum,
+        misdecoded_script_letters=scripts,
+        unlisted_math_font_chars=unlisted,
+    )
+
+
 #: Glyphs a PDF uses to draw an unordered list marker. Their presence in the text
 #: layer means the page *has* a list; flat text can only render them as literal
 #: characters mid-paragraph, which is the GH-127 symptom.
@@ -2405,6 +2587,11 @@ class PageAssessment:
     invisible_text_over_raster: bool = False
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
+    #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
+    #: routes the page off the trusted-native lane to OCR; nothing is dropped.
+    garbled_math_signals: dict[str, int] = field(default_factory=dict)
+    #: #960: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
+    garbled_math_scan_failed: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: GH-371: zero-based ordinals of separator-bearing table regions whose
     #: per-region geometry verifier hard-failed.  The ordinal is relative to
@@ -3404,6 +3591,30 @@ class BornDigitalDetector:
                 + " -> OCR"
             )
 
+        # #960: math the text layer garbled (private-use glyphs, math-alphanumeric codepoints,
+        # letters of a script no corpus page is written in, or a math font ``_MATH_FONT_RE``
+        # does not list). The P4-R region lane keeps this native text as its floor, so only a
+        # whole-page read replaces it. GPU A/B (docs/log/2026-10-03_960-garbled-math-reroute.md):
+        # a model read fixed 8 of 8 such pages and degraded none of 7 clean ones it also fires on.
+        garbled_math_signals: dict[str, int] = {}
+        garbled_math_scan_failed = False
+        try:
+            garbled_math_signals = detect_garbled_math(page, raw_text).nonzero()
+        except Exception:
+            # Fail closed: an unreadable page is "unknown", not "clean".
+            logger.warning("#960: garbled-math scan failed", exc_info=True)
+            garbled_math_scan_failed = True
+        if garbled_math_signals or garbled_math_scan_failed:
+            needs_ocr_enhancement = True
+            notes.append(
+                "garbled math in the native text layer ("
+                + (
+                    ", ".join(f"{k}={v}" for k, v in garbled_math_signals.items())
+                    or "scan failed: unknown"
+                )
+                + ") -> OCR"
+            )
+
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
         # suspect so it is never silently relied on.
@@ -3580,16 +3791,15 @@ class BornDigitalDetector:
                 "glyphs); equation regions need image-OCR -> LaTeX"
             )
 
-        # Unmapped math glyphs (PUA): the native prose is trustworthy, but math
-        # symbols are font-private and lost outside the embedding font. We do NOT
-        # set needs_ocr_enhancement here — that would route the whole page to OCR,
-        # the lane empirically shown to make these pages worse (it falls back to the
-        # same broken native layer). The flag surfaces via the audit log (and, when
-        # equation recovery is enabled, the region-crop lane), never silently.
+        # Unmapped math glyphs (PUA): math symbols are font-private and lost outside the
+        # embedding font. Since #960 a PUA glyph is one of the garbled-math signals above,
+        # so the page is already routed to a whole-page OCR read (the GPU A/B in the #960
+        # log: the read replaced the broken layer on Hameed p9). This flag still feeds the
+        # audit log for a page whose native text ships anyway.
         if has_unmapped_math_glyphs:
             notes.append(
-                f"unmapped math glyphs ({pua_count} private-use codepoint(s)); native prose "
-                "trusted, math symbols are font-private (weak ToUnicode) -> need region OCR"
+                f"unmapped math glyphs ({pua_count} private-use codepoint(s)); math symbols "
+                "are font-private (weak ToUnicode)"
             )
 
         return PageAssessment(
@@ -3614,6 +3824,8 @@ class BornDigitalDetector:
             control_byte_scan_failed=control_byte_scan_failed,
             invisible_text_over_raster=invisible_text_over_raster,
             invisible_text_scan_failed=invisible_text_scan_failed,
+            garbled_math_signals=garbled_math_signals,
+            garbled_math_scan_failed=garbled_math_scan_failed,
             has_unverifiable_table_region=has_unverifiable_table_region,
             text_grid_rejections=text_grid_rejections,
             orphan_word_drops=orphan_word_drops,
