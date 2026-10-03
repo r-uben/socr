@@ -43,7 +43,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.judge.judge import PageJudgeCircuitOpenError, is_page_judge_timeout
+from socr.judge.judge import JudgeVerdict, PageJudgeCircuitOpenError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -187,19 +187,34 @@ REJUDGE_EVENT_KINDS = tuple(
 
 
 def rejudge_candidate(
-    candidate: PageOutput, prof: ProviderProfile, judge: PageJudge, *, attempts: int
+    make_candidate: Callable[[], PageOutput],
+    prof: ProviderProfile,
+    judge: PageJudge,
+    *,
+    attempts: int,
 ) -> tuple[str, str]:
-    """#1013: ask ``judge`` about ``candidate`` at most ``attempts`` times.
+    """#1013: ask ``judge`` about the kept bytes at most ``attempts`` times.
 
-    Only a TIMEOUT is retried (it is a missing verdict); an accept, a completed
-    rejection or any other failure ends the loop. Returns ``(outcome, reason)``
-    where ``outcome`` is one of the ``REJUDGE_*`` constants. A verdict-shaped
-    decision that carries a ``judge_outcome`` (a verifier crash) is NOT a verdict.
+    ``make_candidate`` returns a FRESH ``PageOutput`` each call: every attempt judges
+    its own snapshot, because a deadline worker can outlive its attempt and the table
+    verifier can rewrite ``text`` in place. Acceptance binds to the sha256 of the bytes
+    first judged: a snapshot whose text no longer hashes to it was rewritten, so its
+    verdict is not a verdict on the kept bytes.
+
+    ACCEPTED requires an explicit COMPLETED acceptance: ``accept``, no ``judge_outcome``
+    (a verifier crash wears a verdict's shape), and a ``JudgeVerdict`` the judge itself
+    produced in ``raw_verdict`` (a heuristic decision carries none). Anything else is
+    ``REJUDGE_ERROR``. Only a TIMEOUT is retried (a missing verdict); an accept, a
+    completed rejection or any other failure ends the loop. Returns ``(outcome, reason)``.
     """
+    from socr.core.page_credential import sha256_text
+
     outcome, reason = REJUDGE_ERROR, "no re-judge attempt was allowed"
+    judged_sha = sha256_text(make_candidate().text)
     for _ in range(max(attempts, 0)):
+        snapshot = make_candidate()
         try:
-            decision = judge.assess(candidate, prof)
+            decision = judge.assess(snapshot, prof)
         except Exception as exc:
             outcome = REJUDGE_TIMEOUT if is_page_judge_timeout(exc) else REJUDGE_ERROR
             reason = f"judge raised: {exc}"
@@ -207,9 +222,15 @@ def rejudge_candidate(
                 continue
             break
         reason = decision.reason
+        if decision.judge_outcome or sha256_text(snapshot.text) != judged_sha:
+            outcome, reason = REJUDGE_ERROR, "verdict does not bind to the kept bytes"
+            break
         if decision.accept:
-            return REJUDGE_ACCEPTED, reason
-        outcome = REJUDGE_ERROR if decision.judge_outcome else REJUDGE_REJECTED
+            if isinstance(decision.raw_verdict, JudgeVerdict):
+                return REJUDGE_ACCEPTED, reason
+            outcome, reason = REJUDGE_ERROR, "acceptance is not a completed VLM verdict"
+            break
+        outcome = REJUDGE_REJECTED
         break
     return outcome, reason
 

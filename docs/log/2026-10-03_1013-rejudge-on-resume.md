@@ -60,3 +60,36 @@ now pins the difference (`rejudge_attempts=0` re-OCRs all four pages; default re
 0 OCR); `test_cli_flag_agentic_status_gh142.py` lists `rejudge_attempts` as `_UNEXERCISED` with the
 observing test named. The kept candidate blanks `judge_reason`/`skip_reason` so a breaker-tripped
 sidecar stays shape-equal to a real-deadline one (#987 contract). Full suite: 6767 passed.
+
+## Astra round 1 (fixes at the follow-up commit)
+
+- **Ship only on a completed VLM acceptance.** `rejudge_candidate` accepts only when the decision is
+  `accept`, carries no `judge_outcome`, and holds a `JudgeVerdict` in `raw_verdict` (a heuristic
+  decision has none). Otherwise `rejudge_error` and the ladder runs. Additionally the page sidecar
+  records `judge_model` (the judge that timed out); the re-judge requires the current
+  `state.agentic_judge_model` to be non-heuristic and equal to it, and makes no judge call otherwise.
+  This also covers a judge-construction failure: `_build_page_judge` degrades to heuristics while the
+  fingerprint still names the resolved model, so the fingerprint cannot tell. The identity check
+  can.
+- **Nothing gating is deserialized.** The sidecar keeps text, sha256, `judge_model`, provider
+  id/model/backend and figure records. The loader requires the provider id to be a rung of this
+  run's ladder with the same resolved backend and model, and the shipped `PageOutput` is built from
+  the bytes plus that profile (engine, status, provider fields, `audit_passed=False`). A serialized
+  `engine="chart_asset"` is never read. Known cost: fields not listed above (confidence,
+  table_corroboration, audit notes) are not restored; the table/credential gates recompute them.
+- **Snapshots.** Each attempt judges a fresh `PageOutput` built from the bytes; acceptance requires
+  the judged snapshot's text still hashes to the kept sha256 (a table verifier that rewrites it
+  voids the verdict); the page ships a different fresh snapshot, so an abandoned deadline worker
+  holding an earlier one cannot alter it.
+- **`rejudge_attempts` and caching.** It is not in the run fingerprint: changing it alone does NOT
+  invalidate cached results (terminal pages stay terminal, kept candidates stay reusable); it only
+  changes how many verdict requests the next resume makes. Documented in the config comment and the
+  `_rejudge_kept_candidate` docstring.
+
+Tests added: heuristic/outcome-bearing accepts do not ship; degraded or different judge identity
+makes no judge call; real `_build_page_judge` with a failing constructor (fingerprint asserted
+unchanged, so reuse would otherwise have been admitted) falls through; spoofed engine rebuilt,
+wrong provider model/id rejected; judged hash equals shipped hash and a rewriting verifier voids
+the verdict. Mutants (external copy, canary, anchor count 1): drop the `JudgeVerdict` check (1 fail),
+drop the identity check (1 fail), `prof = ladder[0]` (1 fail), drop the backend/model match (1 fail),
+drop the sha binding (1 fail).

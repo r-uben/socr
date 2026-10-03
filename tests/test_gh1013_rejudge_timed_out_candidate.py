@@ -11,6 +11,7 @@ engine call is replaced by a counter so "no OCR call in run 2" is a measured fac
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,7 +24,7 @@ from socr.core.born_digital import DocumentAssessment, PageAssessment  # noqa: E
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.providers import PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
-from socr.judge.judge import PageJudgeTimeoutError  # noqa: E402
+from socr.judge.judge import JudgeVerdict, PageJudgeTimeoutError  # noqa: E402
 from socr.pipeline.agentic import (  # noqa: E402
     REJUDGE_EVENT_KINDS,
     AcceptDecision,
@@ -55,7 +56,24 @@ class _Judge:
         self.calls.append(output.text)
         if self.mode == "timeout":
             raise PageJudgeTimeoutError("page judge timeout (test)")
-        return AcceptDecision(accept=self.mode == "accept", reason=self.mode)
+        if self.mode == "accept":  # a completed VLM verdict
+            return AcceptDecision(
+                accept=True, reason="faithful", raw_verdict=JudgeVerdict(faithful=True)
+            )
+        if self.mode == "accept_heuristic":  # accept=True, no VLM verdict behind it
+            return AcceptDecision(accept=True, reason="heuristics passed")
+        if self.mode == "accept_mutating":  # the verifier rewrote the text it was shown
+            if self.calls[-1] == _MODEL_TEXT:
+                output.text = output.text + " (rewritten)"
+            return AcceptDecision(accept=True, reason="x", raw_verdict=JudgeVerdict(faithful=True))
+        if self.mode == "accept_with_outcome":  # a missing verdict wearing a verdict's shape
+            return AcceptDecision(
+                accept=True,
+                reason="x",
+                raw_verdict=JudgeVerdict(faithful=True),
+                judge_outcome="page_judge_verifier_error",
+            )
+        return AcceptDecision(accept=False, reason=self.mode)
 
 
 class _Harness:
@@ -73,8 +91,10 @@ class _Harness:
         self.ocr_text = _MODEL_TEXT
         self.config = config
         self.runs = 0
+        self.judge_identity = "vlm-test"
+        self.judge_backend = config.pop("judge_backend", "heuristic")
 
-    def run(self):
+    def run(self, *, real_builder: bool = False):
         # A recorded AUDIT_FAILED document is skipped at the root index, so the real
         # second run is `--reprocess`; that flag is excluded from the fingerprint.
         reprocess = self.runs > 0
@@ -82,7 +102,7 @@ class _Harness:
         pipeline = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
-                judge_backend="heuristic",
+                judge_backend=self.judge_backend,
                 enabled_engines=[EngineType.GEMINI],
                 primary_engine=EngineType.DEEPSEEK,
                 save_figures=False,
@@ -123,12 +143,19 @@ class _Harness:
                 for p in pages
             ]
 
-        with (
-            patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),
-            patch.object(pipeline, "_build_page_judge", return_value=self.judge),
-        ):
+        build = (
+            contextlib.nullcontext()
+            if real_builder
+            else patch.object(pipeline, "_build_page_judge", side_effect=self._build_judge)
+        )
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine), build:
             result = pipeline.process(self.pdf, self.out)
         return result, pipeline
+
+    def _build_judge(self, state):
+        # What the real builder records: the judge that ACTUALLY runs.
+        state.agentic_judge_model = self.judge_identity
+        return self.judge
 
     def sidecar_path(self) -> Path:
         return next((self.out / "doc" / "pages").glob("*.json"))
@@ -278,7 +305,105 @@ def test_rejudge_candidate_stops_on_first_non_timeout_answer() -> None:
                 raise PageJudgeTimeoutError("t")
             return AcceptDecision(accept=step == "accept", reason=step)
 
-    cand = PageOutput(page_num=1, text="x y z", status=PageStatus.WARNING)
+    def make():
+        return PageOutput(page_num=1, text="x y z", status=PageStatus.WARNING)
+
     j = _J(["timeout", "reject", "accept"])
-    assert rejudge_candidate(cand, PROFILE_QWEN_LOCAL, j, attempts=5)[0] == "rejected"
+    assert rejudge_candidate(make, PROFILE_QWEN_LOCAL, j, attempts=5)[0] == "rejected"
     assert j.n == 2
+
+
+def _timed_out_then(tmp_path, tag, mode, *, edit=None, identity=None):
+    """Run 1 times out; optionally edit the sidecar; run 2 uses ``mode``."""
+    h = _Harness(tmp_path / tag)
+    _run1_times_out(h)
+    if edit is not None:
+        side = h.sidecar()
+        edit(side)
+        h.sidecar_path().write_text(json.dumps(side), encoding="utf-8")
+    h.judge.mode = mode
+    h.ocr_text = _OTHER_TEXT
+    if identity is not None:
+        h.judge_identity = identity
+    h.run()
+    return h
+
+
+def _kinds(h):
+    return [e["kind"] for e in h.sidecar()["audit_events"]]
+
+
+def test_item1_only_a_completed_vlm_acceptance_ships(tmp_path) -> None:
+    control = _timed_out_then(tmp_path, "ok", "accept")
+    assert control.ocr_calls == [] and "rejudge_accepted" in _kinds(control)
+    for mode in ("accept_heuristic", "accept_with_outcome"):
+        h = _timed_out_then(tmp_path, mode, mode)
+        assert h.ocr_calls == [1], mode
+        assert _MODEL_TEXT not in h.shipped(), mode
+        assert "rejudge_accepted" not in _kinds(h), mode
+        assert "rejudge_error" in _kinds(h), mode
+
+
+def test_item1_a_degraded_or_different_judge_does_not_ship(tmp_path) -> None:
+    for tag, identity in (("heur", "heuristic"), ("other", "some-other-vlm")):
+        h = _timed_out_then(tmp_path, tag, "accept", identity=identity)
+        assert h.ocr_calls == [1], tag
+        assert h.judge.calls == [_OTHER_TEXT], "the kept bytes were never shown to it"
+        assert "rejudge_error" in _kinds(h)
+
+
+def test_item2_judge_construction_failure_falls_through(tmp_path, monkeypatch) -> None:
+    """Same fingerprint (resolved model unchanged), but the VLM judge cannot be built."""
+    monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self, *a, **kw: "m")
+    h = _Harness(tmp_path, judge_backend="vlm")
+    _run1_times_out(h)
+    fp1 = h.sidecar()["run_fingerprint"]
+    h.ocr_text = _OTHER_TEXT
+
+    def boom(*a, **kw):
+        raise RuntimeError("cannot construct the judge")
+
+    # The REAL _build_page_judge runs and degrades to heuristics.
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge", side_effect=boom):
+        h.run(real_builder=True)
+    assert h.sidecar()["run_fingerprint"] == fp1, "reuse would have been admitted"
+    assert h.ocr_calls == [1]
+    assert _MODEL_TEXT not in h.shipped()
+    assert "rejudge_accepted" not in _kinds(h)
+
+
+def test_item3_serialised_engine_is_not_trusted(tmp_path) -> None:
+    def spoof(side):
+        side["judge_timeout_candidate"]["candidate"]["engine"] = "chart_asset"
+
+    h = _timed_out_then(tmp_path, "spoof", "accept", edit=spoof)
+    assert h.ocr_calls == []  # still the same profile: it is re-judged and accepted
+    assert h.sidecar()["winning_output"]["engine"] != "chart_asset"
+    assert h.sidecar()["winning_output"]["engine"] == "qwen"
+
+    def wrong_model(side):
+        side["judge_timeout_candidate"]["candidate"]["provider_model"] = "not-this-model"
+
+    h2 = _timed_out_then(tmp_path, "model", "accept", edit=wrong_model)
+    assert h2.ocr_calls == [1]
+
+    def unknown_provider(side):
+        side["judge_timeout_candidate"]["candidate"]["provider_id"] = "no-such-rung"
+
+    h3 = _timed_out_then(tmp_path, "prov", "accept", edit=unknown_provider)
+    assert h3.ocr_calls == [1]
+
+
+def test_item4_shipped_bytes_hash_equals_judged_hash(tmp_path) -> None:
+    from socr.core.page_credential import sha256_text
+
+    h = _timed_out_then(tmp_path, "hash", "accept")
+    assert h.ocr_calls == []
+    shipped = h.sidecar()["winning_output"]["text"]
+    assert [sha256_text(t) for t in h.judge.calls] == [sha256_text(shipped)]
+
+    # A judge chain that rewrites the text it was shown has not judged the kept bytes.
+    m = _timed_out_then(tmp_path, "mut", "accept_mutating")
+    assert m.ocr_calls == [1]
+    assert "rejudge_accepted" not in _kinds(m)
+    assert "(rewritten)" not in m.shipped()

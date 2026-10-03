@@ -436,7 +436,8 @@ class PipelineConfig:
     # verdict ships the candidate; a rejection or another timeout runs the normal
     # ladder. Deliberately not in the run fingerprint: it changes no byte on a page
     # that has no kept candidate, and the kept candidate is checked against the
-    # fingerprint itself.
+    # fingerprint itself. Consequence: changing this value alone does NOT invalidate
+    # cached results. Only an ACCEPT by the same VLM judge that timed out ships.
     rejudge_attempts: int = 1
 
     # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):

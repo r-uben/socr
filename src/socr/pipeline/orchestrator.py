@@ -12903,11 +12903,21 @@ class UnifiedPipeline:
             # deadline and the #987 breaker word it differently) is not identity and
             # is blanked: the re-judge writes its own reason, and a sidecar must not
             # change shape depending on whether the breaker tripped.
-            kept = _timed_out.to_dict()
-            kept["judge_reason"] = kept["skip_reason"] = ""
+            # Only the bytes and the identity of what produced them are kept. Nothing
+            # that gates a page (engine class, status, credential, outcome) is read
+            # back from here: the loader rebuilds those from the matched ladder profile.
             payload["judge_timeout_candidate"] = {
                 "text_sha256": sha256_text(_timed_out.text),
-                "candidate": kept,
+                # The judge that timed out; only that same VLM judge may re-judge.
+                "judge_model": state.agentic_judge_model or "",
+                "candidate": {
+                    "text": _timed_out.text,
+                    "engine": _timed_out.engine or "",
+                    "provider_id": _timed_out.provider_id or "",
+                    "provider_model": _timed_out.provider_model or "",
+                    "provider_backend": _timed_out.provider_backend or "",
+                    "figures": [f.to_dict() for f in (_timed_out.figures or [])],
+                },
             }
 
         tmp_path = sidecar_path.with_suffix(".json.tmp")
@@ -12917,16 +12927,18 @@ class UnifiedPipeline:
 
     def _load_rejudge_candidate(
         self, state: DocumentState, page_num: int, output_dir: Path, ladder: list
-    ) -> tuple[PageOutput, ProviderProfile] | None:
+    ) -> tuple[str, str, list, ProviderProfile] | None:
         """#1013: the timed-out candidate a prior run kept, or ``None`` on ANY doubt.
 
-        Conservative exactly as ``_load_terminal_page`` is: the sidecar must be a
-        readable ``terminal`` one whose run fingerprint AND input checksum equal this
-        run's, the candidate bytes must hash to the recorded checksum, the page must
-        still be one whose native layer is known bad, and the producing provider must
-        still be a rung of THIS run's ladder (so the judge sees the profile the ladder
-        would have shown it). A false ``None`` costs one re-OCR; a false hit would ship
-        text nobody judged.
+        Returns ``(text, recorded_judge_model, figures, profile)``. Conservative exactly
+        as ``_load_terminal_page`` is: the sidecar must be a readable ``terminal`` one
+        whose run fingerprint AND input checksum equal this run's, the page must still be
+        one whose native layer is known bad, the bytes must hash to the recorded
+        checksum, and the producing provider must still be a rung of THIS run's ladder
+        with the same resolved backend and model. Only the BYTES and figure records are
+        taken from the sidecar; the engine, status and every other field that gates a
+        page are rebuilt from the matched profile by the caller, never deserialized.
+        A false ``None`` costs one re-OCR; a false hit would ship text nobody judged.
         """
         import json
 
@@ -12953,17 +12965,24 @@ class UnifiedPipeline:
             kept = meta.get("judge_timeout_candidate")
             if not isinstance(kept, dict) or not isinstance(kept.get("candidate"), dict):
                 return None
-            candidate = PageOutput.from_dict(kept["candidate"])
+            cand = kept["candidate"]
+            text = cand.get("text")
+            judge_model = kept.get("judge_model")
             if (
-                candidate.page_num != page_num
-                or not candidate.text.strip()
-                or kept.get("text_sha256") != sha256_text(candidate.text)
+                not isinstance(text, str)
+                or not text.strip()
+                or not isinstance(judge_model, str)
+                or kept.get("text_sha256") != sha256_text(text)
             ):
                 return None
-            prof = next((p for p in ladder if p.id == candidate.provider_id), None)
+            prof = next((p for p in ladder if p.id == cand.get("provider_id")), None)
             if prof is None:
                 return None
-            return candidate, prof
+            backend, model = resolved_provenance(prof, self.config)
+            if cand.get("provider_backend") != backend or cand.get("provider_model") != model:
+                return None
+            figures = [FigureInfo.from_dict(f) for f in cand.get("figures", [])]
+            return text, judge_model, figures, prof
         except Exception:
             logger.debug("#1013: p%d kept candidate unreadable; reprocessing", page_num)
             return None
@@ -12978,12 +12997,22 @@ class UnifiedPipeline:
     ) -> PageDecision | None:
         """#1013: pre-route step. Re-judge the candidate a prior run timed out on.
 
-        Returns a ``PageDecision`` ONLY on an accepting verdict (the page then flows
-        through the table/credential gates as if freshly routed, with no OCR call).
-        A rejection, another timeout, or any doubt returns ``None`` and the normal
-        ladder runs; native is never shipped on a second timeout without it. Uses the
-        same ``judge`` object the ladder uses, so the deadline adapter and the #987
-        circuit breaker apply. Bounded by ``config.rejudge_attempts``.
+        Returns a ``PageDecision`` ONLY on an explicit COMPLETED acceptance by the same
+        VLM judge that timed out (a ``JudgeVerdict`` the judge itself produced: never a
+        heuristic verdict, never a decision carrying a ``judge_outcome``), on exactly the
+        bytes that were kept. The page then flows through the table/credential gates as
+        if freshly routed, with no OCR call. A rejection, another timeout, a degraded
+        judge, or any doubt returns ``None`` and the normal ladder runs; native is never
+        shipped on a second timeout without it.
+
+        The judge is the ladder's own (deadline adapter + #987 breaker). Bounded by
+        ``config.rejudge_attempts``; each attempt judges a fresh snapshot of the bytes,
+        and the page ships another fresh one, so an abandoned deadline worker or a
+        table-verifier rewrite can neither change what ships nor what was judged.
+
+        ``rejudge_attempts`` is NOT in the run fingerprint: changing it alone does not
+        invalidate cached results (a terminal page stays terminal, a kept candidate stays
+        reusable). It only decides how many verdict requests the next resume makes.
         """
         from socr.core.audit_log import AuditEvent
 
@@ -12993,11 +13022,33 @@ class UnifiedPipeline:
         loaded = self._load_rejudge_candidate(state, page_num, output_dir, ladder)
         if loaded is None:
             return None
-        candidate, prof = loaded
-        candidate.judge_outcome = ""
-        candidate.audit_passed = False
-        candidate.table_acceptance_credential = None
-        outcome, reason = rejudge_candidate(candidate, prof, judge, attempts=attempts)
+        text, recorded_judge, figures, prof = loaded
+        backend, model = resolved_provenance(prof, self.config)
+
+        def snapshot() -> PageOutput:
+            # Rebuilt from the bytes and the matched profile only.
+            return PageOutput(
+                page_num=page_num,
+                text=text,
+                status=PageStatus.SUCCESS,
+                engine=prof.engine.value,
+                audit_passed=False,
+                provider_id=prof.id,
+                provider_backend=backend,
+                provider_model=model,
+                figures=list(figures),
+            )
+
+        current = state.agentic_judge_model or JUDGE_IDENTITY_HEURISTIC
+        if current == JUDGE_IDENTITY_HEURISTIC or current != recorded_judge:
+            # A degraded (heuristic / failed-to-build) or different judge is weaker or
+            # unrelated evidence: it never ships these bytes. No judge call is made.
+            outcome, reason = (
+                "error",
+                f"judge {current!r} is not the VLM judge {recorded_judge!r} that timed out",
+            )
+        else:
+            outcome, reason = rejudge_candidate(snapshot, prof, judge, attempts=attempts)
         detail = {
             "accepted": "re-judged the kept model candidate on resume: accepted, shipped "
             "without re-OCR",
@@ -13005,27 +13056,30 @@ class UnifiedPipeline:
             "ladder ran and the candidate was not shipped",
             "timeout": "the page judge timed out again on the kept model candidate; the "
             "normal ladder ran",
-            "error": "the page judge failed on the kept model candidate; the normal ladder ran",
+            "error": "the kept model candidate could not be re-judged by the VLM judge that "
+            "timed out; the normal ladder ran",
         }[outcome]
         state.events.append(
             AuditEvent(
                 page_num=page_num,
                 kind=f"rejudge_{outcome}",
-                engine=candidate.engine or "",
+                engine=prof.engine.value,
                 detail=detail,
                 data={
-                    "provider_id": candidate.provider_id,
+                    "provider_id": prof.id,
                     "attempts_allowed": attempts,
+                    "judge_model": current,
                     "reason": reason,
                 },
             )
         )
         if outcome != REJUDGE_ACCEPTED:
             return None
-        candidate.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        shipped = snapshot()
+        shipped.judge_outcome = JUDGE_OUTCOME_COMPLETED
         att = ProviderAttempt(
             engine=prof.engine,
-            output=candidate,
+            output=shipped,
             cost_usd=0.0,
             accepted=True,
             reason=reason,
@@ -13033,7 +13087,7 @@ class UnifiedPipeline:
             model=prof.model,
             backend=prof.backend,
         )
-        return PageDecision(page_num, candidate, [att], accepted=True)
+        return PageDecision(page_num, shipped, [att], accepted=True)
 
     def _load_terminal_page(
         self,
