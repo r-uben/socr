@@ -1118,6 +1118,10 @@ def library(
                     f"Index refreshed: {summary['documents']} documents, "
                     f"{len(summary['missing_text'])} missing text, "
                     f"{len(summary['unverified'])} unverified. "
+                    f"Tables: {summary['tables']['shipped_text']} as text "
+                    f"({summary['tables']['verified_text']} verified), "
+                    f"{summary['tables']['withheld']} withheld, over "
+                    f"{summary['tables_recorded_documents']} documents with counts. "
                     f"Run backup-gdrive to push ({cfg.rclone_remote})."
                 )
     except lib.LibraryError as e:
