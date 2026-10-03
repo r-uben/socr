@@ -326,6 +326,7 @@ This list is the kinds present at the time of writing; the code is the authority
 - `chart_counts_derived`, `chart_counts_not_derived`: counts read from vector geometry and published, or refused.
 - `chart_grid_reconciled`, `chart_grid_contradicted`, `chart_grid_not_reconciled`: a filled grid compared with geometry: agreed, disagreed, or not comparable.
 - `visual_values_not_transcribed`: a figure's in-image text and values are not in the Markdown.
+- `scanned_figure_asset`: a scanned page (invisible OCR layer over a raster) whose layer carries a figure caption line shipped its page image beside the page text (#1030). Per page, not per region: a scan has no vector marks and nothing isolates the figure box. `data.png_saved` false means the image could not be written (the page is `warning`). Sidecar key `scanned_figure_png_ref`. When the text that ships IS the layer, runs of 7 or more one-character lines (an axis title spelled down the page) sit verbatim inside a `socr:spelled-axis-residue` HTML comment instead of the body.
 - `figure_placeholder_unresolved`, `figure_phase_failed`, `figure_cap_reached`, `figure_recoverable_labels`: figure phase outcomes.
 - `fabricated_image_ref`: image links with no source were removed; the document is demoted.
 

@@ -35,6 +35,7 @@ EXPECTED_RESUME_KINDS = frozenset(
         "native_unrecovered_symbol_glyphs",
         "possible_table_structure_not_reconstructed",
         "rotated_native_table_quarantined",
+        "scanned_figure_asset",
         "source_evidence_no_witness_backend",
         "source_evidence_table_label_unverified",
         "table_binding_adjudicated",
@@ -64,4 +65,4 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    assert len(EXPECTED_RESUME_KINDS) == 45
+    assert len(EXPECTED_RESUME_KINDS) == 46

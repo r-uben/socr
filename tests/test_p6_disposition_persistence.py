@@ -282,6 +282,7 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "native_table_structure_failed",
         "native_rotated_text_shredded",
         "rotated_shred_png_ref",
+        "scanned_figure_png_ref",
         "native_table_structure_defective",
         "native_table_emission_defect",
         "native_table_content_defect",

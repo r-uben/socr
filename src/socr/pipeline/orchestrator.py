@@ -143,6 +143,10 @@ class _AbandonedEscalation:
 #: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
 #: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
 _RESUME_REPLAYED: dict[str, str] = {
+    "scanned_figure_asset": (
+        "#1030: emitted by the page loop's scanned-figure step, which a terminal resumed page "
+        "skips; the document note and CLI line read this event"
+    ),
     **{
         kind: (
             "#1013: how a timed-out model candidate was re-judged on resume. Per-run, but the "
@@ -5735,6 +5739,44 @@ class UnifiedPipeline:
         return "; ".join(parts)
 
     @staticmethod
+    def _scanned_figure_split(state) -> tuple[list[int], list[int]]:
+        """#1030: (pages whose scanned figure ships as a page image, pages where it could not).
+
+        One derivation for the document note and the CLI line, as ``_visual_values_split``
+        is. Read from the audit events: the kind is replayed on resume, so the events are the
+        durable record. A page that saved on one event and failed on another counts as lost.
+        """
+        saved: set[int] = set()
+        lost: set[int] = set()
+        for ev in state.events:
+            if getattr(ev, "kind", "") != "scanned_figure_asset":
+                continue
+            data = getattr(ev, "data", None) or {}
+            (saved if data.get("png_saved") else lost).add(ev.page_num)
+        saved -= lost
+        return sorted(saved), sorted(lost)
+
+    @staticmethod
+    def _scanned_figure_note(state) -> str | None:
+        """#1030: name the scanned pages whose figure ships as a page image. ``None`` if none."""
+        saved, lost = UnifiedPipeline._scanned_figure_split(state)
+        if not saved and not lost:
+            return None
+        parts = []
+        if saved:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in saved)}: scanned figure page; the figure "
+                "ships as the page image beside the page text (the scan's layer cannot "
+                "localize it)"
+            )
+        if lost:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in lost)}: scanned figure page AND the page "
+                "image was not saved; the figure is preserved nowhere"
+            )
+        return "; ".join(parts)
+
+    @staticmethod
     def _unverified_wording_split(
         state, pages: list[int]
     ) -> tuple[list[int], list[int], list[int], list[int]]:
@@ -10236,6 +10278,12 @@ class UnifiedPipeline:
                                     state, [bo], page_nums=[page_num]
                                 )
 
+                # #1030: a scanned page whose invisible layer names a figure ships the page
+                # image beside its text (no vector marks on a scan, and the figure extractor
+                # skips scanned pages).
+                with clock.span("figures"):
+                    self._agentic_scanned_figure_page(state, page_num, ps, _chart_figures_dir)
+
                 # GH-86: strip VLM sentinel image refs before provisional flush.
                 if _agentic_doc_dir is not None:
                     with clock.span("figures"):
@@ -10724,6 +10772,68 @@ class UnifiedPipeline:
                     "the markdown, no model read it, and the page image failed to save"
                 ),
                 data={"png_saved": not chart_render_failed, "png_path": chart_png_ref},
+            )
+        )
+
+    def _agentic_scanned_figure_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        figures_dir: Path | None,
+    ) -> None:
+        """#1030: render the page image for a scanned page whose layer names a figure.
+
+        Fires only on a page whose native text is an invisible OCR layer over a raster
+        (``invisible_text_over_raster``) AND carries a figure caption line. Both are needed:
+        the caption alone is what the 98-page measurement found precise, and the layer is the
+        only place a scan keeps one that survives every model's rewrite. Abstains on a page
+        that already ships an image of itself (a floor), and never edits the page text here --
+        ``manifest._apply_scanned_figure_guard`` appends the ref at finalize so every writer
+        sees one body.
+
+        The PNG is forced even without ``--save-figures`` (like chart PNGs: it is the only
+        artifact holding the figure). A render failure is surfaced, not swallowed: the event
+        says ``png_saved: false`` and the page is demoted to WARNING by the guard.
+        """
+        if not getattr(ps, "invisible_text_over_raster", False):
+            return
+        from socr.figures.scanned_figures import has_figure_caption
+
+        if not has_figure_caption(ps.native_text or ""):
+            return
+        if (
+            getattr(ps, "d3_floor_png_ref", "")
+            or getattr(ps, "rotated_shred_png_ref", "")
+            or getattr(ps, "invisible_scan_png_ref", "")
+        ):
+            return
+        from socr.core.audit_log import AuditEvent
+
+        ref = ""
+        if figures_dir is not None:
+            ref = self._render_d3_floor_png(
+                state.handle.path,
+                page_num,
+                figures_dir,
+                stem="scanned_figure_page",
+                label="Scanned figure page",
+            )
+        ps.scanned_figure_png_ref = ref
+        ps.scanned_figure_render_failed = not ref
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="scanned_figure_asset",
+                engine="",
+                detail=(
+                    "scanned page whose text layer names a figure: the page image ships beside "
+                    "the page text (the figure box cannot be isolated on a scan)"
+                    if ref
+                    else "scanned page whose text layer names a figure: the page image could "
+                    "NOT be saved, so the figure is preserved nowhere"
+                ),
+                data={"png_saved": bool(ref), "png_path": ref},
             )
         )
 
@@ -12966,6 +13076,10 @@ class UnifiedPipeline:
                 bool(getattr(ps, "native_rotated_text_shredded", False)) if ps else False
             ),
             "rotated_shred_png_ref": (str(getattr(ps, "rotated_shred_png_ref", "")) if ps else ""),
+            # #1030: scanned figure page image ref (the guard re-appends it idempotently).
+            "scanned_figure_png_ref": (
+                str(getattr(ps, "scanned_figure_png_ref", "")) if ps else ""
+            ),
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
@@ -14185,6 +14299,7 @@ class UnifiedPipeline:
             # floor ships marker + image exactly as the first run did instead of
             # silently degrading to a bare marker.
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
+            ps.scanned_figure_png_ref = str(meta.get("scanned_figure_png_ref", ""))
             _summary = meta.get("attempts_summary")
             ps.attempts_summary_restored = _summary if isinstance(_summary, list) else None
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
@@ -16379,6 +16494,18 @@ class UnifiedPipeline:
                         f"transcribed; in-image text is preserved in the page image only: "
                         f"{_visual_kept}[/cyan]"
                     )
+                _scanned_fig_kept, _scanned_fig_lost = self._scanned_figure_split(state)
+                if _scanned_fig_kept:
+                    console.print(
+                        f"  [cyan]{len(_scanned_fig_kept)} scanned figure page(s): the figure "
+                        f"ships as the page image beside the page text: {_scanned_fig_kept}[/cyan]"
+                    )
+                if _scanned_fig_lost:
+                    console.print(
+                        f"  [red]{len(_scanned_fig_lost)} scanned figure page(s): the page "
+                        f"image was not saved; the figure is preserved nowhere: "
+                        f"{_scanned_fig_lost}[/red]"
+                    )
                 if _visual_lost:
                     # GH-566: and the render-failure pages are NOT that. Nothing
                     # holds their figure, so this line is a loss, not a note.
@@ -16694,6 +16821,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_visual_note}"
             else:
                 final_result.error = _visual_note
+        # #1030: and the scanned figure pages, for the same reason.
+        _scanned_fig_note = self._scanned_figure_note(state)
+        if _scanned_fig_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_scanned_fig_note}"
+            else:
+                final_result.error = _scanned_fig_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
@@ -17546,6 +17680,11 @@ class UnifiedPipeline:
                     f"  [dim]Skipping {len(skip_pages)} scanned page(s) "
                     f"(no localizable figures)[/dim]"
                 )
+        # #1030: a page that already ships its scanned-figure page image must not get a second
+        # one (the extractor would emit the same raster as a full-page "figure").
+        _own_image = {n for n, _p in state.pages.items() if _p.scanned_figure_png_ref}
+        if _own_image:
+            skip_pages = (skip_pages or set()) | _own_image
         extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)
         # GH-189: a chart region registered for mandatory preservation already
         # has its own crop referenced from the page body, at the position the
