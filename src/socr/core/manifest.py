@@ -3677,7 +3677,12 @@ def _select_page_output_tagged(
         # page; by this point selection is settled and this synthetic output is
         # what ships either way.
         grid_rejected = bool(getattr(p, "text_grid_rejected", False))
-        native_demoted = native_is_fallback or grid_rejected
+        # GH-994: a flattened table with no selected winner (no best_output, no attempts)
+        # reaches this synthetic page. Status-only: the text is unchanged and
+        # ``audit_passed`` stays as the other causes leave it, so a flagged page is never
+        # NATIVE_CLEAN / SUCCESS here.
+        table_flattened = table_not_reconstructed_suspect(p)
+        native_demoted = native_is_fallback or grid_rejected or table_flattened
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3692,7 +3697,7 @@ def _select_page_output_tagged(
             text=fallback_text,
             status=PageStatus.WARNING if native_demoted else PageStatus.SUCCESS,
             engine="native",
-            audit_passed=not native_demoted,
+            audit_passed=not (native_is_fallback or grid_rejected),
             # GH-151 B1: the attempt-level PageOutput this synthetic page
             # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
             # (set at ``_score_per_page`` / the native ship sites) -- but that
@@ -3709,7 +3714,11 @@ def _select_page_output_tagged(
                     else (
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)
-                        else FailureMode.NONE
+                        else (
+                            FailureMode.TABLE_NOT_RECONSTRUCTED
+                            if table_flattened
+                            else FailureMode.NONE
+                        )
                     )
                 )
             ),

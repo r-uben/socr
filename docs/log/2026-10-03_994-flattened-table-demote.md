@@ -82,3 +82,11 @@ untested. The fixture labels were made two-word and it is killed now.
 3. Chart-asset lane test: body and `audit_passed` kept, WARNING + failure mode, document not SUCCESS.
    Honest limit: the lane's own `flattened_suspect` term is backstopped by the manifest demotion,
    so removing only that term survives; removing both is killed by the chart test.
+
+## Review fix 2: the synthetic fallback is reachable
+
+The terms removed from the native-fallback branch were reachable: a flagged born-digital page with
+native text, no `best_output` and no attempts returned NATIVE_CLEAN / SUCCESS. Restored
+(`table_flattened` in `native_demoted` and the failure-mode chain; `audit_passed` is left to the
+other causes, so the demotion is status-only). Regression test builds exactly that state; two
+mutants (demotion, failure mode) are killed by it.

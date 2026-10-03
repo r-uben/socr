@@ -415,3 +415,30 @@ def test_resume_restores_a_cached_model_winner_on_a_flagged_page(tmp_path, monke
     monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", spy)
     _process(tmp_path, "m", monkeypatch, neutralised=False, **kw)
     assert loaded and all(o is not None for o in loaded), "model winner must be restored"
+
+
+def test_flagged_page_with_no_winner_and_no_attempts_is_demoted_not_clean(tmp_path) -> None:
+    """The synthetic native fallback: nothing selected, nothing attempted, no other defect."""
+    from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
+
+    def ship(flagged: bool):
+        pdf = tmp_path / f"fb-{flagged}.pdf"
+        doc = fitz.open()
+        doc.new_page().insert_text((54, 72), "text layer long enough to count as native here.")
+        doc.save(pdf)
+        doc.close()
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        p = state.pages[1]
+        p.is_born_digital = True
+        p.native_text = "native body"
+        p.table_not_reconstructed = flagged
+        assert p.best_output is None and not p.attempts
+        return _select_page_output_tagged(state, 1)
+
+    (base, base_tag), (flag, flag_tag) = ship(False), ship(True)
+    assert (base.status.value, base.failure_mode) == ("success", FailureMode.NONE)
+    assert base_tag is SelectionProvenance.NATIVE_CLEAN
+    assert flag.text == base.text == "native body"
+    assert flag.status.value == "warning"
+    assert flag.failure_mode == FailureMode.TABLE_NOT_RECONSTRUCTED
+    assert flag_tag is SelectionProvenance.NATIVE_FALLBACK
