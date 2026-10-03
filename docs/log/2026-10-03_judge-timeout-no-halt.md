@@ -74,3 +74,44 @@ M5_no_probe_after_timeout     1 failed (same test), 7 passed
 ```
 
 Rebased onto origin/main 790ce1fa (#984 guard present); full suite run with the default OLLAMA_HOST.
+
+## Review round 2 (Astra rejected 52d52498): the breaker fails closed, it does not degrade
+
+Round 1 switched a wedged judge to the heuristic judge. That is WEAKER: heuristics do not check
+fidelity to the page image, so pages accepted that way ship COMPLETED with audit_passed=True. Replaced.
+
+- `SwitchablePageJudge` removed. `CircuitBreakerPageJudge` (agentic.py) wraps the VLM LEAF (inside the
+  deterministic native-table verifier, so pages that verifier settles without a model are untouched).
+  While the breaker is open it raises the same `PageJudgeTimeoutError` a real deadline raises,
+  instantly. `route_page` types it `JUDGE_OUTCOME_TIMEOUT` and the page fails closed exactly as
+  today, minus the wait. Event renamed `judge_wedged_circuit_open` (one, page 0).
+- Probe exceptions count as wedged (fail closed).
+- vLLM judges: `VLLMVisionJudge.is_available` only lists `/models`, which answers on a wedge, so it
+  is not used. The breaker probes with `probe_openai_server_idle(url, model=...)` (listing + a
+  1-token generation, the same OpenAI-compatible canary the OCR side uses). No trip-on-timeout
+  fallback was needed.
+- Measured through `process()` (tests/test_gh987_judge_breaker_e2e.py): the wedged run's page
+  sidecars equal the slow-judge run's, key for key (excluding input_checksum/timings_s), only the
+  judge call count differs (1 vs 4). On this harness both end as status=warning, audit_passed=false,
+  disposition demoted_native (flagged native fallback), failure_mode none; document AUDIT_FAILED.
+  The `page_judge_timeout` failure mode itself is not what these pages carry here, because the
+  native fallback outranks it with no provider/credential; the pin is therefore the equality with
+  today's per-page behaviour, not a pinned tuple (CLAUDE.md, no-provider trap).
+- Resume pinned: a control run whose judge accepts leaves SUCCESS pages and a second run skips all of
+  them (0 OCR calls); the wedged run's pages are WARNING, so a second run with a healthy judge
+  re-reads all four and they become SUCCESS. Note: a document recorded completed is skipped at the
+  DOCUMENT level without `--reprocess` (pre-existing, same for ordinary judge timeouts); the page
+  ledger is what the test exercises, via `reprocess=True`.
+
+### Mutations, external copy (src+tests+pyproject), socr.__file__ canary, count(anchor)==1 asserted
+
+```
+M0_none                                           11 passed
+M1_judge_timeout_arms_halt                        2 failed, 9 passed
+M2_canary_floor_only                              2 failed, 9 passed
+M3_breaker_never_opens                            5 failed, 6 passed (all five e2e pins)
+M4_breaker_opens_when_alive                       3 failed, 8 passed
+M5_no_probe_after_timeout                         5 failed, 6 passed
+M6_probe_exception_counts_alive                   1 failed, 10 passed (test_a_probe_that_raises_counts_as_wedged)
+M7_open_breaker_accepts_instead_of_failing_closed 4 failed, 7 passed
+```

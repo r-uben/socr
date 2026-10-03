@@ -43,7 +43,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.judge.judge import is_page_judge_timeout
+from socr.judge.judge import PageJudgeTimeoutError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -460,21 +460,30 @@ class HeuristicPageJudge:
         )
 
 
-class SwitchablePageJudge:
-    """Routes to ``primary`` until ``tripped``, then to ``fallback`` (#987).
+class CircuitBreakerPageJudge:
+    """Short-circuits ``inner`` to a judge TIMEOUT while ``is_open()`` (#987).
 
-    The judge circuit breaker: once the page judge is shown to be wedged, the
-    remaining pages take the SAME path as a run whose judge model was missing
-    (the heuristic judge) instead of paying a full judge deadline per page.
+    The judge circuit breaker. Once the page judge is shown to be wedged, every
+    later call raises the SAME ``PageJudgeTimeoutError`` a real deadline raises,
+    instantly. ``route_page`` then types it ``JUDGE_OUTCOME_TIMEOUT`` and the page
+    fails closed exactly as it does today, minus the wait. It never degrades to a
+    weaker judge: a heuristic judge does not check fidelity to the page image, so
+    pages it accepted would ship as passed.
+
+    Sits at the VLM leaf, inside the deterministic native-table verifier: pages
+    that verifier settles without a model never reach it and are unaffected.
     """
 
-    def __init__(self, primary: PageJudge, fallback: PageJudge) -> None:
-        self._primary = primary
-        self._fallback = fallback
-        self.tripped = False
+    def __init__(self, inner: PageJudge, is_open: Callable[[], bool]) -> None:
+        self._inner = inner
+        self._is_open = is_open
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        return (self._fallback if self.tripped else self._primary).assess(output, provider)
+        if self._is_open():
+            raise PageJudgeTimeoutError(
+                "page judge timeout: circuit breaker open (judge failed a liveness probe)"
+            )
+        return self._inner.assess(output, provider)
 
 
 class VLMPageJudge:

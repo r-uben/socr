@@ -11913,30 +11913,42 @@ class UnifiedPipeline:
         Judge timeouts do not arm the OCR halt (``_attempts_show_timeout``), so
         a wedged judge would otherwise cost a full judge deadline on every
         remaining page. The evidence is one real 1-token generation on the
-        judge model (``/api/tags`` answers on a wedge). It passes: a slow page,
-        keep judging. It fails: the judge is switched to the heuristic judge for
-        the rest of the document, the path a missing judge model takes, and ONE
-        document-level event says so. Not a count of timeouts (#851).
+        judge model (``/api/tags`` and vLLM ``/models`` answer on a wedge). It
+        passes: a slow page, keep judging. It fails, or the probe itself raises
+        (fail closed): the breaker opens for the rest of the document, and every
+        later judge call raises the same judge timeout a real deadline raises,
+        instantly (``CircuitBreakerPageJudge``). Pages then fail closed exactly
+        as today, without the wait. It does NOT degrade to a weaker judge. ONE
+        document-level event records it. Not a count of timeouts (#851).
         """
         from socr.core.audit_log import AuditEvent
 
-        switch = getattr(self, "_judge_switch", None)
         target = getattr(self, "_judge_probe_target", None)
-        if switch is None or target is None or switch.tripped:
+        if target is None or getattr(self, "_judge_breaker_open", False):
             return
-        host, model = target
-        alive, reason = probe_model_generation(host, model, canary_deadline())
+        kind, where, model = target
+        try:
+            if kind == "openai":
+                alive = probe_openai_server_idle(
+                    where, model=model, generation_timeout=canary_deadline()
+                )
+                reason = "" if alive else "generation probe failed"
+            else:
+                alive, reason = probe_model_generation(where, model, canary_deadline())
+        except Exception as exc:  # an unanswerable probe is not evidence of life
+            alive, reason = False, f"probe raised {type(exc).__name__}: {exc}"
         if alive:
             return
-        switch.tripped = True
+        self._judge_breaker_open = True
         detail = (
             f"page judge {model!r} timed out on p{page_num} and failed a 1-token "
-            f"generation probe ({reason}); heuristic judge for the remaining pages"
+            f"generation probe ({reason}); later pages fail closed on a judge "
+            "timeout without waiting"
         )
         state.events.append(
             AuditEvent(
                 page_num=0,
-                kind="judge_wedged_degraded_to_heuristic",
+                kind="judge_wedged_circuit_open",
                 engine="",
                 detail=detail,
                 data={"judge_model": model, "trigger_page": page_num, "probe_reason": reason},
@@ -11958,13 +11970,13 @@ class UnifiedPipeline:
             HeuristicPageJudge,
             NativeTableVerifierJudge,
             SourceEvidenceTableJudge,
-            SwitchablePageJudge,
+            CircuitBreakerPageJudge,
             VLMPageJudge,
         )
 
         backend = self.config.judge_backend
         inner_judge = None
-        self._judge_switch = None
+        self._judge_breaker_open = False
         self._judge_probe_target = None
         judge_identity = JUDGE_IDENTITY_HEURISTIC
         resolved_model: str | None = None
@@ -11990,15 +12002,20 @@ class UnifiedPipeline:
                         vj = OllamaVisionJudge(model=resolved_model)
                     inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
                     judge_identity = resolved_model
+                    # #987: breaker target + leaf. An Ollama judge is probed with a
+                    # 1-token generation; a vLLM judge with the OpenAI-compatible
+                    # generation canary (its /models listing is blind to a wedge).
                     if isinstance(vj, OllamaVisionJudge):
-                        # #987: breaker target. vLLM judges have no Ollama probe.
-                        self._judge_probe_target = (vj.host, resolved_model)
-                        switch = SwitchablePageJudge(
-                            inner_judge,
-                            HeuristicPageJudge(self.heuristics, sparse_ok=self._sparse_page_ok),
+                        self._judge_probe_target = ("ollama", vj.host, resolved_model)
+                    else:
+                        self._judge_probe_target = (
+                            "openai",
+                            self.config.judge_vllm_url,
+                            self.config.judge_vllm_model,
                         )
-                        self._judge_switch = switch
-                        inner_judge = switch
+                    inner_judge = CircuitBreakerPageJudge(
+                        inner_judge, lambda: self._judge_breaker_open
+                    )
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
             if inner_judge is None:
