@@ -139,6 +139,11 @@ _RESUME_REPLAYED: dict[str, str] = {
         "GH-851: a page that lost its escalation because the provider was wedged; the "
         "record that it was never re-read lives only on this event"
     ),
+    "judge_wedged_circuit_open": (
+        "#987: the page-judge breaker opened on this page; the judge was shown wedged "
+        "and later pages failed closed without it. A restored trigger page would "
+        "otherwise lose the only record of why"
+    ),
     TABLE_BINDING_ADJUDICATED_KIND: "GH-609: binding adjudication record",
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND: (
         "GH-609 round 3: neither a ladder terminal nor resolvable by one "
@@ -8545,7 +8550,7 @@ class UnifiedPipeline:
         def assess(self, output, provider):
             import concurrent.futures
 
-            from socr.judge.judge import PageJudgeTimeoutError
+            from socr.judge.judge import PageJudgeCircuitOpenError, PageJudgeTimeoutError
 
             if self._timeout_sec is None:
                 return self._inner.assess(output, provider)
@@ -8577,6 +8582,14 @@ class UnifiedPipeline:
                 # leave as an exception so ``route_page`` types it.
                 inner_raised = future.done()
                 future.cancel()
+                if isinstance(exc, PageJudgeCircuitOpenError):
+                    # #987: the breaker answered, the judge was never called. Already
+                    # typed and worded; do not re-probe, re-wrap or call it a timeout.
+                    logger.info(
+                        "page judge circuit open on page %s — failing closed without waiting",
+                        output.page_num,
+                    )
+                    raise
                 if self._on_timeout is not None:
                     try:
                         self._on_timeout(output.page_num)
@@ -9500,8 +9513,15 @@ class UnifiedPipeline:
                         # Cascade-halt check: did any attempt time out, and is the
                         # backend now unresponsive?  Use PP-0's probe_ollama_idle.
                         #
+                        # #987: a page-JUDGE timeout (typed outcome) does NOT arm this
+                        # probe any more -- ``_attempts_show_timeout`` skips those
+                        # attempts; a wedged judge is the judge circuit breaker's
+                        # concern. Only an OCR-rung (provider) timeout arms it.
+                        # What follows is the #713 round 3 history, kept for the
+                        # reason-text lesson it records:
+                        #
                         # #713 round 3 (Astra P2): the JUDGE half of this trigger
-                        # reads the TYPED outcome, not the reason text. The
+                        # used to read the TYPED outcome, not the reason text. The
                         # deadline adapter used to re-raise an inner timeout
                         # UNCHANGED, so a judge raising builtin
                         # ``TimeoutError("timed out")`` recorded reason "judge
@@ -11929,9 +11949,8 @@ class UnifiedPipeline:
         kind, where, model = target
         try:
             if kind == "openai":
-                alive = probe_openai_server_idle(
-                    where, model=model, generation_timeout=canary_deadline()
-                )
+                # No cold-load allowance: it is an Ollama eviction effect.
+                alive = probe_openai_server_idle(where, model=model)
                 reason = "" if alive else "generation probe failed"
             else:
                 alive, reason = probe_model_generation(where, model, canary_deadline())
@@ -11947,7 +11966,9 @@ class UnifiedPipeline:
         )
         state.events.append(
             AuditEvent(
-                page_num=0,
+                # On the TRIGGER page, not page 0: only a page's own events reach
+                # its sidecar, and the sidecar is what ``resume_restore_kinds`` replays.
+                page_num=page_num,
                 kind="judge_wedged_circuit_open",
                 engine="",
                 detail=detail,

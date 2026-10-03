@@ -155,3 +155,54 @@ def test_slow_but_alive_first_response_is_not_a_wedge(monkeypatch, allowance, al
     monkeypatch.setattr(extract_mod.httpx, "post", _slow_post)
 
     assert extract_mod.probe_ollama_idle("http://gpu-node:11434", model="m") is alive
+
+
+def test_cold_load_allowance_applies_to_ollama_only(monkeypatch) -> None:
+    """cubic P3: Ollama evicts models, vLLM/SGLang do not. DIFFERENCE: the same probe
+    call against the two backends gets different budgets, and a real wedge on an
+    openai-compatible server is reported at the floor, not the floor plus allowance."""
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+    seen: dict[str, list[float]] = {"openai": [], "ollama": []}
+
+    def _post(url, *args, **kwargs):
+        seen["openai" if "chat/completions" in url else "ollama"].append(kwargs["timeout"])
+        return _Resp()
+
+    monkeypatch.setattr(extract_mod.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(extract_mod.httpx, "post", _post)
+    assert extract_mod.probe_openai_server_idle("http://h/v1", model="m")
+    assert extract_mod.probe_ollama_idle("http://evict-node:11434", model="m2")  # own label
+
+    assert seen["openai"] == [extract_mod._CROP_DEADLINE_FLOOR_S]
+    assert seen["ollama"] == [extract_mod.canary_deadline()]
+    assert seen["openai"] != seen["ollama"]
+
+
+def test_a_circuit_open_short_circuit_is_logged_as_such_and_still_a_timeout(caplog) -> None:
+    from socr.judge.judge import PageJudgeCircuitOpenError, is_page_judge_timeout
+    from socr.pipeline.agentic import CircuitBreakerPageJudge
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    class _NeverCalled:
+        def assess(self, output, provider):
+            raise AssertionError("an open breaker must not call the judge")
+
+    probes: list[int] = []
+    judge = UnifiedPipeline._TimeoutJudge(
+        CircuitBreakerPageJudge(_NeverCalled(), lambda: True),
+        timeout_sec=5.0,
+        on_timeout=probes.append,
+    )
+    out = PageOutput(page_num=7, text="x", status=PageStatus.SUCCESS, engine="t")
+    with caplog.at_level("INFO"), pytest.raises(PageJudgeCircuitOpenError) as excinfo:
+        judge.assess(out, MagicMock())
+
+    assert is_page_judge_timeout(excinfo.value)  # routing still types it a timeout
+    assert probes == []  # the breaker answered; nothing is re-probed
+    assert "page judge timeout: page judge timeout" not in str(excinfo.value)
+    log = caplog.text
+    assert "circuit open" in log and "raised by the judge" not in log

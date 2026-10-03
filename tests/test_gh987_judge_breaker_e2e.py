@@ -112,11 +112,16 @@ def _make_pipeline(monkeypatch, *, probe, judge_calls, judge="hang", vllm=False,
     monkeypatch.setattr(
         "socr.pipeline.orchestrator.probe_model_generation", lambda *a, **k: _answer()
     )
-    monkeypatch.setattr(
-        "socr.pipeline.orchestrator.probe_openai_server_idle", lambda *a, **k: _answer()[0]
-    )
+    pipe_openai_kwargs: list[dict] = []
+
+    def _openai(*a, **k):
+        pipe_openai_kwargs.append(k)
+        return _answer()[0]
+
+    monkeypatch.setattr("socr.pipeline.orchestrator.probe_openai_server_idle", _openai)
 
     pipe.ocr_calls = []
+    pipe.openai_probe_kwargs = pipe_openai_kwargs
 
     def ocr(state, nums, nat, eng, phase, profile=None, **_kwargs):
         pipe.ocr_calls.append(list(nums))
@@ -163,7 +168,13 @@ def _run(tmp_path: Path, monkeypatch, probe, **kw):
 
 
 def _shape(sidecar: dict) -> dict:
-    return {k: v for k, v in sidecar.items() if k not in _VOLATILE}
+    shape = {k: v for k, v in sidecar.items() if k not in _VOLATILE}
+    # The breaker's own event rides the trigger page's sidecar (so a resume replays it);
+    # it is the one intended difference from the slow-judge run.
+    shape["audit_events"] = [
+        e for e in sidecar.get("audit_events", []) if e.get("kind") != BREAKER_EVENT
+    ]
+    return shape
 
 
 def _passed(sidecar: dict) -> bool:
@@ -216,6 +227,9 @@ def test_a_vllm_judge_is_probed_with_a_generation_not_its_listing(tmp_path, monk
     alive = _run(tmp_path / "a", monkeypatch, ALIVE, vllm=True)
     assert wedged["judge_calls"] == 1 and alive["judge_calls"] == _PAGES
     assert wedged["events"].count(BREAKER_EVENT) == 1
+    # No cold-load allowance for an openai-compatible judge (no eviction).
+    assert wedged["pipe"].openai_probe_kwargs
+    assert all("generation_timeout" not in k for k in wedged["pipe"].openai_probe_kwargs)
     for n in wedged["sidecars"]:
         assert _shape(wedged["sidecars"][n]) == _shape(alive["sidecars"][n]), n
 
@@ -246,3 +260,19 @@ def test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healt
     resumed.process(wedged["pdf"], output_dir=wedged["out"])
     assert sorted(n for call in resumed.ocr_calls for n in call) == list(range(1, _PAGES + 1))
     assert all(_passed(sc) for sc in _sidecars(wedged["out"]).values())
+
+
+def test_the_breaker_event_rides_a_page_sidecar_and_is_replayed_on_resume(
+    tmp_path, monkeypatch
+) -> None:
+    """cubic P2: only a page's own events reach its sidecar, and the sidecar is what
+    ``resume_restore_kinds`` replays. The event must sit on the trigger page AND the kind
+    must be in the allowlist, or the audit log loses it after a resume."""
+    wedged = _run(tmp_path, monkeypatch, WEDGED)
+    carrying = [
+        n
+        for n, sc in wedged["sidecars"].items()
+        if any(e.get("kind") == BREAKER_EVENT for e in sc.get("audit_events", []))
+    ]
+    assert carrying == [1], carrying  # the page whose judge timed out and tripped it
+    assert BREAKER_EVENT in UnifiedPipeline.resume_restore_kinds()

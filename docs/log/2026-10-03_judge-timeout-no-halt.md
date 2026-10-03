@@ -115,3 +115,34 @@ M5_no_probe_after_timeout                         5 failed, 6 passed
 M6_probe_exception_counts_alive                   1 failed, 10 passed (test_a_probe_that_raises_counts_as_wedged)
 M7_open_breaker_accepts_instead_of_failing_closed 4 failed, 7 passed
 ```
+
+## Review round 3 (cubic on 4e3cfb99)
+
+- openai/vLLM probes (`/models` precondition and generation canary) now run under
+  `call_with_total_deadline`, as the Ollama sibling does; a trickling server no longer holds the
+  document loop (trickle-server pin on the canary; the `/models` GET cannot reach a loopback server
+  under the suite's hermetic `httpx.get` stub, so it is pinned by a call-site spy instead).
+- The cold-load allowance (`canary_deadline()`) is Ollama-only: `probe_openai_server_idle` defaults to
+  `_CROP_DEADLINE_FLOOR_S`, and the breaker's vLLM probe passes no `generation_timeout`.
+- `judge_wedged_circuit_open` is in `_RESUME_REPLAYED`. Only a page's own events reach its sidecar,
+  so a page-0 event would have made the allowlist entry a no-op: the event now carries the TRIGGER
+  page's number (still exactly one per document; it is in `audit_log.json`).
+  `test_resume_restore_kinds` expects it (41 kinds).
+- `PageJudgeCircuitOpenError(PageJudgeTimeoutError)`: routing still types it a judge timeout, the
+  log says "circuit open", `_TimeoutJudge` re-raises it unchanged (no re-probe, no doubled
+  "page judge timeout: page judge timeout:" text).
+- Comments: halt-site comment in `_phase_agentic` and the `probe_ollama_idle` / `probe_openai_server_idle`
+  docstrings corrected.
+
+### Mutations, external copy (src+tests+pyproject), `socr.__file__` canary, `count(anchor)==1` asserted
+
+```
+M0_none                                        43 passed
+M1a_openai_canary_unwrapped                    2 failed (trickle pin, call-site spy)
+M1b_openai_models_unwrapped                    1 failed (call-site spy)
+M2a_openai_default_gets_allowance              1 failed (allowance Ollama-only pin)
+M2b_breaker_openai_probe_gets_allowance        1 failed (vLLM breaker e2e)
+M3a_kind_not_replayed                          2 failed (e2e replay pin, test_resume_restore_kinds)
+M3b_event_on_page_0                            1 failed (e2e replay pin)
+M4_circuit_open_wrapped_as_ordinary_timeout    1 failed (circuit-open log/type pin)
+```

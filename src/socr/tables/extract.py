@@ -87,6 +87,7 @@ DEFAULT_READER_TIMEOUT_S = 120.0
 # above the 30s floor; docs/log/2026-09-16_221.md). A wedge never answers at all,
 # so the larger deadline only delays the verdict on a real wedge, once. Derived
 # from the reader's own read budget, not a new number.
+# Ollama probes ONLY: vLLM/SGLang keep one model resident and have no eviction.
 CANARY_LOAD_ALLOWANCE_S = DEFAULT_READER_TIMEOUT_S
 
 
@@ -282,25 +283,34 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
     same reason as the Ollama canary: the workload it guards is a vision call.
     """
     try:
-        resp = httpx.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            json={
-                "model": model,
-                "max_tokens": 1,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "ok"},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{_CANARY_IMAGE_B64}"},
-                            },
-                        ],
-                    }
-                ],
-            },
-            timeout=timeout,
+        # #987 (cubic P2): a TOTAL wall-clock deadline, like the Ollama sibling. The
+        # httpx timeout is per socket operation, so a server that trickles a byte
+        # never trips it and would hold the calling (document) loop.
+        resp = call_with_total_deadline(
+            lambda: httpx.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json={
+                    "model": model,
+                    "max_tokens": 1,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "ok"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{_CANARY_IMAGE_B64}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+                timeout=timeout,
+            ),
+            timeout,
+            label=f"openai {safe_host_label(base_url)} generation canary ({model})",
         )
         raise_for_status_redacted(resp)
         return True
@@ -326,18 +336,24 @@ def probe_openai_server_idle(
     GPU is free — a server mid-generation answers it too. Once that
     precondition passes, a minimal generation call (``_openai_generation_canary``)
     is the only thing that tells the two apart. ``generation_timeout`` defaults
-    to ``canary_deadline()`` (#987: floor + cold-load allowance), the budget this pipeline already
-    budgets for a normal crop read — no new number invented for this probe.
+    to ``_CROP_DEADLINE_FLOOR_S``, the wall-clock floor this pipeline already
+    budgets for a normal crop read. #987: NOT ``canary_deadline()`` -- the
+    cold-load allowance exists because Ollama evicts models, and vLLM/SGLang
+    keep one model resident, so a real wedge is reported at the floor.
     """
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        resp = call_with_total_deadline(
+            lambda: httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout),
+            timeout,
+            label=f"openai {safe_host_label(base_url)}/models probe",
+        )
         raise_for_status_redacted(resp)
     except _PROBE_ERRORS:
         return False
     return _openai_generation_canary(
         base_url,
         model or _default_canary_model(),
-        generation_timeout if generation_timeout is not None else canary_deadline(),
+        generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
     )
 
 
@@ -361,9 +377,10 @@ def probe_ollama_idle(
     exists to catch. ``/api/tags`` is now only the cheap precondition — an
     unreachable host still fails fast — and a minimal generation request
     (``_ollama_generation_canary``) is the evidence that actually gates the
-    return value. ``generation_timeout`` defaults to ``canary_deadline()`` (#987: floor + cold-load allowance),
-    the wall-clock floor this pipeline already budgets for a normal crop read;
-    no new threshold is invented for this probe.
+    return value. ``generation_timeout`` defaults to ``canary_deadline()``: the
+    30 s ``_CROP_DEADLINE_FLOOR_S`` plus ``CANARY_LOAD_ALLOWANCE_S`` (the 120 s
+    reader timeout) for a cold model load, since Ollama evicts models (#987); no
+    new threshold is invented for this probe.
 
     GH-222: ``host`` used to default to a hardcoded ``http://localhost:11434``,
     and the cascade call site passed nothing. On any deployment without a local

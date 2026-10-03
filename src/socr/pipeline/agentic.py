@@ -43,7 +43,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.judge.judge import PageJudgeTimeoutError, is_page_judge_timeout
+from socr.judge.judge import PageJudgeCircuitOpenError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -480,8 +480,9 @@ class CircuitBreakerPageJudge:
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         if self._is_open():
-            raise PageJudgeTimeoutError(
-                "page judge timeout: circuit breaker open (judge failed a liveness probe)"
+            raise PageJudgeCircuitOpenError(
+                "page judge timeout (circuit open): the judge failed a liveness probe "
+                "earlier in this document; failing closed without waiting"
             )
         return self._inner.assess(output, provider)
 
