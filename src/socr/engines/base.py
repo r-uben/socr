@@ -6,6 +6,7 @@ Two engine families:
 """
 
 import logging
+import re
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,30 @@ from socr.core.result import (
 logger = logging.getLogger(__name__)
 
 _normalizer = OutputNormalizer()
+
+
+#: Placeholders an engine CLI writes INSTEAD of text when it failed a page (GH-1020).
+#: Each is matched against the WHOLE stripped page text, never as a substring, so a
+#: page that merely quotes the marker is not touched. Sources (sibling repos):
+#:  - qwen-ocr-cli ``qwen_ocr/processor.py::_ocr_pages`` writes
+#:    ``*[OCR failed for page {idx}]*`` (``idx`` = 1-based position in the image dir) and
+#:    records the real reason in ``DocResult.page_errors`` / metadata.json ``error``.
+#:  - qwen-ocr-cli ``processor.py::_write_document`` and mistral-ocr-cli
+#:    ``mistral_ocr/processor.py`` write ``*[OCR Failed]*`` for a document with no pages.
+#: Other CLIs (gemini, marker, glm, deepseek, nougat) write no placeholder: they
+#: skip the page file and exit non-zero, already handled as CLI_ERROR/EMPTY_OUTPUT.
+CLI_FAILURE_PLACEHOLDERS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\*\[OCR failed for page \d+\]\*"),
+    re.compile(r"\*\[OCR Failed\]\*"),
+)
+
+
+def is_cli_failure_placeholder(text: str | None) -> bool:
+    """True when ``text`` is exactly a CLI per-page failure marker, nothing else."""
+    if not text:
+        return False
+    stripped = text.strip()
+    return any(p.fullmatch(stripped) for p in CLI_FAILURE_PLACEHOLDERS)
 
 
 def sanitize_filename(name: str) -> str:
@@ -178,6 +203,17 @@ class BaseEngine(ABC):
                         status=DocumentStatus.ERROR,
                         failure_mode=FailureMode.EMPTY_OUTPUT,
                         error="CLI produced no output markdown",
+                        processing_time=time.time() - start_time,
+                        model_version=self.resolved_model_version(config),
+                    )
+
+                if is_cli_failure_placeholder(markdown):
+                    return EngineResult(
+                        document_path=pdf_path,
+                        engine=self.name,
+                        status=DocumentStatus.ERROR,
+                        failure_mode=FailureMode.CLI_ERROR,
+                        error="CLI wrote a failure placeholder instead of text",
                         processing_time=time.time() - start_time,
                         model_version=self.resolved_model_version(config),
                     )
@@ -359,7 +395,31 @@ class BaseEngine(ABC):
                 if not text and aggregate is not None:
                     text = aggregate.get(page_num)
 
-                if text:
+                if text and (
+                    is_cli_failure_placeholder(text)
+                    or is_cli_failure_placeholder(self._clean_output(text, self.name))
+                ):
+                    # GH-1020: the CLI reported this page as failed and wrote a marker
+                    # instead of text. It is a failure, not content: no judge call, the
+                    # ladder moves on, and the marker never reaches the output.
+                    logger.warning(
+                        f"[{self.name}] page {page_num}: CLI wrote a failure placeholder"
+                        + (f" ({cli_error_note})" if cli_error_note else "")
+                    )
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.CLI_ERROR,
+                            audit_passed=False,
+                            error=(
+                                f"CLI reported OCR failure for page {page_num}"
+                                + (f" ({cli_error_note})" if cli_error_note else "")
+                            ),
+                        )
+                    )
+                elif text:
                     text = self._clean_output(text, self.name)
                     outputs.append(
                         PageOutput(
@@ -604,8 +664,6 @@ class BaseEngine(ABC):
           - Engine-specific artifact cleanup (via OutputNormalizer)
           - Generic markdown normalization (line endings, whitespace, unicode)
         """
-        import re
-
         # Strip YAML frontmatter
         if text.startswith("---"):
             parts = text.split("---", 2)
