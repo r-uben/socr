@@ -200,13 +200,9 @@ def compose_upright_shipped_page(page, regions: list) -> str:
 def _markdown_table_tokens(table_markdown: str) -> set[str]:
     table_tokens: set[str] = set()
     for line in (table_markdown or "").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("| ---"):
+        if not line.strip() or _MD_SEP_RE.match(line):
             continue
-        for cell in stripped.strip("|").split("|"):
-            token = cell.strip()
-            if token:
-                table_tokens.add(token)
+        table_tokens.update(cell for cell in _parse_output_row_cells(line) if cell)
     return table_tokens
 
 
@@ -401,7 +397,7 @@ def splice_cell_tokens(
         if len(hits) != 1:
             return None
         line_index = hits[0]
-        cells = [cell.strip() for cell in lines[line_index].strip().strip("|").split("|")]
+        cells = _parse_output_row_cells(lines[line_index])
         seen: set[int] = set()
         for cell_index, old, new in edits:
             if cell_index in seen or cell_index < 0 or cell_index >= len(cells):
