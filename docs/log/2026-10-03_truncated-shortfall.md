@@ -77,3 +77,34 @@ were merged by adjacency); no bridge 1; bridge without lane check 1; no adjacent
 - Census: still 24 cleared / 16 refused / 0 new. Mutations: bands reusable 1 killed, no gap rule 1,
   no caption rule 1 (after making the caption fixture's gap pass the pitch rule), bridge limits
   removed 1, no bridge 1.
+
+## Round 4 -- region scoping DROPPED
+
+Region scoping of the native count (rounds 1-3) was tried and removed. Astra found four bypasses,
+each letting a truncated table ship because scoping RELAXES a refusal:
+1. Panel truncation: extension stopped at a numeric-free panel heading (native 10 rows, heading,
+   10 more; candidate emits the first 10).
+2. Invented blank-stub SE rows counted without binding, masking missing rows.
+3. Matching reset per block, so a repeated block re-credited the same SE bands
+   (`_markdown(5) + _markdown(5)` counted 20 against 20); then three copies (10 bound + 10 unbound
+   labelled = 20) did the same.
+4. Same-lane bridging, and adjacent table-shaped bands that skipped the gap check, absorbed a
+   second table (`_page() + _page(y0=900)`).
+Each fix (lane-defined extent, bridging, pitch/caption stops, binding-coverage gate) opened the
+next hole. Any rule that narrows the native count is a rule for shipping an incomplete table, so
+the native side is back to main's page-wide `table_shaped_native_row_count`.
+
+Kept: the symmetric blank-stub fix only. A blank-stub candidate row counts iff it binds to a native
+band (`match_rows_monotonic`); a band credits one row on the page (blanked after use, across
+blocks); a labelled row counts as on main but an exact repeat (label + tokens) is not counted again.
+`row_shape_min` stays the min over labelled counted rows. No extent, bridge, pitch, caption or
+coverage logic remains. Never more lenient than main except for corroborated SE lines.
+
+Census (40 refused candidates): 14 clear, 26 still refuse, 0 refusals new vs main. (Region scoping
+had cleared 24; the other 10 were the price of the bypasses.) Cleared pages viewed: ghost p13,
+huynh p32, bybee p31 (render viewed in the original census notes) -- all complete tables.
+Cleared-and-incomplete: 0.
+
+Mutations (external copy, canary): blank-stub never counts 1 killed; unbound blank-stub counts 3;
+bands reusable across blocks 2; no labelled dedupe 1. Baseline 59 passed.
+`tests/tables/test_gh703_text_table_dominance.py` is back to origin/main (no edits needed).

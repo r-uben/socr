@@ -164,12 +164,6 @@ def test_text_table_is_not_truncated() -> None:
     assert table_output_defect(TEXT_TABLE_MD, TEXT_TABLE_WORDS) != DEFECT_TABLE_TRUNCATED
 
 
-def _legacy_rows(words, markdown):
-    """What main counted: blank-stub rows dropped, nothing bound (page-wide)."""
-    rows = [r for blk in table_blocks(markdown) for r in numeric_body_rows(blk) if r]
-    return rows, [], min((len(r) for r in rows), default=0)
-
-
 def test_text_table_difference_pin_term_b_ungated_vs_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -179,13 +173,6 @@ def test_text_table_difference_pin_term_b_ungated_vs_gated(
     gated = table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS)
 
     monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
-    # #988's table-extent scoping alone also spares this page; restore the
-    # page-wide count so the pin stays about the lane gate.
-    monkeypatch.setattr(
-        structure_check,
-        "_corroborated_candidate_rows",
-        _legacy_rows,
-    )
     ungated = table_truncated(TEXT_TABLE_MD, TEXT_TABLE_WORDS)
 
     assert (ungated, gated) == (True, False)
@@ -346,15 +333,6 @@ def test_real_boe_p1_difference_pin(monkeypatch: pytest.MonkeyPatch) -> None:
 
     gated = table_truncated(markdown, words)
     monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
-    # #988 scopes the native count to the candidate's table region, which on
-    # its own already stops this page truncating. The #703 regression is the
-    # page-wide count with no lane gate, so restore that to keep the pin about
-    # what the lane gate is for.
-    monkeypatch.setattr(
-        structure_check,
-        "_corroborated_candidate_rows",
-        _legacy_rows,
-    )
     ungated = table_truncated(markdown, words)
 
     assert (ungated, gated) == (True, False)

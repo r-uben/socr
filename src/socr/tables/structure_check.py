@@ -368,21 +368,22 @@ def _native_page_has_column_lanes(words: list) -> bool:
     return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES, seeded_lanes=True)
 
 
-def _corroborated_candidate_rows(
-    words: list, markdown: str
-) -> tuple[list[tuple[str, ...]], list[int], int]:
+def _corroborated_candidate_rows(words: list, markdown: str) -> tuple[list[tuple[str, ...]], int]:
     """#988: the candidate's numeric body rows that count toward the shortfall,
-    the native band index each bound row matched, and ``row_shape_min``.
+    and ``row_shape_min``.
+
+    A labelled row counts as it always has (once: an exact repeat of a labelled
+    row is not counted again). A blank-stub row -- a standard-error / t-stat
+    line, which the native side always counted -- counts only if it binds to a
+    native baseline band (``match_rows_monotonic``), and a native band credits
+    at most ONE candidate row on the page: matching is monotonic within a
+    block and the bands a block consumed are blanked for the next. Invented or
+    repeated SE rows therefore cannot make up a shortfall.
 
     ``row_shape_min`` is the minimum width over LABELLED counted rows, as it
     always was (a blank-stub row can be a sparse SE line or a numeric header and
     would widen the native count); it falls back to all counted rows only when
-    there is no labelled row.
-
-    A row with a label counts as it always has. A blank-stub row (a standard-
-    error / t-stat line) counts ONLY if it binds to a native band
-    (``match_rows_monotonic``): the native side counts those lines, but a
-    candidate must not be able to make up the difference by inventing them.
+    there is no labelled counted row.
     """
     from socr.tables.row_corroboration import (
         baseline_bands,
@@ -391,141 +392,32 @@ def _corroborated_candidate_rows(
         table_blocks,
     )
 
-    # A native band credits at most ONE candidate row on the page: matching is
-    # monotonic within a block, and bands a block consumed are blanked for the
-    # next, so two blocks cannot both claim the same standard-error lines.
     token_lists = [band.tokens for band in baseline_bands(words)]
     counted: list[tuple[str, ...]] = []
     labelled: list[tuple[str, ...]] = []
-    bound: list[int] = []
+    seen_labelled: set[tuple[str, tuple[str, ...]]] = set()
     for rows in table_blocks(markdown):
         entries = []
         for row in rows:
             tokens = [r for r in numeric_body_rows([row], include_blank_stub=True) if r]
             if tokens:
-                entries.append((tokens[0], not row[0].strip()))
-        matches = match_rows_monotonic([tokens for tokens, _ in entries], token_lists)
-        for (tokens, blank_stub), idx in zip(entries, matches):
+                entries.append((row[0].strip(), tokens[0]))
+        matches = match_rows_monotonic([tokens for _, tokens in entries], token_lists)
+        for (label, tokens), idx in zip(entries, matches):
             if idx is not None:
-                bound.append(idx)
                 token_lists[idx] = ()
-            if idx is not None or not blank_stub:
+            if label:
+                # a labelled row counts as it always has, once: a repeated
+                # block must not count its copies
+                if (label, tokens) in seen_labelled:
+                    continue
+                seen_labelled.add((label, tokens))
                 counted.append(tokens)
-            if not blank_stub:
                 labelled.append(tokens)
+            elif idx is not None:
+                counted.append(tokens)
     shape_rows = labelled or counted
-    return counted, bound, (min(len(r) for r in shape_rows) if shape_rows else 0)
-
-
-def _native_table_rows_in_table_extent(
-    words: list, bound_bands: list[int], row_shape_min: int
-) -> int:
-    """#988: ``table_shaped_native_row_count`` over the table's extent on the
-    native page, not over the whole page.
-
-    The page-wide count also counts axis ticks, running heads and watermarks,
-    none of which a candidate table could reproduce. The extent is read from
-    native geometry, not from the candidate's surviving rows alone: the
-    numeric lanes (x0 / x1 positions, ``reconstruct._LANE_X_TOL_PT``) of the
-    bands the candidate bound are the table's columns, and from the bound
-    span the extent grows outward through adjacent table-shaped bands, and
-    across a run of non-table-shaped bands (a panel heading, a section label)
-    when the next table-shaped band beyond it has all its numbers in those
-    lanes. Rows the candidate never emitted at either end, or in a later
-    panel, are therefore still counted; ticks and running heads, whose
-    numbers sit elsewhere, are not.
-    """
-    from socr.tables.reconstruct import _LANE_X_TOL_PT
-    from socr.tables.row_corroboration import (
-        _is_genuine_numeric,
-        baseline_bands,
-        cluster_band_words,
-        is_column_index_row,
-        table_shaped_native_row_count,
-        words_in_region,
-    )
-
-    band_words = cluster_band_words(words)
-    bands = baseline_bands(words)
-    token_lists = [band.tokens for band in bands]
-
-    def numeric_words(idx: int) -> list:
-        return [w for w in band_words[idx] if _is_genuine_numeric(w[4])[0]]
-
-    lane_x0 = [w[0] for idx in set(bound_bands) for w in numeric_words(idx)]
-    lane_x1 = [w[2] for idx in set(bound_bands) for w in numeric_words(idx)]
-
-    def in_lanes(w: tuple) -> bool:
-        return any(abs(w[0] - x) <= _LANE_X_TOL_PT for x in lane_x0) or any(
-            abs(w[2] - x) <= _LANE_X_TOL_PT for x in lane_x1
-        )
-
-    def table_shaped(idx: int) -> bool:
-        tokens = token_lists[idx]
-        return bool(tokens) and len(tokens) >= row_shape_min and not is_column_index_row(tokens)
-
-    def strictly_in_lanes(idx: int) -> bool:
-        return table_shaped(idx) and all(in_lanes(w) for w in numeric_words(idx))
-
-    # The table's own row pitch: the largest y-spacing between consecutive
-    # table-shaped bands inside the span the candidate bound. A bridge may not
-    # leave more vertical space than its bands would take at that pitch (one
-    # pitch per bridged band, plus one to step onto the far band), so a separate
-    # table below a wide gap is not absorbed.
-    span_ys = [
-        bands[idx].y_center
-        for idx in range(min(bound_bands), max(bound_bands) + 1)
-        if table_shaped(idx)
-    ]
-    pitch = max((b - a for a, b in zip(span_ys, span_ys[1:])), default=None)
-
-    def is_caption(idx: int) -> bool:
-        """A ``Table N`` / ``Figure N`` line starts a different object."""
-        lead = min(band_words[idx], key=lambda w: w[0])[4]
-        return lead.rstrip(".:").lower() in {"table", "figure"}
-
-    def may_bridge(edge: int, beyond: int, step: int) -> bool:
-        run = range(edge + step, beyond, step)
-        if any(is_caption(idx) for idx in run):
-            return False
-        if pitch is None:
-            return True
-        gap = abs(bands[beyond].y_center - bands[edge].y_center)
-        return gap <= pitch * (len(run) + 1)
-
-    def reach(start: int, step: int) -> int:
-        """Walk from *start* away from the table. Adjacent table-shaped bands are
-        in. A run of non-table-shaped bands (a panel heading, a section label) is
-        bridged when the next table-shaped band beyond it has ALL its numbers in
-        the table's lanes; anything else ends the extent.
-        """
-        edge, idx = start, start + step
-        while 0 <= idx < len(band_words):
-            if table_shaped(idx):
-                edge, idx = idx, idx + step
-                continue
-            beyond = idx
-            while 0 <= beyond < len(band_words) and not table_shaped(beyond):
-                beyond += step
-            if (
-                0 <= beyond < len(band_words)
-                and strictly_in_lanes(beyond)
-                and may_bridge(edge, beyond, step)
-            ):
-                edge, idx = beyond, beyond + step
-            else:
-                break
-        return edge
-
-    first, last = reach(min(bound_bands), -1), reach(max(bound_bands), 1)
-    in_extent = [w for idx in range(first, last + 1) for w in band_words[idx]]
-    region = (
-        min(w[0] for w in in_extent),
-        min(w[1] for w in in_extent),
-        max(w[2] for w in in_extent),
-        max(w[3] for w in in_extent),
-    )
-    return table_shaped_native_row_count(words_in_region(words, region), row_shape_min)
+    return counted, (min(len(r) for r in shape_rows) if shape_rows else 0)
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
@@ -551,11 +443,11 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     row and a complete candidate reads as a massive shortfall. Such candidates
     are left to term (a) and to the ladder verdict.
 
-    #988: both sides count like with like. The candidate side keeps its
-    blank-stub rows (each standard-error / t-stat line), as the native side
-    always counted them, and the native side counts only inside the table
-    extent (``_native_table_rows_in_table_extent``) of the lanes the candidate binds to.
-    ``manifest._row_shape_reconciliation`` still uses the page-wide count.
+    #988: the candidate side counts its blank-stub rows (each standard-error /
+    t-stat line) as the native side always did, but only rows that bind
+    uniquely to a native band (``_corroborated_candidate_rows``). The native
+    count stays page-wide: scoping it to a "table region" was tried and every
+    variant let a truncated table through (see docs/log/2026-10-03_truncated-shortfall.md).
 
     ``row_shape_min`` is still the candidate's own minimum, deliberately. The
     lane gate has already established that this page HAS column structure, so
@@ -575,19 +467,11 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         table_shaped_native_row_count,
     )
 
-    # #988: both sides count like with like. Blank-stub rows count only when
-    # corroborated by a native band. The native count is scoped to the table's
-    # extent only when the candidate is substantially bound to the page
-    # (ROW_CORROBORATION_MIN of its counted rows); a candidate that mostly
-    # fails to bind gives no trustworthy lanes, and the page-wide count stands.
-    candidate_rows, bound_bands, row_shape_min = _corroborated_candidate_rows(words, markdown)
+    candidate_rows, row_shape_min = _corroborated_candidate_rows(words, markdown)
     if not candidate_rows:
         return False
 
-    if len(bound_bands) >= math.ceil(len(candidate_rows) * ROW_CORROBORATION_MIN):
-        native_table_rows = _native_table_rows_in_table_extent(words, bound_bands, row_shape_min)
-    else:
-        native_table_rows = table_shaped_native_row_count(words, row_shape_min)
+    native_table_rows = table_shaped_native_row_count(words, row_shape_min)
     if native_table_rows <= 0:
         return False
 
