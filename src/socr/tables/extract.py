@@ -76,6 +76,25 @@ _CROP_WALL_CLOCK_MULTIPLIER = 2.0
 _CROP_DEADLINE_FLOOR_S = 30.0
 
 
+# Default per-request read budget of ``OllamaTableReader`` -- the time this
+# pipeline already grants a crop read that may itself have to load the model.
+DEFAULT_READER_TIMEOUT_S = 120.0
+
+# #987: extra time a liveness canary is allowed on top of the floor so a COLD
+# model load is not read as a wedge. The local OCR model shares one GPU with the
+# page judge; when the judge is a different, large model, Ollama evicts the OCR
+# model and the next request to it queues behind a reload (measured ~37.5s,
+# above the 30s floor; docs/log/2026-09-16_221.md). A wedge never answers at all,
+# so the larger deadline only delays the verdict on a real wedge, once. Derived
+# from the reader's own read budget, not a new number.
+CANARY_LOAD_ALLOWANCE_S = DEFAULT_READER_TIMEOUT_S
+
+
+def canary_deadline() -> float:
+    """Wall-clock budget of a generation canary: floor plus a cold-load allowance."""
+    return _CROP_DEADLINE_FLOOR_S + CANARY_LOAD_ALLOWANCE_S
+
+
 def crop_wall_clock_deadline(reader_timeout_s: float) -> float:
     """Return the per-crop ThreadPoolExecutor wall-clock deadline in seconds.
 
@@ -307,7 +326,7 @@ def probe_openai_server_idle(
     GPU is free — a server mid-generation answers it too. Once that
     precondition passes, a minimal generation call (``_openai_generation_canary``)
     is the only thing that tells the two apart. ``generation_timeout`` defaults
-    to ``_CROP_DEADLINE_FLOOR_S``, the wall-clock floor this pipeline already
+    to ``canary_deadline()`` (#987: floor + cold-load allowance), the budget this pipeline already
     budgets for a normal crop read — no new number invented for this probe.
     """
     try:
@@ -318,7 +337,7 @@ def probe_openai_server_idle(
     return _openai_generation_canary(
         base_url,
         model or _default_canary_model(),
-        generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
+        generation_timeout if generation_timeout is not None else canary_deadline(),
     )
 
 
@@ -342,7 +361,7 @@ def probe_ollama_idle(
     exists to catch. ``/api/tags`` is now only the cheap precondition — an
     unreachable host still fails fast — and a minimal generation request
     (``_ollama_generation_canary``) is the evidence that actually gates the
-    return value. ``generation_timeout`` defaults to ``_CROP_DEADLINE_FLOOR_S``,
+    return value. ``generation_timeout`` defaults to ``canary_deadline()`` (#987: floor + cold-load allowance),
     the wall-clock floor this pipeline already budgets for a normal crop read;
     no new threshold is invented for this probe.
 
@@ -368,7 +387,7 @@ def probe_ollama_idle(
     return _ollama_generation_canary(
         resolved,
         model or _default_canary_model(),
-        generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
+        generation_timeout if generation_timeout is not None else canary_deadline(),
     )
 
 
@@ -463,7 +482,7 @@ class OllamaTableReader:
         self,
         model: str,
         host: str = "http://localhost:11434",
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_READER_TIMEOUT_S,
     ) -> None:
         self.model = model
         self.host = host.rstrip("/")

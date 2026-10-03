@@ -8469,7 +8469,17 @@ class UnifiedPipeline:
     def _attempts_show_timeout(attempts) -> bool:
         """PP-0 cascade-halt trigger: did anything on this page time out?
 
-        The JUDGE half reads the TYPED outcome (#713 round 3). The reason string
+        #987: a page-JUDGE timeout does NOT arm the halt. The judge is a different
+        model on the same GPU; its timeout says nothing about the OCR VLM, and the
+        canary that follows pays a cold OCR-model reload. Measured: 8 halts in 11
+        papers, every one started by a judge timeout, never an OCR-rung timeout. An
+        attempt typed ``JUDGE_OUTCOME_TIMEOUT`` is therefore skipped entirely (its
+        reason, "judge raised: page judge timeout ...", also contains the word).
+        A genuine OCR-rung timeout still arms it, even on a page whose judge also
+        timed out, because that rung has its own attempt.
+
+        History (#713 round 3), superseded for the judge half: the judge half read
+        the TYPED outcome. The reason string
         is built by interpolating an arbitrary exception, so a judge raising
         builtin ``TimeoutError("timed out")`` produced "judge raised: timed out"
         -- no contiguous "timeout" -- and the wedged-backend probe was never
@@ -8480,9 +8490,9 @@ class UnifiedPipeline:
         can pin THIS expression rather than a copy of it.
         """
         return any(
-            getattr(getattr(att, "output", None), "judge_outcome", "") == JUDGE_OUTCOME_TIMEOUT
-            or "timeout" in (getattr(att, "reason", "") or "")
+            "timeout" in (getattr(att, "reason", "") or "")
             for att in attempts
+            if getattr(getattr(att, "output", None), "judge_outcome", "") != JUDGE_OUTCOME_TIMEOUT
         )
 
     # ------------------------------------------------------------------
@@ -8498,11 +8508,9 @@ class UnifiedPipeline:
         ``route_page``'s judge guard catches: it records the attempt UNJUDGED,
         stamps the typed ``JUDGE_OUTCOME_TIMEOUT`` on the page output and
         escalates normally -- the same escalation the old rejection produced.
-        If the backend is also not idle after the timeout, the caller should set
-        ``backend_degraded`` and halt. That probe reads the TYPED outcome for
-        the judge half of its trigger (#713 round 3), so no wording here is
-        load-bearing; the raised message still says "timeout" for the humans
-        reading the audit trail.
+        #987: a judge timeout does NOT arm the document halt (see
+        ``_attempts_show_timeout``); only an OCR-rung timeout does. The raised
+        message still says "timeout" for the humans reading the audit trail.
 
         BOTH timeout branches leave as this one type: our own deadline, and a
         timeout the inner judge raised itself (which arrives here as the same

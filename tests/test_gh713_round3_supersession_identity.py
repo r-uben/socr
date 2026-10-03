@@ -227,8 +227,9 @@ def test_an_inner_timeout_arms_the_production_cascade_halt_predicate() -> None:
         decision = agentic.route_page(1, [_Prof()], lambda prof, page, _o=out: _o, judge)
         armed[label] = UnifiedPipeline._attempts_show_timeout(decision.attempts)
 
-    assert armed["inner"] is True
-    assert armed["deadline"] is True
+    # #987: a judge timeout (either branch) no longer arms the OCR-backend halt.
+    assert armed["inner"] is False
+    assert armed["deadline"] is False
     assert armed["answered"] is False
 
 
