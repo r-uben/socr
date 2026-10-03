@@ -4223,9 +4223,10 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     layer (engine ``native*``), runs of one-character lines (an axis title spelled down the
     page), which are FENCED verbatim rather than dropped.
 
-    Abstains (returns *output* untouched) when the page already ships an image of itself -- a
-    fail-closed marker, or any floor PNG -- because those carry the picture and rewriting their
-    bytes could change what the disposition classifier reads from them. Applied on the FINALIZED
+    Abstains (returns *output* untouched) only when the page already ships an image of itself
+    (a floor PNG, or a marker that carries one). A marker with NO image and an empty page DO get
+    the ref: the render succeeded, and a captioned scan must not end with neither text nor image.
+    A marker plus one image block still reads as a marker to the disposition classifier. Applied on the FINALIZED
     copy so the flush, the stitch and a resume replay see one text; idempotent on its own ref.
 
     A render failure is status-only, like the chart-region guard: SUCCESS becomes WARNING, the
@@ -4238,17 +4239,19 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     if not ref:
         return output
     text = output.text or ""
-    if (
-        ref in text
-        or not text.strip()
-        or is_page_failed_marker(text)
-        or any(
-            getattr(p, name, "")
-            for name in ("d3_floor_png_ref", "rotated_shred_png_ref", "invisible_scan_png_ref")
-        )
+    is_marker = is_page_failed_marker(text)
+    if ref in text or any(
+        getattr(p, name, "")
+        for name in ("d3_floor_png_ref", "rotated_shred_png_ref", "invisible_scan_png_ref")
     ):
         return output
-    if (output.engine or "").startswith("native"):
+    if is_marker and any(ln.lstrip().startswith("![") for ln in text.splitlines()):
+        # A marker that already carries its own image: a second block would stop it reading as
+        # "marker plus one image" to the disposition classifier.
+        return output
+    if not text.strip():
+        return replace(output, text=ref)
+    if not is_marker and (output.engine or "").startswith("native"):
         from socr.figures.scanned_figures import fence_spelled_runs
 
         text, _ = fence_spelled_runs(text)

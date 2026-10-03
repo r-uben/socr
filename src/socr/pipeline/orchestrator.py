@@ -5739,35 +5739,51 @@ class UnifiedPipeline:
         return "; ".join(parts)
 
     @staticmethod
-    def _scanned_figure_split(state) -> tuple[list[int], list[int]]:
-        """#1030: (pages whose scanned figure ships as a page image, pages where it could not).
+    def _scanned_figure_split(state, records) -> tuple[list[int], list[int], list[int]]:
+        """#1030: (shipped, suppressed, lost) scanned-figure pages, from the FINALISED output.
 
-        One derivation for the document note and the CLI line, as ``_visual_values_split``
-        is. Read from the audit events: the kind is replayed on resume, so the events are the
-        durable record. A page that saved on one event and failed on another counts as lost.
+        The page-loop event only says the image was rendered. Whether it reached the page is
+        decided at finalisation (a marker page, an empty page, or a floor image abstains), so
+        the report reads the finalised text: ``shipped`` = rendered AND the ref is in the text
+        that ships; ``suppressed`` = rendered but not referenced; ``lost`` = render failed.
+        The events are the durable record on resume (the kind is replayed); the finalised text
+        is the truth about the bytes.
         """
-        saved: set[int] = set()
+        text_by_page = {r.output.page_num: (r.output.text or "") for r in records}
+        shipped: set[int] = set()
+        suppressed: set[int] = set()
         lost: set[int] = set()
         for ev in state.events:
             if getattr(ev, "kind", "") != "scanned_figure_asset":
                 continue
             data = getattr(ev, "data", None) or {}
-            (saved if data.get("png_saved") else lost).add(ev.page_num)
-        saved -= lost
-        return sorted(saved), sorted(lost)
+            ref = data.get("png_path") or ""
+            if not data.get("png_saved"):
+                lost.add(ev.page_num)
+            elif ref and ref in text_by_page.get(ev.page_num, ""):
+                shipped.add(ev.page_num)
+            else:
+                suppressed.add(ev.page_num)
+        shipped -= lost
+        suppressed -= lost | shipped
+        return sorted(shipped), sorted(suppressed), sorted(lost)
 
     @staticmethod
-    def _scanned_figure_note(state) -> str | None:
-        """#1030: name the scanned pages whose figure ships as a page image. ``None`` if none."""
-        saved, lost = UnifiedPipeline._scanned_figure_split(state)
-        if not saved and not lost:
+    def _scanned_figure_note(state, records) -> str | None:
+        """#1030: name the scanned figure pages and what actually shipped. ``None`` if none."""
+        shipped, suppressed, lost = UnifiedPipeline._scanned_figure_split(state, records)
+        if not (shipped or suppressed or lost):
             return None
         parts = []
-        if saved:
+        if shipped:
             parts.append(
-                f"page(s) {', '.join(str(n) for n in saved)}: scanned figure page; the figure "
-                "ships as the page image beside the page text (the scan's layer cannot "
-                "localize it)"
+                f"page(s) {', '.join(str(n) for n in shipped)}: scanned figure page; the page "
+                "image ships beside the page text (the scan's layer cannot localize the figure)"
+            )
+        if suppressed:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in suppressed)}: scanned figure page; the "
+                "page image was rendered but the page ships without a reference to it"
             )
         if lost:
             parts.append(
@@ -10827,8 +10843,8 @@ class UnifiedPipeline:
                 kind="scanned_figure_asset",
                 engine="",
                 detail=(
-                    "scanned page whose text layer names a figure: the page image ships beside "
-                    "the page text (the figure box cannot be isolated on a scan)"
+                    "scanned page whose text layer names a figure: the page image was rendered "
+                    "(whether the page references it is decided at finalisation)"
                     if ref
                     else "scanned page whose text layer names a figure: the page image could "
                     "NOT be saved, so the figure is preserved nowhere"
@@ -16494,17 +16510,24 @@ class UnifiedPipeline:
                         f"transcribed; in-image text is preserved in the page image only: "
                         f"{_visual_kept}[/cyan]"
                     )
-                _scanned_fig_kept, _scanned_fig_lost = self._scanned_figure_split(state)
-                if _scanned_fig_kept:
+                _sf_shipped, _sf_suppressed, _sf_lost = self._scanned_figure_split(
+                    state, pre_records
+                )
+                if _sf_shipped:
                     console.print(
-                        f"  [cyan]{len(_scanned_fig_kept)} scanned figure page(s): the figure "
-                        f"ships as the page image beside the page text: {_scanned_fig_kept}[/cyan]"
+                        f"  [cyan]{len(_sf_shipped)} scanned figure page(s): the page image "
+                        f"ships beside the page text: {_sf_shipped}[/cyan]"
                     )
-                if _scanned_fig_lost:
+                if _sf_suppressed:
                     console.print(
-                        f"  [red]{len(_scanned_fig_lost)} scanned figure page(s): the page "
-                        f"image was not saved; the figure is preserved nowhere: "
-                        f"{_scanned_fig_lost}[/red]"
+                        f"  [yellow]{len(_sf_suppressed)} scanned figure page(s): the page "
+                        f"image was rendered but the page ships without a reference to it: "
+                        f"{_sf_suppressed}[/yellow]"
+                    )
+                if _sf_lost:
+                    console.print(
+                        f"  [red]{len(_sf_lost)} scanned figure page(s): the page image was "
+                        f"not saved; the figure is preserved nowhere: {_sf_lost}[/red]"
                     )
                 if _visual_lost:
                     # GH-566: and the render-failure pages are NOT that. Nothing
@@ -16822,7 +16845,7 @@ class UnifiedPipeline:
             else:
                 final_result.error = _visual_note
         # #1030: and the scanned figure pages, for the same reason.
-        _scanned_fig_note = self._scanned_figure_note(state)
+        _scanned_fig_note = self._scanned_figure_note(state, pre_records)
         if _scanned_fig_note:
             if final_result.error:
                 final_result.error = f"{final_result.error}; {_scanned_fig_note}"

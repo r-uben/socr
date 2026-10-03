@@ -25,7 +25,9 @@ from socr.core.result import PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.figures.scanned_figures import (
     MIN_SPELLED_RUN,
+    MAX_CAPTION_LINE,
     SPELLED_FENCE_CLOSE,
+    SPELLED_FENCE_NOTE,
     SPELLED_FENCE_OPEN,
     fence_spelled_runs,
     has_figure_caption,
@@ -71,7 +73,7 @@ def test_loaded_source_is_this_checkout() -> None:
     ],
 )
 def test_caption_line_is_a_caption(line: str) -> None:
-    assert has_figure_caption(f"some prose\n{line}\nmore prose")
+    assert has_figure_caption(f"some prose\n{line}\nMore prose")
 
 
 @pytest.mark.parametrize(
@@ -81,10 +83,27 @@ def test_caption_line_is_a_caption(line: str) -> None:
         "see\nFigure 5 shows the series",  # a wrapped reference starts the line but continues
         "TABLE I\nBinomial test",
         "",
+        # Wrapped prose that opens a line with a label (Astra, #1031 r1).
+        "the estimates\nFigure 3. We estimate the effect of the policy change on output and report it\n"
+        "in the next section of the paper.",
+        "Figure 3\nshows that the estimated effect of the policy change is small.",
+        "Figure 3.\nshows that the effect is small.",
     ],
 )
 def test_reference_or_table_is_not_a_caption(text: str) -> None:
     assert not has_figure_caption(text)
+
+
+def test_caption_shape_is_short_or_followed_by_figure_furniture() -> None:
+    long_line = "Figure 3. " + "Rejection frequency of the size-corrected test " * 2
+    assert len(long_line) > MAX_CAPTION_LINE
+    assert not has_figure_caption(f"{long_line}\nthe test is shown for each sample size")
+    # The same long line followed by a lone tick label or axis character is a caption.
+    assert has_figure_caption(f"{long_line}\n 50\n 40")
+    assert has_figure_caption(f"{long_line}\nP\nr")
+    # Short, and a label alone on its line followed by a capitalised title, are captions.
+    assert has_figure_caption("Figure 3. Power under mean correction\nrest")
+    assert has_figure_caption("FIGURE 1\nFactors Contributing to the Delay")
 
 
 # ---------------------------------------------------------------------------
@@ -92,20 +111,79 @@ def test_reference_or_table_is_not_a_caption(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fence_keeps_every_character_and_leaves_short_runs_alone() -> None:
-    run = "\n".join("Price" + "X" * (MIN_SPELLED_RUN - 5))
-    text = f"Intro line\n{run}\nclosing line"
-    fenced, n = fence_spelled_runs(text)
-    assert n == MIN_SPELLED_RUN
-    assert SPELLED_FENCE_OPEN in fenced and SPELLED_FENCE_CLOSE in fenced
-    assert fenced.startswith("Intro line\nclosing line")
-    inside = fenced.split(SPELLED_FENCE_OPEN, 1)[1].split(SPELLED_FENCE_CLOSE, 1)[0]
-    assert "".join(inside.split("\n")[2:]).replace(" ", "") == "P" + "rice" + "X" * (
-        MIN_SPELLED_RUN - 5
-    )
+def _unfence(text: str) -> str:
+    """Delete the three wrapper lines of every fence; what is left is the text outside them."""
+    out = []
+    for ln in text.split("\n"):
+        if ln in (SPELLED_FENCE_OPEN, SPELLED_FENCE_NOTE, SPELLED_FENCE_CLOSE):
+            continue
+        out.append(ln)
+    return "\n".join(out)
 
-    short = "\n".join("a" * (MIN_SPELLED_RUN - 1))
-    assert fence_spelled_runs(f"xx\n{short}\nyy") == (f"xx\n{short}\nyy", 0)
+
+def _run_lines(word: str = "Price" + "X" * (MIN_SPELLED_RUN - 5)) -> str:
+    return "\n".join(word)
+
+
+def test_fence_is_in_place_and_removing_it_gives_back_the_input_byte_for_byte() -> None:
+    first = _run_lines()
+    gappy = "\n\n".join("AxisYY"[: MIN_SPELLED_RUN - 1] + "Z")  # blank line between characters
+    text = f"Intro line\n{first}\nmiddle prose line\n\n{gappy}\n\nclosing line\n"
+    fenced, n = fence_spelled_runs(text)
+    assert n == 2 * MIN_SPELLED_RUN
+    assert fenced.count(SPELLED_FENCE_OPEN) == 2, "separate runs are not merged"
+    assert _unfence(fenced) == text, "nothing moved, nothing dropped, blank lines kept"
+    # Each fence sits where its run sat: the prose between them is still between them.
+    assert fenced.index(SPELLED_FENCE_OPEN) < fenced.index("middle prose line")
+    assert fenced.index("middle prose line") < fenced.rindex(SPELLED_FENCE_OPEN)
+    assert fenced.startswith("Intro line\n" + SPELLED_FENCE_OPEN)
+    assert fenced.endswith("closing line\n")
+
+
+def test_short_runs_are_left_alone() -> None:
+    short = _run_lines("a" * (MIN_SPELLED_RUN - 1))
+    text = f"xx\n{short}\nyy"
+    assert fence_spelled_runs(text) == (text, 0)
+
+
+_RUN = _run_lines()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a vertical table header, in or beside a markdown table
+        f"| a | b |\n| --- | --- |\n{_RUN}\n| 1 | 2 |",
+        f"intro\n{_RUN}\n| a | b |",
+        f"| a | b |\n\n{_RUN}\nafter",
+        # display math and inline math, spanning lines
+        f"$$\n{_RUN}\n$$",
+        f"before $\n{_RUN}\n$ after",
+        f"text\n{_run_lines('$' + 'x' * (MIN_SPELLED_RUN - 1))}",
+        # lists: a neighbouring item, and a run of bare bullet markers
+        f"- first item\n{_RUN}\nafter",
+        f"intro\n{_RUN}\n1. second item",
+        "intro\n" + "\n".join("-" * MIN_SPELLED_RUN) + "\nafter",
+    ],
+    ids=[
+        "table-above",
+        "table-below",
+        "table-after-blank",
+        "display-math",
+        "inline-math",
+        "math-dollar-run",
+        "list-before",
+        "list-after",
+        "bullet-markers",
+    ],
+)
+def test_fence_abstains_inside_tables_math_and_lists(text: str) -> None:
+    assert fence_spelled_runs(text) == (text, 0)
+
+
+def test_fence_still_fires_beside_ordinary_prose() -> None:
+    text = f"A sentence about prices.\n{_RUN}\nAnother sentence."
+    assert fence_spelled_runs(text)[1] == MIN_SPELLED_RUN
 
 
 # ---------------------------------------------------------------------------
@@ -149,12 +227,23 @@ def test_guard_abstains_when_the_page_already_ships_its_image(floor: str) -> Non
     assert manifest._apply_scanned_figure_guard(out, page) is out
 
 
-def test_guard_abstains_on_a_failure_marker_and_on_empty_text() -> None:
+def test_guard_keeps_the_rendered_image_on_a_bare_marker_and_on_empty_text() -> None:
+    """cubic P2 on #1031: a captioned scan must not end with neither text nor image."""
     marker = _out("[page 1 failed: no usable OCR output]")
     assert manifest.is_page_failed_marker(marker.text)
+    got = manifest._apply_scanned_figure_guard(marker, _p(REF))
+    assert got.text == marker.text + "\n\n" + REF
+    # Marker plus ONE image block still reads as a marker to the disposition classifier.
+    assert manifest.is_page_failed_marker(got.text)
+    assert manifest._apply_scanned_figure_guard(got, _p(REF)) is got, "idempotent"
+    empty = manifest._apply_scanned_figure_guard(_out("   "), _p(REF))
+    assert empty.text == REF
+
+
+def test_guard_abstains_on_a_marker_that_already_carries_an_image() -> None:
+    marker = _out("[page 1 failed: unverifiable table]\n\n![Failed table page 1](figures/f.png)")
+    assert manifest.is_page_failed_marker(marker.text)
     assert manifest._apply_scanned_figure_guard(marker, _p(REF)) is marker
-    empty = _out("   ")
-    assert manifest._apply_scanned_figure_guard(empty, _p(REF)) is empty
 
 
 def test_guard_fences_only_when_the_layer_itself_ships() -> None:
@@ -340,32 +429,98 @@ def test_e2e_no_provider_layer_ships_with_its_spelled_axis_title_fenced(
     assert _AXIS_TITLE not in on_text.replace(fenced, "")
 
 
-def test_e2e_resume_does_not_duplicate_the_image(tmp_path, monkeypatch) -> None:
+class _CountingEngine(_Engine):
+    calls = 0
+
+    def process_pages(self, *a, **kw):
+        type(self).calls += 1
+        return super().process_pages(*a, **kw)
+
+
+def _pipe(monkeypatch_ctx):
+    monkeypatch_ctx.setattr(orch, "get_engine", lambda engine_type: _CountingEngine())
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+            native_first=True,
+            write_manifest=False,
+            judge_backend="heuristic",
+            dual_pass_tables=False,
+            detect_equations=False,
+            save_figures=True,
+        )
+    )
+    pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+    pipe._build_page_judge = lambda state: _Judge()
+    pipe._resolve_crop_vlm_model = lambda: None
+    pipe._resolve_judge_model = lambda *a, **k: ""
+    return pipe
+
+
+def test_e2e_resume_skips_the_page_and_replays_the_event_with_identical_bytes(
+    tmp_path, monkeypatch
+) -> None:
     pdf = _scan_pdf(tmp_path / "r.pdf", caption=True)
-    texts = []
-    for _ in range(2):
-        with monkeypatch.context() as m:
-            m.setattr(orch, "get_engine", lambda engine_type: _Engine())
-            pipe = UnifiedPipeline(
-                PipelineConfig(
-                    agentic=True,
-                    quiet=True,
-                    primary_engine=EngineType.QWEN,
-                    local_engine=EngineType.QWEN,
-                    enabled_engines=[EngineType.QWEN],
-                    native_first=True,
-                    write_manifest=False,
-                    judge_backend="heuristic",
-                    dual_pass_tables=False,
-                    detect_equations=False,
-                    save_figures=True,
-                )
-            )
-            pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
-            pipe._build_page_judge = lambda state: _Judge()
-            pipe._resolve_crop_vlm_model = lambda: None
-            pipe._resolve_judge_model = lambda *a, **k: ""
-            pipe.process(pdf, output_dir=tmp_path / "out-r")
-        texts.append(next(iter((tmp_path / "out-r").rglob("pages/00001.md"))).read_text())
-    for t in texts:
-        assert len([i for i in _images(t) if "scanned_figure_page" in i]) == 1
+    out = tmp_path / "out-r"
+    _CountingEngine.calls = 0
+    with monkeypatch.context() as m:
+        _pipe(m).process(pdf, output_dir=out)
+    first_calls = _CountingEngine.calls
+    assert first_calls >= 1, "the first run reads the page"
+    final = next(iter(out.rglob("r.md")))
+    first_md = final.read_bytes()
+    page_md = next(iter(out.rglob("pages/00001.md")))
+    first_page = page_md.read_bytes()
+    # Force a document-level re-run (drop the doc ledger) so the PAGE-level gate is what skips.
+    for meta in out.rglob("metadata.json"):
+        meta.unlink()
+    audit = next(iter(out.rglob("audit_log.json")))
+    audit.unlink()
+
+    with monkeypatch.context() as m:
+        _pipe(m).process(pdf, output_dir=out)
+    assert _CountingEngine.calls == first_calls, "the terminal page was skipped, not re-read"
+    assert next(iter(out.rglob("r.md"))).read_bytes() == first_md, "resumed .md is byte identical"
+    assert next(iter(out.rglob("pages/00001.md"))).read_bytes() == first_page
+    events = json.loads(next(iter(out.rglob("audit_log.json"))).read_text())["events"]
+    assert "scanned_figure_asset" in {e["kind"] for e in events}, "the event is replayed"
+    meta = next(
+        iter(json.loads(next(iter(out.rglob("metadata.json"))).read_text())["files"].values())
+    )
+    assert "scanned figure page" in (meta.get("error") or "")
+    text = first_page.decode()
+    assert len([i for i in _images(text) if "scanned_figure_page" in i]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Reporting reads the finalised output (cubic P2 / Astra on #1031)
+# ---------------------------------------------------------------------------
+
+
+def test_report_derives_from_the_finalised_text_not_the_render_event() -> None:
+    from types import SimpleNamespace
+
+    from socr.core.audit_log import AuditEvent
+
+    def ev(page, saved):
+        return AuditEvent(
+            page_num=page,
+            kind="scanned_figure_asset",
+            data={"png_saved": saved, "png_path": REF if saved else ""},
+        )
+
+    state = SimpleNamespace(events=[ev(1, True), ev(2, True), ev(3, False)])
+    recs = [
+        SimpleNamespace(output=SimpleNamespace(page_num=1, text=f"body\n\n{REF}")),
+        SimpleNamespace(output=SimpleNamespace(page_num=2, text="body without the image")),
+        SimpleNamespace(output=SimpleNamespace(page_num=3, text="body")),
+    ]
+    assert UnifiedPipeline._scanned_figure_split(state, recs) == ([1], [2], [3])
+    note = UnifiedPipeline._scanned_figure_note(state, recs)
+    assert "page(s) 1: scanned figure page; the page image ships" in note
+    assert "page(s) 2:" in note and "without a reference" in note
+    assert "page(s) 3:" in note and "not saved" in note

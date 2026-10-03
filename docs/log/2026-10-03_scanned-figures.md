@@ -118,3 +118,33 @@ Frozen pins updated for the new member / sidecar key: `test_resume_restore_kinds
 `scanned_figure_asset`), `test_p6_disposition_persistence` (sidecar key set),
 `p6_stage_c_oracle.VOLATILE_KEYS` (+`scanned_figure_png_ref`, empty on every page without a scanned
 figure). Full suite: 6879 passed, 2 skipped, 4 xfailed.
+
+## Round 2 (review of 7f4ad170)
+
+- Fence is IN PLACE: each run of >= 7 one-character lines keeps its position, every line and every
+  blank line; three wrapper lines are added (open, note, close), so deleting them returns the input
+  byte for byte. Separate runs are not merged. This supersedes "moved to the end of the page" above.
+- Fence abstains inside or beside a markdown table, inside `$...$` / `$$` math, beside a list item,
+  and on a run of bare bullet markers (a vertical table header, an equation and a list of single
+  characters all look like an axis title to a line counter). Conservative by construction: a stray
+  `$` earlier on the page also makes later runs abstain.
+- Caption needs caption-shaped evidence: the line is at most `MAX_CAPTION_LINE` = 50 characters
+  (longest caption line in the sample; the 27 caption lines run 8 to 50, wrapped prose 79 to 87) OR the next
+  non-blank line is figure furniture (a lone character or a bare number); and a label with nothing
+  after it is rejected when the next line continues in lowercase ("Figure 3" / "shows ...").
+  Re-scored with the shipped function on the same 98 pages: precision 17/17, recall 17/19, 0 table and
+  0 prose false fires, i.e. unchanged. The sample contains no `Figure 3. We ...` style over-fire, so the new rules
+  cost no recall HERE; they are pinned by synthetic cases, not by corpus evidence. Residual: a SHORT
+  prose line that opens with a label and a terminator still passes.
+- Reporting reads the FINALISED output: the event now says only "rendered"; document note, CLI and
+  metadata classify each page as shipped (ref in the finalised text), suppressed (rendered, not
+  referenced; yellow CLI line) or lost (render failed).
+- Guard keeps the rendered image on a bare marker and on an empty page (a captioned scan never ends
+  with neither text nor image; marker plus one image block still classifies as a marker). It still
+  abstains when a floor image or a marker-with-image is present.
+- Resume test now proves: engine not called on the second run (page-level skip, document ledger
+  dropped to force it), resumed `.md` and page fragment byte identical, event replayed into the
+  new `audit_log.json`, note in `metadata.error`, one image ref.
+- Mutants (external copy, canary + anchor count 1, 43 pass at baseline): blank lines dropped 1 fail;
+  table / math / list abstention removed 1 / 3 / 1 fail; caption length gate removed 2 fail;
+  continuation gate removed 2 fail; guard abstains on bare marker again 1 fail.
