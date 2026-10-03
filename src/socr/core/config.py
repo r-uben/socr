@@ -429,6 +429,10 @@ class PipelineConfig:
     # the page ends UNVERIFIED with a ``table_ladder_budget_exhausted`` event.
     table_judge_page_budget_sec: float | None = None
 
+    # Typesafe (Jev) systemone model id for vision-table confirmation on pages
+    # whose stored/upright word geometry cannot exact-pass the emitted grid.
+    typesafe_model: str = "jev"
+
     # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):
     # the blind cell-transcription ADJUDICATOR. Not a third reader rung: it never
     # produces a PASS/FAIL verdict and never enters ``run_table_ladder``. It is

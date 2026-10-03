@@ -819,11 +819,14 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         get_fitz_page: Callable[[int], object] | None,
         is_table_page: Callable[[int], bool],
         record_event: Callable[[object], None] | None = None,
+        *,
+        typesafe_gate: object | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
+        self._typesafe_gate = typesafe_gate
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.native_verifier import (
@@ -970,7 +973,9 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # a gate rejection below can never be mistaken for this one.
             if not decision.accept:
                 output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
-            return self._apply_structural_gate(decision, output, page_num, words, rules)
+            return self._structural_after_typesafe(
+                decision, output, page_num, words, rules, fitz_page
+            )
 
         if vr.state == VerifierState.EXACT_PASS:
             # EXACT_PASS: ship immediately — no model needed
@@ -993,8 +998,15 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # #245: this is the one accepting exit where no model has seen the
             # page. The gate is told so; a header-attribution abstain on this
             # path delegates to the inner judge instead of shipping at 1.0.
-            return self._apply_structural_gate(
-                decision, output, page_num, words, rules, provider=provider, inner_consulted=False
+            return self._structural_after_typesafe(
+                decision,
+                output,
+                page_num,
+                words,
+                rules,
+                fitz_page,
+                provider=provider,
+                inner_consulted=False,
             )
 
         # No issue detected → delegate to inner judge
@@ -1010,7 +1022,77 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         # decision unchanged and leaves ``rejection_class`` alone).
         if not decision.accept:
             output.rejection_class = REJECTION_JUDGE_ONLY
-        return self._apply_structural_gate(decision, output, page_num, words, rules)
+        return self._structural_after_typesafe(decision, output, page_num, words, rules, fitz_page)
+
+    def _structural_after_typesafe(
+        self,
+        decision: AcceptDecision,
+        output: PageOutput,
+        page_num: int,
+        words: list | None,
+        rules: list[tuple[float, float, float]] | None,
+        fitz_page,
+        *,
+        provider: ProviderProfile | None = None,
+        inner_consulted: bool = True,
+    ) -> AcceptDecision:
+        decision = self._apply_typesafe_gate(decision, output, page_num, fitz_page)
+        return self._apply_structural_gate(
+            decision,
+            output,
+            page_num,
+            words,
+            rules,
+            provider=provider,
+            inner_consulted=inner_consulted,
+        )
+
+    def _apply_typesafe_gate(
+        self,
+        decision: AcceptDecision,
+        output: PageOutput,
+        page_num: int,
+        fitz_page,
+    ) -> AcceptDecision:
+        if not decision.accept or self._typesafe_gate is None or fitz_page is None:
+            return decision
+        if not self._is_table_page(page_num):
+            return decision
+        from socr.tables.typesafe import (
+            is_vision_model_table_output,
+            needs_typesafe_confirmation,
+        )
+
+        if not needs_typesafe_confirmation(
+            fitz_page,
+            output.text or "",
+            vision_model_output=is_vision_model_table_output(output.engine),
+        ):
+            return decision
+        if self._typesafe_gate.confirm(fitz_page, output.text or ""):
+            self._emit_event(
+                page_num=page_num,
+                kind="typesafe_table_confirmed",
+                engine=output.engine or "",
+                detail="Typesafe confirmed the vision-model table matches the page image",
+                data={},
+            )
+            return decision
+        self._emit_event(
+            page_num=page_num,
+            kind="typesafe_table_reject",
+            engine=output.engine or "",
+            detail=(
+                "Typesafe did not confirm the vision-model table against the page "
+                "image; rejected fail-closed"
+            ),
+            data={},
+        )
+        return AcceptDecision(
+            accept=False,
+            reason="typesafe_table_reject: table not confirmed against page image",
+            confidence=0.0,
+        )
 
     def _apply_structural_gate(
         self,
