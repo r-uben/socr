@@ -126,6 +126,42 @@ def page_image(tmp_path) -> Path:
     return img
 
 
+# Hang guard for a CHILD interpreter, not a performance claim (GH-991): it must
+# exceed a cold interpreter + import under heavy host load, and is only ever
+# reached when the child is genuinely stuck (the regression these tests catch).
+_CHILD_HANG_GUARD_SEC = 60.0
+
+
+def _run_child_timed(child_src: str, env: dict[str, str]):
+    """Run ``child_src`` in a fresh interpreter; return ``(result, lifetime_sec)``.
+
+    ``lifetime_sec`` runs from the instant the child announces (via a printed
+    ``time.monotonic()``) that its imports are done and the call under test is
+    about to start, to the instant the process has fully exited. Interpreter
+    start-up and ``import socr`` are load-dependent and are not what these tests
+    pin; the claim is that the CALL and the interpreter's TEARDOWN are bounded.
+    ``time.monotonic`` is system-wide, so parent and child readings compare.
+    """
+    announce = "import time as _t; print('SOCR_CALL_START', _t.monotonic(), flush=True)\n"
+    result = subprocess.run(
+        [sys.executable, "-c", child_src.replace("#ANNOUNCE\n", announce, 1)],
+        env=env,
+        capture_output=True,
+        timeout=_CHILD_HANG_GUARD_SEC,
+    )
+    ended = time.monotonic()
+    out = [
+        ln
+        for ln in result.stdout.decode(errors="replace").splitlines()
+        if ln.startswith("SOCR_CALL_START ")
+    ]
+    assert out, (
+        f"child never reached the call under test (exit {result.returncode}), "
+        f"stderr={result.stderr.decode(errors='replace')[-2000:]}"
+    )
+    return result, ended - float(out[0].split()[1])
+
+
 def test_judge_call_is_bounded_and_typed_in_process(trickle_server, page_image) -> None:
     # `is_available()` is exercised separately, below
     # (`test_probe_is_bounded_and_typed_against_a_trickling_peer`) -- GH-903
@@ -163,6 +199,7 @@ def test_judge_call_exits_in_a_child_process(trickle_server, page_image) -> None
         judge = OllamaVisionJudge(
             model="qwen2-vl:7b", host={trickle_server.url!r}, timeout={_JUDGE_TIMEOUT_SEC}
         )
+        #ANNOUNCE
         try:
             judge.judge({str(page_image)!r}, "some ocr text")
         except TimeoutError:
@@ -170,14 +207,7 @@ def test_judge_call_exits_in_a_child_process(trickle_server, page_image) -> None
         raise SystemExit(3)  # did not time out — unexpected, fail loudly
         """
     )
-    start = time.monotonic()
-    result = subprocess.run(
-        [sys.executable, "-c", child_src],
-        env=child_env,
-        capture_output=True,
-        timeout=_OUTER_BOUND_SEC + 5.0,  # outer safety net; the assertion below is the real bound
-    )
-    elapsed = time.monotonic() - start
+    result, elapsed = _run_child_timed(child_src, child_env)
 
     assert result.returncode == 0, (
         f"child exited {result.returncode}, stderr={result.stderr.decode(errors='replace')[-2000:]}"
@@ -242,20 +272,14 @@ def test_probe_exits_in_a_child_process(trickle_server) -> None:
         judge = OllamaVisionJudge(
             model="qwen2-vl:7b", host={trickle_server.url!r}, timeout={_JUDGE_TIMEOUT_SEC}
         )
+        #ANNOUNCE
         available = judge.is_available()
         if available is False and "timed out" in judge.unavailable_reason:
             raise SystemExit(0)
         raise SystemExit(3)  # did not classify as an inconclusive timeout — fail loudly
         """
     )
-    start = time.monotonic()
-    result = subprocess.run(
-        [sys.executable, "-c", child_src],
-        env=child_env,
-        capture_output=True,
-        timeout=_OUTER_BOUND_SEC + 5.0,  # outer safety net; the assertion below is the real bound
-    )
-    elapsed = time.monotonic() - start
+    result, elapsed = _run_child_timed(child_src, child_env)
 
     assert result.returncode == 0, (
         f"child exited {result.returncode}, stderr={result.stderr.decode(errors='replace')[-2000:]}"

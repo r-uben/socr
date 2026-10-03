@@ -9,6 +9,7 @@ Every pin is a DIFFERENCE between two runs that change only the budget.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
+from socr.judge import ladder_budget
 from socr.judge.ladder_budget import TABLE_LADDER_BUDGET_EXHAUSTED_KIND
 from socr.judge.table_rung_ollama import BlindCellResult
 from socr.judge.table_verdict import (
@@ -81,6 +83,53 @@ def _two_table_pdf(tmp_path: Path) -> tuple[Path, str]:
     return path, "\n".join(md_parts)
 
 
+class _VirtualClock:
+    """A monotonic clock that only moves when a fake rung "runs" (GH-991).
+
+    The budget logic compares elapsed time against a budget; real ``time.sleep``
+    made that comparison depend on scheduler latency, so a loaded machine could
+    push a third call inside (or out of) the budget. Virtual time makes the
+    comparison exact: each rung call costs exactly ``SLOW`` virtual seconds.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def timed(self, rung):
+        """``rung`` made to take ``SLOW`` virtual seconds instead of sleeping."""
+
+        @functools.wraps(rung)
+        def _run(crop_path, markdown, prior_findings):
+            try:
+                return rung(crop_path, markdown, prior_findings)
+            finally:
+                self.now += SLOW
+
+        return _run
+
+
+@contextlib.contextmanager
+def _virtual_budget_clock():
+    """Make every ``PageLadderBudget`` the orchestrator builds read a virtual clock."""
+    clock = _VirtualClock()
+    real = ladder_budget.PageLadderBudget
+    with patch.object(
+        ladder_budget,
+        "PageLadderBudget",
+        lambda *a, **kw: real(*a, clock=clock, **kw),
+    ):
+        yield clock
+
+
+def _virtual_rungs(clock: _VirtualClock, calls: list[str], n: int):
+    return [
+        clock.timed(_rung(f"r{i}", f"m{i}", sleep=0.0, passes=False, calls=calls)) for i in range(n)
+    ]
+
+
 def test_budget_is_shared_across_the_tables_on_one_page(tmp_path):
     pdf, md = _two_table_pdf(tmp_path)
 
@@ -89,9 +138,10 @@ def test_budget_is_shared_across_the_tables_on_one_page(tmp_path):
         with patch.object(DocumentHandle, "__post_init__", lambda self: None):
             state.handle = DocumentHandle(path=pdf, page_count=1)
         calls: list[str] = []
-        rungs = [_rung(f"r{i}", f"m{i}", sleep=SLOW, passes=False, calls=calls) for i in range(3)]
-        bo = PageOutput(page_num=1, text=md, status=PageStatus.SUCCESS, engine="qwen")
-        pipeline._run_table_judge_gate(state, 1, state.pages[1], bo, rungs)
+        with _virtual_budget_clock() as clock:
+            rungs = _virtual_rungs(clock, calls, 3)
+            bo = PageOutput(page_num=1, text=md, status=PageStatus.SUCCESS, engine="qwen")
+            pipeline._run_table_judge_gate(state, 1, state.pages[1], bo, rungs)
         return calls, state
 
     calls, state = run(BUDGET)
@@ -113,8 +163,8 @@ def test_same_page_only_the_budget_differs(tmp_path):
     for budget in (BUDGET, 60.0):
         pipeline, state = _pipeline(tmp_path, table_judge_page_budget_sec=budget)
         calls: list[str] = []
-        rungs = [_rung(f"r{i}", f"m{i}", sleep=SLOW, passes=False, calls=calls) for i in range(4)]
-        _gate(pipeline, state, 1, rungs)
+        with _virtual_budget_clock() as clock:
+            _gate(pipeline, state, 1, _virtual_rungs(clock, calls, 4))
         results[budget] = (calls, len(_budget_events(state)))
     assert results[BUDGET] == (["r0", "r1"], 1)
     assert results[60.0] == (["r0", "r1", "r2", "r3"], 0)
