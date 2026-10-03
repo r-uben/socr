@@ -118,7 +118,8 @@ Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeepi
 - #92's AEA pages (Andrade 2019, Sastry 2026) are not in the corpus, and the AEA papers
   that are (flynn_sastry) carry no private-use glyph. #92's evidence against whole-page OCR
   was a pipeline fallback ("native_fallback / page_failed"), not a worse model read. The
-  STIXNonUnicode glyphs it named still count, because they sit in a math font.
+  STIXNonUnicode glyphs it named still count: the rule exempts only dingbat fonts and the
+  non-math codes of a Symbol-encoded font, and STIXNonUnicode is neither.
 
 - Second review (Astra): the Symbol-code exemption applied to every font, so another font's own
   private glyph at, say, U+F0B7 escaped detection. The exemption now applies only to fonts that
@@ -130,7 +131,9 @@ Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeepi
 ### Table pages (native-first)
 - Pages that native-first table handling serves on main (born-digital, table detected, no
   enhancement flag): 2,564. The #960 detector fires on **531** of them (105 documents; fama
-  49, woodford 36, theodoridis 32, ...). The detector also fires on 271 of the 1,493
+  49, woodford 36, theodoridis 32, conrad 23, gertler_karadi 14, romer_romer 2000 10,
+  romer_romer 2010 10, hansen_mcmahon_prat 2017 10 and 2018 10, jarocinski_karadi 10, then 95
+  documents with fewer; measured with the rule at ebe76b53). The detector also fires on 271 of the 1,493
   chart-lane pages. The whole-page re-route volume is therefore about 1,817 + 531 + 271 ≈
   2,619 pages, not 1,849: the population behind 1,849 excluded table and chart pages.
 - Not changed. A native-first SHIP ships the whole page's native text through
@@ -141,3 +144,24 @@ Measured offline (no model). Scripts and output: `~/.local/state/socr-housekeepi
   splits the page: native grid for the table regions, a model read for the rest. No lane does
   that today, so it is left for a follow-up. On these pages the model's table transcription
   goes through the existing per-page table verification instead.
+
+## Cubic review fixes
+- P2, no-attempt pages: `NATIVE_GARBLED_MATH` and the WARNING demotion required
+  `native_is_fallback`, which needs `p.attempts`. A flagged page with no attempts (no provider,
+  or a ladder that never ran) could ship native SUCCESS. The synthetic native output now demotes
+  on `garbled_math_suspect(p)` alone and carries the failure mode. Pinned in
+  `test_no_attempt_native_page_is_demoted_when_flagged`, a difference between the flagged and
+  unflagged page.
+- P2, math-alphanumeric: the count is now the U+1D400–U+1D7FF block, not the "MATHEMATICAL"
+  name prefix. Measured: 114 population pages carry such characters; the only out-of-block ones
+  are U+27E8/U+27E9 (34), all on pages that fire on another signal, so no page changes.
+- P2, `_MATH_FAMILY_FONT_RE`: the bare `math` alternative is gone. Every alternative is anchored
+  at the start of the name and names a family measured on the population (54 font names, grouped
+  in the constant's comment). The population pages whose font signal changes: 0. A span font
+  that only contains "Math" (PyMuPDF's NotoSansMath fallback) no longer counts, so the
+  page-level font fixture became a span-fake unit test plus a quiet pin.
+- Counts: corpus 1,818 (unchanged), 8/8 WRONG, the same 15 of the 60 audited pages.
+- P3: OUTPUT.md qualifies `--native-only` and the chart lane. The span walk tests a span's font
+  once and then only its characters.
+- Mutants killed: no-attempt demotion reverted (1 failed), name-prefix match restored (2),
+  unanchored `math` restored (3).

@@ -3691,7 +3691,10 @@ def _select_page_output_tagged(
         # ``audit_passed`` stays as the other causes leave it, so a flagged page is never
         # NATIVE_CLEAN / SUCCESS here.
         table_flattened = table_not_reconstructed_suspect(p)
-        native_demoted = native_is_fallback or grid_rejected or table_flattened
+        # #960: garbled math ships demoted whether or not a recovery attempt ran (a
+        # providerless run, or a ladder that never started, leaves no attempts).
+        garbled_math = garbled_math_suspect(p)
+        native_demoted = native_is_fallback or grid_rejected or table_flattened or garbled_math
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -3725,7 +3728,7 @@ def _select_page_output_tagged(
                         if native_is_fallback and _invisible_text_suspect(p)
                         else (
                             FailureMode.NATIVE_GARBLED_MATH
-                            if native_is_fallback and garbled_math_suspect(p)
+                            if garbled_math
                             else (
                                 FailureMode.TABLE_NOT_RECONSTRUCTED
                                 if table_flattened

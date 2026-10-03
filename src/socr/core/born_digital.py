@@ -2296,11 +2296,19 @@ MISDECODED_MATH_SCRIPTS = frozenset(
 
 #: #960: font names that set mathematics. ``_MATH_FONT_RE`` lists the families whose text
 #: extracts well enough for the P4-R region lane; a span in a font this matches and that
-#: list misses is math whose text layer the measurement found garbled (MathTime MTMI/MTSY/
-#: MTSYN/MTEX/RMTMI, UniMath, LibertinusT1Math, MathematicalPi, MnSymbol, Fourier-Math,
-#: "Cambria Math" with a space). Anchored MathTime names so that body fonts merely
-#: containing "MT" (e.g. ``TimesNewRomanPSMT``) do not match.
-_MATH_FAMILY_FONT_RE = re.compile(r"(?i)(math|^(?:[A-Z]{6}\+)?R?MT(MI|SYN?|EX)B?$|MnSymbol)")
+#: list misses is math whose text layer the measurement found garbled. Every alternative is
+#: a family measured on the trusted-native population (each font with at least one span on a
+#: page): MathTime (MTMI, MTSY, MTSYN, MTEX, RMTMI and bold forms), MathematicalPi, UniMath,
+#: MnSymbol, Universal-GreekwithMathPi, Libertine/LibertinusT1 Math, EuclidMath, XCharterMath,
+#: Fourier-Math, MathDesign, "Cambria Math" (with a space), MathTechnicalP, LucidaMath,
+#: AdvMathPack, TeX-math. Anchored at the start of the name (after a subset prefix), so a body
+#: font that merely contains "math" or "MT" (e.g. ``TimesNewRomanPSMT``) does not match.
+_MATH_FAMILY_FONT_RE = re.compile(
+    r"(?i)^(?:[A-Z]{6}\+)?("
+    r"R?MT(?:MI|SYN?|EX)B?$|MathematicalPi|UniMath|MnSymbol|Universal-GreekwithMath|"
+    r"Libertin(?:e|us)\w*Math|EuclidMath|XCharterMath|Fourier-Math|MathDesign|Cambria Math|"
+    r"MathTechnical|LucidaMath|AdvMathPack|TeX-math)"
+)
 
 #: #960 review: a private-use glyph in a dingbat font is a bullet, arrow or check mark, never
 #: math. Measured on the 87 pages the union fired on through private-use glyphs alone: every
@@ -2325,14 +2333,28 @@ _SYMBOL_PUA_BASE = 0xF000  # Word's Symbol-font PUA convention: U+F000 + encodin
 _SYMBOL_ENCODED_FONT_RE = re.compile(r"(?i)^(?:[A-Z]{6}\+)?Symbol(?:MT)?$")
 
 
-def _is_math_private_use(ch: str, font: str) -> bool:
-    """Whether a private-use glyph in *font* stands for mathematics (#960)."""
-    if not count_pua_chars(ch) or _DINGBAT_FONT_RE.search(font):
-        return False
-    if not _SYMBOL_ENCODED_FONT_RE.search(font):
-        return True
-    code = ord(ch) - _SYMBOL_PUA_BASE
-    return not (0 <= code <= 0xFF and code in SYMBOL_ENCODING_NON_MATH_CODES)
+def _math_private_use_count(text: str, font: str) -> int:
+    """Private-use glyphs in one span of *font* that stand for mathematics (#960)."""
+    if _DINGBAT_FONT_RE.search(font):
+        return 0
+    symbol_encoded = bool(_SYMBOL_ENCODED_FONT_RE.search(font))
+    n = 0
+    for ch in text:
+        if not count_pua_chars(ch):
+            continue
+        code = ord(ch) - _SYMBOL_PUA_BASE
+        if symbol_encoded and 0 <= code <= 0xFF and code in SYMBOL_ENCODING_NON_MATH_CODES:
+            continue
+        n += 1
+    return n
+
+
+#: #960: the Mathematical Alphanumeric Symbols block. Only these count as math-alphanumeric:
+#: a name prefix would also take ordinary symbols (U+27E8 MATHEMATICAL LEFT ANGLE BRACKET).
+#: Measured: the 34 such out-of-block characters in the population sit on pages that fire on
+#: other signals anyway, so the block bound moves no page.
+_MATH_ALNUM_FIRST = 0x1D400
+_MATH_ALNUM_LAST = 0x1D7FF
 
 
 @dataclass(frozen=True)
@@ -2348,7 +2370,7 @@ class GarbledMathSignals:
     #: Private-use glyphs that stand for mathematics (Hameed p9: SymbolMT bracket pieces);
     #: dingbat-font glyphs and the non-math Symbol codes (bullets, marks) are not counted.
     private_use: int = 0
-    #: Mathematical Alphanumeric Symbols (U+1D400 block): math italics that extract as
+    #: Mathematical Alphanumeric Symbols (U+1D400-U+1D7FF): math italics that extract as
     #: codepoints readers and search cannot use, with sub/superscripts flattened.
     math_alphanumeric: int = 0
     #: Letters of a :data:`MISDECODED_MATH_SCRIPTS` script.
@@ -2387,7 +2409,7 @@ def _garbled_math_span_counts(page) -> tuple[int, int]:
         text = span.get("text") or ""
         if _MATH_FAMILY_FONT_RE.search(font) and not _MATH_FONT_RE.search(font):
             unlisted += len(text)
-        private_use += sum(1 for ch in text if _is_math_private_use(ch, font))
+        private_use += _math_private_use_count(text, font)
     return private_use, unlisted
 
 
@@ -2402,11 +2424,11 @@ def detect_garbled_math(page, text: str) -> GarbledMathSignals:
     for ch in text:
         if ord(ch) < 128 or count_pua_chars(ch):
             continue
-        name = unicodedata.name(ch, "")
-        if name.startswith("MATHEMATICAL"):
+        if _MATH_ALNUM_FIRST <= ord(ch) <= _MATH_ALNUM_LAST:
             malnum += 1
         elif (
-            unicodedata.category(ch)[0] in "LM" and name.split(" ", 1)[0] in MISDECODED_MATH_SCRIPTS
+            unicodedata.category(ch)[0] in "LM"
+            and unicodedata.name(ch, "").split(" ", 1)[0] in MISDECODED_MATH_SCRIPTS
         ):
             scripts += 1
     private_use, unlisted = _garbled_math_span_counts(page)

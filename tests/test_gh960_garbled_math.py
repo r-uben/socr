@@ -36,10 +36,11 @@ _PROSE = (
 )
 
 #: Lines written with a TextWriter: PyMuPDF falls back to its bundled Noto fonts for glyphs
-#: Helvetica lacks, so a math-italic letter lands in a "Noto Sans Math" span (a math font
-#: ``_MATH_FONT_RE`` does not list) and Syriac letters extract as Syriac.
+#: Helvetica lacks, so Syriac letters extract as Syriac. (A math-italic letter lands in a
+#: ``NotoSansMath`` span, which is not a measured family; see the quiet pin below. The font
+#: signal is pinned with span fakes instead.)
+NOTO_MATH_LINE = "the coefficient \U0001d465 is reported here"
 HITS = {
-    "unlisted_math_font": "the coefficient \U0001d465 is reported here",
     "misdecoded_script": "the coefficient ܐܒ is reported here",
 }
 CONTROL = "the coefficient x is reported here"
@@ -77,16 +78,18 @@ def _signals(pdf: Path) -> GarbledMathSignals:
 
 def test_setup_fonts_really_produce_the_signals(tmp_path: Path) -> None:
     """Canary: if PyMuPDF's fallback fonts changed, every page-level pin below is vacuous."""
-    with fitz.open(_page_pdf(tmp_path / "m.pdf", HITS["unlisted_math_font"])) as doc:
-        fonts = {f[3] for f in doc[0].get_fonts()}
-    assert any("Math" in f for f in fonts), fonts
     with fitz.open(_page_pdf(tmp_path / "s.pdf", HITS["misdecoded_script"])) as doc:
         assert "ܐ" in doc[0].get_text("text")
 
 
-def test_unlisted_math_font_fires(tmp_path: Path) -> None:
-    sig = _signals(_page_pdf(tmp_path / "p.pdf", HITS["unlisted_math_font"]))
-    assert sig.unlisted_math_font_chars > 0 and sig.fired
+def test_unmeasured_math_font_name_is_quiet(tmp_path: Path) -> None:
+    """``_MATH_FAMILY_FONT_RE`` is anchored to measured families: a span font that merely
+    contains "Math" (PyMuPDF's NotoSansMath fallback) does not count."""
+    pdf = _page_pdf(tmp_path / "p.pdf", NOTO_MATH_LINE)
+    with fitz.open(pdf) as doc:
+        fonts = {sp["font"] for sp in born_digital.iter_page_spans(doc[0])}
+    assert any("Math" in f for f in fonts), fonts  # setup: the span is there
+    assert _signals(pdf).unlisted_math_font_chars == 0
 
 
 def test_misdecoded_script_fires(tmp_path: Path) -> None:
@@ -142,6 +145,13 @@ def test_text_signals_quiet_on_legitimate_text(text: str) -> None:
         ("MnSymbol10", True),
         ("Cambria Math", True),
         ("Fourier-Math-Symbols", True),
+        ("LibertineMathMI", True),
+        ("EuclidMathOne", True),
+        ("MathDesign-CH-Regular-It", True),
+        ("TeX-matha12", True),
+        ("ABCDEF+MathematicalPiLTStd", True),
+        ("SomeMathSans", False),  # "math" not at the start of the name
+        ("Mathematica", False),
         ("CMMI10", False),  # listed: the P4-R region lane owns it
         ("ABCDEF+CambriaMath", False),
         ("STIXMath-Regular", False),
@@ -189,6 +199,15 @@ class _SpanPage:
 def test_private_use_counts_only_math_glyphs(font: str, code: int, counts: bool) -> None:
     sig = detect_garbled_math(_SpanPage(font, f"a {chr(code)} b"), "")
     assert (sig.private_use == 1) is counts
+
+
+@pytest.mark.parametrize(
+    ("code", "counts"),
+    [(0x1D400, True), (0x1D465, True), (0x1D7FF, True), (0x27E8, False), (0x27E9, False)],
+)
+def test_math_alphanumeric_is_the_block_only(code: int, counts: bool) -> None:
+    """U+27E8 is named MATHEMATICAL LEFT ANGLE BRACKET but is an ordinary symbol."""
+    assert (detect_garbled_math(_NoSpans(), f"a {chr(code)} b").math_alphanumeric == 1) is counts
 
 
 def test_script_set_excludes_scripts_the_corpus_prints() -> None:
@@ -581,3 +600,32 @@ def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, 
     assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
     assert _sidecar(tmp_path, "c")["status"] == "success"
     assert res.status is DocumentStatus.SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# A flagged page that ships native with NO attempts (providerless, or a ladder that never ran)
+# must still carry the failure mode at non-SUCCESS status.
+# ---------------------------------------------------------------------------
+
+
+def test_no_attempt_native_page_is_demoted_when_flagged(tmp_path) -> None:
+    from socr.core.manifest import _select_page_output_tagged
+
+    def ship(flagged: bool):
+        pdf = tmp_path / f"n-{flagged}.pdf"
+        _page_pdf(pdf, CONTROL)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        p = state.pages[1]
+        p.is_born_digital = True
+        p.native_text = "native body with the maths"
+        p.needs_ocr_enhancement = flagged  # what born_digital sets on a hit
+        if flagged:
+            p.garbled_math_signals = {"misdecoded_script_letters": 3}
+        assert not p.attempts and p.best_output is None, "setup: the ladder never ran"
+        return _select_page_output_tagged(state, 1)[0]
+
+    clean, flagged = ship(False), ship(True)
+    assert clean.status.value == "success" and clean.failure_mode is FailureMode.NONE
+    assert flagged.text == clean.text, "the same native text ships"
+    assert flagged.status.value != "success"
+    assert flagged.failure_mode is FailureMode.NATIVE_GARBLED_MATH
