@@ -39,6 +39,7 @@ The seam is test-only. Production code carries no pre-change path.
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib
 
 import pytest
@@ -433,7 +434,7 @@ def ollama_connection_guard():
 
     def _connect_ex(self, address):
         if _hit(address):
-            return 111  # ECONNREFUSED
+            return errno.ECONNREFUSED
         return real_connect_ex(self, address)
 
     socket.socket.connect = _connect

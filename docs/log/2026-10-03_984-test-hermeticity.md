@@ -3,7 +3,7 @@
 ## Problem
 `_run_fingerprint` -> `_resolve_judge_model` -> `OllamaVisionJudge.is_available` ->
 `probe_model_generation` makes a real generation call. With a live but busy daemon,
-any test that drives a pipeline blocks. CI has no Ollama so it never showed.
+any test that drives a pipeline on the default Ollama judge path blocks (heuristic configs skip the probe). CI has no Ollama so it never showed.
 
 ## Sweep
 A socket-level recorder (connect/connect_ex to the configured Ollama host, recording
@@ -53,7 +53,7 @@ Limits of the guard, also stated in the conftest comment:
   matching can be bypassed.
 - The module-wide pins also silently cover FUTURE tests added to a listed module. A new
   test meant to exercise the judge probe would see "" and never reach it; put such a test
-  in its own module. Named at the 53-module list in tests/conftest.py.
+  in its own module. See the 53-module list in tests/conftest.py.
 
 Added guard tests (10 total): fixture loopback server works under the autouse guard; a
 test pointing OLLAMA_HOST at its own server is allowed; httpx (via Client, because
