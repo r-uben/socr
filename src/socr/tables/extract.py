@@ -117,8 +117,14 @@ def _bracket_bare_ipv6(candidate: str) -> str:
     if not sep:
         scheme, rest = "http", candidate
     hostpart, slash, tail = rest.partition("/")
+    # GH-976: ``user:pass@`` is not part of the host token. Its colon is not a
+    # port separator, so counting it would bracket the credentials as if they
+    # were an IPv6 literal. Set it aside, bracket only what follows the last
+    # ``@``, and put it back untouched.
+    userinfo, at, hostpart = hostpart.rpartition("@")
     if not hostpart.startswith("[") and hostpart.count(":") > 1:
         hostpart = f"[{hostpart}]"
+    hostpart = f"{userinfo}{at}{hostpart}"
     return f"{scheme}://{hostpart}{slash}{tail}" if slash else f"{scheme}://{hostpart}"
 
 
@@ -159,7 +165,10 @@ def resolve_ollama_host(host: str | None = None) -> str:
         parts = urlsplit(candidate)
         has_port = parts.port is not None
     except ValueError:  # malformed host or port — leave the value exactly as given
-        logger.warning("GH-222: cannot parse backend host %r; using it verbatim", candidate)
+        # Never the raw value: it may carry URL userinfo (GH-976).
+        logger.warning(
+            "GH-222: cannot parse backend host %r; using it verbatim", safe_host_label(candidate)
+        )
         return candidate
     if not has_port and parts.hostname:
         default_port = urlsplit(DEFAULT_OLLAMA_HOST).port
