@@ -94,7 +94,9 @@ def test_cli_line_is_printed_once_per_document(
     capsys.readouterr()
     _run(tmp_path, _pass("high"), quiet=False)
     lines = [ln for ln in capsys.readouterr().out.splitlines() if "tables:" in ln]
-    assert [ln.strip() for ln in lines] == ["tables: 1 as text (1 verified), 0 withheld"], lines
+    assert [ln.strip() for ln in lines] == [
+        "tables: 1 as text (1 verified, 0 unverified), 0 withheld"
+    ], lines
 
 
 def _assemble_with_final_body(tmp_path: Path, final_page: str) -> dict:
@@ -208,6 +210,7 @@ def test_a_field_unknown_on_any_input_is_unknown_in_the_sum() -> None:
 def _sidecar_doc(root: Path, name: str = "d") -> Path:
     doc_dir = root / name
     (doc_dir / "pages").mkdir(parents=True)
+    (doc_dir / "metadata.json").write_text(json.dumps({"status": "completed", "pages": 2}))
     for n in (1, 2):
         (doc_dir / "pages" / f"{n:05d}.json").write_text(
             json.dumps(
@@ -261,9 +264,9 @@ def test_library_counts_unknown_documents_and_excludes_them_from_totals(tmp_path
         _pdf(cfg.pdf_dir / f"{stem}.pdf")
     for stem in ("good", "corrupt_sidecar", "corrupt_trust"):
         shutil.rmtree(_fake_doc(cfg.text_dir, stem) / "pages")
-        shutil.copytree(
-            _sidecar_doc(tmp_path / "src", stem) / "pages", cfg.text_dir / stem / "pages"
-        )
+        src = _sidecar_doc(tmp_path / "src", stem)
+        shutil.copytree(src / "pages", cfg.text_dir / stem / "pages")
+        shutil.copy(src / "metadata.json", cfg.text_dir / stem / "metadata.json")
     (cfg.text_dir / "corrupt_sidecar" / "pages" / "00002.json").write_text("{not json")
     (cfg.text_dir / "corrupt_trust" / "tables_trust.json").write_text("{not json")
 
@@ -304,6 +307,7 @@ def _library_with_three_documents(tmp_path: Path):
     (rec / "metadata.json").write_text(json.dumps(meta))
     # 2. written before the block existed: derived from the sidecar
     old = _fake_doc(cfg.text_dir, "legacy")
+    (old / "metadata.json").write_text(json.dumps({"status": "completed", "pages": 1}))
     (old / "pages" / "00000.json").write_text(
         json.dumps(
             {
@@ -345,3 +349,81 @@ def test_manifest_has_a_per_paper_tables_entry_and_summary_a_corpus_total(tmp_pa
         "withheld": 2,
     }
     assert summary["tables_recorded_documents"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (cubic on PR #997)
+# ---------------------------------------------------------------------------
+
+
+def test_table_unverified_page_without_a_trust_entry_is_not_verified() -> None:
+    """Item 1: `success` with no tables_trust entry, but the failure mode says unverified."""
+    assert count_page_tables(_TABLE_MD, "success", "table_unverified") == TableCounts(1, 0, 1, 0)
+
+
+def test_leftover_sidecar_of_a_removed_page_is_not_counted(tmp_path: Path) -> None:
+    """Item 2: reprocessing a shorter document leaves old sidecars behind."""
+    doc_dir = _sidecar_doc(tmp_path)
+    (doc_dir / "pages" / "00003.json").write_text(
+        json.dumps(
+            {
+                "page_num": 3,
+                "status": "success",
+                "failure_mode": "none",
+                "winning_output": {"page_num": 3, "text": _TABLE_MD},
+            }
+        )
+    )
+    assert count_from_sidecars(doc_dir).shipped_text == 2
+
+
+def test_recorded_page_without_a_sidecar_makes_the_document_unknown(tmp_path: Path) -> None:
+    doc_dir = _sidecar_doc(tmp_path)
+    (doc_dir / "pages" / "00002.json").unlink()
+    assert count_from_sidecars(doc_dir) is None
+
+
+def test_unrecorded_page_count_makes_the_document_unknown(tmp_path: Path) -> None:
+    doc_dir = _sidecar_doc(tmp_path)
+    (doc_dir / "metadata.json").write_text(json.dumps({"status": "completed"}))
+    assert count_from_sidecars(doc_dir) is None
+
+
+@pytest.mark.parametrize(
+    "trust",
+    ['{"pages": ["a", "b"]}', '{"pages": {"1": 5}}', '{"pages": {"1": {"reasons": 3}}}', "7"],
+)
+def test_malformed_trust_file_does_not_abort_the_refresh(tmp_path: Path, trust: str) -> None:
+    """Item 3: valid JSON of the wrong shape; the document is unknown, the refresh goes on."""
+    from test_gh964_library import _fake_doc, _pdf, _write_cfg
+
+    from socr import library as lib
+
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    for stem in ("bad", "fine"):
+        _pdf(cfg.pdf_dir / f"{stem}.pdf")
+        shutil.rmtree(_fake_doc(cfg.text_dir, stem) / "pages")
+        src = _sidecar_doc(tmp_path / "src", stem)
+        shutil.copytree(src / "pages", cfg.text_dir / stem / "pages")
+        shutil.copy(src / "metadata.json", cfg.text_dir / stem / "metadata.json")
+    (cfg.text_dir / "bad" / "tables_trust.json").write_text(trust)
+
+    summary = lib.refresh_index(cfg)
+    docs = json.loads(cfg.manifest.read_text())["documents"]
+    assert docs["fine"]["tables"]["verified_text"] == 2
+    assert docs["bad"]["tables"]["verified_text"] is None
+    assert summary["tables_recorded_documents"] == 1
+    assert summary["tables_unknown_documents"] == 1
+
+
+def test_a_pdf_with_no_text_yet_is_counted_unknown(tmp_path: Path) -> None:
+    """Item 4: the missing-text branch used to skip the unknown counter."""
+    from test_gh964_library import _pdf, _write_cfg
+
+    from socr import library as lib
+
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "pending.pdf")
+    summary = lib.refresh_index(cfg)
+    assert summary["tables_unknown_documents"] == 1
+    assert summary["tables_recorded_documents"] == 0

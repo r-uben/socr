@@ -30,7 +30,7 @@ Branch `feat/993-readable-tables-metric`, cut from origin/main 54fe285a (ancestr
 
 ## Validation on real output (no pipeline re-run)
 
-Read from `~/.local/state/socr-housekeeping/archive-scan/redo-out/<stem>/pages/*.json` and
+Local measurement on the author's machine, not a reproducible artifact (the paths are not in the repository). Read from `~/.local/state/socr-housekeeping/archive-scan/redo-out/<stem>/pages/*.json` and
 `tables_trust.json`, compared with `withheld/chain.json` (chain covers only pages where the
 January output had more tables than the re-OCR, so it is a subset check, not equality).
 
@@ -97,3 +97,25 @@ was not re-run after that one-line fixture change.
    are `int | None`; sums propagate unknown. The library totals only fully-known documents and
    reports `tables_unknown_documents` (also on the "Index refreshed" line).
    Mutants (external copy, canary): 7 of 7 killed (one needed a direct `sum_counts` test).
+
+## Review round 2 (cubic, PR #997)
+
+All seven applied to 499d71a2; none was already resolved.
+
+1. `verified` now also requires the page not be unverified by failure mode (a `table_unverified`
+   page with no trust entry was counted verified).
+2. Sidecar derivation is restricted to the pages 1..N recorded in the document's `metadata.json`;
+   leftover sidecars are ignored, a recorded page with no sidecar, or no recorded page count,
+   makes the document unknown.
+3. A trust file of the wrong shape was already contained inside `count_from_sidecars` (round 1),
+   and `refresh_index` now also wraps `doc_tables` so no per-document failure aborts the refresh.
+   The wrapper is defence in depth: removing it alone is not caught by any test, because the
+   inner containment catches every shape tried. Removing both is caught (9 tests).
+4. PDFs with no text yet now count in `tables_unknown_documents`.
+5. CLI line is `tables: N as text (V verified, U unverified), W withheld`. The P6 capture filter
+   matches the `  tables: ` prefix and needed no change.
+6. `docs/OUTPUT.md` says `shipped_text` counts blocks regardless of page status (ERROR included).
+7. The validation section is labelled a local measurement.
+
+Mutants (external copy, canary): items 1, 2, 4 and the combined item 3 killed; 3b (library
+wrapper only) survives, as above.

@@ -82,7 +82,7 @@ Then read the details:
 | Which socr produced it? | `socr_version`, `socr_source_digest`, `run_fingerprint`, `input_checksum`. |
 | Was it a final result? | `terminal`. `false` is a mid-run crash-recovery copy. |
 | What does the document say overall? | `metadata.json`: `status` and `error`. |
-| How many tables can a reader use? | `metadata.json` `tables`: `shipped_text`, `verified_text`, `unverified_text`, `withheld` (definitions below). The CLI prints `tables: N as text (V verified), W withheld` once per document; `socr library` copies the block into each `manifest.json` entry and prints the corpus total. |
+| How many tables can a reader use? | `metadata.json` `tables`: `shipped_text`, `verified_text`, `unverified_text`, `withheld` (definitions below). The CLI prints `tables: N as text (V verified, U unverified), W withheld` once per document; `socr library` copies the block into each `manifest.json` entry and prints the corpus total. |
 
 Other sidecar fields (`native_table_*`, `chart_*`, `d3_floor_png_ref`,
 `table_ladder_disposition`, `figure_refs`, `winning_output`) are the page decision
@@ -97,7 +97,7 @@ producer fragmented counts once per fragment. Code: `core/table_counts.py`.
 
 | Key | Meaning |
 | --- | --- |
-| `shipped_text` | Tables emitted as markdown text, on a verified page or on a WARNING page whose text was kept. |
+| `shipped_text` | Table blocks in the shipped page text, whatever the page status: verified pages, WARNING pages whose text was kept, and ERROR pages that still carry a table block (a regional splice keeps tables beside a withheld one). |
 | `verified_text` | The part of `shipped_text` on a `success` page that carries no entry in `tables_trust.json`. |
 | `unverified_text` | The part of `shipped_text` on a page whose failure mode is `table_unverified` or that carries a live `table_ladder_unverified` flag. |
 | `withheld` | Table regions shipped only as a marker (usually with a page image): one per `[page N failed: unverifiable table ...]` or `[page N failed: invalid table emission ...]` marker. On a prose-recovery page (`[page N: unverified scan ...]`) the markers are per withheld run, not per table, so the page counts as one. |

@@ -401,10 +401,16 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
     for stem in stems:
         if not has_text(cfg, stem):
             missing.append(stem)
+            tables_unknown += 1  # no text yet: its tables are not counted, so not known
             manifest[stem] = {"status": "missing_text", "awaiting_approval": stem in awaiting}
             continue
         info = doc_status(cfg, cfg.text_doc_dir(stem))
-        tables = doc_tables(cfg.text_doc_dir(stem), cfg.metadata)
+        try:
+            tables = doc_tables(cfg.text_doc_dir(stem), cfg.metadata)
+        except Exception:
+            # One malformed sidecar must not abort the index refresh; the document is
+            # simply unknown.
+            tables = None
         # Totals are over documents whose four counts are all known; every other
         # document is counted as unknown rather than summed from partial evidence.
         if tables is not None and all(tables[k] is not None for k in _TABLE_COUNT_KEYS):

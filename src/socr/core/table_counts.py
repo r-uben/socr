@@ -70,8 +70,8 @@ class TableCounts:
 
     def summary_line(self) -> str:
         return (
-            f"tables: {self.shipped_text} as text ({self.verified_text} verified), "
-            f"{self.withheld} withheld"
+            f"tables: {self.shipped_text} as text ({self.verified_text} verified, "
+            f"{self.unverified_text} unverified), {self.withheld} withheld"
         )
 
 
@@ -92,7 +92,7 @@ def count_page_tables(
     unverified = failure_mode == FailureMode.TABLE_UNVERIFIED.value or (
         _UNVERIFIED_TRUST_KIND in reasons
     )
-    verified = status == PageStatus.SUCCESS.value and not reasons
+    verified = status == PageStatus.SUCCESS.value and not reasons and not unverified
     return TableCounts(
         shipped_text=blocks,
         verified_text=blocks if verified else 0,
@@ -153,6 +153,14 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
     sidecars = sorted(pages_dir.glob("*.json")) if pages_dir.is_dir() else []
     if not sidecars:
         return None
+    # The document's recorded page set. Reprocessing does not delete sidecars of pages
+    # that are gone, so the glob alone can include strangers; and a recorded page with no
+    # sidecar would make the total partial. Either way the evidence is not the document.
+    meta = _read_json(Path(doc_dir) / "metadata.json")
+    page_count = meta.get("pages") if isinstance(meta, dict) else None
+    if type(page_count) is not int or page_count < 1:
+        return None
+    wanted = set(range(1, page_count + 1))
     # tables_trust.json: absent means no table is flagged (the file's own contract), but a
     # file that is present and unreadable says nothing. Reading it as "no distrust" would
     # overstate verified, so the trust-dependent counts become unknown instead.
@@ -170,6 +178,7 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
                 except (TypeError, ValueError, AttributeError):
                     trust_known = False
     per_page: list[TableCounts] = []
+    seen: set[int] = set()
     for sidecar in sidecars:
         rec = _read_json(sidecar)
         win = rec.get("winning_output") if isinstance(rec, dict) else None
@@ -180,6 +189,9 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
             num = int(rec.get("page_num") or win.get("page_num") or 0)
         except (TypeError, ValueError):
             return None
+        if num not in wanted:
+            continue
+        seen.add(num)
         per_page.append(
             count_page_tables(
                 win.get("text") or "",
@@ -188,6 +200,8 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
                 trust_reasons=trust_pages.get(num, ()),
             )
         )
+    if seen != wanted:
+        return None
     total = sum_counts(per_page)
     if not trust_known:
         total = replace(total, verified_text=None, unverified_text=None)
