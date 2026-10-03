@@ -41,3 +41,28 @@ Script: scratchpad remeasure.py (old logic re-implemented inline, new = producti
 
 M1 no blank-stub: 2 killed. M2 page-wide: 1. M3 no downward extension: 14. M4 no upward: 1.
 M5 no-bound relaxes: 1. M6 extend through anything: 1. Baseline 57 passed.
+
+## Round 2 (Astra rejected 1ea33233: two bypasses)
+
+1. Panel truncation: adjacency-only extension stopped at a numeric-free panel heading and the
+   candidate's own rows alone set the extent. Now the extent grows through adjacent table-shaped
+   bands AND bridges a run of non-table-shaped bands when the next table-shaped band beyond has
+   ALL its numbers in the lanes (x0/x1, `reconstruct._LANE_X_TOL_PT`) of the bands the candidate
+   bound. Native geometry decides the far end; tick/running-head numbers elsewhere are not bridged.
+2. Invented SE rows: a blank-stub candidate row counts only if it binds to a native band
+   (`match_rows_monotonic`). Labelled rows count as before.
+3. Scoping applies only when bound bands >= ceil(counted rows * ROW_CORROBORATION_MIN); otherwise
+   the page-wide count stands (one stray binding cannot pick the region).
+4. `row_shape_min` is again the min over LABELLED counted rows (a numeric header with a blank stub
+   had lowered it and produced a new refusal on Eichengreen p21 that main accepts).
+Known limitation kept: citation rows on a text page still expose term (b) (bridge reaches them);
+the #703 test pinning that is restored to its original assertion.
+
+Census re-run (40 refused candidates): 24 cleared, 16 refuse, 0 refusals new vs main.
+Cleared set changed by one: acosta p35 (complete table, starred coefficient rows are not
+counted -> refused as before this fix) out, huynh p32 (viewed: complete) in. bernanke p17, ghost
+p13, lanza p22 stay cleared. Cleared-and-incomplete: 0.
+
+Mutations (8, external copy, canary): blank-stub-never-counts 2 killed; unbound-blank-stub-counts 1;
+always page-wide 1; scope-on-any-binding 1 (needed a fixture fix: ticks adjacent to the table
+were merged by adjacency); no bridge 1; bridge without lane check 1; no adjacent extension 7.
