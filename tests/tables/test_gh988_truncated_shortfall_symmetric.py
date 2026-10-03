@@ -199,3 +199,37 @@ def test_one_binding_does_not_enable_scoping(pre_988) -> None:
     assert table_truncated(md, words) is True
     pre_988()
     assert table_truncated(md, words) is True
+
+
+def test_two_blocks_cannot_credit_the_same_native_bands(pre_988) -> None:
+    """Astra's reproducer: the first half of the table emitted twice (two blocks)
+    must not count 20 rows against 20 native bands, nor bind the same bands twice.
+    """
+    words = _page()
+    md = _markdown(COEFS // 2) + "\n" + _markdown(COEFS // 2)
+    assert table_truncated(md, words) is True
+    pre_988()
+    assert table_truncated(md, words) is True
+
+
+def _two_tables_same_lanes(caption: str | None, gap: float) -> list[tuple]:
+    """Table A, then table B printed in the same lanes ``gap`` below it."""
+    words = _page()
+    bottom = 100.0 + COEFS * 40.0
+    if caption:
+        words.append((0.0, bottom + gap - 20.0, 60.0, bottom + gap - 10.0, caption))
+        words.append((70.0, bottom + gap - 20.0, 90.0, bottom + gap - 10.0, "2"))
+    else:
+        words.append((0.0, bottom + gap - 20.0, 90.0, bottom + gap - 10.0, "Notes"))
+    return words + _page(y0=bottom + gap)
+
+
+@pytest.mark.parametrize("caption,gap", [(None, 400.0), ("Table", 20.0)])
+def test_second_table_in_same_lanes_is_not_absorbed(caption, gap) -> None:
+    """A complete candidate for table A must not be refused because table B
+    below shares its lanes: a wide gap or a ``Table N`` caption ends the bridge.
+    """
+    words = _two_tables_same_lanes(caption, gap)
+    assert table_truncated(_markdown(), words) is False
+    # and table A really is missing rows when the candidate stops early
+    assert table_truncated(_markdown(COEFS // 2), words) is True

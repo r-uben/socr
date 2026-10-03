@@ -391,6 +391,9 @@ def _corroborated_candidate_rows(
         table_blocks,
     )
 
+    # A native band credits at most ONE candidate row on the page: matching is
+    # monotonic within a block, and bands a block consumed are blanked for the
+    # next, so two blocks cannot both claim the same standard-error lines.
     token_lists = [band.tokens for band in baseline_bands(words)]
     counted: list[tuple[str, ...]] = []
     labelled: list[tuple[str, ...]] = []
@@ -405,6 +408,7 @@ def _corroborated_candidate_rows(
         for (tokens, blank_stub), idx in zip(entries, matches):
             if idx is not None:
                 bound.append(idx)
+                token_lists[idx] = ()
             if idx is not None or not blank_stub:
                 counted.append(tokens)
             if not blank_stub:
@@ -442,7 +446,8 @@ def _native_table_rows_in_table_extent(
     )
 
     band_words = cluster_band_words(words)
-    token_lists = [band.tokens for band in baseline_bands(words)]
+    bands = baseline_bands(words)
+    token_lists = [band.tokens for band in bands]
 
     def numeric_words(idx: int) -> list:
         return [w for w in band_words[idx] if _is_genuine_numeric(w[4])[0]]
@@ -462,6 +467,32 @@ def _native_table_rows_in_table_extent(
     def strictly_in_lanes(idx: int) -> bool:
         return table_shaped(idx) and all(in_lanes(w) for w in numeric_words(idx))
 
+    # The table's own row pitch: the largest y-spacing between consecutive
+    # table-shaped bands inside the span the candidate bound. A bridge may not
+    # leave more vertical space than its bands would take at that pitch (one
+    # pitch per bridged band, plus one to step onto the far band), so a separate
+    # table below a wide gap is not absorbed.
+    span_ys = [
+        bands[idx].y_center
+        for idx in range(min(bound_bands), max(bound_bands) + 1)
+        if table_shaped(idx)
+    ]
+    pitch = max((b - a for a, b in zip(span_ys, span_ys[1:])), default=None)
+
+    def is_caption(idx: int) -> bool:
+        """A ``Table N`` / ``Figure N`` line starts a different object."""
+        lead = min(band_words[idx], key=lambda w: w[0])[4]
+        return lead.rstrip(".:").lower() in {"table", "figure"}
+
+    def may_bridge(edge: int, beyond: int, step: int) -> bool:
+        run = range(edge + step, beyond, step)
+        if any(is_caption(idx) for idx in run):
+            return False
+        if pitch is None:
+            return True
+        gap = abs(bands[beyond].y_center - bands[edge].y_center)
+        return gap <= pitch * (len(run) + 1)
+
     def reach(start: int, step: int) -> int:
         """Walk from *start* away from the table. Adjacent table-shaped bands are
         in. A run of non-table-shaped bands (a panel heading, a section label) is
@@ -476,7 +507,11 @@ def _native_table_rows_in_table_extent(
             beyond = idx
             while 0 <= beyond < len(band_words) and not table_shaped(beyond):
                 beyond += step
-            if 0 <= beyond < len(band_words) and strictly_in_lanes(beyond):
+            if (
+                0 <= beyond < len(band_words)
+                and strictly_in_lanes(beyond)
+                and may_bridge(edge, beyond, step)
+            ):
                 edge, idx = beyond, beyond + step
             else:
                 break

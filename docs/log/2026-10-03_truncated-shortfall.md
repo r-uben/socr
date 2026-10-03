@@ -66,3 +66,14 @@ p13, lanza p22 stay cleared. Cleared-and-incomplete: 0.
 Mutations (8, external copy, canary): blank-stub-never-counts 2 killed; unbound-blank-stub-counts 1;
 always page-wide 1; scope-on-any-binding 1 (needed a fixture fix: ticks adjacent to the table
 were merged by adjacency); no bridge 1; bridge without lane check 1; no adjacent extension 7.
+
+## Round 3 (Astra rejected fe26b80)
+
+- Native bands are consumed uniquely across blocks (a band bound by one block is blanked for the
+  next), so a repeated block cannot re-credit the same SE bands. Pin: `_markdown(5) + _markdown(5)`.
+- A bridge stops at a `Table` / `Figure` lead word and when its vertical span exceeds one table row
+  pitch per bridged band plus one (pitch = largest spacing between table-shaped bands inside the
+  bound span; no pitch -> no limit). Pins: two tables in the same lanes (wide gap; caption).
+- Census: still 24 cleared / 16 refused / 0 new. Mutations: bands reusable 1 killed, no gap rule 1,
+  no caption rule 1 (after making the caption fixture's gap pass the pitch rule), bridge limits
+  removed 1, no bridge 1.
