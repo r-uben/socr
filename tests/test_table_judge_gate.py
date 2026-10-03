@@ -1131,6 +1131,11 @@ class TestProcessFlagDifference:
             ),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
             patch.object(pipeline, "_build_table_judge_rungs", return_value=[_reject_rung()]),
+            # GH-984: the qwen engine probes the ambient Ollama daemon; CI has none.
+            patch(
+                "socr.engines.qwen._check_ollama_model",
+                return_value="ollama unreachable (hermetic test)",
+            ),
         ):
             result = pipeline.process(pdf_path, tmp_path / "native_out")
 

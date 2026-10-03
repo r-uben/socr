@@ -38,6 +38,8 @@ The seam is test-only. Production code carries no pre-change path.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import importlib
 
 import pytest
@@ -353,3 +355,215 @@ def _table_judge_rungs_are_absent(monkeypatch):
             )
     monkeypatch.setattr("socr.judge.table_rung_ollama.httpx.get", _no_daemon, raising=True)
     monkeypatch.setattr("socr.judge.table_rung_gemini.shutil.which", lambda _b: None)
+
+
+# ---------------------------------------------------------------------------
+# GH-984: no test may reach the AMBIENT Ollama daemon.
+#
+# CI has no Ollama, so a test that quietly reaches one passes there and
+# behaves differently on a developer machine -- and with a live-but-busy daemon
+# it blocks in a real generation call, hanging the whole local suite. This
+# guard turns that leak class from a hang into a loud, attributed failure.
+#
+# It is deliberately NOT a blanket "no sockets" rule: only the host:port the
+# deployment is configured to use (``OLLAMA_HOST``, default 127.0.0.1:11434),
+# captured BEFORE the test body runs, is refused. Tests that stand up their own
+# loopback server -- and point ``OLLAMA_HOST`` at it from inside the test -- keep
+# working, as does any other loopback port.
+#
+# LIMITS (what this guard does NOT see):
+# * Child processes. Exec'd subprocess engines (qwen-ocr, deepseek, ...) do not
+#   inherit these monkeypatches, so a real subprocess launch can reach Ollama
+#   unobserved. Unit tests must stub the subprocess launch boundary.
+# * Proxies. A connection routed through an HTTP(S) proxy connects to the proxy
+#   address, not the Ollama endpoint, so endpoint matching is bypassed.
+# ---------------------------------------------------------------------------
+
+
+def _ambient_ollama_endpoints() -> set[tuple[str, int]]:
+    import socket
+    from urllib.parse import urlsplit
+
+    from socr.tables.extract import resolve_ollama_host
+
+    endpoints = {("127.0.0.1", 11434), ("::1", 11434)}
+    try:
+        parts = urlsplit(resolve_ollama_host())
+        host, port = parts.hostname, parts.port or 11434
+        if host:
+            endpoints.add((host, port))
+            for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+                endpoints.add((info[4][0], info[4][1]))
+    except (ValueError, OSError):
+        pass  # unparseable/unresolvable host: the default endpoints still guard
+    return endpoints
+
+
+@contextlib.contextmanager
+def ollama_connection_guard():
+    """Refuse and record connections to the ambient Ollama endpoint; yield the record.
+
+    Refusal alone is not enough: a probe's own ``except`` clause swallows it, so
+    the caller must inspect the yielded list afterwards.
+    """
+    import socket
+    import traceback
+
+    forbidden = _ambient_ollama_endpoints()
+    violations: list[str] = []
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _hit(address) -> bool:
+        if not (isinstance(address, tuple) and len(address) >= 2):
+            return False
+        if (address[0], address[1]) not in forbidden:
+            return False
+        sites = [
+            f"{f.filename.rsplit('/', 1)[-1]}:{f.name}"
+            for f in traceback.extract_stack()
+            if "/src/socr/" in f.filename
+        ]
+        violations.append(f"{address[0]}:{address[1]} via " + " > ".join(sites))
+        return True
+
+    def _connect(self, address):
+        if _hit(address):
+            raise ConnectionRefusedError(f"GH-984: test reached live Ollama at {address[:2]}")
+        return real_connect(self, address)
+
+    def _connect_ex(self, address):
+        if _hit(address):
+            return errno.ECONNREFUSED
+        return real_connect_ex(self, address)
+
+    socket.socket.connect = _connect
+    socket.socket.connect_ex = _connect_ex
+    try:
+        yield violations
+    finally:
+        socket.socket.connect = real_connect
+        socket.socket.connect_ex = real_connect_ex
+
+
+@pytest.fixture(autouse=True)
+def _no_live_ollama():
+    with ollama_connection_guard() as violations:
+        yield
+    if violations:
+        pytest.fail(
+            "GH-984: this test connected to the configured Ollama host:\n  "
+            + "\n  ".join(violations)
+            + "\nPatch the call (e.g. _resolve_judge_model -> '' and pin engines, "
+            "see CLAUDE.md) instead of reaching a live daemon.",
+            pytrace=False,
+        )
+
+
+# Modules whose pipelines run ``_run_fingerprint`` -> ``_resolve_judge_model``,
+# which probes the ambient Ollama judge model with a real generation call. Their
+# subject is never the judge probe, so they get it pinned to "no judge" (the
+# outcome CI sees). This is an explicit opt-in list, NOT an autouse fixture: a
+# NEW test file that reaches the probe fails the guard above instead of being
+# silently hidden, and the modules that exercise ``_resolve_judge_model`` itself
+# (e.g. test_gh873, test_gh903) are not on it.
+#
+# RISK: the pin is MODULE-WIDE, so it also silently covers every FUTURE test added
+# to a listed module. A new test there that is meant to exercise the judge probe
+# will see "" and never reach it, and the guard cannot flag what no longer
+# connects. Put such a test in its own module, off these lists.
+_JUDGE_PROBE_PINNED_MODULES = frozenset(
+    (
+        "test_a1c_header_binding_unverified_surfacing.py",
+        "test_agentic_figures.py",
+        "test_b2_routing.py",
+        "test_canon_remediation.py",
+        "test_canon_round2.py",
+        "test_chart_lane.py",
+        "test_dual_pass_tables.py",
+        "test_equation_lane_pipeline_p4r.py",
+        "test_gh165_unresolved_math_outcome.py",
+        "test_gh171_sidecar_carries_figures.py",
+        "test_gh177_exit_code_policy.py",
+        "test_gh238_caption_engine_identity.py",
+        "test_gh262_d3_marker_over_cached_grid.py",
+        "test_gh317_structure_class_floor.py",
+        "test_gh346_content_defect_clear_and_resume.py",
+        "test_gh371_d3_region_splice.py",
+        "test_gh488_figure_sidecar_end_to_end.py",
+        "test_gh493_resume_figure_sidecar.py",
+        "test_gh498_figure_repair_through_process.py",
+        "test_gh519_visual_values_debt.py",
+        "test_gh520_regional_floor_splice.py",
+        "test_gh560_unwitnessed_wording.py",
+        "test_gh625_ditto_unresolved.py",
+        "test_gh635_chart_reader.py",
+        "test_gh635_chart_table_skeletons.py",
+        "test_gh649_scanned_prose_recovery.py",
+        "test_gh652_prose_witness_trust.py",
+        "test_gh658_no_witness_backend_reason.py",
+        "test_gh659_label_unverified_finalization.py",
+        "test_gh697_prose_recovery_surfacing.py",
+        "test_gh713_judge_timeout_credential.py",
+        "test_gh713_round2_credential_lifecycle.py",
+        "test_gh713_round3_supersession_identity.py",
+        "test_gh714_a1b_text_table_gate.py",
+        "test_gh734b_wired_grid_reconciliation.py",
+        "test_gh819_native_audit_resume.py",
+        "test_gh916_native_ship_gate.py",
+        "test_gh96_escalation_lane.py",
+        "test_ladder_status_surfacing.py",
+        "test_native_only_table_status_gh211.py",
+        "test_orchestrator.py",
+        "test_p6_cold_review_round2.py",
+        "test_p6_disposition_finalization.py",
+        "test_p6_stage_ab_difference.py",
+        "test_p6_stage_c_difference.py",
+        "test_pp1_fragment_flush.py",
+        "test_qwen_fingerprint_determinants.py",
+        "test_resume_source_version_gh214.py",
+        "test_rotated_native_table_first.py",
+        "test_s1_structure_class_winner_gh_reachability.py",
+        "test_silent_content_destruction.py",
+        "test_structural_gate_b1_gh151.py",
+        "test_tr3_d3_floor.py",
+    )
+)
+
+
+# Modules that drive ``_phase_agentic`` without pinning the provider ladder:
+# ``_available_engines_for_agentic`` would otherwise probe every Ollama-backed
+# engine's availability against the ambient daemon. Pinned to the local profile,
+# as CLAUDE.md prescribes; a test that pins its own ladder overrides this.
+_ENGINES_PINNED_MODULES = frozenset(
+    (
+        "test_chart_lane.py",
+        "test_gh498_figure_repair_through_process.py",
+        "test_gh519_visual_values_debt.py",
+    )
+)
+
+
+@pytest.fixture
+def judge_probe_pinned(monkeypatch):
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self: "")
+
+
+@pytest.fixture
+def engines_pinned(monkeypatch):
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    monkeypatch.setattr(
+        UnifiedPipeline, "_available_engines_for_agentic", lambda self: [PROFILE_QWEN_LOCAL]
+    )
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if item.path.name in _JUDGE_PROBE_PINNED_MODULES:
+            item.fixturenames.insert(0, "judge_probe_pinned")
+        if item.path.name in _ENGINES_PINNED_MODULES:
+            item.fixturenames.insert(0, "engines_pinned")
