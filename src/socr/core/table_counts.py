@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
@@ -58,12 +58,14 @@ _UNVERIFIED_TRUST_KIND = "table_ladder_unverified"
 
 @dataclass(frozen=True)
 class TableCounts:
-    shipped_text: int = 0
-    verified_text: int = 0
-    unverified_text: int = 0
-    withheld: int = 0
+    #: ``None`` means unknown: the evidence for that count was incomplete or unreadable.
+    #: Never a confident number built from partial evidence.
+    shipped_text: int | None = 0
+    verified_text: int | None = 0
+    unverified_text: int | None = 0
+    withheld: int | None = 0
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | None]:
         return asdict(self)
 
     def summary_line(self) -> str:
@@ -99,13 +101,18 @@ def count_page_tables(
     )
 
 
+def _sum_field(values: list[int | None]) -> int | None:
+    return None if any(v is None for v in values) else sum(values)
+
+
 def sum_counts(counts: Iterable[TableCounts]) -> TableCounts:
+    """Field-wise sum; a field unknown on any input is unknown in the sum."""
     items = list(counts)
     return TableCounts(
-        shipped_text=sum(c.shipped_text for c in items),
-        verified_text=sum(c.verified_text for c in items),
-        unverified_text=sum(c.unverified_text for c in items),
-        withheld=sum(c.withheld for c in items),
+        shipped_text=_sum_field([c.shipped_text for c in items]),
+        verified_text=_sum_field([c.verified_text for c in items]),
+        unverified_text=_sum_field([c.unverified_text for c in items]),
+        withheld=_sum_field([c.withheld for c in items]),
     )
 
 
@@ -137,35 +144,51 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
     """The same counts, read from a finished document directory.
 
     For output written before the ``tables`` metadata block existed. ``None`` when the
-    directory has no page sidecars, which means "not recorded", never "zero".
+    directory has no page sidecars, or any sidecar is unreadable or lacks a winning output:
+    unknown, never "zero" and never a total over the pages that happened to parse. If only
+    ``tables_trust.json`` is unreadable, ``verified_text`` and ``unverified_text`` are
+    ``None`` and the other two counts stay known.
     """
     pages_dir = Path(doc_dir) / "pages"
     sidecars = sorted(pages_dir.glob("*.json")) if pages_dir.is_dir() else []
     if not sidecars:
         return None
-    trust = _read_json(Path(doc_dir) / "tables_trust.json")
+    # tables_trust.json: absent means no table is flagged (the file's own contract), but a
+    # file that is present and unreadable says nothing. Reading it as "no distrust" would
+    # overstate verified, so the trust-dependent counts become unknown instead.
+    trust_path = Path(doc_dir) / "tables_trust.json"
+    trust_known = True
     trust_pages: dict[int, list[str]] = {}
-    if isinstance(trust, dict):
-        for num, rec in (trust.get("pages") or {}).items():
-            try:
-                trust_pages[int(num)] = list((rec or {}).get("reasons") or ["unspecified"])
-            except (TypeError, ValueError):
-                continue
+    if trust_path.exists():
+        trust = _read_json(trust_path)
+        if not isinstance(trust, dict) or not isinstance(trust.get("pages") or {}, dict):
+            trust_known = False
+        else:
+            for num, rec in (trust.get("pages") or {}).items():
+                try:
+                    trust_pages[int(num)] = list((rec or {}).get("reasons") or ["unspecified"])
+                except (TypeError, ValueError, AttributeError):
+                    trust_known = False
     per_page: list[TableCounts] = []
     for sidecar in sidecars:
         rec = _read_json(sidecar)
-        if not isinstance(rec, dict):
-            continue
-        win = rec.get("winning_output")
+        win = rec.get("winning_output") if isinstance(rec, dict) else None
         if not isinstance(win, dict):
-            continue
-        num = rec.get("page_num") or win.get("page_num") or 0
+            # A skipped page would make every total a partial sum that reads as complete.
+            return None
+        try:
+            num = int(rec.get("page_num") or win.get("page_num") or 0)
+        except (TypeError, ValueError):
+            return None
         per_page.append(
             count_page_tables(
                 win.get("text") or "",
                 str(rec.get("status") or win.get("status") or ""),
                 str(rec.get("failure_mode") or win.get("failure_mode") or ""),
-                trust_reasons=trust_pages.get(int(num), ()),
+                trust_reasons=trust_pages.get(num, ()),
             )
         )
-    return sum_counts(per_page) if per_page else None
+    total = sum_counts(per_page)
+    if not trust_known:
+        total = replace(total, verified_text=None, unverified_text=None)
+    return total

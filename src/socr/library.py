@@ -311,7 +311,9 @@ def doc_status(cfg: LibraryConfig, doc_dir: Path) -> dict[str, Any]:
 _TABLE_COUNT_KEYS = ("shipped_text", "verified_text", "unverified_text", "withheld")
 
 
-def doc_tables(doc_dir: Path, metadata_name: str = METADATA_FILENAME) -> dict[str, int] | None:
+def doc_tables(
+    doc_dir: Path, metadata_name: str = METADATA_FILENAME
+) -> dict[str, int | None] | None:
     """Readable-table counts for one processed document (GH-993), or ``None``.
 
     Read from the ``tables`` block the pipeline wrote into ``metadata.json``; a document
@@ -395,6 +397,7 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
     computed: set[str] = set()
     cleared: set[str] = set()
     table_docs: list[dict[str, int]] = []
+    tables_unknown = 0
     for stem in stems:
         if not has_text(cfg, stem):
             missing.append(stem)
@@ -402,8 +405,12 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
             continue
         info = doc_status(cfg, cfg.text_doc_dir(stem))
         tables = doc_tables(cfg.text_doc_dir(stem), cfg.metadata)
-        if tables is not None:
+        # Totals are over documents whose four counts are all known; every other
+        # document is counted as unknown rather than summed from partial evidence.
+        if tables is not None and all(tables[k] is not None for k in _TABLE_COUNT_KEYS):
             table_docs.append(tables)
+        else:
+            tables_unknown += 1
         if info["state"] == UNVERIFIED:
             computed.add(stem)
         elif info["state"] == VERIFIED and stem in processed:
@@ -432,6 +439,7 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
         "unverified": unverified,
         "tables": {k: sum(d[k] for d in table_docs) for k in _TABLE_COUNT_KEYS},
         "tables_recorded_documents": len(table_docs),
+        "tables_unknown_documents": tables_unknown,
     }
 
 

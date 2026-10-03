@@ -15965,6 +15965,9 @@ class UnifiedPipeline:
         # replay blobs must all freeze the same guarded page text and status.
         final_page_outputs: list[PageOutput] | None = None
         final_records: list[FinalizedPageRecord] | None = None
+        # GH-993: the metadata written above carries the counts of the PRE-final records.
+        counts_written = state.table_counts
+        metadata_rewritten = False
         if has_text:
             from ocr_output_contract import assemble_pages, split_native_pages
 
@@ -16026,6 +16029,7 @@ class UnifiedPipeline:
                         # flag too or the fix above is undone here.
                         provisional=figure_phase_failed,
                     )
+                    metadata_rewritten = True
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -16033,6 +16037,14 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+
+        # GH-993: a final recount that differs from the one already persisted (a caption
+        # table the figure phase added, a guard rewrite) must reach metadata.json, which
+        # the library reads. Same provisional flag as every other late writer (GH-503).
+        if has_text and not metadata_rewritten and state.table_counts != counts_written:
+            self._write_metadata(
+                state, final_result, output_dir, has_text, provisional=figure_phase_failed
+            )
 
         # PP-4: single authoritative fragment rewrite from the FINAL text (post-
         # strip_phantom_images, post-inline-figures for figure docs, plain post-

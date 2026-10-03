@@ -12,6 +12,7 @@ exactly one thing.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -96,11 +97,11 @@ def test_cli_line_is_printed_once_per_document(
     assert [ln.strip() for ln in lines] == ["tables: 1 as text (1 verified), 0 withheld"], lines
 
 
-def test_final_body_guard_withholding_is_counted(tmp_path: Path) -> None:
-    """A table the post-figure body guard withholds must be in the metadata counts.
+def _assemble_with_final_body(tmp_path: Path, final_page: str) -> dict:
+    """Assemble a clean one-page doc whose figure phase returns ``final_page`` as the body.
 
-    The counts are first derived from the pre-figure records, which hold a clean page;
-    only the re-derivation from the final records sees the invalid-emission marker.
+    The counts are first derived from the pre-figure records, which hold a clean page
+    with no table; only the re-derivation from the final records sees ``final_page``.
     """
     from unittest.mock import patch
 
@@ -127,9 +128,7 @@ def test_final_body_guard_withholding_is_counted(tmp_path: Path) -> None:
     )
     state.pages[1].attempts.append(output)
     state.pages[1].best_output = output
-    invalid_final = assemble_pages(
-        [r"| A | \multicolumn{2}{c}{B} |" + "\n| --- | --- |\n| 1 | 2 |"]
-    )
+    invalid_final = assemble_pages([final_page])
     pipeline = UnifiedPipeline(
         PipelineConfig(
             save_figures=True,
@@ -145,8 +144,21 @@ def test_final_body_guard_withholding_is_counted(tmp_path: Path) -> None:
     with patch.object(pipeline, "_describe_and_embed_figures", return_value=invalid_final):
         pipeline._phase_assemble(state, out_dir)
 
-    block = json.loads((out_dir / "paper" / "metadata.json").read_text())["tables"]
+    return json.loads((out_dir / "paper" / "metadata.json").read_text())["tables"]
+
+
+def test_final_body_guard_withholding_is_counted(tmp_path: Path) -> None:
+    block = _assemble_with_final_body(
+        tmp_path, r"| A | \multicolumn{2}{c}{B} |" + "\n| --- | --- |\n| 1 | 2 |"
+    )
     assert block["withheld"] == 1 and block["shipped_text"] == 0, block
+
+
+def test_valid_caption_table_added_after_the_first_count_reaches_metadata(tmp_path: Path) -> None:
+    """The final recount differs from the first (0 -> 1 table) with NO emission failure,
+    which is the case where nothing else rewrites metadata.json."""
+    block = _assemble_with_final_body(tmp_path, _TABLE_MD)
+    assert block["shipped_text"] == 1, block
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +196,92 @@ def test_prose_recovery_page_withholds_at_least_one_not_one_per_run() -> None:
 
 def test_sidecar_reader_returns_none_without_sidecars(tmp_path: Path) -> None:
     assert count_from_sidecars(tmp_path) is None
+
+
+def test_a_field_unknown_on_any_input_is_unknown_in_the_sum() -> None:
+    from socr.core.table_counts import sum_counts
+
+    total = sum_counts([TableCounts(1, 1, 0, 0), TableCounts(2, None, None, 1)])
+    assert total == TableCounts(3, None, None, 1)
+
+
+def _sidecar_doc(root: Path, name: str = "d") -> Path:
+    doc_dir = root / name
+    (doc_dir / "pages").mkdir(parents=True)
+    for n in (1, 2):
+        (doc_dir / "pages" / f"{n:05d}.json").write_text(
+            json.dumps(
+                {
+                    "page_num": n,
+                    "status": "success",
+                    "failure_mode": "none",
+                    "winning_output": {"page_num": n, "text": _TABLE_MD},
+                }
+            )
+        )
+    return doc_dir
+
+
+def test_baseline_sidecar_doc_is_fully_known(tmp_path: Path) -> None:
+    assert count_from_sidecars(_sidecar_doc(tmp_path)).to_dict() == {
+        "shipped_text": 2,
+        "verified_text": 2,
+        "unverified_text": 0,
+        "withheld": 0,
+    }
+
+
+@pytest.mark.parametrize("garbage", ["{not json", "[]", '{"pages": 7}', '{"pages": {"x": {}}}'])
+def test_unreadable_trust_file_makes_verified_unknown_not_overstated(
+    tmp_path: Path, garbage: str
+) -> None:
+    doc_dir = _sidecar_doc(tmp_path)
+    (doc_dir / "tables_trust.json").write_text(garbage)
+    counts = count_from_sidecars(doc_dir)
+    assert counts.verified_text is None and counts.unverified_text is None, counts
+    # What does not depend on the trust file stays known.
+    assert counts.shipped_text == 2 and counts.withheld == 0
+
+
+@pytest.mark.parametrize("garbage", ["{not json", "[]", '{"status": "success"}'])
+def test_a_corrupt_sidecar_makes_the_whole_document_unknown(tmp_path: Path, garbage: str) -> None:
+    doc_dir = _sidecar_doc(tmp_path)
+    (doc_dir / "pages" / "00002.json").write_text(garbage)
+    # Not shipped_text == 1: a total over the pages that parsed reads as complete.
+    assert count_from_sidecars(doc_dir) is None
+
+
+def test_library_counts_unknown_documents_and_excludes_them_from_totals(tmp_path: Path) -> None:
+    from test_gh964_library import _fake_doc, _pdf, _write_cfg
+
+    from socr import library as lib
+
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    for stem in ("good", "corrupt_sidecar", "corrupt_trust"):
+        _pdf(cfg.pdf_dir / f"{stem}.pdf")
+    for stem in ("good", "corrupt_sidecar", "corrupt_trust"):
+        shutil.rmtree(_fake_doc(cfg.text_dir, stem) / "pages")
+        shutil.copytree(
+            _sidecar_doc(tmp_path / "src", stem) / "pages", cfg.text_dir / stem / "pages"
+        )
+    (cfg.text_dir / "corrupt_sidecar" / "pages" / "00002.json").write_text("{not json")
+    (cfg.text_dir / "corrupt_trust" / "tables_trust.json").write_text("{not json")
+
+    summary = lib.refresh_index(cfg)
+    docs = json.loads(cfg.manifest.read_text())["documents"]
+
+    assert docs["corrupt_sidecar"]["tables"] is None
+    assert docs["corrupt_trust"]["tables"]["verified_text"] is None
+    assert docs["corrupt_trust"]["tables"]["shipped_text"] == 2
+    assert docs["good"]["tables"]["verified_text"] == 2
+    assert summary["tables"] == {
+        "shipped_text": 2,
+        "verified_text": 2,
+        "unverified_text": 0,
+        "withheld": 0,
+    }
+    assert summary["tables_recorded_documents"] == 1
+    assert summary["tables_unknown_documents"] == 2
 
 
 # ---------------------------------------------------------------------------

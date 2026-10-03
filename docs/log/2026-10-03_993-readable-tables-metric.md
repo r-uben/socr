@@ -84,3 +84,16 @@ compares the assemble output to a pre-change baseline and now also saw the new a
 `tables:` line. The capture drops that line (it is pinned in `test_gh993_readable_tables.py`);
 the two P6 files then pass (61 passed together with the GH-993 file). The rest of the suite
 was not re-run after that one-line fixture change.
+
+## Review fixes (Astra, PR #997)
+
+1. A final recount that differs from the count already persisted now rewrites metadata.json
+   (`_phase_assemble`, same provisional flag as the other late writers). Before, only an
+   emission failure rewrote it, so a valid caption table left metadata and library counts stale.
+   Pin: `test_valid_caption_table_added_after_the_first_count_reaches_metadata`.
+2. `count_from_sidecars` returns unknown, not a confident number, on incomplete evidence: any
+   unreadable or winner-less page sidecar gives `None` for the document; an unreadable
+   `tables_trust.json` gives `verified_text` / `unverified_text` = `None`. `TableCounts` fields
+   are `int | None`; sums propagate unknown. The library totals only fully-known documents and
+   reports `tables_unknown_documents` (also on the "Index refreshed" line).
+   Mutants (external copy, canary): 7 of 7 killed (one needed a direct `sum_counts` test).

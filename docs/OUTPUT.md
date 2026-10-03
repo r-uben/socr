@@ -108,6 +108,11 @@ rejected and flagged text, not only unverified text. The block is absent when it
 could not be derived: absent means not recorded, never zero. Output written before
 this block existed has none; `socr library` derives the same counts from the page
 sidecars and `tables_trust.json` for such a document.
+Derivation from sidecars never returns a confident number from incomplete evidence: an
+unreadable page sidecar makes the whole document's counts `null` in `manifest.json`, and an
+unreadable `tables_trust.json` makes `verified_text` and `unverified_text` `null`. The
+library total sums only documents whose four counts are all known and reports the rest as
+`tables_unknown_documents`.
 
 A document can be `partial` or `audit_failed` while most pages are clean. Use the
 page sidecars to find which pages carry the debt.
