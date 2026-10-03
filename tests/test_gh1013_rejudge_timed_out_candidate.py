@@ -62,6 +62,10 @@ class _Judge:
             )
         if self.mode == "accept_heuristic":  # accept=True, no VLM verdict behind it
             return AcceptDecision(accept=True, reason="heuristics passed")
+        if self.mode == "accept_label_unverified":
+            # SourceEvidenceTableJudge annotates the judged output in place.
+            output.table_label_unverified = "row labels not witnessed"
+            return AcceptDecision(accept=True, reason="x", raw_verdict=JudgeVerdict(faithful=True))
         if self.mode == "accept_mutating":  # the verifier rewrote the text it was shown
             if self.calls[-1] == _MODEL_TEXT:
                 output.text = output.text + " (rewritten)"
@@ -407,3 +411,18 @@ def test_item4_shipped_bytes_hash_equals_judged_hash(tmp_path) -> None:
     assert m.ocr_calls == [1]
     assert "rejudge_accepted" not in _kinds(m)
     assert "(rewritten)" not in m.shipped()
+
+
+def test_fields_set_by_verification_survive_to_the_ship(tmp_path) -> None:
+    """Label disclosure set on the judged snapshot must reach the shipped page (WARNING)."""
+    plain = _timed_out_then(tmp_path, "plain", "accept")
+    flagged = _timed_out_then(tmp_path, "flagged", "accept_label_unverified")
+    for h in (plain, flagged):
+        assert h.ocr_calls == [] and "rejudge_accepted" in _kinds(h)
+        assert _MODEL_TEXT in h.shipped()
+    # Differ in exactly the verification annotation.
+    assert plain.sidecar()["winning_output"]["status"] == "success"
+    assert not plain.sidecar()["winning_output"].get("table_label_unverified")
+    won = flagged.sidecar()["winning_output"]
+    assert won["table_label_unverified"] == "row labels not witnessed"
+    assert won["status"] == "warning"

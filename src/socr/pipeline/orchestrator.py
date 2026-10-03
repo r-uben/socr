@@ -13043,12 +13043,13 @@ class UnifiedPipeline:
         if current == JUDGE_IDENTITY_HEURISTIC or current != recorded_judge:
             # A degraded (heuristic / failed-to-build) or different judge is weaker or
             # unrelated evidence: it never ships these bytes. No judge call is made.
-            outcome, reason = (
+            outcome, reason, shipped = (
                 "error",
                 f"judge {current!r} is not the VLM judge {recorded_judge!r} that timed out",
+                None,
             )
         else:
-            outcome, reason = rejudge_candidate(snapshot, prof, judge, attempts=attempts)
+            outcome, reason, shipped = rejudge_candidate(snapshot, prof, judge, attempts=attempts)
         detail = {
             "accepted": "re-judged the kept model candidate on resume: accepted, shipped "
             "without re-OCR",
@@ -13073,9 +13074,10 @@ class UnifiedPipeline:
                 },
             )
         )
-        if outcome != REJUDGE_ACCEPTED:
+        if outcome != REJUDGE_ACCEPTED or shipped is None:
             return None
-        shipped = snapshot()
+        # ``shipped`` is a copy of the snapshot the judge chain annotated (label
+        # disclosure, corroboration, audit notes, status): never rebuilt from scratch.
         shipped.judge_outcome = JUDGE_OUTCOME_COMPLETED
         att = ProviderAttempt(
             engine=prof.engine,

@@ -93,3 +93,13 @@ wrong provider model/id rejected; judged hash equals shipped hash and a rewritin
 the verdict. Mutants (external copy, canary, anchor count 1): drop the `JudgeVerdict` check (1 fail),
 drop the identity check (1 fail), `prof = ladder[0]` (1 fail), drop the backend/model match (1 fail),
 drop the sha binding (1 fail).
+
+## Astra round 2
+
+The shipped page was rebuilt from scratch, dropping what verification set on the JUDGED snapshot
+(`table_label_unverified`, so the WARNING guard never fired). `rejudge_candidate` now returns a deep
+copy of the accepted snapshot, taken right after the verdict with its text sha256 re-checked; the
+orchestrator ships that copy. The rebuild-from-profile rule stays for the LOAD side (gating fields
+are never deserialized); after the judge, nothing is rebuilt. Test: a snapshot annotated with
+`table_label_unverified` ships WARNING with the disclosure, versus a plain accept at SUCCESS.
+Mutant `shipped = make_candidate()` (anchor count 1, external copy): 1 fail.
