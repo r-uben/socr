@@ -9220,6 +9220,16 @@ class UnifiedPipeline:
                         f"  [red]p{page_num}: backend degraded — halting "
                         "(PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
                     )
+                # GH-995: every page from here on was never processed. Mark it so it
+                # ships demoted and non-terminal; a resumed page (restored by the
+                # pre-pass) and an unloadable one already carry their own truth.
+                for _skipped in sorted(state.pages):
+                    if (
+                        _skipped >= page_num
+                        and _skipped not in resumed_pages
+                        and _skipped not in unloadable_pages
+                    ):
+                        state.pages[_skipped].not_processed_after_halt = True
                 break
 
             # #881: a page MuPDF could not load is failed HERE, before the resume
@@ -12414,6 +12424,11 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         sidecar_path = doc_dir / "pages" / f"{page_num:05d}.json"
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # GH-995: a page the halted loop never reached is never terminal, whichever
+        # writer asks (the assemble-time flush and the final-records flush both do).
+        if getattr(state.pages.get(page_num), "not_processed_after_halt", False):
+            terminal = False
 
         # PP-5: bind the sidecar to the EXACT input bytes.  The doc-level
         # RootIndex gate already rejects a changed input on checksum mismatch, but
@@ -15808,6 +15823,15 @@ class UnifiedPipeline:
         # so callers and tests can detect a partial-save due to a wedged backend.
         _pp2_halt = state.pp2_halt_reason
         if _pp2_halt:
+            _unprocessed = sorted(
+                n for n, ps_ in state.pages.items() if ps_.not_processed_after_halt
+            )
+            if _unprocessed:
+                _pp2_halt = (
+                    f"{_pp2_halt} ({len(_unprocessed)} page(s) not processed: "
+                    + ", ".join(str(n) for n in _unprocessed)
+                    + "; re-run to process them)"
+                )
             # Append to any existing per-page error rather than overwriting it.
             if final_result.error:
                 final_result.error = f"{final_result.error}; {_pp2_halt}"

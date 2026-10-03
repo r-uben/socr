@@ -86,6 +86,11 @@ class FailureMode(str, Enum):
     #: on, so the grid was flattened to prose. The text is retained unchanged and ships
     #: WARNING, never clean SUCCESS. Not re-routed.
     TABLE_NOT_RECONSTRUCTED = "table_not_reconstructed"
+    #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page,
+    #: so no table, figure or model pass ever ran on it. Whatever text ships is the
+    #: unprocessed native layer: it is retained, never clean SUCCESS, never terminal, and a
+    #: re-run reprocesses the page.
+    PAGE_NOT_PROCESSED_AFTER_HALT = "page_not_processed_after_halt"
     #: Deprecated / deserialization-only: historically assigned when a
     #: structure-class page had no grid-authoring model attempt. Pre-P2 sidecars
     #: in old caches may still contain this string; modern runs fail closed to

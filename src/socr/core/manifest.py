@@ -4075,6 +4075,26 @@ def _apply_chart_region_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, status=PageStatus.WARNING)
 
 
+def _apply_halt_unprocessed_guard(output: PageOutput, p) -> PageOutput:
+    """GH-995: a page the halted loop never reached is not a clean, finished page.
+
+    Status-only on the FINALIZED copy, like the chart-region guard: the text (the
+    unprocessed native layer) and ``audit_passed`` -- the winner-selection flag -- are
+    untouched, so nothing is discarded and the final ``.md`` stays byte-identical. SUCCESS
+    becomes WARNING; ERROR stays ERROR; the failure mode names the cause unless a more
+    specific one is already set.
+    """
+    if not getattr(p, "not_processed_after_halt", False):
+        return output
+    status = PageStatus.WARNING if output.status is PageStatus.SUCCESS else output.status
+    mode = (
+        FailureMode.PAGE_NOT_PROCESSED_AFTER_HALT
+        if output.failure_mode is FailureMode.NONE
+        else output.failure_mode
+    )
+    return replace(output, status=status, failure_mode=mode)
+
+
 def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
     """#165: demote a page whose detected math-glyph damage survived into its body.
 
@@ -4178,6 +4198,7 @@ def _select_and_finalize_page(
         # each only ever turns SUCCESS into WARNING and none of them upgrades --
         # but it is fixed here so the chain reads in one direction.
         output = _apply_chart_region_guard(output, p)
+        output = _apply_halt_unprocessed_guard(output, p)
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``
