@@ -123,9 +123,11 @@ killed (the slash-boundary one needed a new test).
    on origin/main: `extract.py` generation canary and `probe_ollama_idle`,
    `table_rung_ollama.py` rung probe and `_post_chat`. Everything else keeps the
    host as given. Pin: against a real loopback server with a trailing-slash host,
-   each of 11 sites must request the exact raw request-target the original code
+   each of 10 request paths must request the exact raw request-target the original code
    did (`/api/tags` vs `//api/tags`; raw `requestline`, because http.server
    collapses a leading `//` in `self.path`), plus a parametrised unit pin of the
    helper. Mutants (always strip, never strip, rung site loses flag, canary site
    loses flag): killed. The rung `_post_chat` is stubbed by conftest, so the test
    loads a pristine copy of the module from source.
+   Not covered by that pin: the two `gemini_api.py` endpoint callers (figure tags and
+   chat); they keep the host as given (`strip_slash=False`), matching origin/main.
