@@ -39,6 +39,7 @@ from socr.core.manifest import (
     PageEnding,
     PagePrimaryReason,
     garbled_math_suspect,
+    judge_timeout_candidate,
     minus_as_digit_suspect,
     native_math_damage_ships,
     native_untrusted_judge_timeout,
@@ -62,6 +63,7 @@ from socr.core.providers import (
     resolved_provenance,
 )
 from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_TIMEOUT,
     DocumentStatus,
     EngineResult,
@@ -109,7 +111,15 @@ from socr.judge.table_verdict import (
     TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
 )
-from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT, route_page
+from socr.pipeline.agentic import (
+    REASON_PROVIDER_TIMEOUT,
+    REJUDGE_ACCEPTED,
+    REJUDGE_EVENT_KINDS,
+    PageDecision,
+    ProviderAttempt,
+    rejudge_candidate,
+    route_page,
+)
 from socr.core.ollama_utils import probe_model_generation
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
@@ -132,6 +142,14 @@ class _AbandonedEscalation:
 #: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
 #: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
 _RESUME_REPLAYED: dict[str, str] = {
+    **{
+        kind: (
+            "#1013: how a timed-out model candidate was re-judged on resume. Per-run, but the "
+            "page it concerns becomes terminal and is not re-processed, so the record of why "
+            "its text is what it is lives only on this event"
+        )
+        for kind in REJUDGE_EVENT_KINDS
+    },
     "table_escalation_timeout": (
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
@@ -9461,15 +9479,21 @@ class UnifiedPipeline:
                                 if total_cost is None
                                 else max(self.config.cost_budget - total_cost, 0.0)
                             )
-                        decision = route_page(
-                            page_num,
-                            ladder,
-                            _timed_route_provider,
-                            judge,
-                            remaining_budget=remaining,
-                            provider_timeout=provider_timeout,
-                            on_candidate=_ingest_candidate,
+                        # #1013: a candidate the judge timed out on last run is re-judged
+                        # first; only an accepting verdict skips the ladder.
+                        decision = self._rejudge_kept_candidate(
+                            state, page_num, output_dir, ladder, judge
                         )
+                        if decision is None:
+                            decision = route_page(
+                                page_num,
+                                ladder,
+                                _timed_route_provider,
+                                judge,
+                                remaining_budget=remaining,
+                                provider_timeout=provider_timeout,
+                                on_candidate=_ingest_candidate,
+                            )
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
                         )
@@ -12864,10 +12888,152 @@ class UnifiedPipeline:
         if _bbox_sane is not None:
             payload["table_bbox_sane"] = bool(_bbox_sane)
 
+        # #1013: the model candidate the page judge TIMED OUT on, kept so a re-run can
+        # re-judge these exact bytes instead of re-OCRing. Sparse: only a page that
+        # shipped NATIVE_UNTRUSTED_JUDGE_TIMEOUT carries it, so every other sidecar
+        # keeps its bytes. Identity (engine/provider/model) rides inside ``candidate``;
+        # the fingerprint and input checksum are the sidecar's own top-level fields.
+        _timed_out = (
+            judge_timeout_candidate(ps) if ps and native_untrusted_judge_timeout(ps) else None
+        )
+        if _timed_out is not None:
+            from socr.core.page_credential import sha256_text
+
+            # The previous run's prose about WHY the judge gave no verdict (a real
+            # deadline and the #987 breaker word it differently) is not identity and
+            # is blanked: the re-judge writes its own reason, and a sidecar must not
+            # change shape depending on whether the breaker tripped.
+            kept = _timed_out.to_dict()
+            kept["judge_reason"] = kept["skip_reason"] = ""
+            payload["judge_timeout_candidate"] = {
+                "text_sha256": sha256_text(_timed_out.text),
+                "candidate": kept,
+            }
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
         return sidecar_path
+
+    def _load_rejudge_candidate(
+        self, state: DocumentState, page_num: int, output_dir: Path, ladder: list
+    ) -> tuple[PageOutput, ProviderProfile] | None:
+        """#1013: the timed-out candidate a prior run kept, or ``None`` on ANY doubt.
+
+        Conservative exactly as ``_load_terminal_page`` is: the sidecar must be a
+        readable ``terminal`` one whose run fingerprint AND input checksum equal this
+        run's, the candidate bytes must hash to the recorded checksum, the page must
+        still be one whose native layer is known bad, and the producing provider must
+        still be a rung of THIS run's ladder (so the judge sees the profile the ladder
+        would have shown it). A false ``None`` costs one re-OCR; a false hit would ship
+        text nobody judged.
+        """
+        import json
+
+        from ocr_output_contract import doc_dir_for, relative_key, safe_checksum
+
+        from socr.core.page_credential import sha256_text
+
+        ps = state.pages[page_num]
+        if not ps.needs_ocr_enhancement:
+            return None
+        try:
+            scan_root = self._scan_root or state.handle.path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+            meta = json.loads(
+                (doc_dir / "pages" / f"{page_num:05d}.json").read_text(encoding="utf-8")
+            )
+            if not isinstance(meta, dict) or meta.get("terminal") is not True:
+                return None
+            if meta.get("run_fingerprint") != self._run_fingerprint():
+                return None
+            recorded = meta.get("input_checksum")
+            if not recorded or recorded != safe_checksum(state.handle.path):
+                return None
+            kept = meta.get("judge_timeout_candidate")
+            if not isinstance(kept, dict) or not isinstance(kept.get("candidate"), dict):
+                return None
+            candidate = PageOutput.from_dict(kept["candidate"])
+            if (
+                candidate.page_num != page_num
+                or not candidate.text.strip()
+                or kept.get("text_sha256") != sha256_text(candidate.text)
+            ):
+                return None
+            prof = next((p for p in ladder if p.id == candidate.provider_id), None)
+            if prof is None:
+                return None
+            return candidate, prof
+        except Exception:
+            logger.debug("#1013: p%d kept candidate unreadable; reprocessing", page_num)
+            return None
+
+    def _rejudge_kept_candidate(
+        self,
+        state: DocumentState,
+        page_num: int,
+        output_dir: Path,
+        ladder: list,
+        judge,
+    ) -> PageDecision | None:
+        """#1013: pre-route step. Re-judge the candidate a prior run timed out on.
+
+        Returns a ``PageDecision`` ONLY on an accepting verdict (the page then flows
+        through the table/credential gates as if freshly routed, with no OCR call).
+        A rejection, another timeout, or any doubt returns ``None`` and the normal
+        ladder runs; native is never shipped on a second timeout without it. Uses the
+        same ``judge`` object the ladder uses, so the deadline adapter and the #987
+        circuit breaker apply. Bounded by ``config.rejudge_attempts``.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        attempts = self.config.rejudge_attempts
+        if attempts <= 0:
+            return None
+        loaded = self._load_rejudge_candidate(state, page_num, output_dir, ladder)
+        if loaded is None:
+            return None
+        candidate, prof = loaded
+        candidate.judge_outcome = ""
+        candidate.audit_passed = False
+        candidate.table_acceptance_credential = None
+        outcome, reason = rejudge_candidate(candidate, prof, judge, attempts=attempts)
+        detail = {
+            "accepted": "re-judged the kept model candidate on resume: accepted, shipped "
+            "without re-OCR",
+            "rejected": "re-judged the kept model candidate on resume: rejected; the normal "
+            "ladder ran and the candidate was not shipped",
+            "timeout": "the page judge timed out again on the kept model candidate; the "
+            "normal ladder ran",
+            "error": "the page judge failed on the kept model candidate; the normal ladder ran",
+        }[outcome]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=f"rejudge_{outcome}",
+                engine=candidate.engine or "",
+                detail=detail,
+                data={
+                    "provider_id": candidate.provider_id,
+                    "attempts_allowed": attempts,
+                    "reason": reason,
+                },
+            )
+        )
+        if outcome != REJUDGE_ACCEPTED:
+            return None
+        candidate.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        att = ProviderAttempt(
+            engine=prof.engine,
+            output=candidate,
+            cost_usd=0.0,
+            accepted=True,
+            reason=reason,
+            provider_id=prof.id,
+            model=prof.model,
+            backend=prof.backend,
+        )
+        return PageDecision(page_num, candidate, [att], accepted=True)
 
     def _load_terminal_page(
         self,
@@ -15221,6 +15387,18 @@ class UnifiedPipeline:
                         data=dict(c),
                     )
                 )
+
+        # #1013: CLI surface for the re-judge of timed-out candidates. Outside the block
+        # below on purpose: an ACCEPTED re-judge leaves a clean page that would never
+        # enter it, and its CLI line is the only place the run says "no OCR was spent".
+        if not self.config.quiet:
+            for _rj in REJUDGE_EVENT_KINDS:
+                _rj_pages = sorted(e.page_num for e in state.events if e.kind == _rj)
+                if _rj_pages:
+                    console.print(
+                        f"  [yellow]{len(_rj_pages)} page(s) {_rj.replace('_', ' ')} "
+                        f"(timed-out model candidate kept from a prior run): {_rj_pages}[/yellow]"
+                    )
 
         if (
             failed_pages

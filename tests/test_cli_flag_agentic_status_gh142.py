@@ -128,6 +128,11 @@ _INERT_AND_UNFINGERPRINTED = {
 #: engine-internal settings, the escalation lane (needs a second ladder rung),
 #: and HPC routing. Verified by reading the source, not by this run.
 _UNEXERCISED = {
+    # #1013: read by _rejudge_kept_candidate, which this fixture reaches only for a page
+    # whose prior run shipped NATIVE_UNTRUSTED_JUDGE_TIMEOUT; see
+    # tests/test_gh1013_rejudge_timed_out_candidate.py::test_rejudge_attempts_is_bounded_by_config
+    # for the observation (0 / 1 / 3 attempts -> 0 / 1 / 3 judge calls).
+    "rejudge_attempts",
     "enabled_engines",  # consumed by _available_engines_for_agentic, stubbed here
     "escalation_timeout_sec",  # escalation lane needs a 2nd ladder rung
     "hpc",

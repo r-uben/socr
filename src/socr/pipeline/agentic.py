@@ -175,6 +175,45 @@ def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAtte
     )
 
 
+#: #1013: the outcomes of re-judging a timed-out candidate on resume, and the audit-event
+#: kind each is surfaced under. Only ``accepted`` ships the candidate.
+REJUDGE_ACCEPTED = "accepted"
+REJUDGE_REJECTED = "rejected"
+REJUDGE_TIMEOUT = "timeout"
+REJUDGE_ERROR = "error"
+REJUDGE_EVENT_KINDS = tuple(
+    f"rejudge_{o}" for o in (REJUDGE_ACCEPTED, REJUDGE_REJECTED, REJUDGE_TIMEOUT, REJUDGE_ERROR)
+)
+
+
+def rejudge_candidate(
+    candidate: PageOutput, prof: ProviderProfile, judge: PageJudge, *, attempts: int
+) -> tuple[str, str]:
+    """#1013: ask ``judge`` about ``candidate`` at most ``attempts`` times.
+
+    Only a TIMEOUT is retried (it is a missing verdict); an accept, a completed
+    rejection or any other failure ends the loop. Returns ``(outcome, reason)``
+    where ``outcome`` is one of the ``REJUDGE_*`` constants. A verdict-shaped
+    decision that carries a ``judge_outcome`` (a verifier crash) is NOT a verdict.
+    """
+    outcome, reason = REJUDGE_ERROR, "no re-judge attempt was allowed"
+    for _ in range(max(attempts, 0)):
+        try:
+            decision = judge.assess(candidate, prof)
+        except Exception as exc:
+            outcome = REJUDGE_TIMEOUT if is_page_judge_timeout(exc) else REJUDGE_ERROR
+            reason = f"judge raised: {exc}"
+            if outcome == REJUDGE_TIMEOUT:
+                continue
+            break
+        reason = decision.reason
+        if decision.accept:
+            return REJUDGE_ACCEPTED, reason
+        outcome = REJUDGE_ERROR if decision.judge_outcome else REJUDGE_REJECTED
+        break
+    return outcome, reason
+
+
 def route_page(
     page_num: int,
     ladder: list[ProviderProfile],
