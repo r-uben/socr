@@ -368,6 +368,66 @@ def _native_page_has_column_lanes(words: list) -> bool:
     return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES, seeded_lanes=True)
 
 
+def _native_table_rows_in_candidate_region(
+    words: list, candidate_blocks: list[list[tuple[str, ...]]], row_shape_min: int
+) -> int:
+    """#988: ``table_shaped_native_row_count`` over the table region the
+    candidate's own rows bind to, not over the whole page.
+
+    The page-wide count also counts prose, axis ticks, running heads and
+    watermarks, none of which a candidate table could ever reproduce. The
+    region is derived from the native geometry the candidate matches: its
+    rows are bound to baseline bands in order (``match_rows_monotonic``), the
+    region spans the first to the last bound band, and is extended outward
+    only through ADJACENT table-shaped bands -- so rows the candidate failed
+    to emit at either end of the table are still inside it. Extending only
+    through table-shaped bands is what stops the region at a numeric-free
+    line (a note, a caption, a panel label); it needs no distance threshold.
+
+    A candidate that binds no band gives no region to scope to, and the
+    whole-page count stands (the pre-#988 behaviour), so the guard never
+    relaxes on evidence it could not locate.
+    """
+    from socr.tables.row_corroboration import (
+        baseline_bands,
+        cluster_band_words,
+        is_column_index_row,
+        match_rows_monotonic,
+        table_shaped_native_row_count,
+        words_in_region,
+    )
+
+    band_words = cluster_band_words(words)
+    bands = baseline_bands(words)
+    token_lists = [band.tokens for band in bands]
+    bound = {
+        idx
+        for block in candidate_blocks
+        for idx in match_rows_monotonic(block, token_lists)
+        if idx is not None
+    }
+    if not bound:
+        return table_shaped_native_row_count(words, row_shape_min)
+
+    def table_shaped(idx: int) -> bool:
+        tokens = token_lists[idx]
+        return bool(tokens) and len(tokens) >= row_shape_min and not is_column_index_row(tokens)
+
+    first, last = min(bound), max(bound)
+    while first > 0 and table_shaped(first - 1):
+        first -= 1
+    while last + 1 < len(bands) and table_shaped(last + 1):
+        last += 1
+    in_region = [w for idx in range(first, last + 1) for w in band_words[idx]]
+    region = (
+        min(w[0] for w in in_region),
+        min(w[1] for w in in_region),
+        max(w[2] for w in in_region),
+        max(w[3] for w in in_region),
+    )
+    return table_shaped_native_row_count(words_in_region(words, region), row_shape_min)
+
+
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     """TICKET-A2 (#645) term (b): candidate's numeric body-row count falls
     short of the native table-shaped row count by more than A1b's own
@@ -391,6 +451,12 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     row and a complete candidate reads as a massive shortfall. Such candidates
     are left to term (a) and to the ladder verdict.
 
+    #988: both sides count like with like. The candidate side keeps its
+    blank-stub rows (each standard-error / t-stat line), as the native side
+    always counted them, and the native side counts only inside the table
+    region the candidate binds to (``_native_table_rows_in_candidate_region``).
+    ``manifest._row_shape_reconciliation`` still uses the page-wide count.
+
     ``row_shape_min`` is still the candidate's own minimum, deliberately. The
     lane gate has already established that this page HAS column structure, so
     counting native bands with one or more numerals is no longer "every prose
@@ -408,17 +474,23 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         ROW_CORROBORATION_MIN,
         numeric_body_rows,
         table_blocks,
-        table_shaped_native_row_count,
     )
 
-    candidate_rows = [
-        row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
+    # #988: blank-stub rows (standard-error / t-stat lines) are counted, as the
+    # native side counts them; the native count is taken inside the table
+    # region the candidate matches, not over the whole page.
+    candidate_blocks = [
+        [row for row in numeric_body_rows(rows, include_blank_stub=True) if row]
+        for rows in table_blocks(markdown)
     ]
+    candidate_rows = [row for block in candidate_blocks for row in block]
     if not candidate_rows:
         return False
 
     row_shape_min = min(len(row) for row in candidate_rows)
-    native_table_rows = table_shaped_native_row_count(words, row_shape_min)
+    native_table_rows = _native_table_rows_in_candidate_region(
+        words, candidate_blocks, row_shape_min
+    )
     if native_table_rows <= 0:
         return False
 

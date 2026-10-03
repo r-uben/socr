@@ -560,7 +560,9 @@ def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
     )
 
 
-def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
+def numeric_body_rows(
+    rows: list[list[str]], *, include_blank_stub: bool = False
+) -> list[tuple[str, ...]]:
     """Return each row's ordered genuine numeric tokens, anchored to a numeric label.
 
     Column 0 (the row's stub/label) is normally NOT numeric data (a code or
@@ -591,10 +593,20 @@ def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
     A row (anchored or not) whose full token sequence is exactly the
     consecutive integers 1..K is also excluded — see
     ``is_column_index_row``.
+
+    ``include_blank_stub=True`` (#988) keeps the blank-stub rows instead of
+    dropping them: a standard-error / t-statistic row prints no label of its
+    own, and a native baseline band counts it like any other line. The
+    row-count comparison in ``structure_check`` needs both sides to count
+    the same lines; row corroboration (A1a) keeps the default, whose
+    blank-stub exclusion is measured for ITS purpose (anchoring a match to its
+    own printed label).
     """
     result: list[tuple[str, ...]] = []
     for row in rows:
-        if not row or not row[0].strip():
+        if not row:
+            continue
+        if not row[0].strip() and not include_blank_stub:
             continue
         stub = row[0].strip()
         is_numeric_stub, stub_normalized = _is_genuine_numeric(stub)

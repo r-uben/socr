@@ -32,7 +32,11 @@ import pytest
 from socr.core.manifest import _strict_grid_authored_pool, structure_class_grid_winner
 from socr.tables import structure_check
 from socr.tables.reconcile import raw_table_block_lines
-from socr.tables.row_corroboration import numeric_body_rows, table_blocks
+from socr.tables.row_corroboration import (
+    numeric_body_rows,
+    table_blocks,
+    table_shaped_native_row_count,
+)
 from socr.tables.structure_check import (
     DEFECT_TABLE_TRUNCATED,
     _final_row_truncated,
@@ -333,6 +337,15 @@ def test_real_boe_p1_difference_pin(monkeypatch: pytest.MonkeyPatch) -> None:
 
     gated = table_truncated(markdown, words)
     monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
+    # #988 scopes the native count to the candidate's table region, which on
+    # its own already stops this page truncating. The #703 regression is the
+    # page-wide count with no lane gate, so restore that to keep the pin about
+    # what the lane gate is for.
+    monkeypatch.setattr(
+        structure_check,
+        "_native_table_rows_in_candidate_region",
+        lambda words, blocks, row_shape_min: table_shaped_native_row_count(words, row_shape_min),
+    )
     ungated = table_truncated(markdown, words)
 
     assert (ungated, gated) == (True, False)
