@@ -12907,6 +12907,7 @@ class UnifiedPipeline:
             # that gates a page (engine class, status, credential, outcome) is read
             # back from here: the loader rebuilds those from the matched ladder profile.
             payload["judge_timeout_candidate"] = {
+                "page_num": page_num,
                 "text_sha256": sha256_text(_timed_out.text),
                 # The judge that timed out; only that same VLM judge may re-judge.
                 "judge_model": state.agentic_judge_model or "",
@@ -12972,6 +12973,8 @@ class UnifiedPipeline:
                 not isinstance(text, str)
                 or not text.strip()
                 or not isinstance(judge_model, str)
+                # A copy of another page's sidecar must never be judged as this page.
+                or kept.get("page_num") != page_num
                 or kept.get("text_sha256") != sha256_text(text)
             ):
                 return None

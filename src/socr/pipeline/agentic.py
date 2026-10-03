@@ -224,8 +224,12 @@ def rejudge_candidate(
                 continue
             break
         reason = decision.reason
-        if decision.judge_outcome or sha256_text(snapshot.text) != judged_sha:
-            outcome, reason = REJUDGE_ERROR, "verdict does not bind to the kept bytes"
+        if decision.judge_outcome:
+            outcome = REJUDGE_ERROR
+            reason = f"decision carries a judge_outcome ({decision.judge_outcome}), not a verdict"
+            break
+        if sha256_text(snapshot.text) != judged_sha:
+            outcome, reason = REJUDGE_ERROR, "the judge chain rewrote the kept bytes"
             break
         if decision.accept:
             if isinstance(decision.raw_verdict, JudgeVerdict):
@@ -235,7 +239,11 @@ def rejudge_candidate(
                 # is taken now, so nothing that still holds ``snapshot`` can alter it.
                 shipped = copy.deepcopy(snapshot)
                 if sha256_text(shipped.text) != judged_sha:
-                    return REJUDGE_ERROR, "verdict does not bind to the kept bytes", None
+                    return (
+                        REJUDGE_ERROR,
+                        "the accepted snapshot no longer hashes to the kept bytes",
+                        None,
+                    )
                 return REJUDGE_ACCEPTED, reason, shipped
             outcome, reason = REJUDGE_ERROR, "acceptance is not a completed VLM verdict"
             break

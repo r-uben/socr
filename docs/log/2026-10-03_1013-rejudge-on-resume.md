@@ -103,3 +103,17 @@ orchestrator ships that copy. The rebuild-from-profile rule stays for the LOAD s
 are never deserialized); after the judge, nothing is rebuilt. Test: a snapshot annotated with
 `table_label_unverified` ships WARNING with the disclosure, versus a plain accept at SUCCESS.
 Mutant `shipped = make_candidate()` (anchor count 1, external copy): 1 fail.
+
+## cubic round
+
+- `judge_timeout_candidate.page_num` is persisted and the loader refuses unless it equals the page
+  being processed (a copied sidecar can never be judged as another page). Test plus mutant (drop the
+  check: 1 fail).
+- `test_item2_judge_construction_failure_falls_through` now asserts a `rejudge_error` event, which
+  only the feature produces. Mutant "never call the re-judge" (`if attempts <= 0` -> `if True`): that
+  test fails, along with 11 others.
+- agentic.py: the "judge_outcome on an accept" and "rewritten/hash mismatch" reasons are separate
+  strings; test and gh142 comments corrected.
+- `rejudge_attempts` stays out of the fingerprint (cubic P2, no change): a page completed by a
+  rejudge-accept passed a genuine VLM verdict from the same judge that timed out, so reusing it
+  under `rejudge_attempts=0` is safe; the value only changes how many verdict requests a resume makes.

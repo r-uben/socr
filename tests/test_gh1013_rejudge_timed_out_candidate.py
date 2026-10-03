@@ -374,6 +374,9 @@ def test_item2_judge_construction_failure_falls_through(tmp_path, monkeypatch) -
     assert h.ocr_calls == [1]
     assert _MODEL_TEXT not in h.shipped()
     assert "rejudge_accepted" not in _kinds(h)
+    # Only the feature produces this: with _rejudge_kept_candidate never called the page
+    # would also re-OCR, so the assertions above alone cannot tell the two apart.
+    assert "rejudge_error" in _kinds(h)
 
 
 def test_item3_serialised_engine_is_not_trusted(tmp_path) -> None:
@@ -426,3 +429,16 @@ def test_fields_set_by_verification_survive_to_the_ship(tmp_path) -> None:
     won = flagged.sidecar()["winning_output"]
     assert won["table_label_unverified"] == "row labels not witnessed"
     assert won["status"] == "warning"
+
+
+def test_a_candidate_kept_for_another_page_is_never_judged_as_this_page(tmp_path) -> None:
+    control = _timed_out_then(tmp_path, "same", "accept")
+    assert control.ocr_calls == [] and control.judge.calls == [_MODEL_TEXT]
+
+    def other_page(side):
+        side["judge_timeout_candidate"]["page_num"] = 2
+
+    h = _timed_out_then(tmp_path, "cross", "accept", edit=other_page)
+    assert h.ocr_calls == [1]
+    assert h.judge.calls == [_OTHER_TEXT], "the foreign bytes were never shown to the judge"
+    assert "rejudge_accepted" not in _kinds(h)
