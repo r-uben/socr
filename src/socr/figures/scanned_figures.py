@@ -45,12 +45,56 @@ MAX_CAPTION_LINE = 50
 #: reach 25 but never share a page with a caption.
 MIN_SPELLED_RUN = 7
 
-SPELLED_FENCE_OPEN = "<!-- socr:spelled-axis-residue"
-SPELLED_FENCE_CLOSE = "socr:end-spelled-axis-residue -->"
-SPELLED_FENCE_NOTE = (
-    "axis-title characters the scan's text layer printed one per line; the figure is in "
-    "the page image on this page."
+#: The fence is VISIBLE: a note line and a ``text`` code block, never an HTML comment (a comment
+#: vanishes in every rendered view, which turns "kept verbatim" into silent loss for a reader).
+SPELLED_FENCE_NOTE = "[unreadable figure text from scan, kept verbatim]"
+SPELLED_FENCE_OPEN = "```text"
+SPELLED_FENCE_CLOSE = "```"
+
+
+#: The most words in the text after the label of any caption in the sample (7, Hansen p11). A
+#: remainder longer than this that ends in a period reads as a sentence, not a caption title.
+MAX_CAPTION_WORDS = 7
+
+#: Words that make the remainder a clause rather than a title: a subject pronoun opening it, or a
+#: finite verb of the kind a results sentence uses. None occurs in any caption of the sample.
+_CLAUSE_SUBJECTS = frozenset({"we", "i", "they", "it", "this", "these", "those", "our", "there"})
+_CLAUSE_VERBS = frozenset(
+    {
+        "is",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "find",
+        "found",
+        "show",
+        "shows",
+        "showed",
+        "report",
+        "reports",
+        "suggest",
+        "suggests",
+        "present",
+        "presents",
+    }
 )
+
+
+def _reads_as_sentence(remainder: str) -> bool:
+    """Whether the text after ``Figure N.`` is a sentence: a clause, or a long run ending in '.'."""
+    text = remainder.strip(" \t-\u2013\u2014.:")
+    words = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
+    if not words or not remainder.rstrip().endswith("."):
+        return False
+    lowered = [w.lower() for w in words]
+    return (
+        lowered[0] in _CLAUSE_SUBJECTS
+        or bool(_CLAUSE_VERBS.intersection(lowered))
+        or len(remainder.split()) > MAX_CAPTION_WORDS
+    )
 
 
 def _is_figure_junk(line: str) -> bool:
@@ -76,22 +120,50 @@ def has_figure_caption(layer_text: str) -> bool:
         nxt = next((x.strip() for x in lines[idx + 1 :] if x.strip()), "")
         if not line[m.end() :].strip() and len(nxt) > 1 and nxt[0].islower():
             continue
-        if len(line.strip()) <= MAX_CAPTION_LINE or (nxt and _is_figure_junk(nxt)):
+        junk_follows = bool(nxt) and _is_figure_junk(nxt)
+        if _reads_as_sentence(line[m.end() :]):
+            # "Figure 3. We find no effect." -- a sentence fires only with figure furniture after it.
+            if junk_follows:
+                return True
+            continue
+        if len(line.strip()) <= MAX_CAPTION_LINE or junk_follows:
             return True
     return False
 
 
-_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
-_BULLET_MARKERS = frozenset("-*+")
+#: Dashes a native text layer uses as a list marker, beyond the glyphs ``born_digital`` already
+#: names (``_LIST_MARKER_GLYPHS``: bullet, triangular bullet, white bullet, square, ...).
+_EXTRA_BULLETS = "-*+\u2013\u2014\u2212\u2043"
+
+
+def _bullet_markers() -> frozenset[str]:
+    from socr.core.born_digital import LIST_MARKER_GLYPHS
+
+    return frozenset(LIST_MARKER_GLYPHS) | frozenset(_EXTRA_BULLETS)
+
+
+def _is_list_item(line: str, markers: frozenset[str]) -> bool:
+    stripped = line.lstrip()
+    if len(stripped) > 1 and stripped[0] in markers and stripped[1].isspace():
+        return bool(stripped[1:].strip())
+    return re.match(r"\d+[.)]\s+\S", stripped) is not None
+
+
+_OPENERS = (("\\[", "\\]"), ("\\(", "\\)"), ("\\begin{", "\\end{"))
 
 
 def _math_lines(lines: list[str]) -> set[int]:
-    """Indices of lines inside, opening or closing a ``$$`` block or an inline ``$...$`` span."""
+    """Indices of lines inside, opening or closing math.
+
+    Dollar math (``$$`` blocks, inline ``$...$`` spans) and LaTeX delimiters: ``\\[ \\]``,
+    ``\\( \\)`` and ``\\begin{..} \\end{..}``, each tracked as a depth across lines.
+    """
     inside: set[int] = set()
     display = False
     inline = False
+    depth = [0] * len(_OPENERS)
     for i, line in enumerate(lines):
-        starts_in = display or inline
+        starts_in = display or inline or any(depth)
         rest = line
         dd = rest.count("$$")
         rest = rest.replace("$$", "")
@@ -100,7 +172,13 @@ def _math_lines(lines: list[str]) -> set[int]:
             display = not display
         if singles % 2 and not display:
             inline = not inline
-        if starts_in or display or inline or dd or singles:
+        latex = False
+        for k, (op, cl) in enumerate(_OPENERS):
+            opened, closed = line.count(op), line.count(cl)
+            if opened or closed:
+                latex = True
+            depth[k] = max(0, depth[k] + opened - closed)
+        if starts_in or display or inline or dd or singles or latex:
             inside.add(i)
     return inside
 
@@ -109,12 +187,12 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
     """Fence, IN PLACE, runs of >= ``MIN_SPELLED_RUN`` one-character lines.
 
     Returns ``(text, lines_fenced)``. Each run keeps its position and every one of its lines
-    (blank lines between the characters included) verbatim; the fence is two lines before it
-    and one after, so deleting those three lines gives back the input byte for byte. Nothing
-    moves and nothing merges. A page with no such run is returned unchanged.
+    (blank lines between the characters included) verbatim, inside a visible ``text`` code block
+    under a one-line note; deleting those three wrapper lines gives back the input byte for byte.
+    Nothing moves and nothing merges. A page with no such run is returned unchanged.
 
     Abstains on a run that is part of something else: inside or beside a markdown table, inside
-    ``$...$`` / ``$$`` math, or in a list (a neighbouring list item, or a run of bare bullet
+    ``$...$`` / ``$$`` / ``\\[ \\]`` / ``\\( \\)`` / ``\\begin..\\end`` math, or in a list (a neighbouring list item, or a run of bare bullet
     markers). A vertical table header, an equation and a list of single characters all look like
     an axis title to a line counter and are not one.
     """
@@ -123,6 +201,7 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
     lines = text.split("\n")
     n = len(lines)
     math = _math_lines(lines)
+    markers = _bullet_markers()
 
     def neighbour(i: int, step: int) -> str:
         j = i + step
@@ -152,12 +231,12 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
             and not any(k in math for k in range(i, last + 1))
             and not before.lstrip().startswith("|")
             and not after.lstrip().startswith("|")
-            and not _LIST_ITEM_RE.match(before)
-            and not _LIST_ITEM_RE.match(after)
-            and not all(c in _BULLET_MARKERS for c in chars)
+            and not _is_list_item(before, markers)
+            and not _is_list_item(after, markers)
+            and not all(c in markers for c in chars)
         )
         if eligible:
-            out.extend([SPELLED_FENCE_OPEN, SPELLED_FENCE_NOTE, *run, SPELLED_FENCE_CLOSE])
+            out.extend([SPELLED_FENCE_NOTE, SPELLED_FENCE_OPEN, *run, SPELLED_FENCE_CLOSE])
             fenced += len(chars)
         else:
             out.extend(run)

@@ -148,3 +148,23 @@ figure). Full suite: 6879 passed, 2 skipped, 4 xfailed.
 - Mutants (external copy, canary + anchor count 1, 43 pass at baseline): blank lines dropped 1 fail;
   table / math / list abstention removed 1 / 3 / 1 fail; caption length gate removed 2 fail;
   continuation gate removed 2 fail; guard abstains on bare marker again 1 fail.
+
+## Round 3 (review of 52426fa5)
+
+- The fence is VISIBLE: the one-line note `[unreadable figure text from scan, kept verbatim]`, then the
+  run in a ```text block, in place. An HTML comment hides the text in every rendered view, which is
+  silent loss for a reader. The wrapper-removal pin deletes the note and the opening and closing
+  fence lines and still gets the input back byte for byte; a test asserts no `<!--` appears.
+  This supersedes the HTML-comment wording of rounds 1 and 2.
+- Math abstention also covers `\[ \]`, `\( \)` and `\begin{..}..\end{..}` (depth tracked across lines).
+- List abstention uses the repo's `born_digital.LIST_MARKER_GLYPHS` plus dashes (en, em, minus,
+  hyphen bullet); runs of bare marker glyphs and neighbouring `<glyph> item` lines abstain.
+- Caption: text after `Figure N.` that reads as a sentence (opens with a subject pronoun, contains a
+  results-sentence verb, or is longer than `MAX_CAPTION_WORDS` = 7, the longest caption remainder in the
+  sample, and ends in a period) fires only when the next line is figure furniture. `Figure 3. We find no
+  effect.` no longer fires alone. Re-scored with the shipped function on the 98 pages: precision 17/17,
+  recall 17/19, 0 table / 0 prose false fires (unchanged: none of the 27 sample captions is a
+  sentence by these rules). The verb and pronoun lists are heuristic and pinned by synthetic cases only.
+- Mutants (baseline 55): fence back to an HTML comment 1 fail; sentence gate removed 3; LaTeX depth
+  not tracked 3; Unicode bullets dropped 3. (A first LaTeX mutant that removed only the per-line
+  "latex" flag survived: the depth already covers the run lines, so it was equivalent.)

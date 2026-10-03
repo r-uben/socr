@@ -106,6 +106,27 @@ def test_caption_shape_is_short_or_followed_by_figure_furniture() -> None:
     assert has_figure_caption("FIGURE 1\nFactors Contributing to the Delay")
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Figure 3. We find no effect.",
+        "Figure 3. This shows the effect.",
+        "Figure 3. Prices converge in every market we study here.",
+        "Fig. 2: The estimates are small.",
+    ],
+)
+def test_a_sentence_after_the_label_fires_only_with_figure_furniture_after_it(line: str) -> None:
+    assert not has_figure_caption(f"intro\n{line}\nNext sentence of the paper.")
+    assert has_figure_caption(f"intro\n{line}\n 50\n 40")
+    assert has_figure_caption(f"intro\n{line}\nP\nr\ni")
+
+
+def test_a_title_ending_in_a_period_is_still_a_caption() -> None:
+    # The measured captions: 6 to 7 words, many ending in a period, none a clause.
+    assert has_figure_caption("FIGURE 5.-Market 5-Series BC, Parameter Set I.\nThis content")
+    assert has_figure_caption("Figure 4. Power under trend correction, R2 = p2.\nText")
+
+
 # ---------------------------------------------------------------------------
 # Fence: separated, never dropped
 # ---------------------------------------------------------------------------
@@ -136,7 +157,8 @@ def test_fence_is_in_place_and_removing_it_gives_back_the_input_byte_for_byte() 
     # Each fence sits where its run sat: the prose between them is still between them.
     assert fenced.index(SPELLED_FENCE_OPEN) < fenced.index("middle prose line")
     assert fenced.index("middle prose line") < fenced.rindex(SPELLED_FENCE_OPEN)
-    assert fenced.startswith("Intro line\n" + SPELLED_FENCE_OPEN)
+    assert fenced.startswith("Intro line\n" + SPELLED_FENCE_NOTE + "\n" + SPELLED_FENCE_OPEN)
+    assert "<!--" not in fenced, "the fence is visible, not an HTML comment"
     assert fenced.endswith("closing line\n")
 
 
@@ -164,6 +186,15 @@ _RUN = _run_lines()
         f"- first item\n{_RUN}\nafter",
         f"intro\n{_RUN}\n1. second item",
         "intro\n" + "\n".join("-" * MIN_SPELLED_RUN) + "\nafter",
+        # LaTeX math delimiters spanning lines
+        f"\\[\n{_RUN}\n\\]",
+        f"see \\(\n{_RUN}\n\\) here",
+        f"\\begin{{align}}\n{_RUN}\n\\end{{align}}",
+        # Unicode bullet glyphs a native text layer emits
+        f"\u2022 first item\n{_RUN}\nafter",
+        f"intro\n{_RUN}\n\u25e6 second item",
+        "intro\n" + "\n".join("\u2022" * MIN_SPELLED_RUN) + "\nafter",
+        f"\u2013 first item\n{_RUN}\nafter",
     ],
     ids=[
         "table-above",
@@ -175,6 +206,13 @@ _RUN = _run_lines()
         "list-before",
         "list-after",
         "bullet-markers",
+        "latex-display",
+        "latex-inline",
+        "latex-env",
+        "unicode-bullet-before",
+        "unicode-bullet-after",
+        "unicode-bullet-run",
+        "dash-bullet-before",
     ],
 )
 def test_fence_abstains_inside_tables_math_and_lists(text: str) -> None:
@@ -424,7 +462,7 @@ def test_e2e_no_provider_layer_ships_with_its_spelled_axis_title_fenced(
     # Same layer, one thing changed (the caption): only the caption page fences the spelled run.
     assert SPELLED_FENCE_OPEN in on_text and SPELLED_FENCE_OPEN not in off_text
     fenced = on_text.split(SPELLED_FENCE_OPEN, 1)[1].split(SPELLED_FENCE_CLOSE, 1)[0]
-    kept = [ln for ln in fenced.split("\n")[2:] if ln.strip()]
+    kept = [ln for ln in fenced.split("\n")[1:] if ln.strip()]
     assert "".join(ch.strip() for ch in kept) == _AXIS_TITLE, "every character is kept, in order"
     assert _AXIS_TITLE not in on_text.replace(fenced, "")
 
