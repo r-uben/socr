@@ -60,19 +60,17 @@ def is_cli_failure_placeholder(text: str | None) -> bool:
     one section of an aggregate), so the whole page is a failure, never a partial SUCCESS.
     A marker quoted inside a sentence is not a line of its own and is left alone. A page
     whose entire text is a marker string is classed as a failure too; that is not a
-    plausible real page. Lines inside a fenced code block are examples, not CLI output, and
-    are skipped. Call this on the RAW page text, before ``_clean_output``.
+    plausible real page.
+    There is deliberately no code-fence exemption: fence tracking can be fooled (a toggled
+    fence hides a real marker), and a paper whose content is itself a literal marker line
+    is effectively impossible, so this fails closed. Callers check the raw text AND the
+    cleaned text and fail if either matches.
     """
     if not text:
         return False
-    in_fence = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
-        elif not in_fence and any(p.fullmatch(stripped) for p in CLI_FAILURE_PLACEHOLDERS):
-            return True
-    return False
+    return any(
+        p.fullmatch(line.strip()) for line in text.splitlines() for p in CLI_FAILURE_PLACEHOLDERS
+    )
 
 
 def sanitize_filename(name: str) -> str:
@@ -409,7 +407,10 @@ class BaseEngine(ABC):
                 if not text and aggregate is not None:
                     text = aggregate.get(page_num)
 
-                if is_cli_failure_placeholder(text):
+                if text and (
+                    is_cli_failure_placeholder(text)
+                    or is_cli_failure_placeholder(self._clean_output(text, self.name))
+                ):
                     # GH-1020: the CLI reported this page as failed and wrote a marker
                     # instead of text. It is a failure, not content: no judge call, the
                     # ladder moves on, and the marker never reaches the output.

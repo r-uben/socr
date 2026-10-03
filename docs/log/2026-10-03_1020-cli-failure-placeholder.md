@@ -100,3 +100,21 @@ qwen-ocr-cli `backends/base.py`: include `resp.text[:300]` in the 5xx error and 
   exit-0 whole-document `*[OCR Failed]*` case.
 - Mutants (external copies, canary, anchor count 1): dropping the healthy-preference fails 2 tests;
   removing the fence skip fails 2; checking cleaned instead of raw text fails 1.
+
+## Round 4 (supersedes the fence handling in round 3)
+
+Astra: fence toggling can be fooled (`` ``` `` / `~~~` / `` ``` `` then a real marker is skipped).
+The fenced-code exemption is removed entirely; the matcher fails closed. A marker alone on a line
+ANYWHERE in the raw text OR in the cleaned text is CLI_ERROR (`process_pages` checks both).
+`process_document` and the aggregate read-back only ever see cleaned text (`_read_output` and
+`_read_aggregated_pages` clean internally), so there only the cleaned text is checked; cleaning
+only unwraps fences, it never removes a marker line, so nothing is lost by that.
+
+Accepted false positive: a paper whose content contains a literal `*[OCR failed for page N]*` /
+`*[OCR Failed]*` line (a page documenting this very tool, say) would be failed. Effectively
+impossible in the citation corpus; failing closed is the safe direction. A marker quoted inside
+a sentence still passes.
+
+Tests: the "fenced example is accepted" tests are removed; replaced with Astra's fence-toggle case
+and fenced-marker pages expecting CLI_ERROR. Mutant (external copy, canary, anchor count 1)
+restoring the fence skip fails both.

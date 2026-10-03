@@ -251,10 +251,11 @@ def test_mixed_content_page_is_a_failure_not_a_partial_success(tmp_path, monkeyp
     assert not page.text  # the readable part is not shipped as if it were the page
 
 
-def test_fenced_marker_example_is_not_a_failure() -> None:
-    fenced = f"Example output:\n\n```\n{PLACEHOLDER}\n```\n\nafter"
-    assert not is_cli_failure_placeholder(fenced)
-    assert is_cli_failure_placeholder(f"{fenced}\n\n{PLACEHOLDER}")
+def test_fence_toggling_cannot_hide_a_real_marker() -> None:
+    """Astra: ``` / ~~~ / ``` followed by a real marker. No fence exemption, fail closed."""
+    toggled = f"```\n~~~\n```\n{PLACEHOLDER}\n"
+    assert is_cli_failure_placeholder(toggled)
+    assert is_cli_failure_placeholder(f"Example:\n\n```\n{PLACEHOLDER}\n```\n")
 
 
 def test_exit_zero_whole_document_marker_is_an_error(tmp_path, monkeypatch) -> None:
@@ -516,13 +517,10 @@ def test_best_effort_differs_from_pre_pr_only_by_dropping_failed_for_healthy() -
     assert _best_effort([weak, strong], 1) is _pre_pr_best_effort([weak, strong], 1)
 
 
-def test_per_page_file_with_fenced_marker_is_judged_on_raw_text(tmp_path, monkeypatch) -> None:
-    """A per-page file (no aggregate) is checked RAW: ``_clean_output`` unwraps the fence,
-    which would turn a quoted example into a bare marker line."""
+def test_per_page_file_with_fence_wrapped_marker_is_a_failure(tmp_path, monkeypatch) -> None:
+    """A per-page file whose marker is wrapped in a fence: it fails either way, and the
+    cleaned text (fence unwrapped) is checked as well as the raw."""
     text = f"```markdown\n{PLACEHOLDER}\n```\n"
-    assert is_cli_failure_placeholder(BaseEngine._clean_output(text, "qwen")), (
-        "setup: cleaning must expose the marker, or this test cannot tell raw from cleaned"
-    )
 
     def _run(cmd, *args, **kwargs):
         if "-o" not in cmd:
@@ -544,4 +542,10 @@ def test_per_page_file_with_fenced_marker_is_judged_on_raw_text(tmp_path, monkey
     monkeypatch.setattr("socr.engines.base.subprocess.run", _run)
     pdf = _pdf(tmp_path / "d.pdf")
     page = _QwenLikeEngine().process_pages(pdf, [1], PipelineConfig(timeout=30))[0]
-    assert page.status == PageStatus.SUCCESS
+    assert page.status == PageStatus.ERROR and page.failure_mode == FailureMode.CLI_ERROR
+
+
+def test_page_with_a_fenced_marker_line_fails_closed(tmp_path, monkeypatch) -> None:
+    text = f"{REAL_TEXT}\n\n```markdown\n{PLACEHOLDER}\n```\n"
+    page = _engine_page(tmp_path, monkeypatch, text, 0)
+    assert page.status == PageStatus.ERROR and page.failure_mode == FailureMode.CLI_ERROR
