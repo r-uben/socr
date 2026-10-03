@@ -179,6 +179,10 @@ def _process(pipeline: UnifiedPipeline, pdf_path: Path, out_dir: Path, rungs, tr
         ),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+        # text contradicts that page, so the #1022 native-contradiction withhold would end it
+        # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+        patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
         patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs),
         patch.object(pipeline, "_transcribe_cell_token", side_effect=transcribe),
     ):
@@ -382,6 +386,12 @@ class TestProcessDifference:
                     pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
                 ),
                 patch.object(pipeline, "_resolve_judge_model", return_value=""),
+                # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+                # text contradicts that page, so the #1022 native-contradiction withhold would end it
+                # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+                patch.object(
+                    pipeline, "_withhold_contradicted_unverified_tables", return_value=None
+                ),
                 patch.object(pipeline, "_build_table_judge_rungs", return_value=[_accept_rung()]),
                 patch.object(pipeline, "_transcribe_cell_token", return_value=None),
                 patch(
@@ -421,6 +431,12 @@ class TestProcessDifference:
                 pipeline_off, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline_off, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(
+                pipeline_off, "_withhold_contradicted_unverified_tables", return_value=None
+            ),
             patch.object(pipeline_off, "_transcribe_cell_token", return_value="RowB"),
         ):
             result_off = pipeline_off.process(pdf_off, tmp_path / "off_out")
@@ -435,6 +451,12 @@ class TestProcessDifference:
                 pipeline_on, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline_on, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(
+                pipeline_on, "_withhold_contradicted_unverified_tables", return_value=None
+            ),
             patch.object(pipeline_on, "_build_table_judge_rungs", return_value=[_accept_rung()]),
             patch.object(pipeline_on, "_transcribe_cell_token", return_value="RowA"),
         ):

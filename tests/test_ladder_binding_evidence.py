@@ -410,6 +410,12 @@ class TestProcessFlagDifference:
                 pipeline_off, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline_off, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(
+                pipeline_off, "_withhold_contradicted_unverified_tables", return_value=None
+            ),
         ):
             result_off = pipeline_off.process(pdf_off, tmp_path / "off_out")
 
@@ -428,6 +434,12 @@ class TestProcessFlagDifference:
                 pipeline_on, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline_on, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(
+                pipeline_on, "_withhold_contradicted_unverified_tables", return_value=None
+            ),
             patch.object(pipeline_on, "_build_table_judge_rungs", return_value=[]),
         ):
             result_on = pipeline_on.process(pdf_on, tmp_path / "on_out")
@@ -453,6 +465,10 @@ class TestProcessFlagDifference:
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # These scenarios pin the ladder's binding clamp on a row-shifted page. The PDF's own
+            # text contradicts that page, so the #1022 native-contradiction withhold would end it
+            # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
+            patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
             patch.object(pipeline, "_build_table_judge_rungs", return_value=[_accept_rung()]),
         ):
             result = pipeline.process(pdf_path, tmp_path / "no_words_out")

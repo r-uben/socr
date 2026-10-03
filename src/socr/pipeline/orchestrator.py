@@ -258,6 +258,30 @@ def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
     return sorted(kinds)
 
 
+def _native_contradiction_withheld_pages(state: "DocumentState") -> dict[int, list[str]]:
+    """Pages withheld because the PDF's own text contradicts an unverified table.
+
+    ``{page: sorted contradiction kinds}``, read from the ``table_ladder_withheld``
+    events whose ``data["reason"]`` is ``native_contradiction``. Events (not a page
+    field) because they are the record that survives a resume and reaches the
+    sidecar, so the metadata note and the CLI line name the same pages the page
+    sidecars do.
+    """
+    from socr.judge.table_verdict import REASON_NATIVE_CONTRADICTION, TABLE_LADDER_WITHHELD_KIND
+
+    found: dict[int, set[str]] = {}
+    for event in state.events:
+        if getattr(event, "kind", "") != TABLE_LADDER_WITHHELD_KIND:
+            continue
+        data = event.data or {}
+        if data.get("reason") != REASON_NATIVE_CONTRADICTION:
+            continue
+        found.setdefault(event.page_num, set()).update(
+            c.get("kind", "") for c in data.get("contradictions", ()) if c.get("kind")
+        )
+    return {n: sorted(kinds) for n, kinds in found.items()}
+
+
 class _PageStageClock:
     """Exclusive wall-clock accumulator for one agentic page (VI-B1).
 
@@ -5839,6 +5863,20 @@ class UnifiedPipeline:
         if not rejected and not unverified and not withheld:
             return None
         parts = []
+        # A withhold the readers did not make: the ladder left the table UNVERIFIED and
+        # the PDF's own text layer contradicts it. Named apart, because "the readers
+        # rejected it and a blind transcription disagreed" would be false for it.
+        contradicted = _native_contradiction_withheld_pages(state)
+        withheld_contradicted = [n for n in withheld if n in contradicted]
+        withheld = [n for n in withheld if n not in contradicted]
+        if withheld_contradicted:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in withheld_contradicted)}: "
+                f"{FailureMode.TABLE_WITHHELD.value} (the ladder could not verify the table "
+                "and the PDF's own text contradicts it: "
+                + "; ".join(f"p{n} {'/'.join(contradicted[n])}" for n in withheld_contradicted)
+                + "; the table's content was WITHHELD, not shipped)"
+            )
         if withheld:
             # Name the rung(s) the latch actually recorded (cold review round 1,
             # finding 8) -- never a fixed "adjudicator", which is a guess that is
@@ -7535,6 +7573,167 @@ class UnifiedPipeline:
         if configured is not None:
             return float(configured)
         return float(self.config.table_judge_timeout_sec) * (len(rungs) + 1)
+
+    def _withhold_contradicted_unverified_tables(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+    ) -> None:
+        """Withhold a table the ladder left unverified when the PDF's own text contradicts it.
+
+        An unverified table ships as text with a flag. Some of those are wrong in ways the
+        page's text layer shows mechanically (a dropped minus, values bound to the wrong
+        row label, a number the page does not print; ``tables.native_contradiction``). For
+        those the flag is not enough: the numbers ship inverted or misplaced under a
+        warning a reader may not read. This sets the page's disposition to
+        ``TABLE_WITHHELD``, so the existing guard (``manifest._apply_ladder_disposition_guard``)
+        ships the failure marker plus the page image and keeps the page's prose.
+
+        Withhold only. A table the ladder ACCEPTED or REJECTED is never touched here, a
+        check that abstains (no usable text layer, no placed region) leaves the table
+        UNVERIFIED exactly as before, and nothing new ships. The finding is recorded as a
+        ``table_ladder_withheld`` event whose ``data["reason"]`` is ``native_contradiction``
+        and whose ``data["contradictions"]`` names each kind, so the page, the metadata note
+        and the CLI line say WHY, not only THAT.
+
+        Withholding is page-granular, as it already is for a ladder withhold: every table
+        region on the page ships as the marker. Never raises; a failure keeps today's
+        behaviour.
+        """
+        if bo is None or not bo.text or bo.engine == "chart_asset" or is_failed_candidate(bo):
+            return
+        if ps.table_ladder_disposition in (FailureMode.TABLE_REJECTED, FailureMode.TABLE_WITHHELD):
+            return
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.judge.table_verdict import (
+            REASON_NATIVE_CONTRADICTION,
+            REASON_SIBLING_OF_CONTRADICTED,
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_REJECTED_KIND,
+            TABLE_LADDER_UNVERIFIED_KIND,
+            TABLE_LADDER_WITHHELD_KIND,
+        )
+        from socr.tables.locate import locate_tables
+        from socr.tables.native_contradiction import contradictions_for_tables, pair_regions
+        from socr.tables.reconcile import find_table_blocks
+
+        blocks = find_table_blocks(bo.text)
+        if not blocks:
+            return
+        terminal_kinds = {
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_REJECTED_KIND,
+            TABLE_LADDER_UNVERIFIED_KIND,
+            TABLE_LADDER_WITHHELD_KIND,
+        }
+        latest: dict[str, str] = {}
+        for event in state.events:
+            if event.page_num == page_num and event.kind in terminal_kinds:
+                table_id = str((event.data or {}).get("table_id", "") or "")
+                if table_id:
+                    latest[table_id] = event.kind
+        lines = bo.text.splitlines()
+        # A table with no terminal at all is backfilled UNVERIFIED at assemble, so it is
+        # unverified for this purpose too.
+        targets = [
+            (f"p{page_num}-t{i}", i, "\n".join(lines[b.start : b.end + 1]))
+            for i, b in enumerate(blocks)
+            if latest.get(f"p{page_num}-t{i}", TABLE_LADDER_UNVERIFIED_KIND)
+            == TABLE_LADDER_UNVERIFIED_KIND
+        ]
+        if not targets:
+            return
+
+        try:
+            doc = open_pdf(state.handle.path)
+            try:
+                page = doc[page_num - 1]
+                boxes = locate_tables(page)
+                regions = pair_regions(
+                    page,
+                    ["\n".join(lines[b.start : b.end + 1]) for b in blocks],
+                    [box.bbox for box in boxes],
+                )
+                findings = contradictions_for_tables(
+                    page,
+                    bo.text,
+                    [markdown for _, _, markdown in targets],
+                    [regions[i] for _, i, _ in targets],
+                )
+            finally:
+                doc.close()
+        except Exception as exc:
+            logger.warning(
+                "native contradiction check failed on p%d (%s: %s); table stays UNVERIFIED",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        withheld = False
+        for (table_id, _, _), found in zip(targets, findings):
+            if not found:
+                continue
+            withheld = True
+            kinds = sorted({c.kind for c in found})
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_WITHHELD_KIND,
+                    engine=bo.engine or "",
+                    detail=(
+                        f"table {table_id} WITHHELD: the ladder could not verify it and the "
+                        f"PDF's own text contradicts it ({', '.join(kinds)}: "
+                        f"{'; '.join(c.detail for c in found[:3])}) "
+                        "-- no table bytes ship for this region"
+                    ),
+                    data={
+                        "table_id": table_id,
+                        "reason": REASON_NATIVE_CONTRADICTION,
+                        "contradictions": [c.to_dict() for c in found],
+                        "rung_trail": [],
+                        "witness_scope": "none",
+                    },
+                )
+            )
+        if not withheld:
+            return
+        ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+        # Withholding is page-granular: the floor replaces EVERY table region on the page, so
+        # every table removed gets its own WITHHELD record. Without one a sibling the ladder
+        # ACCEPTED (or never judged) would read as shipped in the events, the trust index
+        # and the #993 count while its bytes are gone.
+        contradicted_ids = [tid for (tid, _, _), found in zip(targets, findings) if found]
+        for index in range(len(blocks)):
+            table_id = f"p{page_num}-t{index}"
+            if table_id in contradicted_ids:
+                continue
+            prior = latest.get(table_id, "none")
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_WITHHELD_KIND,
+                    engine=bo.engine or "",
+                    detail=(
+                        f"table {table_id} WITHHELD: it shares a page with a table the PDF's own "
+                        f"text contradicts ({', '.join(contradicted_ids)}), and withholding is "
+                        f"page-granular (it was {prior} before) -- no table bytes ship for this region"
+                    ),
+                    data={
+                        "table_id": table_id,
+                        "reason": REASON_SIBLING_OF_CONTRADICTED,
+                        "contradicted_tables": contradicted_ids,
+                        "prior_terminal": prior,
+                        "rung_trail": [],
+                        "witness_scope": "none",
+                    },
+                )
+            )
 
     @_under_page_ladder_budget
     def _run_table_judge_gate(
@@ -10020,6 +10219,7 @@ class UnifiedPipeline:
                     if self.config.table_judge_ladder:
                         with clock.span("ladder"):
                             self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
+                            self._withhold_contradicted_unverified_tables(state, page_num, ps, bo)
                         # P1 (owner ruling Q2): a withheld page ships a failure marker
                         # in place of the table, so the human's ONLY route back to the
                         # numbers is the page image. Rendered here, right after the
@@ -16042,13 +16242,30 @@ class UnifiedPipeline:
                         for n in table_withheld_pages
                         if getattr(state.pages.get(n), "table_judge_retry_pending", False)
                     ]
-                    console.print(
-                        f"  [red]{len(table_withheld_pages)} table page(s) WITHHELD — "
-                        f"TABLE_WITHHELD (the judge ladder rejected the table and a blind "
-                        f"cell transcription read different tokens out of the same cells; the "
-                        f"table's content was NOT shipped, see the page image): "
-                        f"{table_withheld_pages}[/red]"
-                    )
+                    _contradicted = _native_contradiction_withheld_pages(state)
+                    _withheld_by_ladder = [
+                        n for n in table_withheld_pages if n not in _contradicted
+                    ]
+                    _withheld_by_text = [n for n in table_withheld_pages if n in _contradicted]
+                    if _withheld_by_text:
+                        console.print(
+                            f"  [red]{len(_withheld_by_text)} table page(s) WITHHELD — "
+                            f"TABLE_WITHHELD (the ladder could not verify the table and the "
+                            f"PDF's own text contradicts it; the table's content was NOT "
+                            f"shipped, see the page image): "
+                            + ", ".join(
+                                f"p{n} ({'/'.join(_contradicted[n])})" for n in _withheld_by_text
+                            )
+                            + "[/red]"
+                        )
+                    if _withheld_by_ladder:
+                        console.print(
+                            f"  [red]{len(_withheld_by_ladder)} table page(s) WITHHELD — "
+                            f"TABLE_WITHHELD (the judge ladder rejected the table and a blind "
+                            f"cell transcription read different tokens out of the same cells; "
+                            f"the table's content was NOT shipped, see the page image): "
+                            f"{_withheld_by_ladder}[/red]"
+                        )
                     if _withheld_latched:
                         _withheld_kinds = _latched_rung_kinds(state, _withheld_latched)
                         _which = (
@@ -17089,7 +17306,7 @@ class UnifiedPipeline:
         derived leaves ``None``, which the metadata renders as an absent block.
         """
         try:
-            from socr.core.table_counts import count_document_tables
+            from socr.core.table_counts import count_document_tables, withheld_table_events
             from socr.core.tables_trust import build_tables_trust
 
             trust = build_tables_trust(
@@ -17101,6 +17318,10 @@ class UnifiedPipeline:
             counts = count_document_tables(
                 [r.output for r in records],
                 {num: page.reasons for num, page in trust.pages.items()},
+                withheld_events=withheld_table_events(
+                    {"kind": e.kind, "page_num": e.page_num, "data": e.data or {}}
+                    for e in getattr(state, "events", [])
+                ),
             )
             state.table_counts = counts.to_dict()
         except Exception as exc:

@@ -748,6 +748,18 @@ TABLE_LADDER_EVENT_KINDS: frozenset[str] = frozenset(
 REASON_VERIFIED_BY_GEOMETRY = "verified_by_geometry"
 REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION = "verified_by_blind_cell_transcription"
 
+#: ``data["reason"]`` of a ``table_ladder_withheld`` event whose table was NOT rejected
+#: by the readers: the ladder left it UNVERIFIED and the PDF's own text layer
+#: contradicts it (``socr.tables.native_contradiction``). ``data["contradictions"]``
+#: names each kind and finding. Read by the metadata note and the CLI line so a
+#: contradiction withhold is not described as a reader rejection.
+REASON_NATIVE_CONTRADICTION = "native_contradiction"
+#: ``data["reason"]`` of a ``table_ladder_withheld`` event for a table that is NOT itself
+#: contradicted but shared a page with one that is: withholding is page-granular, so its
+#: bytes are gone too. ``data["contradicted_tables"]`` names the cause and
+#: ``data["prior_terminal"]`` what the ladder had said about it.
+REASON_SIBLING_OF_CONTRADICTED = "sibling_of_contradicted"
+
 #: GH-581: the closed set of causes a ``table_ladder_unverified`` event's
 #: ``data["cause"]`` may carry. Every UNVERIFIED terminal has exactly one --
 #: this is what a consumer reads instead of guessing from ``detail`` prose or
