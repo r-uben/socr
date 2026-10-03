@@ -460,6 +460,23 @@ class HeuristicPageJudge:
         )
 
 
+class SwitchablePageJudge:
+    """Routes to ``primary`` until ``tripped``, then to ``fallback`` (#987).
+
+    The judge circuit breaker: once the page judge is shown to be wedged, the
+    remaining pages take the SAME path as a run whose judge model was missing
+    (the heuristic judge) instead of paying a full judge deadline per page.
+    """
+
+    def __init__(self, primary: PageJudge, fallback: PageJudge) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        self.tripped = False
+
+    def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        return (self._fallback if self.tripped else self._primary).assess(output, provider)
+
+
 class VLMPageJudge:
     """Judge a page by *looking* at it: render the page, ask the VLM judge whether
     the OCR faithfully represents it.

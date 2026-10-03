@@ -105,7 +105,8 @@ from socr.judge.table_verdict import (
     rung_kind,
 )
 from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT, route_page
-from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
+from socr.core.ollama_utils import probe_model_generation
+from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
@@ -8529,8 +8530,11 @@ class UnifiedPipeline:
         disables the wrapper (forward to the inner judge directly).
         """
 
-        def __init__(self, inner, timeout_sec: float | None, owner=None) -> None:
+        def __init__(self, inner, timeout_sec: float | None, owner=None, on_timeout=None) -> None:
             self._inner = inner
+            # #987: called once per timed-out judge call (either branch), before
+            # the typed exception leaves; the circuit breaker's evidence probe.
+            self._on_timeout = on_timeout
             self._timeout_sec = timeout_sec
             # Round 3, finding 3: the worker runs on its own thread, so the
             # pipeline's per-invocation event binding has to be carried across
@@ -8573,6 +8577,11 @@ class UnifiedPipeline:
                 # leave as an exception so ``route_page`` types it.
                 inner_raised = future.done()
                 future.cancel()
+                if self._on_timeout is not None:
+                    try:
+                        self._on_timeout(output.page_num)
+                    except Exception as probe_exc:  # never mask the timeout itself
+                        logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
                 if inner_raised:
                     # #713 round 3 (Astra P2): WRAPPED, not re-raised unchanged.
                     # Both branches are the same outcome -- a page judge that
@@ -8970,7 +8979,12 @@ class UnifiedPipeline:
         _judge_timeout: float | None = None
         if provider_timeout:
             _judge_timeout = max(provider_timeout.values()) if provider_timeout else None
-        judge = self._TimeoutJudge(_inner_judge, _judge_timeout, owner=self)
+        judge = self._TimeoutJudge(
+            _inner_judge,
+            _judge_timeout,
+            owner=self,
+            on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+        )
 
         if not self.config.quiet:
             ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
@@ -11893,6 +11907,44 @@ class UnifiedPipeline:
 
         return patched_delta, flagged_delta
 
+    def _judge_circuit_breaker(self, state: DocumentState, page_num: int) -> None:
+        """#987: after a page-judge timeout, ask whether the judge is WEDGED.
+
+        Judge timeouts do not arm the OCR halt (``_attempts_show_timeout``), so
+        a wedged judge would otherwise cost a full judge deadline on every
+        remaining page. The evidence is one real 1-token generation on the
+        judge model (``/api/tags`` answers on a wedge). It passes: a slow page,
+        keep judging. It fails: the judge is switched to the heuristic judge for
+        the rest of the document, the path a missing judge model takes, and ONE
+        document-level event says so. Not a count of timeouts (#851).
+        """
+        from socr.core.audit_log import AuditEvent
+
+        switch = getattr(self, "_judge_switch", None)
+        target = getattr(self, "_judge_probe_target", None)
+        if switch is None or target is None or switch.tripped:
+            return
+        host, model = target
+        alive, reason = probe_model_generation(host, model, canary_deadline())
+        if alive:
+            return
+        switch.tripped = True
+        detail = (
+            f"page judge {model!r} timed out on p{page_num} and failed a 1-token "
+            f"generation probe ({reason}); heuristic judge for the remaining pages"
+        )
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind="judge_wedged_degraded_to_heuristic",
+                engine="",
+                detail=detail,
+                data={"judge_model": model, "trigger_page": page_num, "probe_reason": reason},
+            )
+        )
+        if not self.config.quiet:
+            console.print(f"  [yellow]{detail}[/yellow]")
+
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
 
@@ -11906,11 +11958,14 @@ class UnifiedPipeline:
             HeuristicPageJudge,
             NativeTableVerifierJudge,
             SourceEvidenceTableJudge,
+            SwitchablePageJudge,
             VLMPageJudge,
         )
 
         backend = self.config.judge_backend
         inner_judge = None
+        self._judge_switch = None
+        self._judge_probe_target = None
         judge_identity = JUDGE_IDENTITY_HEURISTIC
         resolved_model: str | None = None
         if backend in ("vlm", "auto"):
@@ -11935,6 +11990,15 @@ class UnifiedPipeline:
                         vj = OllamaVisionJudge(model=resolved_model)
                     inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
                     judge_identity = resolved_model
+                    if isinstance(vj, OllamaVisionJudge):
+                        # #987: breaker target. vLLM judges have no Ollama probe.
+                        self._judge_probe_target = (vj.host, resolved_model)
+                        switch = SwitchablePageJudge(
+                            inner_judge,
+                            HeuristicPageJudge(self.heuristics, sparse_ok=self._sparse_page_ok),
+                        )
+                        self._judge_switch = switch
+                        inner_judge = switch
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
             if inner_judge is None:

@@ -46,3 +46,31 @@ Mutations (external copy, `socr.__file__` canary asserted inside the copy):
 - #984's guard was not on this base; the full suite ran with `OLLAMA_HOST=http://127.0.0.1:1`.
 - Not changed: a judge that is wedged still costs 120 s per page; this ticket only stops it halting
   the document.
+
+## Review round 1 (Astra, P1): judge circuit breaker
+
+Suppressing judge timeouts entirely let a wedged judge cost a full judge deadline on every remaining
+page. Added: after a judge timeout `_judge_circuit_breaker` sends one 1-token `probe_model_generation`
+to the judge model (timeout `canary_deadline()`, existing constants). Probe fails -> the judge chain
+switches (`SwitchablePageJudge`) to the heuristic judge, the path a missing judge takes, with ONE
+document-level `judge_wedged_degraded_to_heuristic` event. Probe passes -> judge stays active. Not a
+count (#851). Ollama judges only (a vLLM judge has no such probe). `agentic_judge_model` provenance
+still names the VLM; the event is the record of the mid-document switch.
+
+Pins: wedged vs alive difference (judge calls 1 vs 4, 1 event vs 0), OCR halt unaffected.
+
+### Mutations, external copy (src+tests+pyproject)
+
+`socr.__file__` asserted inside the copy by a canary test; uncapped `count(anchor) == 1` asserted
+before each edit. M0 is the unmutated control (8 = 7 tests + the canary).
+
+```
+M0_none                       8 passed
+M1_judge_timeout_arms_halt    3 failed (difference pin, masking pin, wedged-vs-alive), 5 passed
+M2_canary_floor_only          2 failed (cold-load default, slow-but-alive), 6 passed
+M3_breaker_never_trips        1 failed (test_wedged_judge_is_cut_off_after_one_probe_slow_judge_is_not), 7 passed
+M4_breaker_trips_when_alive   1 failed (same test), 7 passed
+M5_no_probe_after_timeout     1 failed (same test), 7 passed
+```
+
+Rebased onto origin/main 790ce1fa (#984 guard present); full suite run with the default OLLAMA_HOST.
