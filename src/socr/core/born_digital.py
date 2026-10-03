@@ -25,7 +25,11 @@ from pathlib import Path
 
 import fitz
 
-from socr.core.glyph_recovery import GlyphRepairReport, count_minus_as_digit_hits
+from socr.core.glyph_recovery import (
+    GlyphRepairReport,
+    count_control_byte_before_digit_hits,
+    count_minus_as_digit_hits,
+)
 from socr.core.pdf import apply_glyph_recovery, open_pdf
 
 logger = logging.getLogger(__name__)
@@ -2382,6 +2386,11 @@ class PageAssessment:
     #: #913: the scan raised, so whether the page has the defect is UNKNOWN. Treated
     #: exactly as a hit (fail closed): a wrong number is worse than a missing one.
     minus_as_digit_scan_failed: bool = False
+    #: #990: control characters (C0, not tab/newline/CR) directly before a digit in the
+    #: repaired native text. A sign or glyph the extractor could not decode, so a negative
+    #: number can read as positive. Same treatment as ``minus_as_digit_hits``.
+    control_byte_digit_hits: int = 0
+    control_byte_scan_failed: bool = False
     #: #961: the page is image-dominant (raster coverage >= ``RASTER_DOMINANCE_RATIO``) and
     #: carries invisible text (render mode 3): a scan with an old baked-in OCR layer, not a
     #: born-digital page. Routes the page off the trusted-native lane to OCR.
@@ -3346,6 +3355,23 @@ class BornDigitalDetector:
                 + " -> OCR"
             )
 
+        # #990: a control byte where the PDF prints a minus (or another symbol) ships as an
+        # invisible character, so a negative number reads as positive. Same route as #913.
+        control_byte_digit_hits = 0
+        control_byte_scan_failed = False
+        try:
+            control_byte_digit_hits = count_control_byte_before_digit_hits(raw_text)
+        except Exception:
+            logger.warning("#990: control-byte scan failed", exc_info=True)
+            control_byte_scan_failed = True
+        if control_byte_digit_hits or control_byte_scan_failed:
+            needs_ocr_enhancement = True
+            notes.append(
+                f"{control_byte_digit_hits} control character(s) before a digit"
+                + (" (scan failed: unknown)" if control_byte_scan_failed else "")
+                + " -> OCR"
+            )
+
         # #961: a scan whose old OCR text layer is invisible (render mode 3) over a page-sized
         # raster is not born-digital; its text is a past OCR run's, shipped verbatim.
         invisible_text_over_raster = False
@@ -3561,6 +3587,8 @@ class BornDigitalDetector:
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             minus_as_digit_hits=minus_as_digit_hits,
             minus_as_digit_scan_failed=minus_as_digit_scan_failed,
+            control_byte_digit_hits=control_byte_digit_hits,
+            control_byte_scan_failed=control_byte_scan_failed,
             invisible_text_over_raster=invisible_text_over_raster,
             invisible_text_scan_failed=invisible_text_scan_failed,
             has_unverifiable_table_region=has_unverifiable_table_region,

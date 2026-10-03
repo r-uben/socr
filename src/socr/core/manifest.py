@@ -911,11 +911,14 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     )
 
 
-def _minus_as_digit_suspect(p) -> bool:
-    """#913: the native text layer reads a minus as the digit "2", or the scan for that
-    failed (unknown is not clean)."""
+def minus_as_digit_suspect(p) -> bool:
+    """#913/#990: the native text layer reads a minus as the digit "2" or carries a control
+    byte before a number, or either scan failed (unknown is not clean)."""
     return bool(
-        getattr(p, "minus_as_digit_hits", 0) or getattr(p, "minus_as_digit_scan_failed", False)
+        getattr(p, "minus_as_digit_hits", 0)
+        or getattr(p, "minus_as_digit_scan_failed", False)
+        or getattr(p, "control_byte_digit_hits", 0)
+        or getattr(p, "control_byte_scan_failed", False)
     )
 
 
@@ -3100,7 +3103,7 @@ def _select_page_output_tagged(
             # failed) must not short-circuit to a clean pass. There is no other text to
             # ship under --native-only, so it falls through to the native fallback below:
             # same text, WARNING, never clean SUCCESS.
-            or _minus_as_digit_suspect(p)
+            or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
@@ -3677,7 +3680,7 @@ def _select_page_output_tagged(
                 if native_table_defect and native_is_fallback
                 else (
                     FailureMode.NATIVE_MINUS_AS_DIGIT
-                    if native_is_fallback and _minus_as_digit_suspect(p)
+                    if native_is_fallback and minus_as_digit_suspect(p)
                     else (
                         FailureMode.NATIVE_INVISIBLE_TEXT_SCAN
                         if native_is_fallback and _invisible_text_suspect(p)

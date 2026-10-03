@@ -431,3 +431,26 @@ def count_minus_as_digit_hits(page: fitz.Page) -> int:
                 if nxt[:1].isdigit() or (nxt[:1] == "." and nxt[1:2].isdigit()):
                     hits += 1
     return hits
+
+
+#: #990: a C0 control character other than tab, newline and carriage return, before a digit
+#: or ``.digit``, with at most one space between (10 of the 35 measured trusted-native hits
+#: are ``<byte> <digit>``: a copyright sign before a year, a binary minus set with thin
+#: spacing; without the space they are missed). ``\d`` is any Unicode decimal digit, as in
+#: the measurement: a page of mis-decoded Indic digits (Ramey p80) is missed by ``[0-9]``.
+#: Those three are layout whitespace; every other C0 code in a text layer is a glyph the
+#: extractor could not decode. Measured on the trusted-native
+#: population: it stands for a minus sign (``\x01``/``\x02``/``\x04``) and for other symbols
+#: (copyright, alpha, sigma, brackets). The same code means different glyphs in different
+#: documents, so it cannot be mapped to a minus; the page has to be read by a model.
+_CONTROL_BYTE_BEFORE_DIGIT = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f] ?\.?\d")
+
+
+def count_control_byte_before_digit_hits(text: str) -> int:
+    """Count control characters sitting directly before a number in native text (#990).
+
+    Run on the page text AFTER #217's repair: it counts what is still wrong. A control
+    byte not followed by a digit (optionally after one space), or a tab/newline/CR before
+    one, is not a hit.
+    """
+    return len(_CONTROL_BYTE_BEFORE_DIGIT.findall(text))
