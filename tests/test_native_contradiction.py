@@ -57,6 +57,8 @@ ROWS = {
     label: tuple(("-" if (label, j) in NEGATIVE else "") + v for j, v in enumerate(vals))
     for label, vals in VALUES.items()
 }
+#: The last cell is a four-digit figure the page prints without a thousands separator.
+ROWS["Omega"] = (*ROWS["Omega"][:-1], "1234")
 PROSE = "The estimates below are reported for the full sample."
 XS = (72.0, 170.0, 240.0, 310.0, 380.0)
 TOP = 140.0
@@ -83,7 +85,9 @@ MINUS_DROPPED_MD = _md({k: tuple(c.lstrip("-") for c in cells) for k, cells in R
 #: Same values, every row bound to the next row's label: a row shift.
 SHIFTED_MD = _md(ROWS, order=LABELS[1:] + LABELS[:1])
 #: One cell wrong: the last value replaced by one the page does not print.
-WRONG_NUMBER_MD = CORRECT_MD.replace(LAST_VALUE, "9.871")
+WRONG_NUMBER_MD = CORRECT_MD.replace(LAST_VALUE, "9871")
+#: The same figure typeset with a thousands separator: not a different number.
+THOUSANDS_MD = CORRECT_MD.replace(LAST_VALUE, "1,234")
 #: Beta's label kept on a row of its own, its values moved to an unlabelled row beneath it.
 DETACHED_MD = CORRECT_MD.replace(
     "| Beta | " + " | ".join(ROWS["Beta"]) + " |",
@@ -95,7 +99,7 @@ def _page_text(table_md: str) -> str:
     return f"{PROSE}\n\n{table_md}"
 
 
-def _draw_table(page, *, invisible: bool = False) -> None:
+def _draw_table(page, *, invisible: bool = False, footnote: str = "") -> None:
     rect = fitz.Rect(60, TOP - 28, XS[-1] + 60, TOP + STEP * len(LABELS) + 4)
     page.draw_rect(rect, color=(0, 0, 0), width=1.0)
     for i in range(len(LABELS) + 1):  # a ruled grid, so the locator places the table
@@ -110,14 +114,18 @@ def _draw_table(page, *, invisible: bool = False) -> None:
     for i, label in enumerate(LABELS):
         y = TOP + i * STEP
         for x, text in zip(XS, (label, *ROWS[label])):
+            if footnote and text != label:
+                text += footnote  # a footnote mark glued to the printed value
             page.insert_text((x, y), text, fontsize=10, fontname="helv", render_mode=mode)
 
 
-def _pdf(tmp_path: Path, name: str = "doc.pdf", *, invisible: bool = False) -> Path:
+def _pdf(
+    tmp_path: Path, name: str = "doc.pdf", *, invisible: bool = False, footnote: str = ""
+) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / name
     doc = fitz.open()
-    _draw_table(doc.new_page(width=612, height=792), invisible=invisible)
+    _draw_table(doc.new_page(width=612, height=792), invisible=invisible, footnote=footnote)
     doc.save(str(path))
     doc.close()
     return path
@@ -179,7 +187,7 @@ class TestSign:
                 chars = lambda s: [{"c": c} for c in s]  # noqa: E731
                 span = lambda s: {"chars": chars(s), "font": "F", "size": 10.0}  # noqa: E731
                 line = lambda s: {"spans": [span(s)]}  # noqa: E731
-                return {"blocks": [{"lines": [line("1990-2000 SIEM50 -3.5 −2.5 – 4.5")]}]}
+                return {"blocks": [{"lines": [line("1990-2000 SIEM50 -3.5 −2.5 Mean – 4.5")]}]}
 
         got = nc.native_signed_numbers(P())
         assert ("1990", "pos") in got and ("2000", "pos") in got
@@ -473,3 +481,129 @@ class TestScope:
         state.pages[1].table_ladder_disposition = FailureMode.TABLE_REJECTED
         self._pipeline()._withhold_contradicted_unverified_tables(state, 1, state.pages[1], out)
         assert state.pages[1].table_ladder_disposition is FailureMode.TABLE_REJECTED
+
+
+class TestFalsePositiveShapes:
+    """Each shape an earlier version convicted a correct table on."""
+
+    def test_an_accounting_negative_equals_a_minus(self) -> None:
+        assert nc.scan_numbers("(0.12)") == [("0.12", "paren")]
+        bracketed = [("0.12", "paren")]
+        minus = ("0.12", "neg", 0)
+        plain = ("0.12", "pos", 0)
+        # the page prints (0.12); the table prints -0.12 or 0.12: neither is a dropped or an
+        # invented minus
+        assert nc.sign_contradictions(bracketed, [minus], [minus])[0] == nc.CLEAR
+        assert nc.sign_contradictions(bracketed, [plain], [plain])[0] == nc.CLEAR
+        # and the reverse direction
+        brk = ("0.12", "paren", 0)
+        assert nc.sign_contradictions([("0.12", "neg")], [brk], [brk])[0] == nc.CLEAR
+        # control: a real dropped minus is still convicted
+        assert nc.sign_contradictions([("0.12", "neg")], [plain], [plain])[0] == nc.CONTRADICTED
+
+    def test_a_range_is_not_a_minus_however_it_is_spaced(self) -> None:
+        tight = nc.scan_numbers("1\u20132")
+        loose = nc.scan_numbers("1 \u2013 2")
+        assert tight == loose == [("1", "pos"), ("2", "pos")]
+        assert nc.scan_numbers("0.45 -0.07") == [("0.45", "pos"), ("0.07", "neg")]
+        assert nc.sign_contradictions(loose, [("2", "pos", 0)], [("2", "pos", 0)])[0] == nc.CLEAR
+
+    def test_a_thousands_separator_is_not_a_different_number(self, page) -> None:
+        assert nc.scan_numbers("1,234") == nc.scan_numbers("1234") == [("1234", "pos")]
+        assert _kinds(page, CORRECT_MD) == []
+        assert _kinds(page, THOUSANDS_MD) == []
+        assert _kinds(page, WRONG_NUMBER_MD) == [nc.NUMBER_ABSENT]
+
+    def test_footnote_marks_do_not_hide_a_printed_value(self, tmp_path: Path) -> None:
+        for mark in ("\u2020", "*", "\u00b9"):
+            assert nc._printed_abs_value(f"0.45{mark}") == "0.45"
+        doc = fitz.open(str(_pdf(tmp_path, footnote="*")))  # base-14 fonts carry no dagger
+        try:
+            page = doc[0]
+            assert _kinds(page, CORRECT_MD) == []
+            # the shift is still found: the marked values were not dropped from row matching
+            assert nc.ROW_SHIFT in _kinds(page, SHIFTED_MD)
+            # a table printing stars the page does not is not a different number
+            starred = CORRECT_MD.replace(ROWS["Gamma"][1], ROWS["Gamma"][1] + "**")
+            assert _kinds(page, starred) == []
+        finally:
+            doc.close()
+
+    def test_identical_rows_abstain_instead_of_convicting(self, page) -> None:
+        twin = ROWS["Delta"]
+        duplicated = {k: (twin if k in ("Beta", "Gamma", "Delta") else v) for k, v in ROWS.items()}
+        assert nc.ROW_SHIFT in _kinds(page, SHIFTED_MD)
+        assert nc.ROW_SHIFT not in _kinds(page, _md(duplicated))
+
+
+class TestEveryRemovedTableIsReported:
+    """Withholding is page-granular, so a sibling of a contradicted table loses its bytes too.
+    It must say so in the events and in the #993 count, not read as shipped."""
+
+    SIBLING = f"| Label | b0 |\n| --- | --- |\n| Gamma | {ROWS['Gamma'][0]} |\n"
+
+    @staticmethod
+    def _pipeline() -> UnifiedPipeline:
+        return UnifiedPipeline(
+            PipelineConfig(
+                primary_engine=EngineType.QWEN, enabled_engines=[EngineType.QWEN], quiet=True
+            )
+        )
+
+    def _run(self, tmp_path: Path, prior: str | None, table_md: str = MINUS_DROPPED_MD):
+        from socr.core.audit_log import AuditEvent
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+
+        state = DocumentState(handle=DocumentHandle.from_path(_pdf(tmp_path)))
+        out = PageOutput(
+            page_num=1,
+            text=_page_text(table_md + "\n" + self.SIBLING),
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        state.pages[1].attempts.append(out)
+        state.pages[1].best_output = out
+        if prior:
+            state.events.append(AuditEvent(page_num=1, kind=prior, data={"table_id": "p1-t1"}))
+        self._pipeline()._withhold_contradicted_unverified_tables(state, 1, state.pages[1], out)
+        return state
+
+    @pytest.mark.parametrize("prior", ["table_ladder_accepted", "table_ladder_unverified", None])
+    def test_the_uncontradicted_sibling_gets_its_own_withheld_record(
+        self, tmp_path: Path, prior
+    ) -> None:
+        from socr.judge.table_verdict import REASON_SIBLING_OF_CONTRADICTED
+
+        state = self._run(tmp_path, prior)
+        events = {
+            e.data["table_id"]: e.data for e in state.events if e.kind == TABLE_LADDER_WITHHELD_KIND
+        }
+        assert set(events) == {"p1-t0", "p1-t1"}
+        assert events["p1-t0"]["reason"] == REASON_NATIVE_CONTRADICTION
+        assert events["p1-t1"]["reason"] == REASON_SIBLING_OF_CONTRADICTED
+        assert events["p1-t1"]["contradicted_tables"] == ["p1-t0"]
+        assert events["p1-t1"]["prior_terminal"] == (prior or "none")
+
+    def test_a_clean_page_files_no_sibling_record(self, tmp_path: Path) -> None:
+        state = self._run(tmp_path, "table_ladder_accepted", table_md=CORRECT_MD)
+        assert not [e for e in state.events if e.kind == TABLE_LADDER_WITHHELD_KIND]
+
+    def test_the_metric_counts_each_removed_table_not_one_per_page(self, tmp_path: Path) -> None:
+        from socr.core.table_counts import withheld_table_events
+
+        state = self._run(tmp_path, "table_ladder_accepted")
+        events = [
+            {"kind": e.kind, "page_num": e.page_num, "data": e.data or {}} for e in state.events
+        ]
+        per_page = withheld_table_events(events)
+        assert per_page == {1: 2}
+        # a whole-page floor ships ONE marker for the two removed tables
+        floor = "[page 1 failed: unverifiable table — see image]"
+        with_events = count_page_tables(
+            floor, "error", "table_withheld", withheld_events=per_page[1]
+        )
+        markers_only = count_page_tables(floor, "error", "table_withheld")
+        assert (with_events.withheld, markers_only.withheld) == (2, 1)
+        assert with_events.shipped_text == with_events.unverified_text == 0

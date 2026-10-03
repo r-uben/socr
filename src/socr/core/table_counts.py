@@ -81,13 +81,21 @@ def count_page_tables(
     failure_mode: str,
     *,
     trust_reasons: Iterable[str] = (),
+    withheld_events: int = 0,
 ) -> TableCounts:
-    """Counts for one page. ``status`` / ``failure_mode`` are the enum VALUES (strings)."""
+    """Counts for one page. ``status`` / ``failure_mode`` are the enum VALUES (strings).
+
+    ``withheld_events`` is the number of distinct tables the page's ``table_ladder_withheld``
+    events name. A whole-page floor carries ONE marker however many tables it removed, so the
+    markers alone undercount a page-granular withhold; each removed table has its own event.
+    """
     text = text or ""
     blocks = len(find_table_blocks(text))
     withheld = len(_WITHHELD_MARKER_RE.findall(text))
     if withheld and _PROSE_RECOVERY_RE.search(text):
         withheld = 1
+    if withheld:
+        withheld = max(withheld, withheld_events)
     reasons = set(trust_reasons)
     unverified = failure_mode == FailureMode.TABLE_UNVERIFIED.value or (
         _UNVERIFIED_TRUST_KIND in reasons
@@ -120,14 +128,36 @@ def _value(member) -> str:
     return getattr(member, "value", member) or ""
 
 
-def count_document_tables(outputs: Iterable, trust_pages: dict[int, list[str]]) -> TableCounts:
+def withheld_table_events(events: Iterable[dict]) -> dict[int, int]:
+    """``{page: distinct tables named by its table_ladder_withheld events}``.
+
+    Events are plain dicts (``kind``, ``page_num``, ``data``) so the live audit events and a
+    sidecar's ``audit_events`` read through one function.
+    """
+    tables: dict[int, set[str]] = {}
+    for event in events:
+        if event.get("kind") != "table_ladder_withheld":
+            continue
+        table_id = str((event.get("data") or {}).get("table_id") or "")
+        if table_id:
+            tables.setdefault(int(event.get("page_num") or 0), set()).add(table_id)
+    return {page: len(ids) for page, ids in tables.items()}
+
+
+def count_document_tables(
+    outputs: Iterable,
+    trust_pages: dict[int, list[str]],
+    withheld_events: dict[int, int] | None = None,
+) -> TableCounts:
     """Counts over finalized ``PageOutput``s; ``trust_pages`` maps page -> distrust kinds."""
+    withheld_events = withheld_events or {}
     return sum_counts(
         count_page_tables(
             o.text,
             _value(o.status),
             _value(o.failure_mode),
             trust_reasons=trust_pages.get(o.page_num, ()),
+            withheld_events=withheld_events.get(o.page_num, 0),
         )
         for o in outputs
     )
@@ -198,6 +228,11 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
                 str(rec.get("status") or win.get("status") or ""),
                 str(rec.get("failure_mode") or win.get("failure_mode") or ""),
                 trust_reasons=trust_pages.get(num, ()),
+                withheld_events=withheld_table_events(
+                    {**e, "page_num": num}
+                    for e in (rec.get("audit_events") or [])
+                    if isinstance(e, dict)
+                ).get(num, 0),
             )
         )
     if seen != wanted:

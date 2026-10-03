@@ -7611,6 +7611,7 @@ class UnifiedPipeline:
         from socr.core.pdf import open_pdf
         from socr.judge.table_verdict import (
             REASON_NATIVE_CONTRADICTION,
+            REASON_SIBLING_OF_CONTRADICTED,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
@@ -7696,8 +7697,39 @@ class UnifiedPipeline:
                     },
                 )
             )
-        if withheld:
-            ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+        if not withheld:
+            return
+        ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+        # Withholding is page-granular: the floor replaces EVERY table region on the page, so
+        # every table removed gets its own WITHHELD record. Without one a sibling the ladder
+        # ACCEPTED (or never judged) would read as shipped in the events, the trust index
+        # and the #993 count while its bytes are gone.
+        contradicted_ids = [tid for (tid, _, _), found in zip(targets, findings) if found]
+        for index in range(len(blocks)):
+            table_id = f"p{page_num}-t{index}"
+            if table_id in contradicted_ids:
+                continue
+            prior = latest.get(table_id, "none")
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_WITHHELD_KIND,
+                    engine=bo.engine or "",
+                    detail=(
+                        f"table {table_id} WITHHELD: it shares a page with a table the PDF's own "
+                        f"text contradicts ({', '.join(contradicted_ids)}), and withholding is "
+                        f"page-granular (it was {prior} before) -- no table bytes ship for this region"
+                    ),
+                    data={
+                        "table_id": table_id,
+                        "reason": REASON_SIBLING_OF_CONTRADICTED,
+                        "contradicted_tables": contradicted_ids,
+                        "prior_terminal": prior,
+                        "rung_trail": [],
+                        "witness_scope": "none",
+                    },
+                )
+            )
 
     @_under_page_ladder_budget
     def _run_table_judge_gate(
@@ -17270,7 +17302,7 @@ class UnifiedPipeline:
         derived leaves ``None``, which the metadata renders as an absent block.
         """
         try:
-            from socr.core.table_counts import count_document_tables
+            from socr.core.table_counts import count_document_tables, withheld_table_events
             from socr.core.tables_trust import build_tables_trust
 
             trust = build_tables_trust(
@@ -17282,6 +17314,10 @@ class UnifiedPipeline:
             counts = count_document_tables(
                 [r.output for r in records],
                 {num: page.reasons for num, page in trust.pages.items()},
+                withheld_events=withheld_table_events(
+                    {"kind": e.kind, "page_num": e.page_num, "data": e.data or {}}
+                    for e in getattr(state, "events", [])
+                ),
             )
             state.table_counts = counts.to_dict()
         except Exception as exc:

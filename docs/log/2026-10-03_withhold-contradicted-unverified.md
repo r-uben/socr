@@ -135,3 +135,34 @@ The first full run had 5 failures, all the same cause and all expected: four pro
 ladder's binding clamp on the row-shifted fixture page, which the new check now withholds. Their pipeline
 setups stub `_withhold_contradicted_unverified_tables` (commented at each site); the withhold on that
 fixture is pinned once, with the check as the only difference, in `test_ladder_e2e.py::TestContradictedShiftIsWithheld`.
+
+## Round 2 (Astra rejected ed6131cd)
+
+1. **Sign false positives.** One scanner, `scan_numbers`, now reads sign and value from page text and from table
+   cells alike. A bracketed number is its own class (`paren`): it matches either sign on the other side, so
+   `(0.12)` equals `-0.12`, and a table that prints `4.98` where the page prints a t-statistic `(4.98)` is not
+   convicted either. A dash is a range separator, not a minus, when it follows a digit (or `)`/`]`/`%`) directly
+   (`1-2`, `1–2`) or after a space with a space after it (`1 – 2`); `0.45 -0.07` and `Mean – 0.48` stay negatives.
+2. **Footnotes and duplicates.** Footnote marks (stars, dagger, section sign, superscript digits) are stripped from
+   the edges of a printed word before it is read as a number, so a marked value no longer vanishes from the printed
+   line. Row-shift abstains for any row whose value multiset appears in more than one row of the grid.
+3. **Wrong number.** Chose to normalise locally, not to change `row_corroboration` (its `1,234` vs `1234` token
+   comparison feeds the row-corroboration gate and other consumers). `number_absent_contradictions` now compares
+   unsigned values through `scan_numbers` against the region's page numbers read at character level, so thousands
+   separators fold, footnote marks are ignored, and a minus drawn as a "2" (#913) is not read as the number 2.x.
+4. **Siblings reported.** Every table the page-granular floor removes now has a `table_ladder_withheld` record: the
+   contradicted one with `reason=native_contradiction`, each other with `reason=sibling_of_contradicted`,
+   `contradicted_tables` and `prior_terminal` (accepted / unverified / none). `table_counts.count_page_tables` takes
+   the number of distinct tables the page's withheld events name (live events and sidecar `audit_events` through
+   `withheld_table_events`) and counts `max(markers, events)`, so a whole-page floor with two removed tables counts
+   two, not one.
+5. **Cost of page-granular withholding on the 75 blocks: 0.** 18 of 75 blocks are flagged, on 16 pages; every other
+   table on those pages is itself flagged. No accepted, verified or merely unflagged sibling table is removed. (The
+   sample has no page where the question arises, so this says nothing about a corpus with more tables per page.)
+
+Phase 1 re-run on the final module. 30 sampled: sign 5/5 sign-lost, row shift 2 of 5 (ids 11 and 14; id 11 returns now
+that starred values are read), wrong number 1, **0 of 12 CORRECT flagged by any check**. All 75: sign 15 / row_shift 3 /
+number_absent 1 contradicted; union 18; no evidence on all three 28.
+
+Mutants killed (same harness): bracketed read as positive, range read as minus, footnote marks not stripped, duplicate
+rows convict, thousands separator not folded, sibling gets no record, metric ignores per-table events.
