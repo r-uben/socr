@@ -22,7 +22,6 @@ after the halt. Mutant (external copy of src+tests, canary on `socr.__file__`, a
 assignment replaced by `pass`): both tests fail (ledger hits [2, 4]). Full suite: 6645 passed, 2 skipped,
 4 xfailed. `uvx ruff@0.16.0 format --check .` clean.
 
-**Note.** A PARTIAL doc with an unchanged fingerprint is still skipped whole by the document gate unless
-`--reprocess` is passed; that rule is unchanged and out of scope here.
+**Note.** The document-level gate skipped a halted PARTIAL doc whole; fixed separately in #1001 (see `2026-10-03_1001-halted-doc-resumable.md`).
 
-**Review follow-up (cubic P3s).** Comment wording narrowed to the per-page passes and notes the plain-re-run limitation (#1001). Trusted-native pages past the halt are flagged even if an earlier run left them terminal: this run never restored or processed them (the pre-pass is OCR-only), so flagging is conservative and correct; pinned by test_native_pages_past_halt_flagged_even_if_previously_terminal. The halt test now asserts the page list in result.error.
+**Review follow-up (cubic P3s).** Comment wording narrowed to the per-page passes . Trusted-native pages past the halt are flagged even if an earlier run left them terminal: this run never restored or processed them (the pre-pass is OCR-only), so flagging is conservative and correct; pinned by test_native_pages_past_halt_flagged_even_if_previously_terminal. The halt test now asserts the page list in result.error.

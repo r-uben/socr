@@ -703,6 +703,12 @@ def _resume_skippable(
     """
     entry = index.files.get(rel_key)
     if entry:
+        if entry.get("halt_retry_pending") is True:
+            # GH-1001: the last run halted (PARTIAL_SAVE_VLM_TIMEOUT) and left pages
+            # unprocessed. A wedged backend is transient, so the "re-running cannot
+            # improve a partial result" rule below does not hold. Reopen the document;
+            # the per-page ledger then reuses only the pages that finished.
+            return False
         if entry.get("equation_lane_retry_pending") is True:
             blocks = (
                 equation_lane_retry_blocks()
@@ -16385,6 +16391,8 @@ class UnifiedPipeline:
             # Fail-closed: if that save raises, NOTHING is recorded, the outer
             # handler logs it, and the next run reprocesses the document.
             pending: dict = {}
+            if state.pp2_halt_reason:
+                pending["halt_retry_pending"] = True
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
                 pending["equation_lane_retry_pending"] = True
             if any(
