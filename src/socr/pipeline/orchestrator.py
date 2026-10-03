@@ -14982,8 +14982,9 @@ class UnifiedPipeline:
                             if state.pages[n].best_output
                             else "native"
                         ),
-                        detail="native text reads a minus sign as the digit 2 (or the scan "
-                        "for that failed) and no OCR read replaced it ("
+                        detail="native text carries an unreliable sign or glyph (a minus "
+                        "read as the digit 2, or a control byte before a number) or the scan "
+                        "for it failed, and no OCR read replaced it ("
                         + (
                             "--native-only"
                             if self.config.native_only
@@ -15275,7 +15276,8 @@ class UnifiedPipeline:
                 if minus_retained_pages:
                     console.print(
                         f"  [yellow]{len(minus_retained_pages)} page(s) shipped native text "
-                        "that reads a minus sign as the digit 2 (no OCR read replaced "
+                        "with an unreliable sign or glyph (minus read as 2, or a control "
+                        "byte before a number; no OCR read replaced "
                         f"it): {minus_retained_pages}[/yellow]"
                     )
                 if invisible_retained_pages:
