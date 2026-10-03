@@ -1030,7 +1030,7 @@ def library(
     """
     from socr import library as lib
 
-    if rerun_stem and promote_stem:
+    if rerun_stem is not None and promote_stem is not None:
         raise click.UsageError("--rerun and --promote are separate steps; give one")
     try:
         cfg = lib.load_library_config(library_config or lib.DEFAULT_CONFIG_PATH)
@@ -1061,9 +1061,11 @@ def library(
         lib.check_stem_collisions(cfg)
         if dry_run:
             # Read-only: no lock, no recovery, no index.
-            if promote_stem:
+            if promote_stem is not None:
+                lib.check_promote(cfg, promote_stem)
                 console.print(f"[dim]would promote {promote_stem} from {cfg.staging_dir}[/dim]")
-            elif rerun_stem:
+            elif rerun_stem is not None:
+                lib.check_rerun(cfg, rerun_stem, after_recovery=True)
                 console.print(f"[dim]would re-process {rerun_stem} into {cfg.staging_dir}[/dim]")
             else:
                 todo, blocked = lib.pending_pdfs(cfg)
@@ -1078,13 +1080,13 @@ def library(
             if note:
                 console.print(f"[yellow]{note}[/yellow]")
             try:
-                if promote_stem:
+                if promote_stem is not None:
                     archived, installed = lib.promote(cfg, promote_stem)
                     processed.add(promote_stem)
                     console.print(f"Installed {installed}")
                     if archived:
                         console.print(f"Old copy archived at {archived}")
-                elif rerun_stem:
+                elif rerun_stem is not None:
                     result = lib.rerun(cfg, make_process(True), rerun_stem)
                     if failed(result):
                         failures.append(rerun_stem)
