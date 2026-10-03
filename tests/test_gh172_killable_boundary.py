@@ -18,6 +18,7 @@ freshly spawned child can resolve ``tests.test_gh172_killable_boundary:name``.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import signal
 import socket
@@ -30,8 +31,15 @@ from pathlib import Path
 
 import httpx
 import pytest
+from multiprocessing import connection as mp_connection
 
-from socr.core.killable import CallSpec, KillableTimeoutError, run_killable
+from socr.core.killable import (
+    DEFAULT_KILL_GRACE_SEC,
+    DEFAULT_TERM_GRACE_SEC,
+    CallSpec,
+    KillableTimeoutError,
+    run_killable,
+)
 
 # One byte every 0.2s is comfortably faster than any read timeout used below
 # (>= 1.0s), reproducing the panel's measurement (0.3s trickle vs 1.0s read
@@ -40,7 +48,6 @@ _TRICKLE_INTERVAL_SEC = 0.2
 # Long enough that a run_killable call which actually bounds the trickle is
 # unambiguous; short enough to stay a fast test.
 _OUTER_TIMEOUT_SEC = 1.5
-_GRACE_SEC = 2.0  # generous upper bound on run_killable's own term/kill joins
 
 
 class _TrickleServer:
@@ -164,17 +171,61 @@ def test_plain_httpx_trickle_defeat_measured_in_a_child(trickle_server) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _bare_spawn_roundtrip_sec() -> float:
+    """Wall time of a bare ``multiprocessing`` spawn child that imports this module.
+
+    Deliberately NOT routed through ``run_killable`` (GH-991 review): calibrating
+    with the code under test would let an overhead regression inflate its own
+    allowance. Process start-up is the load-dependent part of the wall time, so a
+    bound that ignores it is a coin flip on a busy host.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    start = time.monotonic()
+    proc = ctx.Process(target=_sleep_forever, args=(0.0,))
+    proc.start()
+    proc.join()
+    return time.monotonic() - start
+
+
 def test_run_killable_bounds_a_trickling_call(trickle_server) -> None:
     spec = CallSpec(func=f"{__name__}:_get", args=(trickle_server.url, _OUTER_TIMEOUT_SEC + 60.0))
+    # run_killable's documented worst case: the deadline, then SIGTERM and SIGKILL
+    # each given their full grace; plus one independently measured process start-up.
+    # This is the broad integration bound (an unbounded trickle never returns). The
+    # exactness of the deadline itself is pinned by the test below, deterministically.
+    bound = (
+        _OUTER_TIMEOUT_SEC
+        + DEFAULT_TERM_GRACE_SEC
+        + DEFAULT_KILL_GRACE_SEC
+        + _bare_spawn_roundtrip_sec()
+    )
     start = time.monotonic()
     with pytest.raises(KillableTimeoutError):
         run_killable(spec, timeout=_OUTER_TIMEOUT_SEC)
     elapsed = time.monotonic() - start
-    assert elapsed < _OUTER_TIMEOUT_SEC + _GRACE_SEC, (
+    assert elapsed < bound, (
         f"run_killable took {elapsed:.2f}s to raise; the deadline "
-        f"({_OUTER_TIMEOUT_SEC}s) plus its own term/kill grace "
-        f"({_GRACE_SEC}s) should bound it"
+        f"({_OUTER_TIMEOUT_SEC}s) plus its own term/kill grace and one process "
+        f"start-up ({bound:.2f}s in all) should bound it"
     )
+
+
+def test_run_killable_hands_the_requested_deadline_to_poll_unchanged(monkeypatch) -> None:
+    """Deterministic pin on the deadline (GH-991 review): the wide wall-clock bound
+    above tolerates a deadline stretched a few times over, so check the value that
+    reaches ``Connection.poll`` instead of timing it."""
+    seen: list[float] = []
+    real_poll = mp_connection.Connection.poll
+
+    def spy(self, timeout=0.0):
+        seen.append(timeout)
+        return real_poll(self, timeout)
+
+    monkeypatch.setattr(mp_connection.Connection, "poll", spy)
+    requested = 37.25  # distinctive, so a scaled or substituted value cannot match
+    spec = CallSpec(func=f"{__name__}:_sleep_forever", args=(0.0,))
+    assert run_killable(spec, timeout=requested) == "done"
+    assert seen == [requested], f"run_killable polled with {seen}, requested {requested}"
 
 
 def test_run_killable_returns_promptly_on_success() -> None:
@@ -192,9 +243,29 @@ def test_run_killable_returns_promptly_on_success() -> None:
 
 def _wedge_with_grandchild(pidfile: str, url: str, timeout: float) -> str:
     proc = subprocess.Popen(["sleep", "100"])
-    with open(pidfile, "w") as f:
+    # Atomic publish: a reader polling for the file must never see it half-written.
+    tmp = pidfile + ".tmp"
+    with open(tmp, "w") as f:
         f.write(str(proc.pid))
+    os.replace(tmp, pidfile)
     return _get(url, timeout)
+
+
+# Upper limit for waiting on an EVENT (a file appearing, a process exiting). Not a
+# performance claim: events are polled, so this only bounds how long a genuinely
+# stuck test may hang; it must exceed any scheduler delay a loaded host produces.
+_EVENT_DEADLINE_SEC = 60.0
+
+
+def _wait_for(predicate, *, what: str, fail: bool = True) -> bool:
+    deadline = time.monotonic() + _EVENT_DEADLINE_SEC
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    if fail:
+        pytest.fail(f"timed out after {_EVENT_DEADLINE_SEC:g}s waiting for {what}")
+    return False
 
 
 def test_kill_is_process_group_wide(trickle_server, tmp_path, monkeypatch) -> None:
@@ -210,24 +281,60 @@ def test_kill_is_process_group_wide(trickle_server, tmp_path, monkeypatch) -> No
         func="test_gh172_killable_boundary:_wedge_with_grandchild",
         args=(str(pidfile), trickle_server.url, _OUTER_TIMEOUT_SEC + 60.0),
     )
-    with pytest.raises(KillableTimeoutError):
-        run_killable(spec, timeout=_OUTER_TIMEOUT_SEC)
+    # GH-991: ``run_killable``'s deadline starts at spawn, and a spawned child
+    # needs a load-dependent time to import this module and fork the grandchild.
+    # If the deadline fired first, the kill landed before there was a grandchild
+    # (no pidfile, or a group with nothing in it), so the test measured the
+    # machine, not the kill. Hold the deadline's clock back until the grandchild
+    # is published: ``run_killable``'s single ``parent_conn.poll(timeout)`` waits
+    # for the pidfile first, then runs unchanged. The kill path is untouched.
+    real_poll = mp_connection.Connection.poll
 
-    # Give the OS a moment to finish reaping after SIGKILL.
-    deadline = time.monotonic() + _GRACE_SEC
-    grandchild_pid = int(pidfile.read_text().strip())
-    alive = True
-    while time.monotonic() < deadline:
-        try:
-            os.kill(grandchild_pid, 0)
-        except ProcessLookupError:
-            alive = False
-            break
-        time.sleep(0.1)
-    assert not alive, (
-        f"grandchild pid {grandchild_pid} was still alive after the killable "
-        "boundary's deadline + grace — the kill did not reach the process group"
-    )
+    pidfile_appeared: list[bool] = []
+
+    def poll_once_grandchild_exists(self, timeout=0.0):
+        # Never raise from here: that would skip run_killable's kill path and leak
+        # the child. If the pidfile never shows, run the real poll anyway so
+        # run_killable still kills the group, and fail below with a clear message.
+        pidfile_appeared.append(
+            _wait_for(pidfile.exists, what=f"grandchild pidfile {pidfile}", fail=False)
+        )
+        return real_poll(self, timeout)
+
+    monkeypatch.setattr(mp_connection.Connection, "poll", poll_once_grandchild_exists)
+
+    grandchild_pid = None
+    try:
+        with pytest.raises(KillableTimeoutError):
+            run_killable(spec, timeout=_OUTER_TIMEOUT_SEC)
+        assert pidfile_appeared == [True], (
+            f"grandchild pidfile {pidfile} did not appear within {_EVENT_DEADLINE_SEC:g}s; "
+            "the child never reached the point under test"
+        )
+        grandchild_pid = int(pidfile.read_text().strip())
+
+        def gone() -> bool:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        # SIGKILL is synchronous but the orphaned grandchild is reaped by init
+        # asynchronously: poll for that, with a deadline far past any scheduler delay.
+        assert _wait_for(gone, what="grandchild exit", fail=False), (
+            f"grandchild pid {grandchild_pid} was still alive after the killable "
+            "boundary's deadline + grace — the kill did not reach the process group"
+        )
+    finally:
+        # Never leak the 100s sleeper, whatever the verdict.
+        if grandchild_pid is None and pidfile.exists():
+            grandchild_pid = int(pidfile.read_text().strip())
+        if grandchild_pid is not None:
+            try:
+                os.kill(grandchild_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 # ---------------------------------------------------------------------------
