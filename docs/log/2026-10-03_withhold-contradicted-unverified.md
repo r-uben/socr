@@ -166,3 +166,20 @@ number_absent 1 contradicted; union 18; no evidence on all three 28.
 
 Mutants killed (same harness): bracketed read as positive, range read as minus, footnote marks not stripped, duplicate
 rows convict, thousands separator not folded, sibling gets no record, metric ignores per-table events.
+
+## Round 3
+
+- A bracket that states its minus (`(-0.12)`) is its own class (`bracket_neg`) and is never matched by an
+  unsigned bracket; the "either sign" wildcard applies only to brackets with no sign inside, on either side.
+- `row_shift_contradictions` now needs the same coverage gate as the absent-number check (`_coverage`): a layer
+  that prints one row of a table it does not carry cannot convict the rest.
+- Regions are paired to blocks by content (`pair_regions`: the box whose text prints most of the block's numbers,
+  unique best, not claimed by another block), else the block abstains from the region checks. The index pairing
+  between `locate_tables` order and markdown order is gone.
+- `number_absent` counts only `row_corroboration.numeric_body_rows` (its candidate-row filter), so header years and
+  decorative rows are not claimed numbers.
+- `count_from_sidecars` returns None (unknown) when a sidecar's `audit_events` or a withheld event's `data` is
+  unreadable, instead of raising.
+- Phase 1 re-run: sign 5/5 sign-lost, 0 of 12 CORRECT flagged by any check; row shift 2 of 5, wrong number 1;
+  all 75: sign 15 / row_shift 3 / number_absent 1, union 18. Mutants killed: stated-minus bracket absorbed, row
+  shift without coverage gate, regions by index, ambiguous pairing not abstained.

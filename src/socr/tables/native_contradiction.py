@@ -67,6 +67,7 @@ from socr.tables.native_verifier import (
     is_numeric_token,
 )
 from socr.tables.row_corroboration import (
+    numeric_body_rows,
     EXTRA_NUMBERS_MAX_SHARE,
     cluster_band_words,
     table_blocks,
@@ -108,7 +109,8 @@ _SCAN_RE = re.compile(
 #: on a printed number; they are not part of the value and must not hide it.
 _FOOTNOTE_MARKS = "*\u2217\u204e\u2731\u2020\u2021\u00a7\u00b9\u00b2\u00b3\u2070-\u209f"
 _FOOTNOTE_EDGE_RE = re.compile(rf"^[{_FOOTNOTE_MARKS}]+|[{_FOOTNOTE_MARKS}]+$")
-_NEG, _POS, _PAREN = "neg", "pos", "paren"
+_NEG, _POS, _PAREN, _BRACKET_NEG = "neg", "pos", "paren", "bracket_neg"
+_NEGATIVE_KINDS = (_NEG, _BRACKET_NEG)
 _WORD_RE = re.compile(r"[a-z]+")
 #: A word of one letter is a footnote mark or a variable, not a row label.
 _MIN_LABEL_WORD_LEN = 2
@@ -175,7 +177,10 @@ def scan_numbers(text: str) -> list[tuple[str, str]]:
             if before[-1:].isspace() and re.search(r"[\d)\]%]$", before.rstrip()):
                 sign = None  # ``1 - 2``: a range, not a minus
         if sign:
-            kind = _NEG
+            # ``(-0.12)``: a minus INSIDE the bracket. The bracket then is not the accounting
+            # convention (the sign is stated), so it never matches the other side's sign.
+            enclosed = text[match.start("sg") - 1 : match.start("sg")] == "(" and raw.endswith(")")
+            kind = _BRACKET_NEG if enclosed else _NEG
         elif raw.startswith("(") and raw.endswith(")"):
             kind = _PAREN
         else:
@@ -249,9 +254,11 @@ def sign_contradictions(
     absent = sum(max(0, table_total[v] - native_total[v]) for v in table_total)
     if not native_total or absent / sum(table_total.values()) > EXTRA_NUMBERS_MAX_SHARE:
         return NO_EVIDENCE, []
-    native_neg = Counter(v for v, s in native if s == _NEG)
+    native_neg = Counter(v for v, s in native if s in _NEGATIVE_KINDS)
     native_pos = Counter(v for v, s in native if s == _POS)
-    table_neg = Counter(v for v, s, _ in page_table_numbers if s == _NEG)
+    native_bracket_neg = Counter(v for v, s in native if s == _BRACKET_NEG)
+    table_bracket_neg = Counter(v for v, s, _ in page_table_numbers if s == _BRACKET_NEG)
+    table_neg = Counter(v for v, s, _ in page_table_numbers if s in _NEGATIVE_KINDS)
     table_pos = Counter(v for v, s, _ in page_table_numbers if s == _POS)
     # A bracketed copy (``(0.12)``) is an accounting negative on one page and a t-statistic
     # on another, so on either side it is compatible with both signs: it can absorb a
@@ -262,17 +269,25 @@ def sign_contradictions(
     target = {(v, s) for v, s, _ in target_numbers}
     found: list[Contradiction] = []
     for value in sorted(table_total):
+        # The wildcard applies to a bracket with NO sign inside. Against a bracket that
+        # states its minus, an unsigned bracket is simply the unsigned number.
+        t_pos, t_paren = table_pos[value], table_paren[value]
+        n_pos, n_paren = native_pos[value], native_paren[value]
+        if native_bracket_neg[value]:
+            t_pos, t_paren = t_pos + t_paren, 0
+        if table_bracket_neg[value]:
+            n_pos, n_paren = n_pos + n_paren, 0
         dropped = min(
-            table_pos[value] - native_pos[value] - native_paren[value],
-            native_neg[value] - table_neg[value] - table_paren[value],
+            t_pos - n_pos - n_paren,
+            native_neg[value] - table_neg[value] - t_paren,
         )
-        if dropped > 0 and (value, _POS) in target:
+        if dropped > 0 and ((value, _POS) in target or (value, _PAREN) in target):
             found.append(Contradiction(SIGN, f"{value}: the page prints a minus the table dropped"))
         invented = min(
-            table_neg[value] - native_neg[value] - native_paren[value],
-            native_pos[value] - table_pos[value] - table_paren[value],
+            table_neg[value] - native_neg[value] - n_paren,
+            n_pos - t_pos - t_paren,
         )
-        if invented > 0 and (value, _NEG) in target:
+        if invented > 0 and ((value, _NEG) in target or (value, _BRACKET_NEG) in target):
             found.append(
                 Contradiction(SIGN, f"{value}: the table prints a minus the page does not")
             )
@@ -310,8 +325,14 @@ def _row_values(cells: list[str]) -> list[str]:
     return values
 
 
-def row_shift_contradictions(words: list, markdown: str, region) -> tuple[str, list[Contradiction]]:
+def row_shift_contradictions(
+    words: list, markdown: str, region, page=None
+) -> tuple[str, list[Contradiction]]:
     """Row values the grid binds to a different label than the page prints them under."""
+    # The same coverage gate as the absent-number check: a layer that prints a single row
+    # of a table it does not carry cannot convict the rest of it.
+    if _coverage(page, region, markdown) is None:
+        return NO_EVIDENCE, []
     region_words = words_in_region(words, region)
     printed: list[tuple[tuple[str, ...], set[str]]] = []
     for band in cluster_band_words(region_words):
@@ -387,6 +408,48 @@ def page_is_upright(page, region) -> bool:
 # -- absent number ------------------------------------------------------------------
 
 
+def _candidate_values(markdown: str) -> list[str]:
+    """The unsigned values of a table's NUMERIC BODY rows, one per number.
+
+    The candidate-row filter is ``row_corroboration.numeric_body_rows``, the one the
+    row-corroboration gate uses: header, delimiter, blank-stub, column-index and value-less
+    rows are not candidates, so a year in a header or a figure in a decorative row is not
+    "a number the table claims". Each token is then read through ``scan_numbers``.
+    """
+    values: list[str] = []
+    for rows in table_blocks(markdown):
+        for tokens in numeric_body_rows(rows):
+            for token in tokens:
+                found = scan_numbers(token)
+                if found:
+                    values.append(found[0][0])
+    return values
+
+
+def _coverage(page, region, markdown: str) -> tuple[list[str], list[str]] | None:
+    """``(table values, values the region's text layer does not print)``, or None.
+
+    None means the layer cannot speak for this table: it prints no numbers in the region, the
+    table has no candidate numbers, or more than ``EXTRA_NUMBERS_MAX_SHARE`` of the table's
+    numbers are absent from it (the layer does not carry this table). Both the absent-number
+    check and the row-shift check convict only on a layer that clears this gate.
+    """
+    native = Counter(v for v, _ in native_signed_numbers(page, region))
+    table = _candidate_values(markdown)
+    if not table or not native:
+        return None
+    remaining = Counter(native)
+    extra: list[str] = []
+    for value in table:
+        if remaining[value] > 0:
+            remaining[value] -= 1
+        else:
+            extra.append(value)
+    if len(extra) / len(table) > EXTRA_NUMBERS_MAX_SHARE:
+        return None
+    return table, extra
+
+
 def number_absent_contradictions(
     words: list, markdown: str, region, page=None
 ) -> tuple[str, list[Contradiction]]:
@@ -397,27 +460,12 @@ def number_absent_contradictions(
     sign), so ``1,234`` equals ``1234`` and a sign difference is left to the sign check.
     This is local rather than ``row_corroboration.corroborate_rows``: that helper compares
     ``1,234`` with ``1234`` as different tokens, and changing it would move its other
-    consumers (the row-corroboration gate).
+    consumers (the row-corroboration gate). It does reuse that gate's candidate-row filter.
     """
-    native = Counter(v for v, _ in native_signed_numbers(page, region))
-    table = [
-        v
-        for rows in table_blocks(markdown)
-        for row in rows
-        for c in row
-        for v, _ in scan_numbers(_normalize_cell(c))
-    ]
-    if not table or not native:
+    covered = _coverage(page, region, markdown)
+    if covered is None:
         return NO_EVIDENCE, []
-    remaining = Counter(native)
-    extra: list[str] = []
-    for value in table:
-        if remaining[value] > 0:
-            remaining[value] -= 1
-        else:
-            extra.append(value)
-    if len(extra) / len(table) > EXTRA_NUMBERS_MAX_SHARE:
-        return NO_EVIDENCE, []
+    table, extra = covered
     if not extra:
         return CLEAR, []
     shown = ", ".join(sorted(set(extra))[:5])
@@ -427,6 +475,30 @@ def number_absent_contradictions(
             f"{len(extra)} of {len(table)} numbers are not printed on the page ({shown})",
         )
     ]
+
+
+def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
+    """One region per block, paired to the locator's boxes by CONTENT, else None.
+
+    ``locate_tables`` orders boxes by position and the markdown orders tables by emission, so
+    pairing by index can hand a table another table's region and attribute a contradiction to
+    the wrong table. A block is paired to the box whose text layer prints most of the block's
+    numbers; the pairing is used only when that box is the unique best for the block and no
+    other block claims it. Anything ambiguous abstains for that block.
+    """
+    count = len(block_markdowns)
+    if not boxes or len(boxes) != count:
+        return [None] * count
+    in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
+    chosen: list[int | None] = []
+    for markdown in block_markdowns:
+        wanted = Counter(_candidate_values(markdown))
+        overlap = [sum((wanted & printed).values()) for printed in in_box]
+        best = max(overlap)
+        winners = [k for k, value in enumerate(overlap) if value == best]
+        chosen.append(winners[0] if best > 0 and len(winners) == 1 else None)
+    claims = Counter(k for k in chosen if k is not None)
+    return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
 
 
 # -- entry point --------------------------------------------------------------------
@@ -460,7 +532,7 @@ def contradictions_for_tables(
             found += sign
             if region is not None:
                 if page_is_upright(page, region):
-                    found += row_shift_contradictions(words, markdown, region)[1]
+                    found += row_shift_contradictions(words, markdown, region, page)[1]
                 found += number_absent_contradictions(words, markdown, region, page)[1]
             out.append(found)
         return out

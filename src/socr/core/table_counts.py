@@ -132,13 +132,20 @@ def withheld_table_events(events: Iterable[dict]) -> dict[int, int]:
     """``{page: distinct tables named by its table_ladder_withheld events}``.
 
     Events are plain dicts (``kind``, ``page_num``, ``data``) so the live audit events and a
-    sidecar's ``audit_events`` read through one function.
+    sidecar's ``audit_events`` read through one function. Raises ``ValueError`` on an entry it
+    cannot read; callers turn that into an unknown count (#997's null-on-incomplete rule).
     """
     tables: dict[int, set[str]] = {}
     for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("audit event is not an object")
         if event.get("kind") != "table_ladder_withheld":
             continue
-        table_id = str((event.get("data") or {}).get("table_id") or "")
+        data = event.get("data")
+        if data is not None and not isinstance(data, dict):
+            # A withheld record whose payload cannot be read: the count is unknown, not zero.
+            raise ValueError("table_ladder_withheld event data is not an object")
+        table_id = str((data or {}).get("table_id") or "")
         if table_id:
             tables.setdefault(int(event.get("page_num") or 0), set()).add(table_id)
     return {page: len(ids) for page, ids in tables.items()}
@@ -222,17 +229,23 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
         if num not in wanted:
             continue
         seen.add(num)
+        raw_events = rec.get("audit_events") or []
+        try:
+            if not isinstance(raw_events, list):
+                raise ValueError("audit_events is not a list")
+            withheld_events = withheld_table_events({**e, "page_num": num} for e in raw_events).get(
+                num, 0
+            )
+        except (ValueError, TypeError):
+            # The page's withheld records are unreadable, so its withheld count is partial.
+            return None
         per_page.append(
             count_page_tables(
                 win.get("text") or "",
                 str(rec.get("status") or win.get("status") or ""),
                 str(rec.get("failure_mode") or win.get("failure_mode") or ""),
                 trust_reasons=trust_pages.get(num, ()),
-                withheld_events=withheld_table_events(
-                    {**e, "page_num": num}
-                    for e in (rec.get("audit_events") or [])
-                    if isinstance(e, dict)
-                ).get(num, 0),
+                withheld_events=withheld_events,
             )
         )
     if seen != wanted:

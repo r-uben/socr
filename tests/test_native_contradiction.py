@@ -607,3 +607,156 @@ class TestEveryRemovedTableIsReported:
         markers_only = count_page_tables(floor, "error", "table_withheld")
         assert (with_events.withheld, markers_only.withheld) == (2, 1)
         assert with_events.shipped_text == with_events.unverified_text == 0
+
+
+class TestBracketedMinus:
+    """A bracket with NO sign inside is the accounting convention and matches either sign; a
+    bracket that states its minus is negative and matches nothing else."""
+
+    def test_the_scanner_tells_the_two_brackets_apart(self) -> None:
+        assert nc.scan_numbers("(-0.12)") == [("0.12", "bracket_neg")]
+        assert nc.scan_numbers("(0.12)") == [("0.12", "paren")]
+
+    def test_a_stated_minus_in_a_bracket_is_not_matched_by_an_unsigned_bracket(self) -> None:
+        stated = ("0.12", "bracket_neg")
+        bare = ("0.12", "paren", 0)
+        # the page prints (-0.12), the table prints (0.12)
+        assert nc.sign_contradictions([stated], [bare], [bare]) == (
+            nc.CONTRADICTED,
+            [nc.Contradiction(nc.SIGN, "0.12: the page prints a minus the table dropped")],
+        )
+        # the reverse: the table states a minus the page's bracket does not
+        table_stated = ("0.12", "bracket_neg", 0)
+        outcome, found = nc.sign_contradictions([("0.12", "paren")], [table_stated], [table_stated])
+        assert outcome == nc.CONTRADICTED and [c.kind for c in found] == [nc.SIGN]
+
+    def test_controls_stay_clear(self) -> None:
+        bare = ("0.12", "paren", 0)
+        assert nc.sign_contradictions([("0.12", "paren")], [bare], [bare])[0] == nc.CLEAR
+        minus = ("0.12", "neg", 0)
+        assert nc.sign_contradictions([("0.12", "paren")], [minus], [minus])[0] == nc.CLEAR
+        stated = ("0.12", "bracket_neg", 0)
+        assert nc.sign_contradictions([("0.12", "bracket_neg")], [stated], [stated])[0] == nc.CLEAR
+
+
+class TestRowShiftNeedsTheSameCoverageAsAbsentNumbers:
+    def _page_with_one_row(self, tmp_path: Path):
+        path = tmp_path / "one_row.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        for x, text in zip(XS, ("Alpha", *ROWS["Alpha"])):
+            page.insert_text((x, TOP), text, fontsize=10, fontname="helv")
+        doc.save(str(path))
+        doc.close()
+        return fitz.open(str(path))
+
+    def test_a_layer_that_prints_one_row_cannot_convict_the_table(self, page, tmp_path) -> None:
+        whole = (0.0, 0.0, 612.0, 792.0)
+        words = page.get_text("words")
+        # full layer: the permuted labels are found
+        assert nc.row_shift_contradictions(words, SHIFTED_MD, whole, page)[0] == nc.CONTRADICTED
+        # the same table against a page that prints only Alpha's row: that one row matches and
+        # its label is bound elsewhere, but the layer does not carry the table
+        one = self._page_with_one_row(tmp_path)
+        try:
+            assert nc.row_shift_contradictions(
+                one[0].get_text("words"), SHIFTED_MD, whole, one[0]
+            ) == (nc.NO_EVIDENCE, [])
+            assert nc.contradictions_for_tables(
+                one[0], _page_text(SHIFTED_MD), [SHIFTED_MD], [whole]
+            ) == [[]]
+        finally:
+            one.close()
+
+
+class TestRegionsArePairedByContent:
+    """locate_tables orders boxes by position, the markdown by emission."""
+
+    TOP_MD = "| L | a | b |\n| --- | --- | --- |\n| r1 | 11.11 | 22.22 |\n| r2 | 33.33 | 44.44 |\n"
+    LOW_MD = "| L | a | b |\n| --- | --- | --- |\n| s1 | 55.55 | 66.66 |\n| s2 | 77.77 | 88.88 |\n"
+    TOP_BOX = (60.0, 80.0, 300.0, 140.0)
+    LOW_BOX = (60.0, 300.0, 300.0, 360.0)
+
+    def _page(self, tmp_path: Path):
+        path = tmp_path / "two.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        for y, rows in (
+            (100.0, ("11.11 22.22", "33.33 44.44")),
+            (320.0, ("55.55 66.66", "77.77 88.88")),
+        ):
+            for k, line in enumerate(rows):
+                page.insert_text((72, y + 16 * k), line, fontsize=10, fontname="helv")
+        doc.save(str(path))
+        doc.close()
+        return fitz.open(str(path))
+
+    def test_blocks_in_a_different_order_than_the_boxes_get_their_own_box(self, tmp_path) -> None:
+        doc = self._page(tmp_path)
+        try:
+            boxes = [self.TOP_BOX, self.LOW_BOX]  # locator order: top first
+            # emitted lower table first: index pairing would swap the regions
+            got = nc.pair_regions(doc[0], [self.LOW_MD, self.TOP_MD], boxes)
+            assert got == [self.LOW_BOX, self.TOP_BOX]
+            assert nc.pair_regions(doc[0], [self.TOP_MD, self.LOW_MD], boxes) == boxes
+        finally:
+            doc.close()
+
+    def test_an_ambiguous_pairing_abstains(self, tmp_path) -> None:
+        doc = self._page(tmp_path)
+        try:
+            boxes = [self.TOP_BOX, self.LOW_BOX]
+            # two blocks that both claim the top box, and a block no box prints
+            assert nc.pair_regions(doc[0], [self.TOP_MD, self.TOP_MD], boxes) == [None, None]
+            stray = self.TOP_MD.replace("11.11", "99.99").replace("22.22", "98.98")
+            stray = stray.replace("33.33", "97.97").replace("44.44", "96.96")
+            assert nc.pair_regions(doc[0], [stray, self.LOW_MD], boxes) == [None, self.LOW_BOX]
+            assert nc.pair_regions(doc[0], [self.TOP_MD], boxes) == [None]  # counts differ
+        finally:
+            doc.close()
+
+
+class TestCandidateRowsOnly:
+    def test_a_year_in_a_decorative_header_row_is_not_a_claimed_number(self, page) -> None:
+        # a blank-stub row of years above the grid is not a numeric body row
+        decorated = CORRECT_MD.replace(
+            "| --- | --- | --- | --- | --- |\n",
+            "| --- | --- | --- | --- | --- |\n|  | 1901 | 1902 | 1903 | 1904 |\n",
+            1,
+        )
+        assert decorated != CORRECT_MD
+        assert _kinds(page, decorated) == []
+        assert nc._candidate_values(decorated) == nc._candidate_values(CORRECT_MD)
+
+
+class TestMalformedSidecarEvents:
+    def _doc(self, tmp_path: Path, events) -> Path:
+        pages = tmp_path / "pages"
+        pages.mkdir(parents=True)
+        (tmp_path / "metadata.json").write_text(json.dumps({"pages": 1}))
+        (pages / "00001.json").write_text(
+            json.dumps(
+                {
+                    "page_num": 1,
+                    "status": "error",
+                    "failure_mode": "table_withheld",
+                    "winning_output": {"text": "[page 1 failed: unverifiable table — see image]"},
+                    "audit_events": events,
+                }
+            )
+        )
+        return tmp_path
+
+    def test_unreadable_event_data_makes_the_count_unknown_not_a_crash(self, tmp_path) -> None:
+        from socr.core.table_counts import count_from_sidecars
+
+        good = [{"kind": "table_ladder_withheld", "data": {"table_id": "p1-t0"}}]
+        assert count_from_sidecars(self._doc(tmp_path / "good", good)).withheld == 1
+        for bad in (
+            [{"kind": "table_ladder_withheld", "data": "oops"}],
+            ["not an object"],
+            "not a list",
+        ):
+            assert (
+                count_from_sidecars(self._doc(tmp_path / f"bad{abs(hash(str(bad)))}", bad)) is None
+            )

@@ -7618,7 +7618,7 @@ class UnifiedPipeline:
             TABLE_LADDER_WITHHELD_KIND,
         )
         from socr.tables.locate import locate_tables
-        from socr.tables.native_contradiction import contradictions_for_tables
+        from socr.tables.native_contradiction import contradictions_for_tables, pair_regions
         from socr.tables.reconcile import find_table_blocks
 
         blocks = find_table_blocks(bo.text)
@@ -7653,12 +7653,16 @@ class UnifiedPipeline:
             try:
                 page = doc[page_num - 1]
                 boxes = locate_tables(page)
-                regions = [box.bbox for box in boxes] if len(boxes) == len(blocks) else None
+                regions = pair_regions(
+                    page,
+                    ["\n".join(lines[b.start : b.end + 1]) for b in blocks],
+                    [box.bbox for box in boxes],
+                )
                 findings = contradictions_for_tables(
                     page,
                     bo.text,
                     [markdown for _, _, markdown in targets],
-                    [regions[i] for _, i, _ in targets] if regions else None,
+                    [regions[i] for _, i, _ in targets],
                 )
             finally:
                 doc.close()
