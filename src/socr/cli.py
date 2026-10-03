@@ -1062,8 +1062,10 @@ def library(
         if dry_run:
             # Read-only: no lock, no recovery, no index.
             if promote_stem:
+                lib.check_promote(cfg, promote_stem)
                 console.print(f"[dim]would promote {promote_stem} from {cfg.staging_dir}[/dim]")
             elif rerun_stem:
+                lib.check_rerun(cfg, rerun_stem)
                 console.print(f"[dim]would re-process {rerun_stem} into {cfg.staging_dir}[/dim]")
             else:
                 todo, blocked = lib.pending_pdfs(cfg)

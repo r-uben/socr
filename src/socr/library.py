@@ -273,6 +273,21 @@ def pending_pdfs(cfg: LibraryConfig) -> tuple[list[Path], list[Path]]:
 # --- status -------------------------------------------------------------
 
 
+def _stem(stem: str) -> str:
+    """A document stem from the CLI: a bare name, never a path (checked before any join)."""
+    if (
+        not isinstance(stem, str)
+        or not stem
+        or "/" in stem
+        or "\\" in stem
+        or "\0" in stem
+        or stem in (".", "..")
+        or Path(stem).is_absolute()
+    ):
+        raise LibraryError(f"invalid document stem {stem!r}: must be a bare name, not a path")
+    return stem
+
+
 def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -290,7 +305,7 @@ def doc_status(cfg: LibraryConfig, doc_dir: Path) -> dict[str, Any]:
         for sidecar in sorted(pages_dir.glob("*.json")):
             rec = _read_json(sidecar)
             page_status = rec.get("status") if isinstance(rec, dict) else None
-            if page_status in _BAD_PAGE_STATUSES:
+            if isinstance(page_status, str) and page_status in _BAD_PAGE_STATUSES:
                 bad_pages.append(sidecar.stem)
     has_status = isinstance(status, str) and bool(status)
     marker = (doc_dir / UNVERIFIED_MARKER).exists()
@@ -370,6 +385,11 @@ def _lines(items: list[str]) -> str:
 
 def _read_entries(path: Path) -> set[str]:
     """Entries of the curated list. Absent is empty; unreadable ABORTS the refresh."""
+    if path.is_symlink():
+        raise LibraryError(
+            f"refusing to read the curated list through a symlink: {path}; "
+            "index refresh aborted, nothing written"
+        )
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -389,6 +409,14 @@ def refresh_index(cfg: LibraryConfig, processed: frozenset[str] = frozenset()) -
     file and the newly computed entries, and a stem leaves it only when it is in
     ``processed`` and came out ``verified``.
     """
+    # Preflight every index path BEFORE the first write: a symlinked target would
+    # otherwise be discovered after documents/missing_text were already rewritten.
+    for index_path in (cfg.documents, cfg.missing_text, cfg.unverified, cfg.manifest):
+        if index_path.is_symlink():
+            raise LibraryError(
+                f"refusing to write through a symlink: {index_path}; "
+                "index refresh aborted, nothing written"
+            )
     pdfs = list_pdfs(cfg)
     stems = sorted({p.stem for p in pdfs})
     awaiting = set(staged_stems(cfg))
@@ -653,7 +681,9 @@ def process_new(
     return out
 
 
-def rerun(cfg: LibraryConfig, process: ProcessFn, stem: str) -> Any:
+def check_rerun(cfg: LibraryConfig, stem: str) -> Path:
+    """The refusals of ``rerun`` without running it; returns the PDF. Read-only."""
+    _stem(stem)
     pdf = next((p for p in list_pdfs(cfg) if p.stem == stem), None)
     if pdf is None:
         raise LibraryError(f"no PDF with stem {stem!r} under {cfg.pdf_dir}")
@@ -663,6 +693,11 @@ def rerun(cfg: LibraryConfig, process: ProcessFn, stem: str) -> Any:
             f"{staged} already exists: promote it (--promote {stem}) or move it aside; "
             "a staged run is never overwritten"
         )
+    return pdf
+
+
+def rerun(cfg: LibraryConfig, process: ProcessFn, stem: str) -> Any:
+    pdf = check_rerun(cfg, stem)
     return process(pdf, cfg.staging_dir)
 
 
@@ -718,6 +753,10 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
     if s and not t and (a or archived is None):
         _mkdir_durable(cfg.text_dir)  # the crash may have preceded promote's own mkdir
         _rename_durable(staged, target)  # the interrupted step: finish it
+        if archived is not None and cfg.archive_dir.is_dir():
+            # The archive rename may still be only in page cache; make it durable
+            # before the journal that vouches for it goes.
+            _fsync_dir(cfg.archive_dir)
         msg = f"recovered interrupted promotion of {j.get('stem')}: installed {target}"
     elif s and t and a is False and archived is not None:
         msg = f"discarded journal of a promotion that had not started ({j.get('stem')})"
@@ -738,6 +777,15 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
     return msg
 
 
+def check_promote(cfg: LibraryConfig, stem: str) -> Path:
+    """The refusals of ``promote`` without promoting; returns the staged dir. Read-only."""
+    _stem(stem)
+    staged = cfg.staging_dir / stem
+    if not (staged.is_dir() and cfg.markdown_path(staged, stem).is_file()):
+        raise LibraryError(f"nothing staged for {stem!r} under {cfg.staging_dir}")
+    return staged
+
+
 def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple[Path | None, Path]:
     """Archive the current text dir under a dated name, then install the staged one.
 
@@ -745,9 +793,7 @@ def promote(cfg: LibraryConfig, stem: str, now: datetime | None = None) -> tuple
     (nothing is deleted) bracketed by a journal so a crash between them is
     finished by the next run instead of leaving the text dir absent.
     """
-    staged = cfg.staging_dir / stem
-    if not (staged.is_dir() and cfg.markdown_path(staged, stem).is_file()):
-        raise LibraryError(f"nothing staged for {stem!r} under {cfg.staging_dir}")
+    staged = check_promote(cfg, stem)
     target = cfg.text_doc_dir(stem)
     archived: Path | None = None
     if target.exists():

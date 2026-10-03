@@ -539,9 +539,10 @@ def test_cli_dry_run_writes_nothing(tmp_path, hermetic):
     cfg_path = _write_cfg(tmp_path)
     cfg = lib.load_library_config(cfg_path)
     _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.staging_dir, "b", body="staged")  # so "--promote b" has something to preview
     root = tmp_path / "lib"
     before = {p: p.stat().st_mtime_ns for p in root.rglob("*")}
-    for extra in ([], ["--rerun", "a"], ["--promote", "a"]):
+    for extra in ([], ["--rerun", "a"], ["--promote", "b"]):
         res = _run("--config", str(cfg_path), "--dry-run", *extra)
         assert res.exit_code == 0, res.output
     assert "would process" in _run("--config", str(cfg_path), "--dry-run").output
@@ -1107,3 +1108,103 @@ def test_recovery_creates_a_missing_text_dir_before_rolling_forward(tmp_path):
     assert msg and "recovered" in msg
     assert (cfg.text_dir / "a" / "a.md").read_text() == "new"
     assert not (cfg.index_dir / lib.JOURNAL_NAME).exists()
+
+
+# --- #969-#973: library hardening -------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", ".", "..", "/etc/passwd", "a\\b", ""])
+def test_969_pathy_stems_are_refused_before_any_rename(tmp_path, bad):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.text_dir, "a", body="old")
+    _fake_doc(cfg.staging_dir, "a", body="new")
+    snap = (_snapshot(cfg.text_dir), _snapshot(cfg.staging_dir), set(tmp_path.rglob("*")))
+    with pytest.raises(lib.LibraryError, match="invalid document stem"):
+        lib.promote(cfg, bad)
+    with pytest.raises(lib.LibraryError, match="invalid document stem"):
+        lib.rerun(cfg, _fake_process(), bad)
+    assert snap == (_snapshot(cfg.text_dir), _snapshot(cfg.staging_dir), set(tmp_path.rglob("*")))
+
+
+def test_969_a_bare_basename_still_promotes(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _fake_doc(cfg.staging_dir, "a.b-c", body="new")
+    lib.promote(cfg, "a.b-c")
+    assert (cfg.text_dir / "a.b-c" / "a.b-c.md").read_text() == "new"
+
+
+def test_970_non_string_page_status_does_not_abort_the_refresh(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    d = _fake_doc(cfg.text_dir, "a", pages=("success",))
+    (d / "pages" / "00001.json").write_text(json.dumps({"status": ["warning"]}))
+    (d / "pages" / "00002.json").write_text(json.dumps({"status": {"x": "error"}}))
+    summary = lib.refresh_index(cfg)
+    assert summary["documents"] == 1
+    assert lib.doc_status(cfg, d)["bad_pages"] == []
+    (d / "pages" / "00003.json").write_text(json.dumps({"status": "warning"}))
+    assert lib.doc_status(cfg, d)["bad_pages"] == ["00003"]
+
+
+def test_971_dry_run_promote_with_nothing_staged_fails(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    _fake_doc(cfg.text_dir, "a", body="old")
+    res = _run("--config", str(cfg_path), "--dry-run", "--promote", "a")
+    assert res.exit_code != 0 and "nothing staged" in res.output
+    assert "would promote" not in res.output
+
+
+def test_971_dry_run_rerun_refuses_missing_pdf_and_staging_leftovers(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    cfg = lib.load_library_config(cfg_path)
+    res = _run("--config", str(cfg_path), "--dry-run", "--rerun", "nope")
+    assert res.exit_code != 0 and "no PDF" in res.output
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.staging_dir, "a")
+    res = _run("--config", str(cfg_path), "--dry-run", "--rerun", "a")
+    assert res.exit_code != 0 and "already exists" in res.output
+    assert "would re-process" not in res.output
+
+
+def test_971_dry_run_rejects_a_pathy_stem(tmp_path, hermetic):
+    cfg_path = _write_cfg(tmp_path)
+    res = _run("--config", str(cfg_path), "--dry-run", "--promote", "../x")
+    assert res.exit_code != 0 and "invalid document stem" in res.output
+
+
+def test_972_symlinked_unverified_refuses_before_any_index_write(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.text_dir, "a")
+    lib.refresh_index(cfg)
+    curated = tmp_path / "curated.txt"
+    curated.write_text("a\n")
+    cfg.unverified.unlink()
+    cfg.unverified.symlink_to(curated)
+    _pdf(cfg.pdf_dir / "c.pdf")  # the next refresh WOULD change documents/missing_text
+    before = {p: p.read_bytes() for p in (cfg.documents, cfg.missing_text, cfg.manifest)}
+    with pytest.raises(lib.LibraryError, match="symlink"):
+        lib.refresh_index(cfg)
+    assert {p: p.read_bytes() for p in before} == before
+    assert curated.read_text() == "a\n"
+
+
+def test_972_absent_curated_file_is_still_the_empty_set(tmp_path):
+    cfg = lib.load_library_config(_write_cfg(tmp_path))
+    _pdf(cfg.pdf_dir / "a.pdf")
+    lib.refresh_index(cfg)
+    assert cfg.unverified.read_text() == ""
+
+
+def test_973_roll_forward_fsyncs_the_archive_dir_before_clearing_the_journal(tmp_path, monkeypatch):
+    cfg = _staged_promotion(tmp_path)
+    _crash_on_nth_rename(monkeypatch, 2)  # old text archived, staged not yet installed
+    with pytest.raises(RuntimeError):
+        lib.promote(cfg, "a")
+    monkeypatch.undo()
+    assert cfg.archive_dir.is_dir() and not (cfg.text_dir / "a").exists()
+    events = _spy_fsync(monkeypatch, cfg)
+    assert "recovered" in lib.recover_promotion(cfg)
+    assert (cfg.archive_dir, True) in events  # synced while the journal still existed
