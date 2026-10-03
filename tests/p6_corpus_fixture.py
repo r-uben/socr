@@ -621,7 +621,15 @@ def capture(tmp_dir: Path) -> dict:
         "result_error": _scrub(result.error or ""),
         "result_audit_passed": bool(result.audit_passed),
         "events": [[n, k, eng, _scrub(d)] for n, k, eng, d in _events(state)],
-        "cli": _scrub(buf.getvalue()),
+        # GH-993 appended one additive summary line ("tables: N as text ...") to the
+        # assemble output. This capture is compared against a pre-change baseline whose
+        # subject is the bucket and status surfaces, so the new line is dropped here and
+        # pinned where it belongs, in tests/test_gh993_readable_tables.py.
+        "cli": "".join(
+            line
+            for line in _scrub(buf.getvalue()).splitlines(keepends=True)
+            if not line.startswith("  tables: ")
+        ),
         "markdown": {f.relative_to(output_dir).as_posix(): _scrub(f.read_text()) for f in md_files},
         "sidecars": {
             f.relative_to(output_dir).as_posix(): json.loads(_scrub(f.read_text()))

@@ -565,6 +565,10 @@ class DocumentState:
     # backend went unresponsive (e.g. "PARTIAL_SAVE_VLM_TIMEOUT"). Set by
     # _phase_agentic, read by _phase_assemble to propagate into EngineResult.error.
     pp2_halt_reason: str = ""
+    # GH-993: readable-table counts (``TableCounts.to_dict()``) derived at assemble from
+    # the finalized page outputs; ``None`` until then, and left ``None`` when they could
+    # not be derived (metadata then omits the block: "not recorded", never zero).
+    table_counts: dict | None = None
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):

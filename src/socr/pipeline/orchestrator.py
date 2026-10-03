@@ -15868,6 +15868,7 @@ class UnifiedPipeline:
             saved_path = self._save_markdown(state, final_text, output_dir)
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
+        self._record_table_counts(state, pre_records)
         self._write_metadata(state, final_result, output_dir, has_text, provisional=runs_figures)
 
         # Figure extraction + description + embedding. A figure-phase failure
@@ -15964,6 +15965,9 @@ class UnifiedPipeline:
         # replay blobs must all freeze the same guarded page text and status.
         final_page_outputs: list[PageOutput] | None = None
         final_records: list[FinalizedPageRecord] | None = None
+        # GH-993: the metadata written above carries the counts of the PRE-final records.
+        counts_written = state.table_counts
+        metadata_rewritten = False
         if has_text:
             from ocr_output_contract import assemble_pages, split_native_pages
 
@@ -15973,6 +15977,7 @@ class UnifiedPipeline:
             if len(final_bodies) == state.handle.page_count:
                 final_records = finalized_page_records(state, final_text)
                 final_page_outputs = [record.output for record in final_records]
+                self._record_table_counts(state, final_records)
                 emission_failures = [
                     page
                     for page in final_page_outputs
@@ -16024,6 +16029,7 @@ class UnifiedPipeline:
                         # flag too or the fix above is undone here.
                         provisional=figure_phase_failed,
                     )
+                    metadata_rewritten = True
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -16031,6 +16037,14 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+
+        # GH-993: a final recount that differs from the one already persisted (a caption
+        # table the figure phase added, a guard rewrite) must reach metadata.json, which
+        # the library reads. Same provisional flag as every other late writer (GH-503).
+        if has_text and not metadata_rewritten and state.table_counts != counts_written:
+            self._write_metadata(
+                state, final_result, output_dir, has_text, provisional=figure_phase_failed
+            )
 
         # PP-4: single authoritative fragment rewrite from the FINAL text (post-
         # strip_phantom_images, post-inline-figures for figure docs, plain post-
@@ -16081,6 +16095,12 @@ class UnifiedPipeline:
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.
         self._write_audit_log(state, doc_dir, records=final_records)
+
+        # GH-993: what a reader can actually use, next to the defect lines above.
+        if state.table_counts is not None and not self.config.quiet:
+            from socr.core.table_counts import TableCounts
+
+            console.print(f"  [blue]{TableCounts(**state.table_counts).summary_line()}[/blue]")
 
         return final_result
 
@@ -16220,7 +16240,14 @@ class UnifiedPipeline:
             )
             from ocr_output_contract import write_doc_metadata
 
-            write_doc_metadata(doc_dir, rel_key, meta)
+            # GH-993: the per-document file only. The root index keeps the contract
+            # shape plus its latches; the counts are a per-document record.
+            doc_meta = (
+                _LatchedDocMetadata(meta, {"tables": dict(state.table_counts)})
+                if state.table_counts is not None
+                else meta
+            )
+            write_doc_metadata(doc_dir, rel_key, doc_meta)
 
             # P4-R (cold review round 3, finding 5): the root entry and its
             # pending-retry latch are ONE write, made by ``RootIndex.record``.
@@ -16500,6 +16527,33 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.warning("table-trust note derivation failed (non-fatal): %s", exc)
             return None
+
+    def _record_table_counts(self, state: DocumentState, records: list) -> None:
+        """GH-993: derive the readable-table counts from the finalized page records.
+
+        Stored on ``state.table_counts`` for ``_write_metadata`` and the CLI line. Pure
+        derivation from what is already recorded (shipped text, page status and failure
+        mode, the table-distrust index); no detection. Non-fatal: a count that cannot be
+        derived leaves ``None``, which the metadata renders as an absent block.
+        """
+        try:
+            from socr.core.table_counts import count_document_tables
+            from socr.core.tables_trust import build_tables_trust
+
+            trust = build_tables_trust(
+                getattr(getattr(state, "handle", None), "filename", ""),
+                list(getattr(state, "events", [])),
+                label_unverified_pages=frozenset(self._label_unverified_pages(records)),
+                ditto_unresolved_pages=frozenset(self._ditto_unresolved_pages(records)),
+            )
+            counts = count_document_tables(
+                [r.output for r in records],
+                {num: page.reasons for num, page in trust.pages.items()},
+            )
+            state.table_counts = counts.to_dict()
+        except Exception as exc:
+            state.table_counts = None
+            logger.warning("table counts derivation failed (non-fatal): %s", exc)
 
     def _drop_chart_region_duplicates(self, state: DocumentState, extracted: list) -> list:
         """Remove extracted figures that re-localise an already-preserved chart region.

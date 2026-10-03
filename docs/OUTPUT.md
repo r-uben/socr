@@ -33,7 +33,7 @@ non-PDF input uses `<stem>_<ext>` so it cannot collide with a PDF of the same na
 | Path | Purpose | Written by |
 | --- | --- | --- |
 | `<stem>.md` | The document text. Byte-identical to the stitched `pages/` fragments. | `_phase_assemble` |
-| `metadata.json` (document) | Document status (`completed` / `partial` / `failed`), model, page count, run fingerprint, and an `error` note that names the document-level debts. | `_write_metadata` |
+| `metadata.json` (document) | Document status (`completed` / `partial` / `failed`), model, page count, run fingerprint, an `error` note that names the document-level debts, and a `tables` block of readable-table counts (section 2). | `_write_metadata` |
 | `metadata.json` (root) | Index over all documents in the run. The resume gate reads it. | `RootIndex.record` |
 | `pages/NNNNN.md` | One page body, five-digit page number. Written as soon as the page finishes. | `_flush_page_fragment` |
 | `pages/NNNNN.json` | Page sidecar. Section 2 says which fields to read. | `_flush_page_sidecar` |
@@ -82,10 +82,37 @@ Then read the details:
 | Which socr produced it? | `socr_version`, `socr_source_digest`, `run_fingerprint`, `input_checksum`. |
 | Was it a final result? | `terminal`. `false` is a mid-run crash-recovery copy. |
 | What does the document say overall? | `metadata.json`: `status` and `error`. |
+| How many tables can a reader use? | `metadata.json` `tables`: `shipped_text`, `verified_text`, `unverified_text`, `withheld` (definitions below). The CLI prints `tables: N as text (V verified, U unverified), W withheld` once per document; `socr library` copies the block into each `manifest.json` entry and prints the corpus total. |
 
 Other sidecar fields (`native_table_*`, `chart_*`, `d3_floor_png_ref`,
 `table_ladder_disposition`, `figure_refs`, `winning_output`) are the page decision
 flags the resume gate restores. They are listed in `_flush_page_sidecar`.
+
+### Readable tables (`tables` in `metadata.json`)
+
+Counts derived from what is already recorded: the shipped text of each page, its
+status and failure mode, and the table-distrust index. Nothing is detected anew.
+The unit is the markdown pipe-table block (`find_table_blocks`), so a table the
+producer fragmented counts once per fragment. Code: `core/table_counts.py`.
+
+| Key | Meaning |
+| --- | --- |
+| `shipped_text` | Table blocks in the shipped page text, whatever the page status: verified pages, WARNING pages whose text was kept, and ERROR pages that still carry a table block (a regional splice keeps tables beside a withheld one). |
+| `verified_text` | The part of `shipped_text` on a `success` page that carries no entry in `tables_trust.json`. |
+| `unverified_text` | The part of `shipped_text` on a page whose failure mode is `table_unverified` or that carries a live `table_ladder_unverified` flag. |
+| `withheld` | Table regions shipped only as a marker (usually with a page image): one per `[page N failed: unverifiable table ...]` or `[page N failed: invalid table emission ...]` marker. On a prose-recovery page (`[page N: unverified scan ...]`) the markers are per withheld run, not per table, so the page counts as one. |
+
+Not counted: tables flattened to prose (socr does not record them yet, #994) and
+chart pages routed to an image asset. `shipped_text - verified_text` includes
+rejected and flagged text, not only unverified text. The block is absent when it
+could not be derived: absent means not recorded, never zero. Output written before
+this block existed has none; `socr library` derives the same counts from the page
+sidecars and `tables_trust.json` for such a document.
+Derivation from sidecars never returns a confident number from incomplete evidence: an
+unreadable page sidecar makes the whole document's counts `null` in `manifest.json`, and an
+unreadable `tables_trust.json` makes `verified_text` and `unverified_text` `null`. The
+library total sums only documents whose four counts are all known and reports the rest as
+`tables_unknown_documents`.
 
 A document can be `partial` or `audit_failed` while most pages are clean. Use the
 page sidecars to find which pages carry the debt.
