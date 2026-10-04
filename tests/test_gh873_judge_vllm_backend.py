@@ -130,9 +130,39 @@ def test_post_chat_sends_an_openai_vision_message(monkeypatch):
     assert body["temperature"] == 0, "judging must not sample"
     content = body["messages"][0]["content"]
     kinds = [part["type"] for part in content]
-    assert kinds == ["text", "image_url"]
-    assert content[0]["text"] == "PROMPT"
-    assert content[1]["image_url"]["url"] == "data:image/png;base64,AAA"
+    assert kinds == ["image_url", "text"], (
+        "the page image must precede the prompt, as Ollama's qwen3-vl renderer "
+        "orders it; text-first made the same model reject pages it accepts"
+    )
+    assert content[0]["image_url"]["url"] == "data:image/png;base64,AAA"
+    assert content[1]["text"] == "PROMPT"
+
+
+#: A verbatim vLLM 0.x ``/v1/chat/completions`` body, recorded on the Bocconi
+#: HPC (job 682679, Qwen/Qwen3-VL-30B-A3B-Instruct, page 2 of the Forsythe
+#: smoke paper). It carries no page content: an accepting verdict has no issues.
+RECORDED_VLLM_ACCEPT = (
+    Path(__file__).parent / "fixtures" / "vllm_judge_accept_raw.json"
+).read_text()
+
+
+def test_a_recorded_vllm_body_parses_to_its_verdict(monkeypatch):
+    """The wire reply vLLM actually sends round-trips to the verdict it carries.
+
+    Pins the half of the debugging that cleared the parser: the reply is a
+    bare JSON object (no fences, no thinking), finish_reason ``stop``, and
+    ``parse_verdict`` reads it as written.
+    """
+    from socr.judge.judge import parse_verdict
+
+    monkeypatch.setattr(
+        vllm_judge.httpx, "post", lambda *a, **k: _Resp(json.loads(RECORDED_VLLM_ACCEPT))
+    )
+    raw = _post_chat(URL, SERVED, "P", "data:image/png;base64,AAA", 1.0)
+    verdict = parse_verdict(raw)
+    assert verdict.faithful is True
+    assert verdict.issues == []
+    assert verdict.suggested_action == "accept"
 
 
 def test_post_chat_returns_empty_string_when_the_server_sends_no_choices(monkeypatch):
