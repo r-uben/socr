@@ -215,22 +215,26 @@ def test_exhausted_adjudicator_leaves_the_page_unverified(tmp_path):
 
 
 class _KeyedRung:
-    """Delay and outcome chosen by the markdown handed in."""
+    """Delay and outcome chosen by the markdown handed in. The delay is VIRTUAL
+    (GH-1034): it advances ``clock`` instead of sleeping, so the budget comparison
+    cannot depend on scheduler latency."""
 
-    def __init__(self, rung_id, script):
+    def __init__(self, rung_id, script, clock):
         self.rung_id = rung_id
         self.executing = rung_id
         self._script = script
+        self._clock = clock
 
     def __call__(self, crop_path, markdown, prior_findings):
         delay, passes = self._script.get(markdown.strip(), (0.0, True))
-        time.sleep(delay)
+        self._clock.now += delay
         if passes:
             return RungResult(rung=self.rung_id, ok=True, verdict=_pass_verdict("high"))
         return RungResult(rung=self.rung_id, ok=False, error="slow peer gave no verdict")
 
 
-def _process(tmp_path, name, text_by_page, rungs, **cfg):
+def _process(tmp_path, name, text_by_page, make_rungs, **cfg):
+    """``make_rungs(clock)`` builds the rungs against the run's virtual clock."""
     pdf = _fixture_copy(tmp_path, name)
     pipeline = UnifiedPipeline(_make_config(table_judge_ladder=True, **cfg))
     with contextlib.ExitStack() as stack:
@@ -245,9 +249,12 @@ def _process(tmp_path, name, text_by_page, rungs, **cfg):
             # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
             patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
             patch.object(pipeline, "_plan_native_table_first", return_value=None),
-            patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs),
         ):
             stack.enter_context(p)
+        clock = stack.enter_context(_virtual_budget_clock())
+        stack.enter_context(
+            patch.object(pipeline, "_build_table_judge_rungs", return_value=make_rungs(clock))
+        )
         result, state = _process_and_capture(pipeline, pdf, tmp_path / f"{name}_out")
     return result, state, tmp_path / f"{name}_out"
 
@@ -262,14 +269,17 @@ def test_budget_exhaustion_demotes_page_and_document_through_process(tmp_path):
     is healthy and gets a fresh budget. Only the budget differs between the runs."""
     text = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_CORRECT_MD}
 
-    def rungs():
-        return [_KeyedRung("r0", {CLEAN_MD.strip(): (SLOW, False)}), _KeyedRung("r1", {})]
+    def rungs(clock):
+        return [
+            _KeyedRung("r0", {CLEAN_MD.strip(): (SLOW, False)}, clock),
+            _KeyedRung("r1", {}, clock),
+        ]
 
     tight, tight_state, tight_out = _process(
-        tmp_path, "tight", text, rungs(), table_judge_page_budget_sec=SLOW / 3
+        tmp_path, "tight", text, rungs, table_judge_page_budget_sec=SLOW / 3
     )
     loose, loose_state, loose_out = _process(
-        tmp_path, "loose", text, rungs(), table_judge_page_budget_sec=60.0
+        tmp_path, "loose", text, rungs, table_judge_page_budget_sec=60.0
     )
 
     assert loose.status == DocumentStatus.SUCCESS
@@ -290,7 +300,9 @@ def test_exhausted_cell_transcriber_cannot_lift_the_binding_clamp(tmp_path):
     text = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_SHIFTED_MD}
 
     def run(name, budget):
-        rungs = [_KeyedRung("r0", {SHIFT_SHIFTED_MD.strip(): (SLOW, True)})]
+        def rungs(clock):
+            return [_KeyedRung("r0", {SHIFT_SHIFTED_MD.strip(): (SLOW, True)}, clock)]
+
         asked: list = []
         with patch(
             "socr.judge.cell_transcribe.transcribe_cell",
