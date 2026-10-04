@@ -115,3 +115,24 @@ word cloud, a diagram, code, a flag, a text snippet):
 - Mutants killed in an external copy (canary on `socr.__file__`, uncapped anchor count 1): Roman off (7
   tests fail), ordinals off (5), bbox gate off (3), path check off (1), table skip off (4), fence skip off (3),
   tail nested under the flag (1), finalised early (3).
+
+## Review round 2
+
+- Hand-rolled block detection deleted. `insert_descriptions` parses with markdown-it-py (the library
+  GH-189's chart-region reconciler already uses; CommonMark plus the GFM `table` rule) and describes an image
+  only when its containing block is a top-level PARAGRAPH: never a table (with or without outer pipes), fenced
+  or indented code, HTML block, list item or block quote. A paragraph containing display math (`$$`, `\[`,
+  `\begin{`) is skipped. The description is spliced in after the paragraph's last source line; no other byte
+  changes. Tests added for two-column tables without outer pipes, multi-line indented code, and a
+  ```` `` literal```` line inside a fence, plus list, quote, HTML block and math paragraphs.
+- Path check: `crop_descriptions.read_asset` resolves the target, checks containment in `doc_dir/figures` and
+  reads the bytes in one function; the orchestrator no longer reads the file itself. Test for
+  `../../other/figures/figure_1_page1.png` (a sibling document's file) at both the pipeline and the reader.
+- Enrichment never changes the document: an exception in the describer logs, records a
+  `figure_description_failed` event and leaves the document SUCCESS with a FINAL record, identical to a run
+  with descriptions off. Only a BaseException (KeyboardInterrupt, process death) between the two metadata
+  writes leaves the provisional record. A model that was down for a run leaves a finished document without
+  descriptions; adding them later needs `--reprocess`.
+- Mutants killed (external copy, canary, anchor count 1): Roman off (7 fail), bbox gate off (3), reader
+  unchecked (3), tables rule off (6), top-level check off (2), math skip off (4), tail nested (1), finalised
+  early (3), exception moves status (1).

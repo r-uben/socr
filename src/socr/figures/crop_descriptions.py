@@ -232,91 +232,76 @@ def safe_asset_path(doc_dir: Path, target: str) -> Path | None:
     return path if is_inside(figures, path) else None
 
 
-_FENCE_RE = re.compile(r"^\s{0,3}(```+|~~~+)")
-_MATH_FENCE_RE = re.compile(r"^\s*(\$\$|\\\[|\\\]|\\begin\{|\\end\{)")
+def read_asset(doc_dir: Path, target: str) -> tuple[Path, bytes] | None:
+    """Resolve *target* inside ``doc_dir/figures`` and read it, in ONE function.
+
+    The containment check and the read share the resolved path, so no caller can read a file
+    whose location was checked under a different spelling. ``None`` when the target escapes
+    the figures directory or cannot be read.
+    """
+    path = safe_asset_path(doc_dir, target)
+    if path is None:
+        return None
+    resolved = path.resolve()
+    if not is_inside(doc_dir / "figures", resolved):
+        return None
+    try:
+        return resolved, resolved.read_bytes()
+    except OSError:
+        return None
 
 
-def _tableish(line: str) -> bool:
-    """A GFM or borderless table row: a leading pipe, or two or more pipes anywhere."""
-    st = line.strip()
-    return st.startswith("|") or st.count("|") >= 2
+# A paragraph holding any of these is display math and is never a candidate.
+_MATH_MARKERS = ("$$", "\\[", "\\]", "\\begin{", "\\end{")
+
+
+def _parse_blocks(body: str):
+    """Block tokens for *body*: CommonMark plus GFM tables, via markdown-it-py.
+
+    Block context is settled by a reference implementation, not re-derived here (the same
+    reuse GH-189's chart-region reconciler makes of this library).
+    """
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt("commonmark").enable("table").parse(body)
 
 
 def insert_descriptions(
     body: str,
     describe_ref: Callable[[str], str | None],
 ) -> str:
-    """Insert ``> *Figure description ...* text`` directly under each crop image ref.
+    """Insert ``> *Figure description ...* text`` after a paragraph holding a crop image ref.
 
-    ``describe_ref(target)`` is called once per crop ref that is not already followed by a
-    description and returns the validated text, or ``None`` to leave the ref alone.
-    Idempotent (a ref already followed by a description line is skipped, so a resumed
-    page is not re-described), and byte-preserving when nothing is inserted: the input
-    string is returned unchanged.
+    Only a TOP-LEVEL PARAGRAPH qualifies: an image inside a table, fenced or indented code,
+    an HTML block, a list item or a block quote is never touched, and neither is a paragraph
+    containing display math (``$$``, ``\\[``, ``\\begin{``). The paragraph's source line range comes from the parser,
+    and the description is spliced in after its last line; every other byte is unchanged.
 
-    A ref is SKIPPED, never described, when inserting beside it could change how other content
-    renders: inside a fenced or indented code block, a display-math block, an HTML comment, or
-    a table (a row with a pipe, bordered or not, or a line directly continuing one: GFM turns
-    that line into a row).
+    ``describe_ref(target)`` is called once per crop ref in such a paragraph that is not already
+    followed by a description and returns the validated text, or ``None`` to leave it alone.
+    Idempotent (the description is itself a block quote, which is never a candidate, and a
+    paragraph already followed by one is skipped) and returns *body* unchanged when nothing is
+    inserted.
     """
     if "![" not in body:
         return body
     lines = body.split("\n")
-    out: list[str] = []
-    fence = ""  # the opening fence marker while inside a fenced block
-    in_math = False
-    in_comment = False
-    changed = False
-    prev_tableish = False
-    prev_blank = True
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        blank = not line.strip()
-
-        skip = False
-        fm = _FENCE_RE.match(line)
-        if fence:
-            skip = True
-            if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence):
-                fence = ""
-        elif fm:
-            fence = fm.group(1)
-            skip = True
-        if not skip and _MATH_FENCE_RE.match(line):
-            # ``$$ ... $$`` on one line is complete; a lone opener/closer toggles the block.
-            if not (
-                line.strip().startswith("$$")
-                and line.strip().endswith("$$")
-                and len(line.strip()) > 2
-            ):
-                in_math = not in_math
-            skip = True
-        if in_math:
-            skip = True
-        if in_comment or "<!--" in line:
-            skip = True
-            if "<!--" in line and "-->" not in line.split("<!--", 1)[1]:
-                in_comment = True
-            if "-->" in line:
-                in_comment = False
-        tableish = _tableish(line)
-        indented_code = prev_blank and (line.startswith("    ") or line.startswith("\t"))
-        if tableish or (prev_tableish and not blank) or indented_code:
-            skip = True
-        prev_tableish = tableish or (prev_tableish and not blank)
-        prev_blank = blank
-        if skip:
+    tokens = _parse_blocks(body)
+    inserts: list[tuple[int, list[str]]] = []
+    for idx, tok in enumerate(tokens):
+        if tok.type != "paragraph_open" or tok.level != 0 or not tok.map:
             continue
-
-        targets = [m.group(1) for m in _REF_RE.finditer(line)]
-        crops = [t for t in targets if is_crop_asset(t)]
+        inline = tokens[idx + 1]
+        if any(m in (inline.content or "") for m in _MATH_MARKERS):
+            continue
+        crops = [
+            child.attrGet("src") or "" for child in (inline.children or []) if child.type == "image"
+        ]
+        crops = [c for c in crops if is_crop_asset(c)]
         if not crops:
             continue
-        # Already described (resume / second pass)? Look past blank lines.
-        j = i
+        last = tok.map[1]  # first line AFTER the paragraph
+        j = last
         while j < len(lines) and not lines[j].strip():
             j += 1
         if j < len(lines) and lines[j].startswith(DESCRIPTION_PREFIX):
@@ -324,11 +309,15 @@ def insert_descriptions(
         texts = [t for t in (describe_ref(c) for c in crops) if t]
         if not texts:
             continue
+        added: list[str] = []
         for text in texts:
-            out.extend(["", f"{DESCRIPTION_PREFIX} {text}"])
-        # Keep a blank line between the description and whatever follows, and make sure the
-        # next line cannot lazily continue the blockquote.
-        if i < len(lines) and lines[i].strip():
-            out.append("")
-        changed = True
-    return "\n".join(out) if changed else body
+            added.extend(["", f"{DESCRIPTION_PREFIX} {text}"])
+        # A blank line after, so the next line cannot lazily continue the block quote.
+        if last < len(lines) and lines[last].strip():
+            added.append("")
+        inserts.append((last, added))
+    if not inserts:
+        return body
+    for at, added in reversed(inserts):
+        lines[at:at] = added
+    return "\n".join(lines)

@@ -16963,8 +16963,8 @@ class UnifiedPipeline:
             # extracted-figure crops are in the text, and BEFORE the metadata is finalised below
             # and before the final-body guard / fragment rewrite / sidecar flush, so every
             # on-disk copy carries the same bytes and the record only looks complete once the
-            # descriptions are in. Optional enrichment: an exception is logged and leaves the
-            # record provisional (a re-run redoes it from the cache); it is never fatal.
+            # descriptions are in. Optional enrichment: an exception is logged and an
+            # event recorded; it is never fatal and never moves status.
             if has_text and self._crop_descriptions_enabled():
                 try:
                     described_text = self._describe_crop_refs(
@@ -16974,8 +16974,22 @@ class UnifiedPipeline:
                         figures=list(getattr(final_result, "figures", []) or []),
                     )
                 except Exception as exc:
+                    # Enrichment never changes the document: no status change, and the record is
+                    # finalised below like any other. Only a genuine interruption (a
+                    # BaseException: KeyboardInterrupt, process death) leaves it provisional.
+                    # Adding descriptions after this needs --reprocess.
+                    from socr.core.audit_log import AuditEvent as _DescFailEvent
+
                     logger.warning("figure descriptions failed (%s); text kept unchanged", exc)
-                    figure_phase_failed = True
+                    state.events.append(
+                        _DescFailEvent(
+                            page_num=0,
+                            kind="figure_description_failed",
+                            engine="",
+                            detail=f"{type(exc).__name__}: {exc}",
+                            data={"reason": "exception"},
+                        )
+                    )
                     described_text = final_text
                 if described_text != final_text:
                     final_text = described_text
@@ -18050,10 +18064,11 @@ class UnifiedPipeline:
                 name = Path(target).name
                 if legacy_owns_extracted and name.startswith("figure_"):
                     return None
-                path = _crop_descriptions.safe_asset_path(doc_dir, target)
-                if path is None:
+                asset = _crop_descriptions.read_asset(doc_dir, target)
+                if asset is None:
                     refuse(name, page_num, "path_outside_figures_dir")
                     return None
+                path, data = asset
                 geo = geometry.get(name)
                 if geo is None or geo[1] is None:
                     refuse(name, page_num, "no_bbox")
@@ -18066,10 +18081,6 @@ class UnifiedPipeline:
                 )
                 if _crop_descriptions.is_page_sized(fraction):
                     refuse(name, page_num, "page_sized" if fraction is not None else "no_page_size")
-                    return None
-                try:
-                    data = path.read_bytes()
-                except OSError:
                     return None
                 key = f"{hashlib.sha256(data).hexdigest()}:{_crop_descriptions.PROMPT_VERSION}:{model}"
                 hit = cache.get(key)

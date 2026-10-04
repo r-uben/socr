@@ -241,9 +241,10 @@ def test_insert_never_calls_the_model_for_page_sized_assets() -> None:
 def test_insert_places_the_description_directly_under_the_crop_ref() -> None:
     body = "Before\n![Chart region 1](figures/chart_region_p1_1.png)\nAfter"
     out = cd.insert_descriptions(body, lambda t: CLEAN)
+    # one paragraph: the description goes after its LAST line, every other byte unchanged
     assert out == (
-        "Before\n![Chart region 1](figures/chart_region_p1_1.png)\n\n"
-        f"{cd.DESCRIPTION_PREFIX} {CLEAN}\n\nAfter"
+        "Before\n![Chart region 1](figures/chart_region_p1_1.png)\nAfter\n\n"
+        f"{cd.DESCRIPTION_PREFIX} {CLEAN}"
     )
     assert "model-generated, non-authoritative gist, no values" in out
 
@@ -257,7 +258,7 @@ def test_insert_is_idempotent_and_does_not_recall_the_model() -> None:
 
 
 def test_insert_ignores_refs_in_code_fences_and_table_rows() -> None:
-    body = "```\n![c](figures/chart_region_p1_1.png)\n```\n| ![c](figures/chart_region_p1_2.png) |"
+    body = "```\n![c](figures/chart_region_p1_1.png)\n```\n\n| a |\n| - |\n| ![c](figures/chart_region_p1_2.png) |"
     calls: list[str] = []
     assert cd.insert_descriptions(body, lambda t: calls.append(t) or CLEAN) == body
     assert calls == []
@@ -623,7 +624,7 @@ REF = "![r](figures/chart_region_p1_1.png)"
     "body",
     [
         f"| a | b |\n| - | - |\n| {REF} | x |",
-        f"a | b | c\n{REF} | y | z",  # borderless table row
+        f"a | b | c\n--- | --- | ---\n{REF} | y | z",  # borderless table row
         f"| a | b |\n| - | - |\n| 1 | 2 |\n{REF}",  # directly continues a GFM table: becomes a row
         f"```\n{REF}\n```",
         f"~~~python\n{REF}\n~~~",
@@ -633,6 +634,15 @@ REF = "![r](figures/chart_region_p1_1.png)"
         f"\\begin{{align}}\n{REF}\n\\end{{align}}",
         f"<!--\n{REF}\n-->",
         f"<!-- {REF} -->",
+        f"a | b\n--- | ---\n{REF} | x",  # two-column table without outer pipes
+        f"| a |\n| - |\n| {REF} |",
+        f"para\n\n    line one\n    {REF}\n    line three",  # multi-line indented code
+        f"````\n``` literal\n{REF}\n````",  # a shorter inner fence is content, not a close
+        f"``` \n`` literal\n{REF}\n```",  # '`` literal' must not close the fence
+        f"- item\n\n  {REF}",  # list item
+        f"> {REF}",  # block quote
+        f"<div>\n{REF}\n</div>",  # html block
+        f"text $$ {REF} $$ text",  # display math in a paragraph
     ],
     ids=[
         "gfm-row",
@@ -646,6 +656,15 @@ REF = "![r](figures/chart_region_p1_1.png)"
         "begin-end-math",
         "multiline-comment",
         "inline-comment",
+        "two-col-table-no-outer-pipes",
+        "one-col-table",
+        "multiline-indented-code",
+        "inner-shorter-fence",
+        "double-backtick-literal-line",
+        "list-item",
+        "block-quote",
+        "html-block",
+        "paragraph-with-display-math",
     ],
 )
 def test_no_description_is_inserted_inside_a_protected_block(body: str) -> None:
@@ -883,20 +902,49 @@ def test_e2e_interruption_before_descriptions_leaves_the_record_provisional(
     assert seen and all(seen), "no write may finalise the record before the descriptions exist"
 
 
-def test_e2e_a_failing_description_pass_leaves_the_record_provisional(
+def test_e2e_a_failing_description_pass_changes_nothing_about_the_document(
     tmp_path, monkeypatch
 ) -> None:
+    """Enrichment never moves status: an exception in the describer leaves the document SUCCESS
+    and the record FINAL, identical to a run with descriptions off."""
     seen = _spy_metadata(monkeypatch)
 
     def boom(self, *a, **k):
         raise RuntimeError("model host exploded")
 
-    monkeypatch.setattr(UnifiedPipeline, "_describe_crop_refs", boom)
-    _run_process(tmp_path, monkeypatch, "fail", _Model([CLEAN]))
-    assert seen and all(seen)
+    with monkeypatch.context() as m:
+        m.setattr(UnifiedPipeline, "_describe_crop_refs", boom)
+        _, res_fail, md_fail, frag_fail, side_fail, _, out_fail = _run_process(
+            tmp_path, monkeypatch, "fail", _Model([CLEAN])
+        )
+    assert seen[0] is True and seen[-1] is False, seen
+    audit = json.loads(next(iter(out_fail.rglob("audit_log.json"))).read_text())
+    assert any(e["kind"] == "figure_description_failed" for e in audit["events"])
+    _, res_off, md_off, frag_off, side_off, _, _ = _run_process(
+        tmp_path, monkeypatch, "off3", _Model([CLEAN]), describe_figure_crops=False
+    )
+    assert (res_fail.status, res_fail.audit_passed) == (res_off.status, res_off.audit_passed)
+    assert side_fail["status"] == side_off["status"]
+    assert md_fail == md_off and frag_fail == frag_off
 
 
 def test_e2e_a_completed_description_pass_finalises_the_record(tmp_path, monkeypatch) -> None:
     seen = _spy_metadata(monkeypatch)
     _run_process(tmp_path, monkeypatch, "done", _Model([CLEAN]))
     assert seen[0] is True and seen[-1] is False
+
+
+def test_a_sibling_documents_figure_is_refused_at_the_reader(tmp_path, monkeypatch) -> None:
+    pipe, state, out, doc_dir, _ = _doc(tmp_path)
+    other = out / "other" / "figures"
+    other.mkdir(parents=True)
+    (other / "figure_1_page1.png").write_bytes(b"\x89PNG other doc")
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    target = "../../other/figures/figure_1_page1.png"
+    text = assemble_pages([f"p\n\n![r]({target})", "q"], page_numbers=[1, 2])
+    assert pipe._describe_crop_refs(state, out, text) == text
+    assert model.calls == []
+    # and locally, in the module's reader
+    assert cd.read_asset(doc_dir, target) is None
+    assert cd.read_asset(doc_dir, "figures/chart_region_p1_1.png") is not None
