@@ -475,12 +475,15 @@ def _vllm_read_crop(
             "messages": [
                 {
                     "role": "user",
+                    # Image first, as Ollama's qwen3-vl renderer orders it for
+                    # ``_ollama_read_crop``; see the same note in
+                    # ``socr.judge.vllm_judge._post_chat``.
                     "content": [
-                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{image_b64}"},
                         },
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],

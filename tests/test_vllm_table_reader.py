@@ -95,8 +95,10 @@ class TestVllmTableReaderRead:
         # Hits the OpenAI chat endpoint, not Ollama's /api/generate.
         assert captured["url"] == "http://h:8000/v1/chat/completions"
         content = captured["json"]["messages"][0]["content"]
-        kinds = {part["type"] for part in content}
-        assert kinds == {"text", "image_url"}
+        kinds = [part["type"] for part in content]
+        assert kinds == ["image_url", "text"], (
+            "the crop must precede the prompt, as Ollama's qwen3-vl renderer orders it"
+        )
         img = next(p for p in content if p["type"] == "image_url")
         assert img["image_url"]["url"].startswith("data:image/png;base64,")
         assert captured["json"]["temperature"] == 0

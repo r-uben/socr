@@ -36,7 +36,18 @@ prompt+transcription→image.
 | text first   | 3 / 18   |
 | image first  | 11 / 18  |
 
-13 pages changed verdict: 12 rejected→accepted and 1 accepted→rejected (p14).
+10 pages changed verdict: 9 rejected→accepted (pages 7, 8, 27, 30, 32, 34, 35,
+38, 40) and 1 accepted→rejected (page 14).
+
+A higher acceptance rate is not, by itself, evidence of accuracy: a judge that
+accepts more could simply be laxer. The corroboration is external to this A/B.
+The Mac Ollama judge, a different serving stack, accepted pages 7, 8, 27, 30, 32, 34,
+35, 38 and 40 (Mac run under `archive-scan/redo-out`). The qwen readings it
+judged are near-identical to the HPC readings judged here (length within a few
+characters; page 35 byte-identical). Ollama's `qwen3-vl:30b-a3b-instruct` itself
+accepted the HPC readings of pages 27, 35 and 40 verbatim. Whether those
+readings are actually correct was not hand-checked.
+
 Image order does not explain the whole gap to Ollama. Image resolution is a
 second factor: at 150 dpi, text-first accepted pages 27 and 40 as well. That
 remainder is not addressed here.
