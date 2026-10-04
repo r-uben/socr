@@ -231,6 +231,20 @@ def common_options(f):
             "Caption failures never overwrite already-written OCR text."
         ),
     )(f)
+    f = click.option(
+        "--figure-descriptions/--no-figure-descriptions",
+        "figure_descriptions",
+        default=None,
+        help=(
+            "Add a short model-written, number-free description under each figure crop "
+            "(chart regions and extracted figures; never whole-page images). ON by default. "
+            "Each is labelled model-generated and non-authoritative, validated to contain "
+            "no digit or spelled number, and DROPPED if the validator fails after one "
+            "retry. Local model only (allowed under --strict-local; no cloud is ever used); "
+            "--native-only produces none. Never affects page "
+            "status. Disable with --no-figure-descriptions."
+        ),
+    )(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
     f = click.option("-q", "--quiet", is_flag=True, help="Suppress non-error output")(f)
@@ -378,6 +392,7 @@ def build_config(
     qwen_model: str | None = None,
     save_figures: bool = False,
     describe_figures: bool = False,
+    figure_descriptions: bool | None = None,
     reprocess: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
@@ -622,6 +637,8 @@ def build_config(
     # spelling is an explicit instruction and wins.
     if table_judge_ladder is not None:
         config.table_judge_ladder = bool(table_judge_ladder)
+    if figure_descriptions is not None and _explicitly_given("figure_descriptions"):
+        config.describe_figure_crops = bool(figure_descriptions)
 
     if output_dir:
         config.output_dir = output_dir

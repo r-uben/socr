@@ -51,6 +51,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "socr"
 _FIELD_ALIASES = {
     "primary": "primary_engine",
     "dpi": "render_dpi",
+    "figure_descriptions": "describe_figure_crops",
     # `--hpc-sequential` writes a NESTED field. Checking the parent `hpc` object
     # instead would let any unrelated HPC setting certify this flag as live --
     # and would even count `config.hpc.enabled = True` itself, since the parent
@@ -150,6 +151,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "dpi": (AGENTIC, "render_dpi; page rasterisation and the fingerprint"),
     "save_figures": (AGENTIC, "gates the figure phase in _phase_assemble"),
     "describe_figures": (AGENTIC, "gates the caption engine in the figure phase"),
+    "figure_descriptions": (AGENTIC, "describe_figure_crops; read by _describe_crop_refs"),
     "write_manifest": (AGENTIC, "manifest is written after assemble"),
     "primary": (AGENTIC, "primary_engine; the ladder's starting rung"),
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),

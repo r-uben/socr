@@ -447,6 +447,27 @@ def ollama_connection_guard():
 
 
 @pytest.fixture(autouse=True)
+def _figure_description_model_is_absent(monkeypatch):
+    """Number-free figure descriptions are ON by default and call a local VLM.
+
+    Without this, any test whose document carries a chart-region crop would reach a live
+    Ollama locally (and find none in CI). The model is absent for every test; the tests of
+    the feature itself install their own stub over this one.
+    """
+    from socr.pipeline import orchestrator as _orch
+
+    def _absent(self):
+        def ask(path, prompt):
+            return None
+
+        ask.model = "absent-for-tests"
+        return ask
+
+    monkeypatch.setattr(_orch.UnifiedPipeline, "_figure_description_ask", _absent)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_live_ollama():
     with ollama_connection_guard() as violations:
         yield

@@ -161,6 +161,7 @@ _UNEXERCISED = {
     # covered directly by tests/test_gh222_probe_host.py.
     "ollama_host",
     "describe_figures",  # read by the figure-description lane, not reached here
+    "describe_figure_crops",  # read by `_crop_descriptions_enabled`; this fixture has no crop ref
     # #635 Stage 1: read by `_derive_chart_counts` -> `verify_panel`, which runs
     # only for a page that HAS a detected chart region and an empty chart-derived
     # grid. This fixture's page has neither, so the field is genuinely unexercised
