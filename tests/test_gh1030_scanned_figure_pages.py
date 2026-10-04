@@ -106,25 +106,17 @@ def test_caption_shape_is_short_or_followed_by_figure_furniture() -> None:
     assert has_figure_caption("FIGURE 1\nFactors Contributing to the Delay")
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        "Figure 3. We find no effect.",
-        "Figure 3. This shows the effect.",
-        "Figure 3. Prices converge in every market we study here.",
-        "Fig. 2: The estimates are small.",
-    ],
-)
-def test_a_sentence_after_the_label_fires_only_with_figure_furniture_after_it(line: str) -> None:
-    assert not has_figure_caption(f"intro\n{line}\nNext sentence of the paper.")
-    assert has_figure_caption(f"intro\n{line}\n 50\n 40")
-    assert has_figure_caption(f"intro\n{line}\nP\nr\ni")
-
-
-def test_a_title_ending_in_a_period_is_still_a_caption() -> None:
-    # The measured captions: 6 to 7 words, many ending in a period, none a clause.
-    assert has_figure_caption("FIGURE 5.-Market 5-Series BC, Parameter Set I.\nThis content")
-    assert has_figure_caption("Figure 4. Power under trend correction, R2 = p2.\nText")
+def test_a_short_prose_line_opening_with_a_label_fires_but_changes_nothing_but_an_image_link() -> (
+    None
+):
+    """Accepted false fire, harm-bounded: only ONE image ref is added, the text is untouched."""
+    prose = "Figure 3. We find no effect.\nThe next sentence of the paper follows here."
+    assert has_figure_caption(prose)
+    out = _out(prose, engine="native")
+    got = manifest._apply_scanned_figure_guard(out, _p(REF))
+    assert got.text == prose + "\n\n" + REF
+    assert got.text.removesuffix("\n\n" + REF) == prose, "byte-identical outside the image link"
+    assert fence_spelled_runs(prose) == (prose, 0), "no junk run, so the fence does not fire"
 
 
 # ---------------------------------------------------------------------------
@@ -562,3 +554,26 @@ def test_report_derives_from_the_finalised_text_not_the_render_event() -> None:
     assert "page(s) 1: scanned figure page; the page image ships" in note
     assert "page(s) 2:" in note and "without a reference" in note
     assert "page(s) 3:" in note and "not saved" in note
+
+
+def test_titles_ending_in_a_period_are_captions() -> None:
+    assert has_figure_caption("FIGURE 5.-Market 5-Series BC, Parameter Set I.\nThis content")
+    assert has_figure_caption("Figure 2. Annual reports.\nText")
+
+
+def test_fence_abstains_inside_an_existing_code_block() -> None:
+    text = f"```python\n{_RUN}\n```"
+    assert fence_spelled_runs(text) == (text, 0)
+    tilde = f"~~~\n{_RUN}\n~~~"
+    assert fence_spelled_runs(tilde) == (tilde, 0)
+    # After the block closes, a run outside it still fences.
+    assert fence_spelled_runs(f"```\ncode\n```\n{_RUN}")[1] == MIN_SPELLED_RUN
+
+
+def test_fence_delimiter_is_longer_than_any_backtick_run_on_the_page() -> None:
+    page = f"Inline ```` four ticks ```` in prose.\n{_RUN}\nend"
+    fenced, n = fence_spelled_runs(page)
+    assert n == MIN_SPELLED_RUN
+    assert "`````text" in fenced and "\n`````\n" in fenced, "delimiter is 5 backticks"
+    plain, _ = fence_spelled_runs(f"xx\n{_RUN}\nyy")
+    assert "\n```text\n" in plain and "\n```\n" in plain

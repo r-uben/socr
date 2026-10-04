@@ -168,3 +168,27 @@ figure). Full suite: 6879 passed, 2 skipped, 4 xfailed.
 - Mutants (baseline 55): fence back to an HTML comment 1 fail; sentence gate removed 3; LaTeX depth
   not tracked 3; Unicode bullets dropped 3. (A first LaTeX mutant that removed only the per-line
   "latex" flag survived: the depth already covers the run lines, so it was equivalent.)
+
+## Round 4 (review of bcc69c89): the sentence gate is removed
+
+Round 3's gate (subject-pronoun / verb / word-count lists) is deleted with its tests and mutant.
+Review showed it both misses ("Figure 3. Prices rise." then a new paragraph; wrapped sentences
+without a period) and misfires ("Figure 2. Annual reports." read "reports" as a verb). No word list
+separates a short sentence from a short title.
+
+Decision: the detector is the round-2 rule (label at the start of a line + terminator, then the
+50-character line or figure-furniture-after rule and the lowercase-continuation rule). Re-scored with
+the shipped function on the 98 pages: precision 17/17, recall 17/19, 0 table / 0 prose false fires.
+
+Why precision beyond the measured 17/17 is not worth more heuristics: a false caption fire is
+harm-bounded. It only ADDS one page-image reference beside unchanged text. The fence is an independent
+gate (runs of 7 or more one-character lines, outside tables, math and lists), so a prose page that
+opens a line with "Figure 3. We find ..." and has no such run is byte-identical apart from one image
+link. Pinned by `test_a_short_prose_line_opening_with_a_label_fires_but_changes_nothing_but_an_image_link`.
+Residual, accepted: short prose lines that open with a label can add that image link.
+
+Also in round 4 (cubic P2): the fence no longer corrupts pages that hold fenced code. Runs inside an
+existing ``` / ~~~ block abstain, and the delimiter is one backtick longer than the longest backtick
+run on the page (3 when there is none), per CommonMark. Mutants: existing-fence check removed 1 fail;
+fixed 3-backtick delimiter 1 fail. The other cubic P2 (`png_saved` recorded before the guard) is not
+true at this head: `png_saved` now means "rendered" and the note / CLI / metadata read the finalised text.

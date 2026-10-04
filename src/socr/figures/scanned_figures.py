@@ -48,53 +48,35 @@ MIN_SPELLED_RUN = 7
 #: The fence is VISIBLE: a note line and a ``text`` code block, never an HTML comment (a comment
 #: vanishes in every rendered view, which turns "kept verbatim" into silent loss for a reader).
 SPELLED_FENCE_NOTE = "[unreadable figure text from scan, kept verbatim]"
+#: The delimiter is three backticks unless the page already holds a longer backtick run, in
+#: which case it is one longer than the longest (CommonMark: a closing fence must be at least as
+#: long as the opening one, so a shorter delimiter could be closed early by page content).
 SPELLED_FENCE_OPEN = "```text"
 SPELLED_FENCE_CLOSE = "```"
 
 
-#: The most words in the text after the label of any caption in the sample (7, Hansen p11). A
-#: remainder longer than this that ends in a period reads as a sentence, not a caption title.
-MAX_CAPTION_WORDS = 7
-
-#: Words that make the remainder a clause rather than a title: a subject pronoun opening it, or a
-#: finite verb of the kind a results sentence uses. None occurs in any caption of the sample.
-_CLAUSE_SUBJECTS = frozenset({"we", "i", "they", "it", "this", "these", "those", "our", "there"})
-_CLAUSE_VERBS = frozenset(
-    {
-        "is",
-        "are",
-        "was",
-        "were",
-        "has",
-        "have",
-        "had",
-        "find",
-        "found",
-        "show",
-        "shows",
-        "showed",
-        "report",
-        "reports",
-        "suggest",
-        "suggests",
-        "present",
-        "presents",
-    }
-)
+def _fence_delimiters(lines: list[str]) -> tuple[str, str]:
+    longest = max((len(m) for ln in lines for m in re.findall(r"`+", ln)), default=0)
+    ticks = "`" * max(3, longest + 1)
+    return f"{ticks}text", ticks
 
 
-def _reads_as_sentence(remainder: str) -> bool:
-    """Whether the text after ``Figure N.`` is a sentence: a clause, or a long run ending in '.'."""
-    text = remainder.strip(" \t-\u2013\u2014.:")
-    words = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
-    if not words or not remainder.rstrip().endswith("."):
-        return False
-    lowered = [w.lower() for w in words]
-    return (
-        lowered[0] in _CLAUSE_SUBJECTS
-        or bool(_CLAUSE_VERBS.intersection(lowered))
-        or len(remainder.split()) > MAX_CAPTION_WORDS
-    )
+def _code_fence_lines(lines: list[str]) -> set[int]:
+    """Indices of lines inside, opening or closing an existing fenced code block."""
+    inside: set[int] = set()
+    marker = ""
+    for i, ln in enumerate(lines):
+        stripped = ln.lstrip()
+        char = stripped[:1]
+        run = len(stripped) - len(stripped.lstrip(char)) if char in "`~" else 0
+        if marker:
+            inside.add(i)
+            if char == marker[0] and run >= len(marker) and not stripped[run:].strip():
+                marker = ""
+        elif run >= 3:
+            inside.add(i)
+            marker = char * run
+    return inside
 
 
 def _is_figure_junk(line: str) -> bool:
@@ -109,6 +91,14 @@ def has_figure_caption(layer_text: str) -> bool:
     A label at the start of a line is necessary, not sufficient: it must be short
     (``MAX_CAPTION_LINE``) or be followed by figure furniture, and a label that ENDS its line
     must not be followed by a lowercase continuation ("Figure 3" / "shows that ...").
+
+    Deliberately NOT a sentence classifier. A prose line that opens with ``Figure 3. We find ...``
+    and is short can still fire, and no word list can tell it from a short title without
+    misreading real captions ("Figure 2. Annual reports."). That is harm-bounded and accepted: a
+    false fire only ADDS one page-image reference beside unchanged text (the fence is a separate
+    gate, on runs of ``MIN_SPELLED_RUN`` or more one-character lines outside tables, math and
+    lists, so a prose page without such runs is otherwise byte-identical). Precision beyond the
+    measured 17/17 is not worth more heuristics.
     """
     if not layer_text:
         return False
@@ -120,13 +110,7 @@ def has_figure_caption(layer_text: str) -> bool:
         nxt = next((x.strip() for x in lines[idx + 1 :] if x.strip()), "")
         if not line[m.end() :].strip() and len(nxt) > 1 and nxt[0].islower():
             continue
-        junk_follows = bool(nxt) and _is_figure_junk(nxt)
-        if _reads_as_sentence(line[m.end() :]):
-            # "Figure 3. We find no effect." -- a sentence fires only with figure furniture after it.
-            if junk_follows:
-                return True
-            continue
-        if len(line.strip()) <= MAX_CAPTION_LINE or junk_follows:
+        if len(line.strip()) <= MAX_CAPTION_LINE or (nxt and _is_figure_junk(nxt)):
             return True
     return False
 
@@ -201,6 +185,8 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
     lines = text.split("\n")
     n = len(lines)
     math = _math_lines(lines)
+    code = _code_fence_lines(lines)
+    fence_open, fence_close = _fence_delimiters(lines)
     markers = _bullet_markers()
 
     def neighbour(i: int, step: int) -> str:
@@ -228,7 +214,7 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
         before, after = neighbour(i, -1), neighbour(last, 1)
         eligible = (
             len(chars) >= MIN_SPELLED_RUN
-            and not any(k in math for k in range(i, last + 1))
+            and not any(k in math or k in code for k in range(i, last + 1))
             and not before.lstrip().startswith("|")
             and not after.lstrip().startswith("|")
             and not _is_list_item(before, markers)
@@ -236,7 +222,7 @@ def fence_spelled_runs(text: str) -> tuple[str, int]:
             and not all(c in markers for c in chars)
         )
         if eligible:
-            out.extend([SPELLED_FENCE_NOTE, SPELLED_FENCE_OPEN, *run, SPELLED_FENCE_CLOSE])
+            out.extend([SPELLED_FENCE_NOTE, fence_open, *run, fence_close])
             fenced += len(chars)
         else:
             out.extend(run)
