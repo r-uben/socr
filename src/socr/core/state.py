@@ -268,6 +268,12 @@ class PageState:
     #: #1027: image ref for the invisible-OCR-layer floor. Not persisted to the sidecar:
     #: that floor ships ``audit_passed=False``, so a resume never restores the page.
     invisible_scan_png_ref: str = ""
+    #: #1030: image ref for a scanned page whose text layer carries a figure caption. The page
+    #: ships its own text PLUS this image (the figure box cannot be isolated on a scan, so the
+    #: asset is the whole page). Persisted to the sidecar; ``scanned_figure_render_failed`` is not
+    #: (a failed page is WARNING and is re-processed on resume).
+    scanned_figure_png_ref: str = ""
+    scanned_figure_render_failed: bool = False
     #: #1027: the per-rung summary a skipped (resumed) page's sidecar carried. A skipped page
     #: ran no rung this run, so re-flushing must keep the original record instead of
     #: replacing it with the single restored winner.

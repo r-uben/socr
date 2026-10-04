@@ -4213,6 +4213,56 @@ def _apply_chart_region_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, status=PageStatus.WARNING)
 
 
+def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
+    """#1030: a scanned page whose layer names a figure ships the page image beside its text.
+
+    A scan has no vector marks, so no chart lane claims its figures and the figure extractor
+    skips it; the chart is otherwise whatever the layer or a model made of it, or nothing. The
+    figure box cannot be isolated on a scan, so the asset is the whole page and the page's own
+    text stays: nothing is removed from it except, when the text that ships IS the invisible
+    layer (engine ``native*``), runs of one-character lines (an axis title spelled down the
+    page), which are FENCED verbatim rather than dropped.
+
+    Abstains (returns *output* untouched) only when the page already ships an image of itself
+    (a floor PNG, or a marker that carries one). A marker with NO image and an empty page DO get
+    the ref: the render succeeded, and a captioned scan must not end with neither text nor image.
+    A marker plus one image block still reads as a marker to the disposition classifier. Applied on the FINALIZED
+    copy so the flush, the stitch and a resume replay see one text; idempotent on its own ref.
+
+    A render failure is status-only, like the chart-region guard: SUCCESS becomes WARNING, the
+    text and ``audit_passed`` (the winner-selection flag) are untouched.
+    """
+    ref = getattr(p, "scanned_figure_png_ref", "")
+    failed = bool(getattr(p, "scanned_figure_render_failed", False))
+    if failed and output.status is PageStatus.SUCCESS:
+        output = replace(output, status=PageStatus.WARNING)
+    if not ref:
+        return output
+    text = output.text or ""
+    is_marker = is_page_failed_marker(text)
+    if ref in text or any(
+        getattr(p, name, "")
+        for name in ("d3_floor_png_ref", "rotated_shred_png_ref", "invisible_scan_png_ref")
+    ):
+        return output
+    if is_marker and any(ln.lstrip().startswith("![") for ln in text.splitlines()):
+        # A marker that already carries its own image: a second block would stop it reading as
+        # "marker plus one image" to the disposition classifier.
+        return output
+    if not text.strip():
+        return replace(output, text=ref)
+    if not is_marker and (output.engine or "").startswith("native"):
+        from socr.figures.scanned_figures import fence_spelled_runs
+
+        text, _ = fence_spelled_runs(text)
+    from socr.figures.scanned_figures import close_open_code_fence
+
+    # A fence the page left open runs to the end of the document: close it, or the image renders
+    # as literal code while the report says it shipped.
+    text = close_open_code_fence(text)
+    return replace(output, text=f"{text.rstrip()}\n\n{ref}")
+
+
 def _apply_halt_unprocessed_guard(output: PageOutput, p) -> PageOutput:
     """GH-995: a page the halted loop never reached is not a clean, finished page.
 
@@ -4359,6 +4409,7 @@ def _select_and_finalize_page(
       7. _apply_label_unverified_guard
       8. _apply_ditto_guard
       9. _apply_chart_region_guard
+      9b. _apply_scanned_figure_guard (#1030)
       10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -4378,6 +4429,7 @@ def _select_and_finalize_page(
         # but it is fixed here so the chain reads in one direction.
         output = _apply_chart_region_guard(output, p)
         output = _apply_halt_unprocessed_guard(output, p)
+        output = _apply_scanned_figure_guard(output, p)
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``

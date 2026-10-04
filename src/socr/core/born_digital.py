@@ -2443,7 +2443,8 @@ def detect_garbled_math(page, text: str) -> GarbledMathSignals:
 #: Glyphs a PDF uses to draw an unordered list marker. Their presence in the text
 #: layer means the page *has* a list; flat text can only render them as literal
 #: characters mid-paragraph, which is the GH-127 symptom.
-_LIST_MARKER_GLYPHS = frozenset("•‣◦▪●⁃⁌⁍")
+LIST_MARKER_GLYPHS = frozenset("•‣◦▪●⁃⁌⁍")
+_LIST_MARKER_GLYPHS = LIST_MARKER_GLYPHS  # private name kept for existing in-module uses
 
 #: A markdown list item or ATX heading in the emitted text. If the emitted text
 #: already carries these, nothing was lost and no signal fires.
