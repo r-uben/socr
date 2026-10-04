@@ -192,3 +192,9 @@ existing ``` / ~~~ block abstain, and the delimiter is one backtick longer than 
 run on the page (3 when there is none), per CommonMark. Mutants: existing-fence check removed 1 fail;
 fixed 3-backtick delimiter 1 fail. The other cubic P2 (`png_saved` recorded before the guard) is not
 true at this head: `png_saved` now means "rendered" and the note / CLI / metadata read the finalised text.
+
+Round 5 (Astra on dea003ae): an unclosed code fence runs to the end of the document, so the appended
+image ref rendered as literal code while the report said it shipped. The guard now closes an open
+``` / ~~~ block (matching delimiter, own line) before appending the ref, using the same tracker the run
+fencing uses (`close_open_code_fence`). Pinned for ```, ~~~ and a 4-backtick fence. Mutant (close
+skipped): 3 fail.

@@ -4255,6 +4255,11 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
         from socr.figures.scanned_figures import fence_spelled_runs
 
         text, _ = fence_spelled_runs(text)
+    from socr.figures.scanned_figures import close_open_code_fence
+
+    # A fence the page left open runs to the end of the document: close it, or the image renders
+    # as literal code while the report says it shipped.
+    text = close_open_code_fence(text)
     return replace(output, text=f"{text.rstrip()}\n\n{ref}")
 
 

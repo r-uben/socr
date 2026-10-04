@@ -577,3 +577,17 @@ def test_fence_delimiter_is_longer_than_any_backtick_run_on_the_page() -> None:
     assert "`````text" in fenced and "\n`````\n" in fenced, "delimiter is 5 backticks"
     plain, _ = fence_spelled_runs(f"xx\n{_RUN}\nyy")
     assert "\n```text\n" in plain and "\n```\n" in plain
+
+
+@pytest.mark.parametrize("delim", ["```", "~~~", "````"])
+def test_guard_closes_an_unclosed_code_fence_before_the_image(delim: str) -> None:
+    out = _out(f"Prose.\n\n{delim}python\nx = 1")
+    got = manifest._apply_scanned_figure_guard(out, _p(REF))
+    assert got.text == f"Prose.\n\n{delim}python\nx = 1\n{delim}\n\n{REF}"
+    # The ref is outside any open block: scanning the result leaves no fence open.
+    from socr.figures.scanned_figures import close_open_code_fence
+
+    assert close_open_code_fence(got.text) == got.text
+    # A closed block, or no block, is untouched apart from the ref.
+    closed = _out(f"{delim}\ncode\n{delim}\nafter")
+    assert manifest._apply_scanned_figure_guard(closed, _p(REF)).text == closed.text + "\n\n" + REF

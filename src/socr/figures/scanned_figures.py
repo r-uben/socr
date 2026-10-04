@@ -61,8 +61,12 @@ def _fence_delimiters(lines: list[str]) -> tuple[str, str]:
     return f"{ticks}text", ticks
 
 
-def _code_fence_lines(lines: list[str]) -> set[int]:
-    """Indices of lines inside, opening or closing an existing fenced code block."""
+def _scan_code_fences(lines: list[str]) -> tuple[set[int], str]:
+    """(indices of lines in an existing fenced code block, the delimiter still open at the end).
+
+    The open delimiter is "" when every block is closed. A block left open runs to the end of the
+    document in CommonMark, so anything appended after it renders as code.
+    """
     inside: set[int] = set()
     marker = ""
     for i, ln in enumerate(lines):
@@ -76,7 +80,22 @@ def _code_fence_lines(lines: list[str]) -> set[int]:
         elif run >= 3:
             inside.add(i)
             marker = char * run
-    return inside
+    return inside, marker
+
+
+def _code_fence_lines(lines: list[str]) -> set[int]:
+    """Indices of lines inside, opening or closing an existing fenced code block."""
+    return _scan_code_fences(lines)[0]
+
+
+def close_open_code_fence(text: str) -> str:
+    """Return *text* ready to have markdown appended: an unclosed fence gets its closer.
+
+    Unchanged when no fenced block is open at the end. The closer is the matching delimiter on
+    its own line, so an image reference appended after it renders as an image, not as code.
+    """
+    marker = _scan_code_fences(text.split("\n"))[1]
+    return f"{text.rstrip()}\n{marker}" if marker else text
 
 
 def _is_figure_junk(line: str) -> bool:
