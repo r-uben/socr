@@ -32,8 +32,11 @@ word cloud, a diagram, code, a flag, a text snippet):
 ## What changed
 
 - `src/socr/figures/crop_descriptions.py`: prompt, validator (every Unicode numeric character plus
-  spelled numbers two..ninety, hundred..trillion, dozen, zero, double, triple, half, quarter, percent;
-  "one" allowed), one-retry policy, crop allow-list (`chart_region_pP_N.png`, `figure_N_pageP.png`),
+  English number words: cardinals including "one", ordinals (first..twentieth, hundredth ...), multipliers
+  and fractions (once, twice, thrice, double, triple, half, quarter, thirds, tenths ...), "percent";
+  standalone uppercase Roman numerals other than the pronoun "I" and the single letters L, C, D, M that
+  are common panel labels; and the symbols % per-mille, Unicode fractions and superscripts. "last" is
+  allowed), one-retry policy, crop allow-list (`chart_region_pP_N.png`, `figure_N_pageP.png`),
   idempotent insertion under the image ref (skips code fences and table rows).
 - Format, directly under the ref: `> *Figure description [model-generated, non-authoritative gist, no
   values]:* text` (the existing caption marker wording plus "no values").
@@ -83,3 +86,32 @@ word cloud, a diagram, code, a flag, a text snippet):
 - Full suite: 6968 passed, 1 failed on the first run (`test_gh974_review_pins::test_budget_exhaustion_...`,
   a table-ladder disposition assertion), which passes alone and in three re-runs; that run overlapped the
   mutant runs. `uvx ruff@0.16.0 format --check .` clean.
+
+
+## Review round (Astra REJECT, cubic P1/P2)
+
+- Validator widened as above (one test per class). Descriptions containing `<`, `>`, `$` are refused, so a
+  description can never open raw HTML (an HTML comment would hide later content) or math.
+- Page-sized images are now gated on the extractor's recorded bbox relative to the page, not the filename:
+  `PAGE_SIZED_BBOX_FRACTION = 0.8`, the midpoint of the measured gap (largest genuine crop inspected 0.675
+  of its page; smallest whole-page image inspected 0.941, 11 of them stored as `figure_N_pageP`). Measured
+  over 1183 extracted-figure records with page size read from the source PDFs. No bbox or no page size
+  means no description (event `figure_description_dropped`, reason `no_bbox` / `no_page_size` / `page_sized`).
+- Path safety: the image target must resolve inside this document's `figures/` directory (symlinks and
+  `..` resolved); absolute paths, `..`, URLs and drive letters are rejected.
+- Insertion safety: never inside a GFM or borderless table row (nor a line directly continuing one), a
+  fenced or indented code block, a display-math block or an HTML comment. Skipped, not relocated.
+- Regression fixed: the description block had split `if runs_figures:` and left the GH-189 chart-region
+  merge, the final `_write_metadata` and the GH-171 sidecar re-flush nested under the description flag. They
+  are back under one block (`if runs_figures or runs_descriptions:`, body unchanged from main); the embed
+  call inside is gated on `runs_figures`. A test with descriptions off proves they still run.
+- Resume ordering: a document that references a crop asset is written provisional (`:pre-figures`) in the
+  first metadata write and only finalised after the descriptions are in the text. An interruption or an
+  exception in between leaves the provisional record, so a re-run redoes the pass (cheap, from the cache).
+  A model that is merely unreachable is not an exception: descriptions are dropped (`model_unavailable`,
+  not cached) and the document completes.
+- `--strict-local`: no change. The describer uses only the local Ollama model, which strict-local allows;
+  no cloud rung is ever reached. Documented in the `--figure-descriptions` help and here.
+- Mutants killed in an external copy (canary on `socr.__file__`, uncapped anchor count 1): Roman off (7
+  tests fail), ordinals off (5), bbox gate off (3), path check off (1), table skip off (4), fence skip off (3),
+  tail nested under the flag (1), finalised early (3).

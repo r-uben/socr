@@ -240,7 +240,8 @@ def common_options(f):
             "(chart regions and extracted figures; never whole-page images). ON by default. "
             "Each is labelled model-generated and non-authoritative, validated to contain "
             "no digit or spelled number, and DROPPED if the validator fails after one "
-            "retry. Local model only; --native-only produces none. Never affects page "
+            "retry. Local model only (allowed under --strict-local; no cloud is ever used); "
+            "--native-only produces none. Never affects page "
             "status. Disable with --no-figure-descriptions."
         ),
     )(f)

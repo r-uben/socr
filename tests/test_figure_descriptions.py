@@ -33,11 +33,24 @@ from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.state import DocumentState
 from socr.figures import crop_descriptions as cd
+from socr.figures.chart_regions import ChartRegionAsset
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 CLEAN = "A line chart of a series against time, comparing named groups."
 WITH_DIGIT = "A line chart of the 2008 series against time."
 WITH_WORD = "A line chart with three series against time."
+
+
+PAGE = (600.0, 800.0)
+SMALL_BBOX = (50.0, 50.0, 350.0, 350.0)  # a fifth of the page
+FULL_PAGE_BBOX = (0.0, 0.0, 600.0, 800.0)
+
+
+@pytest.fixture(autouse=True)
+def _page_size(request, monkeypatch):
+    """Unit tests read no PDF: every page is PAGE. The end-to-end tests read the real one."""
+    if not request.node.name.startswith("test_e2e"):
+        monkeypatch.setattr(UnifiedPipeline, "_crop_page_size", lambda self, state, pn: PAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +81,71 @@ def test_validator_rejects_digits_and_spelled_numbers(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "one of the groups",
+        "Eleven bars",
+        "forty-two points",
+        "a hundred observations",
+        "dozens of series",
+    ],
+    ids=lambda t: "cardinal:" + t,
+)
+def test_validator_rejects_cardinals_including_one(text: str) -> None:
+    assert cd.find_number_tokens(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the first panel",
+        "Second row",
+        "the third and twentieth series",
+        "firstly, a line",
+        "thirds of the sample",
+        "tenths",
+    ],
+    ids=lambda t: "ordinal:" + t,
+)
+def test_validator_rejects_ordinals_and_fractions(text: str) -> None:
+    assert cd.find_number_tokens(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["once a year", "twice as wide", "thrice", "double axes", "triple", "half of it", "a quarter"],
+    ids=lambda t: "multiplier:" + t,
+)
+def test_validator_rejects_multipliers(text: str) -> None:
+    assert cd.find_number_tokens(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["Panel II", "Phase III", "stage IV", "Table VI", "XII", "figure V", "axis X"]
+)
+def test_validator_rejects_standalone_roman_numerals(text: str) -> None:
+    assert cd.find_number_tokens(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["I think so", "Panel C and Panel D", "Model M", "CIVIC", "VIVID", "xii"]
+)
+def test_validator_allows_the_pronoun_labels_and_words(text: str) -> None:
+    assert cd.find_number_tokens(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a 5% rate", "per mille \u2030", "\u00bd of it", "\u00be", "\u00b2 axes", "x\u00b3", "\u2155"],
+)
+def test_validator_rejects_value_symbols_fractions_and_superscripts(text: str) -> None:
+    assert cd.find_number_tokens(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         CLEAN,
-        "One of the groups is shaded.",  # 'one' is a pronoun, deliberately allowed
+        "Another group is shaded; the last point is marked.",  # 'last' carries no value
+        "I think this is a panel C; I see a legend.",  # pronoun I, single-letter label
         "Axes show time and the policy rate for the euro area.",
     ],
 )
@@ -241,15 +317,20 @@ class _Model:
         monkeypatch.setattr(UnifiedPipeline, "_figure_description_ask", factory)
 
 
-def _doc(tmp_path: Path, *, with_assets=("chart_region_p1_1.png",)):
+def _doc(tmp_path: Path, *, with_assets=("chart_region_p1_1.png",), bbox=SMALL_BBOX):
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     pipe = _pipeline()
     state = DocumentState(handle=_handle(pdf, 2))
     doc_dir, figures = pipe._doc_and_figures_dir(pdf, tmp_path / "out")
     figures.mkdir(parents=True)
+    assets = []
     for name in with_assets:
         (figures / name).write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+        m = re.match(r"chart_region_p(\d+)_(\d+)\.png$", name)
+        if m:
+            assets.append(ChartRegionAsset(int(m.group(1)), int(m.group(2)), bbox, rendered=True))
+    state._chart_region_assets = {1: assets} if assets else {}
     return pipe, state, tmp_path / "out", doc_dir, pdf
 
 
@@ -419,6 +500,184 @@ def test_the_fingerprint_moves_with_the_effective_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page-sized images, decided from the extractor's bbox (never from the filename alone)
+# ---------------------------------------------------------------------------
+
+
+def test_the_cut_sits_in_the_measured_gap() -> None:
+    # Largest genuine crop inspected: 0.675 of its page. Smallest whole-page image: 0.941.
+    assert 0.675 < cd.PAGE_SIZED_BBOX_FRACTION < 0.941
+
+
+def test_a_full_page_chart_region_is_not_described(tmp_path, monkeypatch) -> None:
+    pipe, state, out, *_ = _doc(tmp_path, bbox=FULL_PAGE_BBOX)
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    text = _text("chart_region_p1_1.png")
+    assert pipe._describe_crop_refs(state, out, text) == text
+    assert model.calls == []
+    (ev,) = _events(state, "figure_description_dropped")
+    assert ev.data["reason"] == "page_sized"
+
+
+def test_a_crop_without_a_bbox_is_not_described(tmp_path, monkeypatch) -> None:
+    pipe, state, out, *_ = _doc(tmp_path, bbox=None)
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    text = _text("chart_region_p1_1.png")
+    assert pipe._describe_crop_refs(state, out, text) == text
+    assert model.calls == []
+    assert _events(state, "figure_description_dropped")[0].data["reason"] == "no_bbox"
+
+
+def test_a_figure_named_asset_that_is_a_full_page_raster_is_not_described(
+    tmp_path, monkeypatch
+) -> None:
+    """Extraction can emit a whole page under a ``figure_N_pageP`` name."""
+    from socr.core.result import FigureInfo
+
+    pipe, state, out, doc_dir, _ = _doc(
+        tmp_path, with_assets=("figure_1_page1.png", "figure_2_page1.png")
+    )
+    figs = [
+        FigureInfo(
+            1, 1, "extracted", "", str(doc_dir / "figures/figure_1_page1.png"), bbox=FULL_PAGE_BBOX
+        ),
+        FigureInfo(
+            2, 1, "extracted", "", str(doc_dir / "figures/figure_2_page1.png"), bbox=SMALL_BBOX
+        ),
+    ]
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    res = pipe._describe_crop_refs(
+        state, out, _text("figure_1_page1.png", "figure_2_page1.png"), figures=figs
+    )
+    assert [name for name, _ in model.calls] == ["figure_2_page1.png"]
+    assert res.count(cd.DESCRIPTION_PREFIX) == 1
+
+
+def test_an_unknown_page_size_means_no_description(tmp_path, monkeypatch) -> None:
+    pipe, state, out, *_ = _doc(tmp_path)
+    monkeypatch.setattr(UnifiedPipeline, "_crop_page_size", lambda self, state, pn: None)
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    text = _text("chart_region_p1_1.png")
+    assert pipe._describe_crop_refs(state, out, text) == text and model.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Path safety
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "../chart_region_p1_1.png",
+        "figures/../../chart_region_p1_1.png",
+        "/etc/chart_region_p1_1.png",
+        "C:/x/chart_region_p1_1.png",
+        "https://example.org/figures/chart_region_p1_1.png",
+        "..\\chart_region_p1_1.png",
+    ],
+)
+def test_unsafe_targets_never_reach_the_model(tmp_path, monkeypatch, target) -> None:
+    pipe, state, out, doc_dir, _ = _doc(tmp_path)
+    (doc_dir.parent / "chart_region_p1_1.png").write_bytes(b"\x89PNG outside")
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    text = assemble_pages([f"p\n\n![r]({target})", "q"], page_numbers=[1, 2])
+    assert pipe._describe_crop_refs(state, out, text) == text
+    assert model.calls == []
+
+
+def test_a_symlink_out_of_the_figures_dir_is_refused(tmp_path, monkeypatch) -> None:
+    pipe, state, out, doc_dir, _ = _doc(tmp_path, with_assets=())
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNG secret")
+    (doc_dir / "figures" / "chart_region_p1_1.png").symlink_to(secret)
+    state._chart_region_assets = {1: [ChartRegionAsset(1, 1, SMALL_BBOX, rendered=True)]}
+    model = _Model([CLEAN])
+    model.install(monkeypatch)
+    text = _text("chart_region_p1_1.png")
+    assert pipe._describe_crop_refs(state, out, text) == text and model.calls == []
+    assert (
+        _events(state, "figure_description_dropped")[0].data["reason"] == "path_outside_figures_dir"
+    )
+
+
+def test_safe_asset_path_accepts_the_normal_target(tmp_path) -> None:
+    (tmp_path / "figures").mkdir()
+    (tmp_path / "figures" / "chart_region_p1_1.png").write_bytes(b"x")
+    assert cd.safe_asset_path(tmp_path, "figures/chart_region_p1_1.png") is not None
+
+
+# ---------------------------------------------------------------------------
+# Insertion safety: never inside a table, code, math or comment; never emits <!--
+# ---------------------------------------------------------------------------
+
+REF = "![r](figures/chart_region_p1_1.png)"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"| a | b |\n| - | - |\n| {REF} | x |",
+        f"a | b | c\n{REF} | y | z",  # borderless table row
+        f"| a | b |\n| - | - |\n| 1 | 2 |\n{REF}",  # directly continues a GFM table: becomes a row
+        f"```\n{REF}\n```",
+        f"~~~python\n{REF}\n~~~",
+        f"para\n\n    {REF}",  # indented code block
+        f"$$\nx = {REF}\n$$",
+        f"\\[\n{REF}\n\\]",
+        f"\\begin{{align}}\n{REF}\n\\end{{align}}",
+        f"<!--\n{REF}\n-->",
+        f"<!-- {REF} -->",
+    ],
+    ids=[
+        "gfm-row",
+        "borderless-row",
+        "table-continuation",
+        "backtick-fence",
+        "tilde-fence",
+        "indented-code",
+        "dollar-math",
+        "bracket-math",
+        "begin-end-math",
+        "multiline-comment",
+        "inline-comment",
+    ],
+)
+def test_no_description_is_inserted_inside_a_protected_block(body: str) -> None:
+    calls: list[str] = []
+    assert cd.insert_descriptions(body, lambda t: calls.append(t) or CLEAN) == body
+    assert calls == []
+
+
+def test_a_ref_after_a_protected_block_is_still_described() -> None:
+    body = f"```\ncode\n```\n\n{REF}\n\n| a | b |\n| - | - |\n| 1 | 2 |"
+    out = cd.insert_descriptions(body, lambda t: CLEAN)
+    assert f"{REF}\n\n{cd.DESCRIPTION_PREFIX} {CLEAN}\n\n| a | b |" in out
+    # the table and the code block are untouched
+    assert out.startswith("```\ncode\n```") and out.endswith("| 1 | 2 |")
+
+
+def test_a_closed_comment_does_not_hide_a_later_ref() -> None:
+    body = f"<!-- note -->\n\n{REF}"
+    assert cd.DESCRIPTION_PREFIX in cd.insert_descriptions(body, lambda t: CLEAN)
+
+
+@pytest.mark.parametrize("text", ["see <!-- x", "a --> b", "<b>bold</b>", "$x$ math", "> quote"])
+def test_a_description_that_could_open_html_comment_or_math_is_refused(text: str) -> None:
+    assert cd.clean_description(text) is None
+
+
+def test_inserted_output_never_contains_an_html_comment_opener() -> None:
+    out = cd.insert_descriptions(f"x\n\n{REF}\n\ny", lambda t: CLEAN)
+    assert "<!--" not in out
+
+
+# ---------------------------------------------------------------------------
 # End to end through process(): enabled vs disabled differ only by the description line
 # ---------------------------------------------------------------------------
 
@@ -579,3 +838,65 @@ def test_e2e_resume_reproduces_the_descriptions_without_the_model(tmp_path, monk
     md2 = next(iter(out.rglob("mixed_chart_table.md")))
     assert second.calls == [], "the cache answers; the model is not consulted again"
     assert md2.read_text().count(CLEAN) == 2
+
+
+def _spy_metadata(monkeypatch) -> list[bool]:
+    seen: list[bool] = []
+    real = UnifiedPipeline._write_metadata
+
+    def spy(self, state, result, output_dir, has_text, provisional=False, **kw):
+        seen.append(bool(provisional))
+        return real(self, state, result, output_dir, has_text, provisional=provisional, **kw)
+
+    monkeypatch.setattr(UnifiedPipeline, "_write_metadata", spy)
+    return seen
+
+
+def test_e2e_with_descriptions_off_the_figure_tail_still_runs(tmp_path, monkeypatch) -> None:
+    """GH-189 merge, the final (non-provisional) metadata write and the GH-171 sidecar re-flush
+    must not depend on the description flag (they were once nested under it by mistake)."""
+    seen = _spy_metadata(monkeypatch)
+    _, _, _, _, side, _, _ = _run_process(
+        tmp_path,
+        monkeypatch,
+        "tail",
+        _Model([CLEAN]),
+        describe_figure_crops=False,
+        save_figures=True,
+    )
+    assert seen[0] is True and seen[-1] is False, seen  # provisional first, finalised last
+    refs = side.get("figure_refs") or []
+    assert any("chart_region_p1_" in str(r.get("image_path", "")) for r in refs), refs
+
+
+def test_e2e_interruption_before_descriptions_leaves_the_record_provisional(
+    tmp_path, monkeypatch
+) -> None:
+    seen = _spy_metadata(monkeypatch)
+
+    def boom(self, *a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(UnifiedPipeline, "_describe_crop_refs", boom)
+    with pytest.raises(KeyboardInterrupt):
+        _run_process(tmp_path, monkeypatch, "intr", _Model([CLEAN]))
+    assert seen and all(seen), "no write may finalise the record before the descriptions exist"
+
+
+def test_e2e_a_failing_description_pass_leaves_the_record_provisional(
+    tmp_path, monkeypatch
+) -> None:
+    seen = _spy_metadata(monkeypatch)
+
+    def boom(self, *a, **k):
+        raise RuntimeError("model host exploded")
+
+    monkeypatch.setattr(UnifiedPipeline, "_describe_crop_refs", boom)
+    _run_process(tmp_path, monkeypatch, "fail", _Model([CLEAN]))
+    assert seen and all(seen)
+
+
+def test_e2e_a_completed_description_pass_finalises_the_record(tmp_path, monkeypatch) -> None:
+    seen = _spy_metadata(monkeypatch)
+    _run_process(tmp_path, monkeypatch, "done", _Model([CLEAN]))
+    assert seen[0] is True and seen[-1] is False

@@ -16886,18 +16886,38 @@ class UnifiedPipeline:
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
         self._record_table_counts(state, pre_records)
-        self._write_metadata(state, final_result, output_dir, has_text, provisional=runs_figures)
+        # Number-free crop descriptions are written AFTER this first metadata write, so a document
+        # that still owes them must be provisional here too: an interruption before they are
+        # written then leaves a record the resume gate refuses, never a complete-looking one.
+        # Only documents that actually reference a crop asset owe them; a document without one is
+        # handled exactly as before.
+        runs_descriptions = (
+            has_text
+            and self._crop_descriptions_enabled()
+            and _crop_descriptions.has_crop_ref(final_text)
+        )
+        self._write_metadata(
+            state,
+            final_result,
+            output_dir,
+            has_text,
+            provisional=runs_figures or runs_descriptions,
+        )
 
         # Figure extraction + description + embedding. A figure-phase failure
         # must never destroy the completed OCR run — fall back to the already-
         # saved un-embedded text.
-        if runs_figures:
+        if runs_figures or runs_descriptions:
             try:
-                embedded_text = self._describe_and_embed_figures(
-                    state,
-                    final_result,
-                    output_dir,
-                    final_text,
+                embedded_text = (
+                    self._describe_and_embed_figures(
+                        state,
+                        final_result,
+                        output_dir,
+                        final_text,
+                    )
+                    if runs_figures
+                    else final_text
                 )
             except Exception as exc:
                 # GH-503: the record STAYS provisional. The pre-figures write a
@@ -16939,21 +16959,28 @@ class UnifiedPipeline:
                 final_result.pages[0].text = final_text
                 self._save_markdown(state, final_text, output_dir)
 
-        # Number-free descriptions under genuine figure crops. Runs for every document that
-        # has text (chart-region crops exist without --save-figures), after the figure
-        # phase so extracted-figure crops are in the text too, and BEFORE the final-body
-        # guard / fragment rewrite / sidecar flush, so every on-disk copy carries the same
-        # bytes. Optional enrichment: a failure here is logged, never fatal.
-        if has_text and self._crop_descriptions_enabled():
-            try:
-                described_text = self._describe_crop_refs(state, output_dir, final_text)
-            except Exception as exc:
-                logger.warning("figure descriptions failed (%s); text kept unchanged", exc)
-                described_text = final_text
-            if described_text != final_text:
-                final_text = described_text
-                final_result.pages[0].text = final_text
-                self._save_markdown(state, final_text, output_dir)
+            # Number-free descriptions under genuine figure crops. After the figure phase, so
+            # extracted-figure crops are in the text, and BEFORE the metadata is finalised below
+            # and before the final-body guard / fragment rewrite / sidecar flush, so every
+            # on-disk copy carries the same bytes and the record only looks complete once the
+            # descriptions are in. Optional enrichment: an exception is logged and leaves the
+            # record provisional (a re-run redoes it from the cache); it is never fatal.
+            if has_text and self._crop_descriptions_enabled():
+                try:
+                    described_text = self._describe_crop_refs(
+                        state,
+                        output_dir,
+                        final_text,
+                        figures=list(getattr(final_result, "figures", []) or []),
+                    )
+                except Exception as exc:
+                    logger.warning("figure descriptions failed (%s); text kept unchanged", exc)
+                    figure_phase_failed = True
+                    described_text = final_text
+                if described_text != final_text:
+                    final_text = described_text
+                    final_result.pages[0].text = final_text
+                    self._save_markdown(state, final_text, output_dir)
             # GH-189: ``_describe_and_embed_figures`` ASSIGNS ``result.figures``,
             # so the chart-region crops added at construction are gone by here.
             # Re-merge before anything else reads the list.
@@ -17917,7 +17944,27 @@ class UnifiedPipeline:
         ask.model = engine.model  # type: ignore[attr-defined]
         return ask
 
-    def _describe_crop_refs(self, state: DocumentState, output_dir: Path, text: str) -> str:
+    def _crop_page_size(self, state: DocumentState, page_num: int) -> tuple[float, float] | None:
+        """``(width, height)`` of a source page in the units the crop bboxes use, or ``None``."""
+        from socr.core.pdf import open_pdf
+
+        try:
+            with open_pdf(state.handle.path) as pdf:
+                if page_num < 1 or page_num > len(pdf):
+                    return None
+                rect = pdf[page_num - 1].rect
+                return float(rect.width), float(rect.height)
+        except Exception as exc:
+            logger.debug("page size unavailable for p%d: %s", page_num, exc)
+            return None
+
+    def _describe_crop_refs(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+        text: str,
+        figures: list | None = None,
+    ) -> str:
         """Insert validated, number-free descriptions under genuine figure-crop image refs.
 
         Per page body, so a page without a crop ref is returned byte-for-byte and the
@@ -17959,6 +18006,33 @@ class UnifiedPipeline:
         counts = {"described": 0, "retried": 0, "dropped": 0}
         legacy_owns_extracted = bool(self.config.describe_figures)
 
+        # Extractor-recorded geometry per crop file: name -> (page_num, bbox). A crop is described
+        # only if its bbox is known and well under page size; extraction can emit a full-page
+        # raster under a ``figure_N_pageP`` name, so the filename alone proves nothing.
+        geometry: dict[str, tuple[int, tuple | None]] = {}
+        for pn, assets in getattr(state, "_chart_region_assets", {}).items():
+            for asset in assets:
+                geometry[asset.filename] = (pn, tuple(asset.bbox) if asset.bbox else None)
+        for fig in figures or []:
+            if getattr(fig, "image_path", None):
+                geometry.setdefault(
+                    Path(str(fig.image_path)).name,
+                    (fig.page_num, tuple(fig.bbox) if getattr(fig, "bbox", None) else None),
+                )
+        page_sizes: dict[int, tuple[float, float] | None] = {}
+
+        def refuse(name: str, page_num: int, reason: str) -> None:
+            counts["dropped"] += 1
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="figure_description_dropped",
+                    engine="",
+                    detail=f"{name}: dropped ({reason})",
+                    data={"asset": name, "retried": False, "reason": reason, "violations": []},
+                )
+            )
+
         bodies = split_native_pages(text)
         if len(bodies) != state.handle.page_count:
             logger.warning(
@@ -17976,7 +18050,23 @@ class UnifiedPipeline:
                 name = Path(target).name
                 if legacy_owns_extracted and name.startswith("figure_"):
                     return None
-                path = (doc_dir / target).resolve()
+                path = _crop_descriptions.safe_asset_path(doc_dir, target)
+                if path is None:
+                    refuse(name, page_num, "path_outside_figures_dir")
+                    return None
+                geo = geometry.get(name)
+                if geo is None or geo[1] is None:
+                    refuse(name, page_num, "no_bbox")
+                    return None
+                if geo[0] not in page_sizes:
+                    page_sizes[geo[0]] = self._crop_page_size(state, geo[0])
+                size = page_sizes[geo[0]]
+                fraction = _crop_descriptions.bbox_page_fraction(
+                    geo[1], size[0] if size else None, size[1] if size else None
+                )
+                if _crop_descriptions.is_page_sized(fraction):
+                    refuse(name, page_num, "page_sized" if fraction is not None else "no_page_size")
+                    return None
                 try:
                     data = path.read_bytes()
                 except OSError:
