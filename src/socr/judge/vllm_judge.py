@@ -90,9 +90,16 @@ def _post_chat(
             "messages": [
                 {
                     "role": "user",
+                    # Image FIRST, then the instructions and the candidate
+                    # transcription. This is the order Ollama's qwen3-vl
+                    # renderer emits for the Ollama judge (vision tokens, then
+                    # the message text), and it is load-bearing: on 18 pages of
+                    # one paper, same model, same readings, the vLLM judge
+                    # accepted 3 text-first and 11 image-first
+                    # (docs/log/2026-10-04_vllm-judge-image-order.md).
                     "content": [
-                        {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": image_data_uri}},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],
