@@ -298,6 +298,12 @@ class PipelineConfig:
     # Keeping them apart lets the operator archive clean deterministic PNGs
     # without coupling the run to non-authoritative model prose.
     describe_figures: bool = False
+    # Number-free descriptions of genuine figure CROPS (chart regions, extracted figures),
+    # ON by default. Optional enrichment: model-written, validated to contain no digit or
+    # spelled number, dropped (never shipped) when the validator fails twice. Never
+    # touches page status, table counts or audit_passed. Off under ``native_only``
+    # regardless of this field. ``--no-figure-descriptions`` disables it.
+    describe_figure_crops: bool = True
     figures_max_total: int = 25
     figures_max_per_page: int = 3
 

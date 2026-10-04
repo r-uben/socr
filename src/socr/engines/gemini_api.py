@@ -275,6 +275,40 @@ class OllamaFigureEngine:
                 engine=self.name,
             )
 
+    def ask(self, image: Image.Image, prompt: str) -> str | None:
+        """Send *prompt* with *image* and return the RAW answer, or ``None`` on any failure.
+
+        Unlike ``describe_figure`` this neither wraps the text in the caption marker nor
+        folds an error into the description string: the number-free describer must be able
+        to tell "the model said nothing usable" from prose, and does its own labelling.
+        """
+        try:
+            buf = io.BytesIO()
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+            image.save(buf, format="JPEG", quality=90)
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [base64.b64encode(buf.getvalue()).decode()],
+                    }
+                ],
+                "stream": False,
+            }
+            url, extra = ollama_endpoint(self.host, "/api/chat")
+            resp = call_with_total_deadline(
+                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
+                120.0,
+                label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
+            )
+            raise_for_status_redacted(resp)
+            return resp.json()["message"]["content"].strip() or None
+        except Exception:
+            return None
+
     def close(self) -> None:
         pass  # stateless HTTP — nothing to close
 

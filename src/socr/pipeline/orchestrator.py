@@ -74,6 +74,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState, PageState, canonical_native_text, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
+from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
     MATH_FONT_UNRECOVERED_KIND,
@@ -1709,6 +1710,15 @@ class UnifiedPipeline:
             ),
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
+            # Number-free crop descriptions change the saved bytes (a blockquote under each
+            # crop), so a run with them and a run without must not share a resume gate.
+            # The prompt version rides along: new wording must not reuse old descriptions.
+            # Only the EFFECTIVE state is recorded (native-only never describes).
+            "figure_descriptions": (
+                _crop_descriptions.PROMPT_VERSION
+                if cfg.describe_figure_crops and not cfg.native_only
+                else None
+            ),
             # --- output-semantics code versions (issue #38) ---
             # The normalizer/assembler can change what bytes an identical
             # engine response produces. Without these, corpora cached under
@@ -16928,6 +16938,22 @@ class UnifiedPipeline:
                 final_text = embedded_text
                 final_result.pages[0].text = final_text
                 self._save_markdown(state, final_text, output_dir)
+
+        # Number-free descriptions under genuine figure crops. Runs for every document that
+        # has text (chart-region crops exist without --save-figures), after the figure
+        # phase so extracted-figure crops are in the text too, and BEFORE the final-body
+        # guard / fragment rewrite / sidecar flush, so every on-disk copy carries the same
+        # bytes. Optional enrichment: a failure here is logged, never fatal.
+        if has_text and self._crop_descriptions_enabled():
+            try:
+                described_text = self._describe_crop_refs(state, output_dir, final_text)
+            except Exception as exc:
+                logger.warning("figure descriptions failed (%s); text kept unchanged", exc)
+                described_text = final_text
+            if described_text != final_text:
+                final_text = described_text
+                final_result.pages[0].text = final_text
+                self._save_markdown(state, final_text, output_dir)
             # GH-189: ``_describe_and_embed_figures`` ASSIGNS ``result.figures``,
             # so the chart-region crops added at construction are gone by here.
             # Re-merge before anything else reads the list.
@@ -17858,6 +17884,187 @@ class UnifiedPipeline:
         # emits canonical ## Page N headers matching the original page order.
         page_numbers = list(range(1, n_pages + 1))
         return assemble_pages(page_bodies, page_numbers=page_numbers)
+
+    def _crop_descriptions_enabled(self) -> bool:
+        """Descriptions are on by default, off by flag, and never produced under native-only."""
+        return bool(self.config.describe_figure_crops) and not self.config.native_only
+
+    def _figure_description_ask(self):
+        """The model call behind the number-free describer: ``(png_path, prompt) -> str | None``.
+
+        Local Ollama only (qwen3-vl:30b-a3b-instruct): this is optional enrichment, so it
+        never reaches a cloud rung, which also makes it correct under ``--strict-local``
+        and a zero cost cap without any extra branch. Returns ``None`` when the model is
+        unreachable. Overridable in tests.
+        """
+        from PIL import Image
+
+        from socr.engines.gemini_api import OllamaFigureEngine
+
+        engine = OllamaFigureEngine()
+        available: bool | None = None
+
+        def ask(path: Path, prompt: str) -> str | None:
+            nonlocal available
+            if available is None:
+                available = engine.is_available()
+            if not available:
+                return None
+            with Image.open(path) as im:
+                im.load()
+                return engine.ask(im, prompt)
+
+        ask.model = engine.model  # type: ignore[attr-defined]
+        return ask
+
+    def _describe_crop_refs(self, state: DocumentState, output_dir: Path, text: str) -> str:
+        """Insert validated, number-free descriptions under genuine figure-crop image refs.
+
+        Per page body, so a page without a crop ref is returned byte-for-byte and the
+        document is only re-assembled when at least one description was inserted.
+
+        Resume: a page restored from its terminal fragment already carries its
+        descriptions (the blockquote is part of the page text), and ``insert_descriptions``
+        skips refs that are already described. A re-run of the figure phase over a regenerated
+        page reads the per-document cache (``figures/figure_descriptions.json``) keyed by
+        the image's sha256 + prompt version + model, so the same crop yields the same bytes.
+        Only definitive outcomes are cached; "model unavailable" is not, so a later run
+        with the model up still describes the figure.
+
+        Never touches page status, table counts or ``audit_passed``: it appends events and
+        text only. Legacy ``--describe-figures`` captions (``**Figure N**`` header lines)
+        already own the extracted ``figure_N_pageP`` crops when that flag is on, so those are
+        left to it rather than described twice.
+        """
+        import hashlib
+        import json
+
+        from ocr_output_contract import assemble_pages, split_native_pages
+
+        from socr.core.audit_log import AuditEvent
+
+        if "![" not in text:
+            return text
+        doc_dir, _figures_dir = self._doc_and_figures_dir(state.handle.path, output_dir)
+        ask = self._figure_description_ask()
+        model = getattr(ask, "model", "") or ""
+        cache_path = doc_dir / "figures" / "figure_descriptions.json"
+        try:
+            cache: dict = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(cache, dict):
+                cache = {}
+        except (OSError, ValueError):
+            cache = {}
+        cache_dirty = False
+        counts = {"described": 0, "retried": 0, "dropped": 0}
+        legacy_owns_extracted = bool(self.config.describe_figures)
+
+        bodies = split_native_pages(text)
+        if len(bodies) != state.handle.page_count:
+            logger.warning(
+                "figure descriptions: split yielded %d page(s), expected %d; skipping",
+                len(bodies),
+                state.handle.page_count,
+            )
+            return text
+        changed = False
+        for idx, body in enumerate(bodies):
+            page_num = idx + 1
+
+            def describe_ref(target: str, page_num: int = page_num) -> str | None:
+                nonlocal cache_dirty
+                name = Path(target).name
+                if legacy_owns_extracted and name.startswith("figure_"):
+                    return None
+                path = (doc_dir / target).resolve()
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    return None
+                key = f"{hashlib.sha256(data).hexdigest()}:{_crop_descriptions.PROMPT_VERSION}:{model}"
+                hit = cache.get(key)
+                if isinstance(hit, dict) and hit.get("status") in ("described", "dropped"):
+                    outcome = _crop_descriptions.DescriptionOutcome(
+                        hit.get("text"),
+                        bool(hit.get("retried")),
+                        hit["status"],
+                        str(hit.get("reason", "")),
+                    )
+                    # A cached "described" must still pass the validator: the cache is a
+                    # file on disk and the no-number rule does not trust it.
+                    if outcome.text and (
+                        _crop_descriptions.find_number_tokens(outcome.text)
+                        or _crop_descriptions.clean_description(outcome.text) is None
+                    ):
+                        outcome = _crop_descriptions.DescriptionOutcome(
+                            None, True, "dropped", "cache_failed_validation"
+                        )
+                    from_cache = True
+                else:
+                    outcome = _crop_descriptions.describe_number_free(
+                        lambda prompt, p=path: ask(p, prompt)
+                    )
+                    from_cache = False
+                    if outcome.reason != "model_unavailable":
+                        cache[key] = {
+                            "status": outcome.status,
+                            "text": outcome.text,
+                            "retried": outcome.retried,
+                            "reason": outcome.reason,
+                        }
+                        cache_dirty = True
+                if not from_cache:
+                    kinds = []
+                    if outcome.retried:
+                        kinds.append("figure_description_retried")
+                        counts["retried"] += 1
+                    kinds.append(
+                        "figure_description_described"
+                        if outcome.status == "described"
+                        else "figure_description_dropped"
+                    )
+                    counts[outcome.status] += 1
+                    for kind in kinds:
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind=kind,
+                                engine="ollama-figure",
+                                detail=f"{name}: {outcome.status}"
+                                + (f" ({outcome.reason})" if outcome.reason else ""),
+                                data={
+                                    "asset": name,
+                                    "retried": outcome.retried,
+                                    "reason": outcome.reason,
+                                    # Offending TOKENS only, never the rejected text.
+                                    "violations": list(outcome.violations),
+                                },
+                            )
+                        )
+                return outcome.text
+
+            new_body = _crop_descriptions.insert_descriptions(body, describe_ref)
+            if new_body != body:
+                bodies[idx] = new_body
+                changed = True
+
+        if cache_dirty:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
+                tmp.replace(cache_path)
+            except OSError as exc:
+                logger.debug("figure description cache not written: %s", exc)
+        if any(counts.values()) and not self.config.quiet:
+            console.print(
+                f"  [dim]Figure descriptions: {counts['described']} described "
+                f"({counts['retried']} retried), {counts['dropped']} dropped "
+                "(model-generated, number-free, non-authoritative)[/dim]"
+            )
+        if not changed:
+            return text
+        return assemble_pages(bodies, page_numbers=list(range(1, len(bodies) + 1)))
 
     def _record_figure_recoverable_labels(self, state, fig_info) -> None:
         """GH-47C (Option C — log-only): collect native word tokens inside a figure bbox.
