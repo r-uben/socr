@@ -24,6 +24,29 @@ _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "judge_page.
 
 VALID_ACTIONS = {"accept", "retry_same", "escalate_engine"}
 
+#: Cap on a page verdict's length, in generated tokens, sent to every VLM judge
+#: backend (vLLM ``max_tokens``, Ollama ``num_predict``). Derivation: the longest
+#: COMPLETE verdict in 151 recorded vLLM replies (Qwen3-VL-30B-A3B-Instruct,
+#: Bocconi HPC jobs 682679-682725, 2026-10-04) was 645 tokens, a 17-issue
+#: rejection; the median accept is 34. 2048 leaves more than 3x headroom over
+#: that maximum. Without a cap one of those replies looped on a single issue
+#: for 27,201 tokens until the context ran out -- minutes of GPU on a verdict
+#: that could never parse. A reply that hits the cap is a judge failure
+#: (``JudgeReplyTruncatedError``), never a verdict.
+JUDGE_MAX_REPLY_TOKENS = 2048
+
+
+class JudgeReplyTruncatedError(RuntimeError):
+    """The judge stopped at the reply-token cap, not at the end of its verdict.
+
+    Raised by a backend when the server reports the reply was cut by the length
+    limit (vLLM ``finish_reason == "length"``, Ollama ``done_reason ==
+    "length"``). It is deliberately not a ``TimeoutError``: a runaway reply is a
+    judge defect, and only a timeout may license #713's credentialed stand-in.
+    A truncated reply is never parsed -- ``_extract_json``'s first-``{``-to-
+    last-``}`` fallback could otherwise read a verdict out of a fragment.
+    """
+
 
 #: #713: exception TYPES that mean the PAGE judge never returned a verdict
 #: because the call did not complete in time. ``httpx.TimeoutException`` covers

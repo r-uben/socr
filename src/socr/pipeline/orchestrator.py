@@ -656,6 +656,29 @@ def _table_judge_prompt_digest() -> str:
         return f"unreadable-table-judge-prompt:{uuid.uuid4().hex}"
 
 
+def _page_judge_prompt_digest() -> str:
+    """SHA-256 of the page-judge prompt, read at call time.
+
+    A wording-only edit to ``prompts/judge_page.md`` changes what the page
+    judge accepts without moving ``judge_model`` -- the 2026-10-04 tolerance
+    edit (page-boundary text, running heads/feet and download stamps, unlabelled
+    rows) flips verdicts on real pages. The file is data, outside
+    ``_socr_source_digest``'s ``.py`` hash, so without this a resumed run would
+    keep pages judged under the old wording. Same non-caching rule as
+    ``_table_judge_prompt_digest``.
+    """
+    import hashlib
+
+    from socr.judge.judge import load_judge_prompt
+
+    try:
+        return hashlib.sha256(load_judge_prompt().encode("utf-8")).hexdigest()
+    except OSError:
+        import uuid
+
+        return f"unreadable-page-judge-prompt:{uuid.uuid4().hex}"
+
+
 def _cell_transcribe_prompt_digest() -> str:
     """SHA-256 of the cell-transcribe prompt, read at call time.
 
@@ -1448,6 +1471,11 @@ class UnifiedPipeline:
         primary = self._engine_determinants(engine_type)
 
         cfg = self.config
+        judge_identity = (
+            JUDGE_IDENTITY_HEURISTIC
+            if cfg.judge_backend == "heuristic"
+            else (self._resolve_judge_model() or JUDGE_IDENTITY_HEURISTIC)
+        )
         extra: dict[str, object] = {
             # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
@@ -1536,10 +1564,12 @@ class UnifiedPipeline:
             # ``--judge-backend heuristic`` short-circuits the resolver: no VLM
             # can run, so probing Ollama would cost 3 HTTP round-trips to record
             # a model that never judges.
-            "judge_model": (
-                JUDGE_IDENTITY_HEURISTIC
-                if cfg.judge_backend == "heuristic"
-                else (self._resolve_judge_model() or JUDGE_IDENTITY_HEURISTIC)
+            "judge_model": judge_identity,
+            # The page judge's WORDING, beside its identity: a prompt edit
+            # changes verdicts without changing the model. ``None`` when no
+            # VLM judge runs -- the heuristic judge never reads the prompt.
+            "page_judge_prompt_digest": (
+                None if judge_identity == JUDGE_IDENTITY_HEURISTIC else _page_judge_prompt_digest()
             ),
             "dual_pass_tables": cfg.dual_pass_tables,
             # #229: ``auto_patch_tables`` rewrites table cells in the saved page.

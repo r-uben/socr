@@ -26,7 +26,13 @@ from socr.core.ollama_utils import (  # noqa: F401 -- CONNECT_PROBE_TIMEOUT_SEC 
     raise_for_status_redacted,
 )
 from socr.core.ollama_utils import host_reachable as _host_reachable
-from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
+from socr.judge.judge import (
+    JUDGE_MAX_REPLY_TOKENS,
+    JudgeReplyTruncatedError,
+    JudgeVerdict,
+    load_judge_prompt,
+    parse_verdict,
+)
 
 DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
@@ -65,14 +71,22 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
             "prompt": prompt,
             "images": [image_b64],
             "stream": False,
-            "options": {"temperature": 0},  # judging should be as stable as we can make it
+            # Judging should be as stable as we can make it; the reply cap is
+            # shared with the vLLM backend (see JUDGE_MAX_REPLY_TOKENS).
+            "options": {"temperature": 0, "num_predict": JUDGE_MAX_REPLY_TOKENS},
             "format": "json",
             "think": PROBE_THINK,
         },
         timeout=timeout,
     )
     raise_for_status_redacted(resp)
-    return resp.json().get("response", "")
+    payload = resp.json()
+    if payload.get("done_reason") == "length":
+        raise JudgeReplyTruncatedError(
+            f"Ollama judge reply hit the {JUDGE_MAX_REPLY_TOKENS}-token cap "
+            "(done_reason=length); no verdict"
+        )
+    return payload.get("response", "")
 
 
 class OllamaVisionJudge:

@@ -18,6 +18,26 @@ see, not about generic quality heuristics. Consider, as relevant to THIS page:
   the page, hallucinated content not on the page, refusal text, or empty output?
 - Is anything on the page that carries meaning missing from the transcription?
 
+Do NOT count these as defects; they are properties of a single page, not
+transcription errors:
+
+- Text that runs across the page boundary. The page may begin or end
+  mid-sentence, mid-word (a hyphenated break) or mid-table, because the
+  document continues on the neighbouring page. A transcription that starts or
+  stops exactly where the page image does is complete, not truncated.
+- Running heads and running feet, page numbers, and publisher or download
+  stamps (for example "This content downloaded from ..." and terms-of-use
+  lines). Their presence, absence or position does not change what the page
+  says.
+- A table whose rows carry no labels in print. If the printed table has no row
+  labels, the transcription must not invent them, and an empty first column is
+  faithful.
+
+Still reject, wherever it occurs: a wrong or missing number, a wrong or
+missing sign (a dropped minus, a swapped parenthesis), a missing or extra row
+or column, values shifted into the wrong row or column, body text dropped from
+the middle of the page, and any content that is not on the page.
+
 A page can be imperfect and still faithful (minor formatting differences are
 fine). A page is mangled if a reader of the transcription would be misled about
 what the page says, or would lose information that is present on the page.
