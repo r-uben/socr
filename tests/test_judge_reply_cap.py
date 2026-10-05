@@ -69,7 +69,7 @@ def _capture_post(monkeypatch, module, payload):
 def test_vllm_request_carries_the_reply_cap(monkeypatch):
     seen = _capture_post(monkeypatch, vllm_judge, _load("vllm_judge_accept_raw.json"))
     vllm_judge._post_chat(URL, SERVED, "P", "data:image/png;base64,AAA", 1.0)
-    assert seen["json"]["max_tokens"] == JUDGE_MAX_REPLY_TOKENS
+    assert seen["json"]["max_tokens"] == JUDGE_MAX_REPLY_TOKENS == 2048
 
 
 def test_ollama_request_carries_the_same_cap(monkeypatch):
@@ -77,7 +77,7 @@ def test_ollama_request_carries_the_same_cap(monkeypatch):
         monkeypatch, ollama_judge, {"response": ACCEPT_JSON, "done": True, "done_reason": "stop"}
     )
     ollama_judge._post_generate("http://localhost:11434", "m", "P", "AAA", 1.0)
-    assert seen["json"]["options"]["num_predict"] == JUDGE_MAX_REPLY_TOKENS
+    assert seen["json"]["options"]["num_predict"] == JUDGE_MAX_REPLY_TOKENS == 2048
     assert seen["json"]["options"]["temperature"] == 0
 
 
