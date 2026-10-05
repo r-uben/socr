@@ -39,7 +39,13 @@ import httpx
 
 from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.killable import CallSpec, run_killable
-from socr.judge.judge import JudgeVerdict, load_judge_prompt, parse_verdict
+from socr.judge.judge import (
+    JUDGE_MAX_REPLY_TOKENS,
+    JudgeReplyTruncatedError,
+    JudgeVerdict,
+    load_judge_prompt,
+    parse_verdict,
+)
 
 #: No default model. Unlike Ollama there is no candidate ladder to probe: an
 #: OpenAI-compatible server serves whatever it was launched with, so the
@@ -107,6 +113,7 @@ def _post_chat(
             # Ollama backend.
             "temperature": 0,
             "response_format": {"type": "json_object"},
+            "max_tokens": JUDGE_MAX_REPLY_TOKENS,
         },
         timeout=timeout,
     )
@@ -115,6 +122,11 @@ def _post_chat(
     choices = payload.get("choices") or []
     if not choices:
         return ""
+    if choices[0].get("finish_reason") == "length":
+        raise JudgeReplyTruncatedError(
+            f"vLLM judge reply hit the {JUDGE_MAX_REPLY_TOKENS}-token cap "
+            "(finish_reason=length); no verdict"
+        )
     return (choices[0].get("message") or {}).get("content") or ""
 
 

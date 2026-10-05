@@ -1,0 +1,1 @@
+{"model":"qwen3.8:27b","created_at":"2026-10-04T16:01:15.121305Z","response":"{\n  \"fruits\": [\n    \"Apple","done":true,"done_reason":"length","total_duration":16145024583,"load_duration":14754304333,"prompt_eval_count":34,"prompt_eval_cached_count":0,"prompt_eval_duration":806493000,"eval_count":12,"eval_duration":576957000}
