@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+# The one place the default Gemini model is named. It was a literal in four modules and went
+# stale there ("gemini-3-flash-preview" while gemini-3.8-flash was current); override per run
+# with --gemini-model.
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+
 
 class EngineType(str, Enum):
     """Available OCR engines.
@@ -512,7 +517,7 @@ class PipelineConfig:
     qwen_model_pinned: bool = False
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
-    gemini_model: str = "gemini-3-flash-preview"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
     gemini_task: str = "convert"  # "convert", "extract", "table", "describe_figure"
     mistral_model: str = "mistral-ocr-latest"
 

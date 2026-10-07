@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 from PIL import Image
 
+from socr.core.config import DEFAULT_GEMINI_MODEL
 from socr.engines.gemini_api import (
     _CAPTION_MARKER,
     GeminiAPIConfig,
@@ -121,7 +122,7 @@ class TestGeminiAPIConfig:
         with patch.dict("os.environ", {}, clear=True):
             config = GeminiAPIConfig(api_key="explicit")
             assert config.api_key == "explicit"
-            assert config.model == "gemini-3-flash-preview"
+            assert config.model == DEFAULT_GEMINI_MODEL
 
     def test_env_gemini_api_key(self):
         with patch.dict("os.environ", {"GEMINI_API_KEY": "from-env"}, clear=True):

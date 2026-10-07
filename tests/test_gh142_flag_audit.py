@@ -156,6 +156,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "primary": (AGENTIC, "primary_engine; the ladder's starting rung"),
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),
     "qwen_vllm_model": (AGENTIC, "resolved model for the vLLM qwen rung"),
+    "gemini_model": (AGENTIC, "model for the gemini cloud rung and its fingerprint"),
     "math_model": (AGENTIC, "equation phases"),
     "clean_equation_model": (AGENTIC, "equation phases"),
     "recover_corrupt_math": (AGENTIC, "corrupt-math recovery routing"),

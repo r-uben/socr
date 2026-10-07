@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from socr.core.config import EngineType
+from socr.core.config import DEFAULT_GEMINI_MODEL, EngineType, PipelineConfig
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
     PROFILE_GEMINI,
@@ -172,7 +172,7 @@ def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
 
 
 def test_gemini_profile_model_matches_engine_default():
-    assert PROFILE_GEMINI.model == "gemini-3-flash-preview"
+    assert PROFILE_GEMINI.model == DEFAULT_GEMINI_MODEL == PipelineConfig().gemini_model
 
 
 # --- B1 verification tests ---
@@ -245,3 +245,14 @@ def test_primary_nougat_still_resolves():
 
     config = build_config(primary="nougat")
     assert config.primary_engine == EngineType.NOUGAT
+
+
+def test_gemini_model_flag_overrides_default():
+    from click.testing import CliRunner
+
+    from socr.cli import build_config, cli
+
+    assert build_config().gemini_model == DEFAULT_GEMINI_MODEL
+    assert build_config(gemini_model="gemini-x").gemini_model == "gemini-x"
+    help_text = CliRunner().invoke(cli, ["process", "--help"]).output
+    assert "--gemini-model" in help_text

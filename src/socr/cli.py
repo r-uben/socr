@@ -6,7 +6,7 @@ import click
 from rich.console import Console
 
 from socr import __version__
-from socr.core.config import EngineType, PipelineConfig
+from socr.core.config import DEFAULT_GEMINI_MODEL, EngineType, PipelineConfig
 
 # Imported under the exact names the reachability diagnostic patches, so a
 # test can stub the probe without a live daemon or a live binary on PATH.
@@ -206,6 +206,12 @@ def common_options(f):
         "(default Qwen/Qwen3-VL-30B-A3B-Instruct). Used when --qwen-backend vllm.",
     )(f)
     f = click.option(
+        "--gemini-model",
+        type=str,
+        default=None,
+        help=f"Gemini model for the cloud rung (default {DEFAULT_GEMINI_MODEL}).",
+    )(f)
+    f = click.option(
         "--qwen-model",
         type=str,
         default=None,
@@ -389,6 +395,7 @@ def build_config(
     qwen_backend: str | None = None,
     qwen_vllm_url: str | None = None,
     qwen_vllm_model: str | None = None,
+    gemini_model: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
     describe_figures: bool = False,
@@ -577,6 +584,8 @@ def build_config(
         config.qwen_vllm_url = qwen_vllm_url
     if qwen_vllm_model is not None:
         config.qwen_vllm_model = qwen_vllm_model
+    if gemini_model is not None:
+        config.gemini_model = gemini_model
     if qwen_model is not None:
         config.qwen_model = qwen_model
         config.qwen_model_pinned = True
