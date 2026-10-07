@@ -407,11 +407,18 @@ def table_content_defect(markdown: str | None) -> str:
     nonblank cell carries content.  In particular, colon-only and ratio-like
     cells remain content.  The existing raw-Markdown provenance helpers
     exclude comments, fenced or indented code, and literal HTML.
+
+    #988 M2: a run with NO body row at all (header and delimiter only) is a
+    defect only when no other run on the answer has body content. Gemini
+    writes a page's navigation menu that way, above the real table, and the
+    answer was refused as empty while its table was complete (20 Coca-Cola
+    pages). A body made only of placeholders is still a defect wherever it is.
     """
     if not markdown:
         return ""
 
     lines = _strip_emission_literal_blocks(_markdown_content_lines(markdown))
+    header_only = populated = False
     i, n = 0, len(lines)
     while i < n:
         if not _is_table_line(lines[i]):
@@ -449,11 +456,15 @@ def table_content_defect(markdown: str | None) -> str:
             continue
 
         body = rows[2:]
-        if all(_is_table_content_placeholder(cell) for row in body for cell in row):
+        if not body:
+            header_only = True
+        elif all(_is_table_content_placeholder(cell) for row in body for cell in row):
             return TABLE_CONTENT_EMPTY
+        else:
+            populated = True
         i = j
 
-    return ""
+    return TABLE_CONTENT_EMPTY if header_only and not populated else ""
 
 
 def raw_table_block_lines(markdown: str) -> list[list[str]]:
