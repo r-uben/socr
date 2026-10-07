@@ -63,6 +63,8 @@ imported by this module.
 from __future__ import annotations
 
 import math
+import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -368,17 +370,115 @@ def _native_page_has_column_lanes(words: list) -> bool:
     return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES, seeded_lanes=True)
 
 
+#: #988: a footnote marker a model writes after a number as markup rather than
+#: as a plain digit -- ``$^3$``, ``$^{2, 3}$`` or ``<sup>3</sup>``. Unicode
+#: superscript digits (``³``) are mapped by ``_SUPERSCRIPT_DIGITS``.
+_MARKUP_SUPERSCRIPT_RE = re.compile(r"\$\^\{?([\d,\s]+)\}?\$|<sup>([\d,\s]+)</sup>")
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+#: #988: what splits a candidate's text into tokens for the supply side of
+#: term (b): whitespace, cell delimiters, Markdown emphasis asterisks and
+#: ``<br>`` (a two-line cell is printed as two native lines). The asterisks
+#: matter for chart labels written as ``- **18**: 0%``: unsplit, ``**18**:``
+#: is not a numeric token and the native ``18`` reads as never written.
+_CANDIDATE_TOKEN_SPLIT_RE = re.compile(r"[\s|*]+|<br\s*/?>")
+
+
+def _glued_marker(match: re.Match) -> str:
+    """The digits of a ``_MARKUP_SUPERSCRIPT_RE`` match, without the markup and
+    without the separators of a multi-marker group (``$^{2, 3}$`` -> ``23``)."""
+    return re.sub(r"[,\s]", "", match.group(1) or match.group(2))
+
+
+def _candidate_numeric_supply(markdown: str) -> Counter:
+    """#988: every genuine numeric token the candidate WROTE, anywhere in its
+    text (table cells, ``<br>`` second lines, header lines, footnotes, footer),
+    as a multiset.
+
+    Uses ``row_corroboration._is_genuine_numeric``, the predicate
+    ``baseline_bands`` applies to the native words, so both sides of term (b)
+    normalise a token the same way. Before tokenising, a footnote marker the
+    model wrote after a number is glued to it the way PyMuPDF's
+    ``get_text("words")`` glues a printed superscript to the value it follows
+    (measured on Coca-Cola 2019 p66: the 6 pt span ``0.32`` and the 4 pt
+    superscript ``3`` come back as the one word ``0.323``). Without this the
+    model's ``0.32³`` can never account for the native ``0.323``. Gluing is the
+    conservative direction: when PyMuPDF does NOT glue a marker, the band stays
+    unaccounted, which is the behaviour before #988.
+    """
+    from socr.tables.row_corroboration import _is_genuine_numeric
+
+    text = (markdown or "").translate(_SUPERSCRIPT_DIGITS)
+    text = _MARKUP_SUPERSCRIPT_RE.sub(_glued_marker, text)
+    supply: Counter = Counter()
+    for token in _CANDIDATE_TOKEN_SPLIT_RE.split(text):
+        if not token:
+            continue
+        is_numeric, normalized = _is_genuine_numeric(token)
+        if is_numeric:
+            supply[normalized] += 1
+    return supply
+
+
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
-    """TICKET-A2 (#645) term (b): candidate's numeric body-row count falls
+    """TICKET-A2 (#645) term (b): the candidate's numeric body-row count falls
     short of the native table-shaped row count by more than A1b's own
     row-count allowance permits -- and by more than one stray header/legend
-    band could explain (see ``_STRAY_HEADER_BAND_ALLOWANCE``).
+    band could explain (see ``_STRAY_HEADER_BAND_ALLOWANCE``) -- AND, since
+    #988, so does the count of native bands whose numbers the candidate wrote.
 
-    Reuses ``row_corroboration.table_shaped_native_row_count`` (the exact
-    function ``manifest._row_shape_reconciliation`` calls) rather than a
-    second implementation of "table-shaped row", and
-    ``row_corroboration.ROW_CORROBORATION_MIN`` (36/39) rather than a second
-    named allowance -- both already measured and owned by A1b/A1a. Abstains
+    **#988: a row-count shortfall must be confirmed by content.** The row
+    count compares the candidate's numeric BODY rows with every table-shaped
+    band on the WHOLE page. The two sides count different things. The
+    native side includes every printed line with
+    ``row_shape_min`` numerals: the year caption over the columns, footnote
+    lines, the page footer, prose with figures, chart labels. The candidate
+    side counts only body rows, with header lines, ``<br>`` second lines and
+    blank-stub rows excluded. On a page with one-value rows
+    ``row_shape_min`` is 1, so every numbered line qualifies. Measured on the
+    Coca-Cola 2018-2021 sustainability reports (cluster job 687398, 73
+    rejected pages): the term fired on 58 of 73 cached answers, 32 of the 40
+    ``table_truncated`` rejections were complete and correct readings, and no
+    answer had lost a row. 2021 p74 (Gemini, every number matching the text
+    layer) read 17 rows against 24 bands. The 7 surplus bands were the year
+    caption, a lone superscript, two ``<br>`` second lines, two footnote
+    lines and the footer.
+
+    So the row count still runs first, unchanged, over the same bands
+    (``row_corroboration.is_table_shaped_band``, the predicate
+    ``table_shaped_native_row_count`` uses). When it falls short, the same
+    inequality is applied a second time to the number of bands the candidate
+    ACCOUNTS for, and the term fires only if that falls short too. A band is
+    accounted for iff its numeric tokens can be drawn from the multiset of
+    numeric tokens the candidate wrote anywhere in its text
+    (``_candidate_numeric_supply``). The draw CONSUMES the tokens, so one
+    written value accounts for one band. Requiring both counts means the term
+    never refuses a candidate the row count alone accepts. A formatting
+    difference between the two sides (``10,234`` against a printed
+    ``10 234``, a footnote marker the model dropped) can only leave a band
+    unaccounted on a page the row count already doubts. Region scoping of the
+    native count (the family #988 rounds 1-4 tried and dropped) is not used:
+    measured again on this corpus, a table-span count is blind to a cut tail.
+
+    Measured on the 56 Coca-Cola answers the audit judged complete and
+    correct (every value checked against the page image), with
+    ``table_truncated`` alone (both terms). The term now fires on 6 of the
+    56 (47 before #988). On synthetic cuts of the same answers (the largest
+    table; 50 answers have one to cut):
+
+    * last 10%, 25% or 50% of rows removed (a model that stopped): caught
+      43, 41 and 44 times of 50 (before: 44, 42, 44);
+    * the same shares deleted from the middle: caught 26, 41 and 44 times
+      (before: 45, 46, 44, while also firing on 47 of the 56 uncut answers).
+
+    Known limits: a dropped row is missed when its numbers also appear
+    elsewhere in the candidate (``0%``, a repeated total) or when it is the
+    one row the allowance absorbs. A candidate that restates a dropped row's
+    numbers in prose is credited. The final-row term (a), unchanged, still
+    catches a reply cut mid-row.
+
+    Reuses ``row_corroboration.ROW_CORROBORATION_MIN`` (36/39) rather than a
+    second named allowance, already measured and owned by A1b/A1a. Abstains
     (returns False) with no ``words`` -- exception-path callers of
     ``table_output_defect`` supply none, matching every other geometry-needing
     term in this module.
@@ -406,9 +506,10 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         return False
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,
+        baseline_bands,
+        is_table_shaped_band,
         numeric_body_rows,
         table_blocks,
-        table_shaped_native_row_count,
     )
 
     candidate_rows = [
@@ -418,14 +519,34 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         return False
 
     row_shape_min = min(len(row) for row in candidate_rows)
-    native_table_rows = table_shaped_native_row_count(words, row_shape_min)
-    if native_table_rows <= 0:
+    bands = [
+        band.tokens
+        for band in baseline_bands(words)
+        if is_table_shaped_band(band.tokens, row_shape_min)
+    ]
+    if not _falls_short(len(candidate_rows), len(bands), ROW_CORROBORATION_MIN):
         return False
 
-    count = len(candidate_rows)
-    if count >= native_table_rows - _STRAY_HEADER_BAND_ALLOWANCE:
+    # #988: the row count says rows are missing; confirm it by content.
+    supply = _candidate_numeric_supply(markdown)
+    accounted = 0
+    for tokens in bands:
+        needed = Counter(tokens)
+        if not needed - supply:
+            supply -= needed
+            accounted += 1
+    return _falls_short(accounted, len(bands), ROW_CORROBORATION_MIN)
+
+
+def _falls_short(count: int, native_rows: int, corroboration_min: float) -> bool:
+    """Term (b)'s inequality: *count* undercuts *native_rows* by more than one
+    stray band (``_STRAY_HEADER_BAND_ALLOWANCE``) AND by more than A1b's
+    row-count allowance (*corroboration_min*, ``ROW_CORROBORATION_MIN``)."""
+    if native_rows <= 0:
         return False
-    return count < math.ceil(native_table_rows * ROW_CORROBORATION_MIN)
+    if count >= native_rows - _STRAY_HEADER_BAND_ALLOWANCE:
+        return False
+    return count < math.ceil(native_rows * corroboration_min)
 
 
 def table_truncated(output_md: str, words: list | None) -> bool:
@@ -443,7 +564,8 @@ def table_truncated(output_md: str, words: list | None) -> bool:
     (b) ``_truncated_row_shortfall`` -- the candidate's own numeric body
         rows undercount the native table-shaped row count by more than
         A1b's row-count allowance, i.e. whole rows are simply missing from
-        the end (or middle) of the emission.
+        the end (or middle) of the emission, AND (#988) the bands whose
+        numbers the candidate wrote undercount it too.
     """
     for block_lines in raw_table_block_lines(output_md):
         if _final_row_truncated(block_lines):
@@ -470,9 +592,10 @@ def table_output_defect(
        and reconciliation diffs remain blind and deliberately unchanged.
     3. ``table_truncated`` (TICKET-A2, #645), also on raw rows before
        ``_parse_grid`` can reshape or drop the row this term is looking for: a
-       final row breaking its block's own leading/trailing-pipe style, or a
-       numeric-row count undercutting the native table-shaped row count by
-       more than A1b's row-count allowance permits. Needs ``words`` for its
+       final row breaking its block's own leading/trailing-pipe style, or
+       a numeric-row count undercutting the native table-shaped row count by
+       more than A1b's row-count allowance permits, confirmed (#988) by the
+       count of bands whose numbers the candidate wrote. Needs ``words`` for its
        second half; abstains on that half without it, same as term 4.
     4. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
