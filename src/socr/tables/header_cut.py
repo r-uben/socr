@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from collections.abc import Callable, Sequence
 
 from socr.tables.header_attribution import HeaderVerdict
 from socr.tables.header_repair import (
@@ -241,10 +242,31 @@ def _emitted_header_tokens(grid: list[list[str]], header_multisets: list) -> set
     return {_fold(t) for row in rows for cell in row for t in cell.split() if t.strip()}
 
 
+def _band_is_furniture(
+    rows_by_y: dict[int, list],
+    band: tuple[float, float],
+    is_furniture: Callable[[Sequence], bool] | None,
+) -> bool:
+    """#988: every word between the two rules is page furniture.
+
+    A page whose table draws no full-width rule of its own has, as its nearest
+    two, those of a navigation bar printed on every page (Coca-Cola 2021: the
+    rules above and below the section sub-menu). That band is the bar, not the
+    table's header, and owing its words would refuse the table. A band with
+    one word of the page's own is still a header band.
+    """
+    if is_furniture is None:
+        return False
+    top, cut = band
+    band_words = [w for y, row in rows_by_y.items() if top < y < cut for w in row]
+    return bool(band_words) and all(is_furniture(w) for w in band_words)
+
+
 def header_cut_verdict(
     grid: list[list[str]],
     words: list | None,
     rules: list[tuple[float, float, float]] | None,
+    is_furniture: Callable[[Sequence], bool] | None = None,
 ) -> HeaderVerdict:
     """HARD when native header content above the midrule is absent from the emitted header.
 
@@ -253,6 +275,10 @@ def header_cut_verdict(
     ``locate._horizontal_rules(page)``, precomputed by the caller so this stays
     pure. Returns only HARD, OK or UNVERIFIABLE -- SOFT remains the advisory
     signal of ``header_attribution`` and is not produced here.
+
+    ``is_furniture`` (#988) says whether a word is page furniture. A band made
+    only of furniture is not taken as the header; with no other band found the
+    verdict is UNVERIFIABLE.
     """
     if not grid or not grid[0] or not words or not rules:
         return HeaderVerdict.UNVERIFIABLE
@@ -269,7 +295,7 @@ def header_cut_verdict(
         if len(lanes) < 2:
             continue
         band = _header_band(rules, rows_by_y, anchor_y, local_ys)
-        if band is not None:
+        if band is not None and not _band_is_furniture(rows_by_y, band, is_furniture):
             resolved = (lanes, band)
             break
     if resolved is None:

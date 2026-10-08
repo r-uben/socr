@@ -1,7 +1,7 @@
 # 2026-10-07 -- #988 row-shortfall term: confirm a row-count shortfall by content
 
-Branch `fix/table-checks-nav-and-shortfall` from origin/main ed2550e2, first of two commits; the second (navigation
-bar, #988 M2) is logged in `2026-10-07_988-navigation-furniture.md`. Issue r-uben/socr#988
+Branch `fix/table-checks-nav-and-shortfall` from origin/main ed2550e2 (PR #1042), first commit; the navigation bar
+(#988 M2, revised after the PR review) is logged in `2026-10-07_988-navigation-furniture.md`. Issue r-uben/socr#988
 (evidence comment: https://github.com/r-uben/socr/issues/988#issuecomment-6041020092).
 Supersedes the approach of `fix/truncated-shortfall-symmetric` (blank-stub credit), which clears none
 of the pages below.
@@ -70,7 +70,7 @@ Gate level (the production `NativeTableVerifierJudge` replayed on each cached an
 stubbed to accept, same probe for both trees): complete answers passing go from 1 to 15 of 56, and no
 answer main accepts is refused. Two answers that are not fully correct now pass; on main each was refused
 only by this term misfiring: 2018 p60 (invented value) and 2019 p51 (mixed). With the navigation-bar fix
-the figure is 40 of 56 (see that log).
+the figure is 38 of 56 (see that log).
 
 ## Tests
 

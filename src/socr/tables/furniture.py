@@ -1,17 +1,20 @@
-"""Page furniture: what a document prints at the same place on several pages.
+"""Page furniture: words a document prints at the same place on several pages.
 
 #988 M2. Report-style PDFs (Coca-Cola's sustainability reports, 2018-2021)
 print a website navigation bar across the top of every page: a menu line, a
 section sub-menu line, and drawn rules under them. Gemini transcribes the bar
 as a Markdown table, and the table gate then judges it as one: an empty table
-(``table_content_empty``), a ragged one (``grid_shape``), and the bar's rules
-become the real table's header cut (``header_unattributed``). Those verdicts
-rejected complete readings of the table below the bar.
+(``table_content_empty``), a ragged one (``grid_shape``), and the sub-menu
+between the bar's two rules is owed to the real table's header
+(``header_unattributed``). Those verdicts rejected complete readings of the
+table below the bar.
 
 The bar is identified by repetition, not by position on the page: a template
 element is printed at identical coordinates on other pages of the same
-document, while a page's own content is not. Nothing here edits shipped text;
-callers only leave furniture out of what the gate checks.
+document, while a page's own content is not. Only words are compared. Drawn
+rules are not: a table layout repeated on most pages repeats its rules too,
+and dropping them switched the header cut off on such documents (PR #1042
+review).
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from socr.tables.locate import _horizontal_rules
+from socr.tables.native_verifier import is_numeric_token
 from socr.tables.reconcile import _is_table_line
 
 #: Decimal places kept when comparing positions across pages (``round`` ndigits).
@@ -35,26 +38,29 @@ _POSITION_DECIMALS = 0
 #: document would miss it (on 2021 p74, the "Data Appendix" sub-menu).
 _MIN_WORD_REPEAT_PAGES = 2
 
-#: A drawn rule is furniture when it is drawn on MORE than this share of the
-#: pages (and on at least ``_MIN_WORD_REPEAT_PAGES`` of them). Dropping a rule
-#: changes the header cut of every table on the page, so rules need the
-#: stronger evidence: a continued table repeats its rules on a few pages, the
-#: page template on most. Measured on the four Coca-Cola reports: header-cut
-#: HARD verdicts on cached answers fall from 23 to 1.
-_RULE_FURNITURE_SHARE = 0.5
+#: Text is split into pieces on whitespace, Markdown pipes and emphasis.
+_PIECE_SPLIT_RE = re.compile(r"[\s|*]+")
 
-#: Words are compared by their letter-and-digit chunks. The model and the text
-#: layer break a menu item differently ("Portfolio/Reducing" written, "Portfolio/"
-#: and "Reducing" printed), and punctuation (``&``, ``|``, ``[Home]``) carries no
-#: identity of its own.
+#: A non-numeric piece is compared by its letter-and-digit chunks. The model and
+#: the text layer break a menu item differently ("Portfolio/Reducing" written,
+#: "Portfolio/" and "Reducing" printed), and punctuation (``&``, ``[Home]``)
+#: carries no identity of its own. A numeric piece is compared whole, so a table
+#: value ``0.32`` is never matched by a page number ``32`` and a ``0``.
 _CHUNK_RE = re.compile(r"\w+")
 
 _PositionKey = tuple[str, float, float]
-_RuleKey = tuple[float, float, float]
 
 
-def _chunks(text: str) -> list[str]:
-    return _CHUNK_RE.findall(text.casefold())
+def _tokens(text: str) -> list[str]:
+    out: list[str] = []
+    for piece in _PIECE_SPLIT_RE.split(text.casefold()):
+        if not piece:
+            continue
+        if is_numeric_token(piece):
+            out.append(piece)
+        else:
+            out.extend(_CHUNK_RE.findall(piece))
+    return out
 
 
 def _word_key(word: Sequence) -> _PositionKey:
@@ -65,80 +71,59 @@ def _word_key(word: Sequence) -> _PositionKey:
     )
 
 
-def _rule_key(rule: tuple[float, float, float]) -> _RuleKey:
-    y, x0, x1 = (round(float(v), _POSITION_DECIMALS) for v in rule)
-    return (y, x0, x1)
-
-
 @dataclass(frozen=True)
 class DocumentFurniture:
-    """Word positions and drawn rules a document repeats across its pages."""
+    """Word positions a document repeats across its pages."""
 
     word_positions: frozenset[_PositionKey] = frozenset()
-    rules: frozenset[_RuleKey] = frozenset()
+
+    def is_furniture_word(self, word: Sequence) -> bool:
+        """Whether *word* (a ``get_text("words")`` tuple) sits at a furniture position."""
+        return _word_key(word) in self.word_positions
 
     def page_words(self, words: Iterable[Sequence] | None) -> frozenset[str]:
-        """Chunks of the words this page prints at a furniture position."""
+        """Tokens of the words this page prints at a furniture position."""
         if not words or not self.word_positions:
             return frozenset()
         return frozenset(
-            chunk
+            token
             for key in map(_word_key, words)
             if key in self.word_positions
-            for chunk in _chunks(key[0])
+            for token in _tokens(key[0])
         )
-
-    def keep_rules(
-        self, rules: list[tuple[float, float, float]] | None
-    ) -> list[tuple[float, float, float]] | None:
-        """*rules* without the document's furniture rules (``None`` passes through)."""
-        if rules is None or not self.rules:
-            return rules
-        return [r for r in rules if _rule_key(r) not in self.rules]
 
 
 def document_furniture(doc) -> DocumentFurniture:
-    """Scan every page of *doc* (a ``fitz.Document``) for repeated words and rules."""
-    return furniture_from_pages((page.get_text("words"), _horizontal_rules(page)) for page in doc)
+    """Scan every page of *doc* (a ``fitz.Document``) for repeated words."""
+    return furniture_from_pages(page.get_text("words") for page in doc)
 
 
-def furniture_from_pages(
-    pages: Iterable[tuple[Iterable[Sequence], Iterable[tuple[float, float, float]]]],
-) -> DocumentFurniture:
-    """Repeated words and rules over ``(words, rules)`` per page, in any order."""
+def furniture_from_pages(pages: Iterable[Iterable[Sequence]]) -> DocumentFurniture:
+    """Repeated word positions over each page's words, pages in any order."""
     word_pages: Counter[_PositionKey] = Counter()
-    rule_pages: Counter[_RuleKey] = Counter()
-    n_pages = 0
-    for words, rules in pages:
-        n_pages += 1
+    for words in pages:
         word_pages.update({_word_key(w) for w in words})
-        rule_pages.update({_rule_key(r) for r in rules})
     return DocumentFurniture(
-        word_positions=frozenset(k for k, n in word_pages.items() if n >= _MIN_WORD_REPEAT_PAGES),
-        rules=frozenset(
-            k
-            for k, n in rule_pages.items()
-            if n >= _MIN_WORD_REPEAT_PAGES and n > n_pages * _RULE_FURNITURE_SHARE
-        ),
+        word_positions=frozenset(k for k, n in word_pages.items() if n >= _MIN_WORD_REPEAT_PAGES)
     )
 
 
 def _run_is_furniture(run: list[str], furniture_words: frozenset[str]) -> bool:
-    chunks = [chunk for line in run for chunk in _chunks(line)]
-    return bool(chunks) and all(chunk in furniture_words for chunk in chunks)
+    tokens = [token for line in run for token in _tokens(line)]
+    return bool(tokens) and all(token in furniture_words for token in tokens)
 
 
-def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> str:
-    """*markdown* without the pipe runs that transcribe page furniture.
+def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> tuple[str, list[str]]:
+    """*markdown* without the pipe runs that transcribe page furniture, and those runs.
 
-    A run is furniture when every word in it is one the page prints at a
+    A run is furniture when every token in it is one the page prints at a
     furniture position. Each such run is replaced by one blank line, so the
-    text around it does not join up. When every pipe run is furniture the text
-    is returned unchanged: the answer then has no table of its own, and the
-    gate must judge what it does have.
+    text around it does not join up. When every pipe run is furniture nothing
+    is removed: the answer then has no table of its own, and the gate must
+    judge what it does have.
     """
     if not markdown or not furniture_words:
-        return markdown
+        return markdown, []
     lines = markdown.splitlines()
     runs: list[tuple[int, int]] = []
     i = 0
@@ -153,7 +138,7 @@ def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> str:
             i += 1
     furniture = [(i, j) for i, j in runs if _run_is_furniture(lines[i:j], furniture_words)]
     if not furniture or len(furniture) == len(runs):
-        return markdown
+        return markdown, []
     out: list[str] = []
     prev = 0
     for i, j in furniture:
@@ -161,4 +146,5 @@ def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> str:
         out.append("")
         prev = j
     out.extend(lines[prev:])
-    return "\n".join(out)
+    text = "\n".join(out) + ("\n" if markdown.endswith("\n") else "")
+    return text, ["\n".join(lines[i:j]) for i, j in furniture]

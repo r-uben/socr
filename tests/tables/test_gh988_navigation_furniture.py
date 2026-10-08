@@ -4,9 +4,9 @@ Coca-Cola's 2018-2021 sustainability reports print a website menu, a section
 sub-menu and drawn rules across the top of every page. Gemini writes the menu
 as a Markdown table, and the gate refused complete readings of the real table
 below it: as an empty table (``table_content_empty``), a ragged one
-(``grid_shape``), or because the menu's rules became the header cut
-(``header_unattributed``). Furniture is found by repetition across the
-document's pages (``socr.tables.furniture``).
+(``grid_shape``), or because the sub-menu between the menu's two rules was
+owed to the table's header (``header_unattributed``). Furniture is found by
+repetition across the document's pages (``socr.tables.furniture``).
 
 Each test pins a difference in the same process.
 """
@@ -18,15 +18,16 @@ from pathlib import Path
 
 import fitz
 
+from socr.core.manifest import _apply_table_emission_guard
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
 from socr.tables import furniture
 from socr.tables.furniture import (
-    DocumentFurniture,
     document_furniture,
     furniture_from_pages,
     strip_furniture_runs,
 )
+from socr.tables.locate import _horizontal_rules
 from socr.tables.reconcile import TABLE_CONTENT_EMPTY, table_content_defect
 from socr.tables.structure_check import (
     DEFECT_GRID_SHAPE,
@@ -44,6 +45,7 @@ TABLE = (
     "| Profit | 7.5 | 8.5 | 9.5 |\n"
 )
 MENU = "| Home | Data | Reports |\n|---|---|---|\n| Overview | Water |\n"
+HEADER_ONLY_MENU = "| Home | Data | Reports |\n|---|---|---|\n"
 
 
 # --------------------------------------------------------------------------
@@ -51,33 +53,27 @@ MENU = "| Home | Data | Reports |\n|---|---|---|\n| Overview | Water |\n"
 # --------------------------------------------------------------------------
 
 
-def _coke_p74() -> tuple[str, list[tuple], list[tuple], DocumentFurniture]:
+def test_coke_p74_menu_run_and_menu_band_are_both_left_out() -> None:
+    """The answer the cluster gated on p74 (its table complete and correct)
+    writes the menu and sub-menu as one ragged pipe run, and the table draws no
+    full-width rule of its own, so the nearest two are the menu's. Each half of
+    the fix is needed: with only the run left out, the sub-menu between the
+    menu's rules is owed to the header; with only the band excused, the run is
+    ragged. The menu repeats on p75, which is all the scan needs."""
     words = [tuple(w) for w in json.loads((FIXTURE / "words.json").read_text())]
     words75 = [tuple(w) for w in json.loads((FIXTURE / "words_p75.json").read_text())]
-    rules = {
-        int(page): [tuple(r) for r in page_rules]
-        for page, page_rules in json.loads((FIXTURE / "rules.json").read_text()).items()
-    }
-    # Words of p74 and p75 (the menu repeats on both); rules of all 86 pages.
-    pages = [(words if n == 74 else words75 if n == 75 else [], rules[n]) for n in sorted(rules)]
+    rules = [tuple(r) for r in json.loads((FIXTURE / "rules_p74.json").read_text())]
     answer = (FIXTURE / "cluster_answer.txt").read_text()
-    return answer, words, rules[74], furniture_from_pages(pages)
-
-
-def test_coke_p74_menu_table_and_menu_rules_are_both_left_out() -> None:
-    """The answer the cluster gated on p74 (its table complete and correct)
-    writes the menu and sub-menu as one ragged pipe run, and the page draws
-    two full-width rules under the menu on most pages of the report. Each
-    half of the fix is needed: with only the run left out, the menu rules cut
-    the header; with only the rules left out, the run is ragged."""
-    answer, words, rules, fur = _coke_p74()
-    gated, kept = strip_furniture_runs(answer, fur.page_words(words)), fur.keep_rules(rules)
+    fur = furniture_from_pages([words, words75])
+    gated, removed = strip_furniture_runs(answer, fur.page_words(words))
+    is_furniture = fur.is_furniture_word
 
     assert table_output_defect(answer, words, rules) == DEFECT_GRID_SHAPE
     assert table_output_defect(gated, words, rules) == DEFECT_HEADER_UNATTRIBUTED
-    assert table_output_defect(answer, words, kept) == DEFECT_GRID_SHAPE
-    assert table_output_defect(gated, words, kept) == ""
-    assert "Executive Summary" in answer and "Executive Summary" not in gated
+    assert table_output_defect(answer, words, rules, is_furniture) == DEFECT_GRID_SHAPE
+    assert table_output_defect(gated, words, rules, is_furniture) == ""
+    assert len(removed) == 1 and "Executive Summary" in removed[0]
+    assert "Executive Summary" not in gated
     assert "| Year ended December 31," in gated
 
 
@@ -89,10 +85,10 @@ def test_coke_p74_menu_table_and_menu_rules_are_both_left_out() -> None:
 def _report_pdf(n_pages: int = 3) -> fitz.Document:
     """Each page: a menu line and a sub-menu line (pages 1-2 only), each with a
     full-width rule under it, and a page-specific title. The sub-menu items sit
-    over the table's data columns. Page 1 has a table
-    whose own rule spans the stub column only, so the nearest full-width rules
-    above it are the menu's (as on Coca-Cola 2021 p74). Page 2 repeats one
-    table word at another position."""
+    over the table's data columns. Page 1 has a table whose own rule spans the
+    stub column only, so the nearest full-width rules above it are the menu's
+    (as on Coca-Cola 2021 p74). Page 2 repeats one table word at another
+    position."""
     doc = fitz.open()
     for i in range(n_pages):
         page = doc.new_page(width=600, height=800)
@@ -116,103 +112,74 @@ def _report_pdf(n_pages: int = 3) -> fitz.Document:
     return doc
 
 
-def test_repeated_words_and_majority_rules_are_furniture() -> None:
+def test_repeated_words_are_furniture() -> None:
     """A word printed at the same place on two or more pages is furniture (so
     a sub-menu repeated within its section counts); a page's own words are
-    not, even when another page prints the same word elsewhere. A rule is
-    furniture only when drawn on most pages: the table's own rule on page 1
-    is kept."""
+    not, even when another page prints the same word elsewhere."""
     doc = _report_pdf()
     fur = document_furniture(doc)
     page1 = fur.page_words(doc[0].get_text("words"))
     page3 = fur.page_words(doc[2].get_text("words"))
 
     assert {"home", "data", "reports", "overview", "water"} <= page1
-    assert {"title1", "item", "sales", "1", "5"}.isdisjoint(page1)
+    assert {"title1", "item", "sales", "1.5"}.isdisjoint(page1)
     assert {"overview", "water"}.isdisjoint(page3)
-    assert [round(r[0]) for r in fur.keep_rules(fitz_rules(doc[0]))] == [126]
 
 
-def fitz_rules(page) -> list[tuple[float, float, float]]:
-    from socr.tables.locate import _horizontal_rules
+def test_numbers_are_compared_whole() -> None:
+    """PR #1042 review: ``0.32`` is not furniture because the page prints a
+    ``0`` and a ``32`` (a page number, a year fragment) at furniture positions."""
+    fur = furniture_from_pages([[(10, 10, 20, 20, "0.32")], [(10, 10, 20, 20, "0.32")]])
+    assert fur.page_words([(10, 10, 20, 20, "0.32")]) == {"0.32"}
 
-    return _horizontal_rules(page)
-
-
-def test_a_rule_on_half_the_pages_or_fewer_is_kept() -> None:
-    """Two pages of four draw the same rule: not a majority, not furniture."""
-    rule = (100.0, 40.0, 560.0)
-    fur = furniture_from_pages([([], [rule]), ([], [rule]), ([], []), ([], [])])
-    assert fur.keep_rules([rule]) == [rule]
-    fur = furniture_from_pages([([], [rule]), ([], [rule]), ([], [rule]), ([], [])])
-    assert fur.keep_rules([rule]) == []
+    run = "| Rate | 0.32 |\n|---|---|\n"
+    assert strip_furniture_runs(run + "\n" + TABLE, frozenset({"rate", "0", "32"}))[1] == []
+    assert strip_furniture_runs(run + "\n" + TABLE, frozenset({"rate", "0.32"}))[1] == [run.strip()]
 
 
 # --------------------------------------------------------------------------
-# Leaving furniture runs out of what is gated
+# Leaving furniture runs out
 # --------------------------------------------------------------------------
 
 MENU_WORDS = frozenset({"home", "data", "reports", "overview", "water", "2020", "goals"})
 
 
 def test_menu_run_is_left_out_and_the_table_kept() -> None:
-    gated = strip_furniture_runs(MENU + "\n" + TABLE, MENU_WORDS)
+    gated, removed = strip_furniture_runs(MENU + "\n" + TABLE, MENU_WORDS)
     assert "Home" not in gated
-    assert TABLE.strip() in gated
+    assert TABLE in gated
+    assert removed == [MENU.strip()]
 
 
 def test_a_run_with_one_word_of_its_own_is_kept() -> None:
     """Every word of a run must be furniture; one page word keeps it."""
     run = "| Home | Data | Sales |\n|---|---|---|\n"
-    assert strip_furniture_runs(run + "\n" + TABLE, MENU_WORDS).startswith(run)
+    gated, removed = strip_furniture_runs(run + "\n" + TABLE, MENU_WORDS)
+    assert gated.startswith(run) and removed == []
 
 
 def test_years_printed_in_the_menu_do_not_keep_it() -> None:
     """Sub-menus carry years ("2020 Sustainability Goals"). Numbers printed at
     furniture positions are furniture like any other word."""
     run = "| Overview | **2020 Goals** | Water |\n|---|---|---|\n"
-    assert "Goals" not in strip_furniture_runs(run + "\n" + TABLE, MENU_WORDS)
+    assert "Goals" not in strip_furniture_runs(run + "\n" + TABLE, MENU_WORDS)[0]
 
 
 def test_an_answer_made_only_of_furniture_is_judged_as_written() -> None:
     """With nothing but the menu, the answer has no table of its own; the gate
     must see the menu rather than nothing."""
-    assert strip_furniture_runs(MENU, MENU_WORDS) == MENU
-    assert table_output_defect(strip_furniture_runs(MENU, MENU_WORDS), None) == DEFECT_GRID_SHAPE
+    assert strip_furniture_runs(MENU, MENU_WORDS) == (MENU, [])
+    assert table_output_defect(MENU, None) == DEFECT_GRID_SHAPE
 
 
-# --------------------------------------------------------------------------
-# table_content_empty and header-only runs
-# --------------------------------------------------------------------------
-
-HEADER_ONLY = "| Home | Data | Reports |\n|---|---|---|\n"
-
-
-def test_header_only_run_beside_a_populated_table_is_not_empty() -> None:
-    assert table_content_defect(HEADER_ONLY + "\n" + TABLE) == ""
-    assert table_content_defect(TABLE + "\n" + HEADER_ONLY) == ""
-
-
-def test_header_only_run_on_its_own_is_still_empty() -> None:
-    assert table_content_defect(HEADER_ONLY) == TABLE_CONTENT_EMPTY
-    assert table_content_defect(HEADER_ONLY + "\nSome prose.\n\n" + HEADER_ONLY) == (
-        TABLE_CONTENT_EMPTY
-    )
-
-
-def test_a_placeholder_body_is_empty_beside_a_populated_table() -> None:
-    placeholders = "| A | B |\n|---|---|\n| - | - |\n| — | — |\n"
-    assert table_content_defect(placeholders + "\n" + TABLE) == TABLE_CONTENT_EMPTY
-
-
-def test_known_limit_a_header_only_data_table_beside_a_populated_one_passes() -> None:
-    """Disclosed limit (#988): the content term cannot tell a menu from a data
-    table whose whole body was dropped, so a second table written header-only
-    beside a populated one is no longer refused as empty. Its numbers are then
-    missing for the value guard and the row-shortfall term to find. Pinned so
-    a change to it is a decision."""
+def test_a_header_only_run_beside_a_populated_table_is_still_empty() -> None:
+    """PR #1042 review: checks with no document (the manifest backstop,
+    native-first, the born-digital native check) cannot tell a menu from a
+    data table whose body was dropped, so a header-only run stays a defect
+    there, whatever else the page carries."""
     dropped = "| Region | 2019 | 2020 |\n|---|---|---|\n"
-    assert table_content_defect(dropped + "\n" + TABLE) == ""
+    assert table_content_defect(dropped + "\n" + TABLE) == TABLE_CONTENT_EMPTY
+    assert table_content_defect(TABLE + "\n" + dropped) == TABLE_CONTENT_EMPTY
 
 
 # --------------------------------------------------------------------------
@@ -225,48 +192,135 @@ class _Accept:
         return AcceptDecision(accept=True, reason="inner judge", confidence=1.0)
 
 
-def _judge(doc: fitz.Document) -> NativeTableVerifierJudge:
-    return NativeTableVerifierJudge(
-        inner=_Accept(), get_fitz_page=lambda n: doc[n - 1], is_table_page=lambda n: True
-    )
-
-
-def _assess(doc: fitz.Document, text: str) -> AcceptDecision:
+def _assess(doc: fitz.Document, text: str, events: list | None = None):
     out = PageOutput(page_num=1, text=text, status=PageStatus.SUCCESS, confidence=0.9)
-    return _judge(doc).assess(out, object())
+    judge = NativeTableVerifierJudge(
+        inner=_Accept(),
+        get_fitz_page=lambda n: doc[n - 1],
+        is_table_page=lambda n: True,
+        record_event=None if events is None else events.append,
+    )
+    return judge.assess(out, object()), out
 
 
-def test_gate_leaves_the_menu_out_and_fails_closed_when_the_scan_fails(monkeypatch) -> None:
+def _scan_fails(monkeypatch) -> None:
+    def _raise(_doc):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(furniture, "document_furniture", _raise)
+
+
+def test_gate_ships_the_answer_without_the_menu_and_records_it(monkeypatch) -> None:
     """Same page, same answer: with the document scanned, the menu run is not
-    gated and the answer passes; when the scan raises, the gate behaves as
-    before #988 M2 and the ragged menu run refuses the page."""
+    gated, the answer passes, and the text that ships no longer carries the
+    menu; the removal is an audit event. When the scan raises, the gate
+    behaves as before #988 M2: the ragged menu run refuses the page and the
+    text is left as written."""
     doc = _report_pdf()
     answer = MENU + "\n" + TABLE
+    events: list = []
 
-    assert _assess(doc, answer).accept is True
+    decision, shipped = _assess(doc, answer, events)
+    assert decision.accept is True
+    assert "Home" not in shipped.text and TABLE in shipped.text
+    removed = [e for e in events if e.kind == "table_furniture_removed"]
+    assert len(removed) == 1 and removed[0].data["runs"] == [MENU.strip()]
 
-    def _raise(_doc):
-        raise RuntimeError("scan failed")
-
-    monkeypatch.setattr(furniture, "document_furniture", _raise)
-    refused = _assess(doc, answer)
+    _scan_fails(monkeypatch)
+    refused, kept = _assess(doc, answer)
     assert refused.accept is False
     assert DEFECT_GRID_SHAPE in refused.reason
+    assert kept.text == answer
 
 
-def test_gate_leaves_the_menu_rules_out_of_the_header_cut(monkeypatch) -> None:
-    """The answer writes only the table. The two full-width rules nearest above
-    it are the menu's, so with every rule kept the header cut owes the
-    sub-menu words to the table's header and refuses it; with the document
-    scanned, the menu rules are dropped and the answer passes."""
+def test_backstop_passes_what_the_gate_ships() -> None:
+    """The manifest backstop has no document, so it judges a header-only menu
+    run as an empty table. The gate removes the run from the text it accepts,
+    so the backstop sees what the gate judged. Left in, the run demotes the
+    page."""
+    doc = _report_pdf()
+    answer = HEADER_ONLY_MENU + "\n" + TABLE
+
+    decision, shipped = _assess(doc, answer)
+    assert decision.accept is True
+    assert _apply_table_emission_guard(shipped, 1).status == PageStatus.SUCCESS
+
+    as_written = PageOutput(page_num=1, text=answer, status=PageStatus.SUCCESS, confidence=0.9)
+    assert _apply_table_emission_guard(as_written, 1).status == PageStatus.ERROR
+
+
+def test_a_header_band_of_menu_words_is_not_owed(monkeypatch) -> None:
+    """The answer writes only the table. The two full-width rules nearest
+    above it are the menu's, with only sub-menu words between them. With the
+    document scanned that band is not taken for the header and the answer
+    passes; when the scan raises, the sub-menu words are owed and the header
+    cut refuses it."""
     doc = _report_pdf()
 
-    assert _assess(doc, TABLE).accept is True
+    assert _assess(doc, TABLE)[0].accept is True
 
-    def _raise(_doc):
-        raise RuntimeError("scan failed")
-
-    monkeypatch.setattr(furniture, "document_furniture", _raise)
-    refused = _assess(doc, TABLE)
+    _scan_fails(monkeypatch)
+    refused = _assess(doc, TABLE)[0]
     assert refused.accept is False
     assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
+
+
+# --------------------------------------------------------------------------
+# PR #1042 review: a table layout repeated on every page keeps its header cut
+# --------------------------------------------------------------------------
+
+APPENDIX_HEADER = ("Item", "Alpha", "Beta")
+
+
+def _appendix_pdf(last_headers: tuple[str, ...]) -> fitz.Document:
+    """One booktabs table per page, at the same place on every page: toprule,
+    header row, midrule, three data rows. The rules repeat on every page; the
+    last column's header is ``last_headers[i]`` on page ``i + 1``."""
+    doc = fitz.open()
+    for i, last in enumerate(last_headers):
+        page = doc.new_page(width=600, height=800)
+        page.insert_text((40, 60), "Online Appendix", fontsize=10)
+        page.draw_line((40, 100), (560, 100))
+        for x, text in zip((40, 200, 300, 400), (*APPENDIX_HEADER, last), strict=True):
+            page.insert_text((x, 115), text, fontsize=10)
+        page.draw_line((40, 122), (560, 122))
+        for r in range(3):
+            page.insert_text((40, 140 + r * 20), f"Row{r}", fontsize=10)
+            for c, x in enumerate((200, 300, 400)):
+                page.insert_text((x, 140 + r * 20), f"{10 * i + r}.{c}5", fontsize=10)
+        page.draw_line((40, 190), (560, 190))
+    return doc
+
+
+def _appendix_answer(last_header: str) -> str:
+    rows = "".join(
+        f"| Row{r} | " + " | ".join(f"{r}.{c}5" for c in range(3)) + " |\n" for r in range(3)
+    )
+    return f"| {' | '.join(APPENDIX_HEADER)} | {last_header} |\n|---|---|---|---|\n" + rows
+
+
+def test_a_repeated_table_layout_keeps_its_header_cut() -> None:
+    """Every page draws the table's rules at the same coordinates. The header
+    band holds one word of the page's own (``Gamma1``), so it is still the
+    header: an answer that drops that word is refused, the full answer passes."""
+    doc = _appendix_pdf(("Gamma1", "Gamma2", "Gamma3"))
+
+    assert _assess(doc, _appendix_answer("Gamma1"))[0].accept is True
+    refused = _assess(doc, _appendix_answer(""))[0]
+    assert refused.accept is False
+    assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
+
+
+def test_known_limit_a_header_band_repeated_word_for_word_is_not_owed() -> None:
+    """Disclosed limit (#988): when every word of a table's header band is
+    printed at the same place on another page, the band is taken for page
+    furniture and the header cut abstains, so a dropped header word there is
+    not caught by this term. Pinned so a change to it is a decision."""
+    doc = _appendix_pdf(("Gamma", "Gamma", "Gamma"))
+    page = doc[0]
+    words, rules = page.get_text("words"), _horizontal_rules(page)
+    fur = document_furniture(doc)
+    dropped = _appendix_answer("")
+
+    assert table_output_defect(dropped, words, rules) == DEFECT_HEADER_UNATTRIBUTED
+    assert table_output_defect(dropped, words, rules, fur.is_furniture_word) == ""
