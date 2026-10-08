@@ -48,6 +48,10 @@ _PIECE_SPLIT_RE = re.compile(r"[\s|*]+")
 #: value ``0.32`` is never matched by a page number ``32`` and a ``0``.
 _CHUNK_RE = re.compile(r"\w+")
 
+#: Audit-event kind the table gate records when it removes furniture runs from the
+#: text it ships; the removed runs are in ``data["runs"]``.
+TABLE_FURNITURE_REMOVED_KIND = "table_furniture_removed"
+
 _PositionKey = tuple[str, float, float]
 
 
@@ -113,7 +117,15 @@ def _run_is_furniture(run: list[str], furniture_words: frozenset[str]) -> bool:
     return bool(tokens) and all(token in furniture_words for token in tokens)
 
 
-def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> tuple[str, list[str]]:
+def _run_has_numeric_cell(run: list[str]) -> bool:
+    return any(
+        is_numeric_token(cell) for line in run for cell in line.strip().strip("|").split("|")
+    )
+
+
+def strip_furniture_runs(
+    markdown: str, furniture_words: frozenset[str], *, keep_numbered: bool = False
+) -> tuple[str, list[str]]:
     """*markdown* without the pipe runs that transcribe page furniture, and those runs.
 
     A run is furniture when every token in it is one the page prints at a
@@ -121,6 +133,14 @@ def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> tupl
     text around it does not join up. When every pipe run is furniture nothing
     is removed: the answer then has no table of its own, and the gate must
     judge what it does have.
+
+    ``keep_numbered`` keeps the furniture runs with a cell that is a number. The
+    gate checks the answer without every furniture run, but removes from the
+    text it ships only those with no numeric cell (PR #1042 review): a data
+    table repeated at the same place on two pages must never leave the output.
+    A number inside a text cell does not keep a run: Coca-Cola's sub-menus
+    print "2020 Sustainability Goals", and keeping those runs left a header-only
+    table that the manifest backstop refused on 5 complete answers.
     """
     if not markdown or not furniture_words:
         return markdown, []
@@ -139,6 +159,10 @@ def strip_furniture_runs(markdown: str, furniture_words: frozenset[str]) -> tupl
     furniture = [(i, j) for i, j in runs if _run_is_furniture(lines[i:j], furniture_words)]
     if not furniture or len(furniture) == len(runs):
         return markdown, []
+    if keep_numbered:
+        furniture = [(i, j) for i, j in furniture if not _run_has_numeric_cell(lines[i:j])]
+        if not furniture:
+            return markdown, []
     out: list[str] = []
     prev = 0
     for i, j in furniture:

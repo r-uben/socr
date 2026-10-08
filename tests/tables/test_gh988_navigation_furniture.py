@@ -21,8 +21,10 @@ import fitz
 from socr.core.manifest import _apply_table_emission_guard
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables import furniture
 from socr.tables.furniture import (
+    TABLE_FURNITURE_REMOVED_KIND,
     document_furniture,
     furniture_from_pages,
     strip_furniture_runs,
@@ -82,7 +84,9 @@ def test_coke_p74_menu_run_and_menu_band_are_both_left_out() -> None:
 # --------------------------------------------------------------------------
 
 
-def _report_pdf(n_pages: int = 3) -> fitz.Document:
+def _report_pdf(
+    n_pages: int = 3, sub_menu: tuple[str, str] = ("Overview", "Water")
+) -> fitz.Document:
     """Each page: a menu line and a sub-menu line (pages 1-2 only), each with a
     full-width rule under it, and a page-specific title. The sub-menu items sit
     over the table's data columns. Page 1 has a table whose own rule spans the
@@ -95,8 +99,8 @@ def _report_pdf(n_pages: int = 3) -> fitz.Document:
         page.insert_text((40, 30), "Home   Data   Reports", fontsize=10)
         page.draw_line((40, 36), (560, 36))
         if i < 2:
-            page.insert_text((200, 50), "Overview", fontsize=10)
-            page.insert_text((300, 50), "Water", fontsize=10)
+            page.insert_text((200, 50), sub_menu[0], fontsize=10)
+            page.insert_text((300, 50), sub_menu[1], fontsize=10)
         page.draw_line((40, 56), (560, 56))
         page.insert_text((40, 80), f"Title{i + 1}", fontsize=14)
         if i == 1:
@@ -223,7 +227,7 @@ def test_gate_ships_the_answer_without_the_menu_and_records_it(monkeypatch) -> N
     decision, shipped = _assess(doc, answer, events)
     assert decision.accept is True
     assert "Home" not in shipped.text and TABLE in shipped.text
-    removed = [e for e in events if e.kind == "table_furniture_removed"]
+    removed = [e for e in events if e.kind == TABLE_FURNITURE_REMOVED_KIND]
     assert len(removed) == 1 and removed[0].data["runs"] == [MENU.strip()]
 
     _scan_fails(monkeypatch)
@@ -263,6 +267,16 @@ def test_a_header_band_of_menu_words_is_not_owed(monkeypatch) -> None:
     refused = _assess(doc, TABLE)[0]
     assert refused.accept is False
     assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
+
+
+def test_a_shared_ampersand_does_not_make_a_menu_band_owed() -> None:
+    """Sub-menus print ``&`` ("GHG & Waste"), and so do table headers. An ``&``
+    in both is not the answer writing the band: only a token with a letter or
+    digit counts as written."""
+    doc = _report_pdf(sub_menu=("Overview", "&"))
+    answer = TABLE.replace("| Item |", "| Item & unit |", 1)
+
+    assert _assess(doc, answer)[0].accept is True
 
 
 # --------------------------------------------------------------------------
@@ -311,16 +325,87 @@ def test_a_repeated_table_layout_keeps_its_header_cut() -> None:
     assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
 
 
-def test_known_limit_a_header_band_repeated_word_for_word_is_not_owed() -> None:
-    """Disclosed limit (#988): when every word of a table's header band is
-    printed at the same place on another page, the band is taken for page
-    furniture and the header cut abstains, so a dropped header word there is
-    not caught by this term. Pinned so a change to it is a decision."""
-    doc = _appendix_pdf(("Gamma", "Gamma", "Gamma"))
+def _appendix_page(last_headers: tuple[str, ...]):
+    doc = _appendix_pdf(last_headers)
     page = doc[0]
-    words, rules = page.get_text("words"), _horizontal_rules(page)
-    fur = document_furniture(doc)
+    return page.get_text("words"), _horizontal_rules(page), document_furniture(doc)
+
+
+def test_a_header_band_repeated_word_for_word_is_still_owed() -> None:
+    """PR #1042 re-review: every word of the header band is printed at the same
+    place on every page, so every word is furniture. The answer still wrote
+    part of the band (``Item Alpha Beta``), so the band is the table's header
+    and the dropped ``Gamma`` is owed."""
+    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"))
     dropped = _appendix_answer("")
 
-    assert table_output_defect(dropped, words, rules) == DEFECT_HEADER_UNATTRIBUTED
-    assert table_output_defect(dropped, words, rules, fur.is_furniture_word) == ""
+    assert table_output_defect(dropped, words, rules, fur.is_furniture_word) == (
+        DEFECT_HEADER_UNATTRIBUTED
+    )
+    assert table_output_defect(_appendix_answer("Gamma"), words, rules, fur.is_furniture_word) == ""
+
+
+def test_known_limit_a_repeated_header_band_the_answer_omits_entirely_is_not_owed() -> None:
+    """Disclosed limit (#988): when every word of the header band is repeated on
+    another page and the answer writes NONE of them (a blank header row), the
+    band looks exactly like a navigation bar the model left out, and the header
+    cut abstains. Pinned so a change to it is a decision."""
+    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"))
+    blank = "|  |  |  |  |\n" + _appendix_answer("Gamma").split("\n", 1)[1]
+
+    assert table_output_defect(blank, words, rules) == DEFECT_HEADER_UNATTRIBUTED
+    assert table_output_defect(blank, words, rules, fur.is_furniture_word) == ""
+
+
+def test_a_band_with_a_page_specific_word_is_owed_even_to_a_blank_header() -> None:
+    """The limit above needs EVERY band word to be furniture. With one word the
+    page prints only here (``Gamma1``), the band is the table's header even
+    when the answer writes none of it, and the blank header is refused."""
+    words, rules, fur = _appendix_page(("Gamma1", "Gamma2", "Gamma3"))
+    blank = "|  |  |  |  |\n" + _appendix_answer("Gamma1").split("\n", 1)[1]
+
+    assert table_output_defect(blank, words, rules, fur.is_furniture_word) == (
+        DEFECT_HEADER_UNATTRIBUTED
+    )
+
+
+# --------------------------------------------------------------------------
+# PR #1042 re-review: a run with a number never leaves the shipped text
+# --------------------------------------------------------------------------
+
+
+def test_only_a_furniture_run_with_a_numeric_cell_stays_in_the_shipped_text() -> None:
+    """A data table repeated at the same place on two pages has cells that are
+    numbers. Such a run is left out of what the gate checks but stays in the
+    shipped text. A number inside a text cell does not keep a run: Coca-Cola's
+    sub-menus print "2020 Sustainability Goals"."""
+    text_year = "| Overview | 2030 Goals |\n|---|---|\n"
+    numeric = "| Overview | 2030 |\n|---|---|\n"
+    words = MENU_WORDS | {"2030"}
+    answer = text_year + "\n" + numeric + "\n" + TABLE
+
+    checked, _ = strip_furniture_runs(answer, words)
+    shipped, removed = strip_furniture_runs(answer, words, keep_numbered=True)
+    assert "2030" not in checked
+    assert removed == [text_year.strip()]
+    assert numeric in shipped and "Goals" not in shipped
+
+
+def test_gate_keeps_a_menu_run_with_a_number_in_the_shipped_text() -> None:
+    """Same gate, a sub-menu item that is a number: the answer is judged
+    without the run and passes, and the run stays in the text that ships."""
+    doc = _report_pdf(sub_menu=("Overview", "2030"))
+    answer = "| Home | Data | Reports |\n|---|---|---|\n| Overview | 2030 |\n\n" + TABLE
+    events: list = []
+
+    decision, shipped = _assess(doc, answer, events)
+    assert decision.accept is True
+    assert shipped.text == answer
+    assert not [e for e in events if e.kind == TABLE_FURNITURE_REMOVED_KIND]
+
+
+def test_the_removal_record_survives_a_resume() -> None:
+    """cubic P2 on #1042: a resumed terminal page skips the gate, so its
+    removal record must be replayed from the sidecar or it disappears from the
+    audit log while the edited text stays."""
+    assert TABLE_FURNITURE_REMOVED_KIND in UnifiedPipeline.resume_restore_kinds()

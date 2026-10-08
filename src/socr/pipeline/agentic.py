@@ -1157,22 +1157,28 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         stands. A grounded verdict (HARD/SOFT/OK) keeps the short-circuit.
 
         #988 M2: pipe runs that transcribe page furniture (a site menu printed
-        on every page) are left out of what is checked and, when the page is
-        accepted, out of the text that ships, recorded as
-        ``table_furniture_removed``. Removing them is what lets the manifest
-        backstop, which has no document, judge the accepted text the same way.
+        on every page) are left out of what is checked. When the page is
+        accepted, those carrying no number are also left out of the text that
+        ships, recorded as ``table_furniture_removed``; removing them is what
+        lets the manifest backstop, which has no document, judge the accepted
+        text the same way. A run with a number stays in the text.
         """
         if not decision.accept:
             return decision
 
-        from socr.tables.furniture import DocumentFurniture, strip_furniture_runs
+        from socr.tables.furniture import (
+            TABLE_FURNITURE_REMOVED_KIND,
+            DocumentFurniture,
+            strip_furniture_runs,
+        )
         from socr.tables.header_attribution import HeaderVerdict
         from socr.tables.structure_check import table_header_verdicts, table_output_defect
 
         # #988 M2: page furniture the model wrote as a table is not judged.
         if furniture is None:
             furniture = DocumentFurniture()
-        gated, removed = strip_furniture_runs(output.text, furniture.page_words(words))
+        page_furniture = furniture.page_words(words)
+        gated, _ = strip_furniture_runs(output.text, page_furniture)
         defect = table_output_defect(gated, words, rules, furniture.is_furniture_word)
         if not defect and words:
             verdicts = table_header_verdicts(gated, words)
@@ -1199,11 +1205,12 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                         return decision
 
         if not defect:
+            shipped, removed = strip_furniture_runs(output.text, page_furniture, keep_numbered=True)
             if removed:
-                output.text = gated
+                output.text = shipped
                 self._emit_event(
                     page_num=page_num,
-                    kind="table_furniture_removed",
+                    kind=TABLE_FURNITURE_REMOVED_KIND,
                     engine=output.engine or "",
                     detail=f"left out {len(removed)} page-furniture run(s) written as a table",
                     data={"runs": removed},

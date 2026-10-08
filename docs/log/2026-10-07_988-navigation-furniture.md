@@ -30,17 +30,22 @@ table below:
   run. When every run on the answer is furniture nothing is removed: the answer has no table of its own,
   and the gate judges what it wrote.
 - `header_cut.header_cut_verdict` takes an optional `is_furniture` word test. A header band (the words
-  between the two rules above the anchor row) made only of furniture words is not taken as the header;
-  with no other band the verdict is UNVERIFIABLE, as for any page without two rules: the term does not
-  refuse, and records no event of its own (the separate `table_header_verdicts` abstain event is
-  unaffected). A band with one word of the page's own is still the header. `structure_check.table_output_defect` passes the test through.
+  between the two rules above the anchor row) is not taken as the header when every word in it is
+  furniture AND the answer's header row (`grid[0]`) carries none of them; only tokens with a letter or
+  digit count, so a shared `&` does not. With no other band the verdict is UNVERIFIABLE, as for any page
+  without two rules: the term does not refuse, and records no event of its own (the separate
+  `table_header_verdicts` abstain event is unaffected). `structure_check.table_output_defect` passes the
+  test through.
 - `NativeTableVerifierJudge` scans the document once, cached by file name, because `get_fitz_page`
   reopens the PDF on each call. `_apply_structural_gate` checks the text without furniture runs
   (`table_output_defect` with the word test, and `table_header_verdicts`). When the page is accepted,
-  the furniture runs are also removed from the text that ships, recorded as `table_furniture_removed`
-  (`docs/OUTPUT.md`) with the removed runs in `data["runs"]`. The manifest backstop, which has no
-  document, then sees the text the gate judged. A scan that raises leaves the gate as before (nothing
+  the furniture runs with no numeric cell are also removed from the text that ships, recorded as
+  `table_furniture_removed` (`TABLE_FURNITURE_REMOVED_KIND`, `docs/OUTPUT.md`) with the removed runs in
+  `data["runs"]`. A run with a cell that is a number stays in the text. The manifest backstop, which has
+  no document, then sees the text the gate judged. A scan that raises leaves the gate as before (nothing
   removed, every header band owed). The value guard still sees the full answer.
+- `table_furniture_removed` is replayed on resume (`orchestrator._RESUME_REPLAYED`): a terminal resumed
+  page skips the gate, and the removed runs live only on the event.
 - `reconcile.table_content_defect` is unchanged from main: a header-only run is a defect wherever it is.
 
 ## Review (PR #1042) and what changed
@@ -64,6 +69,27 @@ Removing the menu from the shipped text interacts with `rejudge_candidate` (#101
 rewrite by the judge chain as an error. That path re-judges a timed-out candidate on resume; a page whose
 menu is removed there does not ship and is recorded `rejudge_error`, as with `table_header_repair`.
 
+## Re-review (PR #1042, on 73fdafc3) and what changed
+
+1. A header band repeated word for word on every page (an appendix under `(1) (2) (3)`, a continued
+   table) was still excused, so a dropped header word passed. Now a furniture band is excused only when
+   the answer's header row carries none of its words, as the reviewer proposed, with one change: only
+   `grid[0]` is compared, not the second tier `_emitted_header_tokens` admits. On 2021 p74 that tier is a
+   section label in the body whose "...emissions" shares a word with the sub-menu ("Greenhouse Gas
+   Emissions & Waste"), and the page was refused again. The former known-limit test now asserts the
+   refusal; what remains open is an answer that writes none of a repeated header (pinned).
+2. Removing shipped text: the reviewer asked to remove only runs with no numeric token. Measured: 10 of
+   the 38 removed runs print a year inside a menu item ("2020 Sustainability Goals"), and keeping them
+   left a header-only table that the backstop refused on 5 complete answers (2018 p56, p64; 2019 p68;
+   2020 p68, p70). A run is now kept when it has a cell that IS a number (`2019`, `0.32`, `**2030**`),
+   which a data table has and none of the 38 menu runs has. A table with no numeric cell can still be
+   removed when every token in it is printed at the same place on another page.
+3. (cubic) `table_furniture_removed` was not replayed on resume, so a resumed run lost the record while
+   the edited text stayed. Added to `_RESUME_REPLAYED`, with a test on `resume_restore_kinds()`.
+4. (cubic) The scan runs inside the table gate, under the page judge's deadline (`_TimeoutJudge`, the
+   longest of `DEFAULT_PROVIDER_TIMEOUTS`, 300 s). The longest scan measured is 3.7 s on 700 pages. Not
+   changed.
+
 ## Measured
 
 Production gate replayed on the 73 cached answers (`NativeTableVerifierJudge`, inner judge stubbed to
@@ -75,8 +101,10 @@ the manifest backstop (`_apply_table_emission_guard`) on the text the gate let t
 | origin/main | 1 |
 | M1 | 15 |
 | M1 + M2, first version (20157757) | 40 |
-| M1 + M2, this version | 38 |
+| M1 + M2, after the review (73fdafc3) | 38 |
+| M1 + M2, after the re-review (this commit) | 38 |
 
+- The re-review commit changes no verdict against 73fdafc3, on the 73 answers or on the 300 cuts below.
 - Every answer this version passes also passes the backstop on the shipped text.
 - No answer that main accepts is refused (4 answers on 3 pages).
 - The two answers the first version passed and this one refuses (`table_content_empty`) each carry an
@@ -123,7 +151,13 @@ the manifest backstop (`_apply_table_emission_guard`) on the text the gate let t
   the menu and records the event; the backstop passes the shipped text and demotes the text as written;
   with the scan failing the gate refuses (`grid_shape`, and `header_unattributed` for the table alone).
 - A generated appendix with the same table layout on every page: an answer that drops a header word is
-  refused. A pinned known limit (below) for a header band repeated word for word.
+  refused, both when one header word differs per page and when the whole band repeats word for word. A
+  pinned known limit (below) for an answer that writes none of a repeated header. A band with one word
+  of the page's own is owed even to a blank header.
+- A menu band sharing only `&` with the table header is still excused.
+- A furniture run with a numeric cell stays in the shipped text, through the production gate; a number
+  inside a text cell does not keep it.
+- `table_furniture_removed` is in `UnifiedPipeline.resume_restore_kinds()`.
 - Numbers compared whole; header-only runs still empty for the content term.
 
 Run against the first version, the two review tests fail: the appendix answer that drops a header word
@@ -133,32 +167,40 @@ Mutants (external copy, `socr.__file__` canary, anchor counted exactly once), ea
 
 | mutant | killed by |
 |---|---|
-| furniture band never excused | p74, gate menu, backstop, header-band and known-limit tests |
-| band excused when ANY word is furniture | repeated-layout test |
-| `table_output_defect` drops the word test | p74, gate menu, backstop, header-band and known-limit tests |
+| furniture band never excused | p74, gate menu, backstop, menu-band, ampersand, known-limit, numeric-run gate tests |
+| band excused when ANY word is furniture | page-specific-word blank-header test |
+| answer's header row not consulted | repeated-word-for-word header test |
+| second header tier compared too | p74 test |
+| punctuation counts as written | ampersand test |
+| `table_output_defect` drops the word test | p74, gate menu, backstop, menu-band, ampersand, known-limit, numeric-run gate tests |
 | gate keeps the menu in the shipped text | gate menu, backstop tests |
-| gate does not strip before checking | gate menu, backstop tests |
+| gate does not strip before checking | gate menu, backstop, numeric-run gate tests |
+| gate removes runs with a numeric cell | numeric-run gate test |
+| a number inside a text cell keeps a run | numeric-cell test |
 | numbers compared in chunks | numbers-whole test |
 | header-only run excused again | still-empty, backstop tests and 7 GH-190 pins |
 | strip even when every run is furniture | furniture-only test |
-| words need 3 pages | p74, repeated-words, numbers, gate menu, backstop, header-band tests |
+| words need 3 pages | p74, repeated-words, numbers, gate menu, backstop, menu-band, ampersand, numeric-run gate tests |
 | word position ignored | repeated-words test |
 | no `table_furniture_removed` event | gate menu test |
-| gate passes no word test | gate menu, backstop, header-band tests |
+| event not replayed on resume | resume test |
+| gate passes no word test | gate menu, backstop, menu-band, ampersand, numeric-run gate tests |
 | trailing newline lost | menu-run and gate menu tests |
 
-An unmutated copy passes the same 18 suite files (473 tests).
+An unmutated copy passes the same 18 suite files (479 tests). The page-specific-word test was added after
+the first run left the "ANY word" mutant alive; that mutant and the unmutated copy were then run again.
 
 ## Known limits
 
 - A sub-menu whose current item is set bold shifts the words after it, so their positions do not repeat
   and the run is kept (2021 p59). A menu item printed as an icon and written as a word (`[Home]`) also
   keeps the run.
-- A table header band whose every word is printed at the same place on another page is taken for
-  furniture, and the header cut abstains on it without an event of its own (pinned by
-  `test_known_limit_…`). One page-specific word in the band keeps the check.
+- A header band whose every word is printed at the same place on another page, in an answer whose header
+  row carries none of those words (a blank header), is taken for furniture, and the header cut abstains on
+  it without an event of its own (pinned by `test_known_limit_…`).
 - Text written as its own run that the document prints identically at the same place on two pages is
-  treated as furniture and, on an accepted page, removed from the shipped text: for example, a continued
-  table's repeated header written as a separate run. The removal is recorded in the event.
+  treated as furniture and left out of the gate's checks. On an accepted page it is also removed from the
+  shipped text unless it has a numeric cell: for example, a continued table's repeated text-only header
+  written as a separate run. The removal is recorded in the event.
 - Only the agentic table gate uses furniture. The value guard, the manifest backstop and native-first
   do not.

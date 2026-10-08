@@ -125,6 +125,7 @@ from socr.pipeline.agentic import (
 from socr.core.ollama_utils import probe_model_generation
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
+from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
@@ -147,6 +148,10 @@ _RESUME_REPLAYED: dict[str, str] = {
     "scanned_figure_asset": (
         "#1030: emitted by the page loop's scanned-figure step, which a terminal resumed page "
         "skips; the document note and CLI line read this event"
+    ),
+    TABLE_FURNITURE_REMOVED_KIND: (
+        "#988: the table gate removed page furniture (a site menu) from the shipped text; the "
+        "removed runs live only on this event, and a terminal resumed page skips the gate"
     ),
     **{
         kind: (
