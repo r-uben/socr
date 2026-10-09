@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>socr page router</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6a66; --line: #c9c6be;
+    --box: #ffffff; --warn: #c2410c; --warn-bg: #fff1e8; --ok: #2f6f4f; --new: #1d5fb8; --new-bg: #eaf2fd; --jev: #7c3aed; --jev-bg: #f3edff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161614; --fg: #ecebe6; --muted: #9c9a93; --line: #4a4843;
+      --box: #1f1f1c; --warn: #fb923c; --warn-bg: #2b1a10; --ok: #6fcf9a; --new: #7fb2ff; --new-bg: #14223a; --jev: #c4a5ff; --jev-bg: #241a3a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161614; --fg: #ecebe6; --muted: #9c9a93; --line: #4a4843;
+    --box: #1f1f1c; --warn: #fb923c; --warn-bg: #2b1a10; --ok: #6fcf9a; --new: #7fb2ff; --new-bg: #14223a; --jev: #c4a5ff; --jev-bg: #241a3a;
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  figure { margin: 0; }
+  svg { width: 100%; height: auto; display: block; }
+  figcaption { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .box { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+  .warnbox { fill: var(--warn-bg); stroke: var(--warn); stroke-width: 1.6; }
+  .t { fill: var(--fg); font-size: 13px; }
+  .tb { fill: var(--fg); font-size: 14px; font-weight: 600; }
+  .tm { fill: var(--muted); font-size: 12px; }
+  .tw { fill: var(--warn); font-size: 12px; font-weight: 600; }
+  .ok { fill: var(--ok); font-size: 12px; font-weight: 600; }
+  .edge { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+  .edgew { stroke: var(--warn); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+  .badge { fill: var(--warn); }
+  .badget { fill: var(--bg); font-size: 12px; font-weight: 700; }
+  .newbox { fill: var(--new-bg); stroke: var(--new); stroke-width: 1.6; }
+  .nedge { stroke: var(--new); stroke-width: 1.6; fill: none; }
+  .tn { fill: var(--new); font-size: 12px; font-weight: 600; }
+  a { color: var(--new); }
+  .jev { fill: var(--jev-bg); stroke: var(--jev); stroke-width: 1.4; }
+  .tj { fill: var(--jev); font-size: 12px; font-weight: 700; }
+  ol { padding-left: 20px; }
+  li { margin-bottom: 10px; }
+  code { font-size: 13px; }
+  .w { color: var(--warn); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+<h1>How socr routes a page today</h1>
+<p class="sub">Read from <code>origin/main @ c4937472</code>: <code>core/born_digital.py</code> (classify), <code>pipeline/orchestrator.py</code> (lanes), <code>pipeline/agentic.py</code> + <code>core/providers.py</code> (ladder).</p>
+
+<figure>
+<svg viewBox="0 0 1000 560" role="img" aria-label="Each page is classified once, then takes one of three lanes: trusted native text ships with no check; table and math pages send only crops to a model; scanned or flagged pages send the whole page up a cost ladder that prices local OCR at zero.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g style="color: var(--muted)">
+
+  <!-- PDF page -->
+  <rect class="box" x="20" y="235" width="120" height="70" rx="8"/>
+  <text class="tb" x="80" y="265" text-anchor="middle">PDF page</text>
+  <text class="tm" x="80" y="284" text-anchor="middle">one at a time</text>
+  <line class="edge" x1="140" y1="270" x2="178" y2="270" marker-end="url(#a)"/>
+
+  <!-- Classifier -->
+  <rect class="box" x="180" y="130" width="220" height="280" rx="8"/>
+  <text class="tb" x="196" y="156">Classify the text layer</text>
+  <text class="tm" x="196" y="174">rules only, no model</text>
+  <text class="t" x="196" y="204">Too few chars, CID glyphs,</text>
+  <text class="t" x="196" y="221">garbage, odd spacing</text>
+  <text class="tm" x="210" y="238">→ scanned</text>
+  <text class="t" x="196" y="266">Minus read as 2, control</text>
+  <text class="t" x="196" y="283">bytes, invisible old OCR,</text>
+  <text class="t" x="196" y="300">garbled math, shredded</text>
+  <text class="t" x="196" y="317">rotated text</text>
+  <text class="tm" x="210" y="334">→ needs OCR</text>
+  <text class="t" x="196" y="362">Tables? Equations?</text>
+  <text class="tm" x="210" y="379">→ region lanes</text>
+
+  <!-- Lane A: trusted native -->
+  <path class="edge" d="M400,170 C425,170 425,80 448,80" marker-end="url(#a)"/>
+  <text class="tm" x="410" y="112">clean prose</text>
+  <rect class="box" x="450" y="45" width="230" height="70" rx="8"/>
+  <text class="tb" x="466" y="73">Trusted native</text>
+  <text class="t" x="466" y="94">take the PDF's own text</text>
+  <line class="edgew" x1="680" y1="80" x2="738" y2="80" marker-end="url(#a)" style="color: var(--warn)"/>
+  <rect class="warnbox" x="740" y="40" width="240" height="80" rx="8"/>
+  <text class="tb" x="756" y="66">Ships as-is</text>
+  <text class="tw" x="756" y="86">no model, no judge</text>
+  <text class="tm" x="756" y="106">58% of pages in one run (#317)</text>
+  <circle class="badge" cx="980" cy="40" r="11"/>
+  <text class="badget" x="980" y="44" text-anchor="middle">2</text>
+
+  <!-- Lane B: region lanes -->
+  <line class="edge" x1="400" y1="250" x2="448" y2="250" marker-end="url(#a)"/>
+  <text class="tm" x="404" y="242">tables / math</text>
+  <rect class="box" x="450" y="200" width="230" height="100" rx="8"/>
+  <text class="tb" x="466" y="226">Region lanes</text>
+  <text class="t" x="466" y="247">tables: native grid, crop reread</text>
+  <text class="t" x="466" y="266">equations: crop per region</text>
+  <text class="t" x="466" y="285">corrupt math: crop hybrid</text>
+  <line class="edge" x1="680" y1="250" x2="738" y2="250" marker-end="url(#a)"/>
+  <rect class="box" x="740" y="210" width="240" height="80" rx="8"/>
+  <text class="tb" x="756" y="236">Native text + crops</text>
+  <text class="ok" x="756" y="256">small model inputs</text>
+  <text class="tm" x="756" y="276">checked by table verifiers</text>
+
+  <!-- Lane C: whole page -->
+  <path class="edge" d="M400,330 C425,330 425,430 448,430" marker-end="url(#a)"/>
+  <text class="tm" x="408" y="398">scanned /</text>
+  <text class="tm" x="408" y="413">needs OCR</text>
+  <rect class="warnbox" x="450" y="395" width="230" height="70" rx="8"/>
+  <text class="tb" x="466" y="421">Whole page to a model</text>
+  <text class="tw" x="466" y="442">all-or-nothing per page</text>
+  <circle class="badge" cx="680" cy="395" r="11"/>
+  <text class="badget" x="680" y="399" text-anchor="middle">3</text>
+  <line class="edge" x1="680" y1="430" x2="738" y2="370" marker-end="url(#a)"/>
+
+  <!-- Ladder -->
+  <rect class="warnbox" x="740" y="340" width="240" height="56" rx="8"/>
+  <text class="tb" x="756" y="364">Local qwen3-vl</text>
+  <text class="tw" x="756" y="384">priced $0.00 in providers.py</text>
+  <circle class="badge" cx="980" cy="340" r="11"/>
+  <text class="badget" x="980" y="344" text-anchor="middle">1</text>
+  <line class="edge" x1="860" y1="396" x2="860" y2="420" marker-end="url(#a)"/>
+  <rect class="box" x="790" y="422" width="140" height="38" rx="19"/>
+  <text class="t" x="860" y="446" text-anchor="middle">judge: accept?</text>
+  <text class="ok" x="940" y="446">yes → ship</text>
+  <line class="edge" x1="860" y1="460" x2="860" y2="484" marker-end="url(#a)"/>
+  <text class="tm" x="868" y="477">no</text>
+  <rect class="box" x="740" y="486" width="240" height="56" rx="8"/>
+  <text class="tb" x="756" y="510">Cloud: Gemini → Mistral</text>
+  <text class="tm" x="756" y="530">$0.0002 → $0.001 / page; best wins</text>
+  </g>
+</svg>
+<figcaption>Each page is classified once by rules, then takes exactly one lane. Orange marks the three places your goals hit the current design.</figcaption>
+</figure>
+
+<h2 style="font-size:17px;margin-top:28px">The three orange spots</h2>
+<ol>
+  <li><span class="w">Local is priced at zero.</span> The ladder sorts by <code>cost_per_page_usd</code>, and local qwen is <code>0.0</code>. So the router has no reason to avoid it: GPU minutes and long-input hallucination never enter the decision. Your point 1 is invisible to the cost model.</li>
+  <li><span class="w">Trusted native is unchecked.</span> The cheapest lane is also the one nothing looks at. Skipping more OCR makes this lane bigger, so the miss rate (#827) has to be measured before we widen it.</li>
+  <li><span class="w">Whole page or nothing.</span> A semi-scanned page with one bad paragraph sends the entire page to the model: the longest input, the highest hallucination risk, and it overwrites the good native prose too. Tables and math already work by crops; body text does not.</li>
+</ol>
+
+<h1 style="margin-top:44px">The routing we want</h1>
+<p class="sub">Blue = new or changed. Purple = Jev (text-only judge). Grey already exists. Coverage check: <a href="https://github.com/r-uben/socr/issues/1050">#1050</a>.</p>
+
+<figure>
+<svg viewBox="0 0 1200 640" role="img" aria-label="Proposed routing: clean-prose pages pass two model-free checks, ink coverage then a cheap CPU re-read compared line by line, before shipping native; gaps and disagreeing lines go to the model as crops; figure regions mask the coverage check; failed checks fall back to whole-page OCR priced by GPU time.">
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g style="color: var(--muted)">
+
+  <!-- page + classify -->
+  <rect class="box" x="20" y="270" width="110" height="70" rx="8"/>
+  <text class="tb" x="75" y="300" text-anchor="middle">PDF page</text>
+  <text class="tm" x="75" y="319" text-anchor="middle">one at a time</text>
+  <line class="edge" x1="130" y1="305" x2="158" y2="305" marker-end="url(#b)"/>
+
+  <rect class="box" x="160" y="170" width="200" height="270" rx="8"/>
+  <text class="tb" x="176" y="196">Classify the page</text>
+  <text class="tm" x="176" y="214">rules, no model</text>
+  <rect class="jev" x="176" y="222" width="168" height="16" rx="8"/>
+  <text class="tj" x="184" y="234">Jev: readable or garbled?</text>
+  <text class="t" x="176" y="256">clean prose</text>
+  <text class="t" x="176" y="300">figures / charts</text>
+  <text class="t" x="176" y="350">tables / math</text>
+  <text class="t" x="176" y="400">scanned / defect flags</text>
+
+  <!-- ROW 1: clean prose -->
+  <path class="nedge" d="M360,246 C380,246 380,90 398,90" marker-end="url(#b)" style="color: var(--new)"/>
+  <rect class="newbox" x="400" y="40" width="220" height="100" rx="8"/>
+  <text class="tb" x="416" y="66">1. Coverage check</text>
+  <text class="t" x="416" y="87">ink minus text-layer words</text>
+  <text class="tn" x="416" y="108">catches MISSING text</text>
+  <text class="tm" x="416" y="126">no model</text>
+
+  <line class="nedge" x1="620" y1="65" x2="658" y2="65" marker-end="url(#b)" style="color: var(--new)"/>
+  <text class="tn" x="624" y="57">covered</text>
+  <rect class="newbox" x="660" y="20" width="230" height="100" rx="8"/>
+  <text class="tb" x="676" y="46">2. Agreement check</text>
+  <text class="t" x="676" y="67">cheap CPU OCR re-read,</text>
+  <text class="t" x="676" y="84">compare words + numbers</text>
+  <text class="tn" x="676" y="105">catches WRONG text</text>
+  <rect class="jev" x="660" y="124" width="230" height="34" rx="8"/>
+  <text class="tj" x="670" y="138">Jev: word diff real or misread?</text>
+  <text class="tj" x="670" y="153">digit diff → always crop</text>
+
+  <line class="nedge" x1="890" y1="50" x2="928" y2="50" marker-end="url(#b)" style="color: var(--new)"/>
+  <text class="tn" x="893" y="42">agree</text>
+  <rect class="newbox" x="930" y="20" width="250" height="60" rx="8"/>
+  <text class="tb" x="946" y="45">Ship native</text>
+  <text class="tn" x="946" y="65">checked twice, recorded</text>
+
+  <line class="nedge" x1="890" y1="100" x2="928" y2="125" marker-end="url(#b)" style="color: var(--new)"/>
+  <text class="tn" x="893" y="128">disagree</text>
+  <path class="nedge" d="M620,120 C700,160 860,150 928,140" marker-end="url(#b)" style="color: var(--new)"/>
+  <text class="tn" x="700" y="166">text-like gaps</text>
+  <rect class="newbox" x="930" y="100" width="250" height="64" rx="8"/>
+  <text class="tb" x="946" y="125">Model on crops only</text>
+  <text class="tn" x="946" y="146">gaps + bad lines, spliced in</text>
+  <rect class="jev" x="930" y="170" width="250" height="34" rx="8"/>
+  <text class="tj" x="940" y="184">Jev: crop, ship, or whole page?</text>
+  <text class="tj" x="940" y="199">low confidence → escalate</text>
+
+  <path class="nedge" d="M510,140 C510,300 560,470 658,500" marker-end="url(#b)" style="color: var(--new); stroke-dasharray: 5 4"/>
+  <text class="tn" x="516" y="200">check can't decide</text>
+  <text class="tn" x="516" y="215">→ fail closed</text>
+
+  <!-- ROW 2: figures -->
+  <line class="edge" x1="360" y1="296" x2="398" y2="296" marker-end="url(#b)"/>
+  <rect class="box" x="400" y="255" width="220" height="80" rx="8"/>
+  <text class="tb" x="416" y="281">Figure lane</text>
+  <text class="tm" x="416" y="301">image asset; chart reader</text>
+  <text class="tm" x="416" y="319">for chart data</text>
+  <path class="nedge" d="M600,255 C600,200 590,170 590,142" marker-end="url(#b)" style="color: var(--new); stroke-dasharray: 3 3"/>
+  <text class="tn" x="606" y="240">marks only</text>
+  <text class="tn" x="606" y="225">masks figure</text>
+  <line class="edge" x1="620" y1="296" x2="928" y2="296" marker-end="url(#b)"/>
+  <rect class="box" x="930" y="266" width="250" height="60" rx="8"/>
+  <text class="tb" x="946" y="291">Figure + caption inline</text>
+  <text class="tm" x="946" y="311">chart values when readable</text>
+
+  <!-- ROW 3: tables/math -->
+  <line class="edge" x1="360" y1="346" x2="398" y2="380" marker-end="url(#b)"/>
+  <rect class="box" x="400" y="355" width="220" height="60" rx="8"/>
+  <text class="tb" x="416" y="381">Region lanes</text>
+  <text class="tm" x="416" y="401">tables, equations: unchanged</text>
+  <line class="edge" x1="620" y1="385" x2="928" y2="385" marker-end="url(#b)"/>
+  <rect class="box" x="930" y="355" width="250" height="60" rx="8"/>
+  <text class="tb" x="946" y="380">Native text + crops</text>
+  <text class="tm" x="946" y="400">table verifiers check</text>
+
+  <!-- ROW 4: whole page -->
+  <path class="edge" d="M360,396 C380,396 380,500 398,500" marker-end="url(#b)"/>
+  <rect class="box" x="400" y="470" width="220" height="60" rx="8"/>
+  <text class="tb" x="416" y="496">Whole page to a model</text>
+  <text class="tm" x="416" y="516">only if the layer is unusable</text>
+  <line class="edge" x1="620" y1="500" x2="658" y2="500" marker-end="url(#b)"/>
+  <rect class="newbox" x="660" y="470" width="230" height="60" rx="8"/>
+  <text class="tb" x="676" y="494">Local qwen3-vl</text>
+  <text class="tn" x="676" y="514">priced by GPU time</text>
+  <line class="edge" x1="775" y1="530" x2="775" y2="552" marker-end="url(#b)"/>
+  <rect class="box" x="705" y="554" width="140" height="36" rx="18"/>
+  <text class="t" x="775" y="577" text-anchor="middle">judge: accept?</text>
+  <line class="edge" x1="845" y1="572" x2="928" y2="500" marker-end="url(#b)"/>
+  <text class="ok" x="862" y="545">yes</text>
+  <rect class="box" x="930" y="470" width="250" height="60" rx="8"/>
+  <text class="tb" x="946" y="495">Ship model text</text>
+  <text class="tm" x="946" y="515">judged</text>
+  <line class="edge" x1="775" y1="590" x2="775" y2="608" marker-end="url(#b)"/>
+  <text class="tm" x="783" y="604">no</text>
+  <rect class="box" x="660" y="604" width="230" height="30" rx="8"/>
+  <text class="t" x="676" y="624">cloud: Gemini → Mistral</text>
+  </g>
+</svg>
+<figcaption>Every lane ends in a checked state. The two free checks on native text split the work: coverage finds what is missing, agreement finds what is wrong.</figcaption>
+</figure>
+
+<h2 style="font-size:17px;margin-top:28px">What changes</h2>
+<ol>
+  <li><b>Native text is checked twice, for free.</b> Coverage (missing text) then agreement with a cheap CPU re-read (wrong text). Neither uses an LLM.</li>
+  <li><b>Figures mask only their marks.</b> Lines, bars and fills inside a figure are not gaps; text-shaped ink inside a figure still is. Gap text outside a figure is substituted into the prose; gap text inside a figure goes under the linked figure image.</li>
+  <li><b>Gaps and bad lines, not pages.</b> The model sees short crops and the good native prose stays.</li>
+  <li><b>Fail closed.</b> A check that can't decide sends the page to today's whole-page route.</li>
+  <li><b>Honest local price.</b> GPU seconds enter the ladder's cost.</li>
+  <li><b>Jev (purple) judges text, never pixels.</b> Three spots: garble classification, word diffs in the agreement check, and the per-region route. Any digit disagreement bypasses Jev and goes to the vision model.</li>
+</ol>
+</main>
+</body>
+</html>
