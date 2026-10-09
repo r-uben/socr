@@ -27,9 +27,9 @@ overlap with the table.
 ## Phase 1 numbers (measure, no src change)
 
 Two output sets (archive re-OCR, 7 docs; HPC socr-h2, 14 docs): 146 floor page-records, 114 unique pages;
-112 records rejected only for a table. Negative controls: 3,444 readings of OTHER pages of the same document
-scored against a page's layer. 4 scored 1.0, all with <= 16 prose tokens, so the token floor is 17. Among
-3,222 at >= 17 tokens the maximum is 0.892, so the cutoff is 0.90.
+112 records rejected only for a table. Negative controls: 3,444 readings of OTHER pages of the same document were BUILT;
+3,363 had both sides to score (the rest had no prose or no layer band). Of the 3,363, 4 scored 1.0, all with <= 16 prose tokens, so the token floor is 17. Among
+3,222 scored at >= 17 tokens the maximum is 0.892, so the cutoff is 0.90.
 
 | | records | unique pages |
 |---|---|---|
@@ -86,3 +86,22 @@ no table block, numeral absent from layer, accepted reading untouched, #993 with
 Mutants (external copy of `src` + `tests`, anchor count asserted == 1, `socr.__file__` canary = the suite's own
 `test_loaded_source_is_this_checkout` passing inside the copy): corroboration check off -> 3 fail; table-only
 check off -> 3 fail.
+
+## Review round (cubic P2s on #1047)
+
+- Mixed rejection text: a clause that also names a figure, axis, caption, equation, footnote, paragraph,
+  text or legend is no longer table-only ("The table is malformed and the figure axis labels are missing"
+  floors). Pinned with that sentence and Forsythe p28's real reason.
+- Image refs: the reading's image references were stripped for scoring but still shipped. They are now
+  stripped from the shipped body too; the only image is the floor's own (`d3_floor_png_ref` /
+  `invisible_scan_png_ref`, written by this document's run).
+- Numerals: the tokeniser was ASCII-only and silently dropped non-ASCII digits, so the unmatched-numeral veto
+  never saw them. It is now Unicode-aware (`[^\W_]+`, `isnumeric`).
+- Wording: the banner no longer says word-for-word. It says corroborated by the page's text layer, with the
+  similarity and the cutoff; the audit event carries `similarity`.
+- Safety: the pass test already ANDs the score cutoff with `unmatched_numerals == 0` (and the token floor);
+  now pinned by a mutant (veto off -> 1 failure).
+- Counts: built vs scored negatives distinguished above.
+- Survivors: replay through the shipped code is now 46 records, 34 unique pages (was 47 / 34); no page lost.
+- Mutants (external copy, anchor count 1): mixed-clause veto off -> 3 fail; ASCII-only tokens -> 1 fail;
+  numeral veto off -> 1 fail; image strip off -> 1 fail.

@@ -1048,6 +1048,15 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
+def _similarity_from_notes(notes) -> float | None:
+    """#1043: the measured corroboration score recorded in the page's audit note."""
+    for note in notes or []:
+        m = re.search(r"table_withheld_prose_corroborated: score=([0-9.]+)", str(note))
+        if m:
+            return float(m.group(1))
+    return None
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -15980,7 +15989,19 @@ class UnifiedPipeline:
                             f"({FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}); a "
                             "re-run re-reads this page"
                         ),
-                        data={"table_withheld_prose_corroborated": True},
+                        data={
+                            "table_withheld_prose_corroborated": True,
+                            "similarity": _similarity_from_notes(
+                                next(
+                                    (
+                                        r.output.audit_notes
+                                        for r in pre_records
+                                        if r.output.page_num == n
+                                    ),
+                                    [],
+                                )
+                            ),
+                        },
                     )
                 )
 

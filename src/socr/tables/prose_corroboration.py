@@ -37,7 +37,9 @@ PROSE_CORROBORATION_MIN_TOKENS = 17
 #: Lowest corroboration score a reading may carry. See module docstring.
 PROSE_CORROBORATION_MIN = 0.90
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+#: Unicode-aware on purpose (#1043 review): an ASCII-only pattern silently DROPPED every
+#: non-ASCII digit (Arabic-Indic, Devanagari, ...), so the unmatched-numeral veto never saw it.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _MARKER_RE = re.compile(r"\[page \d+[^\]]*\]")
@@ -51,6 +53,15 @@ TABLE_GATE_PREFIXES = ("table_structure_failed", "source_evidence_table", "nativ
 #: pattern, is what stops a wrong page from shipping.
 _TABLE_CLAUSE_RE = re.compile(
     r"\btable|\bcolumns?\b|\brows?\b|\bgrid\b|\bheaders?\b", re.IGNORECASE
+)
+
+#: A clause that ALSO names something that is not a table makes the rejection mixed, whatever
+#: else it says ("the table is malformed and the figure axis labels are missing"). The page
+#: then floors: the judge refused more than the table.
+_NON_TABLE_CLAUSE_RE = re.compile(
+    r"\bfigures?\b|\baxis\b|\baxes\b|\bcaptions?\b|\bequations?\b|\bfootnotes?\b"
+    r"|\bparagraphs?\b|\btext\b|\blegends?\b",
+    re.IGNORECASE,
 )
 
 
@@ -68,7 +79,9 @@ def rejection_is_table_only(reason: str) -> bool:
     if reason.startswith(TABLE_GATE_PREFIXES):
         return True
     clauses = [c.strip() for c in re.split(r"[;\n]", reason) if c.strip()]
-    return bool(clauses) and all(_TABLE_CLAUSE_RE.search(c) for c in clauses)
+    return bool(clauses) and all(
+        _TABLE_CLAUSE_RE.search(c) and not _NON_TABLE_CLAUSE_RE.search(c) for c in clauses
+    )
 
 
 def _tokens(text: str) -> list[str]:
@@ -80,7 +93,12 @@ def _bigrams(tokens: list[str]) -> Counter:
 
 
 def _has_digit(token: str) -> bool:
-    return any(ch.isdigit() for ch in token)
+    return any(ch.isdigit() or ch.isnumeric() for ch in token)
+
+
+def strip_image_refs(text: str) -> str:
+    """*text* without markdown image references (model-authored paths are never trusted)."""
+    return _IMAGE_RE.sub("", text or "")
 
 
 def prose_of(reading_text: str) -> tuple[str, int]:

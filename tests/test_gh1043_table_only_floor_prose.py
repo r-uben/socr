@@ -54,6 +54,15 @@ _TABLE = "| Variable | Mean |\n| --- | --- |\n| Output | 12.5 |\n| Prices | 13.5
 _TABLE_REASON = "Table 1 is missing the 'Mean' column; The last row of the table is malformed"
 
 
+#: Forsythe p28's real qwen rejection (#1047 review): it names the data tables AND the figure
+#: axes, legends and page number, so it is mixed and must floor.
+_P28_REASON = (
+    "The transcription completely omits the data tables located at the top of Figure 17 and "
+    "Figure 18.; The transcription omits the axis labels, legends, and x-axis tick labels for "
+    "the charts in Figure 17 and Figure 18.; The transcription omits the page number '335'."
+)
+
+
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -127,6 +136,9 @@ def _shipped(state):
         (_TABLE_REASON, True),
         ("Table 1 is missing a column; Missing text in the first paragraph", False),
         ("The transcription omits the axis labels of Figure 3", False),
+        ("The table is malformed and the figure axis labels are missing", False),
+        ("Table 1 is missing a column; the footnote under the table is dropped", False),
+        (_P28_REASON, False),
         ("", False),
         ("judge raised: page judge timeout", False),
     ],
@@ -191,6 +203,46 @@ def test_difference_non_table_rejection_keeps_the_floor() -> None:
     assert ok_prov is SelectionProvenance.TABLE_WITHHELD_PROSE_CORROBORATED
     assert bad_prov is SelectionProvenance.INVISIBLE_SCAN_UNREAD
     assert manifest.is_page_failed_marker(bad.text)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["The table is malformed and the figure axis labels are missing", _P28_REASON],
+)
+def test_difference_mixed_clause_keeps_the_floor(reason: str) -> None:
+    ok, ok_prov = _shipped(_state([_reading()]))
+    bad, bad_prov = _shipped(_state([_reading(reason=reason)]))
+    assert ok_prov is SelectionProvenance.TABLE_WITHHELD_PROSE_CORROBORATED
+    assert bad_prov is SelectionProvenance.INVISIBLE_SCAN_UNREAD
+    assert manifest.is_page_failed_marker(bad.text)
+
+
+def test_model_authored_image_refs_do_not_ship_but_the_floor_image_does() -> None:
+    invented = list(_PROSE_LINES)
+    invented[1] = invented[1] + "\n\n![fig](figures/invented_by_model.png)"
+    state = _state([_reading(prose_lines=invented)])
+    state.pages[1].invisible_scan_png_ref = "![scan](figures/invisible_scan_page_p1.png)"
+    out, prov = _shipped(state)
+    assert prov is SelectionProvenance.TABLE_WITHHELD_PROSE_CORROBORATED
+    assert "invented_by_model" not in out.text
+    assert out.text.count("invisible_scan_page_p1.png") == 1
+
+
+def test_non_ascii_numeral_absent_from_the_layer_is_vetoed() -> None:
+    """An ASCII-only tokeniser dropped Arabic-Indic digits, so the veto never saw them."""
+    lines = [*_PROSE_LINES[:3], "Robustness checks give very similar results in ٣١ cases"]
+    c = corroborate_prose("\n\n".join([*lines, _TABLE]), _words(_PROSE_LINES))
+    assert c.unmatched_numerals >= 1 and not c.passed
+    _, prov = _shipped(_state([_reading(prose_lines=lines)]))
+    assert prov is SelectionProvenance.INVISIBLE_SCAN_UNREAD
+
+
+def test_banner_claims_corroboration_not_word_for_word() -> None:
+    out, _ = _shipped(_state([_reading()]))
+    first = out.text.splitlines()[0]
+    assert "word-for-word" not in out.text
+    assert "corroborated by this page's text layer" in first
+    assert "similarity" in first and "cutoff" in first
 
 
 def test_one_non_table_rejected_reading_blocks_even_a_corroborated_one() -> None:
@@ -316,13 +368,17 @@ def _run(tmp_path, monkeypatch, tag, prose):
     side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
     text = next(iter(out.rglob("pages/00001.md"))).read_text()
     audit = json.loads(next(iter(out.rglob("audit_log.json"))).read_text())
-    return result, side, text, {e["kind"] for e in audit["events"]}
+    return result, side, text, audit["events"]
 
 
 def test_e2e_corroborated_vs_uncorroborated_same_scan(tmp_path, monkeypatch) -> None:
     other = ["Quarterly dividends were ratified by the committee without dissent"] * 4
-    good, good_side, good_text, good_kinds = _run(tmp_path, monkeypatch, "good", _PROSE_LINES)
-    bad, bad_side, bad_text, bad_kinds = _run(tmp_path, monkeypatch, "bad", other)
+    good, good_side, good_text, good_events = _run(tmp_path, monkeypatch, "good", _PROSE_LINES)
+    bad, bad_side, bad_text, bad_events = _run(tmp_path, monkeypatch, "bad", other)
+    good_kinds = {e["kind"] for e in good_events}
+    bad_kinds = {e["kind"] for e in bad_events}
+    (ev,) = [e for e in good_events if e["kind"] == "table_withheld_prose_corroborated"]
+    assert isinstance(ev["data"]["similarity"], float) and ev["data"]["similarity"] >= 0.9
 
     assert good_side["failure_mode"] == FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value
     assert good_side["status"] == "warning" and good_side["audit_passed"] is False

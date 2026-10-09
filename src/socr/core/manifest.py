@@ -4024,7 +4024,11 @@ def _corroborated_prose_over_floor(
     if not words:
         return None
 
-    from socr.tables.prose_corroboration import corroborate_prose, rejection_is_table_only
+    from socr.tables.prose_corroboration import (
+        PROSE_CORROBORATION_MIN,
+        corroborate_prose,
+        rejection_is_table_only,
+    )
 
     readings = [
         a
@@ -4063,14 +4067,18 @@ def _corroborated_prose_over_floor(
     )
     where = "see image" if image_ref else f"see PDF page {page_num}"
     marker = f"[page {page_num} failed: unverifiable table — {where}]"
-    body = splice_all_table_regions(best.text, marker, image_ref)
+    # A model-authored image reference is not an asset this document wrote: it was stripped
+    # before scoring and is dropped here too. The only image that ships is the floor's own.
+    from socr.tables.prose_corroboration import strip_image_refs
+
+    body = splice_all_table_regions(strip_image_refs(best.text), marker, image_ref)
     if not body:
         return None
     withheld = body.count(marker)
     banner = socr_marker(
-        f"page {page_num}: prose is a model reading matched word-for-word against this "
-        f"page's own text layer; {withheld} table(s) withheld, not verified or recovered -- "
-        f"{where}"
+        f"page {page_num}: prose is a model reading corroborated by this page's text layer "
+        f"(similarity {corr.score:.2f} >= cutoff {PROSE_CORROBORATION_MIN}); {withheld} "
+        f"table(s) withheld, not verified or recovered -- {where}"
     )
     note = (
         f"{FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}: score={corr.score:.3f} "
