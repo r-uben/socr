@@ -226,8 +226,8 @@
   <text class="tm" x="416" y="301">image asset; chart reader</text>
   <text class="tm" x="416" y="319">for chart data</text>
   <path class="nedge" d="M600,255 C600,200 590,170 590,142" marker-end="url(#b)" style="color: var(--new); stroke-dasharray: 3 3"/>
-  <text class="tn" x="606" y="240">figure boxes</text>
-  <text class="tn" x="606" y="225">masks</text>
+  <text class="tn" x="606" y="240">marks only</text>
+  <text class="tn" x="606" y="225">masks figure</text>
   <line class="edge" x1="620" y1="296" x2="928" y2="296" marker-end="url(#b)"/>
   <rect class="box" x="930" y="266" width="250" height="60" rx="8"/>
   <text class="tb" x="946" y="291">Figure + caption inline</text>
@@ -272,7 +272,7 @@
 <h2 style="font-size:17px;margin-top:28px">What changes</h2>
 <ol>
   <li><b>Native text is checked twice, for free.</b> Coverage (missing text) then agreement with a cheap CPU re-read (wrong text). Neither uses an LLM.</li>
-  <li><b>Figures mask the coverage check.</b> Ink inside a detected figure is expected to have no text, so it is not a gap.</li>
+  <li><b>Figures mask only their marks.</b> Lines, bars and fills inside a figure are not gaps; text-shaped ink inside a figure still is. Gap text outside a figure is substituted into the prose; gap text inside a figure goes under the linked figure image.</li>
   <li><b>Gaps and bad lines, not pages.</b> The model sees short crops and the good native prose stays.</li>
   <li><b>Fail closed.</b> A check that can't decide sends the page to today's whole-page route.</li>
   <li><b>Honest local price.</b> GPU seconds enter the ladder's cost.</li>

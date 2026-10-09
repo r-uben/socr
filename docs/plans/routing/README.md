@@ -32,8 +32,23 @@ Three problems:
 Native text ships only after two model-free checks; models see gaps and bad lines, not pages.
 
 1. **Coverage check (#1050).** Render the page, find ink, subtract text-layer word boxes. Text-like
-   ink with no words over it → OCR that crop only. Figure-lane boxes mask the check (ink inside a
-   figure is expected to have no text). Finds **missing** text.
+   ink with no words over it → OCR that crop only. Finds **missing** text. Inside a figure, the
+   figure's **marks** (lines, bars, fills) are expected to have no text and are ignored, but
+   **text-shaped** ink still counts: axis labels, legends and box labels are content. Masking whole
+   figure boxes would hide exactly the case on `2023__patel_gloor__systematic_esg_scoring__WP.pdf`
+   p2, a diagram whose words exist only as pixels.
+
+   Where the OCR'd text lands (ruled 2026-10-09):
+   - **Outside a figure** (e.g. a scanned paragraph): substituted into the prose at its
+     reading-order position, as if the text layer had held it.
+   - **Inside a figure:** the figure is embedded as an image link to its asset, and the OCR'd words
+     go directly beneath it, attached to that figure and kept apart from the prose:
+
+     ```markdown
+     ![Figure 1: …](figures/p002_fig1.png)
+
+     > Text in figure (OCR): ESG Score · Environmental: Greenhouse Gas Emissions, …
+     ```
 2. **Agreement check (#1051).** Re-read the rendered page with a cheap CPU OCR, align line by
    line with the native text. Disagreeing lines → crop to the VLM. Finds **wrong** text.
 3. **Jev as the text-only judge (#1051).** Jev cannot see images. It judges text pairs: whether a
