@@ -128,3 +128,11 @@ text mentions a page number were spot-checked by hand.
 | #1040 | bug(judge): tolerance clause in judge_page.md excuses tail/head loss; no truncated_tail/head case measured (#1039 leftover) | PARK | Prompt hole shown only with injected synthetic defects; no real failing page. |
 | #1041 | bug(tables): crop readers send no reply cap and ignore finish_reason/done_reason=length, so a cut table reading can ship as complete (#1039 follow-up) | PARK | Code-reading finding; cut reply shipping not observed on a page. |
 | #1046 | Soft(tables): _has_data_row treats overview year lines as table data | PARK | Review soft finding, fail-closed; explicitly not seen on real docs. |
+
+## Done (2026-10-09)
+
+- Created the `parked` label and applied it to the 72 PARK issues. A check against GitHub
+  afterwards showed exactly those 72 carry it, all still open, and no KEEP issue does.
+  Nothing was closed. The KEEP issues and #749, #826 and #962 were not touched.
+- Opened after this triage, so it has no row above: #1048 (scanned-page tables that cannot be
+  checked ship marked "unverified"). It names Forsythe-Lundholm 1990 and Gleason-Lee 2003 pages.

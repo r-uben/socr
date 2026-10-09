@@ -111,3 +111,19 @@ what its PR carried. Three branches with no PR of their own have their head insi
 | `~/repos/tools/socr/.claude/worktrees/agent-af8d59442f1a928b1` | `fix/991-flaky-timing-tests` | PR #1011 merged; head is on origin/main. |
 | `~/repos/tools/socr/.claude/worktrees/figdesc` | `feat/figure-descriptions-number-free` | PR #1033 merged; head is on origin/main. |
 | `~/repos/tools/socr/.claude/worktrees/gh960` | `fix/960-garbled-math-reroute` | PR #1006 merged; head is on origin/main. |
+
+## Done (2026-10-09)
+
+- Removed 57 of the 58 REMOVE worktrees with `git worktree remove`, without `--force`. Each
+  was re-checked just before removal: same head as listed, no changes, no process with its
+  working directory inside, nothing modified in the last two hours. No branches were deleted.
+- Skipped `~/repos/tools/socr/.claude/worktrees/agent-a12931476f20daa79`. On the first pass a
+  housekeeping scan (`native-tables/scan.py`) was running inside it. The owner then killed the
+  scan, and the worktree passed the re-check: clean, head `ed2550e2` already on origin/main,
+  no ignored files. Git still refused to remove it, because it is locked by a live Claude
+  session (pid 2957, running since 2026-10-04). It holds nothing of its own, so it can go
+  once that session ends.
+- Added after this list was written, so not in the tables above:
+  - `/private/tmp/fable1047/wt`, made by another session on the #1043 commit.
+  - `~/repos/.worktrees/socr-1048`, on `fix/1048-unverified-tables-ship-marked`, made by this
+    session for #1048.
