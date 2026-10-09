@@ -2819,6 +2819,9 @@ class PagePrimaryReason(str, Enum):
     #: #1027: a scan whose only native text is an invisible OCR layer, and no model
     #: reading was accepted: fail-closed marker plus page image.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1043: every model reading was rejected only for a table, and the reading's prose
+    #: matches the page's own text layer: the prose ships, each table is a withheld marker.
+    TABLE_WITHHELD_PROSE_CORROBORATED = "table_withheld_prose_corroborated"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
     DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
@@ -2984,6 +2987,11 @@ class SelectionProvenance(str, Enum):
     BEST_ATTEMPT_FLAGGED = "best_attempt_flagged"
     #: nothing anywhere produced text: explicit failure marker, never a silent gap
     NO_TEXT_MARKER = "no_text_marker"
+    #: #1043: the cascade chose a table floor (marker plus image) for a page whose every
+    #: model reading was rejected only for a table, and one reading's prose matches the
+    #: page's own text layer. Chosen by ``_select_page_output_tagged`` AFTER the cascade, in
+    #: place of the floor, so it is the one member the cascade itself never returns.
+    TABLE_WITHHELD_PROSE_CORROBORATED = "table_withheld_prose_corroborated"
 
 
 _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
@@ -3072,6 +3080,11 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     SelectionProvenance.NO_TEXT_MARKER: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.NO_USABLE_OUTPUT
     ),
+    # #1043: prose ships, so the ending is MODEL_OUTPUT, not a fail-closed marker; the
+    # withheld table rides on the reason and on the page's failure mode.
+    SelectionProvenance.TABLE_WITHHELD_PROSE_CORROBORATED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.TABLE_WITHHELD_PROSE_CORROBORATED
+    ),
 }
 
 
@@ -3107,12 +3120,15 @@ def _select_page_output(
     return _select_page_output_tagged(state, page_num, whole_doc)[0]
 
 
-def _select_page_output_tagged(
+def _select_page_output_cascade(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
 ) -> tuple[PageOutput, SelectionProvenance]:
-    """The PageOutput that should be frozen for this page.
+    """The PageOutput that should be frozen for this page (the selection cascade).
+
+    #1043: ``_select_page_output_tagged`` below calls this and may then replace a table
+    floor with corroborated prose; this function is the cascade R7's structural tests read.
 
     Mirrors ``DocumentState.text`` selection: a passing OCR best_output wins;
     otherwise born-digital native text; otherwise text recovered from a
@@ -3952,6 +3968,142 @@ def _select_page_output_tagged(
         error=f"page could not be loaded: {_load_error}" if _load_error else "",
         audit_passed=False,
     ), SelectionProvenance.NO_TEXT_MARKER
+
+
+#: The cascade's fail-closed floors that exist BECAUSE of a table. Each ships a bare marker
+#: (plus image) for the whole page; ``_corroborated_prose_over_floor`` may replace that body.
+#: Deliberately absent: the judge-timeout and text-table structure-class floors (nothing was
+#: refused there, or the reading is a text table the numeric route cannot speak for), the
+#: rotated-shred floor (the layer is the damage) and the no-text marker.
+_TABLE_FLOOR_PROVENANCES = frozenset(
+    {
+        SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED,
+        SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE,
+        SelectionProvenance.INVISIBLE_SCAN_UNREAD,
+        SelectionProvenance.STRUCTURE_CLASS_FLOOR,
+    }
+)
+
+
+def _corroborated_prose_over_floor(
+    p, page_num: int, floor: PageOutput, provenance: SelectionProvenance
+) -> PageOutput | None:
+    """#1043: the model reading's prose around withheld tables, or ``None`` to keep the floor.
+
+    Fires only when ALL of these hold; any doubt keeps the floor exactly as before:
+
+    * the cascade chose one of ``_TABLE_FLOOR_PROVENANCES`` and its body is a bare marker
+      (plus image), so no prose was already recovered by another lane;
+    * the page's native words were cached (live run; a resumed page is re-read, because this
+      ending is WARNING / ``audit_passed`` False and never terminal);
+    * every model reading that produced text was refused by a COMPLETED judge verdict whose
+      reason names only table defects (``rejection_is_table_only``: a gate prefix, or free
+      text every clause of which names a table structure);
+    * one such reading carries a markdown table and its prose, outside the table blocks,
+      matches the page's own text layer (``corroborate_prose``).
+
+    The table-only test reads model-authored text, so it is a filter, not the safeguard: the
+    corroboration is. A reading refused for a missing paragraph, a figure or an axis is
+    mixed and floors; a table-only reading whose prose the layer does not reproduce floors.
+
+    ``audit_passed`` stays False and the page ships WARNING: ``audit_passed`` is the
+    winner-selection flag, and this reading was NOT accepted. The tables are not verified
+    and not recovered; each is a withheld-table marker, counted by the #993 metric.
+    """
+    if provenance not in _TABLE_FLOOR_PROVENANCES or p is None:
+        return None
+    # A withhold the table ladder ISSUED (a blind transcription read different tokens out of
+    # the same cells) is a content verdict on the table, owned by
+    # ``_apply_ladder_disposition_guard``, which would overwrite this ending's status and
+    # failure mode anyway. Out of scope here.
+    if getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_WITHHELD:
+        return None
+    if not is_page_failed_marker(floor.text or ""):
+        return None
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return None
+
+    from socr.tables.prose_corroboration import corroborate_prose, rejection_is_table_only
+
+    readings = [
+        a
+        for a in (getattr(p, "attempts", None) or [])
+        if (a.engine or "")
+        and not (a.engine or "").startswith(_NATIVE_TEXT_LANES)
+        and (a.text or "").strip()
+    ]
+    if not readings:
+        return None
+    for a in readings:
+        # A completed verdict only: a timeout or a crashed judge refused nothing.
+        if getattr(a, "judge_outcome", "") != JUDGE_OUTCOME_COMPLETED:
+            return None
+        if a.audit_passed or not rejection_is_table_only(a.judge_reason or ""):
+            return None
+
+    scored = []
+    for order, a in enumerate(readings):
+        if is_page_failed_marker(a.text or ""):
+            continue
+        c = corroborate_prose(a.text, words)
+        if c.passed:
+            scored.append((c.score, -order, a, c))
+    if not scored:
+        return None
+    _score, _neg_order, best, corr = max(scored, key=lambda t: (t[0], t[1]))
+
+    image_ref = next(
+        (
+            ln.strip()
+            for ln in (floor.text or "").splitlines()[1:]
+            if _PAGE_FAILED_IMAGE_RE.fullmatch(ln.strip())
+        ),
+        "",
+    )
+    where = "see image" if image_ref else f"see PDF page {page_num}"
+    marker = f"[page {page_num} failed: unverifiable table — {where}]"
+    body = splice_all_table_regions(best.text, marker, image_ref)
+    if not body:
+        return None
+    withheld = body.count(marker)
+    banner = socr_marker(
+        f"page {page_num}: prose is a model reading matched word-for-word against this "
+        f"page's own text layer; {withheld} table(s) withheld, not verified or recovered -- "
+        f"{where}"
+    )
+    note = (
+        f"{FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}: score={corr.score:.3f} "
+        f"precision={corr.precision:.3f} recall={corr.recall:.3f} "
+        f"prose_tokens={corr.prose_tokens} withheld_tables={withheld}"
+    )
+    return replace(
+        best,
+        text=f"{banner}\n\n{body}",
+        status=PageStatus.WARNING,
+        audit_passed=False,
+        failure_mode=FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED,
+        audit_notes=[*(best.audit_notes or []), note],
+        error="",
+    )
+
+
+def _select_page_output_tagged(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> tuple[PageOutput, SelectionProvenance]:
+    """The PageOutput that should be frozen for this page, with the ending that chose it.
+
+    The cascade's answer, except that a table floor whose model readings were all refused
+    only for a table, and whose prose the page's own text layer corroborates, ships that
+    prose (#1043, ``_corroborated_prose_over_floor``).
+    """
+    output, provenance = _select_page_output_cascade(state, page_num, whole_doc)
+    prose = _corroborated_prose_over_floor(state.pages.get(page_num), page_num, output, provenance)
+    if prose is not None:
+        return prose, SelectionProvenance.TABLE_WITHHELD_PROSE_CORROBORATED
+    return output, provenance
 
 
 _select_page_output_with_provenance = _select_page_output_tagged

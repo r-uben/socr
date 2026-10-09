@@ -2342,7 +2342,13 @@ class UnifiedPipeline:
                 # #881: a page that never loaded has no words to cache, and
                 # reading it would raise and cost every later page its words.
                 if not getattr(pa, "load_error", "")
-                and (pa.detected_table_count > 0 or not pa.is_born_digital)
+                and (
+                    pa.detected_table_count > 0
+                    or not pa.is_born_digital
+                    # #1043: an invisible-layer scan is classed born-digital and may detect no
+                    # table, yet its layer is the witness the corroborated-prose ending reads.
+                    or getattr(pa, "invisible_text_over_raster", False)
+                )
             ]
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)
@@ -5675,6 +5681,33 @@ class UnifiedPipeline:
         """
         return sorted(
             {rec.output.page_num for rec in records if rec.output.scanned_prose_recovered}
+        )
+
+    @staticmethod
+    def _table_withheld_prose_pages(records: list) -> list[int]:
+        """#1043: pages whose shipped output is corroborated prose around withheld tables.
+
+        Read off the finalized record's own failure mode, like the other floors: the page
+        ships text, so it is NOT in ``failed_pages``, and without its own bucket the
+        document would report SUCCESS over a page whose tables were withheld.
+        """
+        return sorted(
+            r.output.page_num
+            for r in records
+            if r.output.failure_mode is FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED
+        )
+
+    @staticmethod
+    def _table_withheld_prose_note(records: list) -> str | None:
+        """Document-level one-liner for #1043 pages (``None`` on a clean run)."""
+        pages = UnifiedPipeline._table_withheld_prose_pages(records)
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: every model reading was rejected "
+            "only for a table; the prose shipped because it matches the page's own text "
+            "layer, and each table is a withheld-table marker, neither verified nor "
+            "recovered -- see table_withheld_prose_corroborated in the page sidecar"
         )
 
     @staticmethod
@@ -15229,6 +15262,9 @@ class UnifiedPipeline:
             for r in pre_records
             if r.output.failure_mode is FailureMode.INVISIBLE_SCAN_UNREAD
         )
+        # #1043: a table floor that kept corroborated prose. Not a failed page (it ships
+        # text), so it needs its own bucket to keep the document out of SUCCESS.
+        table_withheld_prose_pages = self._table_withheld_prose_pages(pre_records)
 
         # The six orthogonal bucket groups (native-only distrust, value drift,
         # fabrication, text-grid rejection, chart-detection failure, and
@@ -15594,6 +15630,9 @@ class UnifiedPipeline:
         # image and withholds every native byte; it is never SUCCESS because no
         # usable grid candidate survived selection.
         pages_ok = pages_ok and not structure_class_floor_pages
+        # #1043: a table floor that kept corroborated prose. The page ships text, so the
+        # document is AUDIT_FAILED, never SUCCESS: its tables are withheld.
+        pages_ok = pages_ok and not table_withheld_prose_pages
         # #262: the model's reading superseded a HARD fail-closed floor. That is
         # strictly more alarming than #259's flag, and it must not leave the run
         # reporting a clean SUCCESS. AUDIT_FAILED rather than ERROR: the page
@@ -15918,8 +15957,32 @@ class UnifiedPipeline:
             or label_unverified_pages
             or ditto_unresolved_pages
             or scanned_prose_recovered_pages
+            or table_withheld_prose_pages
         ):
             from socr.core.audit_log import AuditEvent
+
+            for n in table_withheld_prose_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="table_withheld_prose_corroborated",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages.get(n) and state.pages[n].best_output
+                            else ""
+                        ),
+                        detail=(
+                            "every model reading of this page was rejected only for a table; "
+                            "the prose of one reading matches the page's own text layer and "
+                            "shipped as text, and each table block was replaced by the "
+                            "withheld-table marker. The tables are neither verified nor "
+                            "recovered "
+                            f"({FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}); a "
+                            "re-run re-reads this page"
+                        ),
+                        data={"table_withheld_prose_corroborated": True},
+                    )
+                )
 
             for n in invisible_scan_unread_pages:
                 state.events.append(
@@ -16349,6 +16412,12 @@ class UnifiedPipeline:
                 # with the ship-with-doubt lines. ``scanned_prose_recovered_
                 # pages`` is computed once, above, so this line is reachable
                 # even when it is the document's ONLY signal.
+                if table_withheld_prose_pages:
+                    console.print(
+                        f"  [yellow]{len(table_withheld_prose_pages)} page(s) shipped prose "
+                        "that matches the page's own text layer, with every table withheld "
+                        f"(rejected only for a table): {table_withheld_prose_pages}[/yellow]"
+                    )
                 if scanned_prose_recovered_pages:
                     console.print(
                         f"  [red]{len(scanned_prose_recovered_pages)} scanned page(s) shipped "
@@ -16834,6 +16903,12 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_prose_recovered_note}"
             else:
                 final_result.error = _prose_recovered_note
+        _withheld_prose_note = self._table_withheld_prose_note(pre_records)
+        if _withheld_prose_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_withheld_prose_note}"
+            else:
+                final_result.error = _withheld_prose_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:

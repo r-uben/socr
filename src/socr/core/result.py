@@ -88,6 +88,12 @@ class FailureMode(str, Enum):
     #: fail-closed floor (marker + page image). WARNING, ``audit_passed`` False so a resume
     #: re-OCRs it, and the document cannot be SUCCESS.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1043: every model reading of the page was rejected ONLY for a table, and the prose
+    #: outside that table matches the page's own text layer (``tables/prose_corroboration``).
+    #: The prose ships as text; each table block is replaced by the withheld-table marker
+    #: (plus the page image). WARNING, ``audit_passed`` False so a resume re-reads it, and
+    #: the document cannot be SUCCESS. The withheld tables were NOT verified or recovered.
+    TABLE_WITHHELD_PROSE_CORROBORATED = "table_withheld_prose_corroborated"
     #: #960: the native text layer garbled the page's mathematics (private-use glyphs,
     #: math-alphanumeric codepoints, letters of a script the corpus is not written in, or a
     #: math font the region lane does not list), or the scan for that failed, and no OCR read

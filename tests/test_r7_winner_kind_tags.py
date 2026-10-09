@@ -33,7 +33,7 @@ def _cascade() -> ast.FunctionDef:
     return next(
         n
         for n in ast.walk(ast.parse(src))
-        if isinstance(n, ast.FunctionDef) and n.name == "_select_page_output_tagged"
+        if isinstance(n, ast.FunctionDef) and n.name == "_select_page_output_cascade"
     )
 
 
@@ -97,16 +97,22 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
+    # #1043: the 24th member is chosen by the ``_select_page_output_tagged`` wrapper AFTER
+    # the cascade, so the cascade itself still returns exactly the 23 it did before.
     assert len(used) == len(set(used)) == 23, "two endings share a tag or tag count != 23"
-    assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 23
+    assert set(used) == {k.name for k in SelectionProvenance} - {
+        "TABLE_WITHHELD_PROSE_CORROBORATED"
+    }
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 24
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
     """Precedence lives in the cascade's order, so the enum must mirror it."""
     fn = _cascade()
     in_source = [n for r in sorted(_returns(fn), key=lambda r: r.lineno) for n in _tag_names(r)]
-    assert in_source == [k.name for k in SelectionProvenance]
+    assert in_source == [
+        k.name for k in SelectionProvenance if k.name != "TABLE_WITHHELD_PROSE_CORROBORATED"
+    ]
 
 
 def test_public_wrapper_returns_the_output_not_the_tuple() -> None:
@@ -188,8 +194,8 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 23
-    assert len(list(SelectionProvenance)) == 23
+    # 1. Total count of mapped provenance members must be exactly 24 (#1043 added the 24th)
+    assert len(list(SelectionProvenance)) == 24
 
     # 2. Check full disposition equivalence groups (exactly 15 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
@@ -197,7 +203,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
     #    timeout floor is a structure-class FAIL_CLOSED_MARKER -- deliberately, so
     #    the floor keeps every document-level surface it already had. #714 round 2's
     #    text-table floor joins that same floor group on the same reasoning.
-    assert len(by_disposition) == 15
+    assert len(by_disposition) == 16
 
     expected_multi_dispositions = {
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS): {
@@ -231,10 +237,10 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
 
     single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
-    assert single_disposition_count == 11
+    assert single_disposition_count == 12
 
     # 3. Check primary reason equivalence groups (exactly 13 distinct primary reasons)
-    assert len(by_reason) == 13
+    assert len(by_reason) == 14
 
     expected_multi_reasons = {
         PagePrimaryReason.STRUCTURE_CLASS: {
@@ -265,4 +271,4 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_reason[reason] == members, f"mismatch for multi-member reason {reason}"
 
     single_reason_count = sum(1 for members in by_reason.values() if len(members) == 1)
-    assert single_reason_count == 9
+    assert single_reason_count == 10

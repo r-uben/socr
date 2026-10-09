@@ -181,6 +181,8 @@ def build_run_audit(state) -> RunAudit:
         "structure_floor_overrode_ladder": 6,
         # #1027: a disposition of the same rank as the other fail-closed floors above.
         "invisible_scan_unread": 6,
+        # #1043: same rank as the other table-floor dispositions.
+        "table_withheld_prose_corroborated": 6,
         # #1030: a scanned figure page's image asset; same rank as the other dispositions.
         "scanned_figure_asset": 6,
         "page_failed": 7,
