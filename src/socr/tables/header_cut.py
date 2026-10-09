@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from socr.tables.header_attribution import HeaderVerdict
 from socr.tables.header_repair import (
@@ -246,35 +246,38 @@ def _emitted_header_tokens(grid: list[list[str]], header_multisets: list) -> set
     return {_fold(t) for row in rows for cell in row for t in cell.split() if t.strip()}
 
 
-def _band_is_furniture(
+def _band_is_menu(
     rows_by_y: dict[int, list],
     band: tuple[float, float],
     grid: list[list[str]],
-    is_furniture: Callable[[Sequence], bool] | None,
+    is_menu_band: Callable[[list], bool] | None,
 ) -> bool:
-    """#988: every word between the two rules is page furniture the answer did not write.
+    """#988: the words between the two rules are a menu the answer did not write.
 
     A page whose table draws no full-width rule of its own has, as its nearest
     two, those of a navigation bar printed on every page (Coca-Cola 2021: the
     rules above and below the section sub-menu). That band is the bar, not the
-    table's header, and owing its words would refuse the table. A band with
-    one word of the page's own is still a header band.
+    table's header, and owing its words would refuse the table.
 
-    Repetition alone does not separate the bar from a header that a table
-    layout repeats word for word on every page (an appendix of regressions
-    under ``(1) (2) (3)``). Whether the answer wrote the band does: the model
+    ``is_menu_band`` (``DocumentFurniture.is_menu_band``) tells the bar from a
+    header that a table layout repeats word for word on every page (an
+    appendix of regressions under ``(1) (2) (3)``): the bar is also printed on
+    pages with no table. That keeps the header owed when the answer writes none
+    of it, as a blank header row or with its first body row promoted into the
+    header (PR #1042 review).
+
+    A band with any word in the answer's header row is still owed: the model
     leaves the sub-menu out of the table, and keeps most of a real header even
-    when it drops a word of it (PR #1042 review). A band with any word in the
-    answer's header row is therefore still owed. Only ``grid[0]`` is compared:
-    the second tier ``_emitted_header_tokens`` admits can be a section label in
-    the body, and on Coca-Cola 2021 p74 one ("...emissions") shares a word with
-    the sub-menu ("Greenhouse Gas Emissions & Waste").
+    when it drops a word of it. Only ``grid[0]`` is compared: the second tier
+    ``_emitted_header_tokens`` admits can be a section label in the body, and
+    on Coca-Cola 2021 p74 one ("...emissions") shares a word with the sub-menu
+    ("Greenhouse Gas Emissions & Waste").
     """
-    if is_furniture is None:
+    if is_menu_band is None:
         return False
     top, cut = band
     band_words = [w for y, row in rows_by_y.items() if top < y < cut for w in row]
-    if not band_words or not all(is_furniture(w) for w in band_words):
+    if not band_words or not is_menu_band(band_words):
         return False
     written = {_fold(t) for cell in grid[0] for t in cell.split() if t.strip()}
     return not any(_WORD_RE.search(_fold(w[4])) and _fold(w[4]) in written for w in band_words)
@@ -284,7 +287,7 @@ def header_cut_verdict(
     grid: list[list[str]],
     words: list | None,
     rules: list[tuple[float, float, float]] | None,
-    is_furniture: Callable[[Sequence], bool] | None = None,
+    is_menu_band: Callable[[list], bool] | None = None,
 ) -> HeaderVerdict:
     """HARD when native header content above the midrule is absent from the emitted header.
 
@@ -294,9 +297,10 @@ def header_cut_verdict(
     pure. Returns only HARD, OK or UNVERIFIABLE -- SOFT remains the advisory
     signal of ``header_attribution`` and is not produced here.
 
-    ``is_furniture`` (#988) says whether a word is page furniture. A band made
-    only of furniture words, none of which the emitted header carries, is not
-    taken as the header; with no other band found the verdict is UNVERIFIABLE.
+    ``is_menu_band`` (#988) says whether a band of words is a navigation menu
+    (``DocumentFurniture.is_menu_band``). A menu band, none of whose words the
+    emitted header carries, is not taken as the header; with no other band
+    found the verdict is UNVERIFIABLE.
     """
     if not grid or not grid[0] or not words or not rules:
         return HeaderVerdict.UNVERIFIABLE
@@ -313,7 +317,7 @@ def header_cut_verdict(
         if len(lanes) < 2:
             continue
         band = _header_band(rules, rows_by_y, anchor_y, local_ys)
-        if band is not None and not _band_is_furniture(rows_by_y, band, grid, is_furniture):
+        if band is not None and not _band_is_menu(rows_by_y, band, grid, is_menu_band):
             resolved = (lanes, band)
             break
     if resolved is None:

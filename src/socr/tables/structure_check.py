@@ -577,7 +577,7 @@ def table_output_defect(
     output_md: str,
     words: list | None,
     rules: list[tuple[float, float, float]] | None = None,
-    is_furniture: Callable[[Sequence], bool] | None = None,
+    is_menu_band: Callable[[list], bool] | None = None,
 ) -> str:
     """Whether *output_md* (the text about to ship) has a structural defect.
 
@@ -604,8 +604,8 @@ def table_output_defect(
     5. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
        when the shape and preceding terms did not already fire, and only when
        the caller supplied both native words and the page's drawn horizontal
-       rules. ``is_furniture`` (#988) marks the page's furniture words, so a
-       navigation bar between two rules is not taken for a table header.
+       rules. ``is_menu_band`` (#988) tells a navigation bar between two
+       rules from a table header, so the bar is not owed to the table.
 
     **On term 5 and the four reverts that precede it.** Earlier implementations
     of a header-attribution disjunct (GH-151 T3's token-pattern rule,
@@ -661,7 +661,7 @@ def table_output_defect(
         from socr.tables.header_cut import header_cut_verdict
 
         for block in find_table_blocks(output_md):
-            if header_cut_verdict(block.grid, words, rules, is_furniture) is HeaderVerdict.HARD:
+            if header_cut_verdict(block.grid, words, rules, is_menu_band) is HeaderVerdict.HARD:
                 return DEFECT_HEADER_UNATTRIBUTED
 
     return DEFECT_NONE

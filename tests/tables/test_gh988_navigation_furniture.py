@@ -61,19 +61,24 @@ def test_coke_p74_menu_run_and_menu_band_are_both_left_out() -> None:
     full-width rule of its own, so the nearest two are the menu's. Each half of
     the fix is needed: with only the run left out, the sub-menu between the
     menu's rules is owed to the header; with only the band excused, the run is
-    ragged. The menu repeats on p75, which is all the scan needs."""
+    ragged. The menu repeats on p75, and the section's overview (p65, prose
+    with no table) prints it too, which is all the scan needs. Without p65 the
+    band is owed: p74 and p75 both carry a table."""
     words = [tuple(w) for w in json.loads((FIXTURE / "words.json").read_text())]
     words75 = [tuple(w) for w in json.loads((FIXTURE / "words_p75.json").read_text())]
+    words65 = [tuple(w) for w in json.loads((FIXTURE / "words_p65.json").read_text())]
     rules = [tuple(r) for r in json.loads((FIXTURE / "rules_p74.json").read_text())]
     answer = (FIXTURE / "cluster_answer.txt").read_text()
-    fur = furniture_from_pages([words, words75])
+    fur = furniture_from_pages([words, words75, words65])
     gated, removed = strip_furniture_runs(answer, fur.page_words(words))
-    is_furniture = fur.is_furniture_word
+    is_menu_band = fur.is_menu_band
 
     assert table_output_defect(answer, words, rules) == DEFECT_GRID_SHAPE
     assert table_output_defect(gated, words, rules) == DEFECT_HEADER_UNATTRIBUTED
-    assert table_output_defect(answer, words, rules, is_furniture) == DEFECT_GRID_SHAPE
-    assert table_output_defect(gated, words, rules, is_furniture) == ""
+    assert table_output_defect(answer, words, rules, is_menu_band) == DEFECT_GRID_SHAPE
+    assert table_output_defect(gated, words, rules, is_menu_band) == ""
+    without_overview = furniture_from_pages([words, words75]).is_menu_band
+    assert table_output_defect(gated, words, rules, without_overview) == DEFECT_HEADER_UNATTRIBUTED
     assert len(removed) == 1 and "Executive Summary" in removed[0]
     assert "Executive Summary" not in gated
     assert "| Year ended December 31," in gated
@@ -139,6 +144,23 @@ def test_numbers_are_compared_whole() -> None:
     run = "| Rate | 0.32 |\n|---|---|\n"
     assert strip_furniture_runs(run + "\n" + TABLE, frozenset({"rate", "0", "32"}))[1] == []
     assert strip_furniture_runs(run + "\n" + TABLE, frozenset({"rate", "0.32"}))[1] == [run.strip()]
+
+
+def test_a_menu_band_is_also_printed_on_a_page_with_no_table() -> None:
+    """PR #1042 review: a band repeated word for word is a menu only when a
+    word of it is also printed, at the same place, on a page with no data row.
+    A table's header is printed only above its table. An ``&`` there does not
+    count: it carries no identity of its own."""
+    menu = [(200, 50, 240, 60, "Overview"), (300, 50, 330, 60, "Water")]
+    amp = [(250, 50, 255, 60, "&")]
+    data_row = [(40, 150, 60, 160, "Sales")] + [
+        (x, 150, x + 20, 160, v) for x, v in ((200, "1.5"), (300, "2.5"), (400, "3.5"))
+    ]
+    table_page = menu + amp + data_row
+
+    assert not furniture_from_pages([table_page, table_page]).is_menu_band(menu)
+    assert furniture_from_pages([table_page, table_page, menu]).is_menu_band(menu + amp)
+    assert not furniture_from_pages([table_page, table_page, amp]).is_menu_band(menu + amp)
 
 
 # --------------------------------------------------------------------------
@@ -286,10 +308,12 @@ def test_a_shared_ampersand_does_not_make_a_menu_band_owed() -> None:
 APPENDIX_HEADER = ("Item", "Alpha", "Beta")
 
 
-def _appendix_pdf(last_headers: tuple[str, ...]) -> fitz.Document:
+def _appendix_pdf(last_headers: tuple[str, ...], notes_page: bool = False) -> fitz.Document:
     """One booktabs table per page, at the same place on every page: toprule,
     header row, midrule, three data rows. The rules repeat on every page; the
-    last column's header is ``last_headers[i]`` on page ``i + 1``."""
+    last column's header is ``last_headers[i]`` on page ``i + 1``. With
+    ``notes_page``, a last page prints the header's shared columns (``Item
+    Alpha Beta``) with notes under them and no table."""
     doc = fitz.open()
     for i, last in enumerate(last_headers):
         page = doc.new_page(width=600, height=800)
@@ -303,6 +327,11 @@ def _appendix_pdf(last_headers: tuple[str, ...]) -> fitz.Document:
             for c, x in enumerate((200, 300, 400)):
                 page.insert_text((x, 140 + r * 20), f"{10 * i + r}.{c}5", fontsize=10)
         page.draw_line((40, 190), (560, 190))
+    if notes_page:
+        page = doc.new_page(width=600, height=800)
+        for x, text in zip((40, 200, 300), APPENDIX_HEADER, strict=True):
+            page.insert_text((x, 115), text, fontsize=10)
+        page.insert_text((40, 140), "Notes: standard errors in parentheses.", fontsize=10)
     return doc
 
 
@@ -325,46 +354,79 @@ def test_a_repeated_table_layout_keeps_its_header_cut() -> None:
     assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
 
 
-def _appendix_page(last_headers: tuple[str, ...]):
-    doc = _appendix_pdf(last_headers)
+def _appendix_page(last_headers: tuple[str, ...], notes_page: bool = False):
+    doc = _appendix_pdf(last_headers, notes_page)
     page = doc[0]
     return page.get_text("words"), _horizontal_rules(page), document_furniture(doc)
 
 
-def test_a_header_band_repeated_word_for_word_is_still_owed() -> None:
-    """PR #1042 re-review: every word of the header band is printed at the same
-    place on every page, so every word is furniture. The answer still wrote
+def _promoted(answer: str) -> str:
+    """*answer* with its header row dropped and its first body row promoted into it."""
+    _header, separator, first, *rest = answer.splitlines()
+    return "\n".join([first, separator, *rest]) + "\n"
+
+
+def test_a_repeated_header_band_the_answer_writes_none_of_is_owed() -> None:
+    """PR #1042 review: every word of the header band is printed at the same
+    place on every page, so every word is furniture, and the answer writes none
+    of them: a blank header row, or the header row dropped and the first body
+    row promoted into it. That is what a menu the model left out looks like.
+    The band is printed only above the table, so it is the header and is owed;
+    the gate refuses the promoted answer and passes the full one."""
+    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"))
+    doc = _appendix_pdf(("Gamma", "Gamma", "Gamma"))
+    full = _appendix_answer("Gamma")
+    blank = "|  |  |  |  |\n" + full.split("\n", 1)[1]
+
+    for answer in (blank, _promoted(full)):
+        assert table_output_defect(answer, words, rules, fur.is_menu_band) == (
+            DEFECT_HEADER_UNATTRIBUTED
+        )
+    refused = _assess(doc, _promoted(full))[0]
+    assert refused.accept is False
+    assert DEFECT_HEADER_UNATTRIBUTED in refused.reason
+    assert _assess(doc, full)[0].accept is True
+
+
+def test_a_header_band_on_a_notes_page_is_owed_to_a_partial_header() -> None:
+    """PR #1042 re-review: the header is also printed on a page with no table (a
+    last page of notes), so the band passes for a menu. The answer still wrote
     part of the band (``Item Alpha Beta``), so the band is the table's header
     and the dropped ``Gamma`` is owed."""
-    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"))
+    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"), notes_page=True)
     dropped = _appendix_answer("")
 
-    assert table_output_defect(dropped, words, rules, fur.is_furniture_word) == (
+    assert fur.is_menu_band([w for w in words if w[4] in (*APPENDIX_HEADER, "Gamma")])
+    assert table_output_defect(dropped, words, rules, fur.is_menu_band) == (
         DEFECT_HEADER_UNATTRIBUTED
     )
-    assert table_output_defect(_appendix_answer("Gamma"), words, rules, fur.is_furniture_word) == ""
+    assert table_output_defect(_appendix_answer("Gamma"), words, rules, fur.is_menu_band) == ""
 
 
-def test_known_limit_a_repeated_header_band_the_answer_omits_entirely_is_not_owed() -> None:
-    """Disclosed limit (#988): when every word of the header band is repeated on
-    another page and the answer writes NONE of them (a blank header row), the
-    band looks exactly like a navigation bar the model left out, and the header
-    cut abstains. Pinned so a change to it is a decision."""
-    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"))
-    blank = "|  |  |  |  |\n" + _appendix_answer("Gamma").split("\n", 1)[1]
+def test_known_limit_a_header_band_on_a_notes_page_is_not_owed_to_a_blank_header() -> None:
+    """Disclosed limit (#988): when the header band is repeated word for word,
+    is also printed on a page with no table, and the answer writes none of it
+    (a blank header row, or the first body row promoted into it), the band
+    looks exactly like a menu the model left out, and the header cut abstains.
+    Pinned so a change to it is a decision."""
+    words, rules, fur = _appendix_page(("Gamma", "Gamma", "Gamma"), notes_page=True)
+    full = _appendix_answer("Gamma")
+    blank = "|  |  |  |  |\n" + full.split("\n", 1)[1]
 
-    assert table_output_defect(blank, words, rules) == DEFECT_HEADER_UNATTRIBUTED
-    assert table_output_defect(blank, words, rules, fur.is_furniture_word) == ""
+    for answer in (blank, _promoted(full)):
+        assert table_output_defect(answer, words, rules) == DEFECT_HEADER_UNATTRIBUTED
+        assert table_output_defect(answer, words, rules, fur.is_menu_band) == ""
 
 
 def test_a_band_with_a_page_specific_word_is_owed_even_to_a_blank_header() -> None:
     """The limit above needs EVERY band word to be furniture. With one word the
     page prints only here (``Gamma1``), the band is the table's header even
-    when the answer writes none of it, and the blank header is refused."""
-    words, rules, fur = _appendix_page(("Gamma1", "Gamma2", "Gamma3"))
+    when it is also printed on a page with no table and the answer writes none
+    of it, and the blank header is refused."""
+    words, rules, fur = _appendix_page(("Gamma1", "Gamma2", "Gamma3"), notes_page=True)
     blank = "|  |  |  |  |\n" + _appendix_answer("Gamma1").split("\n", 1)[1]
 
-    assert table_output_defect(blank, words, rules, fur.is_furniture_word) == (
+    assert table_output_defect(blank, words, rules, fur.is_menu_band) == (
         DEFECT_HEADER_UNATTRIBUTED
     )
 

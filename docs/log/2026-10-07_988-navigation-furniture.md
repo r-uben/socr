@@ -29,13 +29,15 @@ table below:
 - `strip_furniture_runs`: a pipe run whose every token is a furniture word on this page is a furniture
   run. When every run on the answer is furniture nothing is removed: the answer has no table of its own,
   and the gate judges what it wrote.
-- `header_cut.header_cut_verdict` takes an optional `is_furniture` word test. A header band (the words
-  between the two rules above the anchor row) is not taken as the header when every word in it is
-  furniture AND the answer's header row (`grid[0]`) carries none of them; only tokens with a letter or
-  digit count, so a shared `&` does not. With no other band the verdict is UNVERIFIABLE, as for any page
-  without two rules: the term does not refuse, and records no event of its own (the separate
-  `table_header_verdicts` abstain event is unaffected). `structure_check.table_output_defect` passes the
-  test through.
+- `header_cut.header_cut_verdict` takes an optional `is_menu_band` test
+  (`DocumentFurniture.is_menu_band`). A header band (the words between the two rules above the anchor
+  row) is not taken as the header when (a) every word in it is furniture, (b) a word of it with a letter
+  or digit is also printed, at the same place, on a page with no data row (no row of 3 numbers, the
+  least the header cut takes as table data), and (c) the answer's header row (`grid[0]`) carries none of
+  its words; only tokens with a letter or digit count, so a shared `&` does not. With no other band the
+  verdict is UNVERIFIABLE, as for any page without two rules: the term does not refuse, and records no
+  event of its own (the separate `table_header_verdicts` abstain event is unaffected).
+  `structure_check.table_output_defect` passes the test through.
 - `NativeTableVerifierJudge` scans the document once, cached by file name, because `get_fitz_page`
   reopens the PDF on each call. `_apply_structural_gate` checks the text without furniture runs
   (`table_output_defect` with the word test, and `table_header_verdicts`). When the page is accepted,
@@ -90,6 +92,29 @@ menu is removed there does not ship and is recorded `rejudge_error`, as with `ta
    longest of `DEFAULT_PROVIDER_TIMEOUTS`, 300 s). The longest scan measured is 3.7 s on 700 pages. Not
    changed.
 
+## Review 6 (PR #1042, on 162657a2) and what changed
+
+The known limit was wider than its test: the excuse fired whenever `grid[0]` shared no word with a
+repeated header band, which includes the model dropping the header row and promoting the first body row
+into it. On a continued table or an appendix that was HARD on main and became UNVERIFIABLE; through the
+gate, with the inner judge accepting, it shipped SUCCESS (probe on the appendix fixture). No other check
+refused it.
+
+The second signal is the one the reviewer proposed: a menu is also printed on pages with no table, a
+table's header only above its table. "No table" is a page with no data row, the header cut's own
+definition (a row of `_MIN_DATA_NUMERIC_CELLS` = 3 numbers); on such a page the header cut never finds a
+table. Not every band word has to qualify: a menu sets its current item apart, which moves that item's
+words on its own pages. On 2021 p74 the whole 23-word band repeats only on p75, which carries a table
+too; word by word, 20 of the 23 (17 of the 19 with a letter or digit) are also printed at the same
+place on p65, the Data Appendix overview (prose, no data row). The 3 others are the current item's
+"Greenhouse", "&" and "Waste".
+
+Before writing it, every band the previous code excused on the 73 answers was checked (96 excusals, on
+2019 p11, p55-p68 and 2021 p68-p78): each had 17-48 words with a letter or digit also printed, at the
+same place, on a page with no data row. None had zero.
+
+The `grid[0]` test stays as a second, independent condition.
+
 ## Measured
 
 Production gate replayed on the 73 cached answers (`NativeTableVerifierJudge`, inner judge stubbed to
@@ -102,9 +127,12 @@ the manifest backstop (`_apply_table_emission_guard`) on the text the gate let t
 | M1 | 15 |
 | M1 + M2, first version (20157757) | 40 |
 | M1 + M2, after the review (73fdafc3) | 38 |
-| M1 + M2, after the re-review (this commit) | 38 |
+| M1 + M2, after the re-review (162657a2) | 38 |
+| M1 + M2, after review 6 (this commit) | 38 |
 
 - The re-review commit changes no verdict against 73fdafc3, on the 73 answers or on the 300 cuts below.
+  The review-6 commit changes none against 162657a2: gate verdict, backstop verdict and removed runs are
+  identical on the 73 answers, and the 300 cut verdicts are identical.
 - Every answer this version passes also passes the backstop on the shipped text.
 - No answer that main accepts is refused (4 answers on 3 pages).
 - The two answers the first version passed and this one refuses (`table_content_empty`) each carry an
@@ -123,7 +151,8 @@ the manifest backstop (`_apply_table_emission_guard`) on the text the gate let t
   every one is a menu or a section sub-menu.
 - Scan cost (words only, once per document): 1.1-3.7 s on five PDFs of 308-700 pages (2.6-7.7 ms per
   page; two annual reports, a CDP climate response, two Joint Committee on Taxation publications), timed
-  while the test suite ran on the same machine. 0.6-1.0 s on the Coca-Cola reports.
+  while the test suite ran on the same machine. 0.6-1.0 s on the Coca-Cola reports. With the data-row
+  check of review 6: 1.3-4.5 s on the same five PDFs (3.0-8.6 ms per page), load average about 13.
 - Synthetic cuts of the largest table, on the 36 passing complete answers that have one of 4+ body rows,
   refused (gate or backstop):
   - tail cuts of 10/25/50%: 31/29/31 of 36;
@@ -144,16 +173,21 @@ the manifest backstop (`_apply_table_emission_guard`) on the text the gate let t
 `tests/tables/test_gh988_navigation_furniture.py`:
 
 - The real 2021 p74 answer the cluster gated (`fixtures/gh988_coke_2021_p74/cluster_answer.txt`), with
-  the words of p74 and p75 and the rules of p74. Each half of the fix is needed there: with only the run
-  removed the menu band gives `header_unattributed`, and with only the band excused the run gives
-  `grid_shape`.
+  the words of p74, p75 and p65 (the Data Appendix overview, no table) and the rules of p74. Each half of
+  the fix is needed there: with only the run removed the menu band gives `header_unattributed`, and with
+  only the band excused the run gives `grid_shape`. Without p65 the band is owed again.
 - A generated 3-page report with a menu: the gate accepts the menu-plus-table answer, ships it without
   the menu and records the event; the backstop passes the shipped text and demotes the text as written;
   with the scan failing the gate refuses (`grid_shape`, and `header_unattributed` for the table alone).
 - A generated appendix with the same table layout on every page: an answer that drops a header word is
-  refused, both when one header word differs per page and when the whole band repeats word for word. A
-  pinned known limit (below) for an answer that writes none of a repeated header. A band with one word
-  of the page's own is owed even to a blank header.
+  refused, both when one header word differs per page and when the whole band repeats word for word. An
+  answer that writes none of a repeated header (a blank header row, or the first body row promoted into
+  it) is refused by the header cut and, for the promoted row, by the gate (review 6). With a notes page
+  that prints the header with no table under it, the band passes for a menu: the dropped header word is
+  still owed, a blank or promoted header is the pinned known limit (below), and a band with one word of
+  the page's own is owed even to a blank header.
+- `is_menu_band` on hand-made pages: a band only on table pages is not a menu, one also on a page with
+  no data row is, and an `&` there does not count.
 - A menu band sharing only `&` with the table header is still excused.
 - A furniture run with a numeric cell stays in the shipped text, through the production gate; a number
   inside a text cell does not keep it.
@@ -190,17 +224,40 @@ Mutants (external copy, `socr.__file__` canary, anchor counted exactly once), ea
 An unmutated copy passes the same 18 suite files (479 tests). The page-specific-word test was added after
 the first run left the "ANY word" mutant alive; that mutant and the unmutated copy were then run again.
 
+Review 6 mutants, same harness (`probes/lead2/mut_review3.sh`), each killed:
+
+| mutant | killed by |
+|---|---|
+| no page-without-a-table condition | p74, `is_menu_band`, none-of-a-repeated-header tests |
+| an `&` counts as printed without a table | `is_menu_band` test |
+| every page counts as a page with no table | p74, `is_menu_band`, none-of-a-repeated-header tests |
+| no page counts as a page with no table | p74, `is_menu_band`, gate menu, backstop, menu-band, ampersand, notes-page, known-limit, numeric-run gate tests |
+| no page-without-a-table positions kept | same 9 tests |
+| a data row needs 4 numbers | `is_menu_band`, none-of-a-repeated-header tests |
+| band a menu when ANY word is furniture | page-specific-word blank-header test |
+| answer's header row not consulted | notes-page partial-header test |
+| header row the only condition | p74, menu-band, none-of-a-repeated-header, page-specific-word tests |
+| gate passes no band test | gate menu, backstop, menu-band, ampersand, numeric-run gate tests |
+
+An unmutated copy passes the same 18 suite files (481 tests).
+
 ## Known limits
 
 - A sub-menu whose current item is set bold shifts the words after it, so their positions do not repeat
   and the run is kept (2021 p59). A menu item printed as an icon and written as a word (`[Home]`) also
   keeps the run.
-- A header band whose every word is printed at the same place on another page, in an answer whose header
-  row carries none of those words (a blank header), is taken for furniture, and the header cut abstains on
-  it without an event of its own (pinned by `test_known_limit_…`).
+- A header band whose every word is printed at the same place on another page, one word of which is
+  also printed on a page with no data row (a notes page under the header), in an answer whose header row
+  carries none of those words (a blank header, or the first body row promoted into it), is taken for a
+  menu, and the header cut abstains on it without an event of its own (pinned by `test_known_limit_…`).
+- "No data row" means no row of 3 numbers, so a page whose only table has two value columns counts as a
+  page with no table (2021 p77). A header band printed both over such a table and over a wider one passes
+  the second condition.
+- A menu printed only on pages that carry a table (a short extract of a report) is owed, as on main.
 - Text written as its own run that the document prints identically at the same place on two pages is
   treated as furniture and left out of the gate's checks. On an accepted page it is also removed from the
   shipped text unless it has a numeric cell: for example, a continued table's repeated text-only header
-  written as a separate run. The removal is recorded in the event.
+  written as a separate run, or a repeated data table whose cells all carry a unit (`12 t`) or a word
+  (`Yes`), since a cell must BE a number to keep the run (review 6). The removal is recorded in the event.
 - Only the agentic table gate uses furniture. The value guard, the manifest backstop and native-first
   do not.

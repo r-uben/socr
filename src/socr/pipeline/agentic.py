@@ -1179,7 +1179,7 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             furniture = DocumentFurniture()
         page_furniture = furniture.page_words(words)
         gated, _ = strip_furniture_runs(output.text, page_furniture)
-        defect = table_output_defect(gated, words, rules, furniture.is_furniture_word)
+        defect = table_output_defect(gated, words, rules, furniture.is_menu_band)
         if not defect and words:
             verdicts = table_header_verdicts(gated, words)
             if HeaderVerdict.UNVERIFIABLE in verdicts:

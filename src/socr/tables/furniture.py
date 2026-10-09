@@ -15,6 +15,11 @@ document, while a page's own content is not. Only words are compared. Drawn
 rules are not: a table layout repeated on most pages repeats its rules too,
 and dropping them switched the header cut off on such documents (PR #1042
 review).
+
+Repetition alone does not separate the bar from a table header that a layout
+repeats on every page. Where else the words are printed does: a menu is also
+printed on pages with no table (a section's overview), a table's header only
+above its table (PR #1042 review).
 """
 
 from __future__ import annotations
@@ -24,6 +29,11 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from socr.tables.header_repair import (
+    _MIN_DATA_NUMERIC_CELLS,
+    _all_rows_by_y,
+    _row_numeric_multiset,
+)
 from socr.tables.native_verifier import is_numeric_token
 from socr.tables.reconcile import _is_table_line
 
@@ -75,15 +85,47 @@ def _word_key(word: Sequence) -> _PositionKey:
     )
 
 
+def _has_data_row(words: list[Sequence]) -> bool:
+    """Whether the page prints a row the header cut would take as table data."""
+    return any(
+        len(_row_numeric_multiset(row)) >= _MIN_DATA_NUMERIC_CELLS
+        for row in _all_rows_by_y(words).values()
+    )
+
+
 @dataclass(frozen=True)
 class DocumentFurniture:
-    """Word positions a document repeats across its pages."""
+    """Word positions a document repeats across its pages.
+
+    ``off_table_positions`` are the furniture positions also printed on a page
+    with no data row, where the header cut finds no table.
+    """
 
     word_positions: frozenset[_PositionKey] = frozenset()
+    off_table_positions: frozenset[_PositionKey] = frozenset()
 
     def is_furniture_word(self, word: Sequence) -> bool:
         """Whether *word* (a ``get_text("words")`` tuple) sits at a furniture position."""
         return _word_key(word) in self.word_positions
+
+    def is_menu_band(self, words: Sequence[Sequence]) -> bool:
+        """Whether *words*, one band of a page, are a menu rather than a table's header.
+
+        Every word must be furniture, and a word with a letter or digit must also
+        be printed, at the same place, on a page with no table. Not every word:
+        a menu sets its current item apart, which moves the words of that item
+        on its own pages (Coca-Cola 2021 p74: 20 of the band's 23 words are also
+        printed at that place on the p65 overview, all but the current item's
+        "Greenhouse", "&" and "Waste").
+        """
+        return (
+            bool(words)
+            and all(self.is_furniture_word(w) for w in words)
+            and any(
+                _CHUNK_RE.search(str(w[4])) and _word_key(w) in self.off_table_positions
+                for w in words
+            )
+        )
 
     def page_words(self, words: Iterable[Sequence] | None) -> frozenset[str]:
         """Tokens of the words this page prints at a furniture position."""
@@ -105,11 +147,15 @@ def document_furniture(doc) -> DocumentFurniture:
 def furniture_from_pages(pages: Iterable[Iterable[Sequence]]) -> DocumentFurniture:
     """Repeated word positions over each page's words, pages in any order."""
     word_pages: Counter[_PositionKey] = Counter()
-    for words in pages:
-        word_pages.update({_word_key(w) for w in words})
-    return DocumentFurniture(
-        word_positions=frozenset(k for k, n in word_pages.items() if n >= _MIN_WORD_REPEAT_PAGES)
-    )
+    off_table: set[_PositionKey] = set()
+    for page_words in pages:
+        words = list(page_words)
+        keys = {_word_key(w) for w in words}
+        word_pages.update(keys)
+        if not _has_data_row(words):
+            off_table |= keys
+    repeated = frozenset(k for k, n in word_pages.items() if n >= _MIN_WORD_REPEAT_PAGES)
+    return DocumentFurniture(word_positions=repeated, off_table_positions=repeated & off_table)
 
 
 def _run_is_furniture(run: list[str], furniture_words: frozenset[str]) -> bool:
