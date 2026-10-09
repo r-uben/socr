@@ -38,12 +38,27 @@ on a real page of a real paper. When it does, the issue names the paper and page
 
 ## In progress when this was written
 
-- Keep a page's correct prose as text when only its table fails, if the prose matches the
-  page's own text layer. Seen on Forsythe-Lundholm 1990, p25.
+- ~~Keep a page's correct prose as text when only its table fails, if the prose matches the
+  page's own text layer. Seen on Forsythe-Lundholm 1990, p25.~~ **Closed:** #1047 was closed
+  without merging (2026-10-09).
+
+## After the archive run
+
+- Recover prose on table-only floors with a second independent reading (e.g. PaddleOCR):
+  ship the prose only if both models agree word for word in order, otherwise keep the floor.
+  The scan's own text layer was tried and rejected as the witness in #1047, recovering 1 of
+  109 pages.
+
+## Decided
+
+- **Tables on scanned pages that cannot be checked** (owner, 2026-10-08): ship them marked
+  "unverified" for the archive run; do not withhold them. A table that evidence contradicts
+  is a different case and is not covered by this. Retrying with the same or another model
+  until a mechanical check passes (for example, totals that must add up)
+  waits until the run shows how many such tables there are. Another model's approval,
+  Jev included, does not remove the label.
 
 ## Open questions for the owner
 
-- **Tables on scanned pages that cannot be checked:** withhold them, or ship them marked
-  "unverified"?
 - **Running on the cluster:** equation recovery and figure descriptions call the Mac's Ollama,
   so they do not run there. Is that acceptable for the archive run?
