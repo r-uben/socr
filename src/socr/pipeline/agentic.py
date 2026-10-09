@@ -29,7 +29,7 @@ import copy
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from socr.core.config import EngineType
 from socr.core.daemon_call import submit_daemon
@@ -47,6 +47,9 @@ from socr.core.result import (
 )
 from socr.judge.judge import JudgeVerdict, PageJudgeCircuitOpenError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
+
+if TYPE_CHECKING:
+    from socr.tables.furniture import DocumentFurniture
 
 logger = logging.getLogger(__name__)
 
@@ -917,6 +920,8 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
+        # #988 M2: repeated word positions, scanned once per document.
+        self._furniture: dict[str, DocumentFurniture] = {}
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.native_verifier import (
@@ -947,6 +952,7 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             from socr.tables.locate import _horizontal_rules
 
             rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
+            furniture = self._document_furniture(fitz_page)
             vr = verify_native_table(fitz_page, output.text)
             vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except _VERIFIER_FATAL:
@@ -1063,7 +1069,9 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # a gate rejection below can never be mistaken for this one.
             if not decision.accept:
                 output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
-            return self._apply_structural_gate(decision, output, page_num, words, rules)
+            return self._apply_structural_gate(
+                decision, output, page_num, words, rules, furniture=furniture
+            )
 
         if vr.state == VerifierState.EXACT_PASS:
             # EXACT_PASS: ship immediately — no model needed
@@ -1087,7 +1095,14 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # page. The gate is told so; a header-attribution abstain on this
             # path delegates to the inner judge instead of shipping at 1.0.
             return self._apply_structural_gate(
-                decision, output, page_num, words, rules, provider=provider, inner_consulted=False
+                decision,
+                output,
+                page_num,
+                words,
+                rules,
+                provider=provider,
+                inner_consulted=False,
+                furniture=furniture,
             )
 
         # No issue detected → delegate to inner judge
@@ -1103,7 +1118,9 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         # decision unchanged and leaves ``rejection_class`` alone).
         if not decision.accept:
             output.rejection_class = REJECTION_JUDGE_ONLY
-        return self._apply_structural_gate(decision, output, page_num, words, rules)
+        return self._apply_structural_gate(
+            decision, output, page_num, words, rules, furniture=furniture
+        )
 
     def _apply_structural_gate(
         self,
@@ -1115,6 +1132,7 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         *,
         provider: ProviderProfile | None = None,
         inner_consulted: bool = True,
+        furniture: DocumentFurniture | None = None,
     ) -> AcceptDecision:
         """GH-200: the winner-side structural/header check on whatever is ABOUT TO SHIP.
 
@@ -1137,16 +1155,33 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         unverifiable -- and an abstain must not ship at confidence 1.0. It is
         treated as AMBIGUOUS: the inner judge is consulted and its decision
         stands. A grounded verdict (HARD/SOFT/OK) keeps the short-circuit.
+
+        #988 M2: pipe runs that transcribe page furniture (a site menu printed
+        on every page) are left out of what is checked. When the page is
+        accepted, those carrying no number are also left out of the text that
+        ships, recorded as ``table_furniture_removed``; removing them is what
+        lets the manifest backstop, which has no document, judge the accepted
+        text the same way. A run with a number stays in the text.
         """
         if not decision.accept:
             return decision
 
+        from socr.tables.furniture import (
+            TABLE_FURNITURE_REMOVED_KIND,
+            DocumentFurniture,
+            strip_furniture_runs,
+        )
         from socr.tables.header_attribution import HeaderVerdict
         from socr.tables.structure_check import table_header_verdicts, table_output_defect
 
-        defect = table_output_defect(output.text, words, rules)
+        # #988 M2: page furniture the model wrote as a table is not judged.
+        if furniture is None:
+            furniture = DocumentFurniture()
+        page_furniture = furniture.page_words(words)
+        gated, _ = strip_furniture_runs(output.text, page_furniture)
+        defect = table_output_defect(gated, words, rules, furniture.is_menu_band)
         if not defect and words:
-            verdicts = table_header_verdicts(output.text, words)
+            verdicts = table_header_verdicts(gated, words)
             if HeaderVerdict.UNVERIFIABLE in verdicts:
                 delegated = not inner_consulted and provider is not None
                 # Abstain, surfaced so its firing rate is measurable rather
@@ -1170,6 +1205,16 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                         return decision
 
         if not defect:
+            shipped, removed = strip_furniture_runs(output.text, page_furniture, keep_numbered=True)
+            if removed:
+                output.text = shipped
+                self._emit_event(
+                    page_num=page_num,
+                    kind=TABLE_FURNITURE_REMOVED_KIND,
+                    engine=output.engine or "",
+                    detail=f"left out {len(removed)} page-furniture run(s) written as a table",
+                    data={"runs": removed},
+                )
             return decision
 
         self._emit_event(
@@ -1184,6 +1229,29 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             reason=f"table_structure_failed: {defect}",
             confidence=0.0,
         )
+
+    def _document_furniture(self, fitz_page) -> DocumentFurniture:
+        """#988 M2: the page's document furniture, scanned once per document.
+
+        ``get_fitz_page`` reopens the PDF on every call, so the scan is cached
+        here by file name. A scan that raises leaves the gate as it was before
+        (nothing removed, every header band owed), which is the stricter side.
+        """
+        from socr.tables.furniture import DocumentFurniture, document_furniture
+
+        if fitz_page is None:
+            return DocumentFurniture()
+        doc = fitz_page.parent
+        key = str(getattr(doc, "name", "") or "")
+        if key not in self._furniture:
+            try:
+                self._furniture[key] = document_furniture(doc)
+            except _VERIFIER_FATAL:
+                raise
+            except Exception as exc:
+                logger.debug("page furniture scan failed: %s", exc)
+                self._furniture[key] = DocumentFurniture()
+        return self._furniture[key]
 
     def _maybe_repair_collapsed_headers(self, fitz_page, output: PageOutput, vr):
         """Repair too-narrow or collapsed multi-band headers when detected."""

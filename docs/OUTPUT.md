@@ -273,6 +273,7 @@ This list is the kinds present at the time of writing; the code is the authority
 - `table_region_unverifiable`: the same failure acted on: OCR also failed, so a marker and page image shipped.
 - `table_structure_failed`: grid-shape or emission defect found.
 - `table_header_unverifiable`, `table_header_repair`: header attribution abstained, or a collapsed header was repaired.
+- `table_furniture_removed`: a site menu printed on every page, written by the model as a table, was removed from the shipped text (#988).
 - `text_grid_rejected`: a lane boundary split a native numeric token; the page is demoted.
 - `orphan_word_dropped`: words the rowizer dropped far from every column lane.
 - `native_table_cell_repaired`, `native_table_cell_unresolved`: failing cells were re-read and fixed, or the table was not shipped.
