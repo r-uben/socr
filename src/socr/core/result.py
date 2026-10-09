@@ -89,7 +89,7 @@ class FailureMode(str, Enum):
     #: re-OCRs it, and the document cannot be SUCCESS.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     #: #1043: every model reading of the page was rejected ONLY for a table, and the prose
-    #: outside that table matches the page's own text layer (``tables/prose_corroboration``).
+    #: outside that table is corroborated by the page's own text layer (``tables/prose_corroboration``).
     #: The prose ships as text; each table block is replaced by the withheld-table marker
     #: (plus the page image). WARNING, ``audit_passed`` False so a resume re-reads it, and
     #: the document cannot be SUCCESS. The withheld tables were NOT verified or recovered.

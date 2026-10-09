@@ -2820,7 +2820,7 @@ class PagePrimaryReason(str, Enum):
     #: reading was accepted: fail-closed marker plus page image.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     #: #1043: every model reading was rejected only for a table, and the reading's prose
-    #: matches the page's own text layer: the prose ships, each table is a withheld marker.
+    #: is corroborated by the page's own text layer (ordered match): the prose ships, each table is a withheld marker.
     TABLE_WITHHELD_PROSE_CORROBORATED = "table_withheld_prose_corroborated"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
@@ -4000,7 +4000,7 @@ def _corroborated_prose_over_floor(
       reason names only table defects (``rejection_is_table_only``: a gate prefix, or free
       text every clause of which names a table structure);
     * one such reading carries a markdown table and its prose, outside the table blocks,
-      matches the page's own text layer (``corroborate_prose``).
+      is corroborated by the page's own text layer (ordered strict alignment, ``corroborate_prose``).
 
     The table-only test reads model-authored text, so it is a filter, not the safeguard: the
     corroboration is. A reading refused for a missing paragraph, a figure or an axis is
@@ -4024,11 +4024,7 @@ def _corroborated_prose_over_floor(
     if not words:
         return None
 
-    from socr.tables.prose_corroboration import (
-        PROSE_CORROBORATION_MIN,
-        corroborate_prose,
-        rejection_is_table_only,
-    )
+    from socr.tables.prose_corroboration import corroborate_prose, rejection_is_table_only
 
     readings = [
         a
@@ -4052,10 +4048,12 @@ def _corroborated_prose_over_floor(
             continue
         c = corroborate_prose(a.text, words)
         if c.passed:
-            scored.append((c.score, -order, a, c))
+            scored.append((-c.noise_edits, -order, a, c))
     if not scored:
         return None
-    _score, _neg_order, best, corr = max(scored, key=lambda t: (t[0], t[1]))
+    # Every passing reading aligns with no mismatch; prefer the one that needed least noise
+    # explaining, then the earliest rung.
+    _noise, _neg_order, best, corr = max(scored, key=lambda t: (t[0], t[1]))
 
     image_ref = next(
         (
@@ -4077,13 +4075,13 @@ def _corroborated_prose_over_floor(
     withheld = body.count(marker)
     banner = socr_marker(
         f"page {page_num}: prose is a model reading corroborated by this page's text layer "
-        f"(similarity {corr.score:.2f} >= cutoff {PROSE_CORROBORATION_MIN}); {withheld} "
+        f"(ordered match, {corr.prose_tokens} tokens); {withheld} "
         f"table(s) withheld, not verified or recovered -- {where}"
     )
     note = (
-        f"{FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}: score={corr.score:.3f} "
-        f"precision={corr.precision:.3f} recall={corr.recall:.3f} "
-        f"prose_tokens={corr.prose_tokens} withheld_tables={withheld}"
+        f"{FailureMode.TABLE_WITHHELD_PROSE_CORROBORATED.value}: ordered_match "
+        f"tokens={corr.prose_tokens} noise_edits={corr.noise_edits} "
+        f"skipped_layer_tokens={corr.skipped_layer_tokens} withheld_tables={withheld}"
     )
     return replace(
         best,

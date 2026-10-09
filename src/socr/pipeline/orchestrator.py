@@ -1048,12 +1048,12 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
-def _similarity_from_notes(notes) -> float | None:
-    """#1043: the measured corroboration score recorded in the page's audit note."""
+def _matched_tokens_from_notes(notes) -> int | None:
+    """#1043: the ordered-match token count recorded in the page's audit note."""
     for note in notes or []:
-        m = re.search(r"table_withheld_prose_corroborated: score=([0-9.]+)", str(note))
+        m = re.search(r"table_withheld_prose_corroborated: ordered_match tokens=(\d+)", str(note))
         if m:
-            return float(m.group(1))
+            return int(m.group(1))
     return None
 
 
@@ -5714,7 +5714,7 @@ class UnifiedPipeline:
             return None
         return (
             f"page(s) {', '.join(str(n) for n in pages)}: every model reading was rejected "
-            "only for a table; the prose shipped because it matches the page's own text "
+            "only for a table; the prose shipped because it is corroborated by the page's own text "
             "layer, and each table is a withheld-table marker, neither verified nor "
             "recovered -- see table_withheld_prose_corroborated in the page sidecar"
         )
@@ -15982,7 +15982,7 @@ class UnifiedPipeline:
                         ),
                         detail=(
                             "every model reading of this page was rejected only for a table; "
-                            "the prose of one reading matches the page's own text layer and "
+                            "the prose of one reading was aligned in order against the page's own text layer and "
                             "shipped as text, and each table block was replaced by the "
                             "withheld-table marker. The tables are neither verified nor "
                             "recovered "
@@ -15991,7 +15991,7 @@ class UnifiedPipeline:
                         ),
                         data={
                             "table_withheld_prose_corroborated": True,
-                            "similarity": _similarity_from_notes(
+                            "matched_tokens": _matched_tokens_from_notes(
                                 next(
                                     (
                                         r.output.audit_notes
@@ -16436,7 +16436,7 @@ class UnifiedPipeline:
                 if table_withheld_prose_pages:
                     console.print(
                         f"  [yellow]{len(table_withheld_prose_pages)} page(s) shipped prose "
-                        "that matches the page's own text layer, with every table withheld "
+                        "corroborated by the page's own text layer, with every table withheld "
                         f"(rejected only for a table): {table_withheld_prose_pages}[/yellow]"
                     )
                 if scanned_prose_recovered_pages:

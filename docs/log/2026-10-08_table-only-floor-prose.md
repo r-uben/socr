@@ -105,3 +105,58 @@ check off -> 3 fail.
 - Survivors: replay through the shipped code is now 46 records, 34 unique pages (was 47 / 34); no page lost.
 - Mutants (external copy, anchor count 1): mixed-clause veto off -> 3 fail; ASCII-only tokens -> 1 fail;
   numeral veto off -> 1 fail; image strip off -> 1 fail.
+
+## Round 2: the bag-of-words guard is REPLACED (Fable REJECT on #1047)
+
+**Everything above about the 0.90 similarity cutoff, the 34 surviving pages and the "0 false-accepts" is
+superseded.** A review ran counterexamples against the real `corroborate_prose` and shipped: dropped sentences
+carrying numerals (recall skipped every layer line with a digit), 4.2%->4.8%, 2.5->2.7, an inserted minus
+sign, 1987->1978 (1978 printed in a reference), a leaked table row 21.0->12.0, number words, flipped meanings,
+a deleted "not". The numeral veto compared digit runs against the whole layer, tables included. Measuring only
+mutual precision and a frequency recall cannot satisfy "a wrong number is worse than a missing one".
+
+New guard (`tables/prose_corroboration.py`): an ORDERED, STRICT alignment (`difflib.SequenceMatcher`, reading
+prose vs the layer's bands in page order). Every non-equal step must be OCR noise ONLY (`NOISE_CLASS`: case,
+surrounding punctuation, markdown decoration, Unicode compatibility forms, soft hyphen / zero-width, the Unicode
+minus; and an ALPHABETIC run split or joined differently). A digit-bearing token has no noise: whole token, sign
+and decimal included. Any inserted, deleted or replaced word, number, sign or negation floors the page. The
+reading must cover every layer band (numeric-bearing ones included) except the withheld table itself, a band
+whose alphabetic words all occur in the reading's own table block (numerals free), within that table's token
+budget. A reading that reproduces a table band as prose is refused (a leaked row ships un-withheld).
+The similarity score, `PROSE_CORROBORATION_MIN` and the unmatched-numeral veto are gone; the 17-token floor
+stays (identical short captions score 1.0 under any measure). Banner: "corroborated by this page's text layer
+(ordered match, N tokens)"; the audit event carries `matched_tokens`.
+
+### Re-measure (same two output sets, same table-only + completed-verdict rules)
+
+| | records | unique pages |
+|---|---|---|
+| floor pages | 139 | 109 |
+| recover under the strict rule | 2 | **1** |
+
+The one page is Forsythe p9 (read against its render: the prose is right). The bag-of-words guard recovered 34.
+Of the 6 over-withheld tables (#1-6): **0 of 6 recover**. Forsythe p25, the motivating case, now fails: the
+invisible layer prints words the model read correctly differently (OCR errors such as "plorr" for "Plott" are not
+noise the guard may excuse), plus running-header and watermark lines. The strict rule is working as specified:
+an invisible OCR layer is too noisy to vouch for a reading word for word, so almost nothing can be vouched for.
+
+### Known limits (not closed)
+
+- Common mode: a line missing from BOTH the layer and the reading is invisible to a two-witness comparison. socr
+  has no measure of an invisible layer's completeness (checked: `_check_token_coverage` is a numeric-orphan
+  diagnostic, `_raster_coverage` is image area), so this is not closed. A layer missing a line that the reading
+  HAS floors (pinned); both missing it passes (not pinned, cannot be).
+- A dropped prose line built only from the table's own words, within the table's token budget, hides in the table
+  band allowance.
+- The table-only test still reads model-authored judge text.
+
+### Tests and mutants
+
+`tests/test_gh1043_table_only_floor_prose.py` (52): every Fable counterexample is a parametrised test
+(dropped numeric sentences, dropped sentences, meaning flips, deleted negation, ASCII and Unicode minus inserted,
+three changed decimals, reversed paragraphs, two-column row-wise read, other page sharing a header, year swap,
+number words, layer missing a line, leaked table row true and misread) plus the earlier mixed-clause, image-ref
+and Unicode-numeral pins. Mutants (external copy of `src` + `tests`, anchor count asserted == 1, canary =
+`test_loaded_source_is_this_checkout` passing in the copy): noise class widened to any word -> 4 fail;
+numeric bands dropped from coverage -> 4 fail; reading-only text tolerated -> 1; uncovered layer line tolerated
+-> 4; table-row leak tolerated -> 1; mixed-clause veto off -> 3; image strip off -> 1.
