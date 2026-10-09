@@ -1,7 +1,7 @@
 # Routing design — OCR only what needs it, check everything that ships
 
-Opened 2026-10-09. Diagram: [`diagram.html`](diagram.html) (current routing on top, target below;
-open it in a browser). Issues: #1050 (coverage check), #1051 (agreement check + Jev).
+Opened 2026-10-09. Dashboard: [`index.html`](index.html) (goal, targets, work order, evidence, then the current and
+target routing diagrams; open it in a browser). Issues: #1050 (text quality check, step 1: missing text), #1051 (step 2: wrong text, with Jev), #1053 (one crop per figure).
 
 ## Goal
 
@@ -31,7 +31,7 @@ Three problems:
 
 Native text ships only after two model-free checks; models see gaps and bad lines, not pages.
 
-1. **Coverage check (#1050).** Render the page, find ink, subtract text-layer word boxes. Text-like
+1. **Text quality check, step 1: missing text (#1050).** Render the page, find ink, subtract text-layer word boxes. Text-like
    ink with no words over it → OCR that crop only. Finds **missing** text. Inside a figure, the
    figure's **marks** (lines, bars, fills) are expected to have no text and are ignored, but
    **text-shaped** ink still counts: axis labels, legends and box labels are content. Masking whole
@@ -49,7 +49,7 @@ Native text ships only after two model-free checks; models see gaps and bad line
 
      > Text in figure (OCR): ESG Score · Environmental: Greenhouse Gas Emissions, …
      ```
-2. **Agreement check (#1051).** Re-read the rendered page with a cheap CPU OCR, align line by
+2. **Text quality check, step 2: wrong text (#1051).** Re-read the rendered page with Tesseract (classic CPU OCR, no LLM), align line by
    line with the native text. Disagreeing lines → crop to the VLM. Finds **wrong** text.
 3. **Jev as the text-only judge (#1051).** Jev cannot see images. It judges text pairs: whether a
    word difference is real or an OCR misread, and the per-region route. **Digit disagreements
@@ -60,11 +60,20 @@ Native text ships only after two model-free checks; models see gaps and bad line
 
 Lanes that already work (tables, equations, figures) are unchanged.
 
+Lanes: the target has four content lanes (text, formulas, figures, tables), each with its own
+check, plus the whole-page fallback for an unusable text layer.
+
+- **Figure quality check (new, #1053).** Each figure is cropped on its own and its words read by the
+  model, then compared with a Tesseract read of the same crop (digits mechanically, words via
+  Jev); every "Figure N" caption must have a crop.
+- **Formulas are the weak spot.** LaTeX validation checks that a formula parses, not that it
+  matches the page. No fix is proposed yet.
+
 ## Prior evidence that constrains this
 
 - **`docs/plans/fake-native-pages`**: 72 of 2972 pages (2.4%) are old scans with a baked-in OCR
   layer, 71 of them from two documents; raster coverage catches them. Since then #961 routes an
-  invisible text layer over a page raster to OCR. The coverage check must not re-solve that.
+  invisible text layer over a page raster to OCR. The missing-text step must not re-solve that.
 - **Same plan, ticket B2 — lexical quality signal: CLOSED, NOT BUILT.** A1 measured it as noise,
   not coverage. This is direct evidence against Jev's garble-classification use in #1051; that
   use needs a new measurement that beats B2's finding, or it is dropped.
@@ -75,14 +84,14 @@ Lanes that already work (tables, equations, figures) are unchanged.
 
 Measurements gate builds. Each step names what would stop the plan.
 
-1. **#1050 measurement.** Coverage check alone over trusted-native pages: how many pages carry
+1. **#1050 measurement.** The missing-text step alone over trusted-native pages: how many pages carry
    text-like uncovered regions, with crops inspected by hand. **Stop condition:** about zero real
-   hits → #1050 shrinks to recording the coverage pass as a witness; no crop route.
+   hits → #1050 shrinks to recording the missing-text pass as a witness; no crop route.
 2. **#1051 measurement.** CPU re-read vs native text on the same pages: disagreeing line pairs,
    split digit / non-digit; hand-label a sample and score Jev against a plain string-distance rule.
    **Stop condition:** Jev no better than the rule → use the rule, drop Jev.
 3. **Price local by GPU time.** Needs per-page GPU seconds, which step 1 and 2 runs can record.
-4. Build what survived, coverage first (it supplies the crop and splice path the agreement
+4. Build what survived, missing-text step first (it supplies the crop and splice path the wrong-text
    check reuses).
 
 ## Open
@@ -91,7 +100,7 @@ Measurements gate builds. Each step names what would stop the plan.
   how it reads the corpus's math.
 - **Splicing.** Gap and line crops must land at their reading-order position. Equation P4-R and
   the corrupt-math hybrid already splice crops into native prose; reuse that, don't build a second.
-- **Figure masking interface.** How the figure lane hands its boxes to the coverage check, given
+- **Figure masking interface.** How the figure lane hands its boxes to the missing-text step, given
   that today they run at different points in the page loop.
 - **GPU-time pricing issue.** Not filed.
 - **Jev key and data handling.** Jev is a cloud service; no call has been made from socr yet.
