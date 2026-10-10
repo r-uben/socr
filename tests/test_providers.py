@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from socr.core.config import DEFAULT_GEMINI_MODEL, EngineType, PipelineConfig
+from socr.core.config import (
+    DEFAULT_GEMINI_MODEL,
+    RETIRED_GEMINI_MODELS,
+    EngineType,
+    PipelineConfig,
+)
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
     PROFILE_GEMINI,
@@ -11,6 +16,7 @@ from socr.core.providers import (
     PROFILE_QWEN_LOCAL,
     ProviderProfile,
     cost_of,
+    profile_by_model,
     provider_ladder,
 )
 
@@ -172,7 +178,13 @@ def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
 
 
 def test_gemini_profile_model_matches_engine_default():
+    assert DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
     assert PROFILE_GEMINI.model == DEFAULT_GEMINI_MODEL == PipelineConfig().gemini_model
+
+
+def test_retired_gemini_model_is_still_priced_as_gemini():
+    for model in RETIRED_GEMINI_MODELS:
+        assert profile_by_model(model) is PROFILE_GEMINI
 
 
 # --- B1 verification tests ---
@@ -256,3 +268,28 @@ def test_gemini_model_flag_overrides_default():
     assert build_config(gemini_model="gemini-x").gemini_model == "gemini-x"
     help_text = CliRunner().invoke(cli, ["process", "--help"]).output
     assert "--gemini-model" in help_text
+
+
+def test_process_forwards_gemini_model_to_config(tmp_path, monkeypatch):
+    """`socr process --gemini-model X` must reach PipelineConfig, not only build_config."""
+    from click.testing import CliRunner
+
+    import socr.cli as cli_mod
+
+    seen = {}
+
+    class _StopError(Exception):
+        pass
+
+    real_build_config = cli_mod.build_config
+
+    def _record(**kwargs):
+        seen["config"] = real_build_config(**kwargs)
+        raise _StopError
+
+    monkeypatch.setattr(cli_mod, "build_config", _record)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    result = CliRunner().invoke(cli_mod.cli, ["process", str(pdf), "--gemini-model", "gemini-x"])
+    assert isinstance(result.exception, _StopError)
+    assert seen["config"].gemini_model == "gemini-x"

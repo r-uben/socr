@@ -12,6 +12,10 @@ from pathlib import Path
 # with --gemini-model.
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
+# Gemini models socr used to default to. ``profile_by_model`` still prices a run recorded
+# under one of them as the metered Gemini rung, not as free.
+RETIRED_GEMINI_MODELS: tuple[str, ...] = ("gemini-3-flash-preview",)
+
 
 class EngineType(str, Enum):
     """Available OCR engines.

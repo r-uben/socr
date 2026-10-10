@@ -122,7 +122,7 @@ class TestGeminiAPIConfig:
         with patch.dict("os.environ", {}, clear=True):
             config = GeminiAPIConfig(api_key="explicit")
             assert config.api_key == "explicit"
-            assert config.model == DEFAULT_GEMINI_MODEL
+            assert config.model == DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
 
     def test_env_gemini_api_key(self):
         with patch.dict("os.environ", {"GEMINI_API_KEY": "from-env"}, clear=True):

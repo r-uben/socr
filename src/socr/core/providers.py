@@ -36,7 +36,12 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from socr.core.config import DEFAULT_GEMINI_MODEL, ENGINE_PRIORITY, EngineType
+from socr.core.config import (
+    DEFAULT_GEMINI_MODEL,
+    ENGINE_PRIORITY,
+    RETIRED_GEMINI_MODELS,
+    EngineType,
+)
 
 if TYPE_CHECKING:
     from socr.core.config import PipelineConfig
@@ -427,6 +432,8 @@ def profile_by_model(model: str) -> ProviderProfile | None:
     for prof in _ALL_PROFILES:
         if prof.model == model:
             return prof
+    if model in RETIRED_GEMINI_MODELS:
+        return PROFILE_GEMINI
     return None
 
 
