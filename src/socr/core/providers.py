@@ -36,7 +36,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from socr.core.config import ENGINE_PRIORITY, EngineType
+from socr.core.config import DEFAULT_GEMINI_MODEL, ENGINE_PRIORITY, EngineType
 
 if TYPE_CHECKING:
     from socr.core.config import PipelineConfig
@@ -102,7 +102,7 @@ PROFILE_GEMINI = ProviderProfile(
     cost_per_page_usd=0.0002,
     id="gemini",
     backend="gemini-api",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_GEMINI_MODEL,
 )
 
 PROFILE_MARKER = ProviderProfile(

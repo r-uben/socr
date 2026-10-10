@@ -7,7 +7,7 @@ Flat @click.command. Uses Google Gemini Files API (native PDF upload).
 import os
 from pathlib import Path
 
-from socr.core.config import PipelineConfig
+from socr.core.config import DEFAULT_GEMINI_MODEL, PipelineConfig
 from socr.engines.base import BaseEngine
 
 
@@ -24,7 +24,7 @@ class GeminiEngine(BaseEngine):
 
     @property
     def model_version(self) -> str:
-        return "gemini-3-flash-preview"
+        return DEFAULT_GEMINI_MODEL
 
     def is_available(self) -> bool:
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
