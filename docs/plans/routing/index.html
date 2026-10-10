@@ -73,7 +73,7 @@
 <div class="goal"><b>Goal.</b> socr ships every page with nothing silently lost, and uses a model only on the parts of a page the PDF's own text can't provide.</div>
 
 <h2>Targets</h2>
-<p class="sub">Baseline: corpus run of 2026-10-10 on Rorqual (array job 22889958, socr <code>main</code> @ c4937472, Qwen3-VL-30B on 4×H100, 395 papers, <b>17,091 pages</b>). Losses are listed one by one; there is no single rate yet.</p>
+<p class="sub">Baseline: corpus run of 2026-10-10 on Rorqual (array job 22889958, socr @ 5e2c3582 of 2026-10-01, Qwen3-VL-30B on 4×H100, 395 papers, <b>17,091 pages</b>). The job was meant to run <code>main</code> @ c4937472; its settings file re-pinned the benchmark environment. A second run of the same code (array 22909584) halted 183 papers against 186; outside halted papers only 16 pages changed lane. Losses are listed one by one; there is no single rate yet.</p>
 <div class="kpis">
   <div class="kpi"><div class="l">Target 1 · silent losses → 0</div><div class="v">partly measured</div><div class="l">
     <b>Fixed:</b> 6,337 numbers hidden as "not data" on 321 pages, real table values among them (#1055, merged in #1056).<br>
@@ -102,7 +102,7 @@
 
 <h2>Evidence so far</h2>
 <ul>
-  <li><b>Whole-page figures</b> (#1053): Rorqual job 22881337, socr main @ c4937472. Pages 2, 6, 9, 12 each ship a 1275×1650 px whole-page PNG; page 6's keyword table (Figure 3) exists only as pixels; every page says <code>success</code>.</li>
+  <li><b>Whole-page figures</b> (#1053): Rorqual job 22881337, socr @ 5e2c3582 (meant to be main; same settings-file trap). Pages 2, 6, 9, 12 each ship a 1275×1650 px whole-page PNG; page 6's keyword table (Figure 3) exists only as pixels; every page says <code>success</code>.</li>
   <li><b>Per-figure crops work</b> (#1053 mock): figure boxes from the PDF's own image placements; local Qwen read all three crops correctly, about 2 s per crop with the model warm.</li>
   <li><b>Missing-text check</b> (#1050 mock): on three corpus pages, leftover ink was nothing (clean page), a chart (expected), and diagram words absent from the text layer (the target case). A dark filled box also showed up, so text-shaped ink must be told apart from fills.</li>
   <li><b>Prior constraint</b>: <code>docs/plans/fake-native-pages</code> closed a lexical text-quality signal unbuilt as noise; Jev's garble role in #1051 must beat that or be dropped.</li>

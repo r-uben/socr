@@ -6,8 +6,8 @@ dispatched. Part of `docs/plans/routing/` (figure lane).
 ## Problem, measured
 
 The chart-asset lane ships a page's native text and appends one PNG of the **entire page** as its
-"figure" (`_agentic_chart_asset_page`). Corpus run on Rorqual (array 22889958, socr main @
-c4937472, 395 papers, 17,091 pages): **1,503 pages** take this lane. Random sample of 30 (seed
+"figure" (`_agentic_chart_asset_page`). Corpus run on Rorqual (array 22889958, socr @ 5e2c3582 (2026-10-01; meant to be main @ c4937472, but the job's settings file re-pinned the benchmark environment),
+395 papers, 17,091 pages): **1,503 pages** take this lane. Random sample of 30 (seed
 10530), sorted by eye:
 
 | Kind | Share | Handled by |
