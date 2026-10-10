@@ -705,6 +705,23 @@ def _extract_xref_image(pdf, xref: int) -> Image.Image | None:
         del pix
 
 
+def _is_page_canvas(rect, page_rect) -> bool:
+    """True when *rect* reaches *page_rect*'s boundary on all four sides (#1069).
+
+    Such a drawing is the page background, not a chart element. Tolerance is
+    ``AXIS_LINE_TOLERANCE_PT``, the same slack used for axis-aligned lines.
+    """
+    if rect is None:
+        return False
+    tol = AXIS_LINE_TOLERANCE_PT
+    return (
+        rect.x0 <= page_rect.x0 + tol
+        and rect.y0 <= page_rect.y0 + tol
+        and rect.x1 >= page_rect.x1 - tol
+        and rect.y1 >= page_rect.y1 - tol
+    )
+
+
 def _cluster_drawings(
     drawings: list[dict],
     page_width: float,
@@ -1305,6 +1322,15 @@ def has_chart_marks(page) -> bool:
 
     if not drawings:
         logger.debug("has_chart_marks p%s: no drawings", page_num_label)
+        return False
+
+    # #1069: a page-sized background fill is the canvas, not a mark. Left in,
+    # it unions the whole page into one cluster and passes as the chart frame.
+    # get_drawings() is in unrotated space, so compare against the derotated rect.
+    unrotated_rect = page.rect * page.derotation_matrix
+    drawings = [d for d in drawings if not _is_page_canvas(d.get("rect"), unrotated_rect)]
+    if not drawings:
+        logger.debug("has_chart_marks p%s: only a page canvas", page_num_label)
         return False
 
     clusters = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
