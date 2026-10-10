@@ -562,3 +562,98 @@ def test_a_timed_out_attempt_arms_the_halt_from_any_position(position) -> None:
     # The provider half of the trigger, same list shape, no typed outcome at all.
     provider = clean[:slot] + [_attempt("", "provider timeout after 120s")] + clean[slot:]
     assert UnifiedPipeline._attempts_show_timeout(provider) is True
+
+
+def test_vllm_canary_asks_for_the_served_model_name(monkeypatch) -> None:
+    """#1062: the generation canary must carry ``qwen_vllm_model``.
+
+    The probe used to send the Ollama tag (``_default_canary_model()``); vLLM
+    serves ``--served-model-name`` and rejects any other name, so a healthy
+    server read as wedged and one timeout halted the document. The fake server
+    answers the canary only to the served name and errors otherwise.
+    """
+    import httpx
+
+    served = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    requested: list[str] = []
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    "model not found", request=httpx.Request("POST", "http://x"), response=self
+                )
+
+        def json(self) -> dict:
+            return {}
+
+    def _fake_get(url, *args, **kwargs):
+        return _Resp(200)
+
+    def _fake_post(url, *args, **kwargs):
+        model = kwargs["json"]["model"]
+        requested.append(model)
+        return _Resp(200 if model == served else 404)
+
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.setattr(extract_mod.httpx, "get", _fake_get)
+    monkeypatch.setattr(extract_mod.httpx, "post", _fake_post)
+
+    pipeline = _pipeline(
+        qwen_backend="vllm",
+        qwen_vllm_url="http://gpu-node:8000/v1",
+        qwen_vllm_model=served,
+    )
+
+    assert pipeline._probe_backend_idle() is True
+    assert requested == [served], f"the canary asked for the wrong model: {requested}"
+
+
+def test_vllm_canary_follows_a_pinned_model_like_ocr_does(monkeypatch) -> None:
+    """#1062 (Astra review): the canary asks for the model OCR REQUESTS.
+
+    ``resolve_qwen_intent`` honours a pinned ``qwen_model`` before
+    ``qwen_vllm_model``. A server serving the pinned alias, with
+    ``qwen_vllm_model`` left at its default, is healthy for OCR; a canary reading
+    ``qwen_vllm_model`` directly would ask for the wrong name and halt the run.
+    """
+    import httpx
+
+    pinned = "local-qwen-alias"
+    requested: list[str] = []
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    "model not found", request=httpx.Request("POST", "http://x"), response=self
+                )
+
+        def json(self) -> dict:
+            return {}
+
+    def _fake_post(url, *args, **kwargs):
+        model = kwargs["json"]["model"]
+        requested.append(model)
+        return _Resp(200 if model == pinned else 404)
+
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.setattr(extract_mod.httpx, "get", lambda url, *a, **k: _Resp(200))
+    monkeypatch.setattr(extract_mod.httpx, "post", _fake_post)
+
+    pipeline = _pipeline(
+        qwen_backend="vllm",
+        qwen_vllm_url="http://gpu-node:8000/v1",
+        qwen_model=pinned,
+        qwen_model_pinned=True,
+    )
+
+    assert pipeline.config.qwen_vllm_model != pinned, "fixture: the two names must differ"
+    assert pipeline._probe_backend_idle() is True
+    assert requested == [pinned], f"the canary asked for the wrong model: {requested}"

@@ -14125,7 +14125,16 @@ class UnifiedPipeline:
         # ``socr.pipeline.orchestrator.probe_ollama_idle``, and routing around
         # that name would silently neuter every one of those patches.
         if self._local_backend_is_openai_compatible():
-            return probe_openai_server_idle(self.config.qwen_vllm_url)
+            # #1062: the canary must ask for the model OCR actually requests
+            # (``resolve_qwen_intent``: a pinned model, else ``qwen_vllm_model``,
+            # the name vLLM serves), not the Ollama tag ``_default_canary_model()``
+            # falls back to; vLLM answers an unknown model with an error, which
+            # read as "wedged" and halted the document. A blank name keeps the
+            # default canary rather than sending an empty ``model``.
+            from socr.engines.qwen import resolve_qwen_intent
+
+            _backend, served_model = resolve_qwen_intent(self.config)
+            return probe_openai_server_idle(self.config.qwen_vllm_url, model=served_model or None)
         return probe_ollama_idle(self._local_backend_host())
 
     def _local_backend_is_openai_compatible(self) -> bool:
