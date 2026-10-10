@@ -30,6 +30,7 @@ from socr.core.glyph_recovery import (
     count_control_byte_before_digit_hits,
     count_minus_as_digit_hits,
 )
+from socr.core.native_paragraphs import page_paragraphs
 from socr.core.pdf import apply_glyph_recovery, open_pdf
 
 logger = logging.getLogger(__name__)
@@ -2738,6 +2739,9 @@ class PageAssessment:
     #: ``dominant_text_direction()``) — consumers must NOT read this field's
     #: default as proof that directional text evidence existed.
     dominant_text_direction: tuple[float, float] = _HORIZONTAL
+    #: #1074: the page's paragraphs read from its geometry (``native_paragraphs``), used at
+    #: emit time to join the printed lines of ``native_text``. Runtime-only.
+    native_paragraphs: tuple = ()
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -3189,6 +3193,8 @@ class BornDigitalDetector:
         direction = dominant_text_direction(blocks)
         assessment = self._assess_page_signals(page, page_num, direction)
         assessment.dominant_text_direction = direction
+        if assessment.is_born_digital and assessment.native_text:
+            assessment.native_paragraphs = page_paragraphs(page)
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
         assessment.native_table_region_count = self._last_extraction_table_count
         assessment.native_table_region_identities = list(self._last_extraction_region_identities)
@@ -4290,12 +4296,21 @@ class BornDigitalDetector:
         self,
         page: fitz.Page,
         table_regions: list[tuple[object, str]],
+        *,
+        suppress_represented: bool = True,
     ) -> str:
         """Interleave *table_regions* with the page's non-table text blocks.
 
         *table_regions* is a list of ``(rect, markdown)`` in page coordinates,
         typically from the word-geometry rowizer. Used by the upright native-
         table SHIP path after GH-147 refused the sideways rowizer output.
+
+        ``suppress_represented=False`` (#1053, figure crops) skips the "already
+        represented" suppression below: a region that is only an image
+        placeholder represents no words, and the bag-of-tokens test would drop
+        a native line because the placeholder happens to contain one of its
+        tokens. Every block then ships whole, in stream order. The default keeps
+        the table paths unchanged.
         """
         _links = _uri_links(page)
         try:
@@ -4411,7 +4426,7 @@ class BornDigitalDetector:
             covering = [
                 (r, raw_md)
                 for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)
-                if _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
+                if suppress_represented and _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
             ]
 
             # GH-779: GH-152 can split one wide table into a left-band and a
@@ -4445,7 +4460,7 @@ class BornDigitalDetector:
             # contributes zero area to the union regardless, so restricting
             # the candidate set to regions that touch this block costs
             # nothing.
-            if not covering:
+            if suppress_represented and not covering:
                 touching = [
                     (r, raw_md)
                     for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)

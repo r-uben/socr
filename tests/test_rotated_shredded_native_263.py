@@ -483,3 +483,15 @@ class TestChartAssetLaneCannotShipShreddedText:
         assert _confetti_lines(shipped_text) == []
         assert "Figure 4" in shipped_text
         assert "![Chart page 1](" in shipped_text
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)

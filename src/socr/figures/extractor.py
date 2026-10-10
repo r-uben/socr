@@ -705,6 +705,23 @@ def _extract_xref_image(pdf, xref: int) -> Image.Image | None:
         del pix
 
 
+def _is_page_canvas(rect, page_rect) -> bool:
+    """True when *rect* reaches *page_rect*'s boundary on all four sides (#1069).
+
+    Such a drawing is the page background, not a chart element. Tolerance is
+    ``AXIS_LINE_TOLERANCE_PT``, the same slack used for axis-aligned lines.
+    """
+    if rect is None:
+        return False
+    tol = AXIS_LINE_TOLERANCE_PT
+    return (
+        rect.x0 <= page_rect.x0 + tol
+        and rect.y0 <= page_rect.y0 + tol
+        and rect.x1 >= page_rect.x1 - tol
+        and rect.y1 >= page_rect.y1 - tol
+    )
+
+
 def _cluster_drawings(
     drawings: list[dict],
     page_width: float,
@@ -998,109 +1015,21 @@ def _looks_like_table_grid(
     return horizontal >= 3 and vertical >= 2
 
 
-#: GH-369 (cubic P2): the smallest run of consecutive bare-number lines that
-#: can be an axis scale. Two, because a scale is a sequence of ticks and a lone
-#: number between sentences is content -- a year, a headline stat, a footnote
-#: marker. Structural, not tuned: no page-level ratio is consulted anywhere.
-_MIN_AXIS_SCALE_TICKS = 2
+def _drawn_image_xrefs(page) -> set[int] | None:
+    """xrefs of the images *page* actually draws, or ``None`` when that is unknown.
 
-_CHART_AXIS_FENCE_OPEN = "<!-- socr:chart-axis-residue"
-_CHART_AXIS_FENCE_CLOSE = "socr:end-chart-axis-residue -->"
-
-
-def _is_bare_number_line(line: str) -> bool:
-    """Whether *line* is nothing but a number.
-
-    GH-369. Deliberately narrow: only a line whose ENTIRE stripped content is a
-    numeric literal (optionally signed, decimal, or percent). Axis tick scales
-    render exactly this way -- ``2``, ``4``, ``18``, ``-0.5``, ``25%`` each
-    alone on a line -- and it is these that are indistinguishable from a series
-    of data values downstream.
-
-    Word-shaped tick labels ("Lower", "Broadly similar", "Higher") are NOT
-    matched. They are ordinary prose to any reader, they do not read as data,
-    and a classifier confident enough to catch them would be confident enough
-    to swallow a real sentence. There is no share-of-page threshold anywhere in
-    this path: each line is judged on its own content.
+    #1059. Read from the display list (``get_image_info``), not the resource
+    list (``get_images``). ``None`` when the lookup raises, or when a drawn image
+    reports xref 0 (inline or unattributable): it could be any listed image, so
+    nothing may be ruled out on it.
     """
-    text = line.strip()
-    if not text:
-        return False
-    if text.endswith("%"):
-        text = text[:-1].strip()
-    if text[:1] in "+-":
-        text = text[1:]
-    if not text:
-        return False
-    return text.replace(".", "", 1).isdigit()
-
-
-def split_chart_axis_residue(native_text: str) -> tuple[str, list[str]]:
-    """Split *native_text* into (body, axis-residue lines).
-
-    GH-369. A page routed to the chart-asset lane saves the chart as an image
-    and records "data values not transcribed" -- then ships the native text
-    layer whole, axis tick scales included. On the reported page 52% of
-    non-empty lines were a lone number, which is indistinguishable from a
-    series of real values and contradicts the lane's own declaration.
-
-    The residue is SEPARATED, never dropped: a wrong or dropped number is worse
-    than a missing one, so every input line is returned in one of the two
-    halves and the caller fences the residue rather than deleting it. Order is
-    preserved WITHIN each half, but the interleaving between them is not: the
-    residue moves to a trailing fence, so the original line order is
-    deliberately lost. Nothing is lost as content; the page is not
-    byte-reconstructible from the output.
-
-    Returns ``(body, residue)``. ``residue`` is empty for any page with no bare
-    numeric lines, which leaves every non-chart page byte-identical.
-    """
-    lines = native_text.splitlines()
-    body: list[str] = []
-    residue: list[str] = []
-
-    index = 0
-    while index < len(lines):
-        if not _is_bare_number_line(lines[index]):
-            body.append(lines[index])
-            index += 1
-            continue
-        run_end = index
-        while run_end < len(lines) and _is_bare_number_line(lines[run_end]):
-            run_end += 1
-        run = lines[index:run_end]
-        # A scale is a SEQUENCE of ticks. One number standing alone between
-        # sentences is a year, a headline stat, or a footnote marker -- content,
-        # not chart furniture -- so it stays visible in the body. This is a
-        # structural minimum drawn from what an axis IS, not a tuned cutoff:
-        # there is no such thing as a one-tick scale.
-        (residue if len(run) >= _MIN_AXIS_SCALE_TICKS else body).extend(run)
-        index = run_end
-
-    return "\n".join(body), residue
-
-
-def fence_chart_axis_residue(native_text: str) -> str:
-    """Body text with bare-numeric axis lines moved into a fenced block.
-
-    GH-369. The fence is an HTML comment, so the residue survives verbatim in
-    the file (auditable, greppable, machine-distinguishable) while not
-    rendering as prose beside the chart image it belongs to. Returns
-    *native_text* unchanged when there is nothing to fence.
-    """
-    body, residue = split_chart_axis_residue(native_text)
-    if not residue:
-        return native_text
-    fenced = "\n".join(
-        [
-            _CHART_AXIS_FENCE_OPEN,
-            "axis tick labels from the chart on this page; not data values.",
-            *residue,
-            _CHART_AXIS_FENCE_CLOSE,
-        ]
-    )
-    body = body.rstrip()
-    return f"{body}\n\n{fenced}" if body else fenced
+    try:
+        info = page.get_image_info(xrefs=True)
+    except Exception as exc:  # noqa: BLE001 - unknown, caller fails open
+        logger.debug("has_chart_marks: get_image_info failed: %s", exc)
+        return None
+    xrefs = {item.get("xref", 0) for item in info}
+    return None if 0 in xrefs else xrefs
 
 
 def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
@@ -1156,6 +1085,77 @@ def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
         "scan/decorative" if is_scan else "not scan",
     )
     return is_scan
+
+
+def _content_drawings(page) -> list[dict]:
+    """``page.get_drawings()`` over the document's own content, annotations excluded.
+
+    #1066: PyMuPDF runs the page with its annotations, so a reader's Highlight
+    (a filled coloured rectangle) reads as a vector data mark and routes a text
+    page to the chart lane. When the page has annotations, take drawings from a
+    one-page copy made with ``annots=False``. Drawings are NOT dropped by
+    annotation rectangle: a Square a reader draws around a real chart would hide
+    it. Any failure in the copy path falls back to ``page.get_drawings()``.
+
+    Documents with optional content (layers) keep ``page.get_drawings()``:
+    ``insert_pdf`` drops the document's optional-content configuration, so a
+    layer that is off in the original would draw in the copy (Astra review).
+    """
+    try:
+        if getattr(page, "first_annot", None) is not None and not page.parent.get_ocgs():
+            import fitz
+
+            tmp = fitz.open()
+            try:
+                tmp.insert_pdf(
+                    page.parent, from_page=page.number, to_page=page.number, annots=False
+                )
+                return tmp[0].get_drawings()
+            finally:
+                tmp.close()
+    except Exception as exc:
+        logger.debug("has_chart_marks: annotation-free copy failed, using page: %s", exc)
+    return page.get_drawings()
+
+
+def figure_boxes(page) -> list[tuple[float, float, float, float]] | None:
+    """Raster figure boxes of *page*: one ``(x0, y0, x1, y1)`` per DRAWN image placement.
+
+    #1053, raster half. Read from the display list (``get_image_info``, the #1059 reader), so an
+    image that is listed in the resources and never drawn on this page has no box. A placement
+    is kept under the same two gates ``has_chart_marks`` applies to a raster: its placed area
+    reaches ``CHART_MIN_CLUSTER_AREA`` and it is not a page scan or decorative page image
+    (``_raster_is_scan_or_decorative``, GH-511/656).
+
+    ``[]`` means the page has no qualifying raster figure. ``None`` means the placements cannot
+    be attributed (the lookup raised, or a drawn image reports xref 0): unknown, and the caller
+    keeps the whole-page route. Panels are NOT merged: one box per placement. Not
+    ``chart_region_bboxes``, which stretches a box to the page edge and swallows what sits beside
+    the chart (#1055). The vector half does not exist yet, so ``has_chart_marks`` is unchanged
+    and the two can disagree on a vector chart; the caller asks ``_vector_chart_found`` too.
+    """
+    import fitz
+
+    if _drawn_image_xrefs(page) is None:
+        return None
+    try:
+        info = page.get_image_info(xrefs=True)
+    except Exception as exc:  # noqa: BLE001 - unknown, caller keeps the whole-page route
+        logger.debug("figure_boxes: get_image_info failed: %s", exc)
+        return None
+    page_area = page.rect.width * page.rect.height
+    boxes: list[tuple[float, float, float, float]] = []
+    for item in info:
+        bbox = item.get("bbox")
+        if not bbox:
+            return None
+        x0, y0, x1, y1 = (float(v) for v in bbox)
+        if (x1 - x0) * (y1 - y0) < CHART_MIN_CLUSTER_AREA:
+            continue
+        if _raster_is_scan_or_decorative(page, fitz.Rect(x0, y0, x1, y1), page_area):
+            continue
+        boxes.append((x0, y0, x1, y1))
+    return sorted(boxes, key=lambda b: (b[1], b[0]))
 
 
 def has_chart_marks(page) -> bool:
@@ -1257,6 +1257,8 @@ def has_chart_marks(page) -> bool:
 
             largest = 0.0
             unmeasurable = False
+            drawn_xrefs: set[int] | None = None
+            drawn_looked_up = False
             # GH-656: track EVERY placement that clears the area bar, not just
             # the largest -- a scan/decorative largest raster must not shadow
             # a smaller qualifying raster that IS a real chart.
@@ -1273,6 +1275,19 @@ def has_chart_marks(page) -> bool:
                 # and one small image be rejected on evidence that never covered
                 # the unresolved one.
                 if not rects:
+                    # #1059: an image can be LISTED in the page's resources and
+                    # never drawn on it (pdfTeX shares one resource dict across
+                    # pages). That is absence, not ignorance: skip it. Fail open
+                    # only when the page's drawn images cannot be attributed.
+                    if not drawn_looked_up:
+                        drawn_xrefs, drawn_looked_up = _drawn_image_xrefs(page), True
+                    if drawn_xrefs is not None and image[0] not in drawn_xrefs:
+                        logger.debug(
+                            "has_chart_marks p%s: image xref %s listed but not drawn; skipped",
+                            page_label,
+                            image[0],
+                        )
+                        continue
                     unmeasurable = True
                     continue
                 for rect in rects:
@@ -1332,9 +1347,23 @@ def has_chart_marks(page) -> bool:
     except Exception as exc:
         logger.debug("has_chart_marks: get_images() failed: %s", exc)
 
+    return _vector_chart_found(page)
+
+
+def _vector_chart_found(page) -> bool:
+    """True when *page* carries a vector chart cluster (the vector half of ``has_chart_marks``).
+
+    Split out so ``figure_boxes``' caller can ask the vector question on its own: a page whose
+    chart is drawn in vectors has no raster box for the crop lane to cut, and must keep the
+    whole-page route. ``has_chart_marks`` ends by returning this, unchanged.
+    """
+    page_width = page.rect.width
+    page_height = page.rect.height
+    page_area = page_width * page_height
+
     # Vector path: cluster drawings, then gate each cluster.
     try:
-        drawings = page.get_drawings()
+        drawings = _content_drawings(page)
     except Exception as exc:
         logger.debug("has_chart_marks: get_drawings() failed: %s", exc)
         return False
@@ -1347,6 +1376,15 @@ def has_chart_marks(page) -> bool:
 
     if not drawings:
         logger.debug("has_chart_marks p%s: no drawings", page_num_label)
+        return False
+
+    # #1069: a page-sized background fill is the canvas, not a mark. Left in,
+    # it unions the whole page into one cluster and passes as the chart frame.
+    # get_drawings() is in unrotated space, so compare against the derotated rect.
+    unrotated_rect = page.rect * page.derotation_matrix
+    drawings = [d for d in drawings if not _is_page_canvas(d.get("rect"), unrotated_rect)]
+    if not drawings:
+        logger.debug("has_chart_marks p%s: only a page canvas", page_num_label)
         return False
 
     clusters = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)

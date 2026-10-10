@@ -1,0 +1,108 @@
+# Routing design — OCR only what needs it, check everything that ships
+
+Opened 2026-10-09. Dashboard: [`index.html`](index.html) (goal, targets, work order, evidence, then the current and
+target routing diagrams; open it in a browser). Issues: #1050 (text quality check, step 1: missing text), #1051 (step 2: wrong text, with Jev), #1053 (one crop per figure).
+
+## Goal
+
+Cut OCR time and cost by sending a model only the parts of a page that need one, **without**
+shipping any text that nothing checked. A wrong or dropped number is worse than a missing one.
+
+## Today (read from `main@c4937472`)
+
+Each page is classified once by text-layer rules (`core/born_digital.py`) and takes one lane:
+
+| Lane | Model sees | Checked by |
+|---|---|---|
+| Trusted native (`_is_agentic_trusted_native`) | nothing | **nothing** |
+| Tables / equations / corrupt math | crops | table verifiers; LaTeX validation |
+| Figures / charts | page or region image | chart reader where it applies |
+| Scanned or defect-flagged | **whole page** | page judge, then cost ladder |
+
+Three problems:
+
+1. **Local OCR is priced at `0.0`** in `core/providers.py`. The ladder sorts by price, so GPU time
+   and long-input hallucination never enter the decision.
+2. **The free lane is the unchecked lane.** 245 of 423 pages took it in one run (#317).
+3. **Whole page or nothing.** One bad paragraph sends the full page to the VLM, and the model
+   output replaces the good native prose around it.
+
+## Target
+
+Native text ships only after two model-free checks; models see gaps and bad lines, not pages.
+
+1. **Text quality check, step 1: missing text (#1050).** Render the page, find ink, subtract text-layer word boxes. Text-like
+   ink with no words over it → OCR that crop only. Finds **missing** text. Inside a figure, the
+   figure's **marks** (lines, bars, fills) are expected to have no text and are ignored, but
+   **text-shaped** ink still counts: axis labels, legends and box labels are content. Masking whole
+   figure boxes would hide exactly the case on `2023__patel_gloor__systematic_esg_scoring__WP.pdf`
+   p2, a diagram whose words exist only as pixels.
+
+   Where the OCR'd text lands (ruled 2026-10-09):
+   - **Outside a figure** (e.g. a scanned paragraph): substituted into the prose at its
+     reading-order position, as if the text layer had held it.
+   - **Inside a figure:** the figure is embedded as an image link to its asset, and the OCR'd words
+     go directly beneath it, attached to that figure and kept apart from the prose:
+
+     ```markdown
+     ![Figure 1: …](figures/p002_fig1.png)
+
+     > Text in figure (OCR): ESG Score · Environmental: Greenhouse Gas Emissions, …
+     ```
+2. **Text quality check, step 2: wrong text (#1051).** Re-read the rendered page with Tesseract (classic CPU OCR, no LLM), align line by
+   line with the native text. Disagreeing lines → crop to the VLM. Finds **wrong** text.
+3. **Jev as the text-only judge (#1051).** Jev cannot see images. It judges text pairs: whether a
+   word difference is real or an OCR misread, and the per-region route. **Digit disagreements
+   never go through Jev**; they always go to the VLM.
+4. **Fail closed.** Any check that cannot run or cannot decide sends the page to today's
+   whole-page route. **Figures are the exception** (owner ruling 2026-10-10, #1053): an undecided
+   figure check keeps the page's native text, flags the page (WARNING, `FIGURE_WORDS_UNREAD`)
+   and escalates the figure's crop, never the page.
+5. **Honest local price.** GPU seconds enter the ladder's cost. Not filed yet (see Open).
+
+Lanes that already work (tables, equations, figures) are unchanged.
+
+Lanes: the target has four content lanes (text, formulas, figures, tables), each with its own
+check, plus the whole-page fallback for an unusable text layer.
+
+- **Figure quality check (new, #1053).** Each figure is cropped on its own and its words read by the
+  model, then compared with a Tesseract read of the same crop (digits mechanically, words via
+  Jev); every "Figure N" caption must have a crop.
+- **Formulas are the weak spot.** LaTeX validation checks that a formula parses, not that it
+  matches the page. No fix is proposed yet.
+
+## Prior evidence that constrains this
+
+- **`docs/plans/fake-native-pages`**: 72 of 2972 pages (2.4%) are old scans with a baked-in OCR
+  layer, 71 of them from two documents; raster coverage catches them. Since then #961 routes an
+  invisible text layer over a page raster to OCR. The missing-text step must not re-solve that.
+- **Same plan, ticket B2 — lexical quality signal: CLOSED, NOT BUILT.** A1 measured it as noise,
+  not coverage. This is direct evidence against Jev's garble-classification use in #1051; that
+  use needs a new measurement that beats B2's finding, or it is dropped.
+- **Judge agreement is not corroboration.** Two vendor judges agreed on a page and both missed a
+  shifted row. Hence the digit rule.
+
+## Order of work
+
+Measurements gate builds. Each step names what would stop the plan.
+
+1. **#1050 measurement.** The missing-text step alone over trusted-native pages: how many pages carry
+   text-like uncovered regions, with crops inspected by hand. **Stop condition:** about zero real
+   hits → #1050 shrinks to recording the missing-text pass as a witness; no crop route.
+2. **#1051 measurement.** CPU re-read vs native text on the same pages: disagreeing line pairs,
+   split digit / non-digit; hand-label a sample and score Jev against a plain string-distance rule.
+   **Stop condition:** Jev no better than the rule → use the rule, drop Jev.
+3. **Price local by GPU time.** Needs per-page GPU seconds, which step 1 and 2 runs can record.
+4. Build what survived, missing-text step first (it supplies the crop and splice path the wrong-text
+   check reuses).
+
+## Open
+
+- **Which CPU OCR.** Tesseract is the obvious candidate; not checked whether it is installed or
+  how it reads the corpus's math.
+- **Splicing.** Gap and line crops must land at their reading-order position. Equation P4-R and
+  the corrupt-math hybrid already splice crops into native prose; reuse that, don't build a second.
+- **Figure masking interface.** How the figure lane hands its boxes to the missing-text step, given
+  that today they run at different points in the page loop.
+- **GPU-time pricing issue.** Not filed.
+- **Jev key and data handling.** Jev is a cloud service; no call has been made from socr yet.

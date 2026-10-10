@@ -629,3 +629,15 @@ def test_no_attempt_native_page_is_demoted_when_flagged(tmp_path) -> None:
     assert flagged.text == clean.text, "the same native text ships"
     assert flagged.status.value != "success"
     assert flagged.failure_mode is FailureMode.NATIVE_GARBLED_MATH
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)

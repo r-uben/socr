@@ -55,7 +55,8 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState
+from socr.core.native_paragraphs import NativeVocabulary, reflow_native_prose
+from socr.core.state import DocumentState, PageState
 
 logger = logging.getLogger(__name__)
 
@@ -994,6 +995,11 @@ def native_untrusted_judge_timeout(p) -> bool:
 def table_not_reconstructed_suspect(p) -> bool:
     """GH-994: a caption plus table structure on a page detection found no table on."""
     return bool(getattr(p, "table_not_reconstructed", False))
+
+
+def figure_words_unread_suspect(p) -> bool:
+    """#1053: a figure crop on the page holds no native word, so its words are unread."""
+    return bool(getattr(p, "figure_words_unread", False))
 
 
 def _reaches_structure_class_branch(p) -> bool:
@@ -3231,6 +3237,21 @@ def _select_page_output_tagged(
                         else winner.failure_mode
                     ),
                 )
+            # #1053: same in-place demotion for a figure crop holding no native word.
+            if (
+                figure_words_unread_suspect(p)
+                and winning_engine.startswith(_NATIVE_TEXT_LANES)
+                and winner.status is PageStatus.SUCCESS
+            ):
+                winner = replace(
+                    winner,
+                    status=PageStatus.WARNING,
+                    failure_mode=(
+                        FailureMode.FIGURE_WORDS_UNREAD
+                        if winner.failure_mode is FailureMode.NONE
+                        else winner.failure_mode
+                    ),
+                )
             return winner, SelectionProvenance.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
@@ -4391,6 +4412,27 @@ def _apply_math_font_unrecovered_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, audit_notes=notes)
 
 
+def _apply_native_paragraphs(
+    output: PageOutput, p: PageState, vocabulary: NativeVocabulary | None
+) -> PageOutput:
+    """#1074: join the printed lines of native prose into paragraphs and split words.
+
+    Last text-rewriting step of the chain, and BEFORE the #713 stamp that digests the
+    shipped bytes. Native-text lanes only, never a failed-page marker. Moved earlier it
+    would hide the spelled-out runs ``_apply_scanned_figure_guard`` fences (the e2e of
+    #1030 fails). Every writer shares this seam, which keeps fragments, the final ``.md``,
+    replay and resume byte-identical.
+    """
+    if (
+        not output.text
+        or not (output.engine or "").startswith(_NATIVE_TEXT_LANES)
+        or is_page_failed_marker(output.text)
+    ):
+        return output
+    text = reflow_native_prose(output.text, p.native_paragraphs, vocabulary)
+    return output if text == output.text else replace(output, text=text)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -4410,6 +4452,7 @@ def _select_and_finalize_page(
       8. _apply_ditto_guard
       9. _apply_chart_region_guard
       9b. _apply_scanned_figure_guard (#1030)
+      9c. _apply_native_paragraphs (#1074)
       10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -4430,6 +4473,7 @@ def _select_and_finalize_page(
         output = _apply_chart_region_guard(output, p)
         output = _apply_halt_unprocessed_guard(output, p)
         output = _apply_scanned_figure_guard(output, p)
+        output = _apply_native_paragraphs(output, p, state.native_vocabulary)
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``

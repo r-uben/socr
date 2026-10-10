@@ -593,3 +593,15 @@ def test_e2e_scan_page_with_corrupt_math_goes_to_whole_page_ocr(tmp_path, monkey
     assert eng_on.calls == 1
     assert _OCR_MARK in _page_text(tmp_path, "m_on")
     assert "estimated effect" not in _page_text(tmp_path, "m_on")
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)

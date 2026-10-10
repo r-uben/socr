@@ -1,0 +1,45 @@
+## Page 1
+
+Executive Summary | CEO Message | Our Company | Water | Portfolio | Packaging | Climate | Agriculture | People | Operations | **Data Appendix** | Frameworks
+---|---|---|---|---|---|---|---|---|---|---|---
+Overview | Financial & Portfolio Data | Packaging | Water | **Greenhouse Gas Emissions & Waste** | Workplace, Safety & Giving Back | Human Rights & Agriculture | Assurance Statement
+
+# Greenhouse Gas Emissions & Waste
+
+| Year ended December 31, | 2013 | 2014 | 2015 | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **● GHG Emissions** | | | | | | | | | |
+| Direct, from manufacturing sites (metric tons) (in millions) | 1.8 | 1.7 | 1.7 | 1.6 | 1.78 | 1.79 | 1.83 | 1.49 | **1.61** |
+| Indirect, from electricity purchased and consumed (without energy trading) at manufacturing sites (metric tons) (in millions) | 3.7 | 3.6 | 3.8 | 3.8 | 3.76 | 3.76 | 3.73 | 3.75 | **3.88** |
+| Indirect, from electricity purchased and consumed (without energy trading) at manufacturing sites (using GHG protocol market-based method)¹ (metric tons) (in millions) | | | | | 3.44 | 3.35 | 3.88 | 3.28 | **3.56** |
+| Total, from manufacturing sites (metric tons) (in millions) | 5.53 | 5.55 | 5.58 | 5.45 | 5.54 | 5.55 | 5.56 | 5.24 | **5.49** |
+| Total, from manufacturing sites (using GHG protocol market-based method)¹ (in millions) | | | | | 5.22 | 5.14 | 5.71 | 4.77 | **5.18** |
+| Emissions Ratio (gCO₂/L) | 37.10 | 36.89 | 36.23 | 35.29 | 33.96 | 34.83 | 34.74 | 33.96 | **33.33** |
+| **Business & ESG Report and CDP Manufacturing Emissions Reconciliation** | | | | | | | | | |
+| **Reported Manufacturing Emissions in Business and ESG Report (millions of MT CO₂e)-TCCS Reporting Entity²** | | | | | | | | | |
+| Scope 1 emissions per B&ESG | | | | | | | | | **1.61** |
+| Scope 2 emissions per B&ESG | | | | | | | | | **3.88** |
+| Total manufacturing emissions per B&ESG | | | | | | | | | **5.49** |
+| **Reported Manufacturing Emissions in CDP (MT CO₂e-TCCC Reporting Entity²,³** | | | | | | | | | |
+| Scope 1-Manufacturing per CDP C7.3c | | | | | | | | | **325,833** |
+| Scope 2 (location-based)-Manufacturing per CDP C6.3 | | | | | | | | | **869,832** |
+| Scope 3-Franchises per CDP C6.5 | | | | | | | | | **4,299,247** |
+| Total manufacturing emissions per CDP | | | | | | | | | **5,494,912** |
+| Total manufacturing emissions per CDP (in millions) | | | | | | | | | **5.49** |
+| **Energy Use⁴** | | | | | | | | | |
+| Total Energy Use (megajoules) (in millions) | 61,599.8 | 61,764.0 | 61,037.4 | 61,558.7 | 59,070.9 | 61,464.0 | 62,419.9<br>11,758.9 | 58,888.1<br>10,985.2 | **63,735.8** ●<br>**12,731.5** • |
+| Percentage renewable (electricity) | | | | | | | 15% | 17% | **12%** • |
+| Energy Use Ratio (megajoules per liter of product) | 0.43 | 0.42 | 0.41 | 0.40 | 0.40 | 0.39 | 0.39<br>0.54 | 0.38<br>0.58 | **0.39** ●<br>**0.61** • |
+
+• The Coca-Cola Company &nbsp;&nbsp;&nbsp;&nbsp; ● Coca-Cola System
+
+---
+
+¹ This metric accounts for renewable energy usage.
+² The GHG emissions reported in the B&ESG report represent the Coca-Cola system's manufacturing emissions, which include emissions from activities which are under the Company's operational control and activities that are related to Coca-Cola brands that are under direct control of franchise bottlers. Our CDP reporting is aligned with an operational control approach as defined by the GHG Protocol, which includes only emissions from activities within The Coca-Cola Company's operational control as Scope 1 and 2 emissions, while manufacturing emissions from franchise bottlers are categorized as "Scope 3- Franchises".
+³ The below emissions figures will be reported in the Company's forthcoming 2022 CDP Climate Change response.
+⁴ Systemwide total based on estimated total use.
+
+Note: Due to joint venture or merger and acquisition activities in 2019-2021, certain brands may not be accounted for in The Coca-Cola Company-specific metrics included on pp. [73-75](73-75).
+
+The Coca-Cola Company 2021 Business & ESG Report | 74

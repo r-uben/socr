@@ -38,6 +38,7 @@ from socr.core.manifest import (
     PageDisposition,
     PageEnding,
     PagePrimaryReason,
+    figure_words_unread_suspect,
     garbled_math_suspect,
     judge_timeout_candidate,
     minus_as_digit_suspect,
@@ -125,6 +126,7 @@ from socr.pipeline.agentic import (
 from socr.core.ollama_utils import probe_model_generation
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
+from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
@@ -147,6 +149,10 @@ _RESUME_REPLAYED: dict[str, str] = {
     "scanned_figure_asset": (
         "#1030: emitted by the page loop's scanned-figure step, which a terminal resumed page "
         "skips; the document note and CLI line read this event"
+    ),
+    TABLE_FURNITURE_REMOVED_KIND: (
+        "#988: the table gate removed page furniture (a site menu) from the shipped text; the "
+        "removed runs live only on this event, and a terminal resumed page skips the gate"
     ),
     **{
         kind: (
@@ -10629,6 +10635,58 @@ class UnifiedPipeline:
         ps.best_output = math_out
         ps.corrupt_math_hybrid = math_out
 
+    def _figure_crop_body(
+        self,
+        state: DocumentState,
+        page_num: int,
+        figures_dir: Path | None,
+    ):
+        """#1053: the crop route's page body and plan, or ``None`` to keep the whole-page route.
+
+        Cuts each drawn raster figure out on its own and interleaves the crops with the page's
+        native text at their y-position (``interleave_table_regions_into_page``, the machinery
+        tables use). Declines (``None``) whenever the plan declines or any crop fails to render:
+        the whole-page PNG is then the representation, exactly as before. Never raises.
+        """
+        if figures_dir is None:
+            return None
+        ps = state.pages.get(page_num)
+        if ps is None or getattr(ps, "native_rotated_text_shredded", False):
+            return None
+        try:
+            import fitz
+
+            from socr.core.born_digital import BornDigitalDetector
+            from socr.core.pdf import open_pdf
+            from socr.figures.chart_regions import chart_region_filename
+            from socr.figures.figure_crops import plan_figure_page
+
+            with open_pdf(str(state.handle.path)) as doc:
+                page = doc[page_num - 1]
+                plan = plan_figure_page(page)
+                if plan is None:
+                    return None
+                rects = [fitz.Rect(box) for box in plan.boxes]
+                assets = self._render_chart_region_crops(
+                    state.handle.path, page_num, rects, figures_dir
+                )
+                if len(assets) != len(rects) or not all(a.rendered for a in assets):
+                    return None
+                regions = []
+                for index, rect in enumerate(rects, start=1):
+                    placeholder = f"![figure {index}]({chart_region_filename(page_num, index)})"
+                    regions.append((rect, placeholder))
+                # A placeholder represents no word: nothing may be suppressed on its account.
+                body = BornDigitalDetector().interleave_table_regions_into_page(
+                    page, regions, suppress_represented=False
+                )
+            for asset in assets:
+                body = body.replace(f"({asset.filename})", f"({asset.rel_path})")
+            return body, plan
+        except Exception as exc:  # noqa: BLE001 - the whole-page route is the fallback
+            logger.warning("#1053 figure crops failed for p%d: %s", page_num, exc)
+            return None
+
     def _agentic_chart_asset_page(
         self,
         state: DocumentState,
@@ -10658,7 +10716,10 @@ class UnifiedPipeline:
 
         chart_png_ref = ""
         chart_render_failed = False
-        if chart_figures_dir is not None:
+        crop_route = self._figure_crop_body(state, page_num, chart_figures_dir)
+        if crop_route is not None:
+            pass  # #1053: each figure has its own crop; no whole-page PNG
+        elif chart_figures_dir is not None:
             try:
                 saved_png = self._render_chart_page_png(
                     state.handle.path, page_num, chart_figures_dir
@@ -10704,16 +10765,15 @@ class UnifiedPipeline:
         # If render failed, set status=WARNING so downstream stages know
         # the visual payload is missing (fail-closed, never silent).
         #
-        # GH-369: this lane declares "data values not transcribed" and then
-        # shipped the native layer whole, axis tick scales included -- a column
-        # of bare numbers indistinguishable from real values, under a clean
-        # SUCCESS. Fence those lines instead: they stay in the file verbatim
-        # (nothing is dropped) but stop reading as body prose beside the image
-        # they belong to. A page with no bare-numeric lines is unchanged.
-        from socr.figures.extractor import fence_chart_axis_residue
-
-        native_prose = fence_chart_axis_residue(ps.native_text or "")
-        if chart_png_ref:
+        # #1055: the native layer ships whole and in order. GH-369 used to move
+        # every run of bare-number lines into a hidden comment labelled "axis
+        # tick labels ... not data values". The rule saw only text, and a table's
+        # cells are emitted one per line too, so real values were hidden under a
+        # SUCCESS. Tick labels in the body are clutter; a hidden value is loss.
+        native_prose = ps.native_text or ""
+        if crop_route is not None:
+            chart_body, crop_plan = crop_route
+        elif chart_png_ref:
             chart_body = (
                 native_prose.rstrip() + "\n\n" + chart_png_ref
                 if native_prose.strip()
@@ -10755,6 +10815,11 @@ class UnifiedPipeline:
         garbled_suspect = garbled_math_suspect(ps)
         # GH-994: and for a flattened table the detector found nothing to re-read.
         flattened_suspect = table_not_reconstructed_suspect(ps)
+        # #1053: a figure crop with no native word inside holds words nothing has read. Status
+        # and failure mode only; ``audit_passed`` selects the winner and stays True.
+        unread_figures = crop_plan.unread_figures if crop_route is not None else []
+        ps.figure_words_unread = bool(unread_figures)
+        figure_unread_suspect = figure_words_unread_suspect(ps)
         chart_status = (
             PageStatus.WARNING
             if (
@@ -10763,6 +10828,7 @@ class UnifiedPipeline:
                 or invisible_suspect
                 or garbled_suspect
                 or flattened_suspect
+                or figure_unread_suspect
             )
             else PageStatus.SUCCESS
         )
@@ -10784,7 +10850,11 @@ class UnifiedPipeline:
                         else (
                             FailureMode.TABLE_NOT_RECONSTRUCTED
                             if flattened_suspect and not chart_render_failed
-                            else FailureMode.NONE
+                            else (
+                                FailureMode.FIGURE_WORDS_UNREAD
+                                if figure_unread_suspect and not chart_render_failed
+                                else FailureMode.NONE
+                            )
                         )
                     )
                 )
@@ -10810,6 +10880,23 @@ class UnifiedPipeline:
                 },
             )
         )
+        if crop_route is not None:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="figure_crops",
+                    engine="chart_asset",
+                    detail=(
+                        f"{len(crop_plan.boxes)} figure crop(s) placed inline; "
+                        f"{len(unread_figures)} with no native word inside"
+                    ),
+                    data={
+                        "figures": len(crop_plan.boxes),
+                        "unread_figures": unread_figures,
+                        "words_by_owner": crop_plan.owner_counts(),
+                    },
+                )
+            )
 
         # GH-519: and the debt as a kind of its own, so counting it never means
         # parsing the sentence above. Both events, not one replacing the other:
@@ -14123,7 +14210,16 @@ class UnifiedPipeline:
         # ``socr.pipeline.orchestrator.probe_ollama_idle``, and routing around
         # that name would silently neuter every one of those patches.
         if self._local_backend_is_openai_compatible():
-            return probe_openai_server_idle(self.config.qwen_vllm_url)
+            # #1062: the canary must ask for the model OCR actually requests
+            # (``resolve_qwen_intent``: a pinned model, else ``qwen_vllm_model``,
+            # the name vLLM serves), not the Ollama tag ``_default_canary_model()``
+            # falls back to; vLLM answers an unknown model with an error, which
+            # read as "wedged" and halted the document. A blank name keeps the
+            # default canary rather than sending an empty ``model``.
+            from socr.engines.qwen import resolve_qwen_intent
+
+            _backend, served_model = resolve_qwen_intent(self.config)
+            return probe_openai_server_idle(self.config.qwen_vllm_url, model=served_model or None)
         return probe_ollama_idle(self._local_backend_host())
 
     def _local_backend_is_openai_compatible(self) -> bool:
@@ -15458,6 +15554,22 @@ class UnifiedPipeline:
             )
         ]
 
+        # #1053: a figure crop with no native word inside ships its page WARNING, so the
+        # document must not report SUCCESS over it. Same retained-native condition as above.
+        figure_unread_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and figure_words_unread_suspect(p)
+            and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
+            and n not in failed_pages
+            and p.best_output
+            and p.best_output.audit_passed
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
+
         # A reconstructed or historical state may contain a whole-document
         # attempt (page_num=0) without per-page winners. Treat a passing one as
         # covering the document for status calculation.
@@ -15582,6 +15694,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not invisible_retained_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
+        pages_ok = pages_ok and not figure_unread_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
@@ -15904,6 +16017,7 @@ class UnifiedPipeline:
             or invisible_retained_pages
             or garbled_math_retained_pages
             or flattened_table_pages
+            or figure_unread_pages
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_floor_pages
@@ -16089,6 +16203,17 @@ class UnifiedPipeline:
                         detail="a table the detector missed was flattened to prose; the "
                         "native text ships WARNING (table_not_reconstructed), its table "
                         "numbers are unverified",
+                    )
+                )
+            for n in figure_unread_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="figure_words_unread_retained",
+                        engine="chart_asset",
+                        detail="a figure crop on this page has no native word inside, so any "
+                        "words in its pixels are unread; the native prose and the crop ship "
+                        "WARNING (figure_words_unread)",
                     )
                 )
             for n in native_only_distrust_pages:
@@ -16390,6 +16515,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(flattened_table_pages)} page(s) have a table that "
                         "detection missed and native text flattened to prose "
                         f"(shipped WARNING): {flattened_table_pages}[/yellow]"
+                    )
+                if figure_unread_pages:
+                    console.print(
+                        f"  [yellow]{len(figure_unread_pages)} page(s) have a figure crop with "
+                        "no native word inside; its words are unread "
+                        f"(shipped WARNING): {figure_unread_pages}[/yellow]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(

@@ -219,3 +219,78 @@ class TestFailOpenOnUnmeasurablePlacement:
             )
         finally:
             doc.close()
+
+
+class TestListedButNotDrawn:
+    """#1059: an image in the page's RESOURCES that the page never DRAWS.
+
+    pdfTeX often shares one resource dictionary across pages, so a page lists
+    images it does not show. ``get_image_rects`` returns nothing for those, and
+    the fail-open branch above read that as "unmeasurable, maybe a chart". In the
+    corpus 206 chart-lane pages in 7 papers were there for that reason alone.
+    The page's display list (``get_image_info``) is evidence of absence; only an
+    unattributable drawn image keeps the fail-open.
+    """
+
+    def _shared_resources_pdf(self, tmp_path: Path) -> Path:
+        """Page 1 draws a chart-sized image; page 2 lists it in its resources only."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        side = _SIDE * 1.2
+        doc = fitz.open()
+        first = doc.new_page(width=612, height=792)
+        first.insert_text((72, 72), "ordinary prose above a figure", fontsize=10)
+        xref = first.insert_image(fitz.Rect(72, 100, 72 + side, 100 + side), stream=_png(400, 300))
+        second = doc.new_page(width=612, height=792)
+        for i in range(30):
+            second.insert_text(
+                (72, 72 + i * 14), f"ordinary prose line {i} of a normal page", fontsize=10
+            )
+        resources = int(doc.xref_get_key(second.xref, "Resources")[1].split()[0])
+        doc.xref_set_key(resources, "XObject", f"<</Shared {xref} 0 R>>")
+        pdf = tmp_path / "shared.pdf"
+        doc.save(pdf)
+        doc.close()
+        return pdf
+
+    def test_a_listed_image_the_page_never_draws_does_not_make_it_a_chart(
+        self, tmp_path: Path
+    ) -> None:
+        doc = fitz.open(self._shared_resources_pdf(tmp_path))
+        try:
+            drawn, listed_only = doc[0], doc[1]
+            assert listed_only.get_images(), "fixture: page 2 must list the image"
+            assert not listed_only.get_image_rects(listed_only.get_images()[0][0])
+            assert not listed_only.get_image_info(), "fixture: page 2 must draw nothing"
+            assert has_chart_marks(drawn), "control: the page that draws it is a chart page"
+            assert not has_chart_marks(listed_only), (
+                "a page was sent to the chart lane for an image it never draws"
+            )
+        finally:
+            doc.close()
+
+    def test_unknown_drawn_images_still_fail_open(self, tmp_path: Path) -> None:
+        doc = fitz.open(self._shared_resources_pdf(tmp_path))
+        try:
+            page = doc[1]
+
+            def _boom(*_a, **_k):
+                raise RuntimeError("no display list for you")
+
+            page.get_image_info = _boom
+            assert has_chart_marks(page), (
+                "with the drawn images unknown, the gate narrowed on ignorance"
+            )
+        finally:
+            doc.close()
+
+    def test_an_unattributable_drawn_image_still_fails_open(self, tmp_path: Path) -> None:
+        """A drawn image reported with xref 0 could be the unresolved listed one."""
+        doc = fitz.open(self._shared_resources_pdf(tmp_path))
+        try:
+            page = doc[1]
+            page.get_image_info = lambda *_a, **_k: [{"xref": 0, "bbox": (0, 0, 1, 1)}]
+            assert has_chart_marks(page), (
+                "an image drawn without an xref ruled out a listed one it may be"
+            )
+        finally:
+            doc.close()

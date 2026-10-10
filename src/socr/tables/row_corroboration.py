@@ -538,25 +538,32 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
     return values == list(range(1, len(values) + 1))
 
 
+def is_table_shaped_band(tokens: tuple[str, ...], row_shape_min: int) -> bool:
+    """Whether one native band's numeric *tokens* look like a table row, by shape alone.
+
+    The predicate ``table_shaped_native_row_count`` counts with, exposed so
+    #988's truncation term can walk the same bands one by one without a
+    second definition drifting from it: at least ``row_shape_min`` numeric
+    tokens, and not the printed column-index legend row
+    (``is_column_index_row``, a table convention, not data).
+    """
+    return bool(tokens) and len(tokens) >= row_shape_min and not is_column_index_row(tokens)
+
+
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
     """Count of native baseline bands that look like a table row, by shape alone.
 
     Factored out of ``manifest._row_shape_reconciliation`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
-    from it. A band counts iff it has at least ``row_shape_min`` numeric
-    tokens (a caller-supplied, per-candidate floor — see
-    ``_row_shape_reconciliation``'s own docstring for why that floor is
-    derived from the candidate rather than a named constant) and is not the
-    printed column-index legend row (``is_column_index_row``, a table
-    convention, not data).
+    from it. A band counts iff ``is_table_shaped_band`` holds: at least
+    ``row_shape_min`` numeric tokens (a caller-supplied, per-candidate floor
+    -- see ``_row_shape_reconciliation``'s own docstring for why that floor is
+    derived from the candidate rather than a named constant) and not the
+    printed column-index legend row.
     """
     return sum(
-        1
-        for band in baseline_bands(words)
-        if band.tokens
-        and len(band.tokens) >= row_shape_min
-        and not is_column_index_row(band.tokens)
+        1 for band in baseline_bands(words) if is_table_shaped_band(band.tokens, row_shape_min)
     )
 
 

@@ -465,3 +465,15 @@ def test_e2e_flagged_page_with_no_winner_makes_the_document_not_success(
     assert off.status is DocumentStatus.SUCCESS, "setup: unflagged no-winner page is clean"
     assert _sidecar(tmp_path, "won")["status"] == "warning"
     assert on.status is not DocumentStatus.SUCCESS
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)
