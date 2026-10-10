@@ -10709,15 +10709,12 @@ class UnifiedPipeline:
         # If render failed, set status=WARNING so downstream stages know
         # the visual payload is missing (fail-closed, never silent).
         #
-        # GH-369: this lane declares "data values not transcribed" and then
-        # shipped the native layer whole, axis tick scales included -- a column
-        # of bare numbers indistinguishable from real values, under a clean
-        # SUCCESS. Fence those lines instead: they stay in the file verbatim
-        # (nothing is dropped) but stop reading as body prose beside the image
-        # they belong to. A page with no bare-numeric lines is unchanged.
-        from socr.figures.extractor import fence_chart_axis_residue
-
-        native_prose = fence_chart_axis_residue(ps.native_text or "")
+        # #1055: the native layer ships whole and in order. GH-369 used to move
+        # every run of bare-number lines into a hidden comment labelled "axis
+        # tick labels ... not data values". The rule saw only text, and a table's
+        # cells are emitted one per line too, so real values were hidden under a
+        # SUCCESS. Tick labels in the body are clutter; a hidden value is loss.
+        native_prose = ps.native_text or ""
         if chart_png_ref:
             chart_body = (
                 native_prose.rstrip() + "\n\n" + chart_png_ref
