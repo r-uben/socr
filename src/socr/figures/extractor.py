@@ -705,6 +705,23 @@ def _extract_xref_image(pdf, xref: int) -> Image.Image | None:
         del pix
 
 
+def _is_page_canvas(rect, page_rect) -> bool:
+    """True when *rect* reaches *page_rect*'s boundary on all four sides (#1069).
+
+    Such a drawing is the page background, not a chart element. Tolerance is
+    ``AXIS_LINE_TOLERANCE_PT``, the same slack used for axis-aligned lines.
+    """
+    if rect is None:
+        return False
+    tol = AXIS_LINE_TOLERANCE_PT
+    return (
+        rect.x0 <= page_rect.x0 + tol
+        and rect.y0 <= page_rect.y0 + tol
+        and rect.x1 >= page_rect.x1 - tol
+        and rect.y1 >= page_rect.y1 - tol
+    )
+
+
 def _cluster_drawings(
     drawings: list[dict],
     page_width: float,
@@ -1051,23 +1068,6 @@ def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
         "scan/decorative" if is_scan else "not scan",
     )
     return is_scan
-
-
-def _is_page_canvas(rect, page_rect) -> bool:
-    """True when *rect* reaches *page_rect*'s boundary on all four sides (#1069).
-
-    Such a drawing is the page background, not a chart element. Tolerance is
-    ``AXIS_LINE_TOLERANCE_PT``, the same slack used for axis-aligned lines.
-    """
-    if rect is None:
-        return False
-    tol = AXIS_LINE_TOLERANCE_PT
-    return (
-        rect.x0 <= page_rect.x0 + tol
-        and rect.y0 <= page_rect.y0 + tol
-        and rect.x1 >= page_rect.x1 - tol
-        and rect.y1 >= page_rect.y1 - tol
-    )
 
 
 def has_chart_marks(page) -> bool:
