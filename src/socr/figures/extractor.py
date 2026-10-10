@@ -1053,6 +1053,37 @@ def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
     return is_scan
 
 
+def _content_drawings(page) -> list[dict]:
+    """``page.get_drawings()`` over the document's own content, annotations excluded.
+
+    #1066: PyMuPDF runs the page with its annotations, so a reader's Highlight
+    (a filled coloured rectangle) reads as a vector data mark and routes a text
+    page to the chart lane. When the page has annotations, take drawings from a
+    one-page copy made with ``annots=False``. Drawings are NOT dropped by
+    annotation rectangle: a Square a reader draws around a real chart would hide
+    it. Any failure in the copy path falls back to ``page.get_drawings()``.
+
+    Documents with optional content (layers) keep ``page.get_drawings()``:
+    ``insert_pdf`` drops the document's optional-content configuration, so a
+    layer that is off in the original would draw in the copy (Astra review).
+    """
+    try:
+        if getattr(page, "first_annot", None) is not None and not page.parent.get_ocgs():
+            import fitz
+
+            tmp = fitz.open()
+            try:
+                tmp.insert_pdf(
+                    page.parent, from_page=page.number, to_page=page.number, annots=False
+                )
+                return tmp[0].get_drawings()
+            finally:
+                tmp.close()
+    except Exception as exc:
+        logger.debug("has_chart_marks: annotation-free copy failed, using page: %s", exc)
+    return page.get_drawings()
+
+
 def has_chart_marks(page) -> bool:
     """Cluster-first chart detector for the PP-7 chart-asset routing lane.
 
@@ -1229,7 +1260,7 @@ def has_chart_marks(page) -> bool:
 
     # Vector path: cluster drawings, then gate each cluster.
     try:
-        drawings = page.get_drawings()
+        drawings = _content_drawings(page)
     except Exception as exc:
         logger.debug("has_chart_marks: get_drawings() failed: %s", exc)
         return False
