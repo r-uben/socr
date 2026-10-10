@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from socr.core.born_digital import DocumentAssessment
 from socr.core.document import DocumentHandle
+from socr.core.native_paragraphs import NativeVocabulary, native_vocabulary
 from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
 
 
@@ -225,6 +226,11 @@ class PageState:
     #: a resumed page's fallback simply has no native-words evidence to
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
+    #: #1074: the page's paragraphs from its geometry, matched to the shipped lines at
+    #: emit time (``native_paragraphs.reflow_native_prose``). RUNTIME-ONLY like
+    #: ``native_words``: analyze runs on every run, resume included, and a replay that
+    #: has none reads text that is already reflowed.
+    native_paragraphs: tuple = ()
     #: #652 P2a: the live run's ``manifest._table_bbox_sane`` verdict for this
     #: page, evaluated once while ``native_words`` above still exists. Unlike
     #: those words this IS persisted in the sidecar and restored on resume,
@@ -560,6 +566,9 @@ class DocumentState:
     handle: DocumentHandle
     status: DocumentStatus = DocumentStatus.PENDING
     pages: dict[int, PageState] = field(default_factory=dict)
+    #: #1074: the document's own witnesses for line-end hyphen splits, built once from the
+    #: analyze-time native text. Runtime-only; ``None`` means no reflow (replay).
+    native_vocabulary: NativeVocabulary | None = None
     whole_doc_attempts: list[PageOutput] = field(
         default_factory=list
     )  # page_num=0 from CLI engines
@@ -682,9 +691,13 @@ class DocumentState:
         has_equations) onto PageState so downstream routing gates can read
         directly from PageState without re-consulting _last_assessment.
         """
+        self.native_vocabulary = native_vocabulary(
+            [pa.native_text for pa in assessment.pages if pa.is_born_digital and pa.native_text]
+        )
         for pa in assessment.pages:
             if pa.page_num in self.pages:
                 ps = self.pages[pa.page_num]
+                ps.native_paragraphs = tuple(getattr(pa, "native_paragraphs", ()) or ())
                 ps.load_error = getattr(pa, "load_error", "") or ""
                 ps.is_born_digital = pa.is_born_digital
                 ps.has_tables = pa.has_tables
