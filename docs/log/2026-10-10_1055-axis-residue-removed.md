@@ -7,7 +7,7 @@ GH-369 fence (`split_chart_axis_residue` / `fence_chart_axis_residue`) is delete
 labelled "axis tick labels ... not data values". It judged text only, and a PDF emits table
 cells one per line too. Reproducer: Aruoba & Drechsel (NBER 2024) p29 has no chart, only a
 3x2 table of correlations; all six values were hidden under SUCCESS. Corpus run (Rorqual
-array 22889958, socr main @ c4937472, 395 papers): 1,503 pages on the chart lane, 6,337
+array 22889958, socr @ 5e2c3582 (2026-10-01; meant to be main @ c4937472, but the job's settings file re-pinned the benchmark environment), 395 papers): 1,503 pages on the chart lane, 6,337
 numbers hidden on 321 of them.
 
 **Considered and rejected: geometry-aware hiding** (hide only numbers inside a chart box).

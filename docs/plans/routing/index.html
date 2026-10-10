@@ -73,23 +73,36 @@
 <div class="goal"><b>Goal.</b> socr ships every page with nothing silently lost, and uses a model only on the parts of a page the PDF's own text can't provide.</div>
 
 <h2>Targets</h2>
+<p class="sub">Baseline: corpus run of 2026-10-10 on Rorqual (array job 22889958, socr @ 5e2c3582 of 2026-10-01, Qwen3-VL-30B on 4×H100, 395 papers, <b>17,091 pages</b>). The job was meant to run <code>main</code> @ c4937472; its settings file re-pinned the benchmark environment. A second run of the same code (array 22909584) halted 183 papers against 186; outside halted papers only 16 pages changed lane. Losses are listed one by one; there is no single rate yet.</p>
 <div class="kpis">
-  <div class="kpi"><div class="l">Target 1 · silent losses → 0</div><div class="v na">not measured</div><div class="l">Pages reporting <code>success</code> while content went unread (figure words, missing text, wrong text). One paper so far: Patel &amp; Gloor 2023, 4 of 17 pages (#1053). Not a corpus rate.</div></div>
-  <div class="kpi"><div class="l">Target 2 · model time, as low as target 1 allows</div><div class="v na">not measured</div><div class="l">GPU-seconds per page, and the share of page area sent to a model. Today a page goes to the model whole or not at all.</div></div>
+  <div class="kpi"><div class="l">Target 1 · silent losses → 0</div><div class="v">partly measured</div><div class="l">
+    <b>Fixed:</b> 6,337 numbers hidden as "not data" on 321 pages, real table values among them (#1055, merged in #1056).<br>
+    <b>In review:</b> 517 pages (3.0%, 111 papers) never processed after a false "backend stuck" halt on vLLM (#1062, PR #1064); 206 text pages sent down the whole-page-figure route by images they never draw (#1059, PR #1061); 29 more by reader highlights read as chart bars (#1066, PR #1067); 65 slides, tables and maths pages whose page-sized background passed as a chart frame (#1069, PR #1070, which also loses one real figure).<br>
+    <b>Open:</b> 1,503 pages (8.8%) ship a whole-page picture as their figure; in a sample of 30, about half are prose plus figures whose words nobody reads (#1053).
+  </div></div>
+  <div class="kpi"><div class="l">Target 2 · model time, as low as target 1 allows</div><div class="v">7.4% of pages</div><div class="l">
+    1,266 pages got a whole-page model read (median 20 s each, 16 workers sharing one H100); 72.9% shipped native text with no model. Understated: the 517 halted pages never reached a model, and every model call from the maths lane failed (21,398 calls) because it only speaks the Ollama API (#1063).
+  </div></div>
 </div>
 
 <h2>Work, in order</h2>
 <div class="tbl"><table>
 <tr><th>#</th><th>Fixes</th><th>Moves</th><th>Gated by</th><th>Status</th></tr>
-<tr><td><a href="https://github.com/r-uben/socr/issues/1053">#1053</a></td><td>A prose page with an embedded image ships the whole page as its figure; figure words never read</td><td>Target 1</td><td>Corpus count of pages in the chart-only lane, split "figure is the page" vs "prose + figures". CPU only.</td><td><span class="pill next">next</span></td></tr>
-<tr><td><a href="https://github.com/r-uben/socr/issues/1050">#1050</a></td><td>Text quality check, step 1 (missing text): ink with no words is invisible today. OCR only the gaps.</td><td>Targets 1 + 2</td><td>Step 1 alone over trusted-native pages; hand-inspect hits. Figure half waits on #1053.</td><td><span class="pill">open</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1055">#1055</a></td><td>Table values hidden as "axis tick labels, not data values" on chart pages</td><td>Target 1</td><td>Confirmed by eye on Aruoba p29; 6,337 numbers on 321 pages</td><td><span class="pill">merged #1056</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1059">#1059</a></td><td>Images listed but never drawn make a text page a "chart page"</td><td>Target 1</td><td>206 pages in 7 papers; all leave the route, all 21 sampled figure pages stay</td><td><span class="pill next">PR #1061</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1066">#1066</a></td><td>Reader highlights count as chart data marks</td><td>Target 1</td><td>29 pages in 6 papers; Aruoba p29 entered this way</td><td><span class="pill next">PR #1067</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1069">#1069</a></td><td>A page-sized background fill passes as a chart frame</td><td>Target 1</td><td>65 pages leave, all checked by eye; 1 real figure lost (Bianchi p58)</td><td><span class="pill next">PR #1070</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1062">#1062</a></td><td>vLLM liveness probe asks for the Ollama model name; one timeout halts the document</td><td>Targets 1 + 2</td><td>517 pages in 111 papers</td><td><span class="pill next">PR #1064</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1063">#1063</a></td><td>Maths recovery only speaks the Ollama API; every call fails on vLLM</td><td>Target 1</td><td>21,398 failed calls in the run</td><td><span class="pill">open</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1053">#1053</a></td><td>Prose pages with figures ship the whole page as the figure; figure words never read</td><td>Target 1</td><td>Design written (<code>docs/log/2026-10-10_1053-figure-crops-design.md</code>); one owner ruling needed</td><td><span class="pill">design</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1050">#1050</a></td><td>Text quality check, step 1 (missing text): ink with no words is invisible today. OCR only the gaps.</td><td>Targets 1 + 2</td><td>Step 1 alone over trusted-native pages; hand-inspect hits. Shares #1053's word-to-owner map.</td><td><span class="pill">open</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1051">#1051</a></td><td>Text quality check, step 2 (wrong text): Tesseract re-read vs native; Jev on word diffs, digits always to the VLM</td><td>Target 1</td><td>Tesseract re-read vs native on a sample; Jev vs a string-distance rule on hand labels.</td><td><span class="pill">open</span></td></tr>
 <tr><td>not filed</td><td>Local OCR priced at <code>0.0</code>; GPU time never enters routing</td><td>Target 2</td><td>Per-page GPU seconds, recorded by the runs above.</td><td><span class="pill">not filed</span></td></tr>
 </table></div>
 
 <h2>Evidence so far</h2>
 <ul>
-  <li><b>Whole-page figures</b> (#1053): Rorqual job 22881337, socr main @ c4937472. Pages 2, 6, 9, 12 each ship a 1275×1650 px whole-page PNG; page 6's keyword table (Figure 3) exists only as pixels; every page says <code>success</code>.</li>
+  <li><b>Whole-page figures</b> (#1053): Rorqual job 22881337, socr @ 5e2c3582 (meant to be main; same settings-file trap). Pages 2, 6, 9, 12 each ship a 1275×1650 px whole-page PNG; page 6's keyword table (Figure 3) exists only as pixels; every page says <code>success</code>.</li>
   <li><b>Per-figure crops work</b> (#1053 mock): figure boxes from the PDF's own image placements; local Qwen read all three crops correctly, about 2 s per crop with the model warm.</li>
   <li><b>Missing-text check</b> (#1050 mock): on three corpus pages, leftover ink was nothing (clean page), a chart (expected), and diagram words absent from the text layer (the target case). A dark filled box also showed up, so text-shaped ink must be told apart from fills.</li>
   <li><b>Prior constraint</b>: <code>docs/plans/fake-native-pages</code> closed a lexical text-quality signal unbuilt as noise; Jev's garble role in #1051 must beat that or be dropped.</li>
