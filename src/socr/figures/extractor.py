@@ -998,6 +998,23 @@ def _looks_like_table_grid(
     return horizontal >= 3 and vertical >= 2
 
 
+def _drawn_image_xrefs(page) -> set[int] | None:
+    """xrefs of the images *page* actually draws, or ``None`` when that is unknown.
+
+    #1059. Read from the display list (``get_image_info``), not the resource
+    list (``get_images``). ``None`` when the lookup raises, or when a drawn image
+    reports xref 0 (inline or unattributable): it could be any listed image, so
+    nothing may be ruled out on it.
+    """
+    try:
+        info = page.get_image_info(xrefs=True)
+    except Exception as exc:  # noqa: BLE001 - unknown, caller fails open
+        logger.debug("has_chart_marks: get_image_info failed: %s", exc)
+        return None
+    xrefs = {item.get("xref", 0) for item in info}
+    return None if 0 in xrefs else xrefs
+
+
 def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
     """True when a page-covering raster is a scan or decorative page image.
 
@@ -1152,6 +1169,8 @@ def has_chart_marks(page) -> bool:
 
             largest = 0.0
             unmeasurable = False
+            drawn_xrefs: set[int] | None = None
+            drawn_looked_up = False
             # GH-656: track EVERY placement that clears the area bar, not just
             # the largest -- a scan/decorative largest raster must not shadow
             # a smaller qualifying raster that IS a real chart.
@@ -1168,6 +1187,19 @@ def has_chart_marks(page) -> bool:
                 # and one small image be rejected on evidence that never covered
                 # the unresolved one.
                 if not rects:
+                    # #1059: an image can be LISTED in the page's resources and
+                    # never drawn on it (pdfTeX shares one resource dict across
+                    # pages). That is absence, not ignorance: skip it. Fail open
+                    # only when the page's drawn images cannot be attributed.
+                    if not drawn_looked_up:
+                        drawn_xrefs, drawn_looked_up = _drawn_image_xrefs(page), True
+                    if drawn_xrefs is not None and image[0] not in drawn_xrefs:
+                        logger.debug(
+                            "has_chart_marks p%s: image xref %s listed but not drawn; skipped",
+                            page_label,
+                            image[0],
+                        )
+                        continue
                     unmeasurable = True
                     continue
                 for rect in rects:
