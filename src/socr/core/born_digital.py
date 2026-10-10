@@ -4290,12 +4290,21 @@ class BornDigitalDetector:
         self,
         page: fitz.Page,
         table_regions: list[tuple[object, str]],
+        *,
+        suppress_represented: bool = True,
     ) -> str:
         """Interleave *table_regions* with the page's non-table text blocks.
 
         *table_regions* is a list of ``(rect, markdown)`` in page coordinates,
         typically from the word-geometry rowizer. Used by the upright native-
         table SHIP path after GH-147 refused the sideways rowizer output.
+
+        ``suppress_represented=False`` (#1053, figure crops) skips the "already
+        represented" suppression below: a region that is only an image
+        placeholder represents no words, and the bag-of-tokens test would drop
+        a native line because the placeholder happens to contain one of its
+        tokens. Every block then ships whole, in stream order. The default keeps
+        the table paths unchanged.
         """
         _links = _uri_links(page)
         try:
@@ -4411,7 +4420,7 @@ class BornDigitalDetector:
             covering = [
                 (r, raw_md)
                 for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)
-                if _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
+                if suppress_represented and _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
             ]
 
             # GH-779: GH-152 can split one wide table into a left-band and a
@@ -4445,7 +4454,7 @@ class BornDigitalDetector:
             # contributes zero area to the union regardless, so restricting
             # the candidate set to regions that touch this block costs
             # nothing.
-            if not covering:
+            if suppress_represented and not covering:
                 touching = [
                     (r, raw_md)
                     for (r, _md), (_, raw_md) in zip(table_regions, raw_table_regions)

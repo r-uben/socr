@@ -996,6 +996,11 @@ def table_not_reconstructed_suspect(p) -> bool:
     return bool(getattr(p, "table_not_reconstructed", False))
 
 
+def figure_words_unread_suspect(p) -> bool:
+    """#1053: a figure crop on the page holds no native word, so its words are unread."""
+    return bool(getattr(p, "figure_words_unread", False))
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -3227,6 +3232,21 @@ def _select_page_output_tagged(
                     status=PageStatus.WARNING,
                     failure_mode=(
                         FailureMode.TABLE_NOT_RECONSTRUCTED
+                        if winner.failure_mode is FailureMode.NONE
+                        else winner.failure_mode
+                    ),
+                )
+            # #1053: same in-place demotion for a figure crop holding no native word.
+            if (
+                figure_words_unread_suspect(p)
+                and winning_engine.startswith(_NATIVE_TEXT_LANES)
+                and winner.status is PageStatus.SUCCESS
+            ):
+                winner = replace(
+                    winner,
+                    status=PageStatus.WARNING,
+                    failure_mode=(
+                        FailureMode.FIGURE_WORDS_UNREAD
                         if winner.failure_mode is FailureMode.NONE
                         else winner.failure_mode
                     ),

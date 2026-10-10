@@ -102,6 +102,10 @@ class FailureMode(str, Enum):
     #: on, so the grid was flattened to prose. The text is retained unchanged and ships
     #: WARNING, never clean SUCCESS. Not re-routed.
     TABLE_NOT_RECONSTRUCTED = "table_not_reconstructed"
+    #: #1053: a figure crop with no native word inside it, so any words in its pixels are
+    #: unread. The page keeps its exact native prose and the crop; it ships WARNING, never clean
+    #: SUCCESS, and only the crop (never the page) is a candidate for a later read.
+    FIGURE_WORDS_UNREAD = "figure_words_unread"
     #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page,
     #: so none of the per-page passes (route, extract, tables, equations) ran on it. The
     #: document-level figure phase may still touch it. Whatever text ships is the

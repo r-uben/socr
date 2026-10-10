@@ -55,7 +55,9 @@ Native text ships only after two model-free checks; models see gaps and bad line
    word difference is real or an OCR misread, and the per-region route. **Digit disagreements
    never go through Jev**; they always go to the VLM.
 4. **Fail closed.** Any check that cannot run or cannot decide sends the page to today's
-   whole-page route.
+   whole-page route. **Figures are the exception** (owner ruling 2026-10-10, #1053): an undecided
+   figure check keeps the page's native text, flags the page (WARNING, `FIGURE_WORDS_UNREAD`)
+   and escalates the figure's crop, never the page.
 5. **Honest local price.** GPU seconds enter the ladder's cost. Not filed yet (see Open).
 
 Lanes that already work (tables, equations, figures) are unchanged.

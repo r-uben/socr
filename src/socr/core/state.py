@@ -130,6 +130,9 @@ class PageState:
     #: GH-994: caption plus table structure on a page detection found no table on; see
     #: ``PageAssessment.table_not_reconstructed``. Recomputed each run, not replayed.
     table_not_reconstructed: bool = False
+    #: #1053: a figure crop on this page holds no native word, so its words are unread. Set by
+    #: the chart-asset lane each run; not replayed (a WARNING page is never resumed as terminal).
+    figure_words_unread: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
     #: actually ran on this page, recorded AFTER the splice so it describes what
     #: went into the body rather than what a model returned. Read only by

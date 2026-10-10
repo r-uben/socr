@@ -1118,6 +1118,46 @@ def _content_drawings(page) -> list[dict]:
     return page.get_drawings()
 
 
+def figure_boxes(page) -> list[tuple[float, float, float, float]] | None:
+    """Raster figure boxes of *page*: one ``(x0, y0, x1, y1)`` per DRAWN image placement.
+
+    #1053, raster half. Read from the display list (``get_image_info``, the #1059 reader), so an
+    image that is listed in the resources and never drawn on this page has no box. A placement
+    is kept under the same two gates ``has_chart_marks`` applies to a raster: its placed area
+    reaches ``CHART_MIN_CLUSTER_AREA`` and it is not a page scan or decorative page image
+    (``_raster_is_scan_or_decorative``, GH-511/656).
+
+    ``[]`` means the page has no qualifying raster figure. ``None`` means the placements cannot
+    be attributed (the lookup raised, or a drawn image reports xref 0): unknown, and the caller
+    keeps the whole-page route. Panels are NOT merged: one box per placement. Not
+    ``chart_region_bboxes``, which stretches a box to the page edge and swallows what sits beside
+    the chart (#1055). The vector half does not exist yet, so ``has_chart_marks`` is unchanged
+    and the two can disagree on a vector chart; the caller asks ``_vector_chart_found`` too.
+    """
+    import fitz
+
+    if _drawn_image_xrefs(page) is None:
+        return None
+    try:
+        info = page.get_image_info(xrefs=True)
+    except Exception as exc:  # noqa: BLE001 - unknown, caller keeps the whole-page route
+        logger.debug("figure_boxes: get_image_info failed: %s", exc)
+        return None
+    page_area = page.rect.width * page.rect.height
+    boxes: list[tuple[float, float, float, float]] = []
+    for item in info:
+        bbox = item.get("bbox")
+        if not bbox:
+            return None
+        x0, y0, x1, y1 = (float(v) for v in bbox)
+        if (x1 - x0) * (y1 - y0) < CHART_MIN_CLUSTER_AREA:
+            continue
+        if _raster_is_scan_or_decorative(page, fitz.Rect(x0, y0, x1, y1), page_area):
+            continue
+        boxes.append((x0, y0, x1, y1))
+    return sorted(boxes, key=lambda b: (b[1], b[0]))
+
+
 def has_chart_marks(page) -> bool:
     """Cluster-first chart detector for the PP-7 chart-asset routing lane.
 
@@ -1306,6 +1346,20 @@ def has_chart_marks(page) -> bool:
                 )
     except Exception as exc:
         logger.debug("has_chart_marks: get_images() failed: %s", exc)
+
+    return _vector_chart_found(page)
+
+
+def _vector_chart_found(page) -> bool:
+    """True when *page* carries a vector chart cluster (the vector half of ``has_chart_marks``).
+
+    Split out so ``figure_boxes``' caller can ask the vector question on its own: a page whose
+    chart is drawn in vectors has no raster box for the crop lane to cut, and must keep the
+    whole-page route. ``has_chart_marks`` ends by returning this, unchanged.
+    """
+    page_width = page.rect.width
+    page_height = page.rect.height
+    page_area = page_width * page_height
 
     # Vector path: cluster drawings, then gate each cluster.
     try:
