@@ -152,7 +152,7 @@ without opening `audit_log.json`.
 
 ## 4. Failure modes
 
-Defined by `FailureMode` in `src/socr/core/result.py` (33 members). The sidecar
+Defined by `FailureMode` in `src/socr/core/result.py` (34 members). The sidecar
 carries the value as `failure_mode`. "Ships" below describes what the reader gets
 in the Markdown.
 
@@ -187,6 +187,7 @@ in the Markdown.
 | `invisible_scan_unread` | A scan whose native text is an invisible baked-in OCR layer (known unreliable: one letter per line, stray axis ticks) and whose model ladder ran but accepted no reading (#1027). Neither the layer nor the rejected reading ships. The page ships `warning` with a marker, `audit_passed` false. The marker points at an image of the page only when one was written (it needs `--save-figures` and a successful render); otherwise it reads "not transcribed, see PDF page N". The document is never `success`. | Read the image, or the PDF page when no image was written. A re-run re-OCRs the page. Per-rung detail is in the page sidecar `attempts_summary`. |
 | `native_garbled_math` | The native text layer garbled the page's mathematics: private-use glyphs, math-alphanumeric codepoints, letters of a script the corpus is not written in (`MISDECODED_MATH_SCRIPTS` in `born_digital.py`: Syriac, Tamil and 21 others), or a span in a math font the region lane does not list (`_MATH_FAMILY_FONT_RE`, matched at the start of the font name after any subset prefix: MathTime (MTMI, MTSY, MTSYN, MTEX, RMTMI and bold forms), MathematicalPi, UniMath, MnSymbol, Universal-GreekwithMath (e.g. Universal-GreekwithMathPi), Libertine/Libertinus ... Math, EuclidMath, XCharterMath, Fourier-Math, MathDesign, "Cambria Math" (with a space), MathTechnical, LucidaMath, AdvMathPack, TeX-math), or the scan for that failed (#960). By default such a page is routed to a whole-page OCR read, and this mode means no read replaced it (no provider, the ladder never ran, or every rung failed). Under `--native-only`, and on the chart-asset lane, the page is not routed: its native text ships with this mode directly. In every case the native text is kept and ships `warning`. Added in #960. | Equations, symbols and sub/superscripts on the page are unreliable. Check them against the PDF. Audit kind `garbled_math_native` lists which signals fired; `data.error` true means the scan failed. |
 | `table_not_reconstructed` | A page has a `Table N` caption line and table structure (at least three horizontal rules of one width, recurring numeric columns, or the label-and-value shape), but table detection found no table. Native extraction flattened the grid to prose. The text is kept unchanged and ships `warning`; nothing is re-routed (#994). The document is not `success`. | Treat table numbers as unverified and read the table from the PDF. About one in five fires is a false positive (a figure page or a prose page that starts a line with `Table N`). |
+| `figure_words_unread` | A raster figure on a single-column chart page was cropped and placed inline, and no native word lies inside its box, so any words in its pixels are unread (#1053). The page keeps its exact native prose and the crop; it ships `warning` and the document is not `success`. Only the crop is a candidate for a later read, never the page. | Read the words in the crop yourself; the page prose is exact. A photograph with no text also fires. |
 
 ### Table judging and fail-closed floors
 
@@ -286,6 +287,8 @@ This list is the kinds present at the time of writing; the code is the authority
 - `possible_table_structure_not_reconstructed`: a borderless label|value shape was seen and not rebuilt. Report only on its own; with a `Table N` caption it also raises `table_not_reconstructed`.
 - `table_not_reconstructed`: a caption plus table structure on a page where detection found no table (#994). The page ships `warning` / `table_not_reconstructed`. Recomputed from the PDF every run.
 - `table_not_reconstructed_retained`: the document-level mirror, emitted at assemble when the native text of such a page is what shipped.
+- `figure_crops`: the page took the per-figure crop route (#1053); `data` carries the figure count, the figures with no native word inside, and the word count per owner (prose, caption, `figure:N`).
+- `figure_words_unread_retained`: the document-level mirror of `figure_words_unread`, emitted at assemble.
 
 ### Scanned-table evidence (`pipeline/agentic.py`, `tables/source_evidence.py`)
 

@@ -473,3 +473,15 @@ def test_retained_event_names_the_real_reason(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(UnifiedPipeline, "_is_agentic_trusted_native", lambda self, n, ps: True)
     normal = detail("g_normal", provider=True)
     assert normal and "--native-only" not in normal[0] and "OCR" in normal[0]
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)

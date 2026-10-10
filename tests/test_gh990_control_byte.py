@@ -456,3 +456,15 @@ def test_resume_hole_is_shared_by_913s_scan(tmp_path, monkeypatch, chart) -> Non
     assert _sidecar(tmp_path, "m")["status"] == "warning"
     assert _sidecar(tmp_path, "m")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert res.status is not DocumentStatus.SUCCESS
+
+
+@pytest.fixture(autouse=True)
+def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1053: this file pins the chart lane's whole-page route, not the per-figure crop route.
+
+    Its raster-figure fixture would otherwise take the crop route (and ship WARNING for the
+    unread figure words), which ``tests/test_1053_figure_crops.py`` owns.
+    """
+    from socr.figures import figure_crops
+
+    monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)
