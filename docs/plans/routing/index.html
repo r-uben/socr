@@ -77,7 +77,7 @@
 <div class="kpis">
   <div class="kpi"><div class="l">Target 1 · silent losses → 0</div><div class="v">partly measured</div><div class="l">
     <b>Fixed:</b> 6,337 numbers hidden as "not data" on 321 pages, real table values among them (#1055, merged in #1056).<br>
-    <b>In review:</b> 517 pages (3.0%, 111 papers) never processed after a false "backend stuck" halt on vLLM (#1062, PR #1064); 206 text pages sent down the whole-page-figure route by images they never draw (#1059, PR #1061); 29 more by reader highlights read as chart bars (#1066, PR #1067).<br>
+    <b>In review:</b> 517 pages (3.0%, 111 papers) never processed after a false "backend stuck" halt on vLLM (#1062, PR #1064); 206 text pages sent down the whole-page-figure route by images they never draw (#1059, PR #1061); 29 more by reader highlights read as chart bars (#1066, PR #1067); 65 slides, tables and maths pages whose page-sized background passed as a chart frame (#1069, PR #1070, which also loses one real figure).<br>
     <b>Open:</b> 1,503 pages (8.8%) ship a whole-page picture as their figure; in a sample of 30, about half are prose plus figures whose words nobody reads (#1053).
   </div></div>
   <div class="kpi"><div class="l">Target 2 · model time, as low as target 1 allows</div><div class="v">7.4% of pages</div><div class="l">
@@ -91,6 +91,7 @@
 <tr><td><a href="https://github.com/r-uben/socr/issues/1055">#1055</a></td><td>Table values hidden as "axis tick labels, not data values" on chart pages</td><td>Target 1</td><td>Confirmed by eye on Aruoba p29; 6,337 numbers on 321 pages</td><td><span class="pill">merged #1056</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1059">#1059</a></td><td>Images listed but never drawn make a text page a "chart page"</td><td>Target 1</td><td>206 pages in 7 papers; all leave the route, all 21 sampled figure pages stay</td><td><span class="pill next">PR #1061</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1066">#1066</a></td><td>Reader highlights count as chart data marks</td><td>Target 1</td><td>29 pages in 6 papers; Aruoba p29 entered this way</td><td><span class="pill next">PR #1067</span></td></tr>
+<tr><td><a href="https://github.com/r-uben/socr/issues/1069">#1069</a></td><td>A page-sized background fill passes as a chart frame</td><td>Target 1</td><td>65 pages leave, all checked by eye; 1 real figure lost (Bianchi p58)</td><td><span class="pill next">PR #1070</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1062">#1062</a></td><td>vLLM liveness probe asks for the Ollama model name; one timeout halts the document</td><td>Targets 1 + 2</td><td>517 pages in 111 papers</td><td><span class="pill next">PR #1064</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1063">#1063</a></td><td>Maths recovery only speaks the Ollama API; every call fails on vLLM</td><td>Target 1</td><td>21,398 failed calls in the run</td><td><span class="pill">open</span></td></tr>
 <tr><td><a href="https://github.com/r-uben/socr/issues/1053">#1053</a></td><td>Prose pages with figures ship the whole page as the figure; figure words never read</td><td>Target 1</td><td>Design written (<code>docs/log/2026-10-10_1053-figure-crops-design.md</code>); one owner ruling needed</td><td><span class="pill">design</span></td></tr>
