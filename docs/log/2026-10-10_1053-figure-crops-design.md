@@ -1,7 +1,7 @@
 # #1053 — per-figure crops: design (Fable + Astra, converged after one rebuttal round)
 
-Status: **design only, no code.** One ruling needed from the owner (below) before an implementer is
-dispatched. Part of `docs/plans/routing/` (figure lane).
+Status: **design ruled 2026-10-10; first PR in progress** (branch `fix/issue-1053`). Part of
+`docs/plans/routing/` (figure lane).
 
 ## Problem, measured
 
@@ -57,13 +57,12 @@ The chart-asset lane ships a page's native text and appends one PNG of the **ent
    unknown or a box is refused; a page whose one figure accounts for all content yields the same
    result through the crop path.
 
-## Owner ruling needed (one question)
+## Owner ruling (2026-10-10)
 
 Point 5 changes rule 4 of `docs/plans/routing/README.md` ("a check that cannot decide sends the
-page to the whole-page route"). For **figures**, both reviewers now recommend:
-
-- **Preserve and flag + escalate the crop** (recommended), or
-- **Keep rule 4 as written**: an undecided figure check sends the whole page to the model.
+page to the whole-page route"). Ruled: for **figures**, **preserve and flag + escalate the crop**.
+Rule 4 now carries that exception. Rejected: keeping rule 4 as written (an undecided figure check
+would send the whole page to the model).
 
 ## Smallest first PR
 
