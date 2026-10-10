@@ -30,6 +30,7 @@ from socr.core.glyph_recovery import (
     count_control_byte_before_digit_hits,
     count_minus_as_digit_hits,
 )
+from socr.core.native_paragraphs import page_paragraphs
 from socr.core.pdf import apply_glyph_recovery, open_pdf
 
 logger = logging.getLogger(__name__)
@@ -2738,6 +2739,9 @@ class PageAssessment:
     #: ``dominant_text_direction()``) — consumers must NOT read this field's
     #: default as proof that directional text evidence existed.
     dominant_text_direction: tuple[float, float] = _HORIZONTAL
+    #: #1074: the page's paragraphs read from its geometry (``native_paragraphs``), used at
+    #: emit time to join the printed lines of ``native_text``. Runtime-only.
+    native_paragraphs: tuple = ()
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -3189,6 +3193,8 @@ class BornDigitalDetector:
         direction = dominant_text_direction(blocks)
         assessment = self._assess_page_signals(page, page_num, direction)
         assessment.dominant_text_direction = direction
+        if assessment.is_born_digital and assessment.native_text:
+            assessment.native_paragraphs = page_paragraphs(page)
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
         assessment.native_table_region_count = self._last_extraction_table_count
         assessment.native_table_region_identities = list(self._last_extraction_region_identities)
