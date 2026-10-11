@@ -1111,6 +1111,9 @@ class UnifiedPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
+        #: #1080: preflight checks the operator ran without (``--allow-missing``),
+        #: set by the CLI gate; recorded as ``ran_without`` in metadata.json.
+        self.ran_without: list[str] = []
         self.heuristics = HeuristicsChecker(min_word_count=config.audit_min_words)
         self.scorer = FailureModeScorer(checker=self.heuristics)
         self.bd_detector = BornDigitalDetector()
@@ -2062,6 +2065,7 @@ class UnifiedPipeline:
                     f"[yellow]Failed/partial:[/yellow] {outcome.failed + outcome.partial}"
                 )
             console.print(f"[dim]Total time: {time.time() - start:.1f}s[/dim]")
+            self._print_ran_without()
 
         return results
 
@@ -2958,6 +2962,28 @@ class UnifiedPipeline:
             return False
         return self._is_trusted_native_without_ocr(page_num, ps)
 
+    def _equation_region_lane_enabled(self) -> bool:
+        """Run-level half of ``_is_equation_region_lane_page``: can the lane act at all.
+
+        One predicate for the page test and for the #1080 preflight, so the
+        startup check cannot require a model for a lane the run never starts.
+        """
+        return bool(
+            self.config.equation_region_lane and self.config.agentic and not self.config.native_only
+        )
+
+    def _corrupt_math_recovery_enabled(self) -> bool:
+        """Run-level half of ``_is_corrupt_math_recovery_page`` (shared with preflight)."""
+        return bool(
+            self.config.native_first
+            and not self.config.native_only
+            and self.config.recover_corrupt_math
+        )
+
+    def _clean_equation_recovery_enabled(self) -> bool:
+        """Whether the GH-36b clean-equation reader runs (shared with preflight)."""
+        return bool(self.config.recover_clean_equations) and bool(self.config.detect_equations)
+
     def _is_equation_region_lane_page(self, page_num: int, ps: PageState) -> bool:
         """P4-R: whether the region-scoped equation lane owns this page.
 
@@ -2982,9 +3008,7 @@ class UnifiedPipeline:
             the ladder as a whole page regardless.
         """
         return bool(
-            self.config.equation_region_lane
-            and self.config.agentic
-            and not self.config.native_only
+            self._equation_region_lane_enabled()
             and self._is_native_eligible_without_ocr(page_num, ps)
             and ps.is_born_digital
             and ps.native_text
@@ -3012,9 +3036,7 @@ class UnifiedPipeline:
         """Whether the corrupt-math region lane (default on) owns this page
         instead of whole-page OCR."""
         return bool(
-            self.config.native_first
-            and not self.config.native_only
-            and self.config.recover_corrupt_math
+            self._corrupt_math_recovery_enabled()
             and ps.is_born_digital
             and ps.native_text
             and ps.has_corrupt_math
@@ -9591,7 +9613,7 @@ class UnifiedPipeline:
 
         # -- Doc-scoped equation flags -------------------------------------------
         _detect_eq = bool(self.config.detect_equations)
-        _recover_eq = bool(self.config.recover_clean_equations) and _detect_eq
+        _recover_eq = self._clean_equation_recovery_enabled()
 
         # -- Doc-scoped write-through blob cache ---------------------------------
         _page_blob_store: object = None
@@ -12948,6 +12970,7 @@ class UnifiedPipeline:
                 records=records,
                 doc_dir=doc_dir,
             )
+            manifest.ran_without = list(self.ran_without)
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:
                 console.print(f"  [dim]Manifest: {doc_dir / 'manifest.json'} (replayable)[/dim]")
@@ -17477,11 +17500,16 @@ class UnifiedPipeline:
 
             # GH-993: the per-document file only. The root index keeps the contract
             # shape plus its latches; the counts are a per-document record.
-            doc_meta = (
-                _LatchedDocMetadata(meta, {"tables": dict(state.table_counts)})
-                if state.table_counts is not None
-                else meta
-            )
+            # #1080: a tool the operator ran without (--allow-missing) is named in
+            # BOTH the per-document file and the root entry; absent, not empty,
+            # when nothing was missing, like the latches below.
+            run_extras: dict = {}
+            if self.ran_without:
+                run_extras["ran_without"] = list(self.ran_without)
+            doc_extras = dict(run_extras)
+            if state.table_counts is not None:
+                doc_extras["tables"] = dict(state.table_counts)
+            doc_meta = _LatchedDocMetadata(meta, doc_extras) if doc_extras else meta
             write_doc_metadata(doc_dir, rel_key, doc_meta)
 
             # P4-R (cold review round 3, finding 5): the root entry and its
@@ -17505,7 +17533,7 @@ class UnifiedPipeline:
             #
             # Fail-closed: if that save raises, NOTHING is recorded, the outer
             # handler logs it, and the next run reprocesses the document.
-            pending: dict = {}
+            pending: dict = dict(run_extras)
             # Keyed on the OUTCOME: a halt this run, or any page still left unprocessed
             # because of one (including a providerless re-run of a halted document).
             if state.pp2_halt_reason or any(
@@ -19068,6 +19096,14 @@ class UnifiedPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _print_ran_without(self) -> None:
+        """#1080: the end-of-run line naming the tools this run went without."""
+        if self.ran_without:
+            console.print(
+                f"[yellow]Ran without:[/yellow] {', '.join(self.ran_without)} "
+                "(--allow-missing; see 'socr preflight')"
+            )
+
     def _print_summary(self, result: EngineResult, state: DocumentState) -> None:
         """Print a final summary line."""
         if result.success:
@@ -19079,6 +19115,7 @@ class UnifiedPipeline:
 
         extra = format_timings_summary_line(rollup_page_timings(state))
         console.print(f"\n{status_str} | {result.engine} | {result.processing_time:.1f}s{extra}")
+        self._print_ran_without()
         if state.pages_needing_repair:
             console.print(
                 f"[yellow]{len(state.pages_needing_repair)} page(s) still failing[/yellow]"

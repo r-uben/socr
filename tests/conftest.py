@@ -468,6 +468,56 @@ def _figure_description_model_is_absent(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _preflight_reports_everything_present(request, monkeypatch):
+    """#1080: every `process`/`batch` CLI test passes the startup preflight.
+
+    The preflight probes a live model server, a judge, Tesseract and the maths
+    route, none of which exist in CI (and some of which exist on a developer
+    machine, which is how a test passes locally and fails there). The CLI tests
+    are about their own subject, so the gate is faked to "all present" in this
+    one place. A test that exercises the gate itself carries
+    ``@pytest.mark.real_preflight`` and gets the real probes, which it then
+    patches one level lower. The gate is not weakened for real runs.
+    """
+    if request.node.get_closest_marker("real_preflight"):
+        yield
+        return
+    from socr import preflight
+
+    monkeypatch.setattr(
+        preflight,
+        "run_preflight",
+        lambda config, pipeline: [
+            preflight.Check(n, True, True, "faked present") for n in preflight.CHECK_NAMES
+        ],
+    )
+    yield
+
+
+@pytest.fixture
+def _only_table_judge_is_real(monkeypatch):
+    """#1080: for tests about the ``table-judge`` row of the startup preflight.
+
+    Every OTHER check is faked present, derived from ``CHECK_NAMES`` so a check
+    added later cannot be forgotten here (a missing ``qwen-ocr`` on GitHub CI blocked
+    these tests once). Both reader rungs default to reachable; a test that wants
+    "no reader" patches the rung probes itself, inside its own ``with``.
+    """
+    from socr import preflight
+
+    for name in preflight.CHECK_NAMES:
+        if name == preflight.CHECK_TABLE_JUDGE:
+            continue
+        monkeypatch.setattr(
+            preflight,
+            "check_" + name.replace("-", "_"),
+            lambda *a, _c=name, **k: preflight.Check(_c, True, True, "faked present"),
+        )
+    monkeypatch.setattr("socr.cli.table_judge_ollama_rung_reachable", lambda *a, **k: True)
+    monkeypatch.setattr("socr.cli.gemini_rung_reachable", lambda *a, **k: True)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_ollama():
     with ollama_connection_guard() as violations:
         yield

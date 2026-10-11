@@ -52,6 +52,8 @@ class HPCPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
+        #: #1080: preflight checks the operator ran without (--allow-missing).
+        self.ran_without: list[str] = []
         self.server_manager = VLLMServerManager(verbose=config.verbose)
         self.reconciler = OutputReconciler(
             use_llm_reconciler=config.hpc.use_llm_reconciler,
@@ -128,6 +130,11 @@ class HPCPipeline:
             status = "[green]Success[/green]" if result.success else "[red]Error[/red]"
             console.print(f"\n{status} | hpc-sequential | {processing_time:.1f}s")
             console.print(f"[dim]{success_pages}/{doc.page_count} pages successful[/dim]")
+            if self.ran_without:
+                console.print(
+                    f"[yellow]Ran without:[/yellow] {', '.join(self.ran_without)} "
+                    "(--allow-missing; see 'socr preflight')"
+                )
 
         return result
 
@@ -508,7 +515,8 @@ class HPCPipeline:
             f"engine: {result.engine}\n"
             f"model_version: {result.model_version}\n"
             f"processed: {datetime.now(timezone.utc).isoformat()}\n"
-            f"---\n\n"
+            + (f"ran_without: [{', '.join(self.ran_without)}]\n" if self.ran_without else "")
+            + "---\n\n"
         )
 
         md_path = doc_dir / f"{stem}.md"

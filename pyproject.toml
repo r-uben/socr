@@ -118,3 +118,6 @@ python_files = ["test_*.py"]
 # Ensure pytest resolves the local src/ tree before any editable-install .pth
 # pointer, so worktree builds pick up local changes without a PYTHONPATH override.
 pythonpath = ["src"]
+markers = [
+    "real_preflight: runs the real #1080 preflight probes (conftest fakes them present for every other test)",
+]

@@ -33,7 +33,7 @@ non-PDF input uses `<stem>_<ext>` so it cannot collide with a PDF of the same na
 | Path | Purpose | Written by |
 | --- | --- | --- |
 | `<stem>.md` | The document text. Byte-identical to the stitched `pages/` fragments. | `_phase_assemble` |
-| `metadata.json` (document) | Document status (`completed` / `partial` / `failed`), model, page count, run fingerprint, an `error` note that names the document-level debts, and a `tables` block of readable-table counts (section 2). | `_write_metadata` |
+| `metadata.json` (document) | Document status (`completed` / `partial` / `failed`), model, page count, run fingerprint, an `error` note that names the document-level debts, a `tables` block of readable-table counts (section 2), and `ran_without` (see below). | `_write_metadata` |
 | `metadata.json` (root) | Index over all documents in the run. The resume gate reads it. | `RootIndex.record` |
 | `pages/NNNNN.md` | One page body, five-digit page number. Written as soon as the page finishes. | `_flush_page_fragment` |
 | `pages/NNNNN.json` | Page sidecar. Section 2 says which fields to read. | `_flush_page_sidecar` |
@@ -87,6 +87,18 @@ Then read the details:
 Other sidecar fields (`native_table_*`, `chart_*`, `d3_floor_png_ref`,
 `table_ladder_disposition`, `figure_refs`, `winning_output`) are the page decision
 flags the resume gate restores. They are listed in `_flush_page_sidecar`.
+
+### Tools the run went without (`ran_without` in `metadata.json`)
+
+Before any page, `socr process` and `socr batch` run the preflight (#1080) and stop
+when a tool the run's enabled features need is missing. `--allow-missing <check>`
+continues anyway. `ran_without` is the list of those allowed misses, e.g.
+`["tesseract"]`, written to the per-document `metadata.json`, the document's
+root-index entry, `manifest.json`, and named in the end-of-run summary
+(`Ran without: ...`); the HPC lane writes it to the `.md` frontmatter. The key is absent, not empty, when nothing was missing, so its
+presence means the output was produced without that tool. Check names:
+`model-server`, `engine-cli`, `page-judge`, `tesseract`, `maths-readers`, `table-judge`.
+Code: `preflight.py`, `_preflight_gate` in `cli.py`, `_write_metadata`.
 
 ### Readable tables (`tables` in `metadata.json`)
 
