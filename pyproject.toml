@@ -74,12 +74,12 @@ scanned = ["pytesseract>=0.3.10"]
 # They cannot coexist. Install one or the other, not both.
 deepseek = ["deepseek-ocr-cli>=0.1.0"]
 nougat = ["nougat-ocr-cli>=0.1.2"]
-gemini = ["gemini-ocr-cli>=0.2.0"]
+gemini = ["gemini-ocr-cli>=0.3.3"]
 mistral = ["mistral-ocr-cli>=0.1.0"]
 # Convenience groups
 local = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2"]
-cloud = ["gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0"]
-all = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0"]
+cloud = ["gemini-ocr-cli>=0.3.3", "mistral-ocr-cli>=0.1.0"]
+all = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "gemini-ocr-cli>=0.3.3", "mistral-ocr-cli>=0.1.0"]
 
 [project.scripts]
 socr = "socr.cli:main"
