@@ -309,6 +309,19 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
     )
 
 
+def _strip_word_edges(word: str) -> str:
+    """Strip sentence punctuation and brackets from both ends of an evidence word.
+
+    #1082: a leading ``.`` that starts a decimal (``.45``) is kept. The plain
+    ``strip`` turned it into ``45``, which could SUPPORT a model ``45`` the
+    page never printed; kept, it is ``0.45`` (``strip_presentation``).
+    """
+    word = word.rstrip(".,;:!?()[]\"'").lstrip(",;:!?()[]\"'")
+    if word[:1] == "." and not word[1:2].isdigit():
+        word = word.lstrip(".")
+    return word
+
+
 def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
     """Parse numeric multiset and content tokens from plain text."""
     if not text.strip():
@@ -318,7 +331,7 @@ def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
     content: set[str] = set()
     decoded_text = html.unescape(text)
     for word in re.findall(r"\S+", decoded_text):
-        word = word.strip(".,;:!?()[]\"'")
+        word = _strip_word_edges(word)
         if not word:
             continue
         # #679: same normalizer as the candidate side (``collect_table_tokens``)
