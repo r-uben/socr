@@ -20,6 +20,7 @@ from socr.core.ollama_utils import (
     raise_for_status_redacted,
     safe_host_label,
 )
+from socr.core.config import DEFAULT_GEMINI_MODEL
 from socr.core.result import FigureInfo
 from socr.engines._figure_prompt import (
     CAPTION_MARKER as _CAPTION_MARKER,  # noqa: F401  re-exported for tests
@@ -37,7 +38,7 @@ class GeminiAPIConfig:
     """Configuration for the Gemini vision API."""
 
     api_key: str = ""
-    model: str = "gemini-3-flash-preview"
+    model: str = DEFAULT_GEMINI_MODEL
     timeout: float = 120.0
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
