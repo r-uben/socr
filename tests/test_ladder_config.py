@@ -560,6 +560,8 @@ def _help_block_for(output: str, option: str) -> str:
     return "\n".join(block)
 
 
+@pytest.mark.real_preflight
+@pytest.mark.usefixtures("_only_table_judge_is_real")
 class TestP1NoReaderStartupDiagnostic:
     """The generic diagnostic missing at prep time (found absent in this
     checkout, not merely "not yet wired" as #553's text implied): when the
@@ -580,7 +582,9 @@ class TestP1NoReaderStartupDiagnostic:
                 ["process", str(dummy_pdf), "--primary", "qwen", "-o", str(tmp_path / "out")],
             )
 
-        assert result.exit_code == 0, result.output
+        # #1080: the notice is the table-judge preflight row, and a needed tool
+        # that is missing now stops the run before any page.
+        assert result.exit_code != 0, result.output
         assert "UNVERIFIED" in result.output
         assert "--no-table-judge-ladder" in result.output
 
@@ -617,7 +621,7 @@ class TestP1NoReaderStartupDiagnostic:
 
         assert "every table page will ship UNVERIFIED" not in result.output
 
-    def test_diagnostic_is_suppressed_under_quiet(self, dummy_pdf: Path, tmp_path: Path):
+    def test_quiet_does_not_hide_the_stop(self, dummy_pdf: Path, tmp_path: Path):
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
@@ -637,7 +641,10 @@ class TestP1NoReaderStartupDiagnostic:
                 ],
             )
 
-        assert "every table page will ship UNVERIFIED" not in result.output
+        # #1080: --quiet no longer hides a STOP. The run does not start, so the
+        # report that says why is printed (an error is not "non-error output").
+        assert result.exit_code != 0
+        assert "table-judge" in result.output
 
     def test_diagnostic_is_suppressed_when_ladder_explicitly_disabled(
         self, dummy_pdf: Path, tmp_path: Path

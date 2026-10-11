@@ -152,6 +152,10 @@ socr process <PDF> [OPTIONS]
                                flush pages/NNN.md to disk before the next page.
                                Re-running resumes from the last finished page.
   --strict-local               Only local/free rungs (no paid cloud)
+  --allow-missing CHECK        Run although this preflight check finds its tool missing
+                               (model-server | engine-cli | page-judge | tesseract |
+                               maths-readers | table-judge; repeatable; recorded as
+                               ran_without in metadata.json, manifest.json, the summary)
   --judge-backend MODE         auto | vlm | heuristic (default: auto)
   --judge-model NAME           VLM model for the judge (e.g. qwen2-vl:7b)
   --max-cost-per-page USD      Skip providers above this price (0 = no cap)
@@ -164,6 +168,13 @@ socr batch <DIR> [OPTIONS]
   Same options as process, plus:
   --limit N                    Process first N files
 
+socr preflight [OPTIONS]         Report which tools this run's flags need and whether they are
+                                 present; exit 1 if a needed one is missing (process and batch
+                                 run the same check before any page; so do library and
+                                 --hpc-sequential. --native-only does not exempt a tool:
+                                 scans still reach OCR, so a convert-only run on a machine
+                                 without a model passes --allow-missing model-server etc.
+                                 The Python API (UnifiedPipeline.process) is not gated.)
 socr replay <MANIFEST> [-o OUT]  Rebuild a document from cache (no model calls)
 socr judge-benchmark <DATASET>   Score the judge against labeled good/mangled pages
 socr engines                     Show available engines

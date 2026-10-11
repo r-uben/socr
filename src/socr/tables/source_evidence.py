@@ -400,6 +400,33 @@ def classical_ocr_with_state(pix) -> tuple[str, str, str]:
     return text, WITNESS_READING, ""
 
 
+def classical_ocr_backend_state() -> tuple[str, str]:
+    """Whether the classical-OCR witness can run at all, without reading a page.
+
+    #1080. The startup counterpart of ``classical_ocr_with_state``: it returns
+    ``(witness_state, detail)`` using the SAME state names and messages, so the
+    preflight report and the per-page failure name a missing install the same
+    way. ``WITNESS_READING`` means the package imports and the binary answers
+    its version probe.
+
+    Unlike the per-page path, a failing version probe is classified by the
+    exception type only: ``TesseractNotFoundError`` is ``binary_missing``,
+    anything else is ``exec_error`` (a present but broken executable).
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        return WITNESS_PACKAGE_MISSING, WITNESS_STATE_MESSAGES[WITNESS_PACKAGE_MISSING]
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        not_found = getattr(pytesseract, "TesseractNotFoundError", ())
+        if not_found and isinstance(exc, not_found):
+            return WITNESS_BINARY_MISSING, WITNESS_STATE_MESSAGES[WITNESS_BINARY_MISSING]
+        return WITNESS_EXEC_ERROR, f"{type(exc).__name__}: {exc}"
+    return WITNESS_READING, ""
+
+
 def classical_ocr_pixmap(pix) -> str:
     """Optional classical OCR over a rendered pixmap; returns "" when unavailable.
 

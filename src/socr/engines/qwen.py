@@ -40,6 +40,8 @@ OLLAMA_MODEL = "qwen3-vl:30b-a3b-instruct"
 # Backends that resolve to the local Ollama layer.  All other values ("vllm", "api")
 # route to non-local infrastructure and must not have their model strings rewritten.
 _LOCAL_BACKENDS: frozenset[str] = frozenset({"auto", "ollama"})
+#: Public name of the same set, for callers outside this package (#1080).
+LOCAL_BACKENDS = _LOCAL_BACKENDS
 
 
 def _probe_cloud(model: str) -> tuple[bool, str]:

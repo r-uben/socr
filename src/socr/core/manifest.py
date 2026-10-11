@@ -350,6 +350,10 @@ class Manifest:
     # VI-B1: document rollup of per-page exclusive stage timings. None when no
     # page recorded ``timings_s`` (pre-B1 sidecar / non-agentic run).
     timings_s: dict[str, float] | None = None
+    # #1080: preflight checks the operator ran without (--allow-missing). Omitted
+    # when empty, like the fields above, so a run that missed nothing is
+    # byte-identical to one written before this field existed.
+    ran_without: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -366,6 +370,8 @@ class Manifest:
             d["agentic_judge_model"] = self.agentic_judge_model
         if self.timings_s:
             d["timings_s"] = self.timings_s
+        if self.ran_without:
+            d["ran_without"] = list(self.ran_without)
         return d
 
     @classmethod
@@ -382,6 +388,7 @@ class Manifest:
             agentic_ladder=d.get("agentic_ladder"),
             agentic_judge_model=d.get("agentic_judge_model", ""),
             timings_s=timings_s,
+            ran_without=list(d.get("ran_without") or []),
         )
 
     def save(self, path: Path | str) -> None:

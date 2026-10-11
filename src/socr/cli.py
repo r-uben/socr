@@ -12,6 +12,8 @@ from socr.core.config import EngineType, PipelineConfig
 # test can stub the probe without a live daemon or a live binary on PATH.
 from socr.judge.table_rung_gemini import gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
+from socr import preflight as preflight_checks
+from socr.preflight import CHECK_NAMES
 from socr.review import html as review_html
 
 console = Console()
@@ -247,6 +249,17 @@ def common_options(f):
     )(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
+    f = click.option(
+        "--allow-missing",
+        "allow_missing",
+        multiple=True,
+        type=click.Choice(CHECK_NAMES),
+        help=(
+            "Continue although this preflight check finds its tool missing (repeatable). "
+            "The run records what it went without in metadata.json (ran_without). "
+            "See 'socr preflight'."
+        ),
+    )(f)
     f = click.option("-q", "--quiet", is_flag=True, help="Suppress non-error output")(f)
     f = click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")(f)
     f = click.option(
@@ -700,6 +713,11 @@ def _any_table_judge_reader_reachable(config: PipelineConfig) -> bool:
     return False
 
 
+#: Public name for the layering rule (no private import across packages): the
+#: preflight's ``table-judge`` check asks the same question this module's notice did.
+any_table_judge_reader_reachable = _any_table_judge_reader_reachable
+
+
 def _report_no_reader_ladder_diagnostic(config: PipelineConfig) -> None:
     """P1 (owner ruling Q3): say so when the ladder is on and nobody can judge.
 
@@ -729,6 +747,36 @@ def _report_no_reader_ladder_diagnostic(config: PipelineConfig) -> None:
         f"({config.table_judge_rung2_binary}) answered a reachability check. "
         "To opt out and ship tables unjudged, pass --no-table-judge-ladder."
     )
+
+
+def _print_preflight_report(checks, allowed) -> None:
+    for line in preflight_checks.format_report(checks, allowed):
+        console.print(line, markup=False, highlight=False, soft_wrap=True)
+
+
+def _preflight_gate(config: PipelineConfig, pipeline, allow_missing: tuple[str, ...]) -> None:
+    """#1080: stop the run before any page when a needed tool is missing.
+
+    Folds the strict-local and no-reader startup notices into the same report.
+    A miss the operator allowed (``--allow-missing``) continues and is set on
+    ``pipeline.ran_without``, which ``_write_metadata`` records. The opt-out is a
+    CLI flag only, not a config field: a profile must not silently disable a check. ``--dry-run`` never probes: the
+    caller has already returned for ``process``, and ``batch`` defers it to
+    ``process_batch``, so it is checked here once for both.
+    """
+    if config.dry_run:
+        return
+    checks = preflight_checks.run_preflight(config, pipeline)
+    blocking = preflight_checks.missing_checks(checks, allow_missing)
+    pipeline.ran_without = preflight_checks.ran_without(checks, allow_missing)
+    if blocking or pipeline.ran_without or not config.quiet:
+        _print_preflight_report(checks, allow_missing)
+    if blocking:
+        names = ", ".join(c.name for c in blocking)
+        raise click.ClickException(
+            f"preflight: needed tool missing ({names}); no page was processed. "
+            "Fix it, or opt out per tool with --allow-missing <name>."
+        )
 
 
 # --- Commands ---
@@ -774,6 +822,7 @@ def process(
         socr paper.pdf --hpc-sequential --save-figures
         socr paper.pdf --unified
     """
+    allow_missing = kwargs.pop("allow_missing", ())
     config = build_config(output_dir=output_dir, **kwargs)
 
     # GH-368: --dry-run was consulted only inside process_batch, so
@@ -845,6 +894,7 @@ def process(
             )
 
         pipeline = HPCPipeline(config)
+        _preflight_gate(config, pipeline, allow_missing)
     else:
         # Resolve AUTO only for the lane that uses it (cubic P2 on #535).
         # `HPCPipeline` reads its models from `config.hpc`, never
@@ -861,9 +911,8 @@ def process(
         # --unified is kept as a backwards-compatible no-op.
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        _report_strict_local_ladder_diagnostic(config)
-        _report_no_reader_ladder_diagnostic(config)
         pipeline = UnifiedPipeline(config)
+        _preflight_gate(config, pipeline, allow_missing)
 
     try:
         result = pipeline.process(pdf_path, output_dir)
@@ -917,6 +966,35 @@ def process(
         raise click.Abort()
 
 
+@cli.command("preflight")
+@common_options
+def preflight_cmd(**kwargs) -> None:
+    """Check that every tool this run's flags and config need is present.
+
+    Prints present / missing per check and exits 0 when nothing needed is
+    missing (or every miss is named in --allow-missing), non-zero otherwise.
+    The same report 'socr process' and 'socr batch' print before any page.
+
+    Example:
+        socr preflight
+        socr preflight --native-only
+        socr preflight --allow-missing tesseract
+    """
+    allow_missing = kwargs.pop("allow_missing", ())
+    config = build_config(**kwargs)
+    if config.primary_engine == EngineType.AUTO and not config.hpc.enabled:
+        from socr.engines.registry import resolve_auto_engine
+
+        config.primary_engine = resolve_auto_engine()
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    checks = preflight_checks.run_preflight(config, UnifiedPipeline(config))
+    _print_preflight_report(checks, allow_missing)
+    blocking = preflight_checks.missing_checks(checks, allow_missing)
+    if blocking:
+        raise SystemExit(1)
+
+
 @cli.command()
 @click.argument("pdf_dir", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
@@ -940,6 +1018,7 @@ def batch(
         socr batch ~/Papers/ --dry-run
         socr batch ~/Papers/ --unified
     """
+    allow_missing = kwargs.pop("allow_missing", ())
     config = build_config(output_dir=output_dir, **kwargs)
 
     # GH-517 (cubic P2 on #535): `hpc.enabled` is authoritative for `process`
@@ -976,9 +1055,8 @@ def batch(
     # --unified is a no-op kept for backwards compatibility.
     from socr.pipeline.orchestrator import UnifiedPipeline
 
-    _report_strict_local_ladder_diagnostic(config)
-    _report_no_reader_ladder_diagnostic(config)
     pipeline = UnifiedPipeline(config)
+    _preflight_gate(config, pipeline, allow_missing)
 
     # Handle --limit by pre-filtering
     if limit:
@@ -1024,6 +1102,13 @@ def batch(
 @click.option("--promote", "promote_stem", metavar="STEM", help="Archive old STEM, install staged")
 @click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")
 @click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml pipeline profile")
+@click.option(
+    "--allow-missing",
+    "allow_missing",
+    multiple=True,
+    type=click.Choice(CHECK_NAMES),
+    help="Continue although this preflight check finds its tool missing (repeatable).",
+)
 def library(
     library_config: Path | None,
     dry_run: bool,
@@ -1031,6 +1116,7 @@ def library(
     promote_stem: str | None,
     primary: str | None,
     profile: str | None,
+    allow_missing: tuple[str, ...] = (),
 ) -> None:
     """Process the papers library described by its own config (GH-964).
 
@@ -1062,9 +1148,8 @@ def library(
             )
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        _report_strict_local_ladder_diagnostic(config)
-        _report_no_reader_ladder_diagnostic(config)
         pipeline = UnifiedPipeline(config)
+        _preflight_gate(config, pipeline, allow_missing)
         return lambda pdf, out_root: pipeline.process(pdf, out_root, scan_root=pdf.parent)
 
     def failed(result) -> bool:

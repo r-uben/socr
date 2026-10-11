@@ -119,6 +119,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "quiet": (PLUMBING, "console verbosity"),
     "verbose": (PLUMBING, "console verbosity"),
     "reprocess": (PLUMBING, "bypasses the resume gate"),
+    "allow_missing": (PLUMBING, "opts a tool out of the #1080 preflight; read in _preflight_gate"),
     "profile": (PLUMBING, "named preset applied before anything else"),
     "unified": (PLUMBING, "legacy alias for the unified pipeline"),
     # -- read on the agentic path or by a helper it calls

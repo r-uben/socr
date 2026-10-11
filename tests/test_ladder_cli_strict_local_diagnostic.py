@@ -8,6 +8,8 @@ finish that document cleanly. The design note says this must be surfaced at
 startup, not discovered after the run.
 
 Contract these tests hold the CLI to:
+  * (#1080) the notice is now the ``table-judge`` row of the startup preflight
+    report, which ``process`` and ``batch`` print instead of a line beside it.
   * one shared CLI helper, called after config construction by both
     ``process`` and ``batch``, for the ordinary ``UnifiedPipeline`` path
     only (never the HPC lane, never a ``--dry-run`` that exits before the
@@ -38,6 +40,8 @@ import pytest
 fitz = pytest.importorskip("fitz")
 
 _DIAGNOSTIC_SUBSTRING = "TABLE_UNVERIFIED"  # narrow, stable anchor; see module docstring
+
+pytestmark = [pytest.mark.real_preflight, pytest.mark.usefixtures("_only_table_judge_is_real")]
 
 
 def _pdf(tmp_path: Path) -> Path:
