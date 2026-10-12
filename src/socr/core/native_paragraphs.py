@@ -348,19 +348,116 @@ def _join_paragraph(paragraph, vocabulary: NativeVocabulary) -> str:
 
 #: Anything that opens, closes or hides math, a comment or code. Both ends of every such
 #: construct are in this set, so the first and last hit bracket whatever lies between.
+#: A currency ``$`` is hidden before this scan (see :func:`_is_currency_dollar`).
 _MARKER = re.compile(r"\$|\\\(|\\\)|\\\[|\\\]|\\begin\{|\\end\{|<!--|-->|^\s*(?:```|~~~)")
 
 
 _FENCE_LINE = re.compile(r"^\s*(?:```|~~~)", re.MULTILINE)
 _ENV = re.compile(r"\\(begin|end)\{([^}]*)\}")
 
+#: Printed amounts after ``$`` on the #1079 sample (Carhart ``$217.8``, ``$ 95.6``,
+#: ``$218 million``) and the issue's ``$29.99`` / ``$1,200``. Thousands form first
+#: so ``1,200`` is not eaten as ``1``.
+_CURRENCY_AMOUNT = re.compile(r"[ \t]*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+#: After a prefix amount: optional comma, whitespace, then a prose word (an
+#: alphabetic run of 2+ letters, not a ``\command``). ``$5 x`` and ``$5.`` stay maths.
+_PROSE_WORD_MIN = 2
+_PREFIX_AFTER_AMOUNT = re.compile(rf",?[ \t]+(?<!\\)[A-Za-z]{{{_PROSE_WORD_MIN},}}")
+#: After a suffix unit ``1987$`` (Christiano–Eichenbaum–Evans 1994) the dollar ends
+#: the token.
+_SUFFIX_AFTER_DOLLAR = set(" \t.,;:)]}\"'")
+#: A suffix amount is a token only when these sit immediately before its first digit.
+_SUFFIX_TOKEN_PREFIX = set(" \t\n(")
+
+
+def _iter_single_dollar_offsets(text: str):
+    """Offsets of ``$`` that are not one half of ``$$``."""
+    i = 0
+    n = len(text)
+    while i < n:
+        j = text.find("$", i)
+        if j < 0:
+            return
+        if j + 1 < n and text[j + 1] == "$":
+            i = j + 2
+            continue
+        yield j
+        i = j + 1
+
+
+def _suffix_number_is_standalone(text: str, dollar_at: int) -> bool:
+    """True when the digits immediately before ``$`` are their own token.
+
+    ``1987$`` and ``(1987$`` count; ``b+2$``, ``x2$``, ``=3$`` are maths.
+    """
+    i = dollar_at - 1
+    if i < 0 or not text[i].isdigit():
+        return False
+    while i > 0 and text[i - 1].isdigit():
+        i -= 1
+    if i == 0:
+        return True
+    return text[i - 1] in _SUFFIX_TOKEN_PREFIX
+
+
+def _is_currency_dollar(text: str, pos: int) -> bool:
+    """True when ``text[pos]`` is a currency ``$``, not a maths delimiter.
+
+    Fail-closed: any doubt returns False and the ``$`` stays a marker. Derived
+    from the #1079 pages (prefix ``$217.8`` / ``$ 95.6``, suffix ``1987$``) plus
+    the issue's ``$29.99``, ``$1,200 million``, ``US$5``. A ``$`` is currency
+    only when it is not part of ``$$``, not escaped by ``\\``, and no other
+    ``$`` appears anywhere on the same printed line (so ``$1$``, ``$2$``,
+    ``$x_t$``, ``$5 + x$``, ``$5 per share and $10`` stay maths). Prefix form
+    further requires that, after the amount, the same printed line continue
+    with an optional comma, whitespace, and a prose word of 2+ letters
+    (``$218 million``, ``$29.99 apiece``). A ``$5`` at end of line, ``$5.``,
+    ``$5 x``, ``$5%``, or ``$5x`` stays a marker. Suffix form (``1987$``)
+    further requires that the digits before ``$`` be a standalone token
+    (preceded by whitespace, line start, or ``(``), so ``b+2$`` stays maths.
+    """
+    if pos < 0 or pos >= len(text) or text[pos] != "$":
+        return False
+    if pos > 0 and text[pos - 1] == "\\":
+        return False
+    if pos + 1 < len(text) and text[pos + 1] == "$":
+        return False
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end < 0:
+        line_end = len(text)
+    if "$" in text[line_start:pos] or "$" in text[pos + 1 : line_end]:
+        return False
+    rest_line = text[pos + 1 : line_end]
+    amount = _CURRENCY_AMOUNT.match(rest_line)
+    if amount and amount.group(0).strip():
+        after = rest_line[amount.end() :]
+        if after[:1].isdigit():
+            return False
+        return _PREFIX_AFTER_AMOUNT.match(after) is not None
+    if pos > 0 and text[pos - 1].isdigit():
+        after_c = text[pos + 1 : pos + 2]
+        if after_c == "" or after_c == "\n" or after_c in _SUFFIX_AFTER_DOLLAR:
+            return _suffix_number_is_standalone(text, pos)
+    return False
+
+
+def _hide_currency_dollars(text: str) -> str:
+    """Copy of *text* with currency ``$`` replaced by a space, for marker scans."""
+    chars = list(text)
+    for pos in _iter_single_dollar_offsets(text):
+        if _is_currency_dollar(text, pos):
+            chars[pos] = " "
+    return "".join(chars)
+
 
 def _markers_unbalanced(text: str) -> bool:
     """Whether the text opens something it never closes (or closes what it never opened).
 
-    Single ``$`` is counted after removing ``$$``; currency makes it over-fire, which is
-    the intended trade: a lost reflow is visible, a deleted minus is not.
+    Single ``$`` is counted after removing ``$$`` and after hiding currency ``$``
+    (#1097). A leftover maths ``$`` still unbalances; a lone ``1987$`` does not.
     """
+    text = _hide_currency_dollars(text)
     envs: dict[str, int] = defaultdict(int)
     for kind, name in _ENV.findall(text):
         envs[name] += 1 if kind == "begin" else -1
@@ -387,12 +484,14 @@ def _protected_lines(lines: list[str]) -> set[int]:
     changed formula. Reflow still runs above the first marker and below the last. A LaTeX
     ``%`` comment joined onto the next line would comment it out, so a protected line is
     never joined in either direction. Tables (`|`), figure placeholders and CommonMark code
-    / HTML blocks are protected line by line as before.
+    / HTML blocks are protected line by line as before. Currency ``$`` does not
+    open the span (#1097).
     """
     from socr.figures.chart_regions import markdown_literal_context
 
     protected = set(markdown_literal_context(lines)[0])
-    marked = [i for i, line in enumerate(lines) if _MARKER.search(line)]
+    hidden_lines = _hide_currency_dollars("\n".join(lines)).split("\n")
+    marked = [i for i, line in enumerate(hidden_lines) if _MARKER.search(line)]
     if marked:
         # Unbalanced markers leave an environment open: its extent is unknowable, so the
         # protected span runs to the end of the text.
