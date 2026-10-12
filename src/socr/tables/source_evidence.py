@@ -30,7 +30,7 @@ from socr.tables.native_verifier import (
     _unwrap_markdown_link,
     is_numeric_token,
 )
-from socr.tables.reconcile import find_table_blocks
+from socr.tables.reconcile import _is_separator_row, _split_row, find_table_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -272,9 +272,105 @@ def page_has_native_words(page) -> bool:
     return any(len(w) > 4 and str(w[4]).strip() for w in words)
 
 
+def _inline_dollar_positions(line: str) -> list[int]:
+    """Offsets of single ``$`` on *line*; ``$$`` is skipped, not paired."""
+    out: list[int] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if line.startswith("$$", i):
+            i += 2
+            continue
+        if line[i] == "$" and (i == 0 or line[i - 1] != "\\"):
+            out.append(i)
+        i += 1
+    return out
+
+
+def _preceded_by_odd_backslashes(line: str, pos: int) -> bool:
+    """True when *pos* is escaped: an odd run of ``\\`` immediately before it."""
+    count = 0
+    i = pos - 1
+    while i >= 0 and line[i] == "\\":
+        count += 1
+        i -= 1
+    return count % 2 == 1
+
+
+def _dollar_interior_is_maths(interior: str) -> bool:
+    """A ``$...$`` pair hides a pipe only when the interior is real maths.
+
+    At least one letter, or a backslash command. Digits, spaces and punctuation
+    only (currency such as ``5|10`` or ``5 | 10``) never hide a pipe.
+    """
+    return any(ch.isalpha() for ch in interior) or "\\" in interior
+
+
+def _pipe_is_maths_local(line: str, pos: int) -> bool:
+    """True when ``line[pos]`` is a ``|`` that is maths on this same line.
+
+    Command forms (``\\|`` with odd backslash parity, ``\\left|``, ``\\right|``,
+    ``\\vert``, ``\\mid``) or a ``$...$`` pair whose interior is maths (a
+    letter or a backslash command). No multi-line spans, environments, or
+    display tracking.
+    """
+    if pos < 0 or pos >= len(line) or line[pos] != "|":
+        return False
+    if pos >= 5 and line[pos - 5 : pos + 1] == "\\left|":
+        return True
+    if pos >= 6 and line[pos - 6 : pos + 1] == "\\right|":
+        return True
+    if pos >= 5 and line[pos - 5 : pos] == "\\vert":
+        return True
+    if pos >= 4 and line[pos - 4 : pos] == "\\mid":
+        return True
+    if _preceded_by_odd_backslashes(line, pos):
+        return True
+    dollars = _inline_dollar_positions(line)
+    for a, b in zip(dollars[0::2], dollars[1::2]):
+        if not (a < pos < b):
+            continue
+        return _dollar_interior_is_maths(line[a + 1 : b])
+    return False
+
+
+def _line_pipes_are_maths_local(line: str) -> bool:
+    positions = [i for i, ch in enumerate(line) if ch == "|"]
+    return bool(positions) and all(_pipe_is_maths_local(line, i) for i in positions)
+
+
+def _block_has_separator(lines: list[str], start: int, end: int) -> bool:
+    return any(_is_separator_row(_split_row(lines[idx])) for idx in range(start, end + 1))
+
+
+def _is_phantom_maths_block(lines: list[str], start: int, end: int) -> bool:
+    """A pipe run that is only maths, so the source-evidence check must skip it.
+
+    Both: (a) no ``|---|`` separator, and (b) every ``|`` on every non-separator
+    line is maths-local on that line. A separator keeps the block even when
+    the data rows look like ``$P(A|B)$``.
+    """
+    if _block_has_separator(lines, start, end):
+        return False
+    data = [idx for idx in range(start, end + 1) if not _is_separator_row(_split_row(lines[idx]))]
+    return bool(data) and all(_line_pipes_are_maths_local(lines[idx]) for idx in data)
+
+
+def _evidence_table_blocks(markdown: str):
+    """Table blocks the scanned-page source-evidence check is allowed to see.
+
+    ``find_table_blocks`` runs on the original text (same as origin/main).
+    Only a phantom maths block is dropped.
+    """
+    lines = markdown.splitlines()
+    return [
+        b for b in find_table_blocks(markdown) if not _is_phantom_maths_block(lines, b.start, b.end)
+    ]
+
+
 def collect_table_tokens(markdown: str) -> TableTokens | None:
     """Extract numeric multiset and content-label tokens from markdown tables."""
-    blocks = find_table_blocks(markdown)
+    blocks = _evidence_table_blocks(markdown)
     if not blocks:
         return None
 
