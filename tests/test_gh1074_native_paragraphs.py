@@ -261,6 +261,29 @@ def test_the_split_occurrence_is_not_its_own_witness() -> None:
     assert "inflation" not in _vocab(text).words
 
 
+def test_hyphen_witness_is_document_wide_not_page_local() -> None:
+    """#1079: a joined form anywhere in the document rejoins a split elsewhere.
+
+    The witness is the analyze-time native text of every born-digital page
+    (``DocumentState.native_vocabulary``), not the page that carries the split.
+    Trade-off: a reference title or another section that spells the word
+    unhyphenated will rejoin every line-end split of that word, even if that
+    occurrence is a different sense. Scoping the witness to the page would
+    stop that, and would also stop the common case (the word appears whole on
+    the next page). This test fails if the vocabulary is built from one page.
+    """
+    other_section = "See the inflation appendix."
+    split_page = "infla-\ntion expectations rose"
+    document = native_vocabulary([other_section, split_page])
+    page_local = native_vocabulary([split_page])
+    paragraph = _para("infla-", "tion expectations rose")
+    assert reflow_native_prose(split_page, (paragraph,), document) == "inflation expectations rose"
+    assert "inflation" not in page_local.words
+    assert (
+        reflow_native_prose(split_page, (paragraph,), page_local) == "infla-tion expectations rose"
+    )
+
+
 def test_dash_glued_to_its_word_joins_without_a_space_and_removes_nothing() -> None:
     vocab = _vocab("x")
     for a, b, want in [
@@ -367,6 +390,23 @@ def test_blank_line_only_between_adjacent_native_paragraphs() -> None:
     out = reflow_native_prose(text, paragraphs, vocab)
     # p1|p2 adjacent -> blank; p2|foreign|p3 keeps the foreign line's adjacency on both sides.
     assert out == "p1 a p1 b\n\np2 a p2 b\nforeign\np3 a"
+
+
+def test_unmatched_neighbour_gets_no_blank_line() -> None:
+    """#1079: a matched paragraph is not followed by a blank when the next
+    geometry neighbour is missing from the shipped text.
+
+    The blank-line insert fires only when two matched spans are adjacent
+    (``last_end == start``). An unmatched printed line keeps the adjacency it
+    already had. This fails if the merge branch inserts a separator after every
+    matched span.
+    """
+    vocab = _vocab("x")
+    text = "lead-in unmatched\naaa\nbbb\ntrail unmatched"
+    paragraphs = (_para("aaa", "bbb"), _para("ccc", "ddd"))
+    out = reflow_native_prose(text, paragraphs, vocab)
+    assert out == "lead-in unmatched\naaa bbb\ntrail unmatched"
+    assert "\n\n" not in out
 
 
 def test_a_joined_line_that_collides_with_another_geometry_line_still_reaches_a_fixed_point() -> (

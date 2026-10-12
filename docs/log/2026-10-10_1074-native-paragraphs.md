@@ -190,8 +190,12 @@ change.
      born-digital pages.
 3. **Astra's safeguards.**
    - Estimate pitch and edges per column and per size class.
-   - Never merge across protected content (math, tables, fences, markers) or across a font/style
-     change.
+   - Never merge across protected content (math, tables, fences, markers). A font
+     change is a boundary only when `a` ends short of `R_env` (a heading); a
+     full-width font change is emphasis inside the paragraph, not a boundary.
+     Review round 1 measured the original "any font/style change" reading: it
+     split mid-sentence italics (Ayivodji p7 "Ottawa" / "Citizen"). The shipped
+     `boundary()` in `native_paragraphs.py` is the short-line form.
    - Insufficient or tied evidence keeps the printed boundary.
    - Replay reads finalized text and needs no geometry.
 
