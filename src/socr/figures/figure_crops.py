@@ -18,8 +18,11 @@ slice reads them, so the page is flagged (``FailureMode.FIGURE_WORDS_UNREAD``), 
 re-routed: the page keeps its exact native prose and the crop is where those pixels live.
 
 Pages this module declines (``plan_figure_page`` returns ``None``) keep today's whole-page route:
-no qualifying raster figure, an unknown placement, a vector chart, a rotated page, or a layout that
-is not clearly one column.
+no qualifying raster figure, an unknown placement, a vector chart, a rotated page, a layout that
+is not clearly one column, or two figure boxes that share area (the same image drawn twice, or an
+inset). ``_beside`` is false when boxes overlap in x, so that case is a separate decline: otherwise
+the first box in ``(y, x)`` order would take the words, the second would be flagged unread, and two
+crops would show the same pixels.
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ class FigurePlan:
     owners: tuple[str, ...]
     #: Figure index -> how many native words lie inside its box.
     figure_word_counts: dict[int, int] = field(default_factory=dict)
+    #: False when the crop route is declined (overlapping boxes) but the unread
+    #: counts are still the check's result: the whole-page fallback must keep the
+    #: flag, not become SUCCESS by dropping the plan.
+    accepted: bool = True
 
     @property
     def unread_figures(self) -> list[int]:
@@ -72,6 +79,20 @@ def _beside(a: tuple[float, float, float, float], b: tuple[float, float, float, 
     overlap = min(a[3], b[3]) - max(a[1], b[1])
     shorter = min(a[3] - a[1], b[3] - b[1])
     return shorter > 0 and overlap / shorter > BESIDE_OVERLAP_MIN
+
+
+def _boxes_overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """True when *a* and *b* share area (overlap in both x and y). Touching edges do not.
+
+    A 0.001-point stack (inserted ``y1=290`` / ``y0=289.999``) is stored by PyMuPDF as
+    ``289.9990539550781`` / ``439.9990234375`` (the latter is ``439 + 1023/1024``): the
+    placement quantum is ``2**-10`` pt. That shared interval is still a positive area, so
+    this function treats it as overlap. The crop route is declined (undecided geometry);
+    the unread check is kept on the fallback so the page cannot become SUCCESS by rounding.
+    """
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
 
 
 def is_single_column(page, boxes) -> bool:
@@ -159,10 +180,12 @@ def plan_figure_page(page) -> FigurePlan | None:
         boxes = figure_boxes(page)
         if not boxes:
             return None
-        if _vector_chart_found(page) or chart_region_bboxes(page):
-            return None
-        if not is_single_column(page, boxes) or not is_in_reading_order(page, boxes):
-            return None
+        overlapped = any(_boxes_overlap(a, b) for i, a in enumerate(boxes) for b in boxes[i + 1 :])
+        if not overlapped:
+            if _vector_chart_found(page) or chart_region_bboxes(page):
+                return None
+            if not is_single_column(page, boxes) or not is_in_reading_order(page, boxes):
+                return None
         words = page.get_text("words") or []
     except Exception as exc:  # noqa: BLE001 - unknown geometry keeps the whole-page route
         logger.debug("figure crops: planning failed, whole-page route: %s", exc)
@@ -174,4 +197,5 @@ def plan_figure_page(page) -> FigurePlan | None:
         figure_word_counts={
             i: owners.count(f"{OWNER_FIGURE_PREFIX}{i}") for i in range(1, len(boxes) + 1)
         },
+        accepted=not overlapped,
     )

@@ -135,6 +135,123 @@ def test_two_column_page_declines(tmp_path: Path) -> None:
         assert figure_crops.plan_figure_page(doc[0]) is None
 
 
+FIG_TOP = fitz.Rect(72, 140, 372, 290)
+FIG_BOT = fitz.Rect(72, 420, 372, 570)
+
+
+TOP_COLOR = (200, 40, 40)
+BOT_COLOR = (40, 40, 200)
+
+
+def _insert_raster(page, rect, color=(235, 235, 235)) -> None:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 300, 150), False)
+    pix.set_rect(pix.irect, color)
+    page.insert_image(rect, pixmap=pix)
+
+
+def _make_two(
+    path: Path,
+    *,
+    top_labelled: bool = False,
+    bot_labelled: bool = False,
+    same_twice: bool = False,
+    inset: bool = False,
+    bottom_first: bool = False,
+    near_touch: bool = False,
+) -> Path:
+    """Two stacked rasters, or the overlap cases `_beside` cannot see."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 72.0
+    for line in ABOVE:
+        page.insert_text((72, y), line, fontname="helv", fontsize=10)
+        y += 14
+    top_rect = fitz.Rect(72, 140, 372, 290) if near_touch else FIG_TOP
+    bot_rect = fitz.Rect(72, 289.999, 372, 439.999) if near_touch else FIG_BOT
+    if same_twice:
+        _insert_raster(page, FIG_TOP)
+        _insert_raster(page, FIG_TOP)
+    elif inset:
+        _insert_raster(page, fitz.Rect(72, 160, 420, 500))
+        _insert_raster(page, fitz.Rect(140, 220, 350, 400))
+    else:
+        rasters = [(bot_rect, BOT_COLOR), (top_rect, TOP_COLOR)]
+        if not bottom_first:
+            rasters.reverse()
+        for rect, color in rasters:
+            _insert_raster(page, rect, color)
+        if not near_touch:
+            if top_labelled:
+                for i, label in enumerate(LABELS):
+                    page.insert_text(
+                        (top_rect.x0 + 20, top_rect.y0 + 40 + 30 * i),
+                        label,
+                        fontname="helv",
+                        fontsize=10,
+                    )
+            page.insert_text(
+                (72, top_rect.y1 + 16), "Figure 1: top panel", fontname="helv", fontsize=10
+            )
+            if bot_labelled:
+                for i, label in enumerate(LABELS):
+                    page.insert_text(
+                        (bot_rect.x0 + 20, bot_rect.y0 + 40 + 30 * i),
+                        label,
+                        fontname="helv",
+                        fontsize=10,
+                    )
+            page.insert_text(
+                (72, bot_rect.y1 + 16), "Figure 2: bottom panel", fontname="helv", fontsize=10
+            )
+    y = (FIG_BOT.y1 if not (same_twice or inset) else 560) + 20
+    for line in BELOW:
+        page.insert_text((72, y), line, fontname="helv", fontsize=10)
+        y += 14
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_two_stacked_figures_share_the_y_x_index(tmp_path: Path) -> None:
+    """Placeholder index, crop filename and figure:N owner share the (y, x) sort."""
+    with fitz.open(_make_two(tmp_path / "p.pdf")) as doc:
+        page = doc[0]
+        boxes = figure_boxes(page)
+        plan = figure_crops.plan_figure_page(page)
+    assert boxes is not None and len(boxes) == 2
+    assert boxes[0][1] < boxes[1][1]
+    assert boxes == sorted(boxes, key=lambda b: (b[1], b[0]))
+    assert plan is not None
+    assert plan.boxes == tuple(boxes)
+    assert plan.unread_figures == [1, 2]
+    assert plan.figure_word_counts == {1: 0, 2: 0}
+
+
+def test_mixed_labelled_unlabelled_pair_flags_only_the_second(tmp_path: Path) -> None:
+    with fitz.open(_make_two(tmp_path / "p.pdf", top_labelled=True)) as doc:
+        plan = figure_crops.plan_figure_page(doc[0])
+    assert plan is not None
+    assert plan.unread_figures == [2]
+    assert plan.figure_word_counts[1] == len(LABELS)
+    assert plan.figure_word_counts[2] == 0
+    assert plan.owner_counts()["figure:1"] == len(LABELS)
+    assert "figure:2" not in plan.owner_counts()
+
+
+@pytest.mark.parametrize("shape", ["same_twice", "inset"])
+def test_overlapping_boxes_decline_the_crop_route(tmp_path: Path, shape: str) -> None:
+    """`_beside` misses x-overlap; shared-area boxes keep the whole-page route."""
+    pdf = _make_two(tmp_path / "p.pdf", same_twice=shape == "same_twice", inset=shape == "inset")
+    with fitz.open(pdf) as doc:
+        boxes = figure_boxes(doc[0])
+        plan = figure_crops.plan_figure_page(doc[0])
+    assert boxes is not None and len(boxes) == 2
+    assert figure_crops._boxes_overlap(boxes[0], boxes[1])
+    assert not figure_crops._beside(boxes[0], boxes[1])
+    assert plan is not None and not plan.accepted
+    assert plan.unread_figures == [1, 2]
+
+
 # ---------------------------------------------------------------------------
 # End-to-end through process()
 # ---------------------------------------------------------------------------
@@ -166,7 +283,7 @@ class _AcceptingJudge:
         return AcceptDecision(accept=True, reason="stub accepts all")
 
 
-def _process(tmp_path, tag, monkeypatch, *, provider, neutralised, **shape):
+def _process(tmp_path, tag, monkeypatch, *, provider, neutralised, native_only=False, **shape):
     from socr.core.providers import PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
 
@@ -186,6 +303,7 @@ def _process(tmp_path, tag, monkeypatch, *, provider, neutralised, **shape):
                 local_engine=EngineType.QWEN,
                 enabled_engines=[EngineType.QWEN],
                 native_first=True,
+                native_only=native_only,
                 write_manifest=False,
                 judge_backend="heuristic",
                 dual_pass_tables=False,
@@ -287,6 +405,116 @@ def test_two_column_page_keeps_the_whole_page_route(tmp_path, monkeypatch, provi
     a, b = _sidecar(tmp_path, "off"), _sidecar(tmp_path, "on")
     assert (a["status"], a["failure_mode"]) == (b["status"], b["failure_mode"])
     assert on.status is off.status
+
+
+def _mean_rgb(path: Path) -> tuple[float, float, float]:
+    from PIL import Image
+
+    with Image.open(path) as im:
+        px = list(im.convert("RGB").getdata())
+    n = len(px)
+    return (sum(p[0] for p in px) / n, sum(p[1] for p in px) / n, sum(p[2] for p in px) / n)
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_two_figures_emit_two_crops_in_y_order(tmp_path, monkeypatch, provider) -> None:
+    _make_two(tmp_path / "two-off.pdf", bottom_first=True)
+    _make_two(tmp_path / "two-on.pdf", bottom_first=True)
+    off, _ = _process(tmp_path, "two-off", monkeypatch, provider=provider, neutralised=True)
+    on, _ = _process(tmp_path, "two-on", monkeypatch, provider=provider, neutralised=False)
+    t_off, t_on = _page_text(tmp_path, "two-off"), _page_text(tmp_path, "two-on")
+    assert "chart_page_1.png" in t_off and "chart_region_p1_1.png" not in t_off
+    assert "chart_page_1.png" not in t_on
+    i1, i2 = t_on.index("chart_region_p1_1.png"), t_on.index("chart_region_p1_2.png")
+    assert i1 < i2
+    assert "![figure 1](" in t_on and "![figure 2](" in t_on
+    crop1 = next((tmp_path / "out-two-on").rglob("chart_region_p1_1.png"))
+    crop2 = next((tmp_path / "out-two-on").rglob("chart_region_p1_2.png"))
+    r1, _g1, b1 = _mean_rgb(crop1)
+    r2, _g2, b2 = _mean_rgb(crop2)
+    assert r1 > b1, "figure 1 is the top (red) crop even when the bottom image was inserted first"
+    assert b2 > r2, "figure 2 is the bottom (blue) crop"
+    a, b = _sidecar(tmp_path, "two-off"), _sidecar(tmp_path, "two-on")
+    assert a["failure_mode"] != FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["status"] == "warning"
+    assert on.status is not DocumentStatus.SUCCESS
+    assert _native_lines(t_on) == _native_lines(t_off)
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_overlapping_boxes_keep_the_whole_page_route(tmp_path, monkeypatch, provider) -> None:
+    _make_two(tmp_path / "ov-off.pdf", inset=True)
+    _make_two(tmp_path / "ov-on.pdf", inset=True)
+    off, _ = _process(tmp_path, "ov-off", monkeypatch, provider=provider, neutralised=True)
+    on, _ = _process(tmp_path, "ov-on", monkeypatch, provider=provider, neutralised=False)
+    assert "chart_page_1.png" in _page_text(tmp_path, "ov-on")
+    assert "chart_region_p1_1.png" not in _page_text(tmp_path, "ov-on")
+    a, b = _sidecar(tmp_path, "ov-off"), _sidecar(tmp_path, "ov-on")
+    assert a["failure_mode"] != FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["status"] == "warning"
+    assert on.status is not DocumentStatus.SUCCESS
+    assert _native_lines(_page_text(tmp_path, "ov-on")) == _native_lines(
+        _page_text(tmp_path, "ov-off")
+    )
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_subpoint_overlap_fallback_keeps_the_unread_flag(tmp_path, monkeypatch, provider) -> None:
+    """Stacked rasters that share 0.001 pt stay flagged on the whole-page fallback."""
+    _make_two(tmp_path / "nt-off.pdf", near_touch=True)
+    _make_two(tmp_path / "nt-on.pdf", near_touch=True)
+    with fitz.open(tmp_path / "nt-on.pdf") as doc:
+        plan = figure_crops.plan_figure_page(doc[0])
+    assert plan is not None and not plan.accepted and plan.unread_figures == [1, 2]
+    off, _ = _process(tmp_path, "nt-off", monkeypatch, provider=provider, neutralised=True)
+    on, _ = _process(tmp_path, "nt-on", monkeypatch, provider=provider, neutralised=False)
+    assert "chart_page_1.png" in _page_text(tmp_path, "nt-on")
+    a, b = _sidecar(tmp_path, "nt-off"), _sidecar(tmp_path, "nt-on")
+    assert a["failure_mode"] != FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["status"] == "warning"
+    assert on.status is not DocumentStatus.SUCCESS
+    loaded: list = []
+    real = UnifiedPipeline._load_terminal_page
+
+    def spy(self, *a, **k):
+        out = real(self, *a, **k)
+        loaded.append(out)
+        return out
+
+    monkeypatch.setattr(UnifiedPipeline, "_resume_skip", lambda self, *a, **k: None)
+    monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", spy)
+    again, _ = _process(tmp_path, "nt-on", monkeypatch, provider=provider, neutralised=False)
+    assert loaded and all(o is None for o in loaded)
+    resumed = _sidecar(tmp_path, "nt-on")
+    assert resumed["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert resumed["status"] == "warning"
+    assert again.status is not DocumentStatus.SUCCESS
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_native_only_ships_inline_crops_and_demotes_the_document(
+    tmp_path, monkeypatch, provider
+) -> None:
+    """`--native-only` still takes the crop route: no engine, page WARNING, document not SUCCESS."""
+    off, eng_off = _process(
+        tmp_path, "noff", monkeypatch, provider=provider, neutralised=True, native_only=True
+    )
+    on, eng_on = _process(
+        tmp_path, "non", monkeypatch, provider=provider, neutralised=False, native_only=True
+    )
+    assert eng_off.calls == 0 and eng_on.calls == 0
+    t_off, t_on = _page_text(tmp_path, "noff"), _page_text(tmp_path, "non")
+    assert "chart_page_1.png" in t_off and "chart_region_p1_1.png" not in t_off
+    assert "chart_region_p1_1.png" in t_on and "chart_page_1.png" not in t_on
+    a, b = _sidecar(tmp_path, "noff"), _sidecar(tmp_path, "non")
+    assert a["failure_mode"] != FailureMode.FIGURE_WORDS_UNREAD.value
+    assert b["status"] == "warning"
+    assert b["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert on.status is not DocumentStatus.SUCCESS
+    assert on.status is not off.status
 
 
 def test_flagged_page_is_not_restored_from_the_ledger(tmp_path, monkeypatch) -> None:
