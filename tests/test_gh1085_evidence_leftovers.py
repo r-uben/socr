@@ -119,24 +119,22 @@ def _verify_untrusted(layer_text: str, md: str, witness_text: str):
 _HDR_MD = "| label | 999 |\n|---|---|\n| row | -5 |"
 
 
-def test_dash_led_reading_does_not_route_into_distrusted_layer_rescue() -> None:
-    # The witness READ "—5" and the layer prints "—5": emptying the bundle used to
-    # activate the rescue, which folds the dash and ignores the header row (999).
+def test_dash_led_reading_with_matching_layer_fails_closed() -> None:
+    # The witness READ "—5" and the layer prints "—5" (#1087: no rescue exists).
     res = _verify_untrusted("—5", _HDR_MD, "—5")
     assert not res.passed
 
 
-def test_rescue_ignores_dash_led_layer_words() -> None:
-    # Witness silent (nothing read) but the layer has "—5": the rescue must not
-    # bind the model's -5 to it.
+def test_dash_led_layer_words_do_not_support_a_negative() -> None:
+    # Witness silent but the layer has "—5": nothing binds the model's -5 to it.
     res = _verify_untrusted("—5", "| label | x |\n|---|---|\n| row | -5 |", "")
     assert not res.passed
 
 
-def test_rescue_still_works_for_ordinary_layer() -> None:
-    # Sanity: the rescue path itself is intact for a layer with a plain -5.
+def test_layer_alone_never_passes_a_table_when_silent() -> None:
+    # No rescue exists (#1087): a layer printing -5 and a silent witness fail closed.
     res = _verify_untrusted("-5", "| label | x |\n|---|---|\n| row | -5 |", "")
-    assert res.passed and "header_binding_unverified" in res.reason
+    assert not res.passed and not res.verifiable
 
 
 @pytest.mark.parametrize(
@@ -149,30 +147,38 @@ def test_encoded_dash_led_evidence_supports_nothing(evidence: str) -> None:
 
 
 def test_ambiguous_reading_is_a_reading_not_an_absence() -> None:
-    # The layer legitimately prints -5, so the rescue WOULD bind the row (and
-    # ignore the invented header 999). It must not be reached: the witness read
-    # "—5", which is a reading that fails to support, not silence.
-    assert not _verify_untrusted("-5", _HDR_MD, "—5").passed
-    # Control: a truly silent witness does reach the rescue on the same layer.
-    assert _verify_untrusted("-5", _HDR_MD, "").passed
+    # The witness read "—5": a reading that fails to support, not silence.
+    ok_md = _HDR_MD.replace("999", "x")
+    assert not _verify_untrusted("-5", ok_md, "—5").passed
+    # The outcome cannot tell a reading from silence (both reject), so the bundle
+    # is checked: a dash-led reading counts as content evidence, silence does not.
+    from socr.tables.source_evidence import build_scanned_evidence
+
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=500, height=700)
+        read = build_scanned_evidence(page, ocr_image_fn=lambda pix: "—5", include_text_layer=False)
+        silent = build_scanned_evidence(page, ocr_image_fn=lambda pix: "", include_text_layer=False)
+    finally:
+        doc.close()
+    assert read.has_content_evidence and read.ambiguous_numeric == 1
+    assert not silent.has_content_evidence
 
 
 def _table(*vals: str) -> str:
-    return "| label | x |\n|---|---|\n" + "\n".join(f"| r{i} | {v} |" for i, v in enumerate(vals))
+    return "| label | x |\n|---|---|\n" + "\n".join(
+        f"| row{chr(97 + i % 26)} | {v} |" for i, v in enumerate(vals)
+    )
 
 
-def test_rescue_declines_when_layer_has_dash_led_row_among_many() -> None:
-    # Layer: 49 rows then "—5"; the model prints the same plus "-5". The rescue
-    # tolerates one unsupported number in fifty, so deleting the word would pass.
+def test_layer_dash_led_row_among_many_does_not_pass() -> None:
+    # Layer: 49 rows then "—5"; the model prints the same plus "-5".
     layer = "\n".join(str(100 + i) for i in range(49)) + "\n—5"
     vals = [str(100 + i) for i in range(49)] + ["-5"]
     assert not _verify_untrusted(layer, _table(*vals), "").passed
-    # Control: the same table against a plain-minus layer is rescued.
-    assert _verify_untrusted(layer.replace("—", "-"), _table(*vals), "").passed
 
 
-def test_rescue_declines_when_layer_dash_led_row_is_omitted_by_model() -> None:
-    # Layer rows 100, —5, 200; the model drops the middle row. Filtering the
-    # word made the omission invisible.
+def test_layer_dash_led_row_omitted_by_model_does_not_pass() -> None:
+    # Layer rows 100, —5, 200; the model drops the middle row.
     layer = "100\n—5\n200"
     assert not _verify_untrusted(layer, _table("100", "200"), "").passed

@@ -231,9 +231,7 @@ class TestTheSuspectLayerCannotCorroborate:
             native_trusted=native_trusted,
         )
 
-    def test_a_table_matching_an_untrusted_layer_ships_flagged_not_a_clean_success(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_table_matching_an_untrusted_layer_fails_closed(self, tmp_path: Path) -> None:
         """#658b: row corroboration now clears this fixture (its 2 candidate
         rows are, in order, exactly the layer's 2 native lines), so it ships
         -- but only as a FLAGGED outcome, never a clean SUCCESS. A pass with
@@ -243,16 +241,10 @@ class TestTheSuspectLayerCannotCorroborate:
         try:
             result = self._verify(doc, native_trusted=False)
             assert not result.deferred
-            assert result.passed, (
-                f"a candidate whose rows the distrusted layer itself "
-                f"corroborates was rejected outright: {result.reason}"
-            )
-            assert result.content_unverified, (
-                "the candidate shipped with no flag at all -- verified only by "
-                f"a layer the caller marked untrusted, and that must be visible: "
-                f"{result.reason}"
-            )
-            assert "header_binding_unverified" in result.content_unverified
+            # #1087: the #658b rescue is removed; a table matching an untrusted
+            # layer fails closed, not verifiable, never a clean or flagged pass.
+            assert not result.passed and not result.verifiable, result.reason
+            assert not result.content_unverified
         finally:
             doc.close()
 
