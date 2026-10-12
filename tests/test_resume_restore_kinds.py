@@ -69,4 +69,5 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    assert len(EXPECTED_RESUME_KINDS) == 48
+    # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused.
+    assert len(EXPECTED_RESUME_KINDS) == 49
