@@ -100,6 +100,14 @@ presence means the output was produced without that tool. Check names:
 `model-server`, `engine-cli`, `page-judge`, `tesseract`, `maths-readers`, `table-judge`.
 Code: `preflight.py`, `_preflight_gate` in `cli.py`, `_write_metadata`.
 
+`maths-readers` (#1063): the corrupt-math recovery and the equation lanes read their
+crops through the run's qwen server: Ollama `/api/generate`, or an OpenAI-compatible
+`/v1/chat/completions` server (vLLM) at `--qwen-vllm-url` under the served model id
+(a pinned `--qwen-model`, else `--qwen-vllm-model`). On such a run the check sends a
+1-token generation to that server. `--math-model` / `--clean-equation-model` left at
+their default mean "the run's qwen rung"; any other value is refused (check MISSING,
+page `model_call_skipped`), never replaced by the served model.
+
 ### Readable tables (`tables` in `metadata.json`)
 
 Counts derived from what is already recorded: the shipped text of each page, its

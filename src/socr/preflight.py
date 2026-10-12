@@ -235,11 +235,13 @@ def check_maths_readers(config, pipeline) -> Check:
     """The maths lanes can address the backend AND their models answer.
 
     Two questions, because "present" must mean the reader can run.
-    ``_equation_lane_backend_addressable``: both lanes post to the Ollama generate
-    API only (#1063), so a vLLM-resolved qwen rung is unreachable for them
-    whatever the model tag. Then each model a lane will call (``math_model`` for
-    the corrupt-math recovery, ``clean_equation_model`` for the equation lanes)
-    gets a real generation on the Ollama host the lanes post to.
+    ``_equation_lane_backend_addressable``: the lanes post to the Ollama generate
+    API, or (#1063) to the run's OpenAI-compatible qwen server when its URL and
+    model id are configured. Then the model a lane will call answers a real
+    generation: each of ``math_model`` / ``clean_equation_model`` on the Ollama
+    host, or on an OpenAI-compatible run the served model through the 1-token
+    ``probe_openai_server_idle`` canary (a lane model naming anything the server
+    does not serve is reported, not replaced).
     """
     from socr.core.providers import PROFILE_QWEN_LOCAL
 
@@ -261,9 +263,30 @@ def check_maths_readers(config, pipeline) -> Check:
             CHECK_MATHS_READERS,
             True,
             False,
-            f"{lanes}: the configured backend is not the Ollama API, so formula "
-            "regions will be detected and never read (#1063)",
+            f"{lanes}: the configured backend is neither the Ollama API nor an "
+            "OpenAI-compatible server with a URL and model id, so formula regions will "
+            "be detected and never read (#1063)",
         )
+    served = pipeline._maths_openai_served_model()
+    if served is not None:
+        # #1063: an OpenAI-compatible run reads through the qwen server, whose one
+        # served model is the only model a lane can call. A lane model naming
+        # anything else is refused (never silently replaced), so it is reported.
+        problems = [
+            refusal
+            for model in dict.fromkeys(lane_models.values())
+            if (refusal := pipeline._maths_model_refusal(model))
+        ]
+        # Policy on the model that will actually be called, independent of the lane tags.
+        forbidden = _cloud_forbidden(config, served)
+        if forbidden:
+            problems.append(forbidden)
+        url = config.qwen_vllm_url
+        if not problems and not probe_openai_server_idle(url, model=served, require_reply=True):
+            problems.append(f"vllm {url} model {served}: no generation answered")
+        if problems:
+            return Check(CHECK_MATHS_READERS, True, False, f"{lanes}: " + "; ".join(problems))
+        return Check(CHECK_MATHS_READERS, True, True, f"{lanes}: vllm {url} model {served}")
     problems: list[str] = []
     for model in dict.fromkeys(lane_models.values()):
         ok, detail = _probe_ollama_model(config, model)

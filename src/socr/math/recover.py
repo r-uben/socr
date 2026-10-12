@@ -266,6 +266,176 @@ def latex_for_image(
     return clean_latex(body.get("response", ""))
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+#: Macros whose braced argument is prose inside a formula. Their contents are blanked
+#: before the prose test, so ``\text{for all } x`` is a formula, not a sentence.
+_TEXT_MACROS = ("text", "mathrm", "textrm", "operatorname")
+_TEXT_MACRO_OPEN = re.compile(r"\\(?:" + "|".join(_TEXT_MACROS) + r")\s*\{")
+
+#: A plain word: letters with internal apostrophes ("I'm", "can't"), not preceded by a
+#: backslash or a letter (a macro name such as ``\log`` is not a word).
+_PLAIN_TOKEN = re.compile(r"(?<![\\A-Za-z])[A-Za-z]+(?:['\u2019][A-Za-z]+)*")
+#: Letters a token needs to count as a word (a lone symbol like ``x`` is not one).
+_MIN_WORD_LETTERS = 2
+
+
+def _has_plain_word_pair(latex: str) -> bool:
+    """Two consecutive plain words separated only by whitespace: a sentence, not a formula."""
+    previous_end: int | None = None
+    for match in _PLAIN_TOKEN.finditer(latex):
+        token = match.group()
+        if sum(ch.isalpha() for ch in token) < _MIN_WORD_LETTERS:
+            previous_end = None
+            continue
+        if previous_end is not None and not latex[previous_end : match.start()].strip():
+            return True
+        previous_end = match.end()
+    return False
+
+
+class MathsReplyError(ValueError):
+    """The server answered, but not with a usable LaTeX transcription."""
+
+
+def _blank_text_macro_contents(latex: str) -> str:
+    """``\text{...}`` and its siblings with the braced contents removed.
+
+    Nesting-aware; an escaped brace (``\{``, ``\}``) is a character, not a brace; a
+    macro whose braces never balance blanks nothing (its contents stay checked).
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        match = _TEXT_MACRO_OPEN.search(latex, pos)
+        if match is None:
+            out.append(latex[pos:])
+            return "".join(out)
+        depth, i = 1, match.end()
+        while i < len(latex) and depth:
+            if latex[i] == "\\":
+                i += 2
+                continue
+            depth += {"{": 1, "}": -1}.get(latex[i], 0)
+            i += 1
+        if depth:  # unbalanced: blank nothing
+            out.append(latex[pos : match.end()])
+            pos = match.end()
+            continue
+        out.append(latex[pos : match.end()] + "}")
+        pos = i
+
+
+def clean_openai_reply(raw: str) -> str:
+    """Reasoning blocks and fences stripped; a prose reply refused.
+
+    Stricter than :func:`clean_latex` on purpose, and only for the OpenAI route
+    (the Ollama path is unchanged): ``clean_latex`` keeps plain prose, which the
+    structural gate accepts as parseable LaTeX. A reply is prose when, outside
+    ``\text``-style macro contents, it holds two consecutive plain words. Any
+    other non-empty reply (``0.25``, ``-1``, ``a/b``) proceeds to the structural
+    validation. Raises :class:`MathsReplyError`.
+    """
+    text = _THINK_BLOCK.sub("", raw)
+    if re.search(r"</?think>", text, re.IGNORECASE):
+        raise MathsReplyError("reply carries an unterminated reasoning block")
+    latex = clean_latex(text)
+    if not latex:
+        raise MathsReplyError("reply is empty after removing reasoning and fences")
+    if _has_plain_word_pair(_blank_text_macro_contents(latex)):
+        raise MathsReplyError("reply is prose (consecutive plain words), not LaTeX")
+    return latex
+
+
+def latex_for_image_openai(
+    png_bytes: bytes,
+    model: str,
+    base_url: str,
+    prompt: str = CORRUPT_MATH_PROMPT,
+    timeout: float | None = None,
+    api_key: str = "EMPTY",
+    failures: list[str] | None = None,
+) -> str:
+    """Read an equation crop through an OpenAI-compatible server (vLLM, SGLang).
+
+    The counterpart of :func:`latex_for_image` for a run whose qwen rung is
+    served over ``/v1/chat/completions`` (#1063). Same prompt contract and the
+    same failure contract: cleaned LaTeX, or ``""`` on a transport, HTTP,
+    malformed-reply, truncated-reply or non-maths-reply failure (callers retain
+    the crop and record the failed disposition). The reason of each failure is
+    logged and appended to ``failures`` when given, so a caller can record it.
+    ``model`` is sent verbatim: it is the id the server serves, never an Ollama tag.
+
+    The reply is capped at ``JUDGE_MAX_REPLY_TOKENS`` (#1041's remedy for a
+    looping reply: an equation reading is far shorter than a page verdict, so
+    the verdict cap is a ceiling it cannot reach legitimately). A reply the
+    server marks ``finish_reason == "length"`` is a cut fragment and is refused.
+    """
+    import httpx
+
+    from socr.core.ollama_utils import raise_for_status_redacted
+    from socr.judge.judge import JUDGE_MAX_REPLY_TOKENS
+    from socr.tables.extract import DEFAULT_READER_TIMEOUT_S
+
+    deadline = DEFAULT_READER_TIMEOUT_S if timeout is None else timeout
+    image_b64 = base64.b64encode(png_bytes).decode()
+    base = base_url.rstrip("/")
+
+    def _fail(reason: str) -> str:
+        logger.warning("math OCR call failed: %s", reason)
+        if failures is not None:
+            failures.append(reason)
+        return ""
+
+    def _call() -> object:
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "temperature": 0,
+                "max_tokens": JUDGE_MAX_REPLY_TOKENS,
+                "messages": [
+                    {
+                        "role": "user",
+                        # Image first, as the table reader and the judge order it.
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            },
+            timeout=deadline,
+        )
+        raise_for_status_redacted(resp)
+        return resp.json()
+
+    try:
+        body = call_with_total_deadline(
+            _call, deadline, label=f"math OCR {safe_host_label(base)}/chat/completions ({model})"
+        )
+    except (httpx.HTTPError, TimeoutError, ValueError, OSError) as exc:
+        return _fail(str(exc))
+    try:
+        choice = body["choices"][0]
+        if choice.get("finish_reason") == "length":
+            return _fail(
+                f"reply hit the {JUDGE_MAX_REPLY_TOKENS}-token cap (finish_reason=length); discarded"
+            )
+        content = choice["message"]["content"]
+        if not isinstance(content, str):
+            raise TypeError(f"message content is {type(content).__name__}, not text")
+        return clean_openai_reply(content)
+    except MathsReplyError as exc:
+        return _fail(str(exc))
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        return _fail(f"malformed reply ({type(exc).__name__}: {exc})")
+
+
 def _save_crop(
     png: bytes,
     crop_dir: Path | None,

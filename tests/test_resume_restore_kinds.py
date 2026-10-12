@@ -27,6 +27,8 @@ EXPECTED_RESUME_KINDS = frozenset(
         "equation_region_reading_unverifiable",
         "equation_sidecar_refused",
         "equation_sidecar_skipped_no_page_output",
+        # #1063 added this kind: a detected crop the clean-equation reader was refused on.
+        "equation_sidecar_skipped_model_refused",
         "judge_wedged_circuit_open",
         "native_encoding_hygiene_suspect",
         "native_math_font_unrecovered",

@@ -1698,7 +1698,22 @@ class UnifiedPipeline:
             # saved bytes. The model is recorded only while the flag is on: an
             # unused model default must not force a needless reprocess (#233).
             "recover_corrupt_math": cfg.recover_corrupt_math,
-            "math_model": cfg.math_model if cfg.recover_corrupt_math else None,
+            # #1063: the model actually CALLED (the served id on an OpenAI-compatible run;
+            # unchanged on Ollama), plus the backend, recorded only on that route so an
+            # Ollama run keeps its fingerprint.
+            "math_model": (
+                self._maths_wire_model(cfg.math_model) if cfg.recover_corrupt_math else None
+            ),
+            **(
+                {"maths_backend": self._maths_backend_label()}
+                if self._maths_openai_served_model() is not None
+                and (
+                    cfg.recover_corrupt_math
+                    or cfg.equation_region_lane
+                    or (cfg.recover_clean_equations and cfg.detect_equations)
+                )
+                else {}
+            ),
             # --- GH-36a: equation region detection ---
             # ``detect_equations`` controls whether display-equation regions are
             # detected, cropped, and recorded in provenance (model-free, GH-36a).
@@ -1724,7 +1739,7 @@ class UnifiedPipeline:
             # the model when EITHER consumer can run; recording it when neither
             # can would force a needless reprocess over an unused default (#233).
             "clean_equation_model": (
-                cfg.clean_equation_model
+                self._maths_wire_model(cfg.clean_equation_model)
                 if (
                     (cfg.recover_clean_equations and cfg.detect_equations)
                     or cfg.equation_region_lane
@@ -3034,7 +3049,7 @@ class UnifiedPipeline:
             return f"model call skipped: --max-cost-per-page 0 forbids remote model {model}"
         if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return "model call skipped: remote equation model has no configured price"
-        return ""
+        return self._maths_model_refusal(model)
 
     def _is_corrupt_math_recovery_page(self, page_num: int, ps: PageState) -> bool:
         """Whether the corrupt-math region lane (default on) owns this page
@@ -3084,11 +3099,21 @@ class UnifiedPipeline:
         regions = []
         error = ""
         model_disabled_reason = self._corrupt_math_model_disabled_reason()
+        # #1063: on an OpenAI-compatible run the crop goes to that server under its
+        # served model id; on Ollama both stay as before (``ocr`` default, the tag).
+        math_model = self._maths_wire_model(self.config.math_model)
+        math_backend = self._maths_backend_label()
+        from socr.math.recover import CORRUPT_MATH_PROMPT, latex_for_image
+
+        reader_failures: list[str] = []
+
         try:
             with open_pdf(state.handle.path) as pdf:
                 regions = recover_math_regions(
                     pdf[page_num - 1],
-                    model=self.config.math_model,
+                    ocr=self._maths_openai_ocr(CORRUPT_MATH_PROMPT, reader_failures)
+                    or latex_for_image,
+                    model=math_model,
                     host=self._local_backend_host(),
                     dpi=self.config.render_dpi,
                     crop_dir=crop_dir,
@@ -3142,6 +3167,8 @@ class UnifiedPipeline:
             f"candidate(s) and left {unresolved} unresolved region(s); {crop_detail}; "
             "candidates are non-authoritative"
         )
+        if reader_failures:
+            detail += f"; reader failures: {'; '.join(dict.fromkeys(reader_failures))}"
         call_cost_usd = 0.0 if model_disabled_reason else None
         state.events.append(
             AuditEvent(
@@ -3156,11 +3183,12 @@ class UnifiedPipeline:
                     "regions": validation,
                     "validation_scope": "latex_syntax_only",
                     "semantic_fidelity_verified": False,
-                    "model_id": self.config.math_model,
-                    "backend": "ollama-compatible",
+                    "model_id": math_model,
+                    "backend": math_backend,
                     "cost_usd": call_cost_usd,
                     "model_call_skipped": bool(model_disabled_reason),
                     "model_disabled_reason": model_disabled_reason,
+                    **({"reader_failures": reader_failures} if reader_failures else {}),
                     "error": error,
                 },
             )
@@ -3175,8 +3203,8 @@ class UnifiedPipeline:
             audit_passed=False,
             audit_notes=[detail],
             provider_id="corrupt-math-region",
-            provider_model=self.config.math_model,
-            provider_backend="ollama-compatible",
+            provider_model=math_model,
+            provider_backend=math_backend,
             skip_reason=model_disabled_reason,
             cost_usd=call_cost_usd,
         )
@@ -3191,7 +3219,7 @@ class UnifiedPipeline:
                     engine="native+math",
                     status=DocumentStatus.AUDIT_FAILED,
                     pages=[page_output],
-                    model_version=self.config.math_model,
+                    model_version=math_model,
                     cost=call_cost_usd,
                     pages_processed=1,
                     audit_passed=False,
@@ -3241,6 +3269,10 @@ class UnifiedPipeline:
             # every run after the one that recorded it, the exact shape this
             # allowlist exists to close.
             "equation_sidecar_skipped_no_page_output",
+            # #1063: a detected crop the clean-equation reader was refused on (cloud
+            # policy, a model the OpenAI-compatible server does not serve, an
+            # unconfigured server). Terminal for the same reason.
+            "equation_sidecar_skipped_model_refused",
         }
     )
 
@@ -3293,7 +3325,141 @@ class UnifiedPipeline:
             return False
         if backend == "auto":
             return not qwen_auto_resolves_to_openai(self.config)
-        return backend in self.EQUATION_LANE_BACKENDS
+        if backend in self.EQUATION_LANE_BACKENDS:
+            return True
+        # #1063: the lane also speaks /v1/chat/completions, but only to the run's
+        # QWEN rung (the one server ``qwen_vllm_url`` names), and only when that
+        # server's URL and model id are configured.
+        return (
+            getattr(profile, "engine", None) is EngineType.QWEN
+            and self._maths_openai_served_model(backend) is not None
+        )
+
+    def _maths_resolved_backend(self) -> str:
+        """The backend the run's qwen rung resolves to, "" when it cannot be resolved."""
+        from socr.engines.qwen import resolve_qwen_intent
+
+        try:
+            return resolve_qwen_intent(self.config)[0] or ""
+        except Exception as exc:  # a resolver failure is doubt, and doubt refuses
+            logger.debug("maths readers: cannot resolve the qwen server: %s", exc)
+            return ""
+
+    def _maths_openai_selected(self, backend: str | None = None) -> bool:
+        """Whether the run selects an OpenAI-compatible qwen backend (configured or not)."""
+        from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
+
+        return (backend or self._maths_resolved_backend()) in OPENAI_COMPATIBLE_BACKENDS
+
+    def _maths_openai_served_model(self, backend: str | None = None) -> str | None:
+        """The model id the run's OpenAI-compatible qwen server serves, else ``None``.
+
+        ``None`` means either the Ollama transport (``_maths_openai_selected`` is
+        False) or an OpenAI-compatible backend that is selected but not configured
+        (``_maths_model_refusal`` then refuses; it never falls back to Ollama). The
+        id is ``resolve_qwen_intent``'s (a pinned model, else ``qwen_vllm_model``),
+        the same one the OCR invocation and the table reader send, so a pinned model
+        is honoured (#1073 is the table reader ignoring it).
+        """
+        from socr.engines.qwen import resolve_qwen_intent
+
+        if not self._maths_openai_selected(backend):
+            return None
+        try:
+            served = resolve_qwen_intent(self.config)[1]
+        except Exception:
+            return None
+        if not (self.config.qwen_vllm_url and served):
+            return None
+        return served
+
+    def _maths_model_refusal(self, lane_model: str) -> str:
+        """Why the maths readers must not call out on this run, else "".
+
+        Applies on an OpenAI-compatible run only; the Ollama path keeps its inline
+        policy checks on the lane model, unchanged.
+
+        * selected but unconfigured (no URL or model id): refused, never sent to
+          Ollama instead;
+        * ``math_model`` / ``clean_equation_model`` default to the Ollama tag, which
+          here means "the run's qwen rung"; any other value is the operator's
+          explicit choice and a server serves one model, so it is refused rather
+          than silently replaced by the served model;
+        * cloud policy runs on the model that will ACTUALLY be called: a pinned
+          ``x:cloud`` served model must not slip past ``--strict-local`` or a zero
+          cost cap because the lane's own tag was local.
+        """
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+        from socr.math.recover import DEFAULT_MODEL
+
+        if not self._maths_openai_selected():
+            return ""
+        served = self._maths_openai_served_model()
+        if served is None:
+            return (
+                "model call skipped: the qwen backend is OpenAI-compatible but its URL or "
+                "model id is not configured; not falling back to Ollama"
+            )
+        if lane_model not in (DEFAULT_MODEL, served):
+            return (
+                f"model call skipped: {lane_model} is not served by the OpenAI-compatible "
+                f"server (it serves {served}); leave the maths model at its default or set it "
+                "to the served id"
+            )
+        if is_cloud_model(served):
+            if self.config.strict_local:
+                return f"model call skipped: strict-local forbids remote model {served}"
+            if zero_cap_pinned_forbids_cloud(self.config):
+                return f"model call skipped: --max-cost-per-page 0 forbids remote model {served}"
+            if self.config.max_cost_per_page > 0 or self.config.cost_budget > 0:
+                return "model call skipped: remote equation model has no configured price"
+        return ""
+
+    def _maths_backend_label(self) -> str:
+        """The provenance label of the transport the maths readers use."""
+        return "openai-compatible" if self._maths_openai_served_model() else "ollama-compatible"
+
+    def _maths_wire_model(self, lane_model: str) -> str:
+        """The model id actually sent: the served id on an OpenAI-compatible run."""
+        served = self._maths_openai_served_model()
+        return (
+            served
+            if served is not None and not self._maths_model_refusal(lane_model)
+            else (lane_model)
+        )
+
+    def _maths_openai_ocr(self, prompt: str, failures: list[str] | None = None):
+        """An ``ocr(png, *, model, host)`` callable posting to the qwen server, or ``None``.
+
+        ``None`` on an Ollama run, so the default Ollama transport is untouched.
+        """
+        if self._maths_openai_served_model() is None:
+            return None
+        from socr.math.recover import latex_for_image_openai
+
+        base_url = self.config.qwen_vllm_url
+
+        def _ocr(png: bytes, *, model: str, host: str = "") -> str:
+            del host  # the Ollama host is irrelevant to this transport
+            return latex_for_image_openai(
+                png, model=model, base_url=base_url, prompt=prompt, failures=failures
+            )
+
+        return _ocr
+
+    def _equation_lane_serves(self, profile, model: str) -> bool:
+        """Whether ``profile`` is the rung ``model`` names (#1063).
+
+        The registry tag, or on an OpenAI-compatible run the id that rung is
+        actually serving: the default lane model is the Ollama tag, but the same
+        rung answers to the served id once ``qwen_backend`` lands on vLLM.
+        """
+        if (getattr(profile, "model", "") or "") == model:
+            return True
+        if getattr(profile, "engine", None) is not EngineType.QWEN:
+            return False
+        served = self._maths_openai_served_model()
+        return served is not None and model == served
 
     def _equation_lane_provider(self, available_profiles=None):
         """The ladder rung that can serve the clean-equation model, or why not.
@@ -3327,6 +3493,10 @@ class UnifiedPipeline:
         if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return None, "model call skipped: remote equation model has no configured price"
 
+        maths_refusal = self._maths_model_refusal(model)
+        if maths_refusal:
+            return None, maths_refusal
+
         profiles = (
             list(available_profiles)
             if available_profiles is not None
@@ -3342,14 +3512,14 @@ class UnifiedPipeline:
             zero_cap_pinned=self.config.max_cost_per_page_pinned,
         )
         for profile in ladder:
-            if (getattr(profile, "model", "") or "") != model:
+            if not self._equation_lane_serves(profile, model):
                 continue
             if self._equation_lane_backend_addressable(profile):
                 return profile, ""
 
         # Name the ACTUAL reason, so an operator can tell "nothing is running"
         # from "you priced it out" from "that rung cannot serve this transport".
-        same_model = [p for p in profiles if (getattr(p, "model", "") or "") == model]
+        same_model = [p for p in profiles if self._equation_lane_serves(p, model)]
         if not same_model:
             served = ", ".join(sorted(getattr(p, "id", "") or "?" for p in profiles)) or "none"
             return None, (
@@ -3400,6 +3570,9 @@ class UnifiedPipeline:
             # on every rerun, restore the same page, and rewrite the latch --
             # idempotent resume defeated forever for that configuration.
             "resolves to backend(s)",
+            # #1063: the same kind of settled refusal on an OpenAI-compatible run.
+            "is not served by",
+            "not configured; not falling back",
         )
         return not any(marker in reason for marker in settled_by_config)
 
@@ -3467,6 +3640,7 @@ class UnifiedPipeline:
             process_equation_region,
         )
         from socr.math.recover import DEFAULT_MODEL
+        from socr.math.validate_latex import EQUATION_LATEX_PROMPT
         from socr.tables.escalation_canary import (
             PRESENCE_INVENTED,
             PRESENCE_UNVERIFIABLE,
@@ -3533,6 +3707,11 @@ class UnifiedPipeline:
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
         profile, skip_reason = self._equation_lane_provider(available_profiles)
+        # #1063: the id sent on the wire (the served id on an OpenAI-compatible run).
+        model = self._maths_wire_model(model)
+        reader_failures: list[str] = []
+        if ocr is None:
+            ocr = self._maths_openai_ocr(EQUATION_LATEX_PROMPT, reader_failures)
         host = self._local_backend_host()
         calls_made = 0
         rate = float(getattr(profile, "cost_per_page_usd", 0.0) or 0.0)
@@ -3678,6 +3857,11 @@ class UnifiedPipeline:
                             "model_call_skipped": False,
                             "validation_ok": result.validation_ok,
                             "validation_reason": result.validation_reason,
+                            **(
+                                {"reader_failures": list(dict.fromkeys(reader_failures))}
+                                if reader_failures
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -10571,7 +10755,7 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(
                 f"  p{page_num}: [cyan]corrupt-equation region lane "
-                f"[{self.config.math_model}][/cyan]"
+                f"[{self._maths_wire_model(self.config.math_model)}][/cyan]"
             )
         math_out = self._recover_corrupt_math_page(state, page_num, output_dir)
         if page_num in chart_winner_pages:
@@ -12995,8 +13179,8 @@ class UnifiedPipeline:
             from socr.math.recover import CORRUPT_MATH_PROMPT
 
             inputs["native+math"] = (
-                self.config.math_model,
-                "ollama-compatible",
+                self._maths_wire_model(self.config.math_model),
+                self._maths_backend_label(),
                 None,
                 CORRUPT_MATH_PROMPT,
             )
@@ -18870,6 +19054,7 @@ class UnifiedPipeline:
         from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.math.equation_latex import process_equation_region
         from socr.math.recover import DEFAULT_MODEL
+        from socr.math.validate_latex import EQUATION_LATEX_PROMPT
 
         # Collect equation_region_detected events grouped by page.
         regions_by_page: dict[int, list[dict]] = {}
@@ -18893,6 +19078,34 @@ class UnifiedPipeline:
         # the consilium local-first mandate (20260615T210537Z-6621).
         model = self.config.clean_equation_model or DEFAULT_MODEL
 
+        def _latch_refusal(reason: str) -> None:
+            """Keep each in-scope page's detected crops as evidence and mark its sidecar
+            skipped, the state ``_phase_assemble`` demotes on (GH-674), so a refusal
+            cannot end SUCCESS unnoticed."""
+            for page_num in sorted(regions_by_page):
+                if page_num not in scope:
+                    continue
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_sidecar_skipped_model_refused",
+                        engine="native+equations",
+                        detail=(
+                            f"{reason}; {len(regions_by_page[page_num])} detected equation "
+                            "crop(s) stay on disk unread; native prose ships unchanged"
+                        ),
+                        data={
+                            "model_id": model,
+                            "model_call_skipped": True,
+                            "skip_reason": reason,
+                            "crop_paths": [r.get("crop_path") for r in regions_by_page[page_num]],
+                        },
+                    )
+                )
+                ps = state.pages.get(page_num)
+                if ps is not None:
+                    ps.equation_sidecar_skipped = True
+
         # GH-154 round 4: this legacy path calls ``process_equation_region``
         # directly and never goes through ``_equation_lane_provider``, so an
         # explicit ``--clean-equation-model qwen3.5:cloud`` (or any other
@@ -18915,7 +19128,19 @@ class UnifiedPipeline:
                         detail=f"{reason}; native prose ships unchanged",
                     )
                 )
+            _latch_refusal(reason)  # #1063: the crops were detected and stay unread
             return
+
+        # #1063: on an OpenAI-compatible run the reader posts to that server under
+        # its served id. A refusal (unconfigured server, a model it does not serve, cloud
+        # policy on the model actually called) is latched the same way.
+        refusal = self._maths_model_refusal(model)
+        if refusal:
+            _latch_refusal(refusal)
+            return
+        model = self._maths_wire_model(model)
+        reader_failures: list[str] = []
+        openai_ocr = self._maths_openai_ocr(EQUATION_LATEX_PROMPT, reader_failures)
 
         accepted_total = 0
         rejected_total = 0
@@ -19010,6 +19235,7 @@ class UnifiedPipeline:
                     crop_path=crop_path,
                     native_text=region_native_text,
                     source_text=region_native_text,
+                    ocr=openai_ocr,
                     model=model,
                     host=self.config.math_model_host
                     if hasattr(self.config, "math_model_host")
