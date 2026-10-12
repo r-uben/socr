@@ -10667,14 +10667,15 @@ class UnifiedPipeline:
 
         Cuts each drawn raster figure out on its own and interleaves the crops with the page's
         native text at their y-position (``interleave_table_regions_into_page``, the machinery
-        tables use). Declines (``None``) whenever the plan declines or any crop fails to render:
-        the whole-page PNG is then the representation, exactly as before. Never raises.
+        tables use). Returns ``(body, plan)`` on the crop route, ``(None, plan)`` when the plan
+        exists but is not accepted (overlapping boxes: whole-page PNG, unread flag kept), or
+        ``(None, None)`` when there is no plan. A render failure is ``(None, None)``. Never raises.
         """
         if figures_dir is None:
-            return None
+            return None, None
         ps = state.pages.get(page_num)
         if ps is None or getattr(ps, "native_rotated_text_shredded", False):
-            return None
+            return None, None
         try:
             import fitz
 
@@ -10687,13 +10688,16 @@ class UnifiedPipeline:
                 page = doc[page_num - 1]
                 plan = plan_figure_page(page)
                 if plan is None:
-                    return None
+                    return None, None
+                if not plan.accepted:
+                    # Overlap (or any other declined plan): keep the unread check.
+                    return None, plan
                 rects = [fitz.Rect(box) for box in plan.boxes]
                 assets = self._render_chart_region_crops(
                     state.handle.path, page_num, rects, figures_dir
                 )
                 if len(assets) != len(rects) or not all(a.rendered for a in assets):
-                    return None
+                    return None, None
                 regions = []
                 for index, rect in enumerate(rects, start=1):
                     placeholder = f"![figure {index}]({chart_region_filename(page_num, index)})"
@@ -10707,7 +10711,7 @@ class UnifiedPipeline:
             return body, plan
         except Exception as exc:  # noqa: BLE001 - the whole-page route is the fallback
             logger.warning("#1053 figure crops failed for p%d: %s", page_num, exc)
-            return None
+            return None, None
 
     def _agentic_chart_asset_page(
         self,
@@ -10738,8 +10742,8 @@ class UnifiedPipeline:
 
         chart_png_ref = ""
         chart_render_failed = False
-        crop_route = self._figure_crop_body(state, page_num, chart_figures_dir)
-        if crop_route is not None:
+        crop_body, crop_plan = self._figure_crop_body(state, page_num, chart_figures_dir)
+        if crop_body is not None:
             pass  # #1053: each figure has its own crop; no whole-page PNG
         elif chart_figures_dir is not None:
             try:
@@ -10793,8 +10797,8 @@ class UnifiedPipeline:
         # cells are emitted one per line too, so real values were hidden under a
         # SUCCESS. Tick labels in the body are clutter; a hidden value is loss.
         native_prose = ps.native_text or ""
-        if crop_route is not None:
-            chart_body, crop_plan = crop_route
+        if crop_body is not None:
+            chart_body = crop_body
         elif chart_png_ref:
             chart_body = (
                 native_prose.rstrip() + "\n\n" + chart_png_ref
@@ -10839,7 +10843,7 @@ class UnifiedPipeline:
         flattened_suspect = table_not_reconstructed_suspect(ps)
         # #1053: a figure crop with no native word inside holds words nothing has read. Status
         # and failure mode only; ``audit_passed`` selects the winner and stays True.
-        unread_figures = crop_plan.unread_figures if crop_route is not None else []
+        unread_figures = crop_plan.unread_figures if crop_plan is not None else []
         ps.figure_words_unread = bool(unread_figures)
         figure_unread_suspect = figure_words_unread_suspect(ps)
         chart_status = (
@@ -10902,7 +10906,7 @@ class UnifiedPipeline:
                 },
             )
         )
-        if crop_route is not None:
+        if crop_plan is not None:
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
@@ -10911,11 +10915,17 @@ class UnifiedPipeline:
                     detail=(
                         f"{len(crop_plan.boxes)} figure crop(s) placed inline; "
                         f"{len(unread_figures)} with no native word inside"
+                        if crop_body is not None
+                        else (
+                            f"{len(crop_plan.boxes)} overlapping figure(s) kept on the "
+                            f"whole-page route; {len(unread_figures)} with no native word inside"
+                        )
                     ),
                     data={
                         "figures": len(crop_plan.boxes),
                         "unread_figures": unread_figures,
                         "words_by_owner": crop_plan.owner_counts(),
+                        "accepted": crop_plan.accepted,
                     },
                 )
             )
@@ -16234,8 +16244,8 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="figure_words_unread_retained",
                         engine="chart_asset",
-                        detail="a figure crop on this page has no native word inside, so any "
-                        "words in its pixels are unread; the native prose and the crop ship "
+                        detail="a figure on this page has no native word inside, so any "
+                        "words in its pixels are unread; the native prose ships "
                         "WARNING (figure_words_unread)",
                     )
                 )
@@ -16541,7 +16551,7 @@ class UnifiedPipeline:
                     )
                 if figure_unread_pages:
                     console.print(
-                        f"  [yellow]{len(figure_unread_pages)} page(s) have a figure crop with "
+                        f"  [yellow]{len(figure_unread_pages)} page(s) have a figure with "
                         "no native word inside; its words are unread "
                         f"(shipped WARNING): {figure_unread_pages}[/yellow]"
                     )
