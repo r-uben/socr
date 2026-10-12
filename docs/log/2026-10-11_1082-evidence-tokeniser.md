@@ -51,3 +51,38 @@ Pre-existing, outside this ticket; worth its own issue.
 
 External copy of src and tests, `socr.__file__` canary, anchors counted == 1: restoring the old plain strip
 fails the leading-dot tests; multiset -> set check fails the count-shortfall guard.
+
+## #1085 — the two leftovers
+
+**Branch:** `fix/issue-1085`. Both changes are in `tables/source_evidence.py`; `strip_presentation` is untouched
+(11 call sites in 7 modules, several born-digital). A test pins its dash fold so a future "fix" there is caught.
+
+1. **Fail-open, em/en dash.** `_tokens_from_plain_text` now drops an evidence numeric token with an en or em dash
+   before its first digit (`_is_dash_led`). The token supports NOTHING, not even the positive `5`: a page printing
+   `—5` may mean "n/a, 5", a range, or a typeset minus, and the text cannot say which, so only "no support" can never
+   create support for a number the page does not print. ASCII `-` and U+2212 keep their sign meaning; a trailing
+   dash (`5—`) is unchanged; the model side is unchanged.
+2. **Fail-closed, dot then punctuation.** After the leading-dot rule, `_strip_word_edges` strips leading punctuation
+   again, so `...(0.025)`, `.(45)`, `.,45`, `."45"`, `.[45]` give `0.025` / `45` as before #1084. `.45` still
+   gives `0.45`.
+
+**Measurement** (181 stored pages; stored `witness_texts` stand in for re-running Tesseract; script
+`scratch/routing-baseline/step-1085/measure.py`, scratch and uncommitted like the #1084 one): passing pages 19 -> 17.
+Forney 1988 p22 still fails; no passing page contains a `model_wrong` token. The two pages lost are
+`2020__bochkay_hales_chava...TAR` p18 (`—11.543***`, `—3.644`, `(—3.53)`) and
+`2023__bauer_swanson...ONLINEAPPENDIX` p3 (eight `—0.xxx` values): Tesseract read typeset minuses as em dashes, and the
+model's negatives were probably right. This is the price of the fail-open fix; recovering them is step 2 (re-read from a
+crop), not a string rule.
+
+**Mutants** (external copy of src and tests, `socr.__file__` canary, anchors counted == 1): restoring dash support fails
+the dash-led tests (2 failed); removing the second strip fails the `_strip_word_edges` cases and the `0.025` end-to-end
+test (6 failed).
+
+**Review P0s (Astra), fixed.** (1) Dropping dash-led tokens could empty the bundle and activate
+`_corroborate_via_distrusted_layer`, whose parser folds `—5` and ignores header rows. Now a dropped dash-led number is
+counted (`SourceEvidenceBundle.ambiguous_numeric`) and keeps `has_content_evidence` true, so the page fails as
+unsupported, not unwitnessed; the rescue DECLINES when the layer has any dash-led number (round 3: deleting the words hid an
+omitted row and let `corroborate_rows` tolerate one unsupported number in fifty; the shared parser and its tolerance are
+untouched, the tolerance is #1087). (2) `_is_dash_led` decodes entities (and a whole-token markdown link) to a
+fixed point before checking, so `&amp;amp;mdash;5` / `&#8212;5` / `[—5](u)` are caught. The header-row blind spot of the
+rescue is reachable on origin/main with no #1085 code: untrusted layer `-5`, silent OCR witness, header 999 passes.

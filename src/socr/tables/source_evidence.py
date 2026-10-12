@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from socr.tables.native_verifier import (
     _normalize_cell,
     _numeric_multiset_from_tokens,
+    _unwrap_markdown_link,
     is_numeric_token,
 )
 from socr.tables.reconcile import find_table_blocks
@@ -216,6 +217,9 @@ class SourceEvidenceBundle:
     #: Free text from the failing witness (an exception type, a probe message),
     #: for the audit trail. Never parsed.
     witness_detail: str = ""
+    #: #1085: dash-led numbers the witness read but that support nothing. Counts
+    #: as a reading (``has_content_evidence``), never as support.
+    ambiguous_numeric: int = 0
 
     @property
     def no_reading(self) -> bool:
@@ -318,14 +322,53 @@ def _strip_word_edges(word: str) -> str:
     """
     word = word.rstrip(".,;:!?()[]\"'").lstrip(",;:!?()[]\"'")
     if word[:1] == "." and not word[1:2].isdigit():
-        word = word.lstrip(".")
+        # #1085: punctuation can sit behind the dots (``...(0.025)``, ``.[45]``).
+        word = word.lstrip(".").lstrip(",;:!?()[]\"'")
     return word
+
+
+#: En/em dash: ``strip_presentation`` folds them to a minus, but on a printed page
+#: they are as often an "n/a" or range dash as a sign.
+_AMBIGUOUS_DASHES: str = "\N{EN DASH}\N{EM DASH}"
+
+
+def _is_dash_led(token: str) -> bool:
+    """True when an en/em dash precedes the first digit of an evidence token.
+
+    #1085: ``strip_presentation`` (shared with born-digital paths, left alone)
+    turns ``\u20145`` into ``-5``, so a page printing an em dash before 5 would
+    support a model ``-5`` it never printed as negative. Such a token supports
+    nothing: neither ``-5`` nor ``5``, since a dash-then-number layout does not
+    show which was printed. ASCII ``-`` and U+2212 keep their sign meaning.
+    """
+    # Decode to a fixed point: the shared numeric parser decodes again after
+    # ``_normalize_cell``, so ``&amp;amp;mdash;5`` reaches it as ``&mdash;5``.
+    # The same parser unwraps a whole-token markdown link first.
+    while True:
+        decoded = _unwrap_markdown_link(html.unescape(token))
+        if decoded == token:
+            break
+        token = decoded
+    first_digit = next((i for i, ch in enumerate(token) if ch.isdigit()), len(token))
+    return any(ch in _AMBIGUOUS_DASHES for ch in token[:first_digit])
 
 
 def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
     """Parse numeric multiset and content tokens from plain text."""
+    numeric, content, _ = _tokens_and_dash_led(text)
+    return numeric, content
+
+
+def _tokens_and_dash_led(text: str) -> tuple[Counter, set[str], int]:
+    """As ``_tokens_from_plain_text``, plus how many dash-led numbers were dropped.
+
+    #1085: a dropped dash-led number is still proof the witness READ a number,
+    so the caller must not treat the page as unwitnessed (that routes it into
+    the distrusted-layer rescue).
+    """
     if not text.strip():
-        return Counter(), set()
+        return Counter(), set(), 0
+    dash_led = 0
 
     raw_numeric: list[str] = []
     content: set[str] = set()
@@ -340,12 +383,15 @@ def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
         # unsupported. See ``_normalize_cell``.
         normalized = _normalize_cell(word)
         if is_numeric_token(normalized):
-            raw_numeric.append(normalized)
+            if _is_dash_led(normalized):
+                dash_led += 1
+            else:
+                raw_numeric.append(normalized)
         for m in _CONTENT_TOKEN_RE.finditer(normalized):
             token = _content_token(m.group(0))
             if token is not None:
                 content.add(token)
-    return _numeric_multiset_from_tokens(raw_numeric), content
+    return _numeric_multiset_from_tokens(raw_numeric), content, dash_led
 
 
 def _merge_evidence(
@@ -495,13 +541,15 @@ def build_scanned_evidence(
 
     numeric: Counter = Counter()
     content: set[str] = set()
+    ambiguous = 0
 
     if include_text_layer:
         try:
             plain = page.get_text() or ""
         except Exception:
             plain = ""
-        n_plain, c_plain = _tokens_from_plain_text(plain)
+        n_plain, c_plain, a_plain = _tokens_and_dash_led(plain)
+        ambiguous += a_plain
         numeric, content = _merge_evidence(numeric, content, n_plain, c_plain)
 
     table_regions_detected = False
@@ -521,12 +569,13 @@ def build_scanned_evidence(
                 continue
             crop_text, crop_state, crop_detail = read_witness(pix)
             record(crop_state, crop_detail)
-            n_crop, c_crop = _tokens_from_plain_text(crop_text)
+            n_crop, c_crop, a_crop = _tokens_and_dash_led(crop_text)
+            ambiguous += a_crop
             numeric, content = _merge_evidence(numeric, content, n_crop, c_crop)
     except Exception as exc:
         logger.debug("locate_tables evidence failed: %s", exc)
 
-    if not numeric and not content:
+    if not numeric and not content and not ambiguous:
         try:
             import fitz
 
@@ -540,13 +589,14 @@ def build_scanned_evidence(
             pix = page.get_pixmap(matrix=mat)
             page_text, page_state, page_detail = read_witness(pix)
             record(page_state, page_detail)
-            n_page, c_page = _tokens_from_plain_text(page_text)
+            n_page, c_page, a_page = _tokens_and_dash_led(page_text)
+            ambiguous += a_page
             numeric, content = _merge_evidence(numeric, content, n_page, c_page)
         except Exception as exc:
             logger.debug("full-page evidence OCR failed: %s", exc)
             record(WITNESS_RENDER_ERROR, f"{type(exc).__name__}: {exc}")
 
-    has_content_evidence = bool(numeric) or bool(content)
+    has_content_evidence = bool(numeric) or bool(content) or bool(ambiguous)
     witness_state = _resolve_witness_state(witness_states)
     return SourceEvidenceBundle(
         numeric=numeric,
@@ -555,6 +605,7 @@ def build_scanned_evidence(
         table_regions_detected=table_regions_detected,
         witness_state=witness_state,
         witness_detail=witness_details.get(witness_state, ""),
+        ambiguous_numeric=ambiguous,
     )
 
 
@@ -758,6 +809,11 @@ def verify_scanned_table(
     return result
 
 
+def _word_is_dash_led_number(word) -> bool:
+    text = _normalize_cell(str(word[4]))
+    return is_numeric_token(text) and _is_dash_led(text)
+
+
 def _corroborate_via_distrusted_layer(page, output_text: str) -> SourceEvidenceResult | None:
     """#658b rescue: corroborate a candidate's rows against a DISTRUSTED text
     layer, for a page where pixel evidence produced nothing to judge by.
@@ -775,6 +831,13 @@ def _corroborate_via_distrusted_layer(page, output_text: str) -> SourceEvidenceR
     except Exception:
         words = []
     if not words:
+        return None
+
+    # #1085: the layer's dash-led numbers are as ambiguous as the OCR's, and the
+    # shared row parser folds them to a minus. Deleting those words would hide a
+    # band (an omitted row goes unnoticed) or tolerate an unsupported number, so
+    # the rescue declines and the page fails closed as if it did not apply.
+    if any(_word_is_dash_led_number(w) for w in words):
         return None
 
     from socr.tables.row_corroboration import corroborate_rows
