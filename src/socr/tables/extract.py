@@ -273,7 +273,9 @@ def _ollama_generation_canary(host: str, model: str, timeout: float) -> bool:
         return False
 
 
-def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool:
+def _openai_generation_canary(
+    base_url: str, model: str, timeout: float, *, require_reply: bool = False
+) -> bool:
     """The OpenAI-compatible (vLLM/SGLang) sibling of ``_ollama_generation_canary``.
 
     Same reasoning: a chat-completion request with ``max_tokens: 1`` queues
@@ -313,8 +315,13 @@ def _openai_generation_canary(base_url: str, model: str, timeout: float) -> bool
             label=f"openai {safe_host_label(base_url)} generation canary ({model})",
         )
         raise_for_status_redacted(resp)
+        if require_reply:
+            # #1063: a 2xx is not a reading. Require a non-empty text reply.
+            content = resp.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                return False
         return True
-    except _PROBE_ERRORS:
+    except (*_PROBE_ERRORS, ValueError, KeyError, IndexError, TypeError):
         return False
 
 
@@ -324,6 +331,7 @@ def probe_openai_server_idle(
     *,
     model: str | None = None,
     generation_timeout: float | None = None,
+    require_reply: bool = False,
 ) -> bool:
     """Return True if an OpenAI-compatible VLM server (vLLM/SGLang) can serve now.
 
@@ -354,6 +362,7 @@ def probe_openai_server_idle(
         base_url,
         model or _default_canary_model(),
         generation_timeout if generation_timeout is not None else _CROP_DEADLINE_FLOOR_S,
+        require_reply=require_reply,
     )
 
 

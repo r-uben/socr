@@ -49,6 +49,15 @@ class _Pipe:
     def _equation_lane_backend_addressable(self, profile) -> bool:
         return self._maths
 
+    # #1063: scripted OpenAI-compatible state; None = the Ollama transport.
+    served: str | None = None
+
+    def _maths_openai_served_model(self, backend=None):
+        return self.served
+
+    def _maths_model_refusal(self, lane_model: str) -> str:
+        return ""
+
     # The run-level lane predicates are the REAL pipeline's, applied to this config.
     def _equation_region_lane_enabled(self) -> bool:
         return UnifiedPipeline._equation_region_lane_enabled(self._stub)

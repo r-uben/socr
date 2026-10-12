@@ -27,6 +27,8 @@ EXPECTED_RESUME_KINDS = frozenset(
         "equation_region_reading_unverifiable",
         "equation_sidecar_refused",
         "equation_sidecar_skipped_no_page_output",
+        # #1063 added this kind: a detected crop the clean-equation reader was refused on.
+        "equation_sidecar_skipped_model_refused",
         "judge_wedged_circuit_open",
         "native_encoding_hygiene_suspect",
         "native_math_font_unrecovered",
@@ -67,4 +69,5 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    assert len(EXPECTED_RESUME_KINDS) == 48
+    # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused.
+    assert len(EXPECTED_RESUME_KINDS) == 49

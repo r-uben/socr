@@ -1152,7 +1152,9 @@ def test_r2_f4_same_model_on_another_backend_is_not_a_provider(tmp_path: Path) -
     from socr.core.config import EngineType
     from socr.core.providers import PROFILE_QWEN_LOCAL
 
-    state, spy = _lane_run(tmp_path / "backend", profiles=[PROFILE_QWEN_LOCAL], qwen_backend="vllm")
+    state, spy = _lane_run(
+        tmp_path / "backend", profiles=[PROFILE_QWEN_LOCAL], qwen_backend="gemini"
+    )
     assert spy.calls == 0, "a vLLM-resolved profile authorised an Ollama-transport call"
 
     state2, spy2 = _lane_run(
@@ -1378,9 +1380,11 @@ def test_r3_f4_a_config_resolved_vllm_backend_is_not_a_provider(tmp_path: Path) 
     from socr.core.config import PipelineConfig
     from socr.core.providers import PROFILE_QWEN_LOCAL, resolved_provenance
 
-    cfg = PipelineConfig(agentic=True, quiet=True, equation_region_lane=True, qwen_backend="vllm")
+    # #1063: vLLM is now addressable (tests/test_gh1063_maths_readers_openai.py); this
+    # pin keeps the refusal for a backend neither transport can reach.
+    cfg = PipelineConfig(agentic=True, quiet=True, equation_region_lane=True, qwen_backend="gemini")
     # The premise, asserted rather than assumed.
-    assert resolved_provenance(PROFILE_QWEN_LOCAL, cfg)[0] == "vllm"
+    assert resolved_provenance(PROFILE_QWEN_LOCAL, cfg)[0] == "gemini"
     assert PROFILE_QWEN_LOCAL.backend == "ollama"
 
     from socr.pipeline.orchestrator import UnifiedPipeline
@@ -1430,11 +1434,10 @@ def test_r3_f4_auto_resolves_by_environment_not_by_ambient_luck(
 
     cfg = PipelineConfig(agentic=True, quiet=True, equation_region_lane=True, qwen_backend="auto")
     profile, reason = UnifiedPipeline(cfg)._equation_lane_provider([PROFILE_QWEN_LOCAL])
-    if exported:
-        assert profile is None, "auto + VLLM_BASE_URL resolves to vLLM and cannot be addressed"
-        assert "backend" in reason
-    else:
-        assert profile is PROFILE_QWEN_LOCAL, reason
+    # Both arms are addressable since #1063; they differ in the transport, not in
+    # whether the lane reads. ``auto`` + VLLM_BASE_URL resolves to the OpenAI route.
+    assert profile is PROFILE_QWEN_LOCAL, reason
+    assert (UnifiedPipeline(cfg)._maths_openai_served_model() is not None) is exported
 
 
 def test_r3_f5_the_root_entry_is_never_persisted_completed_without_its_latch(
@@ -1613,7 +1616,7 @@ def test_r4_f5_a_stale_root_entry_cannot_survive_a_failed_terminal_write(
 def test_r4_n2_an_unaddressable_backend_is_a_settled_refusal(tmp_path: Path) -> None:
     """N2: a refusal decided by configuration must not latch for retry.
 
-    `qwen_backend=vllm` is a supported deployment, not a transient outage. If it
+    `qwen_backend=gemini` is a configured deployment, not a transient outage. If it
     sets the latch, every rerun refuses the document skip, restores the same
     page, and writes the latch again -- idempotent resume is defeated forever
     for that configuration.
@@ -1623,11 +1626,11 @@ def test_r4_n2_an_unaddressable_backend_is_a_settled_refusal(tmp_path: Path) -> 
     out_dir = root / "out"
     spy = _ModelSpy(_LATEX_CONTAINED)
 
-    first = _process_run(pdf, out_dir, provider=True, spy=spy, qwen_backend="vllm")
+    first = _process_run(pdf, out_dir, provider=True, spy=spy, qwen_backend="gemini")
     assert spy.calls == 0
     assert first.status.value != "skipped"
 
-    second = _process_run(pdf, out_dir, provider=True, spy=spy, qwen_backend="vllm")
+    second = _process_run(pdf, out_dir, provider=True, spy=spy, qwen_backend="gemini")
     assert spy.calls == 0
     assert second.status.value == "skipped", (
         "a configuration-settled refusal keeps the document permanently unskippable"
