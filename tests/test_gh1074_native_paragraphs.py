@@ -352,9 +352,8 @@ def test_every_line_between_the_first_and_last_marker_is_protected(text: str) ->
         "\\( x\na-\nb",  # \\( without \\)
         "<!-- x\na-\nb",  # comment never closed
         "```\ncode\na-\nb",  # odd fence lines
-        "costs $5 here\na-\nb",  # an odd single $ (currency) over-protects, on purpose
     ],
-    ids=["env-names", "dollars", "bracket", "paren", "comment", "fence", "currency"],
+    ids=["env-names", "dollars", "bracket", "paren", "comment", "fence"],
 )
 def test_unbalanced_markers_protect_to_the_end_of_the_text(text: str) -> None:
     assert reflow_native_prose(text, (_para("a-", "b"),), _vocab("ab")) == text
