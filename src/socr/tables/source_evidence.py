@@ -24,6 +24,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from socr.tables.image_locate import DETECT_DPI as _TEXT_LAYER_INK_DPI
 from socr.tables.native_verifier import (
     _normalize_cell,
     _numeric_multiset_from_tokens,
@@ -368,6 +369,210 @@ def _evidence_table_blocks(markdown: str):
     ]
 
 
+def page_has_page_covering_raster(page) -> bool:
+    """True when embedded images cover at least ``RASTER_DOMINANCE_RATIO`` of the page.
+
+    GH-1099 / GH-35-FU: the same signal ``BornDigitalDetector`` uses to treat a
+    baked-in OCR text layer as untrusted (GH-163). Pages below the threshold are
+    born-digital for evidence: the PDF's own characters are the witness.
+
+    A coverage computation that raises is treated as image-dominant (fail closed),
+    never as born-digital (#1099 r3).
+    """
+    from socr.core.born_digital import BornDigitalDetector
+
+    try:
+        coverage = BornDigitalDetector._raster_coverage(page)
+    except Exception:
+        logger.debug("raster coverage failed; treating page as scan for evidence", exc_info=True)
+        return True
+    return coverage >= BornDigitalDetector.RASTER_DOMINANCE_RATIO
+
+
+def _text_dict_spans(page):
+    """Yield text spans from ``get_text("dict")`` (text blocks only)."""
+    try:
+        page_dict = page.get_text("dict") or {}
+    except Exception:
+        return
+    for block in page_dict.get("blocks", ()):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if isinstance(span, dict):
+                    yield span
+
+
+def text_layer_span_is_visible(span: dict) -> bool:
+    """True when a text-layer span is visibly rendered (#961 / #1099).
+
+    Uses ``get_text("dict")`` span ``alpha`` (0 = invisible / render mode 3 on
+    typical PDFs). ``get_texttrace()`` is avoided: repeated calls across many
+    pages can trip a PyMuPDF refcount defect in ``find_tables`` later in-process.
+    """
+    return span.get("alpha", 255) != 0
+
+
+def _invisible_text_layer_bboxes(page) -> list[tuple[float, float, float, float]]:
+    """Bounding boxes of invisible text spans (#961); tests / diagnostics only."""
+    boxes: list[tuple[float, float, float, float]] = []
+    for span in _text_dict_spans(page):
+        if text_layer_span_is_visible(span):
+            continue
+        bbox = span.get("bbox")
+        if bbox and len(bbox) >= 4:
+            boxes.append((bbox[0], bbox[1], bbox[2], bbox[3]))
+    return boxes
+
+
+def _text_layer_ink_matrix(page):
+    """Render matrix for per-glyph ink clips (rotation-aware, GH-304b)."""
+    import fitz
+
+    from socr.core.born_digital import upright_rotation_for
+
+    rotation = upright_rotation_for(page)
+    mat = fitz.Matrix(_TEXT_LAYER_INK_DPI / 72, _TEXT_LAYER_INK_DPI / 72)
+    if rotation != 0:
+        mat.prerotate(rotation)
+    return mat
+
+
+def _pixmap_sample_has_ink(pix) -> bool:
+    samples = pix.samples
+    n = pix.n
+    for i in range(0, len(samples), n):
+        if samples[i] < 255:
+            return True
+        if n > 1 and samples[i + 1] < 255:
+            return True
+        if n > 2 and samples[i + 2] < 255:
+            return True
+    return False
+
+
+def _glyph_bbox_has_ink(
+    page,
+    mat,
+    bbox: tuple[float, float, float, float],
+    *,
+    page_pix=None,
+) -> bool:
+    """True when the glyph box contains a non-white pixel on a white-backed render."""
+    import fitz
+
+    rect = fitz.Rect(bbox)
+    if rect.is_empty or rect.get_area() <= 0:
+        return False
+    if page_pix is not None:
+        device = fitz.Rect(bbox) * mat
+        x0 = max(0, int(device.x0))
+        y0 = max(0, int(device.y0))
+        x1 = min(page_pix.width, int(device.x1))
+        y1 = min(page_pix.height, int(device.y1))
+        if x1 <= x0 or y1 <= y0:
+            return False
+        samples = page_pix.samples
+        width = page_pix.width
+        n = page_pix.n
+        for y in range(y0, y1):
+            row = y * width * n
+            for x in range(x0, x1):
+                i = row + x * n
+                if samples[i] < 255:
+                    return True
+                if n > 1 and samples[i + 1] < 255:
+                    return True
+                if n > 2 and samples[i + 2] < 255:
+                    return True
+        return False
+    try:
+        clip_pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
+    except Exception:
+        logger.debug("glyph ink clip render failed", exc_info=True)
+        return False
+    return _pixmap_sample_has_ink(clip_pix)
+
+
+def _plain_text_from_visible_chars(page, mat, page_pix=None) -> str:
+    """Visible, ink-backed characters from ``rawdict``, grouped like ``get_text("words")``.
+
+    Walk block → line → span → char in ``rawdict`` order.  Start a new word on a
+    whitespace character or at each line boundary (same delimiters ``get_text("words")``
+    uses for born-digital text: it does not split merely because the PDF put the
+    next glyph in another span).  Invisible (``alpha==0``) or inkless characters
+    are dropped without splitting the surrounding word.  No geometric gap rule.
+    """
+    try:
+        raw = page.get_text("rawdict") or {}
+    except Exception:
+        return ""
+    words: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            words.append("".join(current))
+            current.clear()
+
+    for block in raw.get("blocks", ()):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if not isinstance(span, dict):
+                    continue
+                alpha = span.get("alpha", 255)
+                for ch in span.get("chars", ()):
+                    if not isinstance(ch, dict):
+                        continue
+                    bbox = ch.get("bbox")
+                    char = ch.get("c")
+                    if not bbox or len(bbox) < 4 or not char:
+                        continue
+                    if not text_layer_span_is_visible({"alpha": alpha}):
+                        continue
+                    if char.isspace():
+                        flush()
+                        continue
+                    if not _glyph_bbox_has_ink(page, mat, bbox, page_pix=page_pix):
+                        continue
+                    current.append(char)
+            flush()
+    return " ".join(words)
+
+
+def _tokens_from_page_text_layer(page) -> tuple[Counter, set[str], int]:
+    """Tokenise the visibly rendered text layer for born-digital evidence (#1099).
+
+    Character-level: drop ``rawdict`` chars with span ``alpha==0``, then drop
+    chars with no non-white pixel in a ``DETECT_DPI`` colour render (white-on-white,
+    text under a blank/white image). Re-group surviving chars into words per line.
+    """
+    try:
+        mat = _text_layer_ink_matrix(page)
+    except Exception:
+        logger.debug("text-layer ink matrix failed", exc_info=True)
+        return Counter(), set(), 0
+    page_pix = None
+    from socr.core.born_digital import upright_rotation_for
+
+    if upright_rotation_for(page) == 0:
+        try:
+            import fitz
+
+            page_pix = page.get_pixmap(matrix=mat, alpha=False)
+        except Exception:
+            logger.debug("text-layer ink page render failed", exc_info=True)
+    try:
+        plain = _plain_text_from_visible_chars(page, mat, page_pix)
+    except Exception:
+        logger.debug("visible char assembly failed", exc_info=True)
+        plain = ""
+    return _tokens_and_dash_led(plain)
+
+
 def collect_table_tokens(markdown: str) -> TableTokens | None:
     """Extract numeric multiset and content-label tokens from markdown tables."""
     blocks = _evidence_table_blocks(markdown)
@@ -428,6 +633,22 @@ def _strip_word_edges(word: str) -> str:
 _AMBIGUOUS_DASHES: str = "\N{EN DASH}\N{EM DASH}"
 
 
+_C0_BEFORE_DIGIT_HEAD = re.compile(r"^[\x00-\x08\x0b\x0c\x0e-\x1f] ?")
+
+
+def _is_control_byte_led(word: str) -> bool:
+    """True when a C0 control byte sits before the first digit (#990 / #1099 r3).
+
+    Like #1085 dash-led tokens: the witness read a number, but the byte cannot
+    establish sign, so the token supports neither ``-x`` nor ``x``.
+    """
+    decoded = html.unescape(word)
+    first_digit = next((i for i, ch in enumerate(decoded) if ch.isdigit()), len(decoded))
+    if first_digit >= len(decoded):
+        return False
+    return bool(_C0_BEFORE_DIGIT_HEAD.match(decoded[:first_digit]))
+
+
 def _is_dash_led(token: str) -> bool:
     """True when an en/em dash precedes the first digit of an evidence token.
 
@@ -478,7 +699,7 @@ def _tokens_and_dash_led(text: str) -> tuple[Counter, set[str], int]:
         # unsupported. See ``_normalize_cell``.
         normalized = _normalize_cell(word)
         if is_numeric_token(normalized):
-            if _is_dash_led(normalized):
+            if _is_dash_led(normalized) or _is_control_byte_led(word):
                 dash_led += 1
             else:
                 raw_numeric.append(normalized)
@@ -498,6 +719,19 @@ def _merge_evidence(
     merged_numeric = numeric + new_numeric
     merged_content = content | new_content
     return merged_numeric, merged_content
+
+
+def _max_merge_numeric(left: Counter, right: Counter) -> Counter:
+    """Per-token maximum when two witnesses read the same page (#1099 r3).
+
+    Summing would let one printed glyph support duplicate model cells (text layer
+    plus OCR of the same glyph). Crop/full-page merges inside
+    ``build_scanned_evidence`` still use ``_merge_evidence`` (additive).
+    """
+    merged = Counter(left)
+    for tok, count in right.items():
+        merged[tok] = max(merged.get(tok, 0), count)
+    return merged
 
 
 def _render_crop_pixmap(page, bbox: tuple[float, float, float, float], dpi: int):
@@ -590,15 +824,78 @@ def classical_ocr_pixmap(pix) -> str:
     return classical_ocr_with_state(pix)[0]
 
 
+def _merge_source_bundles(
+    text_layer: SourceEvidenceBundle,
+    pixel_witness: SourceEvidenceBundle,
+) -> SourceEvidenceBundle:
+    """Union two evidence bundles (#1099 r2: born-digital text + crop/full-page OCR)."""
+    numeric = _max_merge_numeric(text_layer.numeric, pixel_witness.numeric)
+    content = set(text_layer.content) | set(pixel_witness.content)
+    states = [s for s in (text_layer.witness_state, pixel_witness.witness_state) if s]
+    witness_state = _resolve_witness_state(states) if states else WITNESS_NOT_ATTEMPTED
+    detail = pixel_witness.witness_detail or text_layer.witness_detail
+    ambiguous = text_layer.ambiguous_numeric + pixel_witness.ambiguous_numeric
+    has_content = (
+        bool(numeric)
+        or bool(content)
+        or bool(ambiguous)
+        or text_layer.has_content_evidence
+        or pixel_witness.has_content_evidence
+    )
+    return SourceEvidenceBundle(
+        numeric=numeric,
+        content=frozenset(content),
+        has_content_evidence=has_content,
+        table_regions_detected=text_layer.table_regions_detected
+        or pixel_witness.table_regions_detected,
+        witness_state=witness_state,
+        witness_detail=detail,
+        ambiguous_numeric=ambiguous,
+    )
+
+
+def build_born_digital_evidence(
+    page,
+    *,
+    ocr_image_fn: OcrImageFn | None = None,
+) -> SourceEvidenceBundle:
+    """Born-digital table evidence: PDF text layer plus pixel/table OCR (#1099 r2).
+
+    Merging ``include_text_layer=False`` pixel evidence avoids the GH-163 scan
+    exclusion while still letting prose on the page satisfy ``has_content_evidence``
+    and block spurious full-page OCR when the only gap is an image-embedded table.
+    """
+    n_text, c_text, amb_text = _tokens_from_page_text_layer(page)
+    text_bundle = SourceEvidenceBundle(
+        numeric=n_text,
+        content=frozenset(c_text),
+        has_content_evidence=bool(n_text) or bool(c_text) or bool(amb_text),
+        table_regions_detected=False,
+        witness_state=WITNESS_NOT_ATTEMPTED,
+        ambiguous_numeric=amb_text,
+    )
+    pixel_bundle = build_scanned_evidence(
+        page,
+        ocr_image_fn=ocr_image_fn,
+        include_text_layer=False,
+    )
+    return _merge_source_bundles(text_bundle, pixel_bundle)
+
+
 def build_scanned_evidence(
     page,
     *,
     ocr_image_fn: OcrImageFn | None = None,
     include_text_layer: bool = True,
+    text_layer_from_words: bool = False,
+    allow_full_page_ocr: bool = True,
 ) -> SourceEvidenceBundle:
     """Build local non-generative evidence for a scanned page.
 
-    ``include_text_layer=False`` drops ``page.get_text()`` from the evidence.
+    ``include_text_layer=False`` drops the PDF text layer from the evidence.
+
+    ``text_layer_from_words=True`` reads the layer via ``get_text("words")`` (for
+    rotated born-digital pages) instead of a single ``get_text()`` blob.
 
     GH-163 review (cubic P1): the text layer is the FIRST source merged in, and
     the full-page raster branch below only fires when nothing else produced any
@@ -639,11 +936,14 @@ def build_scanned_evidence(
     ambiguous = 0
 
     if include_text_layer:
-        try:
-            plain = page.get_text() or ""
-        except Exception:
-            plain = ""
-        n_plain, c_plain, a_plain = _tokens_and_dash_led(plain)
+        if text_layer_from_words:
+            n_plain, c_plain, a_plain = _tokens_from_page_text_layer(page)
+        else:
+            try:
+                plain = page.get_text() or ""
+            except Exception:
+                plain = ""
+            n_plain, c_plain, a_plain = _tokens_and_dash_led(plain)
         ambiguous += a_plain
         numeric, content = _merge_evidence(numeric, content, n_plain, c_plain)
 
@@ -670,7 +970,7 @@ def build_scanned_evidence(
     except Exception as exc:
         logger.debug("locate_tables evidence failed: %s", exc)
 
-    if not numeric and not content and not ambiguous:
+    if allow_full_page_ocr and not numeric and not content and not ambiguous:
         try:
             import fitz
 
@@ -835,9 +1135,10 @@ def verify_scanned_table(
     hallucinated table could be corroborated by a hallucinated text layer.
 
     ``False`` means the caller classified the page as NOT trusted-native, and
-    the evidence check runs however many words the layer contains -- and that
-    layer is excluded from the evidence, so the table cannot be corroborated by
-    the reading under suspicion. ``None`` means the caller cannot tell, and the
+    the evidence check runs however many words the layer contains. GH-163 still
+    excludes that layer when a page-covering raster is present (scan + baked-in
+    OCR); born-digital pages without such a raster use the PDF text layer as
+    evidence (#1099). ``None`` means the caller cannot tell, and the
     pre-GH-163 word-presence behaviour is kept -- an unknown classification must
     not silently start failing pages closed.
 
@@ -870,11 +1171,21 @@ def verify_scanned_table(
             deferred=True,
         )
 
-    # An explicitly UNTRUSTED layer must not corroborate the model's table
-    # (cubic P1 on #512). Only pixel-derived readings count for such a page.
-    bundle = build_scanned_evidence(
-        page,
-        ocr_image_fn=ocr_image_fn,
-        include_text_layer=native_trusted is not False,
-    )
+    if native_trusted is False:
+        # GH-163 for image-dominant scans; born-digital text + crop OCR (#1099 / r2).
+        if page_has_page_covering_raster(page):
+            bundle = build_scanned_evidence(
+                page,
+                ocr_image_fn=ocr_image_fn,
+                include_text_layer=False,
+            )
+        else:
+            bundle = build_born_digital_evidence(page, ocr_image_fn=ocr_image_fn)
+    else:
+        bundle = build_scanned_evidence(
+            page,
+            ocr_image_fn=ocr_image_fn,
+            include_text_layer=native_trusted is not False,
+            text_layer_from_words=False,
+        )
     return verify_table_tokens(bundle, tokens)

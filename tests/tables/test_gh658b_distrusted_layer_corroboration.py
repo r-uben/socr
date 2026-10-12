@@ -39,6 +39,18 @@ CANDIDATE_ROWS = [
 CANDIDATE_TABLE = _md_table(["Counterparty", "Amount", "Drawn"], CANDIDATE_ROWS)
 
 
+def _stamp_full_page_raster(page) -> None:
+    import io
+
+    from PIL import Image
+
+    w, h = int(page.rect.width * 3), int(page.rect.height * 3)
+    img = Image.new("L", (w, h), color=245)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    page.insert_image(page.rect, stream=buf.getvalue())
+
+
 def _empty_pixel_witness(_pix) -> str:
     """Stands in for a host with no working classical-OCR reading at all --
     the pixels are looked at and nothing comes back. Deterministic, and
@@ -51,6 +63,7 @@ def _page_with_matching_layer(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
+    _stamp_full_page_raster(page)
     for i, row in enumerate(CANDIDATE_ROWS):
         page.insert_text((72, 100 + i * 20), " ".join(row), fontsize=10)
     pdf = tmp_path / "scan.pdf"
@@ -65,6 +78,7 @@ def _page_with_disagreeing_layer(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
+    _stamp_full_page_raster(page)
     for i in range(3):
         page.insert_text((72, 100 + i * 20), f"Some Other Line {i} 999.9 888.8", fontsize=10)
     pdf = tmp_path / "scan.pdf"
