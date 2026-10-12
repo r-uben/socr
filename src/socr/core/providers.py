@@ -433,6 +433,9 @@ def profile_by_model(model: str) -> ProviderProfile | None:
         if prof.model == model:
             return prof
     if model in RETIRED_GEMINI_MODELS:
+        # GH-1086 (#1060): price at today's PROFILE_GEMINI rates so a run recorded
+        # under a retired model name does not read as $0. That is a cost floor for
+        # aggregation, not a claim about what Google billed for that model id.
         return PROFILE_GEMINI
     return None
 
