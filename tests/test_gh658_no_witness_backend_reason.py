@@ -930,7 +930,12 @@ def _run_ladder(tmp_path: Path, attempts: list):
     pdf = tmp_path / "doc.pdf"
     pdf.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
-    doc.new_page(width=500, height=700)
+    page = doc.new_page(width=500, height=700)
+    # #1100: a page with no ink is blank and never reaches route_page. This
+    # fixture is a scanned-table stand-in, so it needs one non-white pixel.
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 2, 2), False)
+    pix.set_rect(pix.irect, (200, 200, 200))
+    page.insert_image(fitz.Rect(72, 72, 74, 74), pixmap=pix)
     doc.save(str(pdf))
     doc.close()
 

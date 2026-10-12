@@ -242,6 +242,10 @@ _RESUME_REPLAYED: dict[str, str] = {
         "GH-916: emitted by _plan_native_table_first (upright and rotated); the fault is "
         "a standing property of the native grid and records why native was rejected"
     ),
+    "blank_page": (
+        "#1100: emitted by the page loop's blank-page step, which a terminal resumed "
+        "page skips; the document note and CLI line read this event"
+    ),
 }
 
 
@@ -9231,10 +9235,15 @@ class UnifiedPipeline:
         # are failed at the top of the page loop and never routed, rendered,
         # planned or judged -- each of those would open the page and raise.
         unloadable_pages = {pn for pn, ps in state.pages.items() if ps.load_error}
+        # #1100: no text and no ink — never a model. Detected here so a
+        # blank-only document with an empty ladder still completes (the page
+        # is not an OCR page), and so resume can skip a SUCCESS blank page.
+        blank_pages = self._detect_blank_pages(state, unloadable_pages)
         math_recovery_pages = {
             page_num
             for page_num, ps in sorted(state.pages.items())
             if page_num not in unloadable_pages
+            and page_num not in blank_pages
             and self._is_corrupt_math_recovery_page(page_num, ps)
         }
         # P4-R: the equation-region lane is likewise a region lane, not a
@@ -9247,6 +9256,7 @@ class UnifiedPipeline:
             for page_num, ps in sorted(state.pages.items())
             if page_num not in math_recovery_pages
             and page_num not in unloadable_pages
+            and page_num not in blank_pages
             and self._is_equation_region_lane_page(page_num, ps)
         }
         ocr_pages: list[int] = []
@@ -9255,6 +9265,7 @@ class UnifiedPipeline:
                 page_num not in math_recovery_pages
                 and page_num not in equation_lane_pages
                 and page_num not in unloadable_pages
+                and page_num not in blank_pages
                 and not self._is_agentic_trusted_native(page_num, ps)
             ):
                 ocr_pages.append(page_num)
@@ -9310,7 +9321,7 @@ class UnifiedPipeline:
         chart_only_pages: set[int] = set()
         chart_mixed_pages: set[int] = set()
         for pn, ps in sorted(state.pages.items()):
-            if pn in resumed_pages or pn in unloadable_pages:
+            if pn in resumed_pages or pn in unloadable_pages or pn in blank_pages:
                 continue
             try:
                 if not self._is_chart_asset_page(pn, ps, state.handle.path):
@@ -9770,9 +9781,13 @@ class UnifiedPipeline:
                                 )
                                 ps.attempts.append(_fallback)
                                 ps.best_output = _fallback
+                # #1100: no text and no ink — ship the note, never a model.
+                if page_num in blank_pages:
+                    with clock.span("extract"):
+                        self._agentic_blank_page(state, page_num, ps)
                 # GH-271: region-only corrupt-equation lane. It owns the page before
                 # whole-page OCR and keeps surrounding native prose untouched.
-                if page_num in math_recovery_pages:
+                elif page_num in math_recovery_pages:
                     with clock.span("equations"):
                         self._agentic_math_recovery_page(
                             state, page_num, ps, output_dir, chart_winner_pages, _chart_figures_dir
@@ -11011,6 +11026,67 @@ class UnifiedPipeline:
                 data={"png_saved": bool(ref), "png_path": ref},
             )
         )
+
+    @staticmethod
+    def _shipped_blank_pages(state: DocumentState) -> list[int]:
+        """Pages whose final disposition is the blank note, not detection-time ``is_blank``."""
+        from socr.core.blank_page import blank_page_marker
+
+        note = blank_page_marker()
+        return [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.best_output and (p.best_output.text or "").strip() == note
+        ]
+
+    def _detect_blank_pages(self, state: DocumentState, unloadable_pages: set[int]) -> set[int]:
+        """#1100: pages with no text layer and no ink, or empty if the PDF cannot be opened."""
+        from socr.core.blank_page import is_blank_page
+        from socr.core.pdf import open_pdf
+
+        found: set[int] = set()
+        try:
+            with open_pdf(str(state.handle.path)) as doc:
+                for page_num, ps in state.pages.items():
+                    if page_num in unloadable_pages or (ps.native_text or "").strip():
+                        continue
+                    try:
+                        if is_blank_page(doc[page_num - 1]):
+                            found.add(page_num)
+                            ps.is_blank = True
+                    except Exception as exc:  # noqa: BLE001 - fail closed: not blank
+                        logger.debug("blank page: p%d lookup failed: %s", page_num, exc)
+        except Exception as exc:  # noqa: BLE001 - fail closed: no page is blank
+            logger.debug("blank page: document open failed: %s", exc)
+        return found
+
+    def _agentic_blank_page(self, state: DocumentState, page_num: int, ps: PageState) -> None:
+        """Ship a blank page as SUCCESS with the house marker; no model, no error."""
+        from socr.core.audit_log import AuditEvent
+        from socr.core.blank_page import blank_page_marker
+
+        ps.is_blank = True
+        out = PageOutput(
+            page_num=page_num,
+            text=blank_page_marker(),
+            status=PageStatus.SUCCESS,
+            engine="blank",
+            audit_passed=True,
+            failure_mode=FailureMode.NONE,
+            cost_usd=0.0,
+        )
+        ps.attempts.append(out)
+        ps.best_output = out
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="blank_page",
+                engine="blank",
+                detail="no text layer and no ink; shipped empty, no model",
+            )
+        )
+        if not self.config.quiet:
+            console.print(f"  p{page_num}: [cyan]blank page[/cyan] (no model)")
 
     def _fail_unloadable_page(
         self, state: DocumentState, page_num: int, ps: PageState, output_dir: Path
@@ -15603,6 +15679,11 @@ class UnifiedPipeline:
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
 
+        # #1100: SUCCESS blank pages. Informational only — they do not demote
+        # the document. Detection-time ``is_blank`` is not the disposition: a
+        # blank page past a cascade halt ships a failure marker, not the note.
+        blank_shipped_pages = self._shipped_blank_pages(state)
+
         # A reconstructed or historical state may contain a whole-document
         # attempt (page_num=0) without per-page winners. Treat a passing one as
         # covering the document for status calculation.
@@ -16065,6 +16146,7 @@ class UnifiedPipeline:
             or label_unverified_pages
             or ditto_unresolved_pages
             or scanned_prose_recovered_pages
+            or blank_shipped_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -16247,6 +16329,16 @@ class UnifiedPipeline:
                         detail="a figure on this page has no native word inside, so any "
                         "words in its pixels are unread; the native prose ships "
                         "WARNING (figure_words_unread)",
+                    )
+                )
+            for n in blank_shipped_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="blank_page_retained",
+                        engine="blank",
+                        detail="no text layer and no ink; the page shipped empty "
+                        "([socr: blank page]), no model",
                     )
                 )
             for n in native_only_distrust_pages:
@@ -16554,6 +16646,11 @@ class UnifiedPipeline:
                         f"  [yellow]{len(figure_unread_pages)} page(s) have a figure with "
                         "no native word inside; its words are unread "
                         f"(shipped WARNING): {figure_unread_pages}[/yellow]"
+                    )
+                if blank_shipped_pages:
+                    console.print(
+                        f"  [cyan]{len(blank_shipped_pages)} blank page(s): no text and no "
+                        f"ink; shipped empty, no model: {blank_shipped_pages}[/cyan]"
                     )
                 if corrupt_math_hybrid_pages:
                     console.print(
@@ -17519,6 +17616,9 @@ class UnifiedPipeline:
             doc_extras = dict(run_extras)
             if state.table_counts is not None:
                 doc_extras["tables"] = dict(state.table_counts)
+            blank_meta = self._shipped_blank_pages(state)
+            if blank_meta:
+                doc_extras["blank_pages"] = blank_meta
             doc_meta = _LatchedDocMetadata(meta, doc_extras) if doc_extras else meta
             write_doc_metadata(doc_dir, rel_key, doc_meta)
 

@@ -301,6 +301,8 @@ This list is the kinds present at the time of writing; the code is the authority
 - `table_not_reconstructed_retained`: the document-level mirror, emitted at assemble when the native text of such a page is what shipped.
 - `figure_crops`: a figure-crop plan was built (#1053); `data` carries the figure count, the figures with no native word inside, the word count per owner (prose, caption, `figure:N`), and `accepted`. `accepted` false means overlapping boxes declined the crop route: the page keeps the whole-page PNG and the unread flag.
 - `figure_words_unread_retained`: the document-level mirror of `figure_words_unread`, emitted at assemble.
+- `blank_page`: the page has no text layer and no ink (#1100). It ships `[socr: blank page]` (house marker, not a failure marker) at `success`, engine `blank`; no model ran. Resume skips it. `metadata.json` lists `blank_pages` when any shipped.
+- `blank_page_retained`: the document-level mirror, emitted at assemble.
 
 ### Scanned-table evidence (`pipeline/agentic.py`, `tables/source_evidence.py`)
 

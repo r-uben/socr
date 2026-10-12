@@ -73,6 +73,9 @@ class PageState:
     #: A non-empty value means the page was never read and ships as a FAILED
     #: ``UNREADABLE_INPUT`` page -- it must never be routed, rendered or judged.
     load_error: str = ""
+    #: #1100: no text layer and no ink. Set each run by the blank-page gate; a
+    #: SUCCESS page with ``engine="blank"`` is the durable signal on resume.
+    is_blank: bool = False
     #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page.
     #: Set by ``_phase_agentic``; the page ships demoted and non-terminal so a re-run
     #: reprocesses it. Not persisted: a resumed page is, by definition, one that ran.
