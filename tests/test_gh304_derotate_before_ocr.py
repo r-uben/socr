@@ -170,6 +170,7 @@ _MUTATE_ONLY_SITES = {
     ("pipeline/orchestrator.py", "_render_adjudication_crop"),
     ("tables/extract.py", "_render_crop"),
     ("tables/source_evidence.py", "_render_crop_pixmap"),
+    ("tables/source_evidence.py", "_text_layer_ink_matrix"),
     ("tables/source_evidence.py", "build_scanned_evidence"),
     ("tables/witness.py", "_render_crop_safe"),
 }

@@ -29,6 +29,10 @@ class _LayerPage:
     def get_text(self, mode: str = "text", *args, **kwargs):
         return self._words if mode == "words" else self._text
 
+    def get_image_info(self):
+        r = self._page.rect
+        return [{"bbox": (r.x0, r.y0, r.x1, r.y1)}]
+
     def __getattr__(self, name):
         return getattr(self._page, name)
 

@@ -100,19 +100,16 @@ def test_lane_refused_born_digital_page_is_trusted(tmp_path) -> None:
     assert judge._native_trusted(1) is True
 
 
-def test_refused_page_does_not_enter_source_evidence_gate(tmp_path) -> None:
-    """Difference-pin: re-applying the a7dce6c distrust changes the route."""
+def test_refused_page_distrusted_still_accepts_via_text_layer(tmp_path) -> None:
+    """GH-1099: distrust routes through source evidence, but born-digital text passes."""
     judge, state = _judge_for_refused_page(tmp_path)
     decision_kept, kinds_kept = _assess(judge, state)
 
-    # Re-apply the reverted behaviour: lane-refused pages are distrusted.
     original = judge._native_trusted
     judge._native_trusted = lambda pn: False if pn == 1 else original(pn)
-    _decision_distrusted, kinds_distrusted = _assess(judge, state)
+    decision_distrusted, kinds_distrusted = _assess(judge, state)
 
     assert not (kinds_kept & _SOURCE_EVIDENCE_KINDS), kinds_kept
     assert decision_kept.accept is True, decision_kept.reason
-    assert kinds_distrusted & _SOURCE_EVIDENCE_KINDS, (
-        "with the distrust re-applied the page must enter the source-evidence "
-        "gate; otherwise this test cannot tell the two behaviours apart"
-    )
+    assert decision_distrusted.accept is True, decision_distrusted.reason
+    assert "source_evidence_table_reject" not in kinds_distrusted

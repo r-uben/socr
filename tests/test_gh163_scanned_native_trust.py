@@ -55,6 +55,19 @@ HALLUCINATED = "\n".join(
 )
 
 
+def _stamp_full_page_raster(page) -> None:
+    """GH-35-FU / GH-1099: image-dominant page so the OCR layer stays untrusted."""
+    import io
+
+    from PIL import Image
+
+    w, h = int(page.rect.width * 3), int(page.rect.height * 3)
+    img = Image.new("L", (w, h), color=245)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    page.insert_image(page.rect, stream=buf.getvalue())
+
+
 def _page_with_untrusted_ocr_layer(tmp_path: Path):
     """A page whose text layer has words, none of them the table's numbers.
 
@@ -65,6 +78,7 @@ def _page_with_untrusted_ocr_layer(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
+    _stamp_full_page_raster(page)
     for i in range(12):
         page.insert_text((72, 100 + i * 16), f"rn1 garbled ocr line {i} lll 000", fontsize=10)
     pdf = tmp_path / "scan.pdf"
@@ -214,6 +228,7 @@ class TestTheSuspectLayerCannotCorroborate:
         tmp_path.mkdir(parents=True, exist_ok=True)
         doc = fitz.open()
         page = doc.new_page(width=612, height=792)
+        _stamp_full_page_raster(page)
         page.insert_text((72, 100), "growth 0.8172", fontsize=10)
         page.insert_text((72, 120), "inflation -0.2946", fontsize=10)
         pdf = tmp_path / "scan.pdf"
@@ -267,6 +282,7 @@ def test_an_untrusted_page_reaches_the_classical_ocr_path(tmp_path: Path) -> Non
     """
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
+    _stamp_full_page_raster(page)
     page.insert_text((72, 100), "growth 0.8172", fontsize=10)
     tmp_path.mkdir(parents=True, exist_ok=True)
     pdf = tmp_path / "scan.pdf"
