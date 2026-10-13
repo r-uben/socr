@@ -434,3 +434,23 @@ The full list of ship-gate predicates, with what each one checks, is in the modu
 docstring of `src/socr/tables/ship_gate.py`. Predicate names are the module
 constants there (`SIGN_DETACHED`, `ROW_ORDER`, and so on) and appear in
 `native_ship_gate_deferred` events under `data.predicates`.
+
+## 7. The acceptance meter (`socr-acceptance`)
+
+```
+uv run socr-acceptance <run_dir> --inputs corpus/manifest.csv --report acceptance.json
+```
+
+CPU only. Prints `METER = <violating pages> of <input pages>` (target 0), per-class
+counts, a surface-agreement section, and writes the page ids per class to the JSON
+report. Exit 1 when the meter or the surface section is non-zero. The meter is the
+union of violating page ids; classes overlap.
+
+Every input page must be CHECKED (a named check ran and passed: judged `qwen` page, a
+blank page with its event, a native page with a coverage witness, ...) or MARKED (a
+recognised mark line in the page `.md`, repeated in that page's `## Page N` section of
+the document `.md`). HTML comments, text in code fences and the blank receipt are not
+marks. The rules per lane and the exact classes are in the docstring of
+`src/socr/benchmark/acceptance.py`; the decision log is
+`docs/log/2026-10-13_1130-acceptance-meter.md`. Native and chart SUCCESS pages need
+witnesses that do not exist yet (#1050), so they all count as violations today.
