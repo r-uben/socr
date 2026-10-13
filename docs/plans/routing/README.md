@@ -46,7 +46,7 @@ shipped native in the baseline now get a whole-page read, mostly because of the 
 - **Built:** native prose ships as paragraphs, with line-end hyphens rejoined only when the same document
   shows the joined word (#1074, merged as #1077).
 - **Check on native text:** missing-text step 1 is built (#1050, 2026-10-13). Every trusted-native page
-  (`native` / `native+math`) gets a model-free ink-vs-visible-text-layer verdict (`passed` / `flagged` /
+  (`native` / `native+math` / `chart_asset`) gets a model-free ink-vs-visible-text-layer verdict (`passed` / `flagged` /
   `unknown`). A flagged page keeps its native prose, ships WARNING / `text_ink_unread`, and links
   `figures/uncovered_text_pN_rI.png`. Repeated ink is flagged like any other uncovered text, so a logo
   page ships a warning. No model call, no OCR of crops (that is step 2). Wrong text (#1051) is still

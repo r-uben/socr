@@ -3884,11 +3884,24 @@ def _select_page_output_tagged(
         # ticket is about.
         fallback_text = _native_text_with_appends(p)
         if text_ink_unread_suspect(p):
-            from socr.core.text_coverage import uncovered_text_marker
+            from socr.core.text_coverage import (
+                uncovered_text_marker,
+                uncovered_text_marker_no_image,
+            )
 
             mark = uncovered_text_marker(page_num)
-            if mark not in (fallback_text or ""):
-                fallback_text = (fallback_text or "").rstrip() + "\n\n" + mark + "\n"
+            bo_text = (p.best_output.text or "") if p.best_output is not None else ""
+            have = fallback_text or ""
+            if mark in bo_text:
+                fallback_text = bo_text
+            elif mark not in have:
+                # apply returned without a crop (best_output was already gone)
+                p.text_ink_unread = False
+                p.text_coverage_unknown = True
+                p.text_coverage_verdict = "unknown"
+                no_img = uncovered_text_marker_no_image(page_num)
+                if no_img not in have:
+                    fallback_text = have.rstrip() + "\n\n" + no_img + "\n"
         return PageOutput(
             page_num=page_num,
             text=fallback_text,

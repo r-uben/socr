@@ -8,10 +8,12 @@ more pages (131 vs Fable's 106) with more furniture. Fable's cuts come from
 600 corpus pages / 1.19 M covered glyphs (seed 20261013).
 
 No model call. No OCR of crops. A page is ``passed``, ``flagged`` or
-``unknown``. There is no repeat-ink suppression: a logo flagged by
-mistake is an unneeded warning; a label suppressed by mistake is
-silent loss. A row is a word if it meets Astra's page-local
-``min_run_components`` *or* Fable's corpus median word width.
+``unknown``. Ink is local-contrast in either polarity (dark-on-light
+or light-on-dark), chosen from the page's own mid-grey. There is no
+repeat-ink suppression: a logo flagged by mistake is an unneeded
+warning; a label suppressed by mistake is silent loss. A row is a
+word if it meets Astra's page-local ``min_run_components`` *or*
+Fable's corpus median word width.
 """
 
 from __future__ import annotations
@@ -85,11 +87,17 @@ VERDICT_FLAGGED = "flagged"
 VERDICT_UNKNOWN = "unknown"
 
 UNCOVERED_TEXT_NOTE = "uncovered text — see image"
+UNCOVERED_TEXT_NOTE_NO_IMAGE = "uncovered text — image unavailable"
 
 
 def uncovered_text_marker(page_num: int) -> str:
     """Visible mark, same shape as #1048's ``[page N failed: … — see image]``."""
     return f"[page {page_num}: {UNCOVERED_TEXT_NOTE}]"
+
+
+def uncovered_text_marker_no_image(page_num: int) -> str:
+    """Fallback mark when apply never saved a region crop."""
+    return f"[page {page_num}: {UNCOVERED_TEXT_NOTE_NO_IMAGE}]"
 
 
 def uncovered_text_image_ref(page_num: int, region_i: int) -> str:
@@ -136,14 +144,29 @@ def _render_gray(page):
 
 
 def _ink_mask(gray):
-    """Local-contrast ink: darker than the local mean by more than ADAPT_C."""
+    """Local-contrast ink in either polarity, same ADAPT_BLOCK / ADAPT_C.
+
+    Dark-on-light is the inverted adaptive (ink darker than the local mean
+    by more than ADAPT_C). Light-on-dark is the same rule on the uninverted
+    page. The page's own mid-grey (min+max)/2 chooses which polarity a
+    pixel uses: a dark chart field is below mid-grey, so white lettering
+    is ink; paper is above it, so a light halo around dark glyphs is not.
+    Union of both polarities everywhere thickens those glyphs and clears
+    real rows.
+    """
     import cv2
 
     inv = cv2.bitwise_not(gray)
-    bw = cv2.adaptiveThreshold(
+    dark = cv2.adaptiveThreshold(
         inv, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, ADAPT_BLOCK, -ADAPT_C
     )
-    return bw > 0
+    light = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, ADAPT_BLOCK, -ADAPT_C
+    )
+    local = cv2.boxFilter(gray, ddepth=cv2.CV_32F, ksize=(ADAPT_BLOCK, ADAPT_BLOCK), normalize=True)
+    mid = (float(np.min(gray)) + float(np.max(gray))) / 2.0
+    use_light = local < mid
+    return np.where(use_light, light > 0, dark > 0)
 
 
 def _to_pix(rect, page, mat):

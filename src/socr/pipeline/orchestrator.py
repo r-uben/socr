@@ -11434,6 +11434,8 @@ class UnifiedPipeline:
         mode = FailureMode.TEXT_INK_UNREAD
         if figure_words_unread_suspect(ps):
             mode = FailureMode.FIGURE_WORDS_UNREAD
+        if bo.failure_mode is not FailureMode.NONE:
+            mode = bo.failure_mode
         self._decorate_coverage_winner(
             ps, bo, text=new_text, status=PageStatus.WARNING, failure_mode=mode
         )

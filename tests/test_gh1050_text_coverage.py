@@ -21,6 +21,7 @@ from socr.core.text_coverage import (
     analyze_page,
     coverage_for_document,
     uncovered_text_marker,
+    uncovered_text_marker_no_image,
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables import image_locate
@@ -38,7 +39,7 @@ def test_reused_constants_match_image_locate() -> None:
     assert _MAX_THICK_PT == image_locate._MAX_THICK_PT
 
 
-def _glyph_row(page, y: float, n: int = 8) -> None:
+def _glyph_row(page, y: float, n: int = 8, color=(0, 0, 0)) -> None:
     """Path-only 'letters': stroked boxes, no text layer.
 
     Solid fills have fill=1.0 and sit above the corpus row-fill p99 (0.917).
@@ -49,7 +50,7 @@ def _glyph_row(page, y: float, n: int = 8) -> None:
     widths = (3.0, 4.0, 5.0, 3.5, 4.5, 5.5, 3.2, 4.8)
     for i in range(n):
         w = widths[i % len(widths)]
-        page.draw_rect(fitz.Rect(x, y, x + w, y + 6.0), color=(0, 0, 0), width=0.6)
+        page.draw_rect(fitz.Rect(x, y, x + w, y + 6.0), color=color, width=0.6)
         x += w + 2.0
 
 
@@ -66,6 +67,25 @@ def _vector_unread_pdf(path: Path) -> Path:
     page.insert_text((72, 80), "A clean paragraph of native body text on this page.")
     _glyph_row(page, 200.0)
     _glyph_row(page, 212.0)
+    page.insert_text((72, 520), "A second paragraph sits below the unread marks.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _light_on_dark_pdf(path: Path) -> Path:
+    """White path-glyphs on a filled dark field, plus native body text.
+
+    Dark-only adaptive ink misses the letters (or treats the field as one
+    solid) and the page can pass. Both polarities, chosen from the page
+    mid-grey, keep the white strokes as ink.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 80), "A clean paragraph of native body text on this page.")
+    page.draw_rect(fitz.Rect(60, 180, 420, 280), color=(0, 0, 0), fill=(0, 0, 0))
+    _glyph_row(page, 200.0, color=(1, 1, 1))
+    _glyph_row(page, 212.0, color=(1, 1, 1))
     page.insert_text((72, 520), "A second paragraph sits below the unread marks.")
     doc.save(path)
     doc.close()
@@ -286,6 +306,28 @@ def test_analyze_page_sees_vector_glyphs(tmp_path: Path) -> None:
     assert rec.regions
 
 
+@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
+def test_light_on_dark_vector_is_flagged(tmp_path: Path, providers) -> None:
+    """White vector lettering on a dark field must not ship silent SUCCESS."""
+    pdf = _light_on_dark_pdf(tmp_path / "lod.pdf")
+    doc = fitz.open(pdf)
+    rec = analyze_page(doc[0])
+    doc.close()
+    assert rec.verdict == "flagged"
+    assert rec.regions
+    on = _run(_pipeline(check_text_coverage=True), pdf, tmp_path / "on", providers)
+    off = _run(_pipeline(check_text_coverage=False), pdf, tmp_path / "off", providers)
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert off.status is DocumentStatus.SUCCESS
+    assert on.status != off.status
+    sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
+    rec = json.loads(sidecar.read_text())
+    assert rec["status"] == PageStatus.WARNING.value
+    assert rec["failure_mode"] == FailureMode.TEXT_INK_UNREAD.value
+    assert rec["text_coverage"] == "flagged"
+    assert uncovered_text_marker(1) in (on.pages[0].text or "")
+
+
 def test_figure_labels_above_caption_stay_flagged(tmp_path: Path) -> None:
     pdf = _figure_above_caption_pdf(tmp_path / "fig.pdf")
     doc = fitz.open(pdf)
@@ -329,7 +371,9 @@ def test_wide_short_run_kept_by_word_width(tmp_path: Path) -> None:
     page.draw_rect(fitz.Rect(97, 212, 119, 218), color=(0, 0, 0), width=0.6)
     doc.save(pdf)
     doc.close()
-    rec = analyze_page(fitz.open(pdf)[0])
+    held = fitz.open(pdf)
+    rec = analyze_page(held[0])
+    held.close()
     assert rec.verdict == "flagged"
     assert rec.regions
     from socr.core.text_coverage import WORD_W_P50_PX
@@ -625,3 +669,64 @@ def test_actual_table_fallback_coverage(tmp_path: Path, native_only: bool, unkno
         assert mark in (on.pages[0].text or "")
         assert mark not in (off.pages[0].text or "")
         assert list((tmp_path / "on").rglob("uncovered_text_p1_r*.png"))
+
+
+def test_fallback_without_crop_does_not_promise_image(tmp_path: Path) -> None:
+    """Fallback must not say 'see image' when apply never saved a crop."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState, PageState
+
+    pdf = _vector_unread_pdf(tmp_path / "fb.pdf")
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.native_text = "A clean paragraph of native body text on this page."
+    ps.best_output = None
+    ps.text_ink_unread = True
+    ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+    winner, _prov = _select_page_output_tagged(state, 1)
+    assert uncovered_text_marker(1) not in (winner.text or "")
+    assert uncovered_text_marker_no_image(1) in (winner.text or "")
+    assert "see image" not in (winner.text or "")
+    assert winner.failure_mode is FailureMode.TEXT_COVERAGE_UNKNOWN
+    assert winner.status is PageStatus.WARNING
+    assert ps.text_coverage_unknown is True
+    assert ps.text_ink_unread is False
+
+
+def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path) -> None:
+    """Coverage keeps NATIVE_MINUS_AS_DIGIT and still adds the mark."""
+    from socr.core.document import DocumentHandle
+    from socr.core.result import PageOutput
+    from socr.core.state import DocumentState, PageState
+
+    pdf = _vector_unread_pdf(tmp_path / "minus.pdf")
+    doc = fitz.open(pdf)
+    cov = analyze_page(doc[0])
+    doc.close()
+    assert cov.verdict == "flagged"
+    minus = PageOutput(
+        page_num=1,
+        text="Clean chart prose with a signed number the layer cannot be trusted on.",
+        status=PageStatus.WARNING,
+        engine="chart_asset",
+        audit_passed=True,
+        failure_mode=FailureMode.NATIVE_MINUS_AS_DIGIT,
+    )
+    ps = PageState(page_num=1)
+    ps.attempts = [minus]
+    ps.best_output = minus
+    ps.text_ink_unread = True
+    ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+    pipe = _pipeline()
+    pipe._text_coverage_pages = {1: cov}
+    pipe._scan_root = tmp_path
+    pipe._apply_text_coverage(state, 1, ps, tmp_path / "out")
+    assert ps.best_output is not None
+    assert ps.best_output.failure_mode is FailureMode.NATIVE_MINUS_AS_DIGIT
+    assert uncovered_text_marker(1) in (ps.best_output.text or "")
+    assert ps.text_coverage_verdict == "flagged"
+    assert ps.text_ink_unread is True
