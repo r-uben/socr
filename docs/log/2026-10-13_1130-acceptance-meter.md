@@ -1,7 +1,7 @@
 # 2026-10-13 #1130: the corpus acceptance meter
 
 Code: `src/socr/benchmark/acceptance.py`, entry point `socr-acceptance`, tests
-`tests/test_acceptance_meter.py`. Spec: `scratch/routing-baseline/thinkers/meter-spec.md`
+`tests/test_acceptance_meter.py`. Spec: the thinkers' consolidated meter spec (not committed),
 including "Corrections after round 3".
 
 ## Rules as built
@@ -39,8 +39,8 @@ including "Corrections after round 3".
 
 ## Mark emitters found (src/)
 
-`page_failed_marker` (no usable OCR output), D3/TR-3 floors `[page N failed: unverifiable table
-...]`, rotated-shredded, invisible-OCR-layer-unread, `invalid table emission` (manifest.py),
+`page_failed_marker` (no usable OCR output), D3/TR-3 floors `[page N failed: unverifiable table`
+and its siblings, rotated-shredded, invisible-OCR-layer-unread, `invalid table emission` (manifest.py),
 `UNVERIFIED_TABLE_MARK` (`> [table unverified:`), `disputed_table_mark`, `page_unchecked_mark`,
 `kept_table_flag_note` (`[page N: flagged table kept`), the "unverifiable table — kept a model
 reading" note (manifest.py ~704, via `d3_superseded_note`), `SCANNED_PROSE_RECOVERED_FLAG` and
@@ -49,7 +49,7 @@ reading" note (manifest.py ~704, via `d3_superseded_note`), `SCANNED_PROSE_RECOV
 grammar and `[page N: uncovered text — see image]` (#1050). Caveat: emitters are many; I
 matched the ones above by reading `grep` output, not by running every code path.
 
-## Measurement (CPU, scratch/routing-baseline/exec/1130/)
+## Measurement (CPU, run 23117187 and the previous run)
 
 Run 23117187: METER = 12,165 of 17,155 (spec: 12,165; Fable 12,098 + 64 + 3). CHECKED 2,930
 qwen + 8 blank; MARKED 1,605 error + 447 warning. native_unchecked 7,571, chart 919,
@@ -68,7 +68,7 @@ real gap between surfaces, but the spec's comparison cannot pass until the journ
 verdict record) carries the final mode. 0 disposition and 0 page/document mismatches.
 `metadata_counts_missing`: 394 documents (the failed one has no pages).
 
-## Mutants (scratch/.../exec/1130/mutants.txt)
+## Mutants (external copies of src, tests and pyproject; not committed)
 
 (a) HTML comments counted as marks: fails the multi-line-comment case only. The one-line
 comment case passes under the mutant because `<!--` prefixes the line and no family matches
@@ -83,7 +83,7 @@ the new witnesses; the `uncovered text` and canonical-grammar families are only 
 
 ## Round 2 (Astra's review, 2026-10-13)
 
-Seven items, each with a test and an external mutant (`exec/1130/mutants-r2/`, 12 mutants,
+Seven items, each with a test and an external mutant (12 mutants in external copies,
 canary `socr.__file__` inside the copy, anchor `count == 1`; every one killed, control 50 pass).
 
 1. P0 shipped bytes: CHECKED needs `winning_output.text` == page `.md` with generated mark
@@ -142,7 +142,7 @@ Re-measurement. METER 23117187: 12,165 -> 12,815 (+650). `runs_main`: 12,146 -> 
 The rise is exactly `mark_not_at_top` (650 / 654): pages whose mark exists but sits below the
 first line, now unmarked by rule. `document_not_assembly` is 0 on both runs: every shipped
 document equals the assembly of its pages. Surface 0; journal diagnostic unchanged.
-Mutants: `exec/1130/mutants-r3/` (15, all killed, control 56 pass).
+Mutants: 15 external, all killed, control 56 pass.
 
 ## Round 4 (Astra's third review: our own visibility rules were still wrong)
 
@@ -172,6 +172,32 @@ Re-measurement: 23117187 METER 12,815 (unchanged from round 3), `runs_main` 12,8
 `document_not_assembly` are all 0 on both runs; `mark_not_at_top` 650 / 654. So no real page
 trips a new class. Measured: the parser path takes about 40 s (23117187) and 60 s (main).
 Not measured: pages whose first block is a table or list that starts with a mark.
-Mutants: `exec/1130/mutants-r4/` (17, all killed, control 74 pass). One mutant (dropping a
+Mutants: 17 external, all killed, control 74 pass. One mutant (dropping a
 "block has text" guard) survived because the guard was dead: reference definitions yield no
 tokens at all. I deleted the guard instead of keeping dead code.
+
+## Round 5 (cubic review of the pull request)
+
+Five findings; each was reproduced on the code as it stood before the fix.
+
+1. P1, real. The text normaliser stripped leading whitespace, so a fragment indented four
+   spaces (a code block when rendered) compared equal to the unindented judged text. Now only
+   trailing whitespace per line and surrounding blank lines are ignored. Test and mutant added.
+2. P2, real. `docs/OUTPUT.md` now states the position rule: the first rendered block of the
+   page, and the first rendered block under the page's heading in the document.
+3. P2, real. The wrapped-mark tests had prose before the wrapper, so a parser that rendered
+   the wrapped mark would not have been caught. The wrapper now opens the page. A mutant
+   that renders the content of HTML blocks and fences is killed by six of those cases (the
+   inline and multi-line comment, the quoted fence, both fence styles, the unclosed comment).
+   The link-text and image-alt cases are paragraphs, not wrappers; they are killed by a mutant
+   that accepts a block when any one line is a mark.
+4. P2, real. `stem:*` was a document-level id counted inside the page union, and a non-canonical
+   file name was too. Both are now document-level findings: listed in the report and the text
+   output, they fail the exit status, and they are not in the METER union. The real page ids of
+   an unlisted document stay `unaccounted`.
+5. P3, real. Scratch paths and the elided mutant heading are gone from this log; evidence is
+   described in words and counts.
+
+Re-measurement: no change. METER 12,815 (23117187) and 12,800 (previous run);
+`shipped_bytes_differ` still 1 page on each, `unlisted_document` and `noncanonical_page_file`
+0 on both. Five external mutants, all killed, control 79 tests pass.

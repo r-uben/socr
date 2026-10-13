@@ -443,14 +443,18 @@ uv run socr-acceptance <run_dir> --inputs corpus/manifest.csv --report acceptanc
 
 CPU only. Prints `METER = <violating pages> of <input pages>` (target 0), per-class
 counts, a surface-agreement section, and writes the page ids per class to the JSON
-report. Exit 1 when the meter or the surface section is non-zero. The meter is the
-union of violating page ids; classes overlap.
+report. Exit 1 when the meter, the surface section or a document-level finding (an unlisted
+document, a non-canonical file in `pages/`) is non-zero. The meter is the union of violating
+page ids; classes overlap, and document-level findings are not page ids.
 
 Every input page must be CHECKED (a named check ran and passed: judged `qwen` page, a
-blank page with its event, a native page with a coverage witness, ...) or MARKED (a
-recognised mark line in the page `.md`, repeated in that page's `## Page N` section of
-the document `.md`). HTML comments, text in code fences and the blank receipt are not
-marks. The rules per lane and the exact classes are in the docstring of
+blank page with its event, a native page with a coverage witness, ...) or MARKED. MARKED is
+position-fixed: one or more recognised mark lines make up the FIRST rendered block of the
+page `.md` (a paragraph, or a quote opening with one), judged by the CommonMark parser, and
+the same mark is the first rendered block under that page's `## Page N` heading in the
+document `.md`. A mark in a comment, a code fence, a reference definition, or lower on the
+page is not a mark, and neither is the blank receipt. The document `.md` must also equal the
+assembly of its page fragments. The rules per lane and the exact classes are in the docstring of
 `src/socr/benchmark/acceptance.py`; the decision log is
 `docs/log/2026-10-13_1130-acceptance-meter.md`. Native and chart SUCCESS pages need
 witnesses that do not exist yet (#1050), so they all count as violations today.

@@ -243,11 +243,12 @@ def test_qwen_success_without_a_completed_judge_is_unchecked(tmp_path: Path) -> 
     "hidden",
     ["<!-- {m} -->", "<!--\n{m}\n-->", "```\n{m}\n```", "~~~\n{m}\n~~~", "> ```\n> {m}\n> ```"],
 )
-def test_a_mark_below_the_top_does_not_count(tmp_path: Path, hidden: str) -> None:
-    text = "Prose.\n\n" + hidden.format(m=MARK)
+def test_a_wrapped_mark_at_the_very_top_does_not_count(tmp_path: Path, hidden: str) -> None:
+    # the wrapper IS the first block: a parser that rendered its content would mark the page
+    text = hidden.format(m=MARK) + "\n\nProse."
     rep = run_meter(tmp_path, {"d": [page(text, status="warning", failure_mode="audit_failed")]})
     assert ids(rep, acc.WARNING_UNMARKED) == {"d:1"}
-    # control: the same line at the top is a mark, so position is what decided it
+    # control: the bare line at the top is a mark, so the wrapper is what decided it
     top = MARK + "\n\nProse."
     rep2 = run_meter(
         tmp_path / "ctl", {"d": [page(top, status="warning", failure_mode="audit_failed")]}
@@ -461,7 +462,7 @@ HIDDEN = {
 
 @pytest.mark.parametrize("hidden", list(HIDDEN))
 def test_hidden_marks_do_not_make_a_page_marked(tmp_path: Path, hidden: str) -> None:
-    text = "Prose.\n\n" + HIDDEN[hidden].format(m=MARK)
+    text = HIDDEN[hidden].format(m=MARK)  # the wrapper opens the page: nothing precedes it
     rep = run_meter(tmp_path, {"d": [page(text, status="warning", failure_mode="audit_failed")]})
     assert ids(rep, acc.WARNING_UNMARKED) == {"d:1"}
 
@@ -690,3 +691,52 @@ def test_hidden_pages_are_those_until_the_next_visible_heading(tmp_path: Path) -
     ]
     rep = run_meter(tmp_path, {"d": pages})
     assert ids(rep, acc.DOCUMENT_PAGE_HIDDEN) == {"d:3", "d:4"}
+
+
+# ---- round 5 (cubic review) -----------------------------------------------------------
+
+
+def test_indented_fragment_is_not_the_judged_text(tmp_path: Path) -> None:
+    indented = page("Judged text.")
+    indented["text"] = indented["doc_text"] = "    Judged text."  # renders as a code block
+    rep = run_meter(tmp_path, {"d": [page("Judged text."), indented]})
+    assert ids(rep, acc.SHIPPED_BYTES_DIFFER) == {"d:2"}
+
+
+def test_surrounding_blank_lines_and_trailing_spaces_are_still_ignored(tmp_path: Path) -> None:
+    p = page("Judged text.")
+    p["text"] = p["doc_text"] = "\n\nJudged text.   \n\n"
+    p["sidecar"]["winning_output"]["text"] = "Judged text."
+    assert run_meter(tmp_path, {"d": [p]}).violating_ids() == set()
+
+
+def test_unlisted_document_is_reported_and_gates_but_is_not_a_page(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    write_doc(root, "listed", [page("Text.")])
+    write_doc(root, "stray", [page("One."), page("Two.")])
+    rep = measure(root, {"listed": 1})
+    assert rep.violations[acc.UNLISTED_DOCUMENT] == ["stray:*"]
+    assert rep.violating_ids() == {"stray:1", "stray:2"}  # real pages only, no "stray:*"
+    assert rep.document_level_count() == 1
+    assert acc.main_exit_code(rep) == 1
+
+
+def test_unlisted_document_with_no_pages_still_fails_the_gate_with_meter_zero(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    write_doc(root, "listed", [page("Text.")])
+    write_failed_doc(root, "stray", None)
+    rep = measure(root, {"listed": 1})
+    assert rep.violating_ids() == set()
+    assert acc.main_exit_code(rep) == 1
+
+
+def test_noncanonical_file_names_are_document_level(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    d = write_doc(root, "d", [page("Text.")])
+    (d / "pages" / "extra.txt").write_text("x")
+    rep = measure(root, {"d": 1})
+    assert rep.violating_ids() == set()
+    assert rep.document_level_count() == 1
+    assert acc.main_exit_code(rep) == 1

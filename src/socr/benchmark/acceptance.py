@@ -4,7 +4,8 @@
 
 Prints ``METER = <violations> of <input pages>``: the number of input pages that are
 neither CHECKED nor MARKED, or that carry a contradiction. Target 0. Exit status 1 when
-the meter or the surface-agreement section is non-zero.
+the meter, the surface-agreement section or a document-level finding (an unlisted document,
+a non-canonical file in ``pages/``) is non-zero.
 
 Rule
 ----
@@ -114,6 +115,10 @@ DOCUMENT_NOT_ASSEMBLY = "document_not_assembly"
 DOCUMENT_PAGE_HIDDEN = "document_page_hidden"
 DOCUMENT_MARK_NOT_FIRST = "document_mark_not_first"
 PAGE_LEAKS_RAW_HTML = "page_leaks_raw_html"
+
+#: Findings about a document or a file, not about a page: reported, and they fail the gate,
+#: but they are not page ids and must not inflate METER.
+DOCUMENT_LEVEL_VIOLATIONS = (UNLISTED_DOCUMENT, NONCANONICAL_PAGE_FILE)
 
 VIOLATION_CLASSES = (
     UNACCOUNTED,
@@ -371,7 +376,14 @@ def check_document(doc_md: str, terminal: dict[int, tuple[dict, str]]) -> tuple[
 
 
 def _norm(text: str) -> str:
-    return "\n".join(line.rstrip() for line in text.strip().split("\n"))
+    """Trailing whitespace per line, and surrounding blank lines, are ignored. Leading
+    indentation is kept: four spaces turn a paragraph into a code block."""
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
 
 
 # --- page record -----------------------------------------------------------------------
@@ -593,7 +605,16 @@ class Report:
     doc_level_bad: set[str] = field(default_factory=set)  # hidden or misplaced in the document
 
     def violating_ids(self) -> set[str]:
-        return {pid for ids in self.violations.values() for pid in ids}
+        """Page ids only: document-level findings are not pages and stay out of the union."""
+        return {
+            pid
+            for cls, ids in self.violations.items()
+            if cls not in DOCUMENT_LEVEL_VIOLATIONS
+            for pid in ids
+        }
+
+    def document_level_count(self) -> int:
+        return sum(len(self.violations.get(cls, [])) for cls in DOCUMENT_LEVEL_VIOLATIONS)
 
     def surface_count(self) -> int:
         return sum(len(ids) for ids in self.surface.values())
@@ -770,10 +791,14 @@ def format_report(rep: Report) -> str:
     lines += [f"  {len(v):7d}  {k}" for k, v in sorted(rep.marked.items())] or ["        0"]
     lines.append("VIOLATION CLASSES (page ids; classes overlap, METER is their union)")
     for cls in VIOLATION_CLASSES:
+        if cls in DOCUMENT_LEVEL_VIOLATIONS:
+            continue
         lines.append(f"  {len(rep.violations.get(cls, [])):7d}  {cls}")
         if cls == WARNING_UNMARKED:
             for mode, v in sorted(rep.warning_unmarked_by_failure_mode.items()):
                 lines.append(f"  {len(v):7d}    failure_mode={mode}")
+    lines += ["", "DOCUMENT-LEVEL FINDINGS (fail the exit status, not page ids, not in METER)"]
+    lines += [f"  {len(rep.violations.get(c, [])):7d}  {c}" for c in DOCUMENT_LEVEL_VIOLATIONS]
     lines += ["", f"SURFACE AGREEMENT = {rep.surface_count()} disagreements"]
     lines += [f"  {len(rep.surface.get(c, [])):7d}  {c}" for c in SURFACE_CLASSES]
     lines += ["", "DIAGNOSTIC (not in METER, not in the exit status)"]
@@ -788,7 +813,7 @@ def format_report(rep: Report) -> str:
 
 
 def main_exit_code(rep: Report) -> int:
-    return 1 if rep.violating_ids() or rep.surface_count() else 0
+    return 1 if rep.violating_ids() or rep.surface_count() or rep.document_level_count() else 0
 
 
 def main(argv: Iterable[str] | None = None) -> int:
