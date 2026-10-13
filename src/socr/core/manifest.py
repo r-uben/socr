@@ -2026,9 +2026,11 @@ def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
         if rejection and rejection != REJECTION_VERIFIER_ERROR:
             return att
         jo = getattr(att, "judge_outcome", "")
-        # #1126-r6: source-evidence reject is a completed refusal of these bytes
-        # (not ``page_judge_completed`` — the page judge never ran).
-        if jo == JUDGE_OUTCOME_SOURCE_EVIDENCE:
+        # #1126-r6 / #1126-r9: source-evidence reject is a completed refusal only when
+        # the witness could read and contradicted (``table_disputed``). An unverifiable
+        # check (``table_unverifiable``) is unknown, not a refusal — it must not retire
+        # a credentialed timeout stand-in on the same bytes.
+        if jo == JUDGE_OUTCOME_SOURCE_EVIDENCE and not getattr(att, "table_unverifiable", ""):
             return att
         if jo == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
             return att

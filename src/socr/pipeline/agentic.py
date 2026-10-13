@@ -163,6 +163,16 @@ def _evidence_readable_table_count(text: str) -> int | None:
     return evidence_readable_table_count(check_text)
 
 
+def _collect_evidence_table_tokens(text: str):
+    """``collect_table_tokens`` on the same converted text the table count uses."""
+    from socr.tables.source_evidence import collect_table_tokens, html_table_for_check
+
+    check_text, html_unparsed = html_table_for_check(text or "")
+    if html_unparsed:
+        return None
+    return collect_table_tokens(check_text)
+
+
 def accepted_winner_has_passed_table(output: PageOutput) -> bool:
     """True when an accepted winner carries a table the source-evidence check passed.
 
@@ -191,9 +201,7 @@ def _witness_supported_numeric_tokens(marked: PageOutput) -> dict[str, int]:
         return {}
     if marked.table_disputed and not marked.table_disputed_values:
         return {}
-    from socr.tables.source_evidence import collect_table_tokens
-
-    table = collect_table_tokens(marked.text or "")
+    table = _collect_evidence_table_tokens(marked.text or "")
     if table is None:
         return {}
     disputed = set(marked.table_disputed_values or ())
@@ -224,9 +232,7 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     supported = _witness_supported_numeric_tokens(marked)
     if not supported:
         return True
-    from socr.tables.source_evidence import collect_table_tokens
-
-    winner_table = collect_table_tokens(winner.text or "")
+    winner_table = _collect_evidence_table_tokens(winner.text or "")
     if winner_table is None:
         return False
     for tok, need in supported.items():

@@ -946,6 +946,41 @@ def test_promotion_refused_inner_does_not_mutate_live_attempt() -> None:
     assert out.audit_notes == ["keep"]
 
 
+def test_unverifiable_source_evidence_does_not_supersede_timeout() -> None:
+    """#1126-r9: SE with ``table_unverifiable`` is unknown; only disputed SE refuses."""
+    from socr.core.manifest import superseding_rejection
+    from socr.core.result import JUDGE_OUTCOME_TIMEOUT
+
+    body = _MODEL_TEXT
+    timed = PageOutput(
+        page_num=1,
+        text=body,
+        judge_outcome=JUDGE_OUTCOME_TIMEOUT,
+        audit_passed=False,
+    )
+    unver = PageOutput(
+        page_num=1,
+        text=body,
+        judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+        table_unverifiable="no local content evidence",
+        audit_passed=False,
+    )
+    refused = PageOutput(
+        page_num=1,
+        text=body,
+        judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+        table_disputed="41.5",
+        table_disputed_values=("41.5",),
+        audit_passed=False,
+    )
+    ps_uv = PageState(page_num=1)
+    ps_uv.attempts.extend([timed, unver])
+    ps_dis = PageState(page_num=1)
+    ps_dis.attempts.extend([timed, refused])
+    assert superseding_rejection(ps_uv, timed) is None
+    assert superseding_rejection(ps_dis, timed) is refused
+
+
 def test_superseding_rejection_counts_source_evidence_refusal() -> None:
     """#1126-r6: same bytes, SE refusal must supersede a typed timeout stand-in."""
     from socr.core.manifest import superseding_rejection
@@ -1166,6 +1201,13 @@ def test_a_blank_page_never_reaches_a_model_and_is_never_marked(tmp_path, monkey
 
 _HTML_OK = "<table><tr><td>alpha</td><td>41.5</td></tr><tr><td>beta</td><td>17.2</td></tr></table>"
 _HTML_BAD = "<table>\nnot rows at all\n</table>"
+_HTML_FOUR_ROW = (
+    "<table><tr><td>Item</td><td>Value</td></tr>"
+    "<tr><td>alpha</td><td>41.5</td></tr>"
+    "<tr><td>beta</td><td>17.2</td></tr>"
+    "<tr><td>gamma</td><td>99.9</td></tr>"
+    "<tr><td>delta</td><td>12.3</td></tr></table>"
+)
 
 
 def _html_retry(tmp_path, monkeypatch, tag, html_table):
@@ -1184,6 +1226,24 @@ def _html_retry(tmp_path, monkeypatch, tag, html_table):
         calls=calls,
     )
     return calls, out
+
+
+def test_html_marked_four_row_later_one_row_does_not_ship_unmarked(tmp_path, monkeypatch) -> None:
+    """#1126-r9: containment must read HTML through ``html_table_for_check`` like the count."""
+    html_first = f"{_PROSE}\n\n{_HTML_FOUR_ROW}"
+    one = f"{_PROSE}\n\n{_TABLE_ONE_ROW}"
+    _, drop_side, drop_frag, _, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "html-drop",
+        witness=_WITNESS_FOUR_ROW,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: html_first, EngineType.GEMINI: one},
+    )
+    assert "17.2" in drop_frag and "12.3" in drop_frag
+    assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
+    assert drop_side["unchecked_table_kind"] == "disputed"
+    assert drop_side["status"] != PageStatus.SUCCESS.value
 
 
 def test_html_retry_is_checked_not_waved_through(tmp_path, monkeypatch) -> None:
