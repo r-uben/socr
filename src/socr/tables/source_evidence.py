@@ -262,6 +262,9 @@ class SourceEvidenceResult:
     #: emitted content label was found, or when there was no numeric token to
     #: anchor the trade-off (see ``is_alpha_only`` below, which still rejects).
     content_unverified: str = ""
+    #: #1048: EVERY unsupported token of a verifiable-and-failed verdict, as
+    #: bare strings (no cap: the reason text keeps its own 5-token excerpt), so the in-text "disputed" mark can name them. Empty otherwise.
+    disputed_values: tuple[str, ...] = ()
 
 
 def page_has_native_words(page) -> bool:
@@ -1077,6 +1080,7 @@ def verify_table_tokens(
             verifiable=True,
             passed=False,
             reason=f"numeric tokens unsupported by page evidence: {missing[:5]}",
+            disputed_values=tuple(str(m) for m in missing),
         )
 
     if tokens.is_alpha_only and not _content_supported(tokens.content, bundle.content):
@@ -1088,6 +1092,7 @@ def verify_table_tokens(
             verifiable=True,
             passed=False,
             reason=f"content labels unsupported by page evidence: {missing}",
+            disputed_values=tuple(sorted(tokens.content - bundle.content)),
         )
 
     content_unverified = ""
@@ -1114,6 +1119,29 @@ def verify_table_tokens(
         reason="source evidence supports emitted table tokens",
         content_unverified=content_unverified,
     )
+
+
+#: ``verify_scanned_table``'s reason when the text holds no markdown table to tokenise.
+REASON_NO_TABLE_BLOCKS = "no markdown table blocks"
+_HTML_TABLE_RE = re.compile(r"<table\b", re.IGNORECASE)
+
+
+def html_table_for_check(text: str) -> tuple[str, bool]:
+    """#1048: ``(text with HTML tables as markdown, an HTML table remains unparsed)``.
+
+    The evidence check tokenises markdown pipe tables only, so a candidate that emitted its
+    table as HTML (rung 2 after a disputed pipe table, say) used to skip the check and be
+    accepted unverified. ``core.html_tables.convert_html_tables`` is the house parser; the
+    converted text is what the check reads, and the SHIPPED text is never changed. A block
+    that does not parse as rows is left in place by that function (it never deletes
+    content), so a ``<table`` surviving the conversion means a table the check cannot read.
+    """
+    if not _HTML_TABLE_RE.search(text or ""):
+        return text, False
+    from socr.core.html_tables import convert_html_tables
+
+    converted = convert_html_tables(text)
+    return converted, bool(_HTML_TABLE_RE.search(converted))
 
 
 def verify_scanned_table(
@@ -1167,7 +1195,7 @@ def verify_scanned_table(
         return SourceEvidenceResult(
             verifiable=True,
             passed=True,
-            reason="no markdown table blocks",
+            reason=REASON_NO_TABLE_BLOCKS,
             deferred=True,
         )
 

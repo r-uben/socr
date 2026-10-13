@@ -91,6 +91,10 @@ the whole document in memory and saving once at the end. Concretely:
   before paying for a VLM judge; figures are embedded **inline** within their page;
   chart/front-matter pages (vector charts that would otherwise become text word-salad)
   are saved as **image assets** with a note rather than transcribed.
+  A scanned table socr **could not check** (no usable evidence) ships its text with the line
+  `> [table unverified: ...]` above each table; one the page evidence **disputes** ships with
+  `> [table disputed: ...]`, the disputed values and a link to the page image. The doubt is in
+  the text itself and survives `socr library`; see `docs/OUTPUT.md`.
 - **Equations (opt-in).** `--detect-equations` saves model-free crop PNGs of display
   equations; `--recover-clean-equations` additionally reads each crop to LaTeX into a
   non-destructive sidecar (validated; bad LaTeX never replaces the native text/crop).

@@ -147,6 +147,45 @@ class PageDecision:
         return self.final_output.engine
 
 
+def promote_unchecked_table_attempt(decision: PageDecision) -> ProviderAttempt | None:
+    """#1048: at the END of an exhausted ladder, ship an unchecked scanned table marked.
+
+    ``SourceEvidenceTableJudge`` rejects a table it could not check, or one the second
+    reading disputes, at its rung exactly as before, so the router escalates and a later
+    rung that verifies wins unmarked. Only when NO rung was accepted does this run: the
+    floor would apply today, and instead the page ships a rejected candidate's text with
+    its in-text mark (owner rulings 2026-10-08 and 2026-10-12).
+
+    Which candidate: the LAST attempt carrying ``table_unverifiable`` or ``table_disputed``
+    with text, i.e. the most-escalated rung that produced a table. No new constant, and
+    deterministic. An attempt that failed for another reason (provider error, no table)
+    carries neither field and is never chosen.
+
+    The chosen attempt is restored to the state it had before the judge rejected it
+    (SUCCESS, no failure mode), marked accepted, and its reason loses the
+    ``source_evidence_table`` token the floor latches on; the decision becomes accepted.
+    Returns the attempt, or ``None`` when nothing qualifies (the floor applies as today).
+    """
+    if decision.accepted:
+        return None
+    chosen: ProviderAttempt | None = None
+    for att in decision.attempts:
+        out = att.output
+        if (out.table_disputed or out.table_unverifiable) and (out.text or "").strip():
+            chosen = att
+    if chosen is None:
+        return None
+    chosen.output.status = PageStatus.SUCCESS
+    chosen.output.failure_mode = FailureMode.NONE
+    chosen.output.error = ""
+    chosen.accepted = True
+    kind = "disputed" if chosen.output.table_disputed else "unverified"
+    chosen.reason = f"ladder exhausted; table shipped marked {kind} (#1048)"
+    decision.final_output = chosen.output
+    decision.accepted = True
+    return chosen
+
+
 def _error_output(page_num: int, msg: str) -> PageOutput:
     return PageOutput(
         page_num=page_num, text="", status=PageStatus.ERROR, error=msg, audit_passed=False
@@ -718,9 +757,12 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.reconcile import find_table_blocks
-        from socr.tables.source_evidence import verify_scanned_table
+        from socr.tables.source_evidence import html_table_for_check, verify_scanned_table
 
-        if not find_table_blocks(output.text or ""):
+        # #1048: HTML tables are converted to markdown for the CHECK (the shipped text is
+        # untouched); one that cannot be parsed is a table the check cannot read.
+        check_text, html_unparsed = html_table_for_check(output.text or "")
+        if not find_table_blocks(check_text) and not html_unparsed:
             return self._inner.assess(output, provider)
 
         if output.status != PageStatus.SUCCESS or not output.text.strip():
@@ -740,7 +782,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     trusted = None
             result = verify_scanned_table(
                 fitz_page,
-                output.text,
+                check_text,
                 ocr_image_fn=self._ocr_image_fn,
                 native_trusted=trusted,
             )
@@ -755,8 +797,23 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             # reading of the page and it ships on zero corroboration.
             return self._reject_unverified(output, exc, page_num)
 
-        if result.deferred:
+        from socr.tables.source_evidence import REASON_NO_TABLE_BLOCKS
+
+        # A deferral to the native verifier stands. "No markdown table to read" is not one
+        # when an HTML table the check could not parse is what the candidate holds.
+        if result.deferred and not (html_unparsed and result.reason == REASON_NO_TABLE_BLOCKS):
             return self._inner.assess(output, provider)
+
+        if html_unparsed and result.verifiable and (result.passed or result.deferred):
+            # The tables the check could read passed, but an HTML table it cannot read
+            # remains: that table is unchecked, so the candidate is could-not-check.
+            from socr.tables.source_evidence import SourceEvidenceResult
+
+            result = SourceEvidenceResult(
+                verifiable=False,
+                passed=False,
+                reason="an HTML table could not be parsed for checking",
+            )
 
         if not result.verifiable or not result.passed:
             from socr.core.result import FailureMode
@@ -803,6 +860,19 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                         "witness_state": result.witness_state,
                     },
                 )
+            # #1048 (owner rulings 2026-10-08 and 2026-10-12): the candidate is
+            # rejected at this rung exactly as before, so the router still escalates.
+            # What changes is the END of the ladder: if no rung verifies, the
+            # orchestrator ships the last candidate carrying one of these fields
+            # with its in-text mark instead of the failed-table marker. A table the
+            # check could not examine (``verifiable`` False) records the reason in
+            # ``table_unverifiable``; one the second reading disputes records EVERY
+            # unsupported value in ``table_disputed`` (no cap; the mark names them
+            # all). Other contradiction sources are not touched.
+            if result.verifiable and not result.passed:
+                output.table_disputed = ", ".join(result.disputed_values) or result.reason
+            else:
+                output.table_unverifiable = result.reason
             output.audit_passed = False
             output.status = PageStatus.ERROR
             output.failure_mode = (

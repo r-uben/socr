@@ -120,6 +120,7 @@ from socr.pipeline.agentic import (
     PageDecision,
     ProviderAttempt,
     is_failed_candidate,
+    promote_unchecked_table_attempt,
     rejudge_candidate,
     route_page,
 )
@@ -10047,6 +10048,13 @@ class UnifiedPipeline:
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
                         )
+                        # #1048: no rung verified; ship the last unchecked/disputed
+                        # table marked instead of the floor (see the helper).
+                        _unchecked_table_attempt = (
+                            None
+                            if ps.is_born_digital
+                            else promote_unchecked_table_attempt(decision)
+                        )
                         # The profile whose reading won. Needed to re-judge a candidate
                         # produced after routing (crop reread) through the same judge
                         # with the same provider context.
@@ -10135,7 +10143,13 @@ class UnifiedPipeline:
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
                             for att in _source_ev_attempts
                         )
-                        if _source_ev_rejected and not ps.is_born_digital:
+                        # #1048: the floor is for a ladder that ended without an
+                        # accepted reading. ``decision.accepted`` is also true once a
+                        # later rung verified the table (before, an earlier rung's
+                        # source-evidence rejection floored that verified page too) or
+                        # once ``promote_unchecked_table_attempt`` chose a candidate to
+                        # ship marked.
+                        if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
@@ -10143,6 +10157,38 @@ class UnifiedPipeline:
                                 _chart_figures_dir,
                                 no_witness=_source_ev_no_witness,
                             )
+                        # #1048: the gate could not check a scanned page's table and
+                        # the candidate was accepted, so it ships. Record the page's
+                        # disposition as TABLE_UNVERIFIED -- the existing state every
+                        # surface (page status, document status, metadata, CLI,
+                        # ``tables`` counts) already reads for a table that shipped
+                        # unchecked, and the one ``_apply_ladder_disposition_guard``
+                        # demotes (``audit_passed`` on the SELECTED attempt stays
+                        # untouched). A stronger terminal the ladder sets later wins.
+                        if _unchecked_table_attempt is not None and (
+                            ps.table_ladder_disposition is None
+                        ):
+                            _un_out = _unchecked_table_attempt.output
+                            # Owner ruling 2026-10-12: a disputed table ships with the
+                            # stronger mark. TABLE_REJECTED is the existing "checked and
+                            # found wanting" state (warning, audit-failed document, its
+                            # own bucket and CLI line); it also stops the later
+                            # native-contradiction withhold from touching the page.
+                            # Could-not-check is TABLE_UNVERIFIED. The page image the
+                            # marks link is the floor's PNG, rendered for both kinds.
+                            ps.unchecked_table_kind = (
+                                "disputed" if _un_out.table_disputed else "unverified"
+                            )
+                            ps.unchecked_table_values = _un_out.table_disputed
+                            ps.table_ladder_disposition = (
+                                FailureMode.TABLE_REJECTED
+                                if _un_out.table_disputed
+                                else FailureMode.TABLE_UNVERIFIED
+                            )
+                            if _chart_figures_dir is not None and not ps.d3_floor_png_ref:
+                                ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                    state.handle.path, page_num, _chart_figures_dir
+                                )
 
                         # #263: rotated-shredded floor PNG. The page's native layer is
                         # confetti and the OCR ladder accepted nothing, so the marker
@@ -12629,7 +12675,30 @@ class UnifiedPipeline:
             # released page that kept it would report a no-witness floor it no
             # longer sits under.
             ps.scanned_table_no_witness = False
-            ps.d3_floor_png_ref = ""
+            # #1048: the patched text PASSED the source-evidence check (this judge
+            # chain contains it), so the unchecked/disputed claims about the old
+            # reading no longer describe what ships: clear them, the disposition
+            # this path set, and the mark with them. A refused patch (the other
+            # branch) keeps all of it, link included.
+            from socr.tables.source_evidence import html_table_for_check
+
+            # Clear only when EVERY table on the page was read by the check: an HTML table
+            # it cannot parse stays unchecked, and keeps the page mark and its table marks.
+            _html_unchecked = html_table_for_check(candidate.text)[1]
+            if ps.unchecked_table_kind and not _html_unchecked:
+                if ps.table_ladder_disposition in (
+                    FailureMode.TABLE_REJECTED,
+                    FailureMode.TABLE_UNVERIFIED,
+                ):
+                    ps.table_ladder_disposition = None
+                ps.unchecked_table_kind = ""
+                ps.unchecked_table_values = ""
+            if not _html_unchecked:
+                bo.table_disputed = ""
+                bo.table_unverifiable = ""
+            # The floor PNG is the link target of the marks; keep it while any mark stays.
+            if not (_html_unchecked and ps.unchecked_table_kind):
+                ps.d3_floor_png_ref = ""
             ps.rotated_shred_png_ref = ""
             ps.invisible_scan_png_ref = ""
             state.events.extend(judge_events)
@@ -13636,6 +13705,12 @@ class UnifiedPipeline:
         # change the byte shape of nearly every sidecar in the corpus for no
         # information -- which is what the P6 stage-C surface oracle exists to
         # catch, and did.
+        # #1048: sparse like the signals around it; only a page that shipped an unchecked table
+        # marked carries it, so every other sidecar keeps its bytes.
+        if ps and getattr(ps, "unchecked_table_kind", ""):
+            payload["unchecked_table_kind"] = ps.unchecked_table_kind
+            payload["unchecked_table_values"] = ps.unchecked_table_values
+
         _detected_count = int(getattr(ps, "detected_table_count", 0) or 0) if ps else 0
         if _detected_count > 0:
             payload["detected_table_count"] = _detected_count
@@ -14716,6 +14791,8 @@ class UnifiedPipeline:
                 # evidence, on geometry the detector itself would have refused.
                 ps.detected_table_count = 0
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
+            ps.unchecked_table_kind = str(meta.get("unchecked_table_kind", ""))
+            ps.unchecked_table_values = str(meta.get("unchecked_table_values", ""))
             # P6 cold review round 2: carry run 1's published disposition forward
             # so a resumed re-flush reproduces the sidecar byte for byte. A
             # sidecar written before the field existed restores None and the

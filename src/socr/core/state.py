@@ -272,6 +272,14 @@ class PageState:
     #: subtotal must never be treated as zero spend.
     page_cost_usd: float | None = 0.0
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
+    #: #1048: set when the page shipped a rejected scanned-table candidate marked because no
+    #: rung verified it: ``"disputed"`` or ``"unverified"``. The in-text marks follow THIS
+    #: (persisted in the sidecar), not only the candidate's own fields, so a later replacement
+    #: of the incumbent that carries neither field cannot ship unmarked. Cleared only by a
+    #: re-judge that passes the source-evidence check.
+    unchecked_table_kind: str = ""
+    #: #1048: the disputed values the mark names (``", "``-joined); "" for ``"unverified"``.
+    unchecked_table_values: str = ""
     #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
     #: ``d3_floor_png_ref``: that field means "the table region was routed to
     #: the image lane", and a consumer must be able to tell the two floors

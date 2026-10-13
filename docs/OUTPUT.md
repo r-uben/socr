@@ -108,6 +108,69 @@ crops through the run's qwen server: Ollama `/api/generate`, or an OpenAI-compat
 their default mean "the run's qwen rung"; any other value is refused (check MISSING,
 page `model_call_skipped`), never replaced by the served model.
 
+### The unverified-table mark (in the page text)
+
+A table that ships without a check carries one line directly above it, in the page
+Markdown, so the doubt is in the text itself: the stitched `<stem>.md`, `pages/NNNNN.md`
+and the text `socr library` promotes carry no status.
+
+```
+> [table unverified: socr could not check this table against the page; verify it against the page image before citing]
+```
+
+- One line per table, then a blank line, then the table. The line is fixed text
+  (`UNVERIFIED_TABLE_MARK` in `core/manifest.py`); find it with `^> \[table unverified: `.
+  The reason is not in the line; it is in the audit events and `tables_trust.json`.
+- Written for every table on a page whose disposition is `table_unverified`: a scanned
+  table the evidence gate could not check (#1048) and a table the judge ladder left
+  unverified. Not written for a verified table, a page without a table, a contradicted
+  table (it is withheld, no table is shipped) or a `table_rejected` table.
+- Written once, in `_select_and_finalize_page`, the seam every writer shares, so
+  fragments, the final `.md`, the manifest and a resumed run agree. Re-running over text
+  that already carries it does not add a second line.
+- A scanned table the gate could not check (`verifiable` false: no local evidence, no OCR
+  witness, no verifiable tokens in the cells) ships its text, marked, when the ladder ends without a verified reading. The page is `warning`, failure mode `table_unverified`; `audit_passed` on the chosen
+  attempt is untouched. A table the evidence contradicts (it was read and the numbers are
+  absent) keeps the failed-table marker.
+
+#### The page-level mark (promoted pages)
+
+When the ladder ends with no verified reading and a rejected candidate is shipped (the
+unverified and disputed cases above), the whole reading ships, prose included, and no page
+judge confirmed it. The page's FIRST line (below the `## Page N` header in the stitched
+file) is therefore:
+
+```
+> [page unchecked: socr could not confirm this page's table(s) against a second reading; everything below is a model reading of the page image \u2014 check it against the [page image](figures/failed_table_pN.png) before citing]
+```
+
+Find it with `^> \[page unchecked: `. The per-table marks stay. They cover every table form
+(markdown pipe tables and HTML `<table>`), and they follow the page state
+(`unchecked_table_kind`, persisted in the page sidecar), not only the candidate, so a later
+replacement of the incumbent cannot ship unmarked. A crop re-judge that passes the
+source-evidence check clears the state, the marks and the rejected disposition; a refused
+patch keeps them. Pages with only the ladder's `table_unverified` get no page-level line.
+
+#### The disputed-table mark
+
+A scanned table that the source-evidence check CHECKED and found unsupported (its numbers
+or labels are absent from the Tesseract reading) also ships (owner ruling 2026-10-12), with
+a stronger line that names EVERY disputed value (no cap) and links the page image the floor
+renders:
+
+```
+> [table disputed: a second reading of the page (Tesseract) disagrees with 6 values: 4.52, 72, 4.01, 124, 4.31, 4.76; check them against the page image before citing. [page image](figures/failed_table_p22.png)]
+```
+
+Find it with `^> \[table disputed: `. The link is omitted when no image could be rendered.
+The page is `warning` with failure mode `table_rejected` (the existing "checked and found
+wanting" state, with its own document bucket and CLI line), and the document is not
+`success`. Only this check ships disputed tables: ladder rejections and native-verifier
+contradictions keep their current handling. Escalation is unchanged: a disputed or unchecked table is rejected at its rung and the router tries the
+next rung; a later rung that verifies ships unmarked. Only when the ladder ends with no verified
+reading does the page ship the LAST (most escalated) rejected candidate that produced a table, with
+its mark, instead of the failed-table marker.
+
 ### Readable tables (`tables` in `metadata.json`)
 
 Counts derived from what is already recorded: the shipped text of each page, its
@@ -216,10 +279,10 @@ in the Markdown.
 | `model_output_flagged` | A model produced the page, no ladder rung accepted it, and the native table carries a distrust flag. The model output ships, flagged. | Verify table numbers. |
 | `model_table_over_failed_floor` | The native table failed its geometry check and a model attempt authored a grid. The model's grid ships instead of the failed-table marker. A stronger warning than `model_output_flagged`. | Verify the whole table against the PDF. |
 | `table_rejected` | The table judge ladder ran out of rungs on a corroborated FAIL. The table text ships, demoted under a warning. | Do not quote its numbers without checking. |
-| `table_unverified` | Every ladder rung failed to give a verdict (timeout, transport, missing binary, unparseable). Nothing said the table is wrong, and nothing confirmed it. The bytes are kept. The audit event `table_ladder_unverified` has `cause` and `latched` in `data`. | Re-run when the judge is available; otherwise verify by hand. |
+| `table_unverified` | The table could not be checked: every ladder rung failed to give a verdict (timeout, transport, missing binary, unparseable), or the scanned-table evidence gate had no usable evidence (#1048). Nothing said the table is wrong, and nothing confirmed it. The bytes are kept, with the unverified-table mark above each table. The audit event `table_ladder_unverified` has `cause` and `latched` in `data`. | Re-run when the judge is available; otherwise verify by hand. |
 | `table_withheld` | Readers rejected the table and a blind transcription of the flagged cells read different tokens. The table bytes are not shipped. A fail-closed marker and a page image replace the table region. Prose outside the region survives. | Read the table from the image or the PDF. |
 | `header_binding_unverified` | The table shipped because its rows match the native rows. Which header belongs to which column was never checked. | Check column headers. |
-| `no_witness_backend` | A scanned table failed the source-evidence gate because the host has no classical OCR backend (for example tesseract). Nothing read the pixels, so there is no evidence about the table either way. The page still fails closed. | Install the OCR backend and re-run. Do not read this as a model fabrication. |
+| `no_witness_backend` | A scanned table failed the source-evidence gate because the host has no classical OCR backend (for example tesseract). Nothing read the pixels, so there is no evidence about the table either way. The router escalates to the next rung; if no rung verifies the table, it ships marked unverified (#1048), as `table_unverified`. | Install the OCR backend and re-run. Do not read this as a model fabrication. |
 | `page_judge_timeout` | The page judge timed out on the page's only grid candidate. Nothing rejected it and nothing confirmed it. The page fails closed. | Re-run when the judge is available. |
 | `judge_timeout_ladder_accepted` | The page judge timed out but the table ladder accepted every table, with a stored credential bound to these exact bytes. The page ships demoted. The tables passed; the surrounding prose was not verified. | Tables are supported. Read the prose with normal care. |
 | `row_shape_not_reconcilable_text_table` | The only grid candidate is a text table (prose cells, a few numbers). Matching a few numeric rows is not evidence for prose cells. The candidate is withheld. | Read the table from the PDF. A completed page-judge acceptance would clear it. |
@@ -314,7 +377,7 @@ This list is the kinds present at the time of writing; the code is the authority
 
 ### Scanned-table evidence (`pipeline/agentic.py`, `tables/source_evidence.py`)
 
-- `source_evidence_table_reject`: the evidence gate failed the table. Either a witness read the page and the model's numbers were not there, or no witness backend existed (then `source_evidence_no_witness_backend` is also emitted). Read `data.cause`.
+- `source_evidence_table_reject`: the evidence gate failed the table. Since #1048 a table the gate could not check (`data.verifiable` false) is rejected at its rung like a disputed one (`data.verifiable` true, `data.passed` false). The router escalates; if no rung verifies, the last candidate ships marked (unverified or disputed) instead of the failed-table marker. Either a witness read the page and the model's numbers were not there, or no witness backend existed (then `source_evidence_no_witness_backend` is also emitted). Read `data.cause`.
 - `source_evidence_no_witness_backend`: no OCR backend, so no witness.
 - `source_evidence_table_label_unverified`: numbers are supported, at least one label is not.
 
