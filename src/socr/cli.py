@@ -149,6 +149,15 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--no-text-coverage",
+        is_flag=True,
+        help=(
+            "#1050 kill switch: skip the ink-vs-visible-text-layer check on trusted-native "
+            "pages. The check is ON by default; a flagged page ships WARNING with the "
+            "uncovered region saved as an image, never plain SUCCESS."
+        ),
+    )(f)
+    f = click.option(
         "--no-equation-region-lane",
         is_flag=True,
         help=(
@@ -401,6 +410,7 @@ def build_config(
     recover_clean_equations: bool = False,
     no_equation_region_lane: bool = False,
     equation_region_lane: bool | None = None,
+    no_text_coverage: bool = False,
     clean_equation_model: str | None = None,
     math_model: str | None = None,
     timeout: int = 1800,
@@ -582,6 +592,8 @@ def build_config(
         config.equation_region_lane = False
     if equation_region_lane is not None:
         config.equation_region_lane = equation_region_lane
+    if no_text_coverage:
+        config.check_text_coverage = False
     if clean_equation_model is not None:
         config.clean_equation_model = clean_equation_model
     if math_model is not None:

@@ -1009,6 +1009,16 @@ def figure_words_unread_suspect(p) -> bool:
     return bool(getattr(p, "figure_words_unread", False))
 
 
+def text_ink_unread_suspect(p) -> bool:
+    """#1050: trusted-native ink looks like text with no visible layer over it."""
+    return bool(getattr(p, "text_ink_unread", False))
+
+
+def text_coverage_unknown_suspect(p) -> bool:
+    """#1050: the coverage check could not run or decide."""
+    return bool(getattr(p, "text_coverage_unknown", False))
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -3259,6 +3269,25 @@ def _select_page_output_tagged(
                         else winner.failure_mode
                     ),
                 )
+            # #1050: uncovered text-like ink, or the check could not decide.
+            if (
+                (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p))
+                and winning_engine.startswith(_NATIVE_TEXT_LANES)
+                and winner.status is PageStatus.SUCCESS
+            ):
+                winner = replace(
+                    winner,
+                    status=PageStatus.WARNING,
+                    failure_mode=(
+                        (
+                            FailureMode.TEXT_COVERAGE_UNKNOWN
+                            if text_coverage_unknown_suspect(p)
+                            else FailureMode.TEXT_INK_UNREAD
+                        )
+                        if winner.failure_mode is FailureMode.NONE
+                        else winner.failure_mode
+                    ),
+                )
             return winner, SelectionProvenance.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
@@ -3830,7 +3859,17 @@ def _select_page_output_tagged(
         # #960: garbled math ships demoted whether or not a recovery attempt ran (a
         # providerless run, or a ladder that never started, leaves no attempts).
         garbled_math = garbled_math_suspect(p)
-        native_demoted = native_is_fallback or grid_rejected or table_flattened or garbled_math
+        # #1050: a structure-class page skips the passing-best_output
+        # short-circuit (native is distrusted for the GRID) and lands here.
+        # Coverage flags must demote this synthetic SUCCESS the same way.
+        coverage_unread = text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p)
+        native_demoted = (
+            native_is_fallback
+            or grid_rejected
+            or table_flattened
+            or garbled_math
+            or coverage_unread
+        )
         # #1004: the model read was never judged (page judge timeout) and the native layer
         # is known bad. Demote by status and failure mode only: ``audit_passed`` selects
         # the winner and is left exactly as the fallback leaves it.
@@ -3844,6 +3883,12 @@ def _select_page_output_tagged(
         # deterministic --native-only path, which is exactly the path this
         # ticket is about.
         fallback_text = _native_text_with_appends(p)
+        if text_ink_unread_suspect(p):
+            from socr.core.text_coverage import uncovered_text_marker
+
+            mark = uncovered_text_marker(page_num)
+            if mark not in (fallback_text or ""):
+                fallback_text = (fallback_text or "").rstrip() + "\n\n" + mark + "\n"
         return PageOutput(
             page_num=page_num,
             text=fallback_text,
@@ -3877,7 +3922,15 @@ def _select_page_output_tagged(
                             else (
                                 FailureMode.TABLE_NOT_RECONSTRUCTED
                                 if table_flattened
-                                else FailureMode.NONE
+                                else (
+                                    FailureMode.TEXT_COVERAGE_UNKNOWN
+                                    if text_coverage_unknown_suspect(p)
+                                    else (
+                                        FailureMode.TEXT_INK_UNREAD
+                                        if text_ink_unread_suspect(p)
+                                        else FailureMode.NONE
+                                    )
+                                )
                             )
                         )
                     )

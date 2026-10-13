@@ -106,6 +106,16 @@ class FailureMode(str, Enum):
     #: unread. The page keeps its exact native prose and the crop; it ships WARNING, never clean
     #: SUCCESS, and only the crop (never the page) is a candidate for a later read.
     FIGURE_WORDS_UNREAD = "figure_words_unread"
+    #: #1050: trusted-native page whose ink looks like text with no visible text
+    #: layer over it (vector-outlined figure labels, inserts). The native prose
+    #: is kept and ships WARNING; uncovered regions are saved as PNGs. Not
+    #: ``FIGURE_WORDS_UNREAD``: those regions are not inside a #1053 figure crop
+    #: (``plan_figure_page`` returned None on the seats' hits).
+    TEXT_INK_UNREAD = "text_ink_unread"
+    #: #1050: the coverage check could not run or decide (render/analysis
+    #: failure). Target 4 fail-closed: the page does not ship SUCCESS. Step 1
+    #: does not call a model; whole-page escalation is step 2.
+    TEXT_COVERAGE_UNKNOWN = "text_coverage_unknown"
     #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page,
     #: so none of the per-page passes (route, extract, tables, equations) ran on it. The
     #: document-level figure phase may still touch it. Whatever text ships is the

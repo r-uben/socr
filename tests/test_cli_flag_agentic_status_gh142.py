@@ -76,6 +76,9 @@ _LIVE = {
     # to decide whether to construct the ladder's rung sequence at all --
     # acted on even when False, since that is the branch that returns `[]`.
     "table_judge_ladder",
+    # #1050: read by _prepare_text_coverage / _apply_text_coverage on every
+    # trusted-native page. This fixture's PDF is real, so the check runs.
+    "check_text_coverage",
 }
 
 #: Hashed into the run fingerprint but never acted on. R174b DELETED every consumer
