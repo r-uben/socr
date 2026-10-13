@@ -180,15 +180,23 @@ def accepted_winner_has_passed_table(output: PageOutput) -> bool:
 
 
 def _witness_supported_numeric_tokens(marked: PageOutput) -> dict[str, int]:
-    """Numeric tokens in the marked table the witness did not dispute."""
+    """Numeric tokens the witness checked and did not dispute in this attempt.
+
+    Containment applies only where the witness actually read the page. An
+    unverifiable table (no witness reading) and a disputed table with only the
+    legacy reason string (no ``table_disputed_values``) carry no supported
+    tokens — only the table-count rule in ``winner_accounts_for_marked_tables``.
+    """
+    if marked.table_unverifiable:
+        return {}
+    if marked.table_disputed and not marked.table_disputed_values:
+        return {}
     from socr.tables.source_evidence import collect_table_tokens
 
     table = collect_table_tokens(marked.text or "")
     if table is None:
         return {}
     disputed = set(marked.table_disputed_values or ())
-    if not disputed and marked.table_disputed:
-        disputed = {v.strip() for v in marked.table_disputed.split(", ") if v.strip()}
     return {tok: count for tok, count in table.numeric.items() if tok not in disputed}
 
 
@@ -741,8 +749,7 @@ def route_page(
                 output.judge_outcome = missing_verdict
         else:
             output.judge_outcome = JUDGE_OUTCOME_COMPLETED
-            if not decision.accept:
-                output.table_acceptance_credential = None
+            output.table_acceptance_credential = None
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,

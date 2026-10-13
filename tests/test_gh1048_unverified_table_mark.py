@@ -266,6 +266,7 @@ def _run(
     tag,
     *,
     witness,
+    witness_fn=None,
     out_dir=None,
     pdf=None,
     profiles=None,
@@ -301,13 +302,18 @@ def _run(
         pipe._available_engines_for_agentic = lambda: list(profiles)
         docs: dict = {}
 
+        def _ocr(_pix):
+            if witness_fn is not None:
+                return witness_fn(_pix)
+            return witness
+
         def _judge(state):
             docs["doc"] = fitz.open(str(pdf))
             ev = SourceEvidenceTableJudge(
                 inner=inner or _InnerAccepts(),
                 get_fitz_page=lambda n: docs["doc"][n - 1],
                 record_event=state.events.append,
-                ocr_image_fn=lambda _pix: witness,
+                ocr_image_fn=_ocr,
                 native_trusted=lambda _n: False,
             )
             if timeout_sec is None and timed_out is None:
@@ -714,6 +720,35 @@ _TABLE_FOUR_ROW = (
 )
 _WITNESS_FOUR_ROW = "Item Value alpha 41.5 beta 17.2 delta 12.3"
 _TABLE_ONE_ROW = "| Item | Value |\n| --- | --- |\n| alpha | 41.5 |\n"
+_TABLE_MISREAD_ONE = "| Item | Value |\n| --- | --- |\n| alpha | 41.6 |\n"
+
+
+def test_flaky_witness_unverifiable_first_rung_does_not_veto_verified_later(
+    tmp_path, monkeypatch
+) -> None:
+    """#1126-r8: empty witness on rung 1 must not make every model token 'supported'."""
+    ocr_calls: list[int] = []
+
+    def _flaky(_pix):
+        ocr_calls.append(1)
+        return SILENT if len(ocr_calls) == 1 else SUPPORTS
+
+    mis = f"{_PROSE}\n\n{_TABLE_MISREAD_ONE}"
+    _, side, frag, final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "flaky-witness",
+        witness=SILENT,
+        witness_fn=_flaky,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: mis, EngineType.GEMINI: _MODEL_TEXT},
+    )
+    assert len(ocr_calls) >= 2
+    assert "41.5" in frag and "17.2" in frag
+    assert "41.6" not in frag and "41.6" not in final
+    assert not UNVERIFIED_TABLE_MARK_RE.search(frag)
+    assert side["status"] == PageStatus.SUCCESS.value
+    assert side.get("unchecked_table_kind", "") == ""
 
 
 def test_later_rung_dropping_witness_supported_rows_promotes_marked(tmp_path, monkeypatch) -> None:
