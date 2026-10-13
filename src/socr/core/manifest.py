@@ -47,6 +47,7 @@ from socr.core.document import DocumentHandle
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
     JUDGE_OUTCOME_TIMEOUT,
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
@@ -2024,7 +2025,12 @@ def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
         rejection = getattr(att, "rejection_class", None)
         if rejection and rejection != REJECTION_VERIFIER_ERROR:
             return att
-        if getattr(att, "judge_outcome", "") == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
+        jo = getattr(att, "judge_outcome", "")
+        # #1126-r6: source-evidence reject is a completed refusal of these bytes
+        # (not ``page_judge_completed`` — the page judge never ran).
+        if jo == JUDGE_OUTCOME_SOURCE_EVIDENCE:
+            return att
+        if jo == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
             return att
     return None
 

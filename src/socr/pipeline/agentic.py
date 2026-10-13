@@ -179,6 +179,19 @@ def accepted_winner_has_passed_table(output: PageOutput) -> bool:
     return True
 
 
+def _witness_supported_numeric_tokens(marked: PageOutput) -> dict[str, int]:
+    """Numeric tokens in the marked table the witness did not dispute."""
+    from socr.tables.source_evidence import collect_table_tokens
+
+    table = collect_table_tokens(marked.text or "")
+    if table is None:
+        return {}
+    disputed = set(marked.table_disputed_values or ())
+    if not disputed and marked.table_disputed:
+        disputed = {v.strip() for v in marked.table_disputed.split(", ") if v.strip()}
+    return {tok: count for tok, count in table.numeric.items() if tok not in disputed}
+
+
 def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) -> bool:
     """True when the winner keeps every evidence-readable table the marked attempt had.
 
@@ -188,13 +201,30 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     re-emits the same number of tables (HTML retry of one verified grid) may
     lift the floor; a rung that drops one of two may not. When in doubt,
     promote: a marked table is the safe outcome.
+
+    #1126-r6: table count alone is not enough — the winner must still carry
+    every numeric token the witness supported in the marked attempt (set
+    containment on ``collect_table_tokens`` multisets, skipping disputed values).
     """
     # #1124-r2: winner must keep every marked-attempt table
     w_n = _evidence_readable_table_count(winner.text)
     m_n = _evidence_readable_table_count(marked.text)
     if w_n is None or m_n is None:
         return False
-    return w_n >= m_n
+    if w_n < m_n:
+        return False
+    supported = _witness_supported_numeric_tokens(marked)
+    if not supported:
+        return True
+    from socr.tables.source_evidence import collect_table_tokens
+
+    winner_table = collect_table_tokens(winner.text or "")
+    if winner_table is None:
+        return False
+    for tok, need in supported.items():
+        if winner_table.numeric.get(tok, 0) < need:
+            return False
+    return True
 
 
 def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
@@ -265,12 +295,12 @@ def settle_scanned_table_decision(
     return promote_unchecked_table_attempt(decision, inner=inner)
 
 
-def _note_promotion_failure(att: ProviderAttempt, extra: str, *, outcome: str) -> None:
+def _note_promotion_failure(att: ProviderAttempt, extra: str) -> None:
     """Keep the original rejection reason; append why promotion failed."""
     # #1125-r3: record why promotion failed — skip this append and
-    # the refuse-journal test fails
+    # the refuse-journal test fails. Never touch ``judge_outcome``: the SE
+    # stamp must survive promotion failures (#1126-r6).
     att.reason = f"{att.reason}; {extra}" if att.reason else extra
-    att.output.judge_outcome = outcome
 
 
 def promote_unchecked_table_attempt(
@@ -296,11 +326,7 @@ def promote_unchecked_table_attempt(
             out = att.output
             if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
                 continue
-            _note_promotion_failure(
-                att,
-                "promotion refused: no inner judge chain",
-                outcome=JUDGE_OUTCOME_EXCEPTION,
-            )
+            _note_promotion_failure(att, "promotion refused: no inner judge chain")
         return None
     for att in reversed(decision.attempts):
         out = att.output
@@ -314,10 +340,11 @@ def promote_unchecked_table_attempt(
             model=att.model,
             backend=att.backend,
         )
-        # Probe a SUCCESS copy: the source-evidence reject left ERROR, and
-        # the page judge treats that as empty/error input. The live attempt
-        # stays rejected until this inner call accepts.
-        probe = copy.copy(out)
+        # Deep-copy probe: the inner chain may rewrite ``text`` (native header
+        # repair) or set fields the shallow copy would drop. ``table_disputed``
+        # / ``table_disputed_values`` stay on the probe as the pre-repair SE
+        # witness record; marks still name those bytes.
+        probe = copy.deepcopy(out)
         probe.status = PageStatus.SUCCESS
         probe.failure_mode = FailureMode.NONE
         probe.error = ""
@@ -331,27 +358,22 @@ def promote_unchecked_table_attempt(
                 if is_page_judge_timeout(exc)
                 else f"promotion judge raised: {exc}"
             )
-            _note_promotion_failure(
-                att,
-                why,
-                outcome=(
-                    JUDGE_OUTCOME_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_OUTCOME_EXCEPTION
-                ),
-            )
+            _note_promotion_failure(att, why)
             continue
         if not verdict.accept:
             why = f"promotion refused: {verdict.reason}" if verdict.reason else "promotion refused"
-            _note_promotion_failure(att, why, outcome=JUDGE_OUTCOME_COMPLETED)
+            _note_promotion_failure(att, why)
             continue
-        if probe.text != out.text:
-            out = replace(out, text=probe.text)
-            att.output = out
         original_reason = att.reason or ""
-        kind = "disputed" if out.table_disputed else "unverified"
-        att.output.status = PageStatus.SUCCESS
-        att.output.failure_mode = FailureMode.NONE
-        att.output.error = ""
-        att.output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        kind = "disputed" if probe.table_disputed else "unverified"
+        out = replace(
+            probe,
+            status=PageStatus.SUCCESS,
+            failure_mode=FailureMode.NONE,
+            error="",
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        )
+        att.output = out
         att.accepted = True
         note = f"ladder exhausted; table shipped marked {kind} (#1048)"
         att.reason = f"{note}; {original_reason}" if original_reason else note
@@ -704,7 +726,14 @@ def route_page(
         # still cannot disguise a real refusal, because a real verdict carries no
         # ``judge_outcome`` at all.
         missing_verdict = decision.judge_outcome if not decision.accept else ""
-        if missing_verdict:
+        if decision.accept:
+            output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        elif missing_verdict == JUDGE_OUTCOME_SOURCE_EVIDENCE:
+            # #1126-r6: witness-contradicted bytes are a completed refusal, not a
+            # missing verdict — retire any credential without stamping page_judge_completed.
+            output.judge_outcome = JUDGE_OUTCOME_SOURCE_EVIDENCE
+            output.table_acceptance_credential = None
+        elif missing_verdict:
             # A missing verdict cannot retire another missing verdict either: an
             # already-typed timeout stands, so a verifier crashing on a LATER
             # rung does not destroy the very stand-in this ticket exists for.

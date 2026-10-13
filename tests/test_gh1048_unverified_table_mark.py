@@ -31,12 +31,14 @@ from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_SOURCE_EVIDENCE,
+    JUDGE_OUTCOME_TIMEOUT,
     DocumentStatus,
     FailureMode,
     PageOutput,
     PageStatus,
 )
-from socr.core.state import PageState
+from socr.core.document import DocumentHandle
+from socr.core.state import DocumentState, PageState
 from socr.pipeline import orchestrator as orch
 from socr.pipeline.agentic import AcceptDecision, SourceEvidenceTableJudge
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -706,6 +708,42 @@ def test_maths_only_later_rung_does_not_lift_the_floor(tmp_path, monkeypatch) ->
     assert maths_side["status"] == PageStatus.WARNING.value
 
 
+_TABLE_FOUR_ROW = (
+    "| Item | Value |\n| --- | --- |\n| alpha | 41.5 |\n| beta | 17.2 |\n"
+    "| gamma | 99.9 |\n| delta | 12.3 |\n"
+)
+_WITNESS_FOUR_ROW = "Item Value alpha 41.5 beta 17.2 delta 12.3"
+_TABLE_ONE_ROW = "| Item | Value |\n| --- | --- |\n| alpha | 41.5 |\n"
+
+
+def test_later_rung_dropping_witness_supported_rows_promotes_marked(tmp_path, monkeypatch) -> None:
+    """#1126-r6: one table with fewer rows must not lift the floor when beta/delta were supported."""
+    abcd = f"{_PROSE}\n\n{_TABLE_FOUR_ROW}"
+    one = f"{_PROSE}\n\n{_TABLE_ONE_ROW}"
+    _, drop_side, drop_frag, drop_final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "drop-rows",
+        witness=_WITNESS_FOUR_ROW,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: abcd, EngineType.GEMINI: one},
+    )
+    _, keep_side, keep_frag, _, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "keep-one",
+        witness=_WITNESS_FOUR_ROW,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: one, EngineType.GEMINI: one},
+    )
+    assert "17.2" in drop_frag and "12.3" in drop_frag
+    assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
+    assert drop_side["unchecked_table_kind"] == "disputed"
+    assert "17.2" not in keep_frag
+    assert not DISPUTED_TABLE_MARK_RE.search(keep_frag)
+    assert keep_side["status"] == PageStatus.SUCCESS.value
+
+
 def test_later_rung_dropping_a_table_promotes_the_marked(tmp_path, monkeypatch) -> None:
     """#1124 r2 P0: winner must keep the marked attempt's tables. Difference:
     first rung is A+B vs B only; later text is B (supported) either way."""
@@ -797,8 +835,7 @@ def test_promotion_honours_the_judge_deadline() -> None:
 
 
 def test_promotion_without_inner_judge_fails_closed() -> None:
-    """#1125-r5: ``inner=None`` must not ship marked with ``page_judge_completed``."""
-    from socr.core.result import JUDGE_OUTCOME_EXCEPTION
+    """#1126-r6: ``inner=None`` fails closed without erasing the SE ``judge_outcome``."""
     from socr.pipeline.agentic import PageDecision, ProviderAttempt, promote_unchecked_table_attempt
 
     out = PageOutput(
@@ -819,7 +856,7 @@ def test_promotion_without_inner_judge_fails_closed() -> None:
     decision = PageDecision(1, out, [att], accepted=False)
     assert promote_unchecked_table_attempt(decision, inner=None) is None
     assert not decision.accepted
-    assert att.output.judge_outcome == JUDGE_OUTCOME_EXCEPTION
+    assert att.output.judge_outcome == JUDGE_OUTCOME_SOURCE_EVIDENCE
     assert "no inner judge chain" in att.reason
 
 
@@ -853,71 +890,116 @@ def test_promotion_ships_bytes_the_inner_judge_accepted() -> None:
     assert "| Item |" not in promoted.output.text
 
 
-def test_promotion_skipping_judged_text_sync_mutant_ships_wrong_header() -> None:
-    """Mutant: promote without copying ``probe.text`` ships the pre-judge table."""
+def test_promotion_refused_inner_does_not_mutate_live_attempt() -> None:
+    """#1126-r7: the inner probe must be isolated from the stored attempt on refuse."""
     from socr.pipeline.agentic import PageDecision, ProviderAttempt, promote_unchecked_table_attempt
 
-    class _RewritingAccepts:
+    class _TouchNotes:
         def assess(self, output, provider):
-            output.text = output.text.replace("| Item |", "| Year |", 1)
-            return AcceptDecision(accept=True, reason="repaired header")
+            output.audit_notes.append("inner touched probe")
+            return AcceptDecision(accept=False, reason="refuse")
 
-    def _promote_without_text_sync(decision, inner=None):
-        import copy as _copy
+    out = PageOutput(
+        page_num=1,
+        text=_DISPUTED_TABLE,
+        table_disputed="99.9",
+        audit_notes=["keep"],
+    )
+    att = ProviderAttempt(engine=EngineType.QWEN, output=out, cost_usd=0.0, accepted=False)
+    decision = PageDecision(1, out, [att], accepted=False)
+    assert promote_unchecked_table_attempt(decision, inner=_TouchNotes()) is None
+    assert out.audit_notes == ["keep"]
 
-        from socr.pipeline.agentic import _note_promotion_failure, is_page_judge_timeout
-        from socr.core.result import (
-            JUDGE_OUTCOME_COMPLETED,
-            JUDGE_OUTCOME_EXCEPTION,
-            JUDGE_OUTCOME_TIMEOUT,
+
+def test_superseding_rejection_counts_source_evidence_refusal() -> None:
+    """#1126-r6: same bytes, SE refusal must supersede a typed timeout stand-in."""
+    from socr.core.manifest import superseding_rejection
+    from socr.core.result import JUDGE_OUTCOME_TIMEOUT
+
+    body = _MODEL_TEXT
+    timed = PageOutput(
+        page_num=1,
+        text=body,
+        judge_outcome=JUDGE_OUTCOME_TIMEOUT,
+        audit_passed=False,
+    )
+    refused = PageOutput(
+        page_num=1,
+        text=body,
+        judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+        audit_passed=False,
+        table_disputed="41.5, 17.2",
+    )
+    ps = PageState(page_num=1)
+    ps.attempts.extend([timed, refused])
+    assert superseding_rejection(ps, timed) is refused
+
+
+def test_route_page_clears_credential_on_source_evidence_reject() -> None:
+    """#1126-r6: witness-contradicted bytes retire an acceptance credential."""
+    from unittest.mock import MagicMock
+
+    from socr.pipeline.agentic import route_page
+
+    doc = fitz.open()
+    page = doc.new_page()
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
+    pix.set_rect(pix.irect, (235, 235, 235))
+    page.insert_image(page.rect, pixmap=pix)
+    try:
+        inner = MagicMock()
+        inner.assess.return_value = AcceptDecision(accept=True, reason="inner ok")
+        judge = SourceEvidenceTableJudge(
+            inner=inner,
+            get_fitz_page=lambda _n: page,
+            record_event=None,
+            ocr_image_fn=lambda _pix: SUPPORTS,
+            native_trusted=lambda _n: False,
         )
-
-        if decision.accepted or inner is None:
-            return None
-        for att in reversed(decision.attempts):
-            out = att.output
-            if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
-                continue
-            from types import SimpleNamespace
-
-            probe = _copy.copy(out)
-            probe.status = PageStatus.SUCCESS
-            probe.failure_mode = FailureMode.NONE
-            probe.error = ""
-            try:
-                verdict = inner.assess(probe, provider=SimpleNamespace())
-            except Exception as exc:
-                _note_promotion_failure(
-                    att,
-                    f"promotion judge raised: {exc}",
-                    outcome=(
-                        JUDGE_OUTCOME_TIMEOUT
-                        if is_page_judge_timeout(exc)
-                        else JUDGE_OUTCOME_EXCEPTION
-                    ),
-                )
-                continue
-            if not verdict.accept:
-                continue
-            att.output.status = PageStatus.SUCCESS
-            att.output.judge_outcome = JUDGE_OUTCOME_COMPLETED
-            att.accepted = True
-            decision.final_output = att.output
-            decision.accepted = True
-            return att
-        return None
-
-    def _disputed_decision() -> PageDecision:
-        disputed = PageOutput(page_num=1, text=_DISPUTED_TABLE, table_disputed="99.9")
-        attempt = ProviderAttempt(
-            engine=EngineType.QWEN, output=disputed, cost_usd=0.0, accepted=False
+        body = f"{_PROSE}\n\n{_DISPUTED_TABLE}"
+        output = PageOutput(
+            page_num=1,
+            text=body,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            table_acceptance_credential={"schema": "table_acceptance", "candidate_sha256": "x"},
         )
-        return PageDecision(1, disputed, [attempt], accepted=False)
+        route_page(1, [PROFILE_QWEN_LOCAL], lambda _prof, _n: output, judge)
+        assert output.judge_outcome == JUDGE_OUTCOME_SOURCE_EVIDENCE
+        assert output.table_acceptance_credential is None
+    finally:
+        doc.close()
 
-    good = promote_unchecked_table_attempt(_disputed_decision(), inner=_RewritingAccepts())
-    bad = _promote_without_text_sync(_disputed_decision(), inner=_RewritingAccepts())
-    assert good is not None and "| Year |" in good.output.text
-    assert bad is not None and "| Item |" in bad.output.text
+
+def test_promotion_inner_judge_peels_production_page_judge(tmp_path) -> None:
+    """#1126-r6: promotion must not re-enter ``SourceEvidenceTableJudge``."""
+    from socr.pipeline.agentic import _promotion_inner_judge
+
+    pdf = _scan_pdf(tmp_path / "peel.pdf")
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            quiet=True,
+            judge_backend="heuristic",
+            primary_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+        )
+    )
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    state.pages[1] = PageState(page_num=1)
+    built = pipe._build_page_judge(state)
+    assert isinstance(built, SourceEvidenceTableJudge)
+    wrapped = pipe._TimeoutJudge(built, 30.0)
+    peeled = _promotion_inner_judge(wrapped)
+    assert peeled is not None
+
+    def _has_source_evidence(judge) -> bool:
+        if judge is None:
+            return False
+        if judge.__class__.__name__ == "SourceEvidenceTableJudge":
+            return True
+        return _has_source_evidence(getattr(judge, "_inner", None))
+
+    assert not _has_source_evidence(peeled)
 
 
 def test_legacy_sidecar_comma_values_use_mark_cap() -> None:
