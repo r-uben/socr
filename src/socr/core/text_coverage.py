@@ -162,12 +162,6 @@ def _polarity_masks(gray):
     return dark > 0, light > 0
 
 
-def _ink_mask(gray):
-    """Union of both polarities, for callers that only need a pixel mask."""
-    dark, light = _polarity_masks(gray)
-    return dark | light
-
-
 def _to_pix(rect, page, mat):
     import fitz
 

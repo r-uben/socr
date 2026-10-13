@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +13,7 @@ import pytest
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus, FailureMode, PageStatus
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.text_coverage import (
     DETECT_DPI,
     _MAX_THICK_PT,
@@ -818,15 +818,36 @@ def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path, providers) -> N
 
 
 @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
-def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers) -> None:
-    """Apply must stamp table_not_reconstructed, not overwrite it with coverage."""
+@pytest.mark.parametrize("unknown_via", [None, "doc_open", "crop_save"])
+def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers, unknown_via) -> None:
+    """Apply must stamp table_not_reconstructed on flagged and both unknown paths."""
     pdf = _vector_unread_pdf(tmp_path / "flat.pdf")
     on_pipe = _pipeline(check_text_coverage=True)
     off_pipe = _pipeline(check_text_coverage=False)
-    with (
-        patch("socr.pipeline.orchestrator.table_not_reconstructed_suspect", return_value=True),
+    patches = [
+        patch(
+            "socr.pipeline.orchestrator.table_not_reconstructed_suspect",
+            return_value=True,
+        ),
         patch("socr.core.manifest.table_not_reconstructed_suspect", return_value=True),
-    ):
+    ]
+    if unknown_via == "doc_open":
+        patches.append(
+            patch(
+                "socr.core.text_coverage.coverage_for_document",
+                side_effect=RuntimeError("open boom"),
+            )
+        )
+    elif unknown_via == "crop_save":
+        patches.append(
+            patch(
+                "socr.core.text_coverage.render_region_png",
+                side_effect=RuntimeError("crop boom"),
+            )
+        )
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         on = _run(on_pipe, pdf, tmp_path / "on", providers)
         off = _run(off_pipe, pdf, tmp_path / "off", providers)
     on_rec = json.loads(next((tmp_path / "on").rglob("pages/00001.json")).read_text())
@@ -834,7 +855,11 @@ def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers) -> No
     assert on_rec["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
     assert off_rec["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
     assert on_rec["status"] == PageStatus.WARNING.value
-    assert uncovered_text_marker(1) in (on.pages[0].text or "")
+    if unknown_via is None:
+        assert uncovered_text_marker(1) in (on.pages[0].text or "")
+    else:
+        assert uncovered_text_marker_no_image(1) in (on.pages[0].text or "")
+        assert uncovered_text_marker(1) not in (on.pages[0].text or "")
     assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert on.status is DocumentStatus.AUDIT_FAILED
 
@@ -860,14 +885,17 @@ def test_document_open_failure_is_unknown(tmp_path: Path) -> None:
 
 
 def test_text_coverage_pages_metadata_skips_ocr(tmp_path: Path) -> None:
-    """metadata text_coverage_pages lists only native / chart / native+math."""
+    """Per-document metadata lists only native / chart / native+math winners."""
     pdf = _vector_unread_pdf(tmp_path / "ocr.pdf")
     on_pipe = _pipeline(check_text_coverage=True)
-    on, state = _run_with_state(on_pipe, pdf, tmp_path / "on", [])
+    _on, state = _run_with_state(on_pipe, pdf, tmp_path / "on", [])
     ps = state.pages[1]
     assert ps.text_ink_unread is True
-    from socr.core.result import PageOutput
-
+    meta = tmp_path / "on" / pdf.stem / "metadata.json"
+    assert meta.is_file()
+    data = json.loads(meta.read_text())
+    assert "text_coverage_pages" in data
+    assert data["text_coverage_pages"] == [1]
     qwen = PageOutput(
         page_num=1,
         text=ps.best_output.text if ps.best_output else "ocr",
@@ -878,6 +906,68 @@ def test_text_coverage_pages_metadata_skips_ocr(tmp_path: Path) -> None:
     )
     ps.best_output = qwen
     on_pipe._phase_assemble(state, tmp_path / "on")
-    meta = next((tmp_path / "on").rglob("metadata.json"))
     data = json.loads(meta.read_text())
     assert 1 not in (data.get("text_coverage_pages") or [])
+
+
+@pytest.mark.parametrize("branch", ["unknown", "flagged"])
+@pytest.mark.parametrize("status", [PageStatus.ERROR, PageStatus.SKIPPED])
+def test_apply_does_not_soften_non_success(tmp_path: Path, branch: str, status) -> None:
+    """Apply must not raise ERROR / SKIPPED to WARNING on either branch."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState, PageState
+
+    pdf = _vector_unread_pdf(tmp_path / "err.pdf")
+    bo = PageOutput(
+        page_num=1,
+        text="A clean paragraph of native body text on this page.",
+        status=status,
+        engine="native",
+        audit_passed=False,
+        failure_mode=FailureMode.HALLUCINATION,
+    )
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.native_text = bo.text
+    ps.best_output = bo
+    ps.attempts = [bo]
+    if branch == "unknown":
+        ps.text_coverage_unknown = True
+        ps.text_coverage_verdict = "unknown"
+    else:
+        ps.text_ink_unread = True
+        ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+    pipe = _pipeline()
+    pipe._scan_root = tmp_path
+    pipe._apply_text_coverage(state, 1, ps, tmp_path / "out")
+    assert ps.best_output is not None
+    assert ps.best_output.status is status
+    assert ps.best_output.failure_mode is FailureMode.HALLUCINATION
+
+
+def test_selection_alone_does_not_write_coverage_flags(tmp_path: Path) -> None:
+    """Selection must not mutate flags when apply never ran."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState, PageState
+
+    pdf = _vector_unread_pdf(tmp_path / "pure.pdf")
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.native_text = "A clean paragraph of native body text on this page."
+    ps.best_output = None
+    ps.text_ink_unread = True
+    ps.text_coverage_unknown = False
+    ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+    before = (ps.text_ink_unread, ps.text_coverage_unknown, ps.text_coverage_verdict)
+    _select_page_output_tagged(state, 1)
+    assert (ps.text_ink_unread, ps.text_coverage_unknown, ps.text_coverage_verdict) == before
+
+
+def test_ink_mask_is_removed() -> None:
+    import socr.core.text_coverage as tc
+
+    assert not hasattr(tc, "_ink_mask")

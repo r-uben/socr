@@ -11359,6 +11359,36 @@ class UnifiedPipeline:
                 ps.attempts[i] = decorated
         return decorated
 
+    @staticmethod
+    def _coverage_apply_status(bo):
+        """Never raise ERROR / SKIPPED to WARNING. Only demote SUCCESS."""
+        return PageStatus.WARNING if bo.status is PageStatus.SUCCESS else bo.status
+
+    @staticmethod
+    def _coverage_apply_mode(ps, bo, coverage_mode: FailureMode) -> FailureMode:
+        """Table, then figure-words, then coverage; keep a pre-existing mode.
+
+        Used by the flagged branch and both unknown branches so a flattened
+        table is not overwritten with ``text_coverage_unknown``.
+        """
+        mode = coverage_mode
+        if figure_words_unread_suspect(ps):
+            mode = FailureMode.FIGURE_WORDS_UNREAD
+        if table_not_reconstructed_suspect(ps):
+            mode = FailureMode.TABLE_NOT_RECONSTRUCTED
+        if bo.failure_mode is not FailureMode.NONE:
+            mode = bo.failure_mode
+        return mode
+
+    def _coverage_stamp_winner(self, ps, bo, coverage_mode, text=None):
+        changes: dict = {
+            "status": self._coverage_apply_status(bo),
+            "failure_mode": self._coverage_apply_mode(ps, bo, coverage_mode),
+        }
+        if text is not None:
+            changes["text"] = text
+        return self._decorate_coverage_winner(ps, bo, **changes)
+
     def _apply_text_coverage(
         self,
         state: DocumentState,
@@ -11392,18 +11422,10 @@ class UnifiedPipeline:
         if ps.text_coverage_unknown:
             no_img = uncovered_text_marker_no_image(page_num)
             body = bo.text or ""
-            changes: dict = {
-                "status": PageStatus.WARNING,
-                "failure_mode": (
-                    bo.failure_mode
-                    if bo.failure_mode is not FailureMode.NONE
-                    else FailureMode.TEXT_COVERAGE_UNKNOWN
-                ),
-            }
+            extra = None
             if uncovered_text_marker(page_num) not in body and no_img not in body:
-                changes["text"] = body.rstrip() + "\n\n" + no_img + "\n"
-            if bo.status is PageStatus.SUCCESS or "text" in changes:
-                self._decorate_coverage_winner(ps, bo, **changes)
+                extra = body.rstrip() + "\n\n" + no_img + "\n"
+            self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
@@ -11435,33 +11457,16 @@ class UnifiedPipeline:
             ps.text_coverage_verdict = "unknown"
             no_img = uncovered_text_marker_no_image(page_num)
             body = bo.text or ""
-            changes: dict = {
-                "status": PageStatus.WARNING,
-                "failure_mode": (
-                    bo.failure_mode
-                    if bo.failure_mode is not FailureMode.NONE
-                    else FailureMode.TEXT_COVERAGE_UNKNOWN
-                ),
-            }
+            extra = None
             if uncovered_text_marker(page_num) not in body and no_img not in body:
-                changes["text"] = body.rstrip() + "\n\n" + no_img + "\n"
-            if bo.status is PageStatus.SUCCESS or "text" in changes:
-                self._decorate_coverage_winner(ps, bo, **changes)
+                extra = body.rstrip() + "\n\n" + no_img + "\n"
+            self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
             return
         mark = uncovered_text_marker(page_num)
         body = (bo.text or "").rstrip()
         extra = mark if not links else mark + "\n\n" + "\n".join(links)
         new_text = body + "\n\n" + extra + "\n"
-        mode = FailureMode.TEXT_INK_UNREAD
-        if figure_words_unread_suspect(ps):
-            mode = FailureMode.FIGURE_WORDS_UNREAD
-        if table_not_reconstructed_suspect(ps):
-            mode = FailureMode.TABLE_NOT_RECONSTRUCTED
-        if bo.failure_mode is not FailureMode.NONE:
-            mode = bo.failure_mode
-        self._decorate_coverage_winner(
-            ps, bo, text=new_text, status=PageStatus.WARNING, failure_mode=mode
-        )
+        self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_INK_UNREAD, new_text)
         state.events.append(
             AuditEvent(
                 page_num=page_num,
