@@ -20,6 +20,7 @@ from socr.core.text_coverage import (
     _MIN_FILL_FRAC,
     analyze_page,
     coverage_for_document,
+    uncovered_text_image_ref,
     uncovered_text_marker,
     uncovered_text_marker_no_image,
 )
@@ -695,38 +696,75 @@ def test_fallback_without_crop_does_not_promise_image(tmp_path: Path) -> None:
     assert ps.text_ink_unread is False
 
 
-def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path) -> None:
-    """Coverage keeps NATIVE_MINUS_AS_DIGIT and still adds the mark."""
+def test_fallback_keeps_equation_sidecar_and_coverage_mark(tmp_path: Path) -> None:
+    """A later native equation append must survive when apply decorated best_output."""
     from socr.core.document import DocumentHandle
     from socr.core.result import PageOutput
     from socr.core.state import DocumentState, PageState
 
-    pdf = _vector_unread_pdf(tmp_path / "minus.pdf")
-    doc = fitz.open(pdf)
-    cov = analyze_page(doc[0])
-    doc.close()
-    assert cov.verdict == "flagged"
-    minus = PageOutput(
+    pdf = _vector_unread_pdf(tmp_path / "eq.pdf")
+    base = "A clean paragraph of native body text on this page."
+    equation = "$$P(A \\cup B)=P(A)+P(B)$$"
+    sidecar = base + "\n\n" + equation + "\n"
+    mark = uncovered_text_marker(1)
+    link = uncovered_text_image_ref(1, 1)
+    decorated = base + "\n\n" + mark + "\n\n" + link + "\n"
+    bo = PageOutput(
         page_num=1,
-        text="Clean chart prose with a signed number the layer cannot be trusted on.",
+        text=decorated,
         status=PageStatus.WARNING,
-        engine="chart_asset",
+        engine="native",
         audit_passed=True,
-        failure_mode=FailureMode.NATIVE_MINUS_AS_DIGIT,
+        failure_mode=FailureMode.TEXT_INK_UNREAD,
+    )
+    eq = PageOutput(
+        page_num=1,
+        text=sidecar,
+        status=PageStatus.SUCCESS,
+        engine="native+equations",
+        audit_passed=True,
+        failure_mode=FailureMode.NONE,
     )
     ps = PageState(page_num=1)
-    ps.attempts = [minus]
-    ps.best_output = minus
+    ps.is_born_digital = True
+    ps.native_text = base
+    ps.has_tables = True
+    ps.attempts = [bo, eq]
+    ps.best_output = bo
     ps.text_ink_unread = True
     ps.text_coverage_verdict = "flagged"
     state = DocumentState(handle=DocumentHandle(path=pdf))
     state.pages[1] = ps
-    pipe = _pipeline()
-    pipe._text_coverage_pages = {1: cov}
-    pipe._scan_root = tmp_path
-    pipe._apply_text_coverage(state, 1, ps, tmp_path / "out")
-    assert ps.best_output is not None
-    assert ps.best_output.failure_mode is FailureMode.NATIVE_MINUS_AS_DIGIT
-    assert uncovered_text_marker(1) in (ps.best_output.text or "")
-    assert ps.text_coverage_verdict == "flagged"
-    assert ps.text_ink_unread is True
+    winner, provenance = _select_page_output_tagged(state, 1)
+    assert provenance is SelectionProvenance.NATIVE_FALLBACK
+    assert equation in (winner.text or "")
+    assert mark in (winner.text or "")
+    assert link in (winner.text or "")
+
+
+@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
+def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path, providers) -> None:
+    """Chart SUCCESS plus minus+coverage must keep MINUS and demote the document."""
+    pdf = _vector_unread_pdf(tmp_path / "minus.pdf")
+    off_pipe = _pipeline(check_text_coverage=False)
+    on_pipe = _pipeline(check_text_coverage=True)
+    with (
+        patch.object(off_pipe, "_is_chart_asset_page", return_value=True),
+        patch("socr.pipeline.orchestrator.minus_as_digit_suspect", return_value=False),
+    ):
+        off = _run(off_pipe, pdf, tmp_path / "off", providers)
+    with (
+        patch.object(on_pipe, "_is_chart_asset_page", return_value=True),
+        patch("socr.pipeline.orchestrator.minus_as_digit_suspect", return_value=True),
+    ):
+        on = _run(on_pipe, pdf, tmp_path / "on", providers)
+    assert off.status is DocumentStatus.SUCCESS
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert on.status != off.status
+    sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
+    rec = json.loads(sidecar.read_text())
+    assert rec["engine"] == "chart_asset"
+    assert rec["status"] == PageStatus.WARNING.value
+    assert rec["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert rec["text_coverage"] == "flagged"
+    assert uncovered_text_marker(1) in (on.pages[0].text or "")

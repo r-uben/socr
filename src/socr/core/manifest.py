@@ -3893,7 +3893,14 @@ def _select_page_output_tagged(
             bo_text = (p.best_output.text or "") if p.best_output is not None else ""
             have = fallback_text or ""
             if mark in bo_text:
-                fallback_text = bo_text
+                # Keep the equation sidecar (or any later native append).
+                # bo_text has the mark and crop links; it may be an earlier
+                # attempt that apply decorated before the sidecar landed.
+                suffix = bo_text[bo_text.index(mark) :]
+                if mark not in have:
+                    fallback_text = have.rstrip() + "\n\n" + suffix
+                    if not fallback_text.endswith("\n"):
+                        fallback_text += "\n"
             elif mark not in have:
                 # apply returned without a crop (best_output was already gone)
                 p.text_ink_unread = False
