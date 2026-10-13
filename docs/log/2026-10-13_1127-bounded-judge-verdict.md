@@ -56,7 +56,7 @@ completes is one call and today's reason bytes. No new `_run_fingerprint` key.
 
 `tests/test_gh1127_judge_truncation_retry.py`: stub truncates once then answers
 → judged; twice → today's exception; timeout → one call, `JUDGE_OUTCOME_TIMEOUT`.
-Mutants (external copy under `scratch/routing-baseline/exec/1127/mutants/`):
+Mutants (external copies of src and tests, outside the repo):
 drop the retry → first test fails; retry forever → bounded-calls test fails.
 
 ## Round 2: retry parked
@@ -126,7 +126,7 @@ retry unmerged.
 
 ## Round 3: schema shipped; retry reverted
 
-The retry diff is saved at `scratch/routing-baseline/exec/1127/retry-parked.patch`
+The retry diff is kept outside the repo (local scratch, not committed)
 and removed from the worktree. The branch does not ship it.
 
 `JUDGE_VERDICT_SCHEMA` / `JUDGE_VERDICT_MAX_ISSUES = 17` live in `judge/judge.py`.
@@ -165,12 +165,12 @@ schema arm (a verdict; an accept would ship SUCCESS).
 Prefix `faithful` is read from the cut reply's first key for this report
 only. It is never parsed in product code.
 
-**Local Ollama** (`exec/1127/bounded/calls.jsonl`; today's `reply_head`):
+**Local Ollama** (per-call records kept in local scratch, not committed; today's arm kept the reply prefix):
 13 recovered (today truncated, schema completed). Schema: **13/13
 `faithful=false`, `retry_same`**. Today's cut prefix: **13/13
 `faithful=false`**. **false→true flips: 0.**
 
-**Cluster vLLM** (`exec/1127/cluster-smoke/calls-{main,branch}.jsonl`):
+**Cluster vLLM** (per-call records kept in local scratch, not committed):
 13 recovered (main truncated, branch completed). Branch: **13/13
 `faithful=false`, `retry_same`**. The cluster smoke did not keep main's
 raw reply. All 13 pages are in the local data: 10 local cut prefixes are
@@ -182,13 +182,13 @@ A recovered accept would have been the path that hides a bad reading.
 There were none. Recovered pages stay fail-closed as rejects, just with a
 finished verdict instead of an exception.
 
-Renders for the recovered set live under `scratch/routing-baseline/exec/1127/renders/`
+Page renders for the recovered set are kept in local scratch (not committed)
 (`{group}_{doc[:40]}_pNNNNN.png`). This log does not judge those images.
 
 ## Round 4
 
 Literal pins on the captured request: `required`, `additionalProperties is
-False`, vLLM `strict: True`. External mutants under `exec/1127/mutants-r4/`
+False`, vLLM `strict: True`. External mutants (copies outside the repo)
 delete each; the pin fails.
 
 Schema comment: `issues` last so `maxItems` forces `]` then `}`. A cut
