@@ -93,6 +93,20 @@ def _light_on_dark_pdf(path: Path) -> Path:
     return path
 
 
+def _fill_unread_pdf(path: Path, fill, color) -> Path:
+    """Unread path-glyphs on a filled field (black-on-blue, grey, …)."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 80), "A clean paragraph of native body text on this page.")
+    page.draw_rect(fitz.Rect(60, 180, 420, 280), color=fill, fill=fill)
+    _glyph_row(page, 200.0, color=color)
+    _glyph_row(page, 212.0, color=color)
+    page.insert_text((72, 520), "A second paragraph sits below the unread marks.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def _repeating_logo_pdf(path: Path, pages: int = 3) -> Path:
     """Same unread mark in the header, different body text on each page.
 
@@ -329,6 +343,27 @@ def test_light_on_dark_vector_is_flagged(tmp_path: Path, providers) -> None:
     assert uncovered_text_marker(1) in (on.pages[0].text or "")
 
 
+@pytest.mark.parametrize(
+    "name,fill,color",
+    [
+        ("black-on-blue", (0.1, 0.2, 0.6), (0, 0, 0)),
+        ("black-on-grey-0.25", (0.25, 0.25, 0.25), (0, 0, 0)),
+        ("black-on-grey-0.40", (0.40, 0.40, 0.40), (0, 0, 0)),
+        ("black-on-grey-0.55", (0.55, 0.55, 0.55), (0, 0, 0)),
+        ("white-on-grey-0.45", (0.45, 0.45, 0.45), (1, 1, 1)),
+        ("white-on-grey-0.55", (0.55, 0.55, 0.55), (1, 1, 1)),
+    ],
+)
+def test_contrast_fill_vector_is_flagged(tmp_path: Path, name, fill, color) -> None:
+    """Black-on-mid and white-on-grey must flag; a global mid hid these."""
+    pdf = _fill_unread_pdf(tmp_path / f"{name}.pdf", fill, color)
+    doc = fitz.open(pdf)
+    rec = analyze_page(doc[0])
+    doc.close()
+    assert rec.verdict == "flagged", name
+    assert rec.regions
+
+
 def test_figure_labels_above_caption_stay_flagged(tmp_path: Path) -> None:
     pdf = _figure_above_caption_pdf(tmp_path / "fig.pdf")
     doc = fitz.open(pdf)
@@ -466,6 +501,7 @@ def test_crop_write_failure_is_unknown(tmp_path: Path) -> None:
     assert rec["failure_mode"] == FailureMode.TEXT_COVERAGE_UNKNOWN.value
     assert rec["text_coverage"] == "unknown"
     assert uncovered_text_marker(1) not in (on.pages[0].text or "")
+    assert uncovered_text_marker_no_image(1) in (on.pages[0].text or "")
     assert not list((tmp_path / "on").rglob("figures/uncovered_text_p1_r*.png"))
 
 
@@ -484,6 +520,7 @@ def test_unknown_does_not_ship_success(tmp_path: Path) -> None:
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.TEXT_COVERAGE_UNKNOWN.value
     assert rec["text_coverage"] == "unknown"
+    assert uncovered_text_marker_no_image(1) in (on.pages[0].text or "")
 
 
 def test_coverage_decorates_math_hybrid(tmp_path: Path) -> None:
@@ -673,7 +710,11 @@ def test_actual_table_fallback_coverage(tmp_path: Path, native_only: bool, unkno
 
 
 def test_fallback_without_crop_does_not_promise_image(tmp_path: Path) -> None:
-    """Fallback must not say 'see image' when apply never saved a crop."""
+    """Fallback must not say 'see image' when apply never saved a crop.
+
+    Selection is pure: apply (best_output already gone) writes unknown,
+    then two selections return the same text with the no-image mark.
+    """
     from socr.core.document import DocumentHandle
     from socr.core.state import DocumentState, PageState
 
@@ -686,14 +727,20 @@ def test_fallback_without_crop_does_not_promise_image(tmp_path: Path) -> None:
     ps.text_coverage_verdict = "flagged"
     state = DocumentState(handle=DocumentHandle(path=pdf))
     state.pages[1] = ps
-    winner, _prov = _select_page_output_tagged(state, 1)
-    assert uncovered_text_marker(1) not in (winner.text or "")
-    assert uncovered_text_marker_no_image(1) in (winner.text or "")
-    assert "see image" not in (winner.text or "")
-    assert winner.failure_mode is FailureMode.TEXT_COVERAGE_UNKNOWN
-    assert winner.status is PageStatus.WARNING
+    pipe = _pipeline()
+    pipe._apply_text_coverage(state, 1, ps, tmp_path / "out")
     assert ps.text_coverage_unknown is True
     assert ps.text_ink_unread is False
+    first, _ = _select_page_output_tagged(state, 1)
+    flags = (ps.text_ink_unread, ps.text_coverage_unknown, ps.text_coverage_verdict)
+    second, _ = _select_page_output_tagged(state, 1)
+    assert first.text == second.text
+    assert flags == (ps.text_ink_unread, ps.text_coverage_unknown, ps.text_coverage_verdict)
+    assert uncovered_text_marker(1) not in (first.text or "")
+    assert uncovered_text_marker_no_image(1) in (first.text or "")
+    assert "see image" not in (first.text or "")
+    assert first.failure_mode is FailureMode.TEXT_COVERAGE_UNKNOWN
+    assert first.status is PageStatus.WARNING
 
 
 def test_fallback_keeps_equation_sidecar_and_coverage_mark(tmp_path: Path) -> None:
@@ -768,3 +815,69 @@ def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path, providers) -> N
     assert rec["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert rec["text_coverage"] == "flagged"
     assert uncovered_text_marker(1) in (on.pages[0].text or "")
+
+
+@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
+def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers) -> None:
+    """Apply must stamp table_not_reconstructed, not overwrite it with coverage."""
+    pdf = _vector_unread_pdf(tmp_path / "flat.pdf")
+    on_pipe = _pipeline(check_text_coverage=True)
+    off_pipe = _pipeline(check_text_coverage=False)
+    with (
+        patch("socr.pipeline.orchestrator.table_not_reconstructed_suspect", return_value=True),
+        patch("socr.core.manifest.table_not_reconstructed_suspect", return_value=True),
+    ):
+        on = _run(on_pipe, pdf, tmp_path / "on", providers)
+        off = _run(off_pipe, pdf, tmp_path / "off", providers)
+    on_rec = json.loads(next((tmp_path / "on").rglob("pages/00001.json")).read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert on_rec["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
+    assert off_rec["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
+    assert on_rec["status"] == PageStatus.WARNING.value
+    assert uncovered_text_marker(1) in (on.pages[0].text or "")
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
+    assert on.status is DocumentStatus.AUDIT_FAILED
+
+
+def test_document_open_failure_is_unknown(tmp_path: Path) -> None:
+    """A failed coverage_for_document must not leave the page SUCCESS."""
+    pdf = _clean_text_pdf(tmp_path / "open.pdf")
+    on_pipe = _pipeline(check_text_coverage=True)
+    off_pipe = _pipeline(check_text_coverage=False)
+    with patch(
+        "socr.core.text_coverage.coverage_for_document",
+        side_effect=RuntimeError("open boom"),
+    ):
+        on = _run(on_pipe, pdf, tmp_path / "on", [PROFILE_QWEN_LOCAL])
+    off = _run(off_pipe, pdf, tmp_path / "off", [PROFILE_QWEN_LOCAL])
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert off.status is DocumentStatus.SUCCESS
+    sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
+    rec = json.loads(sidecar.read_text())
+    assert rec["text_coverage"] == "unknown"
+    assert rec["failure_mode"] == FailureMode.TEXT_COVERAGE_UNKNOWN.value
+    assert uncovered_text_marker_no_image(1) in (on.pages[0].text or "")
+
+
+def test_text_coverage_pages_metadata_skips_ocr(tmp_path: Path) -> None:
+    """metadata text_coverage_pages lists only native / chart / native+math."""
+    pdf = _vector_unread_pdf(tmp_path / "ocr.pdf")
+    on_pipe = _pipeline(check_text_coverage=True)
+    on, state = _run_with_state(on_pipe, pdf, tmp_path / "on", [])
+    ps = state.pages[1]
+    assert ps.text_ink_unread is True
+    from socr.core.result import PageOutput
+
+    qwen = PageOutput(
+        page_num=1,
+        text=ps.best_output.text if ps.best_output else "ocr",
+        status=PageStatus.WARNING,
+        engine="qwen",
+        audit_passed=True,
+        failure_mode=FailureMode.TEXT_INK_UNREAD,
+    )
+    ps.best_output = qwen
+    on_pipe._phase_assemble(state, tmp_path / "on")
+    meta = next((tmp_path / "on").rglob("metadata.json"))
+    data = json.loads(meta.read_text())
+    assert 1 not in (data.get("text_coverage_pages") or [])

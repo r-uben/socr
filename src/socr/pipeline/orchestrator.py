@@ -11370,7 +11370,13 @@ class UnifiedPipeline:
         if not self.config.check_text_coverage:
             return
         bo = ps.best_output
-        if bo is None or not (bo.engine or "").startswith(("native", "chart_asset")):
+        if bo is None:
+            if ps.text_ink_unread:
+                ps.text_ink_unread = False
+                ps.text_coverage_unknown = True
+                ps.text_coverage_verdict = "unknown"
+            return
+        if not (bo.engine or "").startswith(("native", "chart_asset")):
             return
         from ocr_output_contract import doc_dir_for, relative_key
         from socr.core.audit_log import AuditEvent
@@ -11379,17 +11385,25 @@ class UnifiedPipeline:
             render_region_png,
             uncovered_text_image_ref,
             uncovered_text_marker,
+            uncovered_text_marker_no_image,
             uncovered_text_png_name,
         )
 
         if ps.text_coverage_unknown:
-            if bo.status is PageStatus.SUCCESS:
-                self._decorate_coverage_winner(
-                    ps,
-                    bo,
-                    status=PageStatus.WARNING,
-                    failure_mode=FailureMode.TEXT_COVERAGE_UNKNOWN,
-                )
+            no_img = uncovered_text_marker_no_image(page_num)
+            body = bo.text or ""
+            changes: dict = {
+                "status": PageStatus.WARNING,
+                "failure_mode": (
+                    bo.failure_mode
+                    if bo.failure_mode is not FailureMode.NONE
+                    else FailureMode.TEXT_COVERAGE_UNKNOWN
+                ),
+            }
+            if uncovered_text_marker(page_num) not in body and no_img not in body:
+                changes["text"] = body.rstrip() + "\n\n" + no_img + "\n"
+            if bo.status is PageStatus.SUCCESS or "text" in changes:
+                self._decorate_coverage_winner(ps, bo, **changes)
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
@@ -11419,13 +11433,20 @@ class UnifiedPipeline:
             ps.text_ink_unread = False
             ps.text_coverage_unknown = True
             ps.text_coverage_verdict = "unknown"
-            if bo.status is PageStatus.SUCCESS:
-                self._decorate_coverage_winner(
-                    ps,
-                    bo,
-                    status=PageStatus.WARNING,
-                    failure_mode=FailureMode.TEXT_COVERAGE_UNKNOWN,
-                )
+            no_img = uncovered_text_marker_no_image(page_num)
+            body = bo.text or ""
+            changes: dict = {
+                "status": PageStatus.WARNING,
+                "failure_mode": (
+                    bo.failure_mode
+                    if bo.failure_mode is not FailureMode.NONE
+                    else FailureMode.TEXT_COVERAGE_UNKNOWN
+                ),
+            }
+            if uncovered_text_marker(page_num) not in body and no_img not in body:
+                changes["text"] = body.rstrip() + "\n\n" + no_img + "\n"
+            if bo.status is PageStatus.SUCCESS or "text" in changes:
+                self._decorate_coverage_winner(ps, bo, **changes)
             return
         mark = uncovered_text_marker(page_num)
         body = (bo.text or "").rstrip()
@@ -11434,6 +11455,8 @@ class UnifiedPipeline:
         mode = FailureMode.TEXT_INK_UNREAD
         if figure_words_unread_suspect(ps):
             mode = FailureMode.FIGURE_WORDS_UNREAD
+        if table_not_reconstructed_suspect(ps):
+            mode = FailureMode.TABLE_NOT_RECONSTRUCTED
         if bo.failure_mode is not FailureMode.NONE:
             mode = bo.failure_mode
         self._decorate_coverage_winner(
@@ -18094,7 +18117,9 @@ class UnifiedPipeline:
             coverage_meta = [
                 n
                 for n, p in sorted(state.pages.items())
-                if text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p)
+                if (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p))
+                and p.best_output
+                and (p.best_output.engine or "").startswith(("native", "chart_asset"))
             ]
             if coverage_meta:
                 doc_extras["text_coverage_pages"] = coverage_meta

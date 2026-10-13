@@ -3883,13 +3883,14 @@ def _select_page_output_tagged(
         # deterministic --native-only path, which is exactly the path this
         # ticket is about.
         fallback_text = _native_text_with_appends(p)
-        if text_ink_unread_suspect(p):
+        if text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p):
             from socr.core.text_coverage import (
                 uncovered_text_marker,
                 uncovered_text_marker_no_image,
             )
 
             mark = uncovered_text_marker(page_num)
+            no_img = uncovered_text_marker_no_image(page_num)
             bo_text = (p.best_output.text or "") if p.best_output is not None else ""
             have = fallback_text or ""
             if mark in bo_text:
@@ -3901,14 +3902,10 @@ def _select_page_output_tagged(
                     fallback_text = have.rstrip() + "\n\n" + suffix
                     if not fallback_text.endswith("\n"):
                         fallback_text += "\n"
-            elif mark not in have:
-                # apply returned without a crop (best_output was already gone)
-                p.text_ink_unread = False
-                p.text_coverage_unknown = True
-                p.text_coverage_verdict = "unknown"
-                no_img = uncovered_text_marker_no_image(page_num)
-                if no_img not in have:
-                    fallback_text = have.rstrip() + "\n\n" + no_img + "\n"
+            elif mark not in have and no_img not in have:
+                # apply never saved a crop. Selection stays pure: the
+                # no-image mark goes on the returned text only.
+                fallback_text = have.rstrip() + "\n\n" + no_img + "\n"
         return PageOutput(
             page_num=page_num,
             text=fallback_text,

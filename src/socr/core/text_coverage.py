@@ -1,6 +1,5 @@
 """#1050 step 1: model-free ink-vs-visible-text-layer coverage on trusted-native pages.
 
-Starts from Fable's scratch check (``native-team/fable/coverage_check.py``).
 Hand-check precision on silent-SUCCESS pages: 53/60 (88%) had some real
 uncovered text; 237/295 regions (80%) were citable. Astra's region precision
 was 41%; Wonder's success-stratum region precision was 80–94% but flagged
@@ -9,11 +8,12 @@ more pages (131 vs Fable's 106) with more furniture. Fable's cuts come from
 
 No model call. No OCR of crops. A page is ``passed``, ``flagged`` or
 ``unknown``. Ink is local-contrast in either polarity (dark-on-light
-or light-on-dark), chosen from the page's own mid-grey. There is no
-repeat-ink suppression: a logo flagged by mistake is an unneeded
-warning; a label suppressed by mistake is silent loss. A row is a
-word if it meets Astra's page-local ``min_run_components`` *or*
-Fable's corpus median word width.
+or light-on-dark). Each polarity is envelope-filtered on its own, then
+the regions are unioned: a page-global mid-grey threshold hid black
+lettering on a mid or dark fill. There is no repeat-ink suppression:
+a logo flagged by mistake is an unneeded warning; a label suppressed
+by mistake is silent loss. A row is a word if it meets Astra's
+page-local ``min_run_components`` *or* Fable's corpus median word width.
 """
 
 from __future__ import annotations
@@ -143,16 +143,12 @@ def _render_gray(page):
     return gray, mat
 
 
-def _ink_mask(gray):
-    """Local-contrast ink in either polarity, same ADAPT_BLOCK / ADAPT_C.
+def _polarity_masks(gray):
+    """Dark-on-light and light-on-dark ink, same ADAPT_BLOCK / ADAPT_C.
 
-    Dark-on-light is the inverted adaptive (ink darker than the local mean
-    by more than ADAPT_C). Light-on-dark is the same rule on the uninverted
-    page. The page's own mid-grey (min+max)/2 chooses which polarity a
-    pixel uses: a dark chart field is below mid-grey, so white lettering
-    is ink; paper is above it, so a light halo around dark glyphs is not.
-    Union of both polarities everywhere thickens those glyphs and clears
-    real rows.
+    Each mask is envelope-filtered on its own. OR-ing the pixels first
+    thickens dark glyphs with a light halo and clears real rows; a
+    page-global mid-grey switch hid black lettering on a mid or dark fill.
     """
     import cv2
 
@@ -163,10 +159,13 @@ def _ink_mask(gray):
     light = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, ADAPT_BLOCK, -ADAPT_C
     )
-    local = cv2.boxFilter(gray, ddepth=cv2.CV_32F, ksize=(ADAPT_BLOCK, ADAPT_BLOCK), normalize=True)
-    mid = (float(np.min(gray)) + float(np.max(gray))) / 2.0
-    use_light = local < mid
-    return np.where(use_light, light > 0, dark > 0)
+    return dark > 0, light > 0
+
+
+def _ink_mask(gray):
+    """Union of both polarities, for callers that only need a pixel mask."""
+    dark, light = _polarity_masks(gray)
+    return dark | light
 
 
 def _to_pix(rect, page, mat):
@@ -370,6 +369,97 @@ def _locate_kind(page, mat, px) -> str:
     return "vector_or_bare"
 
 
+def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
+    """Envelope-filter one polarity's ink into coverage regions."""
+    import cv2
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+    hit = np.bincount(labels[layer], minlength=n).astype(np.float64)
+    tot = np.bincount(labels.ravel(), minlength=n).astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        frac = np.where(tot > 0, hit / tot, 0.0)
+    x, y, w, h, area = (stats[:, i] for i in range(5))
+    idx = np.arange(1, n)
+    resid_idx = idx[frac[idx] < COVER_MAJORITY]
+    covered_idx = idx[frac[idx] >= COVER_MAJORITY]
+    h_med = (
+        float(np.median(h[covered_idx]))
+        if len(covered_idx) >= H_MED_MIN_COVERED
+        else GLYPH_H_P50_PX
+    )
+    rh, rw = h[resid_idx], w[resid_idx]
+    # page.rotation swaps pixmap axes. Filter on the orientation-
+    # invariant pair so a 16 pt Helvetica-Oblique raster that flags
+    # at 0° also flags at 90/270. Raw rh/rw clears the rotated case.
+    short = np.minimum(rh, rw)
+    long = np.maximum(rh, rw)
+    glyph_like = (
+        (short >= GLYPH_H_P02_PX)
+        & (short <= GLYPH_H_P98_PX)
+        & (long >= GLYPH_W_P02_PX)
+        & (long <= WORD_W_P98_PX)
+    )
+    thin = short <= MAX_THICK_PX
+    long_ = long > GLYPH_H_P98_PX
+    glyph_like &= ~(thin & long_)
+    # Solids that fill more of their box than ``_MIN_FILL_FRAC`` and are
+    # thicker than a rule are still glyphs when they sit in the height band;
+    # the fill envelope below drops dashed-line rows, not this cut.
+    _ = _MIN_FILL_FRAC
+    g = resid_idx[glyph_like]
+    min_run = _page_min_run(page, mat, labels, set(int(i) for i in covered_idx))
+    regions: list[CoverageRegion] = []
+    if len(g) < 2:
+        return regions
+    gx0, gy0, gw, gh = x[g], y[g], w[g], h[g]
+    gfill = area[g] / np.maximum(1, gw * gh)
+    row_boxes = []
+    row_boxes.extend(_accept_runs(gx0, gy0, gw, gh, gfill, h_med, min_run, vertical=False))
+    # page.rotation 90/270 turns a horizontal label into a column in
+    # the pixmap. Vertical linking on *upright* pages treats rules
+    # and spines as words (production silent flags 101 → 1096).
+    # Upright y-axis labels stay a follow-up (Ben–Gunn–Khan p7).
+    if getattr(page, "rotation", 0) % 360 in (90, 270):
+        row_boxes.extend(_accept_runs(gx0, gy0, gw, gh, gfill, h_med, min_run, vertical=True))
+    rparent = list(range(len(row_boxes)))
+
+    def rfind(a):
+        while rparent[a] != a:
+            rparent[a] = rparent[rparent[a]]
+            a = rparent[a]
+        return a
+
+    for i in range(len(row_boxes)):
+        for j in range(i + 1, len(row_boxes)):
+            a, b = row_boxes[i], row_boxes[j]
+            vgap = max(a[1], b[1]) - min(a[3], b[3])
+            xov = min(a[2], b[2]) - max(a[0], b[0])
+            if vgap <= h_med and xov > 0:
+                ra, rb = rfind(i), rfind(j)
+                if ra != rb:
+                    rparent[rb] = ra
+    blocks: dict[int, list] = collections.defaultdict(list)
+    for i in range(len(row_boxes)):
+        blocks[rfind(i)].append(row_boxes[i])
+    for members in blocks.values():
+        bx0 = min(r[0] for r in members)
+        by0 = min(r[1] for r in members)
+        bx1 = max(r[2] for r in members)
+        by1 = max(r[3] for r in members)
+        px = (int(bx0), int(by0), int(bx1), int(by1))
+        pdf = _from_pix(*px, page, mat)
+        regions.append(
+            CoverageRegion(
+                pdf=pdf,
+                px=px,
+                glyphs=int(sum(r[4] for r in members)),
+                band=_locate_band(page, mat, px),
+                kind=_locate_kind(page, mat, px),
+            )
+        )
+    return regions
+
+
 def analyze_page(page) -> CoveragePage:
     """Ink-vs-layer check on one page. Never raises; failures are ``unknown``."""
     import time
@@ -377,96 +467,17 @@ def analyze_page(page) -> CoveragePage:
     t0 = time.perf_counter()
     try:
         gray, mat = _render_gray(page)
-        ink = _ink_mask(gray)
         vis, _inv = visible_char_boxes(page)
-        layer = _paint(ink.shape, vis, page, mat)
-        import cv2
-
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
-        hit = np.bincount(labels[layer], minlength=n).astype(np.float64)
-        tot = np.bincount(labels.ravel(), minlength=n).astype(np.float64)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            frac = np.where(tot > 0, hit / tot, 0.0)
-        x, y, w, h, area = (stats[:, i] for i in range(5))
-        idx = np.arange(1, n)
-        resid_idx = idx[frac[idx] < COVER_MAJORITY]
-        covered_idx = idx[frac[idx] >= COVER_MAJORITY]
-        h_med = (
-            float(np.median(h[covered_idx]))
-            if len(covered_idx) >= H_MED_MIN_COVERED
-            else GLYPH_H_P50_PX
-        )
-        rh, rw = h[resid_idx], w[resid_idx]
-        # page.rotation swaps pixmap axes. Filter on the orientation-
-        # invariant pair so a 16 pt Helvetica-Oblique raster that flags
-        # at 0° also flags at 90/270. Raw rh/rw clears the rotated case.
-        short = np.minimum(rh, rw)
-        long = np.maximum(rh, rw)
-        glyph_like = (
-            (short >= GLYPH_H_P02_PX)
-            & (short <= GLYPH_H_P98_PX)
-            & (long >= GLYPH_W_P02_PX)
-            & (long <= WORD_W_P98_PX)
-        )
-        thin = short <= MAX_THICK_PX
-        long_ = long > GLYPH_H_P98_PX
-        glyph_like &= ~(thin & long_)
-        # Solids that fill more of their box than ``_MIN_FILL_FRAC`` and are
-        # thicker than a rule are still glyphs when they sit in the height band;
-        # the fill envelope below drops dashed-line rows, not this cut.
-        _ = _MIN_FILL_FRAC
-        g = resid_idx[glyph_like]
-        min_run = _page_min_run(page, mat, labels, set(int(i) for i in covered_idx))
+        dark, light = _polarity_masks(gray)
+        layer = _paint(dark.shape, vis, page, mat)
         regions: list[CoverageRegion] = []
-        if len(g) >= 2:
-            gx0, gy0, gw, gh = x[g], y[g], w[g], h[g]
-            gfill = area[g] / np.maximum(1, gw * gh)
-            row_boxes = []
-            row_boxes.extend(_accept_runs(gx0, gy0, gw, gh, gfill, h_med, min_run, vertical=False))
-            # page.rotation 90/270 turns a horizontal label into a column in
-            # the pixmap. Vertical linking on *upright* pages treats rules
-            # and spines as words (production silent flags 101 → 1096).
-            # Upright y-axis labels stay a follow-up (Ben–Gunn–Khan p7).
-            if getattr(page, "rotation", 0) % 360 in (90, 270):
-                row_boxes.extend(
-                    _accept_runs(gx0, gy0, gw, gh, gfill, h_med, min_run, vertical=True)
-                )
-            rparent = list(range(len(row_boxes)))
-
-            def rfind(a):
-                while rparent[a] != a:
-                    rparent[a] = rparent[rparent[a]]
-                    a = rparent[a]
-                return a
-
-            for i in range(len(row_boxes)):
-                for j in range(i + 1, len(row_boxes)):
-                    a, b = row_boxes[i], row_boxes[j]
-                    vgap = max(a[1], b[1]) - min(a[3], b[3])
-                    xov = min(a[2], b[2]) - max(a[0], b[0])
-                    if vgap <= h_med and xov > 0:
-                        ra, rb = rfind(i), rfind(j)
-                        if ra != rb:
-                            rparent[rb] = ra
-            blocks: dict[int, list] = collections.defaultdict(list)
-            for i in range(len(row_boxes)):
-                blocks[rfind(i)].append(row_boxes[i])
-            for members in blocks.values():
-                bx0 = min(r[0] for r in members)
-                by0 = min(r[1] for r in members)
-                bx1 = max(r[2] for r in members)
-                by1 = max(r[3] for r in members)
-                px = (int(bx0), int(by0), int(bx1), int(by1))
-                pdf = _from_pix(*px, page, mat)
-                regions.append(
-                    CoverageRegion(
-                        pdf=pdf,
-                        px=px,
-                        glyphs=int(sum(r[4] for r in members)),
-                        band=_locate_band(page, mat, px),
-                        kind=_locate_kind(page, mat, px),
-                    )
-                )
+        seen: set[tuple[float, float, float, float]] = set()
+        for ink in (dark, light):
+            for reg in _regions_from_ink(page, mat, ink, layer):
+                if reg.pdf in seen:
+                    continue
+                seen.add(reg.pdf)
+                regions.append(reg)
         return CoveragePage(
             verdict=VERDICT_FLAGGED if regions else VERDICT_PASSED,
             regions=regions,
