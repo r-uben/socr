@@ -137,6 +137,12 @@ class PageState:
     #: #1053: a figure crop on this page holds no native word, so its words are unread. Set by
     #: the chart-asset lane each run; not replayed (a WARNING page is never resumed as terminal).
     figure_words_unread: bool = False
+    #: #1050: ink-vs-layer coverage on a trusted-native page. ``passed`` /
+    #: ``flagged`` / ``unknown``. Runtime; a WARNING page is never resumed as
+    #: terminal SUCCESS.
+    text_coverage_verdict: str = ""
+    text_ink_unread: bool = False
+    text_coverage_unknown: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
     #: actually ran on this page, recorded AFTER the splice so it describes what
     #: went into the body rather than what a model returned. Read only by

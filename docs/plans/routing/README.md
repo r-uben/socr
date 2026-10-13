@@ -45,8 +45,12 @@ shipped native in the baseline now get a whole-page read, mostly because of the 
 
 - **Built:** native prose ships as paragraphs, with line-end hyphens rejoined only when the same document
   shows the joined word (#1074, merged as #1077).
-- **Check on native text:** none yet. Missing text (#1050, ink with no words over it) and wrong text (#1051,
-  a Tesseract re-read compared line by line) are designed, not built (Target 1-3 below).
+- **Check on native text:** missing-text step 1 is built (#1050, 2026-10-13). Every trusted-native page
+  (`native` / `native+math` / `chart_asset`) gets a model-free ink-vs-visible-text-layer verdict (`passed` / `flagged` /
+  `unknown`). A flagged page keeps its native prose, ships WARNING / `text_ink_unread`, and links
+  `figures/uncovered_text_pN_rI.png`. Repeated ink is flagged like any other uncovered text, so a logo
+  page ships a warning. No model call, no OCR of crops (that is step 2). Wrong text (#1051) is still
+  designed, not built.
 - **Known whole-page triggers besides maths:** invisible text layers over a scan (226 pages), control bytes
   before digits (152 pages).
 
@@ -135,11 +139,12 @@ the page. Otherwise the page ships `[page N failed: unverifiable table — see i
 
 Native text ships only after model-free checks; models see gaps and bad lines, not pages.
 
-1. **Text quality check, step 1: missing text (#1050).** Render the page, find ink, subtract text-layer word
-   boxes. Text-like ink with no words over it → OCR that crop only. Inside a figure, the figure's marks are
-   ignored but text-shaped ink still counts (axis labels, legends, box labels). Where the OCR'd text lands:
-   outside a figure, substituted into the prose at its reading-order position; inside a figure, beneath the
-   linked figure image:
+1. **Text quality check, step 1: missing text (#1050).** Built as flag-and-link (2026-10-13). Render the page,
+   find ink, subtract visible text-layer char boxes. Text-like ink with no words over it flags the page
+   (`text_ink_unread`) and saves the region PNG; native prose is unchanged. A check that cannot decide is
+   `text_coverage_unknown` (WARNING, no model in step 1; Target 4's whole-page route is step 2). Step 2
+   (not built) OCRs the crop only. Inside a figure, the figure's marks are ignored but text-shaped ink still
+   counts (axis labels, legends, box labels). Where the OCR'd text would land:
 
    ```markdown
    ![Figure 1: …](figures/p002_fig1.png)
@@ -151,7 +156,8 @@ Native text ships only after model-free checks; models see gaps and bad lines, n
 3. **Jev as the text-only judge (#1051).** Jev judges text pairs (a real word difference or a misread). Digit
    disagreements never go through Jev.
 4. **Fail closed.** A check that cannot run or decide sends the page to today's whole-page route; figures are
-   the exception (2026-10-10 ruling above).
+   the exception (2026-10-10 ruling above). #1050 step 1 has no model: `unknown` ships WARNING /
+   `text_coverage_unknown` and keeps the native prose; the whole-page route is step 2.
 5. **Honest local price.** GPU seconds enter the ladder's cost.
 
 Order of work for the text checks: measure #1050 on trusted-native pages first (stop if there are about zero

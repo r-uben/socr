@@ -57,6 +57,7 @@ _FIELD_ALIASES = {
     # and would even count `config.hpc.enabled = True` itself, since the parent
     # is loaded in order to store into it (cubic P2 on #516).
     "hpc_sequential": "hpc.enabled",
+    "no_text_coverage": "check_text_coverage",
 }
 
 # Flags that gate BY CONSTRUCTION rather than through a config read, with the
@@ -166,6 +167,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     # exact case it was written for. Verified live rather than assumed: read at
     # orchestrator.py:462 and :1549, both gating on `and self.config.agentic`.
     "no_equation_region_lane": (AGENTIC, "equation_region_lane, gated in the agentic lane"),
+    "no_text_coverage": (
+        AGENTIC,
+        "check_text_coverage; gates _prepare_text_coverage / _apply_text_coverage",
+    ),
     # -- non-agentic by design
     "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),
     "hpc_sequential": (NON_AGENTIC, "HPC lane only; sets hpc.enabled, read at pipeline choice"),
