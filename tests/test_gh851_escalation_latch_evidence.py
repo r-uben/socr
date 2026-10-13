@@ -175,7 +175,15 @@ def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) ->
     assert slow_p2["status"] == PageStatus.SUCCESS.value
     assert wedge_p2["status"] != slow_p2["status"]
     assert wedge_p2["failure_mode"] == "table_unverified"
-    assert wedge_p2["text"] == slow_p2["text"], "demotion must not discard the page text"
+    # #1048: the demoted page's table now carries the unverified mark, and ONLY the
+    # mark differs: the demotion still does not discard or alter the page text.
+    from socr.core.manifest import UNVERIFIED_TABLE_MARK
+
+    assert UNVERIFIED_TABLE_MARK in wedge_p2["text"]
+    assert UNVERIFIED_TABLE_MARK not in slow_p2["text"]
+    assert wedge_p2["text"].replace(f"{UNVERIFIED_TABLE_MARK}\n\n", "") == slow_p2["text"], (
+        "demotion must not discard the page text"
+    )
 
     # Document: a clean run is SUCCESS; one withheld page makes it not-SUCCESS, and
     # the withheld page is named in what the document reports.

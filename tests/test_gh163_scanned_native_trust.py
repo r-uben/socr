@@ -378,15 +378,20 @@ class TestTheJudgePassesTheClassificationThrough:
                 "the page must have words, or the old code would not have deferred"
             )
             judge, inner = self._judge(doc, trusted=False)
-            decision = judge.assess(self._output(), self._provider())
 
-            assert inner.calls == 0, (
+            # #1048: a table the evidence check could not verify (silent OCR)
+            # now reaches the inner judge, so reaching it no longer proves a
+            # deferral. What does: the check ran and recorded that it could not
+            # verify (a deferral returns before ``table_unverifiable`` is set).
+            output = self._output()
+            decision = judge.assess(output, self._provider())
+            assert output.table_unverifiable, (
                 "the judge deferred to the inner chain on an untrusted page, so "
                 "the classification never reached verify_scanned_table"
             )
-            assert not decision.accept, (
-                f"a hallucinated table on an untrusted page was accepted: {decision.reason}"
-            )
+            # Rejected at this rung (so the router escalates); the ladder end ships it marked.
+            assert not decision.accept
+            assert inner.calls == 0
         finally:
             doc.close()
 

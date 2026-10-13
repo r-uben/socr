@@ -92,10 +92,16 @@ def _candidate_output() -> PageOutput:
 
 
 def _assess(*, witness) -> tuple[AcceptDecision, PageOutput, list]:
-    """Run the judge once with the witness environment fully controlled."""
+    """Run the judge once with the witness environment fully controlled.
+
+    #1048: a table the gate could not check (no witness) now ships when the inner
+    judge accepts it; the fail-closed ending these tests pin is reached when the
+    inner judge REFUSES. The inner judge refuses here, so both endings are still
+    exercised. A contradicted table never reaches the inner judge at all.
+    """
     events: list[AuditEvent] = []
     inner = MagicMock()
-    inner.assess.return_value = AcceptDecision(accept=True, reason="inner ok")
+    inner.assess.return_value = AcceptDecision(accept=False, reason="inner refuses")
     page = _scanned_page()
     judge = SourceEvidenceTableJudge(
         inner=inner,
@@ -109,7 +115,6 @@ def _assess(*, witness) -> tuple[AcceptDecision, PageOutput, list]:
     output = _candidate_output()
     with patch("socr.tables.source_evidence.classical_ocr_with_state", witness):
         decision = judge.assess(output, MagicMock())
-    inner.assess.assert_not_called()
     return decision, output, events
 
 

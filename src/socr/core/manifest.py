@@ -4156,6 +4156,131 @@ def _apply_label_unverified_guard(output: PageOutput) -> PageOutput:
     return replace(output, status=PageStatus.WARNING)
 
 
+#: #1048: the one-line mark written above every table that ships unverified. A
+#: blockquote, like ``> Text in figure (OCR): ...``, so it reads as an aside in
+#: rendered Markdown. Machine-findable by ``UNVERIFIED_TABLE_MARK_RE``; the text
+#: is fixed (the reason lives in the audit events and ``tables_trust.json``) so a
+#: consumer can count marks with one grep. Documented in docs/OUTPUT.md.
+UNVERIFIED_TABLE_MARK: str = (
+    "> [table unverified: socr could not check this table against the page; "
+    "verify it against the page image before citing]"
+)
+UNVERIFIED_TABLE_MARK_RE = re.compile(r"^> \[table unverified: ", re.MULTILINE)
+#: #1048 (owner ruling 2026-10-12): the stronger mark for a scanned table whose numbers or
+#: labels a second reading (Tesseract) disputes. It names the first disputed values and links
+#: the page image the floor already renders (``figures/failed_table_pN.png``).
+DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)
+_IMAGE_REF_PATH_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def disputed_table_mark(values: str, png_ref: str) -> str:
+    """The one-line disputed mark; the link is omitted when no page image was rendered."""
+    count = len([v for v in values.split(", ") if v]) if values else 0
+    path = _IMAGE_REF_PATH_RE.search(png_ref or "")
+    link = f" [page image]({path.group(1)})" if path else ""
+    noun = f"{count} value{'s' if count != 1 else ''}"
+    detail = f"disagrees with {noun}: {values}" if values else "disagrees with this table"
+    return (
+        f"> [table disputed: a second reading of the page (Tesseract) {detail}; "
+        f"check them against the page image before citing.{link}]"
+    )
+
+
+PAGE_UNCHECKED_MARK_RE = re.compile(r"^> \[page unchecked: ")
+
+
+def page_unchecked_mark(png_ref: str) -> str:
+    """The first line of a page that shipped a rejected, unchecked table (#1048)."""
+    path = _IMAGE_REF_PATH_RE.search(png_ref or "")
+    # An image EMBED, not a link: manifest asset discovery collects embeds only, and the
+    # table marks' plain links point at this same file, so it must be a recorded asset or a
+    # replay into another directory leaves every link broken.
+    link = f" against the ![page image]({path.group(1)})" if path else ""
+    return (
+        "> [page unchecked: socr could not confirm this page's table(s) against a second "
+        "reading; everything below is a model reading of the page image \u2014 check it"
+        f"{link or ' against the PDF page'} before citing]"
+    )
+
+
+_HTML_TABLE_OPEN_RE = re.compile(r"<table\b", re.IGNORECASE)
+_HTML_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.IGNORECASE)
+
+
+def _table_start_lines(text: str, lines: list[str]) -> list[int]:
+    """Line index of every table in ``text``: markdown pipe blocks AND outermost HTML tables."""
+    from socr.tables.reconcile import find_table_blocks
+
+    starts = {b.start for b in find_table_blocks(text)}
+    depth = 0
+    for idx, line in enumerate(lines):
+        opens = len(_HTML_TABLE_OPEN_RE.findall(line))
+        if opens and depth == 0:
+            starts.add(idx)
+        depth = max(0, depth + opens - len(_HTML_TABLE_CLOSE_RE.findall(line)))
+    return sorted(starts)
+
+
+def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
+    """#1048: write the unverified / disputed marks above every table of an unchecked page.
+
+    A table that ships unchecked is labelled in the page text itself, so the label reaches
+    the stitched ``<stem>.md``, the page fragment and the promoted library text, which carry
+    no status. Runs in ``_select_and_finalize_page``, the one seam every writer shares, so
+    fragments, final ``.md``, manifest and resume agree.
+
+    Which mark follows the PAGE, not only the candidate: ``PageState.unchecked_table_kind``
+    (set when the ladder ended and a rejected candidate was promoted; persisted) wins over
+    the candidate's own fields, so a later replacement that carries neither field cannot
+    ship unmarked while the page keeps its rejected disposition. A page also counts as
+    unverified when its ladder disposition is ``TABLE_UNVERIFIED``, its failure mode is, or
+    the candidate carries ``table_unverifiable``.
+
+    Every table form is covered: markdown pipe tables and HTML ``<table>``. A promoted page
+    also gets ``page_unchecked_mark`` as its first line, because promotion ships the whole
+    reading, prose included, and no page judge ran on it.
+
+    Idempotent: marks already present are not repeated. Pages that are not unchecked, and
+    page failure markers, are returned unchanged.
+    """
+    kind = getattr(p, "unchecked_table_kind", "") if p is not None else ""
+    values = getattr(p, "unchecked_table_values", "") if p is not None else ""
+    # #1099: born-digital pages are now checked against their own text layer, so a rejected
+    # candidate there carries the doubt fields too. Those pages are never promoted (the
+    # ladder end keeps its existing handling), so their candidates' fields must not mark them.
+    scanned = p is None or not getattr(p, "is_born_digital", False)
+    if scanned and output.table_disputed:
+        kind, values = "disputed", output.table_disputed
+    mark = UNVERIFIED_TABLE_MARK
+    mark_re = UNVERIFIED_TABLE_MARK_RE
+    if kind == "disputed":
+        mark = disputed_table_mark(values, getattr(p, "d3_floor_png_ref", ""))
+        mark_re = DISPUTED_TABLE_MARK_RE
+    unverified = (
+        kind in ("disputed", "unverified")
+        or getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_UNVERIFIED
+        or output.failure_mode is FailureMode.TABLE_UNVERIFIED
+        or (scanned and bool(output.table_unverifiable))
+    )
+    if not unverified or not output.text or is_page_failed_marker(output.text):
+        return output
+    lines = output.text.splitlines(keepends=True)
+    changed = False
+    for start in reversed(_table_start_lines(output.text, lines)):
+        if start >= 2 and mark_re.match(lines[start - 2]) and not lines[start - 1].strip():
+            continue
+        insert = [mark + "\n", "\n"]
+        if start > 0 and lines[start - 1].strip():
+            insert.insert(0, "\n")
+        lines[start:start] = insert
+        changed = True
+    text = "".join(lines)
+    if kind and not PAGE_UNCHECKED_MARK_RE.match(text):
+        text = page_unchecked_mark(getattr(p, "d3_floor_png_ref", "")) + "\n\n" + text
+        changed = True
+    return replace(output, text=text) if changed else output
+
+
 def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
     """#625: detect ditto-mark cells in the FINALIZED table text, post-selection.
 
@@ -4460,6 +4585,7 @@ def _select_and_finalize_page(
       9. _apply_chart_region_guard
       9b. _apply_scanned_figure_guard (#1030)
       9c. _apply_native_paragraphs (#1074)
+      9d. _apply_unverified_table_mark (#1048)
       10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -4481,6 +4607,7 @@ def _select_and_finalize_page(
         output = _apply_halt_unprocessed_guard(output, p)
         output = _apply_scanned_figure_guard(output, p)
         output = _apply_native_paragraphs(output, p, state.native_vocabulary)
+        output = _apply_unverified_table_mark(output, p)
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``

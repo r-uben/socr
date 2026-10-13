@@ -451,6 +451,20 @@ class PageOutput:
     #: shipped. "" means either no doubt, or this output never went through
     #: the scanned-table gate at all.
     table_label_unverified: str = ""
+    #: #1048: non-empty when the scanned-table gate COULD NOT CHECK this
+    #: output's table (``SourceEvidenceResult.verifiable`` False: no local
+    #: evidence, no OCR witness, no verifiable tokens) and the output was
+    #: accepted anyway. The value is the gate's reason. Owner ruling
+    #: 2026-10-08: such a table ships, marked unverified. A table the evidence
+    #: CONTRADICTS never sets this; it stays on the fail-closed floor.
+    #: Candidate-associated for the same reason as ``table_label_unverified``.
+    table_unverifiable: str = ""
+    #: #1048 (owner ruling 2026-10-12): non-empty when the scanned-table gate
+    #: CHECKED this output's table and the page evidence disputes it (numbers or
+    #: labels unsupported), and the output was accepted anyway. The value is the
+    #: gate's reason, which names the first unsupported tokens. Ships with the
+    #: stronger "disputed" mark and a link to the page image.
+    table_disputed: str = ""
     #: #625: ditto marks (`"`, `''`, `”`, `″`, `〃`) detected verbatim in this
     #: winning candidate's shipped table cells. Owner ruling (2026-09-08,
     #: option 3): the mark is NOT resolved into the value it stands for --
@@ -542,6 +556,11 @@ class PageOutput:
         # reprocess across every existing corpus.
         if self.table_label_unverified:
             d["table_label_unverified"] = self.table_label_unverified
+        # #1048: same omit-when-empty convention and reason as the field above.
+        if self.table_unverifiable:
+            d["table_unverifiable"] = self.table_unverifiable
+        if self.table_disputed:
+            d["table_disputed"] = self.table_disputed
         # #625: same omit-when-empty convention, same reason -- this field
         # postdates every already-terminal page's sidecar; emitting it
         # unconditionally would change the content-addressed fingerprint of
@@ -590,6 +609,8 @@ class PageOutput:
             rejection_class=d.get("rejection_class", ""),
             table_corroboration=d.get("table_corroboration"),
             table_label_unverified=d.get("table_label_unverified", ""),
+            table_unverifiable=d.get("table_unverifiable", ""),
+            table_disputed=d.get("table_disputed", ""),
             table_ditto_columns=list(d.get("table_ditto_columns", [])),
             # #713: a sidecar is parsed JSON, so both are read defensively --
             # a non-string outcome is no outcome, and a non-dict credential is

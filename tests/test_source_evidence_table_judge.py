@@ -207,7 +207,12 @@ class TestSourceEvidenceTableJudge:
         fitz_page = _make_empty_page()
         assert not page_has_native_words(fitz_page)
 
-        judge, inner, events = self._wrap_chain(fitz_page, ocr_image_fn=lambda pix: "")
+        # #1048: the witness READ the page and the table is not in it. The rung still
+        # rejects; if no later rung verifies, the ladder end ships it with the disputed
+        # mark (test_gh1048_unverified_table_mark.py).
+        judge, inner, events = self._wrap_chain(
+            fitz_page, ocr_image_fn=lambda pix: "Quarterly report 2019 revenue 41 17"
+        )
         output = _make_output(1, _HALLUCINATED_SAAS_TABLE)
         decision = judge.assess(output, MagicMock())
 
@@ -216,8 +221,30 @@ class TestSourceEvidenceTableJudge:
         assert output.audit_passed is False
         assert output.status == PageStatus.ERROR
         assert output.failure_mode == FailureMode.HALLUCINATION
-        inner.assess.assert_not_called()
+        assert output.table_disputed  # carried to the ladder end, which ships it marked
         assert any(e.kind == "source_evidence_table_reject" for e in events)
+
+    def test_scanned_disputed_vs_unchecked_are_both_rejected_at_the_rung(self) -> None:
+        """#1048: both endings reject at the rung (the router escalates), each recording its
+        own field for the ladder end; they differ only in what the witness read."""
+        fitz_page = _make_empty_page()
+        runs = {}
+        for tag, reading in (
+            ("disputed", "Quarterly report 2019 revenue 41 17"),
+            ("unchecked", ""),
+        ):
+            judge, inner, events = self._wrap_chain(
+                fitz_page, ocr_image_fn=lambda pix, r=reading: r
+            )
+            output = _make_output(1, _HALLUCINATED_SAAS_TABLE)
+            decision = judge.assess(output, MagicMock())
+            assert decision.accept is False
+            inner.assess.assert_not_called()
+            assert "source_evidence_table" in decision.reason
+            assert any(e.kind == "source_evidence_table_reject" for e in events)
+            runs[tag] = output
+        assert runs["disputed"].table_disputed and not runs["disputed"].table_unverifiable
+        assert runs["unchecked"].table_unverifiable and not runs["unchecked"].table_disputed
 
     def test_born_digital_matching_table_passes(self) -> None:
         """Born-digital native table still passes through native verifier (no regression)."""
@@ -283,11 +310,14 @@ class TestSourceEvidenceTableJudge:
             fitz_page,
             ocr_image_fn=lambda pix: "Unrelated prose about tax policy in 1981.",
         )
+        inner.assess.return_value = AcceptDecision(accept=False, reason="inner refuses")
         output = _make_output(1, _ALPHA_ONLY_UNSUPPORTED)
         decision = judge.assess(output, MagicMock())
 
+        # #1048: an accepting inner judge would now ship this as disputed; a refusing
+        # one keeps the floor.
         assert decision.accept is False
-        inner.assess.assert_not_called()
+        assert output.failure_mode == FailureMode.HALLUCINATION
 
     def test_prose_without_tables_delegates_to_inner(self) -> None:
         fitz_page = _make_empty_page()
