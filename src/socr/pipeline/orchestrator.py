@@ -120,7 +120,8 @@ from socr.pipeline.agentic import (
     PageDecision,
     ProviderAttempt,
     is_failed_candidate,
-    promote_unchecked_table_attempt,
+    _promotion_inner_judge,
+    settle_scanned_table_decision,
     rejudge_candidate,
     route_page,
 )
@@ -10048,12 +10049,16 @@ class UnifiedPipeline:
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
                         )
-                        # #1048: no rung verified; ship the last unchecked/disputed
-                        # table marked instead of the floor (see the helper).
+                        # #1048 / #1124 / #1125: a later accept lifts the floor
+                        # only when it carries a table the check passed; else
+                        # promote a marked earlier candidate the inner page
+                        # judge accepts, or keep the fail-closed floor.
                         _unchecked_table_attempt = (
                             None
                             if ps.is_born_digital
-                            else promote_unchecked_table_attempt(decision)
+                            else settle_scanned_table_decision(
+                                decision, inner=_promotion_inner_judge(judge)
+                            )
                         )
                         # The profile whose reading won. Needed to re-judge a candidate
                         # produced after routing (crop reread) through the same judge
@@ -10143,12 +10148,12 @@ class UnifiedPipeline:
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
                             for att in _source_ev_attempts
                         )
-                        # #1048: the floor is for a ladder that ended without an
-                        # accepted reading. ``decision.accepted`` is also true once a
-                        # later rung verified the table (before, an earlier rung's
-                        # source-evidence rejection floored that verified page too) or
-                        # once ``promote_unchecked_table_attempt`` chose a candidate to
-                        # ship marked.
+                        # #1048 / #1124: the floor is for a ladder that ended
+                        # without an accepted reading that carries a passed
+                        # table. ``settle_scanned_table_decision`` un-accepts a
+                        # prose (or unread-table) winner and may promote a
+                        # marked candidate; ``decision.accepted`` is then true
+                        # only for a verified later table or a promoted mark.
                         if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
                             self._apply_scanned_table_floor(
                                 ps,
@@ -10180,6 +10185,7 @@ class UnifiedPipeline:
                                 "disputed" if _un_out.table_disputed else "unverified"
                             )
                             ps.unchecked_table_values = _un_out.table_disputed
+                            ps.unchecked_table_value_list = list(_un_out.table_disputed_values)
                             ps.table_ladder_disposition = (
                                 FailureMode.TABLE_REJECTED
                                 if _un_out.table_disputed
@@ -12693,8 +12699,10 @@ class UnifiedPipeline:
                     ps.table_ladder_disposition = None
                 ps.unchecked_table_kind = ""
                 ps.unchecked_table_values = ""
+                ps.unchecked_table_value_list = []
             if not _html_unchecked:
                 bo.table_disputed = ""
+                bo.table_disputed_values = ()
                 bo.table_unverifiable = ""
             # The floor PNG is the link target of the marks; keep it while any mark stays.
             if not (_html_unchecked and ps.unchecked_table_kind):
@@ -13710,6 +13718,8 @@ class UnifiedPipeline:
         if ps and getattr(ps, "unchecked_table_kind", ""):
             payload["unchecked_table_kind"] = ps.unchecked_table_kind
             payload["unchecked_table_values"] = ps.unchecked_table_values
+            if getattr(ps, "unchecked_table_value_list", None):
+                payload["unchecked_table_value_list"] = list(ps.unchecked_table_value_list)
 
         _detected_count = int(getattr(ps, "detected_table_count", 0) or 0) if ps else 0
         if _detected_count > 0:
@@ -14793,6 +14803,10 @@ class UnifiedPipeline:
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             ps.unchecked_table_kind = str(meta.get("unchecked_table_kind", ""))
             ps.unchecked_table_values = str(meta.get("unchecked_table_values", ""))
+            _value_list = meta.get("unchecked_table_value_list")
+            ps.unchecked_table_value_list = (
+                [str(v) for v in _value_list] if isinstance(_value_list, list) else []
+            )
             # P6 cold review round 2: carry run 1's published disposition forward
             # so a resumed re-flush reproduces the sidecar byte for byte. A
             # sidecar written before the field existed restores None and the

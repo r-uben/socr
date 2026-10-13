@@ -30,6 +30,7 @@ import logging
 import math
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -46,6 +47,7 @@ from socr.core.document import DocumentHandle
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
     JUDGE_OUTCOME_TIMEOUT,
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
@@ -2023,7 +2025,14 @@ def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
         rejection = getattr(att, "rejection_class", None)
         if rejection and rejection != REJECTION_VERIFIER_ERROR:
             return att
-        if getattr(att, "judge_outcome", "") == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
+        jo = getattr(att, "judge_outcome", "")
+        # #1126-r6 / #1126-r9: source-evidence reject is a completed refusal only when
+        # the witness could read and contradicted (``table_disputed``). An unverifiable
+        # check (``table_unverifiable``) is unknown, not a refusal — it must not retire
+        # a credentialed timeout stand-in on the same bytes.
+        if jo == JUDGE_OUTCOME_SOURCE_EVIDENCE and not getattr(att, "table_unverifiable", ""):
+            return att
+        if jo == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
             return att
     return None
 
@@ -4173,13 +4182,35 @@ DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)
 _IMAGE_REF_PATH_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 
 
-def disputed_table_mark(values: str, png_ref: str) -> str:
+#: #1125: name this many disputed tokens in the in-text mark, then "+K more".
+#: Eight is a typical small two-column table (a handful of body rows) on one
+#: blockquote line; the full list stays on ``PageState.unchecked_table_values``
+#: / ``table_disputed_values``. Not a quality threshold — a display cap.
+DISPUTED_TABLE_MARK_VALUE_CAP = 8
+
+
+def _disputed_mark_values(values: Sequence[str] | str) -> list[str]:
+    """Tokens to name. A string is one blob — never split on ``", "``."""
+    if isinstance(values, str):
+        return [values] if values else []
+    return [v for v in values if v]
+
+
+def disputed_table_mark(values: Sequence[str] | str, png_ref: str) -> str:
     """The one-line disputed mark; the link is omitted when no page image was rendered."""
-    count = len([v for v in values.split(", ") if v]) if values else 0
+    items = _disputed_mark_values(values)
+    count = len(items)
+    if count > DISPUTED_TABLE_MARK_VALUE_CAP:
+        named = (
+            ", ".join(items[:DISPUTED_TABLE_MARK_VALUE_CAP])
+            + f" +{count - DISPUTED_TABLE_MARK_VALUE_CAP} more"
+        )
+    else:
+        named = ", ".join(items)
     path = _IMAGE_REF_PATH_RE.search(png_ref or "")
     link = f" [page image]({path.group(1)})" if path else ""
     noun = f"{count} value{'s' if count != 1 else ''}"
-    detail = f"disagrees with {noun}: {values}" if values else "disagrees with this table"
+    detail = f"disagrees with {noun}: {named}" if items else "disagrees with this table"
     return (
         f"> [table disputed: a second reading of the page (Tesseract) {detail}; "
         f"check them against the page image before citing.{link}]"
@@ -4208,7 +4239,14 @@ _HTML_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.IGNORECASE)
 
 
 def _table_start_lines(text: str, lines: list[str]) -> list[int]:
-    """Line index of every table in ``text``: markdown pipe blocks AND outermost HTML tables."""
+    """Line index of every table in ``text``: markdown pipe blocks AND outermost HTML tables.
+
+    Tables inside code fences are counted too, on purpose (#1124 r3-r4). Skipping them
+    needs a fence parser, and every one tried misread model output somewhere (a shorter
+    inner fence, a fence inside an HTML comment, an unclosed fence) and so hid the mark of
+    a real disputed table after it. An extra mark inside a code block is harmless; a
+    hidden dispute is not.
+    """
     from socr.tables.reconcile import find_table_blocks
 
     starts = {b.start for b in find_table_blocks(text)}
@@ -4245,16 +4283,30 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     """
     kind = getattr(p, "unchecked_table_kind", "") if p is not None else ""
     values = getattr(p, "unchecked_table_values", "") if p is not None else ""
+    value_list = list(getattr(p, "unchecked_table_value_list", None) or [])
     # #1099: born-digital pages are now checked against their own text layer, so a rejected
     # candidate there carries the doubt fields too. Those pages are never promoted (the
     # ladder end keeps its existing handling), so their candidates' fields must not mark them.
     scanned = p is None or not getattr(p, "is_born_digital", False)
-    if scanned and output.table_disputed:
-        kind, values = "disputed", output.table_disputed
+    use_output_disputed = scanned and output.table_disputed
+    if use_output_disputed:
+        kind = "disputed"
+        values = output.table_disputed
+        value_list = list(output.table_disputed_values)
+    if value_list:
+        mark_values: Sequence[str] | str = value_list
+    elif use_output_disputed and values:
+        # #1125.4: ``table_disputed`` without ``table_disputed_values`` is one blob.
+        mark_values = values
+    elif values:
+        # Pre-#1125.4 sidecars: only the comma-joined page-state string exists.
+        mark_values = [v for v in values.split(", ") if v]
+    else:
+        mark_values = []
     mark = UNVERIFIED_TABLE_MARK
     mark_re = UNVERIFIED_TABLE_MARK_RE
     if kind == "disputed":
-        mark = disputed_table_mark(values, getattr(p, "d3_floor_png_ref", ""))
+        mark = disputed_table_mark(mark_values, getattr(p, "d3_floor_png_ref", ""))
         mark_re = DISPUTED_TABLE_MARK_RE
     unverified = (
         kind in ("disputed", "unverified")
