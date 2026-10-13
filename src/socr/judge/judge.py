@@ -35,15 +35,20 @@ VALID_ACTIONS = {"accept", "retry_same", "escalate_engine"}
 #: (``JudgeReplyTruncatedError``), never a verdict.
 JUDGE_MAX_REPLY_TOKENS = 2048
 
-#: Longest complete verdict in 151 recorded vLLM replies had 17 issues
-#: (``judge/judge.py`` / ``docs/log/2026-10-04_judge-reply-cap-and-tolerance.md``).
-#: The 151 dump is not on disk, so this number is cited, not re-measured.
+#: Issue count of the longest-by-tokens complete verdict in the 2026-10-04
+#: record (151 vLLM replies; 645 tokens). Cited from
+#: ``docs/log/2026-10-04_judge-reply-cap-and-tolerance.md``. The dump is not
+#: on disk, so this is not "no complete verdict had more than 17 issues".
 JUDGE_VERDICT_MAX_ISSUES = 17
 
-#: Shared page-judge JSON schema. Verdict fields first so a cut reply still
-#: carries accept/reject; ``issues`` is then bounded. Both backends send this
-#: (Ollama ``format``, vLLM ``response_format.json_schema``). #1127: both
-#: backends send JUDGE_VERDICT_SCHEMA.
+#: Shared page-judge JSON schema. ``issues`` is last so ``maxItems`` forces
+#: ``]`` and then ``}``. A cut reply is never parsed. Constrained decoding
+#: overrides the prompt's key order. Both backends send this (Ollama
+#: ``format``, vLLM ``response_format.json_schema``). Verified servers:
+#: vLLM 0.17.1 (Rorqual cluster smoke, 0 schema rejects) and Ollama 0.40.2
+#: (local schema arm). A server that 400s the schema already fail-closes
+#: every page; the liveness probe is left as a listing / 1-token generate.
+#: #1127: both backends send JUDGE_VERDICT_SCHEMA.
 JUDGE_VERDICT_SCHEMA: dict = {
     "type": "object",
     "properties": {

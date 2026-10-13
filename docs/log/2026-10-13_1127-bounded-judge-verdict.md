@@ -2,7 +2,7 @@
 
 What shipped: the verdict JSON schema (Round 3), measured on the cluster below. The one-retry design in the first sections is HISTORY: it was parked in Round 2 (the retry never fired in production) and is not on this branch.
 
-**Branch** `fix/issue-1127` · worktree only; not committed.
+**Branch** `fix/issue-1127` · PR #1133 · HEAD `d878b85` plus this round.
 
 ## The defect
 
@@ -81,11 +81,10 @@ reply stays fail-closed — never a verdict.
 
 ## Round 2: bounded-verdict measure
 
-**N = 17.** Derivation: `JUDGE_MAX_REPLY_TOKENS` and
-`docs/log/2026-10-04_judge-reply-cap-and-tolerance.md` record that the longest
-complete verdict in 151 recorded vLLM replies was a 17-issue reject (645
-tokens). The 151 dump is not on this Mac. A smaller N would clip a verdict
-that already completed in production.
+**N = 17.** The issue count of the longest-by-tokens complete verdict in the
+2026-10-04 record (151 vLLM replies; 645 tokens;
+`docs/log/2026-10-04_judge-reply-cap-and-tolerance.md`). The dump is not on
+disk. That is not "no complete verdict had more than 17 issues".
 
 **How JSON is requested today.** Ollama `_post_generate` sends `format:
 "json"`. vLLM `_post_chat` sends `response_format: {type: json_object}`.
@@ -137,9 +136,9 @@ stay fail-closed: a truncated reply is still never a verdict. `parse_verdict`
 does not clip `issues` — the server is asked to cap, the client must not
 trust that blindly.
 
-The vLLM `json_schema` path is **not measured on the cluster**. Measure it on
-the next cluster run. The truncation count to compare against is **274 per
-run** (`t3_23117187`; the sibling run was 280).
+Round 3 asked for a cluster measure. That ran (next section): vLLM 0.17.1
+accepted `json_schema` (0 request rejects). A full-corpus compare against
+**274 truncations per run** (`t3_23117187`) is still the next cluster job.
 
 ## Cluster check (Rorqual, vLLM 0.17.1 + xgrammar, 2026-10-13)
 
@@ -155,3 +154,53 @@ The review asked for the deployed vLLM path to be verified before merging. A one
 - The two branch truncations stay fail-closed, as before.
 
 Not measured: a full corpus run (the next cluster run compares against 274 truncations per run), and verdict quality beyond agreement with today's verdicts.
+
+## What happens to recovered pages
+
+Agreement (46/46 local, 45/45 cluster) only covers pages where both arms
+finished. The pages this change moves are the ones that were truncated on
+today/main (`page_judge_exception` → ERROR + marker) and completed on the
+schema arm (a verdict; an accept would ship SUCCESS).
+
+Prefix `faithful` is read from the cut reply's first key for this report
+only. It is never parsed in product code.
+
+**Local Ollama** (`exec/1127/bounded/calls.jsonl`; today's `reply_head`):
+13 recovered (today truncated, schema completed). Schema: **13/13
+`faithful=false`, `retry_same`**. Today's cut prefix: **13/13
+`faithful=false`**. **false→true flips: 0.**
+
+**Cluster vLLM** (`exec/1127/cluster-smoke/calls-{main,branch}.jsonl`):
+13 recovered (main truncated, branch completed). Branch: **13/13
+`faithful=false`, `retry_same`**. The cluster smoke did not keep main's
+raw reply. All 13 pages are in the local data: 10 local cut prefixes are
+`false`; 3 (adamek p20, tabatabaei p58, Martens p22) completed locally
+today as accept, so they have no local *cut* prefix. **false→true flips:
+0** (no cut prefix was `false` with a branch `true`).
+
+A recovered accept would have been the path that hides a bad reading.
+There were none. Recovered pages stay fail-closed as rejects, just with a
+finished verdict instead of an exception.
+
+Renders for the recovered set live under `scratch/routing-baseline/exec/1127/renders/`
+(`{group}_{doc[:40]}_pNNNNN.png`). This log does not judge those images.
+
+## Round 4
+
+Literal pins on the captured request: `required`, `additionalProperties is
+False`, vLLM `strict: True`. External mutants under `exec/1127/mutants-r4/`
+delete each; the pin fails.
+
+Schema comment: `issues` last so `maxItems` forces `]` then `}`. A cut
+reply is never parsed. `judge_page.md` notes that constrained decoding
+overrides the prompt's key order (`git grep`: no test pins those prompt
+bytes; `test_page_judge_prompt_fingerprint.py` only hashes the file).
+
+Server floor: smallest option is a version note, not a schema-bearing
+probe. Verified: vLLM 0.17.1 (cluster smoke, 0 schema rejects) and
+Ollama 0.40.2 (local schema arm). A 400 is already loud fail-closed; a
+probe generate would add a startup call the verified servers do not need.
+
+`issues[].items` has no `maxLength`. The residual 1/60 local and 2/60
+cluster truncations are that case (long per-item strings) and stay
+fail-closed. Nothing added.

@@ -90,20 +90,25 @@ def test_ollama_request_sends_the_verdict_schema(monkeypatch):
         monkeypatch, ollama_judge, {"response": ACCEPT_JSON, "done": True, "done_reason": "stop"}
     )
     ollama_judge._post_generate("http://localhost:11434", "m", "P", "AAA", 1.0)
-    assert seen["json"]["format"] == JUDGE_VERDICT_SCHEMA
-    assert (
-        seen["json"]["format"]["properties"]["issues"]["maxItems"] == JUDGE_VERDICT_MAX_ISSUES == 17
-    )
+    sent = seen["json"]["format"]
+    assert sent == JUDGE_VERDICT_SCHEMA
+    assert sent["properties"]["issues"]["maxItems"] == JUDGE_VERDICT_MAX_ISSUES == 17
+    assert sent["required"] == ["faithful", "suggested_action", "confidence", "issues"]
+    assert sent["additionalProperties"] is False
 
 
 def test_vllm_request_sends_the_verdict_schema(monkeypatch):
     seen = _capture_post(monkeypatch, vllm_judge, _load("vllm_judge_accept_raw.json"))
     vllm_judge._post_chat(URL, SERVED, "P", "data:image/png;base64,AAA", 1.0)
-    assert seen["json"]["response_format"] == JUDGE_VERDICT_RESPONSE_FORMAT
-    assert seen["json"]["response_format"]["type"] == "json_schema"
-    schema = seen["json"]["response_format"]["json_schema"]["schema"]
+    sent = seen["json"]["response_format"]
+    assert sent == JUDGE_VERDICT_RESPONSE_FORMAT
+    assert sent["type"] == "json_schema"
+    assert sent["json_schema"]["strict"] is True
+    schema = sent["json_schema"]["schema"]
     assert schema == JUDGE_VERDICT_SCHEMA
     assert list(schema["properties"]) == ["faithful", "suggested_action", "confidence", "issues"]
+    assert schema["required"] == ["faithful", "suggested_action", "confidence", "issues"]
+    assert schema["additionalProperties"] is False
 
 
 def test_parse_verdict_does_not_clip_issues_past_the_schema_cap():
