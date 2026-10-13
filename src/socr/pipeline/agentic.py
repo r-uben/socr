@@ -28,7 +28,7 @@ import concurrent.futures
 import copy
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from socr.core.config import EngineType
@@ -290,62 +290,68 @@ def promote_unchecked_table_attempt(
     """
     if decision.accepted:
         return None
+    if inner is None:
+        # #1125-r5: promotion requires an inner chain; peeling to nothing is fail-closed.
+        for att in reversed(decision.attempts):
+            out = att.output
+            if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
+                continue
+            _note_promotion_failure(
+                att,
+                "promotion refused: no inner judge chain",
+                outcome=JUDGE_OUTCOME_EXCEPTION,
+            )
+        return None
     for att in reversed(decision.attempts):
         out = att.output
         if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
             continue
-        inner_ran = False
-        if inner is not None:
-            from types import SimpleNamespace
+        from types import SimpleNamespace
 
-            provider = SimpleNamespace(
-                id=att.provider_id,
-                engine=att.engine,
-                model=att.model,
-                backend=att.backend,
+        provider = SimpleNamespace(
+            id=att.provider_id,
+            engine=att.engine,
+            model=att.model,
+            backend=att.backend,
+        )
+        # Probe a SUCCESS copy: the source-evidence reject left ERROR, and
+        # the page judge treats that as empty/error input. The live attempt
+        # stays rejected until this inner call accepts.
+        probe = copy.copy(out)
+        probe.status = PageStatus.SUCCESS
+        probe.failure_mode = FailureMode.NONE
+        probe.error = ""
+        try:
+            # #1125: inner-chain accept is required to promote — skip this
+            # call and the refuse-everything test fails
+            verdict = inner.assess(probe, provider)
+        except Exception as exc:  # noqa: BLE001 - a raised inner is a refuse
+            why = (
+                f"promotion timeout: {exc}"
+                if is_page_judge_timeout(exc)
+                else f"promotion judge raised: {exc}"
             )
-            # Probe a SUCCESS copy: the source-evidence reject left ERROR, and
-            # the page judge treats that as empty/error input. The live attempt
-            # stays rejected until this inner call accepts.
-            probe = copy.copy(out)
-            probe.status = PageStatus.SUCCESS
-            probe.failure_mode = FailureMode.NONE
-            probe.error = ""
-            try:
-                # #1125: inner-chain accept is required to promote — skip this
-                # call and the refuse-everything test fails
-                verdict = inner.assess(probe, provider)
-            except Exception as exc:  # noqa: BLE001 - a raised inner is a refuse
-                why = (
-                    f"promotion timeout: {exc}"
-                    if is_page_judge_timeout(exc)
-                    else f"promotion judge raised: {exc}"
-                )
-                _note_promotion_failure(
-                    att,
-                    why,
-                    outcome=(
-                        JUDGE_OUTCOME_TIMEOUT
-                        if is_page_judge_timeout(exc)
-                        else JUDGE_OUTCOME_EXCEPTION
-                    ),
-                )
-                continue
-            if not verdict.accept:
-                why = (
-                    f"promotion refused: {verdict.reason}"
-                    if verdict.reason
-                    else "promotion refused"
-                )
-                _note_promotion_failure(att, why, outcome=JUDGE_OUTCOME_COMPLETED)
-                continue
-            inner_ran = True
+            _note_promotion_failure(
+                att,
+                why,
+                outcome=(
+                    JUDGE_OUTCOME_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_OUTCOME_EXCEPTION
+                ),
+            )
+            continue
+        if not verdict.accept:
+            why = f"promotion refused: {verdict.reason}" if verdict.reason else "promotion refused"
+            _note_promotion_failure(att, why, outcome=JUDGE_OUTCOME_COMPLETED)
+            continue
+        if probe.text != out.text:
+            out = replace(out, text=probe.text)
+            att.output = out
         original_reason = att.reason or ""
         kind = "disputed" if out.table_disputed else "unverified"
         att.output.status = PageStatus.SUCCESS
         att.output.failure_mode = FailureMode.NONE
         att.output.error = ""
-        att.output.judge_outcome = JUDGE_OUTCOME_COMPLETED if inner_ran else ""
+        att.output.judge_outcome = JUDGE_OUTCOME_COMPLETED
         att.accepted = True
         note = f"ladder exhausted; table shipped marked {kind} (#1048)"
         att.reason = f"{note}; {original_reason}" if original_reason else note

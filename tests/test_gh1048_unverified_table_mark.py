@@ -796,6 +796,143 @@ def test_promotion_honours_the_judge_deadline() -> None:
     assert timed_reason != ref_reason
 
 
+def test_promotion_without_inner_judge_fails_closed() -> None:
+    """#1125-r5: ``inner=None`` must not ship marked with ``page_judge_completed``."""
+    from socr.core.result import JUDGE_OUTCOME_EXCEPTION
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt, promote_unchecked_table_attempt
+
+    out = PageOutput(
+        page_num=1,
+        text=_DISPUTED_TABLE,
+        status=PageStatus.ERROR,
+        engine="qwen",
+        table_disputed="99.9",
+        judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+    )
+    att = ProviderAttempt(
+        engine=EngineType.QWEN,
+        output=out,
+        cost_usd=0.0,
+        accepted=False,
+        reason="source_evidence_table: disputed",
+    )
+    decision = PageDecision(1, out, [att], accepted=False)
+    assert promote_unchecked_table_attempt(decision, inner=None) is None
+    assert not decision.accepted
+    assert att.output.judge_outcome == JUDGE_OUTCOME_EXCEPTION
+    assert "no inner judge chain" in att.reason
+
+
+def test_promotion_ships_bytes_the_inner_judge_accepted() -> None:
+    """#1125-r5: promotion must ship the text ``inner.assess`` accepted."""
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt, promote_unchecked_table_attempt
+
+    class _RewritingAccepts:
+        def assess(self, output, provider):
+            output.text = output.text.replace("| Item |", "| Year |", 1)
+            return AcceptDecision(accept=True, reason="repaired header")
+
+    out = PageOutput(
+        page_num=1,
+        text=_DISPUTED_TABLE,
+        status=PageStatus.ERROR,
+        engine="qwen",
+        table_disputed="99.9",
+    )
+    att = ProviderAttempt(
+        engine=EngineType.QWEN,
+        output=out,
+        cost_usd=0.0,
+        accepted=False,
+        reason="source_evidence_table: disputed",
+    )
+    decision = PageDecision(1, out, [att], accepted=False)
+    promoted = promote_unchecked_table_attempt(decision, inner=_RewritingAccepts())
+    assert promoted is not None
+    assert "| Year |" in promoted.output.text
+    assert "| Item |" not in promoted.output.text
+
+
+def test_promotion_skipping_judged_text_sync_mutant_ships_wrong_header() -> None:
+    """Mutant: promote without copying ``probe.text`` ships the pre-judge table."""
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt, promote_unchecked_table_attempt
+
+    class _RewritingAccepts:
+        def assess(self, output, provider):
+            output.text = output.text.replace("| Item |", "| Year |", 1)
+            return AcceptDecision(accept=True, reason="repaired header")
+
+    def _promote_without_text_sync(decision, inner=None):
+        import copy as _copy
+
+        from socr.pipeline.agentic import _note_promotion_failure, is_page_judge_timeout
+        from socr.core.result import (
+            JUDGE_OUTCOME_COMPLETED,
+            JUDGE_OUTCOME_EXCEPTION,
+            JUDGE_OUTCOME_TIMEOUT,
+        )
+
+        if decision.accepted or inner is None:
+            return None
+        for att in reversed(decision.attempts):
+            out = att.output
+            if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
+                continue
+            from types import SimpleNamespace
+
+            probe = _copy.copy(out)
+            probe.status = PageStatus.SUCCESS
+            probe.failure_mode = FailureMode.NONE
+            probe.error = ""
+            try:
+                verdict = inner.assess(probe, provider=SimpleNamespace())
+            except Exception as exc:
+                _note_promotion_failure(
+                    att,
+                    f"promotion judge raised: {exc}",
+                    outcome=(
+                        JUDGE_OUTCOME_TIMEOUT
+                        if is_page_judge_timeout(exc)
+                        else JUDGE_OUTCOME_EXCEPTION
+                    ),
+                )
+                continue
+            if not verdict.accept:
+                continue
+            att.output.status = PageStatus.SUCCESS
+            att.output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+            att.accepted = True
+            decision.final_output = att.output
+            decision.accepted = True
+            return att
+        return None
+
+    def _disputed_decision() -> PageDecision:
+        disputed = PageOutput(page_num=1, text=_DISPUTED_TABLE, table_disputed="99.9")
+        attempt = ProviderAttempt(
+            engine=EngineType.QWEN, output=disputed, cost_usd=0.0, accepted=False
+        )
+        return PageDecision(1, disputed, [attempt], accepted=False)
+
+    good = promote_unchecked_table_attempt(_disputed_decision(), inner=_RewritingAccepts())
+    bad = _promote_without_text_sync(_disputed_decision(), inner=_RewritingAccepts())
+    assert good is not None and "| Year |" in good.output.text
+    assert bad is not None and "| Item |" in bad.output.text
+
+
+def test_legacy_sidecar_comma_values_use_mark_cap() -> None:
+    """#1125-r5: resume from a pre-list sidecar splits legacy comma values for the mark."""
+    many = [f"{n}.5" for n in range(1, 13)]
+    p = PageState(page_num=1)
+    p.unchecked_table_kind = "disputed"
+    p.unchecked_table_values = ", ".join(many)
+    p.unchecked_table_value_list = []
+    marked = manifest._apply_unverified_table_mark(_out(_MODEL_TEXT), p)
+    assert "12 values" in marked.text
+    assert f"+{len(many) - DISPUTED_TABLE_MARK_VALUE_CAP} more" in marked.text
+    assert "1 value" not in marked.text.split("| Item")[0]
+
+
 def test_unselected_disputed_attempt_does_not_claim_page_judge(tmp_path, monkeypatch) -> None:
     """#1125 r2 P1: journal. Difference: one disputed rung vs two; only the
     attempt the inner judge ran on may show page_judge_completed."""

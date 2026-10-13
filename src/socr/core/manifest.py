@@ -4280,11 +4280,21 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     # candidate there carries the doubt fields too. Those pages are never promoted (the
     # ladder end keeps its existing handling), so their candidates' fields must not mark them.
     scanned = p is None or not getattr(p, "is_born_digital", False)
-    if scanned and output.table_disputed:
+    use_output_disputed = scanned and output.table_disputed
+    if use_output_disputed:
         kind = "disputed"
         values = output.table_disputed
         value_list = list(output.table_disputed_values)
-    mark_values: Sequence[str] | str = value_list or values
+    if value_list:
+        mark_values: Sequence[str] | str = value_list
+    elif use_output_disputed and values:
+        # #1125.4: ``table_disputed`` without ``table_disputed_values`` is one blob.
+        mark_values = values
+    elif values:
+        # Pre-#1125.4 sidecars: only the comma-joined page-state string exists.
+        mark_values = [v for v in values.split(", ") if v]
+    else:
+        mark_values = []
     mark = UNVERIFIED_TABLE_MARK
     mark_re = UNVERIFIED_TABLE_MARK_RE
     if kind == "disputed":
