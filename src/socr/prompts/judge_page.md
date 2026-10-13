@@ -45,7 +45,9 @@ what the page says, or would lose information that is present on the page.
 Do not apply fixed numeric cutoffs (word counts, percentages). Judge this page on
 the evidence in front of you.
 
-Respond with ONLY a JSON object, no prose, in exactly this shape:
+Respond with ONLY a JSON object, no prose, in exactly this shape
+(constrained decoding overrides this key order: faithful,
+suggested_action, confidence, issues):
 
 {
   "faithful": true | false,

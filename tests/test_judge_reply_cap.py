@@ -24,8 +24,12 @@ from socr.core.result import JUDGE_OUTCOME_EXCEPTION, PageOutput, PageStatus
 from socr.judge import ollama_judge, vllm_judge
 from socr.judge.judge import (
     JUDGE_MAX_REPLY_TOKENS,
+    JUDGE_VERDICT_MAX_ISSUES,
+    JUDGE_VERDICT_RESPONSE_FORMAT,
+    JUDGE_VERDICT_SCHEMA,
     JudgeReplyTruncatedError,
     is_page_judge_timeout,
+    parse_verdict,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -79,6 +83,51 @@ def test_ollama_request_carries_the_same_cap(monkeypatch):
     ollama_judge._post_generate("http://localhost:11434", "m", "P", "AAA", 1.0)
     assert seen["json"]["options"]["num_predict"] == JUDGE_MAX_REPLY_TOKENS == 2048
     assert seen["json"]["options"]["temperature"] == 0
+
+
+def test_ollama_request_sends_the_verdict_schema(monkeypatch):
+    seen = _capture_post(
+        monkeypatch, ollama_judge, {"response": ACCEPT_JSON, "done": True, "done_reason": "stop"}
+    )
+    ollama_judge._post_generate("http://localhost:11434", "m", "P", "AAA", 1.0)
+    sent = seen["json"]["format"]
+    assert sent == JUDGE_VERDICT_SCHEMA
+    assert sent["properties"]["issues"]["maxItems"] == JUDGE_VERDICT_MAX_ISSUES == 17
+    assert sent["required"] == ["faithful", "suggested_action", "confidence", "issues"]
+    assert sent["additionalProperties"] is False
+
+
+def test_vllm_request_sends_the_verdict_schema(monkeypatch):
+    seen = _capture_post(monkeypatch, vllm_judge, _load("vllm_judge_accept_raw.json"))
+    vllm_judge._post_chat(URL, SERVED, "P", "data:image/png;base64,AAA", 1.0)
+    sent = seen["json"]["response_format"]
+    assert sent == JUDGE_VERDICT_RESPONSE_FORMAT
+    assert sent["type"] == "json_schema"
+    assert sent["json_schema"]["strict"] is True
+    schema = sent["json_schema"]["schema"]
+    assert schema == JUDGE_VERDICT_SCHEMA
+    assert list(schema["properties"]) == ["faithful", "suggested_action", "confidence", "issues"]
+    assert schema["required"] == ["faithful", "suggested_action", "confidence", "issues"]
+    assert schema["additionalProperties"] is False
+
+
+def test_parse_verdict_does_not_clip_issues_past_the_schema_cap():
+    """The server is asked to cap; the client must not trust that blindly.
+
+    Today ``parse_verdict`` keeps every issue the JSON carries. A reply with
+    more than N issues is therefore handled exactly as today: accepted as a
+    verdict (if the server marked it complete) with the extra issues intact.
+    """
+    extra = JUDGE_VERDICT_MAX_ISSUES + 1
+    payload = {
+        "faithful": False,
+        "suggested_action": "retry_same",
+        "confidence": 0.5,
+        "issues": [f"issue {i}" for i in range(extra)],
+    }
+    verdict = parse_verdict(json.dumps(payload))
+    assert len(verdict.issues) == extra
+    assert verdict.faithful is False
 
 
 # --------------------------------------------------------------------------
