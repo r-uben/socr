@@ -314,10 +314,11 @@ class TestSourceEvidenceTableJudge:
         output = _make_output(1, _ALPHA_ONLY_UNSUPPORTED)
         decision = judge.assess(output, MagicMock())
 
-        # #1048: an accepting inner judge would now ship this as disputed; a refusing
-        # one keeps the floor.
+        # Reject path: the inner page judge is not consulted. Promotion, if any,
+        # is the ladder-end's job.
         assert decision.accept is False
         assert output.failure_mode == FailureMode.HALLUCINATION
+        inner.assess.assert_not_called()
 
     def test_prose_without_tables_delegates_to_inner(self) -> None:
         fitz_page = _make_empty_page()

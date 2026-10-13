@@ -372,6 +372,15 @@ def _evidence_table_blocks(markdown: str):
     ]
 
 
+def evidence_readable_table_count(markdown: str) -> int:
+    """How many tables ``collect_table_tokens`` / ``verify_scanned_table`` will read.
+
+    ``find_table_blocks`` also counts the maths pipes #1098 excludes; this is
+    the checker's count, and the one any wrapper must use.
+    """
+    return len(_evidence_table_blocks(markdown))
+
+
 def page_has_page_covering_raster(page) -> bool:
     """True when embedded images cover at least ``RASTER_DOMINANCE_RATIO`` of the page.
 

@@ -21,13 +21,21 @@ from socr.core import manifest
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.manifest import (
     DISPUTED_TABLE_MARK_RE,
+    DISPUTED_TABLE_MARK_VALUE_CAP,
     PAGE_UNCHECKED_MARK_RE,
     UNVERIFIED_TABLE_MARK,
     UNVERIFIED_TABLE_MARK_RE,
     disputed_table_mark,
 )
 from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
+from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
+    DocumentStatus,
+    FailureMode,
+    PageOutput,
+    PageStatus,
+)
 from socr.core.state import PageState
 from socr.pipeline import orchestrator as orch
 from socr.pipeline.agentic import AcceptDecision, SourceEvidenceTableJudge
@@ -126,20 +134,69 @@ def test_mark_needs_an_unverified_page_and_a_table() -> None:
 def test_disputed_mark_names_values_links_image_and_is_idempotent() -> None:
     p = PageState(page_num=1)
     p.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
-    flagged = _out(_MODEL_TEXT, table_disputed="41.5, 17.2")
+    flagged = _out(_MODEL_TEXT, table_disputed="41.5, 17.2", table_disputed_values=("41.5", "17.2"))
     once = manifest._apply_unverified_table_mark(flagged, p)
-    assert disputed_table_mark("41.5, 17.2", p.d3_floor_png_ref) in once.text
+    assert disputed_table_mark(("41.5", "17.2"), p.d3_floor_png_ref) in once.text
     assert (
         "(figures/failed_table_p1.png)" in once.text
         and "disagrees with 2 values: 41.5, 17.2" in once.text
     )
-    # No cap: all of a long list are named.
-    many = ", ".join(f"{n}.5" for n in range(1, 13))
-    assert many in disputed_table_mark(many, "") and "12 values" in disputed_table_mark(many, "")
+    many = tuple(f"{n}.5" for n in range(1, 13))
+    marked = disputed_table_mark(many, "")
+    assert "12 values" in marked
+    assert ", ".join(many[:DISPUTED_TABLE_MARK_VALUE_CAP]) in marked
+    assert f"+{len(many) - DISPUTED_TABLE_MARK_VALUE_CAP} more" in marked
+    assert many[DISPUTED_TABLE_MARK_VALUE_CAP] not in marked
+    # A string is one blob: never split on ", " to count.
+    blob = "41.5, 17.2"
+    assert "1 value" in disputed_table_mark(blob, "") and blob in disputed_table_mark(blob, "")
     assert manifest._apply_unverified_table_mark(once, p).text == once.text
     # No rendered image: the mark still ships, without a link.
     bare = manifest._apply_unverified_table_mark(flagged, PageState(page_num=1))
     assert "](" not in bare.text.split("| Item")[0]
+
+
+def test_table_start_lines_counts_tables_inside_a_fence_too() -> None:
+    """#1124 r4: fail-safe. A table inside a code fence is still counted, so a fence
+    parser can never hide a real table's mark; an extra mark in code is harmless."""
+    text = "prose\n\n```html\n<table><tr><td>nope</td></tr></table>\n```\n\n" + _TABLE
+    lines = text.splitlines(keepends=True)
+    starts = manifest._table_start_lines(text, lines)
+    assert len(starts) == 2
+    assert lines[starts[0]].startswith("<table>")
+    assert lines[starts[1]].startswith("| Item")
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "<!--\n```\n-->\n\n",  # a fence opener inside an HTML comment (Astra r3)
+        "```\nunclosed fence\n\n",  # an unclosed fence before the table
+    ],
+)
+def test_a_stray_fence_before_the_table_does_not_hide_its_mark(prefix: str) -> None:
+    """#1124 r3 P2. Difference: the same disputed table with vs without a stray fence
+    line in front of it; both must carry the disputed mark and its values."""
+    p = _promoted_page()
+    plain = manifest._apply_unverified_table_mark(_out(_MODEL_TEXT), p)
+    stray = manifest._apply_unverified_table_mark(_out(prefix + _MODEL_TEXT), p)
+    assert DISPUTED_TABLE_MARK_RE.search(plain.text)
+    assert DISPUTED_TABLE_MARK_RE.search(stray.text)
+    assert "41.5, 17.2" in stray.text.split("| Item")[0]
+
+
+def test_a_shorter_inner_fence_does_not_hide_the_following_table() -> None:
+    """#1124 r3 P2: CommonMark closer. Difference: ```` … ```` with vs without
+    an inner ``` line. The following disputed table must be marked either way."""
+    closer_ok = "````\nhello\n````\n\n" + _MODEL_TEXT
+    nested = "````\n```\nhello\n````\n\n" + _MODEL_TEXT
+    p = _promoted_page()
+    marked_ok = manifest._apply_unverified_table_mark(_out(closer_ok), p)
+    marked_nested = manifest._apply_unverified_table_mark(_out(nested), p)
+    assert DISPUTED_TABLE_MARK_RE.search(marked_ok.text)
+    assert DISPUTED_TABLE_MARK_RE.search(marked_nested.text)
+    assert "41.5, 17.2" in marked_nested.text.split("| Item")[0]
+    assert marked_ok.text.count("| Item") == marked_nested.text.count("| Item") == 1
 
 
 def test_mark_is_not_a_page_failure_marker() -> None:
@@ -196,6 +253,11 @@ class _InnerAccepts:
         return AcceptDecision(accept=True, reason="inner ok", confidence=0.9)
 
 
+class _InnerRefuses:
+    def assess(self, output, provider):
+        return AcceptDecision(accept=False, reason="inner refuses", confidence=0.1)
+
+
 def _run(
     tmp_path,
     monkeypatch,
@@ -207,6 +269,9 @@ def _run(
     profiles=None,
     texts=None,
     calls=None,
+    inner=None,
+    timeout_sec=None,
+    timed_out=None,
 ):
     profiles = profiles or [PROFILE_QWEN_LOCAL]
     texts = texts or {}
@@ -236,12 +301,19 @@ def _run(
 
         def _judge(state):
             docs["doc"] = fitz.open(str(pdf))
-            return SourceEvidenceTableJudge(
-                inner=_InnerAccepts(),
+            ev = SourceEvidenceTableJudge(
+                inner=inner or _InnerAccepts(),
                 get_fitz_page=lambda n: docs["doc"][n - 1],
                 record_event=state.events.append,
                 ocr_image_fn=lambda _pix: witness,
                 native_trusted=lambda _n: False,
+            )
+            if timeout_sec is None and timed_out is None:
+                return ev
+            return pipe._TimeoutJudge(
+                ev,
+                timeout_sec,
+                on_timeout=lambda _pn: timed_out.append(_pn) if timed_out is not None else None,
             )
 
         pipe._build_page_judge = _judge
@@ -349,6 +421,7 @@ def _promoted_page(kind="disputed", values="41.5, 17.2") -> PageState:
     p = PageState(page_num=1)
     p.unchecked_table_kind = kind
     p.unchecked_table_values = values
+    p.unchecked_table_value_list = [v for v in values.split(", ") if v] if values else []
     p.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
     return p
 
@@ -514,6 +587,242 @@ def test_both_rungs_disputed_ships_the_last_candidate_marked(tmp_path, monkeypat
     assert len(DISPUTED_TABLE_MARK_RE.findall(frag)) == 1
     assert "77.7" in frag.split("| Item")[0]  # the mark names the shipped candidate's values
     assert side["failure_mode"] == FailureMode.TABLE_REJECTED.value
+    summary = side["attempts_summary"]
+    completed = [a for a in summary if a["judge_outcome"] == JUDGE_OUTCOME_COMPLETED]
+    assert len(completed) == 1 and completed[0]["accepted"]
+    unselected = [a for a in summary if not a["accepted"]]
+    assert unselected and all(
+        a["judge_outcome"] == JUDGE_OUTCOME_SOURCE_EVIDENCE for a in unselected
+    )
+
+
+def test_later_rung_without_a_table_promotes_the_marked_earlier(tmp_path, monkeypatch) -> None:
+    """#1124: later prose must not lift the floor. Difference: same first rung
+    and witness; only whether the later text carries a passed table."""
+    first = f"{_PROSE}\n\n{_DISPUTED_TABLE}"
+    later_verified = {
+        EngineType.QWEN: first,
+        EngineType.GEMINI: _MODEL_TEXT,
+    }
+    later_prose = {
+        EngineType.QWEN: first,
+        EngineType.GEMINI: _PROSE,
+    }
+    _, ver_side, ver_frag, ver_final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "later-ver",
+        witness=SUPPORTS,
+        profiles=_TWO_RUNGS,
+        texts=later_verified,
+    )
+    _, prose_side, prose_frag, prose_final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "later-prose",
+        witness=SUPPORTS,
+        profiles=_TWO_RUNGS,
+        texts=later_prose,
+    )
+    # Later rung verified: unmarked table, SUCCESS. Later prose: marked earlier table.
+    assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
+    assert _TABLE.rstrip() in ver_frag and "99.9" not in ver_frag
+    assert ver_side["status"] == PageStatus.SUCCESS.value
+    assert "99.9" in prose_frag and "99.9" in prose_final
+    assert len(DISPUTED_TABLE_MARK_RE.findall(prose_frag)) == 1
+    assert prose_side["failure_mode"] == FailureMode.TABLE_REJECTED.value
+    assert prose_side["status"] == PageStatus.WARNING.value
+    assert prose_side["unchecked_table_kind"] == "disputed"
+    # Journal: original rejection reason kept; page_judge_completed only because inner ran.
+    summary = prose_side["attempts_summary"]
+    promoted = next(a for a in summary if a["accepted"])
+    assert promoted["rejection_reason"].startswith(
+        "ladder exhausted; table shipped marked disputed"
+    )
+    assert "source_evidence_table" in promoted["rejection_reason"]
+    assert promoted["judge_outcome"] == JUDGE_OUTCOME_COMPLETED
+
+
+def test_inner_refuses_everything_floors_a_disputed_rung(tmp_path, monkeypatch) -> None:
+    """#1125: promotion ships only when the inner chain accepts. Difference:
+    same disputed page; only whether the inner accepts."""
+    texts = {EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}"}
+    _, acc_side, acc_frag, acc_final, _ = _run(
+        tmp_path, monkeypatch, "inner-acc", witness=SUPPORTS, texts=texts, inner=_InnerAccepts()
+    )
+    _, ref_side, ref_frag, ref_final, _ = _run(
+        tmp_path, monkeypatch, "inner-ref", witness=SUPPORTS, texts=texts, inner=_InnerRefuses()
+    )
+    assert "99.9" in acc_frag and DISPUTED_TABLE_MARK_RE.search(acc_frag)
+    assert acc_side["unchecked_table_kind"] == "disputed"
+    assert acc_side["failure_mode"] == FailureMode.TABLE_REJECTED.value
+    # Refusing inner: the old fail-closed floor. The table does not ship unmarked.
+    assert "99.9" not in ref_frag and "99.9" not in ref_final
+    assert not DISPUTED_TABLE_MARK_RE.search(ref_frag)
+    assert ref_side.get("unchecked_table_kind", "") == ""
+    assert ref_side["failure_mode"] != FailureMode.TABLE_REJECTED.value
+    assert acc_side["status"] != ref_side["status"] or acc_frag != ref_frag
+    acc_reason = next(a["rejection_reason"] for a in acc_side["attempts_summary"] if a["accepted"])
+    ref_reason = ref_side["attempts_summary"][0]["rejection_reason"]
+    assert "source_evidence_table" in acc_reason and "promotion refused" not in acc_reason
+    assert (
+        "source_evidence_table" in ref_reason and "promotion refused: inner refuses" in ref_reason
+    )
+
+
+_MATHS_ONLY = "$P(A|B) = P(B|A)$\n$P(X|Y) = 0$\n"
+_TABLE_B = "| City | Pop |\n| --- | --- |\n| Rome | 41.5 |\n| Pisa | 17.2 |\n"
+_WITNESS_B = "City Pop Rome 41.5 Pisa 17.2"
+
+
+def test_maths_only_later_rung_does_not_lift_the_floor(tmp_path, monkeypatch) -> None:
+    """#1124 r2 P0: maths pipes are not a table. Difference: later maths vs later verified."""
+    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.source_evidence import collect_table_tokens
+
+    assert find_table_blocks(_MATHS_ONLY) and collect_table_tokens(_MATHS_ONLY) is None
+    first = f"{_PROSE}\n\n{_DISPUTED_TABLE}"
+    _, ver_side, ver_frag, _, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "maths-ver",
+        witness=SUPPORTS,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: first, EngineType.GEMINI: _MODEL_TEXT},
+    )
+    _, maths_side, maths_frag, maths_final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "maths-only",
+        witness=SUPPORTS,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: first, EngineType.GEMINI: _MATHS_ONLY},
+    )
+    assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
+    assert ver_side["status"] == PageStatus.SUCCESS.value
+    assert "99.9" in maths_frag and "99.9" in maths_final
+    assert DISPUTED_TABLE_MARK_RE.search(maths_frag)
+    assert maths_side["unchecked_table_kind"] == "disputed"
+    assert maths_side["status"] == PageStatus.WARNING.value
+
+
+def test_later_rung_dropping_a_table_promotes_the_marked(tmp_path, monkeypatch) -> None:
+    """#1124 r2 P0: winner must keep the marked attempt's tables. Difference:
+    first rung is A+B vs B only; later text is B (supported) either way."""
+    ab = f"{_PROSE}\n\n{_DISPUTED_TABLE}\n{_TABLE_B}"
+    b_only = f"{_PROSE}\n\n{_TABLE_B}"
+    _, drop_side, drop_frag, drop_final, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "drop-a",
+        witness=_WITNESS_B,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: ab, EngineType.GEMINI: b_only},
+    )
+    _, keep_side, keep_frag, _, _ = _run(
+        tmp_path,
+        monkeypatch,
+        "b-only",
+        witness=_WITNESS_B,
+        profiles=_TWO_RUNGS,
+        texts={EngineType.QWEN: b_only, EngineType.GEMINI: b_only},
+    )
+    assert "99.9" in drop_frag and "99.9" in drop_final
+    assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
+    assert drop_side["unchecked_table_kind"] == "disputed"
+    assert "99.9" not in keep_frag
+    assert not DISPUTED_TABLE_MARK_RE.search(keep_frag)
+    assert keep_side["status"] == PageStatus.SUCCESS.value
+
+
+def test_promotion_honours_the_judge_deadline() -> None:
+    """#1125 r2 P1: peel source-evidence only. Difference: same slow inner
+    under the peeled timeout wrapper vs the inner called with no deadline."""
+    import time
+
+    from socr.pipeline.agentic import (
+        PageDecision,
+        ProviderAttempt,
+        _promotion_inner_judge,
+        promote_unchecked_table_attempt,
+    )
+
+    class _SlowAccepts:
+        def assess(self, output, provider):
+            time.sleep(0.25)
+            return AcceptDecision(accept=True, reason="slow ok", confidence=0.9)
+
+    slow = _SlowAccepts()
+    ev = SourceEvidenceTableJudge(inner=slow, get_fitz_page=None)
+    hit: list = []
+    wrapped = UnifiedPipeline._TimeoutJudge(ev, 0.08, on_timeout=lambda pn: hit.append(pn))
+    peeled = _promotion_inner_judge(wrapped)
+    assert peeled.__class__.__name__ == "_TimeoutJudge"
+    assert peeled._timeout_sec == 0.08
+    assert peeled._inner is slow
+
+    def _decision() -> PageDecision:
+        out = PageOutput(
+            page_num=1,
+            text=_DISPUTED_TABLE,
+            status=PageStatus.ERROR,
+            engine="qwen",
+            table_disputed="99.9",
+            judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+        )
+        att = ProviderAttempt(
+            engine=EngineType.QWEN,
+            output=out,
+            cost_usd=0.0,
+            accepted=False,
+            reason="source_evidence_table: disputed",
+        )
+        return PageDecision(1, out, [att], accepted=False)
+
+    d_bound = _decision()
+    bound = promote_unchecked_table_attempt(d_bound, inner=peeled)
+    d_free = _decision()
+    free = promote_unchecked_table_attempt(d_free, inner=slow)
+    d_refused = _decision()
+    refused = promote_unchecked_table_attempt(d_refused, inner=_InnerRefuses())
+    assert hit and bound is None and refused is None
+    assert free is not None and free.accepted
+    timed_reason = d_bound.attempts[0].reason
+    ref_reason = d_refused.attempts[0].reason
+    assert timed_reason.startswith("source_evidence_table: disputed")
+    assert "promotion timeout:" in timed_reason
+    assert ref_reason.startswith("source_evidence_table: disputed")
+    assert "promotion refused: inner refuses" in ref_reason
+    assert timed_reason != ref_reason
+
+
+def test_unselected_disputed_attempt_does_not_claim_page_judge(tmp_path, monkeypatch) -> None:
+    """#1125 r2 P1: journal. Difference: one disputed rung vs two; only the
+    attempt the inner judge ran on may show page_judge_completed."""
+    one_texts = {EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}"}
+    two_texts = {
+        EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}",
+        EngineType.GEMINI: f"{_PROSE}\n\n| Item | Value |\n| --- | --- |\n| alpha | 77.7 |\n| beta | 66.6 |\n",
+    }
+    _, one_side, _, _, _ = _run(tmp_path, monkeypatch, "j-one", witness=SUPPORTS, texts=one_texts)
+    _, two_side, _, _, _ = _run(
+        tmp_path, monkeypatch, "j-two", witness=SUPPORTS, profiles=_TWO_RUNGS, texts=two_texts
+    )
+    one_c = [
+        a for a in one_side["attempts_summary"] if a["judge_outcome"] == JUDGE_OUTCOME_COMPLETED
+    ]
+    two_c = [
+        a for a in two_side["attempts_summary"] if a["judge_outcome"] == JUDGE_OUTCOME_COMPLETED
+    ]
+    two_se = [
+        a
+        for a in two_side["attempts_summary"]
+        if a["judge_outcome"] == JUDGE_OUTCOME_SOURCE_EVIDENCE
+    ]
+    assert len(one_c) == 1 and one_c[0]["accepted"]
+    assert len(two_c) == 1 and two_c[0]["accepted"]
+    assert len(two_se) == 1 and not two_se[0]["accepted"]
+    assert len(two_side["attempts_summary"]) == 2
 
 
 def test_page_state_round_trips_through_the_sidecar(tmp_path) -> None:
@@ -542,6 +851,7 @@ def test_page_state_round_trips_through_the_sidecar(tmp_path) -> None:
     ps.is_born_digital = False
     ps.unchecked_table_kind = "disputed"
     ps.unchecked_table_values = "41.5, 17.2"
+    ps.unchecked_table_value_list = ["41.5", "17.2"]
     ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
     bo = _out(_MODEL_TEXT, audit_passed=True)
     ps.attempts.append(bo)
@@ -549,9 +859,11 @@ def test_page_state_round_trips_through_the_sidecar(tmp_path) -> None:
     sidecar = pipe._flush_page_sidecar(state, 1, out_dir, terminal=True)
     meta = json.loads(sidecar.read_text(encoding="utf-8"))
     assert meta["unchecked_table_kind"] == "disputed"
+    assert meta["unchecked_table_value_list"] == ["41.5", "17.2"]
     pipe._restore_terminal_page_state(resumed, 1, bo, out_dir)
     rps = resumed.pages[1]
     assert (rps.unchecked_table_kind, rps.unchecked_table_values) == ("disputed", "41.5, 17.2")
+    assert rps.unchecked_table_value_list == ["41.5", "17.2"]
 
 
 # ---------------------------------------------------------------------------
