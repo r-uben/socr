@@ -454,7 +454,8 @@ page `.md` (a paragraph, or a quote opening with one), judged by the CommonMark 
 the same mark is the first rendered block under that page's `## Page N` heading in the
 document `.md`. A mark in a comment, a code fence, a reference definition, or lower on the
 page is not a mark, and neither is the blank receipt. The document `.md` must also equal the
-assembly of its page fragments. The rules per lane and the exact classes are in the docstring of
+assembly of its page fragments, ignoring only trailing whitespace on each line and
+surrounding blank lines. The rules per lane and the exact classes are in the docstring of
 `src/socr/benchmark/acceptance.py`; the decision log is
 `docs/log/2026-10-13_1130-acceptance-meter.md`. Native and chart SUCCESS pages need
 witnesses that do not exist yet (#1050), so they all count as violations today.

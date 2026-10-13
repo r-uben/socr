@@ -9,7 +9,9 @@ including "Corrections after round 3".
 - Denominator: `corpus/manifest.csv` `n_pages`. Document dirs are found by a
   `metadata.json` carrying `key` (the batch dir `out/wN/metadata.json` has `files`, no `key`).
 - Accounted: a terminal `pages/NNNNN.json` + `.md`. Missing, extra, non-terminal, duplicate
-  document, unlisted document: `unaccounted`. Failed doc with `unreadable_input`: MARKED only
+  document: `unaccounted` page ids. An unlisted document is also a document-level
+  `unlisted_document` finding (`stem:*`, gating but outside METER; its real page ids stay
+  `unaccounted`, see Round 5). Failed doc with `unreadable_input`: MARKED only
   if its document `.md` has a mark, else `document_failed_unmarked`.
 - SUCCESS pages: `success_common` (top level AND winning_output: status, failure_mode,
   audit_passed, empty rejection_class) plus one function per lane in `LANE_RULES`.
@@ -178,7 +180,8 @@ tokens at all. I deleted the guard instead of keeping dead code.
 
 ## Round 5 (cubic review of the pull request)
 
-Five findings; each was reproduced on the code as it stood before the fix.
+Five findings. The three code findings (1, 3, 4) were reproduced on the code as it stood
+before the fix; items 2 and 5 are documentation and log corrections.
 
 1. P1, real. The text normaliser stripped leading whitespace, so a fragment indented four
    spaces (a code block when rendered) compared equal to the unindented judged text. Now only
