@@ -35,6 +35,44 @@ VALID_ACTIONS = {"accept", "retry_same", "escalate_engine"}
 #: (``JudgeReplyTruncatedError``), never a verdict.
 JUDGE_MAX_REPLY_TOKENS = 2048
 
+#: Longest complete verdict in 151 recorded vLLM replies had 17 issues
+#: (``judge/judge.py`` / ``docs/log/2026-10-04_judge-reply-cap-and-tolerance.md``).
+#: The 151 dump is not on disk, so this number is cited, not re-measured.
+JUDGE_VERDICT_MAX_ISSUES = 17
+
+#: Shared page-judge JSON schema. Verdict fields first so a cut reply still
+#: carries accept/reject; ``issues`` is then bounded. Both backends send this
+#: (Ollama ``format``, vLLM ``response_format.json_schema``). #1127: both
+#: backends send JUDGE_VERDICT_SCHEMA.
+JUDGE_VERDICT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "faithful": {"type": "boolean"},
+        "suggested_action": {
+            "type": "string",
+            "enum": ["accept", "retry_same", "escalate_engine"],
+        },
+        "confidence": {"type": "number"},
+        "issues": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": JUDGE_VERDICT_MAX_ISSUES,
+        },
+    },
+    "required": ["faithful", "suggested_action", "confidence", "issues"],
+    "additionalProperties": False,
+}
+
+#: OpenAI-compatible envelope for the vLLM / guided-decoding path.
+JUDGE_VERDICT_RESPONSE_FORMAT: dict = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "judge_verdict",
+        "schema": JUDGE_VERDICT_SCHEMA,
+        "strict": True,
+    },
+}
+
 
 class JudgeReplyTruncatedError(RuntimeError):
     """The judge stopped at the reply-token cap, not at the end of its verdict.
