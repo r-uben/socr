@@ -379,10 +379,9 @@ class TestTheJudgePassesTheClassificationThrough:
             )
             judge, inner = self._judge(doc, trusted=False)
 
-            # #1048: a table the evidence check could not verify (silent OCR)
-            # now reaches the inner judge, so reaching it no longer proves a
-            # deferral. What does: the check ran and recorded that it could not
-            # verify (a deferral returns before ``table_unverifiable`` is set).
+            # The evidence check ran and could not verify: reject at this rung
+            # (so the router escalates) without calling the inner page judge.
+            # A deferral returns before ``table_unverifiable`` is set.
             output = self._output()
             decision = judge.assess(output, self._provider())
             assert output.table_unverifiable, (

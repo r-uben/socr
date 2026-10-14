@@ -137,6 +137,12 @@ class PageState:
     #: #1053: a figure crop on this page holds no native word, so its words are unread. Set by
     #: the chart-asset lane each run; not replayed (a WARNING page is never resumed as terminal).
     figure_words_unread: bool = False
+    #: #1050: ink-vs-layer coverage on a trusted-native page. ``passed`` /
+    #: ``flagged`` / ``unknown``. Runtime; a WARNING page is never resumed as
+    #: terminal SUCCESS.
+    text_coverage_verdict: str = ""
+    text_ink_unread: bool = False
+    text_coverage_unknown: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
     #: actually ran on this page, recorded AFTER the splice so it describes what
     #: went into the body rather than what a model returned. Read only by
@@ -280,6 +286,9 @@ class PageState:
     unchecked_table_kind: str = ""
     #: #1048: the disputed values the mark names (``", "``-joined); "" for ``"unverified"``.
     unchecked_table_values: str = ""
+    #: #1125: the same tokens as a list so the mark can count without splitting
+    #: ``unchecked_table_values`` on ``", "``. Empty when unverified or unknown.
+    unchecked_table_value_list: list[str] = field(default_factory=list)
     #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
     #: ``d3_floor_png_ref``: that field means "the table region was routed to
     #: the image lane", and a consumer must be able to tell the two floors

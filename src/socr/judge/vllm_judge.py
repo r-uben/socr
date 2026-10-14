@@ -41,6 +41,7 @@ from socr.core.ollama_utils import raise_for_status_redacted
 from socr.core.killable import CallSpec, run_killable
 from socr.judge.judge import (
     JUDGE_MAX_REPLY_TOKENS,
+    JUDGE_VERDICT_RESPONSE_FORMAT,
     JudgeReplyTruncatedError,
     JudgeVerdict,
     load_judge_prompt,
@@ -112,7 +113,7 @@ def _post_chat(
             # Judging should be as stable as we can make it, same as the
             # Ollama backend.
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            "response_format": JUDGE_VERDICT_RESPONSE_FORMAT,
             "max_tokens": JUDGE_MAX_REPLY_TOKENS,
         },
         timeout=timeout,

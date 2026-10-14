@@ -7,6 +7,7 @@ structured loop that operates on the DocumentState blackboard.
 
 from __future__ import annotations
 
+import copy
 import functools
 import logging
 import math
@@ -16,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,8 @@ from socr.core.manifest import (
     PagePrimaryReason,
     figure_words_unread_suspect,
     garbled_math_suspect,
+    text_coverage_unknown_suspect,
+    text_ink_unread_suspect,
     judge_timeout_candidate,
     minus_as_digit_suspect,
     native_math_damage_ships,
@@ -120,7 +123,8 @@ from socr.pipeline.agentic import (
     PageDecision,
     ProviderAttempt,
     is_failed_candidate,
-    promote_unchecked_table_attempt,
+    _promotion_inner_judge,
+    settle_scanned_table_decision,
     rejudge_candidate,
     route_page,
 )
@@ -1555,6 +1559,9 @@ class UnifiedPipeline:
             # not reuse fragments produced with the flag in the other state — that
             # would silently ship a mix of escalated and non-escalated pages.
             "escalate_ambiguous_tables": getattr(cfg, "escalate_ambiguous_tables", False),
+            # #1050: the coverage check rewrites flagged pages (WARNING + mark +
+            # PNG). Toggling it must not resume a SUCCESS page as clean.
+            "check_text_coverage": getattr(cfg, "check_text_coverage", True),
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
@@ -9224,10 +9231,10 @@ class UnifiedPipeline:
         message still says "timeout" for the humans reading the audit trail.
 
         BOTH timeout branches leave as this one type: our own deadline, and a
-        timeout the inner judge raised itself (which arrives here as the same
-        exception class, since ``concurrent.futures.TimeoutError`` IS builtin
-        ``TimeoutError`` from 3.11). The inner one used to be re-raised verbatim
-        and reached the trail wearing the judge's own words.
+        timeout the inner judge raised itself. The inner one used to be
+        re-raised verbatim and reached the trail wearing the judge's own words.
+        Inner exceptions are tagged return values so ``result(timeout=)``
+        raising TimeoutError cannot mean "the judge raised TimeoutError".
 
         #713 round 2 (Astra P1-3): it used to return
         ``AcceptDecision(accept=False, reason="judge timeout")`` instead. That
@@ -9238,6 +9245,20 @@ class UnifiedPipeline:
 
         ``timeout_sec`` is a soft wall-clock bound in seconds.  ``None``
         disables the wrapper (forward to the inner judge directly).
+
+        #1128 / #1135: wraps only the model leaf. Local evidence
+        (``SourceEvidenceTableJudge``, ``NativeTableVerifierJudge``) runs on
+        the live ``PageOutput`` before this adapter, so a timeout cannot
+        skip or erase a witness result. The worker judges a deep copy.
+        Fields come back when the worker finished inside the deadline,
+        whether it returned or raised. A late result is discarded and
+        noted. ``result(timeout=)`` raising TimeoutError is always OUR
+        deadline — inner exceptions come back as tagged values, so
+        lateness is never re-read from ``future.done()``. Peer deadline
+        sites already discard an abandoned return value (they never share
+        a live ``PageOutput``): ``route_page``'s provider
+        ``submit_daemon``, escalation ``submit_daemon``, crop
+        ``_read_with_deadline``, and ``killable.run`` (child process).
         """
 
         def __init__(self, inner, timeout_sec: float | None, owner=None, on_timeout=None) -> None:
@@ -9252,6 +9273,12 @@ class UnifiedPipeline:
             # construct it directly); the pipeline always passes itself.
             self._owner = owner
 
+        @staticmethod
+        def _adopt_judged_output(live, judged) -> None:
+            """Copy the on-time worker's fields onto the caller's object."""
+            for f in fields(judged):
+                setattr(live, f.name, getattr(judged, f.name))
+
         def assess(self, output, provider):
             import concurrent.futures
 
@@ -9262,68 +9289,72 @@ class UnifiedPipeline:
 
             owner = self._owner
             binding = owner._current_judge_binding() if owner is not None else None
+            probe = copy.deepcopy(output)
 
             def _run():
-                if owner is not None:
-                    owner._bind_judge_events(binding)
-                    try:
-                        return self._inner.assess(output, provider)
-                    finally:
-                        owner._bind_judge_events(None)
-                return self._inner.assess(output, provider)
+                # Return exceptions as values so ``result(timeout=)`` raising
+                # TimeoutError means only OUR deadline — never re-read
+                # ``future.done()`` for that decision (#1128 r2).
+                try:
+                    if owner is not None:
+                        owner._bind_judge_events(binding)
+                        try:
+                            return ("ok", self._inner.assess(probe, provider))
+                        finally:
+                            owner._bind_judge_events(None)
+                    return ("ok", self._inner.assess(probe, provider))
+                except Exception as exc:
+                    return ("err", exc)
 
             if owner is not None:
                 owner._enter_judge_call()
             future = submit_daemon(_run)  # GH-974: daemon, abandonable
             try:
-                result = future.result(timeout=self._timeout_sec)
-                return result
-            except concurrent.futures.TimeoutError as exc:
-                # ``concurrent.futures.TimeoutError`` IS builtin ``TimeoutError``
-                # since 3.11, so this one clause catches both OUR deadline and a
-                # timeout the inner judge raised itself. ``future.done()``
-                # separates them: on our deadline the worker is still running.
-                # Either way the outcome is a timeout, and either way it must
-                # leave as an exception so ``route_page`` types it.
-                inner_raised = future.done()
-                future.cancel()
-                if isinstance(exc, PageJudgeCircuitOpenError):
-                    # #987: the breaker answered, the judge was never called. Already
-                    # typed and worded; do not re-probe, re-wrap or call it a timeout.
+                try:
+                    kind, payload = future.result(timeout=self._timeout_sec)
+                except concurrent.futures.TimeoutError as exc:
+                    # Worker did not finish inside the deadline. A completion
+                    # that lands after this raise is late; do not ask done().
+                    future.cancel()
+                    note = "late page-judge result discarded"
+                    if note not in output.audit_notes:
+                        output.audit_notes.append(note)
+                    if self._on_timeout is not None:
+                        try:
+                            self._on_timeout(output.page_num)
+                        except Exception as probe_exc:  # never mask the timeout itself
+                            logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
+                    logger.warning(
+                        "judge timed out on page %s (%.2fs) — no verdict",
+                        output.page_num,
+                        self._timeout_sec,
+                    )
+                    raise PageJudgeTimeoutError(
+                        f"page judge timeout after {self._timeout_sec:.2f}s"
+                    ) from exc
+                # Worker finished inside the deadline: adopt what it wrote,
+                # whether it returned or raised (#1128 r2).
+                self._adopt_judged_output(output, probe)
+                if kind == "ok":
+                    return payload
+                if isinstance(payload, PageJudgeCircuitOpenError):
                     logger.info(
                         "page judge circuit open on page %s — failing closed without waiting",
                         output.page_num,
                     )
-                    raise
-                if self._on_timeout is not None:
-                    try:
-                        self._on_timeout(output.page_num)
-                    except Exception as probe_exc:  # never mask the timeout itself
-                        logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
-                if inner_raised:
-                    # #713 round 3 (Astra P2): WRAPPED, not re-raised unchanged.
-                    # Both branches are the same outcome -- a page judge that
-                    # produced no verdict because time ran out -- so both must
-                    # leave this adapter as the same type carrying the same
-                    # vocabulary. Re-raising the inner exception verbatim let a
-                    # judge that raised builtin ``TimeoutError("timed out")``
-                    # reach the audit trail as "judge raised: timed out", which
-                    # every human-readable timeout surface then failed to
-                    # recognise. The original is chained, so nothing about its
-                    # identity is lost.
+                    raise payload
+                if isinstance(payload, TimeoutError):
+                    if self._on_timeout is not None:
+                        try:
+                            self._on_timeout(output.page_num)
+                        except Exception as probe_exc:
+                            logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
                     logger.warning(
                         "judge timed out on page %s (raised by the judge) — no verdict",
                         output.page_num,
                     )
-                    raise PageJudgeTimeoutError(f"page judge timeout: {exc}") from exc
-                logger.warning(
-                    "judge timed out on page %s (%.2fs) — no verdict",
-                    output.page_num,
-                    self._timeout_sec,
-                )
-                raise PageJudgeTimeoutError(
-                    f"page judge timeout after {self._timeout_sec:.2f}s"
-                ) from exc
+                    raise PageJudgeTimeoutError(f"page judge timeout: {payload}") from payload
+                raise payload
             finally:
                 # Decremented in the CALLER exactly once, including on timeout:
                 # from here on nothing is waiting on that worker, so anything it
@@ -9359,8 +9390,9 @@ class UnifiedPipeline:
           6. Provisional fragment + sidecar flush (``terminal=False``).
 
         Cascade HALT (fork B / judge-guard):
-          - The judge is wrapped in ``_TimeoutJudge`` so a wedged VLM judge
-            cannot block the orchestrator thread.
+          - The model leaf is wrapped in ``_TimeoutJudge`` so a wedged VLM
+            judge cannot block the orchestrator thread. Local evidence
+            checks run outside that deadline (#1135).
           - When ``route_page`` records a provider timeout AND ``probe_ollama_idle``
             reports the backend is NOT responding, the document-level
             ``backend_degraded`` latch is set: pages processed so far are already
@@ -9424,6 +9456,7 @@ class UnifiedPipeline:
         # blank-only document with an empty ladder still completes (the page
         # is not an OCR page), and so resume can skip a SUCCESS blank page.
         blank_pages = self._detect_blank_pages(state, unloadable_pages)
+        self._prepare_text_coverage(state, output_dir, unloadable_pages, blank_pages)
         math_recovery_pages = {
             page_num
             for page_num, ps in sorted(state.pages.items())
@@ -9698,17 +9731,20 @@ class UnifiedPipeline:
         # getattr override without a field on PipelineConfig backing it.
         provider_timeout = DEFAULT_PROVIDER_TIMEOUTS
 
-        # Wrap the judge in a deadline adapter so a wedged VLM judge cannot
-        # block the orchestrator thread (fork B: orchestrator-side adapter).
-        # Use the maximum configured provider timeout as the judge bound.
-        _judge_timeout: float | None = None
-        if provider_timeout:
-            _judge_timeout = max(provider_timeout.values()) if provider_timeout else None
-        judge = self._TimeoutJudge(
-            _inner_judge,
-            _judge_timeout,
-            owner=self,
-            on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+        # #1128/#1135: ``_build_page_judge`` wraps the model leaf. A replacement
+        # that omitted the leaf adapter still gets a deadline (tests; the
+        # ``se_inside_deadline`` mutant). Do not wrap again when the leaf
+        # adapter is already in the chain — that would put local evidence
+        # back inside the deadline.
+        judge = (
+            _inner_judge
+            if self._judge_chain_has_leaf_deadline(_inner_judge)
+            else self._TimeoutJudge(
+                _inner_judge,
+                self._page_judge_leaf_timeout_sec(),
+                owner=self,
+                on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+            )
         )
 
         if not self.config.quiet:
@@ -10048,12 +10084,16 @@ class UnifiedPipeline:
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
                         )
-                        # #1048: no rung verified; ship the last unchecked/disputed
-                        # table marked instead of the floor (see the helper).
+                        # #1048 / #1124 / #1125: a later accept lifts the floor
+                        # only when it carries a table the check passed; else
+                        # promote a marked earlier candidate the inner page
+                        # judge accepts, or keep the fail-closed floor.
                         _unchecked_table_attempt = (
                             None
                             if ps.is_born_digital
-                            else promote_unchecked_table_attempt(decision)
+                            else settle_scanned_table_decision(
+                                decision, inner=_promotion_inner_judge(judge)
+                            )
                         )
                         # The profile whose reading won. Needed to re-judge a candidate
                         # produced after routing (crop reread) through the same judge
@@ -10143,12 +10183,12 @@ class UnifiedPipeline:
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
                             for att in _source_ev_attempts
                         )
-                        # #1048: the floor is for a ladder that ended without an
-                        # accepted reading. ``decision.accepted`` is also true once a
-                        # later rung verified the table (before, an earlier rung's
-                        # source-evidence rejection floored that verified page too) or
-                        # once ``promote_unchecked_table_attempt`` chose a candidate to
-                        # ship marked.
+                        # #1048 / #1124: the floor is for a ladder that ended
+                        # without an accepted reading that carries a passed
+                        # table. ``settle_scanned_table_decision`` un-accepts a
+                        # prose (or unread-table) winner and may promote a
+                        # marked candidate; ``decision.accepted`` is then true
+                        # only for a verified later table or a promoted mark.
                         if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
                             self._apply_scanned_table_floor(
                                 ps,
@@ -10180,6 +10220,7 @@ class UnifiedPipeline:
                                 "disputed" if _un_out.table_disputed else "unverified"
                             )
                             ps.unchecked_table_values = _un_out.table_disputed
+                            ps.unchecked_table_value_list = list(_un_out.table_disputed_values)
                             ps.table_ladder_disposition = (
                                 FailureMode.TABLE_REJECTED
                                 if _un_out.table_disputed
@@ -10732,6 +10773,7 @@ class UnifiedPipeline:
                         # The `structure_class_floor_text` special case goes too: the
                         # floor disposition already lives inside the record, so deriving
                         # it separately was a third path to the same bytes.
+                        self._apply_text_coverage(state, page_num, ps, output_dir)
                         _record = finalized_page_record(
                             state, page_num, _whole_doc_page_texts(state)
                         )
@@ -11289,6 +11331,190 @@ class UnifiedPipeline:
         except Exception as exc:  # noqa: BLE001 - fail closed: no page is blank
             logger.debug("blank page: document open failed: %s", exc)
         return found
+
+    def _prepare_text_coverage(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+        unloadable_pages: set[int],
+        blank_pages: set[int],
+    ) -> None:
+        """#1050: run the ink-vs-layer check once per document (trusted-native frame)."""
+        self._text_coverage_pages = {}
+        self._text_coverage_output_dir = output_dir
+        if not self.config.check_text_coverage:
+            return
+        from socr.core.pdf import open_pdf
+        from socr.core.text_coverage import coverage_for_document
+
+        src = Path(state.handle.path)
+        if not src.is_file():
+            # A mocked or vanished path is not "could not decide"; page load
+            # already holds those pages out. Fail-closed unknown is for a
+            # readable PDF whose analysis raised.
+            return
+        try:
+            with open_pdf(str(src)) as doc:
+                pages = coverage_for_document(doc)
+        except Exception as exc:
+            logger.debug("text coverage: document open failed: %s", exc)
+            for page_num, ps in state.pages.items():
+                if page_num in unloadable_pages or page_num in blank_pages:
+                    continue
+                ps.text_coverage_verdict = "unknown"
+                ps.text_coverage_unknown = True
+            return
+        for i, cov in enumerate(pages):
+            page_num = i + 1
+            if page_num in unloadable_pages or page_num in blank_pages:
+                continue
+            self._text_coverage_pages[page_num] = cov
+            ps = state.pages.get(page_num)
+            if ps is None:
+                continue
+            ps.text_coverage_verdict = cov.verdict
+            ps.text_ink_unread = cov.verdict == "flagged"
+            ps.text_coverage_unknown = cov.verdict == "unknown"
+
+    def _decorate_coverage_winner(self, ps, bo, **changes):
+        """#1050: stamp coverage on the winning attempt in place.
+
+        Replacing ``best_output`` while leaving ``corrupt_math_hybrid`` on the
+        predecessor made selection reject the hybrid and fall back to raw
+        native text — recovery and the coverage mark both disappeared.
+        """
+        from dataclasses import replace as _replace
+
+        decorated = _replace(bo, **changes)
+        ps.best_output = decorated
+        if getattr(ps, "corrupt_math_hybrid", None) is bo:
+            ps.corrupt_math_hybrid = decorated
+        for i, attempt in enumerate(ps.attempts):
+            if attempt is bo:
+                ps.attempts[i] = decorated
+        return decorated
+
+    @staticmethod
+    def _coverage_apply_status(bo):
+        """Never raise ERROR / SKIPPED to WARNING. Only demote SUCCESS."""
+        return PageStatus.WARNING if bo.status is PageStatus.SUCCESS else bo.status
+
+    @staticmethod
+    def _coverage_apply_mode(ps, bo, coverage_mode: FailureMode) -> FailureMode:
+        """Table, then figure-words, then coverage; keep a pre-existing mode.
+
+        Used by the flagged branch and both unknown branches so a flattened
+        table is not overwritten with ``text_coverage_unknown``.
+        """
+        mode = coverage_mode
+        if figure_words_unread_suspect(ps):
+            mode = FailureMode.FIGURE_WORDS_UNREAD
+        if table_not_reconstructed_suspect(ps):
+            mode = FailureMode.TABLE_NOT_RECONSTRUCTED
+        if bo.failure_mode is not FailureMode.NONE:
+            mode = bo.failure_mode
+        return mode
+
+    def _coverage_stamp_winner(self, ps, bo, coverage_mode, text=None):
+        changes: dict = {
+            "status": self._coverage_apply_status(bo),
+            "failure_mode": self._coverage_apply_mode(ps, bo, coverage_mode),
+        }
+        if text is not None:
+            changes["text"] = text
+        return self._decorate_coverage_winner(ps, bo, **changes)
+
+    def _apply_text_coverage(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        output_dir: Path,
+    ) -> None:
+        """Demote a trusted-native page and attach region PNGs + the visible mark."""
+        if not self.config.check_text_coverage:
+            return
+        bo = ps.best_output
+        if bo is None:
+            if ps.text_ink_unread:
+                ps.text_ink_unread = False
+                ps.text_coverage_unknown = True
+                ps.text_coverage_verdict = "unknown"
+            return
+        if not (bo.engine or "").startswith(("native", "chart_asset")):
+            return
+        from ocr_output_contract import doc_dir_for, relative_key
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.core.text_coverage import (
+            render_region_png,
+            uncovered_text_image_ref,
+            uncovered_text_marker,
+            uncovered_text_marker_no_image,
+            uncovered_text_png_name,
+        )
+
+        if ps.text_coverage_unknown:
+            no_img = uncovered_text_marker_no_image(page_num)
+            body = bo.text or ""
+            extra = None
+            if uncovered_text_marker(page_num) not in body and no_img not in body:
+                extra = body.rstrip() + "\n\n" + no_img + "\n"
+            self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="text_coverage_unknown",
+                    engine=bo.engine or "native",
+                    detail="text-coverage check could not run or decide; page is not SUCCESS",
+                )
+            )
+            return
+        if not ps.text_ink_unread:
+            return
+        cov = getattr(self, "_text_coverage_pages", {}).get(page_num)
+        kept = list(cov.kept) if cov is not None else []
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        fig_dir = doc_dir / "figures"
+        links: list[str] = []
+        try:
+            with open_pdf(str(state.handle.path)) as doc:
+                page = doc[page_num - 1]
+                for i, reg in enumerate(kept, start=1):
+                    dest = fig_dir / uncovered_text_png_name(page_num, i)
+                    render_region_png(page, reg.pdf, dest)
+                    links.append(uncovered_text_image_ref(page_num, i))
+        except Exception as exc:
+            logger.debug("text coverage: crop save failed p%d: %s", page_num, exc)
+            ps.text_ink_unread = False
+            ps.text_coverage_unknown = True
+            ps.text_coverage_verdict = "unknown"
+            no_img = uncovered_text_marker_no_image(page_num)
+            body = bo.text or ""
+            extra = None
+            if uncovered_text_marker(page_num) not in body and no_img not in body:
+                extra = body.rstrip() + "\n\n" + no_img + "\n"
+            self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
+            return
+        mark = uncovered_text_marker(page_num)
+        body = (bo.text or "").rstrip()
+        extra = mark if not links else mark + "\n\n" + "\n".join(links)
+        new_text = body + "\n\n" + extra + "\n"
+        self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_INK_UNREAD, new_text)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="text_ink_unread",
+                engine=bo.engine or "native",
+                detail="text-like ink with no visible text layer; native prose kept; regions saved",
+                data={
+                    "n_regions": len(kept),
+                    "suppressed_repeat": getattr(cov, "suppressed_repeat", 0) if cov else 0,
+                    "suppressed_furniture": getattr(cov, "suppressed_furniture", 0) if cov else 0,
+                },
+            )
+        )
 
     def _agentic_blank_page(self, state: DocumentState, page_num: int, ps: PageState) -> None:
         """Ship a blank page as SUCCESS with the house marker; no model, no error."""
@@ -12693,8 +12919,10 @@ class UnifiedPipeline:
                     ps.table_ladder_disposition = None
                 ps.unchecked_table_kind = ""
                 ps.unchecked_table_values = ""
+                ps.unchecked_table_value_list = []
             if not _html_unchecked:
                 bo.table_disputed = ""
+                bo.table_disputed_values = ()
                 bo.table_unverifiable = ""
             # The floor PNG is the link target of the marks; keep it while any mark stays.
             if not (_html_unchecked and ps.unchecked_table_kind):
@@ -13048,13 +13276,30 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  [yellow]{detail}[/yellow]")
 
+    def _page_judge_leaf_timeout_sec(self) -> float | None:
+        """Wall-clock bound for the model leaf only (#1128/#1135)."""
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
+
+        return max(DEFAULT_PROVIDER_TIMEOUTS.values()) if DEFAULT_PROVIDER_TIMEOUTS else None
+
+    @staticmethod
+    def _judge_chain_has_leaf_deadline(judge) -> bool:
+        cur = judge
+        while cur is not None:
+            if any(cls.__name__ == "_TimeoutJudge" for cls in type(cur).__mro__):
+                return True
+            cur = getattr(cur, "_inner", None)
+        return False
+
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
 
-        The returned judge is always wrapped in NativeTableVerifierJudge, which
-        runs a deterministic two-tier PyMuPDF geometry check on born-digital
-        table pages BEFORE the inner judge is called (Consilium decision
-        20260615T170212Z-0362, Option C).  Scanned pages bypass cleanly.
+        Chain (outside → inside): ``SourceEvidenceTableJudge`` (Tesseract
+        witness, live output), ``NativeTableVerifierJudge`` (local PyMuPDF
+        geometry + ``verify_native_table``; no model call), then
+        ``_TimeoutJudge`` around the model leaf (VLM / heuristic, plus the
+        circuit breaker). Local checks therefore finish even when the leaf
+        times out (#1128/#1135).
         """
         from socr.core.audit_log import AuditEvent
         from socr.pipeline.agentic import (
@@ -13186,8 +13431,17 @@ class UnifiedPipeline:
         def record_event(event) -> None:
             self._record_judge_event(state, event)
 
+        # #1128/#1135: deadline wraps the MODEL leaf only. Local
+        # SourceEvidenceTableJudge and NativeTableVerifierJudge run on the
+        # live output before this adapter.
+        timed_leaf = self._TimeoutJudge(
+            inner_judge,
+            self._page_judge_leaf_timeout_sec(),
+            owner=self,
+            on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+        )
         native_judge = NativeTableVerifierJudge(
-            inner=inner_judge,
+            inner=timed_leaf,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
@@ -13694,6 +13948,11 @@ class UnifiedPipeline:
             # Table-pass and figure refs.
             "figure_refs": figure_refs,
         }
+        # #1050: sparse like unchecked_table_kind. Absent when the check is off
+        # or has not run, so P6 sidecar bytes stay identical on those pages.
+        _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
+        if _coverage:
+            payload["text_coverage"] = _coverage
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor
@@ -13710,6 +13969,8 @@ class UnifiedPipeline:
         if ps and getattr(ps, "unchecked_table_kind", ""):
             payload["unchecked_table_kind"] = ps.unchecked_table_kind
             payload["unchecked_table_values"] = ps.unchecked_table_values
+            if getattr(ps, "unchecked_table_value_list", None):
+                payload["unchecked_table_value_list"] = list(ps.unchecked_table_value_list)
 
         _detected_count = int(getattr(ps, "detected_table_count", 0) or 0) if ps else 0
         if _detected_count > 0:
@@ -14793,6 +15054,10 @@ class UnifiedPipeline:
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             ps.unchecked_table_kind = str(meta.get("unchecked_table_kind", ""))
             ps.unchecked_table_values = str(meta.get("unchecked_table_values", ""))
+            _value_list = meta.get("unchecked_table_value_list")
+            ps.unchecked_table_value_list = (
+                [str(v) for v in _value_list] if isinstance(_value_list, list) else []
+            )
             # P6 cold review round 2: carry run 1's published disposition forward
             # so a resumed re-flush reproduces the sidecar byte for byte. A
             # sidecar written before the field existed restores None and the
@@ -15940,6 +16205,18 @@ class UnifiedPipeline:
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
 
+        # #1050: uncovered text-like ink, or the check could not decide.
+        text_coverage_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p))
+            and n not in native_fallback_pages
+            and n not in judge_timeout_native_pages
+            and n not in failed_pages
+            and p.best_output
+            and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+        ]
+
         # #1100: SUCCESS blank pages. Informational only — they do not demote
         # the document. Detection-time ``is_blank`` is not the disposition: a
         # blank page past a cascade halt ships a failure marker, not the note.
@@ -16070,6 +16347,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
+        pages_ok = pages_ok and not text_coverage_pages
         # #259: the kept model page carries a table flag, so the document
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
@@ -16393,6 +16671,7 @@ class UnifiedPipeline:
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
+            or text_coverage_pages
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_floor_pages
@@ -16590,6 +16869,29 @@ class UnifiedPipeline:
                         detail="a figure on this page has no native word inside, so any "
                         "words in its pixels are unread; the native prose ships "
                         "WARNING (figure_words_unread)",
+                    )
+                )
+            for n in text_coverage_pages:
+                ps_n = state.pages[n]
+                unknown = text_coverage_unknown_suspect(ps_n)
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=(
+                            "text_coverage_unknown_retained"
+                            if unknown
+                            else "text_ink_unread_retained"
+                        ),
+                        engine="native",
+                        detail=(
+                            "the ink-vs-layer coverage check could not run or decide; "
+                            "the native prose ships WARNING (text_coverage_unknown); "
+                            "step 1 does not call a model"
+                            if unknown
+                            else "text-like ink has no visible text layer over it; "
+                            "the native prose ships WARNING (text_ink_unread) "
+                            "with uncovered regions saved as images"
+                        ),
                     )
                 )
             for n in blank_shipped_pages:
@@ -16907,6 +17209,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(figure_unread_pages)} page(s) have a figure with "
                         "no native word inside; its words are unread "
                         f"(shipped WARNING): {figure_unread_pages}[/yellow]"
+                    )
+                if text_coverage_pages:
+                    console.print(
+                        f"  [yellow]{len(text_coverage_pages)} page(s) have text-like ink "
+                        "with no visible text layer, or the coverage check could not "
+                        f"decide (shipped WARNING): {text_coverage_pages}[/yellow]"
                     )
                 if blank_shipped_pages:
                     console.print(
@@ -17880,6 +18188,15 @@ class UnifiedPipeline:
             blank_meta = self._shipped_blank_pages(state)
             if blank_meta:
                 doc_extras["blank_pages"] = blank_meta
+            coverage_meta = [
+                n
+                for n, p in sorted(state.pages.items())
+                if (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p))
+                and p.best_output
+                and (p.best_output.engine or "").startswith(("native", "chart_asset"))
+            ]
+            if coverage_meta:
+                doc_extras["text_coverage_pages"] = coverage_meta
             doc_meta = _LatchedDocMetadata(meta, doc_extras) if doc_extras else meta
             write_doc_metadata(doc_dir, rel_key, doc_meta)
 

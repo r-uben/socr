@@ -106,6 +106,16 @@ class FailureMode(str, Enum):
     #: unread. The page keeps its exact native prose and the crop; it ships WARNING, never clean
     #: SUCCESS, and only the crop (never the page) is a candidate for a later read.
     FIGURE_WORDS_UNREAD = "figure_words_unread"
+    #: #1050: trusted-native page whose ink looks like text with no visible text
+    #: layer over it (vector-outlined figure labels, inserts). The native prose
+    #: is kept and ships WARNING; uncovered regions are saved as PNGs. Not
+    #: ``FIGURE_WORDS_UNREAD``: those regions are not inside a #1053 figure crop
+    #: (``plan_figure_page`` returned None on the seats' hits).
+    TEXT_INK_UNREAD = "text_ink_unread"
+    #: #1050: the coverage check could not run or decide (render/analysis
+    #: failure). Target 4 fail-closed: the page does not ship SUCCESS. Step 1
+    #: does not call a model; whole-page escalation is step 2.
+    TEXT_COVERAGE_UNKNOWN = "text_coverage_unknown"
     #: GH-995: the page loop halted (PARTIAL_SAVE_VLM_TIMEOUT) before reaching this page,
     #: so none of the per-page passes (route, extract, tables, equations) ran on it. The
     #: document-level figure phase may still touch it. Whatever text ships is the
@@ -324,6 +334,10 @@ JUDGE_OUTCOME_COMPLETED = "page_judge_completed"
 #: This is a MISSING verdict, in the same family as the two outcomes above, and
 #: it never supersedes anything.
 JUDGE_OUTCOME_VERIFIER_ERROR = "page_judge_verifier_error"
+#: #1125 r2: ``SourceEvidenceTableJudge`` rejected this attempt before the
+#: page judge ran. A missing verdict in the same family as the three above:
+#: the boundary must not stamp ``JUDGE_OUTCOME_COMPLETED``.
+JUDGE_OUTCOME_SOURCE_EVIDENCE = "source_evidence_table"
 
 
 @dataclass
@@ -465,6 +479,10 @@ class PageOutput:
     #: gate's reason, which names the first unsupported tokens. Ships with the
     #: stronger "disputed" mark and a link to the page image.
     table_disputed: str = ""
+    #: #1125: the disputed tokens as a list. ``table_disputed`` stays the
+    #: ``", "``-joined form for sidecar / mark-text compat; the mark counts
+    #: THIS, never by splitting that string.
+    table_disputed_values: tuple[str, ...] = ()
     #: #625: ditto marks (`"`, `''`, `”`, `″`, `〃`) detected verbatim in this
     #: winning candidate's shipped table cells. Owner ruling (2026-09-08,
     #: option 3): the mark is NOT resolved into the value it stands for --
@@ -561,6 +579,8 @@ class PageOutput:
             d["table_unverifiable"] = self.table_unverifiable
         if self.table_disputed:
             d["table_disputed"] = self.table_disputed
+        if self.table_disputed_values:
+            d["table_disputed_values"] = list(self.table_disputed_values)
         # #625: same omit-when-empty convention, same reason -- this field
         # postdates every already-terminal page's sidecar; emitting it
         # unconditionally would change the content-addressed fingerprint of
@@ -611,6 +631,9 @@ class PageOutput:
             table_label_unverified=d.get("table_label_unverified", ""),
             table_unverifiable=d.get("table_unverifiable", ""),
             table_disputed=d.get("table_disputed", ""),
+            table_disputed_values=tuple(
+                str(v) for v in d.get("table_disputed_values", ()) if str(v)
+            ),
             table_ditto_columns=list(d.get("table_ditto_columns", [])),
             # #713: a sidecar is parsed JSON, so both are read defensively --
             # a non-string outcome is no outcome, and a non-dict credential is

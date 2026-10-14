@@ -208,6 +208,10 @@ class PipelineConfig:
     # Setting both ``--native-only`` and ``--no-native-first`` is incoherent; the
     # CLI warns and ``--no-native-first`` wins (everything goes to OCR).
     native_only: bool = False
+    # #1050: model-free ink-vs-visible-text-layer check on trusted-native pages.
+    # Default on: a flagged page never ships plain SUCCESS. ``--no-text-coverage``
+    # turns it off (tests pin the on/off difference).
+    check_text_coverage: bool = True
 
     # --- Math recovery (font-corrupted equations, default ON) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted

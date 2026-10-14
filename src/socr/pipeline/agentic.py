@@ -28,7 +28,7 @@ import concurrent.futures
 import copy
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from socr.core.config import EngineType
@@ -37,6 +37,7 @@ from socr.core.providers import ProviderProfile
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
     JUDGE_OUTCOME_TIMEOUT,
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
@@ -147,43 +148,255 @@ class PageDecision:
         return self.final_output.engine
 
 
-def promote_unchecked_table_attempt(decision: PageDecision) -> ProviderAttempt | None:
-    """#1048: at the END of an exhausted ladder, ship an unchecked scanned table marked.
+def _evidence_readable_table_count(text: str) -> int | None:
+    """How many tables ``verify_scanned_table`` / ``collect_table_tokens`` will read.
 
-    ``SourceEvidenceTableJudge`` rejects a table it could not check, or one the second
-    reading disputes, at its rung exactly as before, so the router escalates and a later
-    rung that verifies wins unmarked. Only when NO rung was accepted does this run: the
-    floor would apply today, and instead the page ships a rejected candidate's text with
-    its in-text mark (owner rulings 2026-10-08 and 2026-10-12).
+    ``None`` when an HTML table remains unparsed: the check cannot count, and
+    the caller treats that as doubt (promote).
+    """
+    from socr.tables.source_evidence import evidence_readable_table_count, html_table_for_check
 
-    Which candidate: the LAST attempt carrying ``table_unverifiable`` or ``table_disputed``
-    with text, i.e. the most-escalated rung that produced a table. No new constant, and
-    deterministic. An attempt that failed for another reason (provider error, no table)
-    carries neither field and is never chosen.
+    check_text, html_unparsed = html_table_for_check(text or "")
+    if html_unparsed:
+        return None
+    # #1124-r2: evidence-readable tables, not find_table_blocks
+    return evidence_readable_table_count(check_text)
 
-    The chosen attempt is restored to the state it had before the judge rejected it
-    (SUCCESS, no failure mode), marked accepted, and its reason loses the
-    ``source_evidence_table`` token the floor latches on; the decision becomes accepted.
-    Returns the attempt, or ``None`` when nothing qualifies (the floor applies as today).
+
+def _collect_evidence_table_tokens(text: str):
+    """``collect_table_tokens`` on the same converted text the table count uses."""
+    from socr.tables.source_evidence import collect_table_tokens, html_table_for_check
+
+    check_text, html_unparsed = html_table_for_check(text or "")
+    if html_unparsed:
+        return None
+    return collect_table_tokens(check_text)
+
+
+def accepted_winner_has_passed_table(output: PageOutput) -> bool:
+    """True when an accepted winner carries a table the source-evidence check passed.
+
+    #1124: a later rung that drops the table (or keeps one the check did not
+    read) must not lift the scanned-table floor. Prose-only text, HTML the
+    checker could not parse, maths pipes #1098 excludes, and a candidate still
+    carrying ``table_disputed`` / ``table_unverifiable`` are not a passed table.
+    """
+    n = _evidence_readable_table_count(output.text)
+    if not n:
+        return False
+    if output.table_disputed or output.table_unverifiable:
+        return False
+    return True
+
+
+def _witness_supported_numeric_tokens(marked: PageOutput) -> dict[str, int]:
+    """Numeric tokens the witness checked and did not dispute in this attempt.
+
+    Containment applies only where the witness actually read the page. An
+    unverifiable table (no witness reading) and a disputed table with only the
+    legacy reason string (no ``table_disputed_values``) carry no supported
+    tokens — only the table-count rule in ``winner_accounts_for_marked_tables``.
+    """
+    if marked.table_unverifiable:
+        return {}
+    if marked.table_disputed and not marked.table_disputed_values:
+        return {}
+    table = _collect_evidence_table_tokens(marked.text or "")
+    if table is None:
+        return {}
+    disputed = set(marked.table_disputed_values or ())
+    return {tok: count for tok, count in table.numeric.items() if tok not in disputed}
+
+
+def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) -> bool:
+    """True when the winner keeps every evidence-readable table the marked attempt had.
+
+    Rule: promote when the winner has fewer evidence-readable tables than the
+    marked attempt, or either side cannot be counted (unparsed HTML). No
+    overlap threshold — a dropped table is a smaller count. A later rung that
+    re-emits the same number of tables (HTML retry of one verified grid) may
+    lift the floor; a rung that drops one of two may not. When in doubt,
+    promote: a marked table is the safe outcome.
+
+    #1126-r6: table count alone is not enough — the winner must still carry
+    every numeric token the witness supported in the marked attempt (set
+    containment on ``collect_table_tokens`` multisets, skipping disputed values).
+    """
+    # #1124-r2: winner must keep every marked-attempt table
+    w_n = _evidence_readable_table_count(winner.text)
+    m_n = _evidence_readable_table_count(marked.text)
+    if w_n is None or m_n is None:
+        return False
+    if w_n < m_n:
+        return False
+    supported = _witness_supported_numeric_tokens(marked)
+    if not supported:
+        return True
+    winner_table = _collect_evidence_table_tokens(winner.text or "")
+    if winner_table is None:
+        return False
+    for tok, need in supported.items():
+        if winner_table.numeric.get(tok, 0) < need:
+            return False
+    return True
+
+
+def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
+    """The chain inside ``SourceEvidenceTableJudge``, deadline kept.
+
+    Peels only ``SourceEvidenceTableJudge`` (re-entering it would reject the
+    same table again). Production (#1128/#1135) is
+    ``SE(Native(_TimeoutJudge(leaf)))``: peeling SE leaves Native around the
+    leaf deadline. An older ``_TimeoutJudge(SE(...))`` wrap is still
+    collected and rebuilt around the peeled inner so promotion keeps the
+    deadline and the timeout callback. Native + circuit-breaker stay.
+    """
+    if judge is None:
+        return None
+    timeouts: list[object] = []
+    core: object = judge
+    while core is not None:
+        name = core.__class__.__name__
+        if name == "_TimeoutJudge":
+            timeouts.append(core)
+            core = getattr(core, "_inner", None)
+            continue
+        if name == "SourceEvidenceTableJudge":
+            # #1125-r2: peel SourceEvidenceTableJudge only — keep the deadline
+            core = getattr(core, "_inner", None)
+            continue
+        break
+    wrapped = core
+    for tw in reversed(timeouts):
+        wrapped = tw.__class__(
+            wrapped,
+            tw._timeout_sec,
+            owner=getattr(tw, "_owner", None),
+            on_timeout=getattr(tw, "_on_timeout", None),
+        )
+    return wrapped
+
+
+def settle_scanned_table_decision(
+    decision: PageDecision, inner: PageJudge | None = None
+) -> ProviderAttempt | None:
+    """#1124 / #1125: promote a marked table the inner chain accepts, else floor.
+
+    Chosen over "just keep the floor on a prose winner": the owner ruling is
+    that a disputed / uncheckable table ships with a visible mark and the page
+    image. A later rung that drops the table and ships SUCCESS is the worst
+    outcome. Promotion walks marked candidates last-to-first and ships only
+    one the inner chain accepts; none accepts → the old fail-closed floor.
+    """
+    marked = [
+        att
+        for att in decision.attempts
+        if (att.output.table_disputed or att.output.table_unverifiable)
+        and (att.output.text or "").strip()
+    ]
+    if not marked:
+        return None
+    # #1124: a later accept without a passed table does not lift the floor
+    if decision.accepted and accepted_winner_has_passed_table(decision.final_output):
+        if all(
+            winner_accounts_for_marked_tables(decision.final_output, att.output) for att in marked
+        ):
+            return None
+    if decision.accepted:
+        decision.accepted = False
+        for att in decision.attempts:
+            if att.output is decision.final_output:
+                att.accepted = False
+                break
+    return promote_unchecked_table_attempt(decision, inner=inner)
+
+
+def _note_promotion_failure(att: ProviderAttempt, extra: str) -> None:
+    """Keep the original rejection reason; append why promotion failed."""
+    # #1125-r3: record why promotion failed — skip this append and
+    # the refuse-journal test fails. Never touch ``judge_outcome``: the SE
+    # stamp must survive promotion failures (#1126-r6).
+    att.reason = f"{att.reason}; {extra}" if att.reason else extra
+
+
+def promote_unchecked_table_attempt(
+    decision: PageDecision, inner: PageJudge | None = None
+) -> ProviderAttempt | None:
+    """#1048 / #1125: at an exhausted (or un-floored) ladder, ship a marked table.
+
+    ``SourceEvidenceTableJudge`` rejects a table it could not check, or one the
+    second reading disputes, at its rung exactly as before, so the router
+    escalates and a later rung that verifies wins unmarked.
+
+    Candidates are walked LAST to FIRST (most-escalated first). #1125: a
+    candidate is promoted only when the inner judge chain accepts it. None
+    accepts → ``None`` and the floor applies. The original rejection reason is
+    kept (the promotion note is a prefix). ``judge_outcome`` is
+    ``page_judge_completed`` only when that inner call ran.
     """
     if decision.accepted:
         return None
-    chosen: ProviderAttempt | None = None
-    for att in decision.attempts:
-        out = att.output
-        if (out.table_disputed or out.table_unverifiable) and (out.text or "").strip():
-            chosen = att
-    if chosen is None:
+    if inner is None:
+        # #1125-r5: promotion requires an inner chain; peeling to nothing is fail-closed.
+        for att in reversed(decision.attempts):
+            out = att.output
+            if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
+                continue
+            _note_promotion_failure(att, "promotion refused: no inner judge chain")
         return None
-    chosen.output.status = PageStatus.SUCCESS
-    chosen.output.failure_mode = FailureMode.NONE
-    chosen.output.error = ""
-    chosen.accepted = True
-    kind = "disputed" if chosen.output.table_disputed else "unverified"
-    chosen.reason = f"ladder exhausted; table shipped marked {kind} (#1048)"
-    decision.final_output = chosen.output
-    decision.accepted = True
-    return chosen
+    for att in reversed(decision.attempts):
+        out = att.output
+        if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
+            continue
+        from types import SimpleNamespace
+
+        provider = SimpleNamespace(
+            id=att.provider_id,
+            engine=att.engine,
+            model=att.model,
+            backend=att.backend,
+        )
+        # Deep-copy probe: the inner chain may rewrite ``text`` (native header
+        # repair) or set fields the shallow copy would drop. ``table_disputed``
+        # / ``table_disputed_values`` stay on the probe as the pre-repair SE
+        # witness record; marks still name those bytes.
+        probe = copy.deepcopy(out)
+        probe.status = PageStatus.SUCCESS
+        probe.failure_mode = FailureMode.NONE
+        probe.error = ""
+        try:
+            # #1125: inner-chain accept is required to promote — skip this
+            # call and the refuse-everything test fails
+            verdict = inner.assess(probe, provider)
+        except Exception as exc:  # noqa: BLE001 - a raised inner is a refuse
+            why = (
+                f"promotion timeout: {exc}"
+                if is_page_judge_timeout(exc)
+                else f"promotion judge raised: {exc}"
+            )
+            _note_promotion_failure(att, why)
+            continue
+        if not verdict.accept:
+            why = f"promotion refused: {verdict.reason}" if verdict.reason else "promotion refused"
+            _note_promotion_failure(att, why)
+            continue
+        original_reason = att.reason or ""
+        kind = "disputed" if probe.table_disputed else "unverified"
+        out = replace(
+            probe,
+            status=PageStatus.SUCCESS,
+            failure_mode=FailureMode.NONE,
+            error="",
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        )
+        att.output = out
+        att.accepted = True
+        note = f"ladder exhausted; table shipped marked {kind} (#1048)"
+        att.reason = f"{note}; {original_reason}" if original_reason else note
+        decision.final_output = att.output
+        decision.accepted = True
+        return att
+    return None
 
 
 def _error_output(page_num: int, msg: str) -> PageOutput:
@@ -529,7 +742,14 @@ def route_page(
         # still cannot disguise a real refusal, because a real verdict carries no
         # ``judge_outcome`` at all.
         missing_verdict = decision.judge_outcome if not decision.accept else ""
-        if missing_verdict:
+        if decision.accept:
+            output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        elif missing_verdict == JUDGE_OUTCOME_SOURCE_EVIDENCE:
+            # #1126-r6: witness-contradicted bytes are a completed refusal, not a
+            # missing verdict — retire any credential without stamping page_judge_completed.
+            output.judge_outcome = JUDGE_OUTCOME_SOURCE_EVIDENCE
+            output.table_acceptance_credential = None
+        elif missing_verdict:
             # A missing verdict cannot retire another missing verdict either: an
             # already-typed timeout stands, so a verifier crashing on a LATER
             # rung does not destroy the very stand-in this ticket exists for.
@@ -537,8 +757,7 @@ def route_page(
                 output.judge_outcome = missing_verdict
         else:
             output.judge_outcome = JUDGE_OUTCOME_COMPLETED
-            if not decision.accept:
-                output.table_acceptance_credential = None
+            output.table_acceptance_credential = None
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,
@@ -870,6 +1089,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             # unsupported value in ``table_disputed`` (no cap; the mark names them
             # all). Other contradiction sources are not touched.
             if result.verifiable and not result.passed:
+                output.table_disputed_values = tuple(result.disputed_values)
                 output.table_disputed = ", ".join(result.disputed_values) or result.reason
             else:
                 output.table_unverifiable = result.reason
@@ -890,6 +1110,8 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 accept=False,
                 reason=f"source_evidence_table: {marker}{result.reason}",
                 confidence=0.0,
+                # #1125-r2: source-evidence reject is not page_judge_completed
+                judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
             )
 
         if result.content_unverified:

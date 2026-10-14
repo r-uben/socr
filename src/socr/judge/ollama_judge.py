@@ -28,6 +28,7 @@ from socr.core.ollama_utils import (  # noqa: F401 -- CONNECT_PROBE_TIMEOUT_SEC 
 from socr.core.ollama_utils import host_reachable as _host_reachable
 from socr.judge.judge import (
     JUDGE_MAX_REPLY_TOKENS,
+    JUDGE_VERDICT_SCHEMA,
     JudgeReplyTruncatedError,
     JudgeVerdict,
     load_judge_prompt,
@@ -74,7 +75,7 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
             # Judging should be as stable as we can make it; the reply cap is
             # shared with the vLLM backend (see JUDGE_MAX_REPLY_TOKENS).
             "options": {"temperature": 0, "num_predict": JUDGE_MAX_REPLY_TOKENS},
-            "format": "json",
+            "format": JUDGE_VERDICT_SCHEMA,  # #1127: Ollama sends JUDGE_VERDICT_SCHEMA
             "think": PROBE_THINK,
         },
         timeout=timeout,

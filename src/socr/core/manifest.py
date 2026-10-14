@@ -30,6 +30,7 @@ import logging
 import math
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -46,6 +47,7 @@ from socr.core.document import DocumentHandle
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
     JUDGE_OUTCOME_TIMEOUT,
     JUDGE_OUTCOME_VERIFIER_ERROR,
     REJECTION_AMBIGUOUS_DEFERRED,
@@ -1007,6 +1009,16 @@ def table_not_reconstructed_suspect(p) -> bool:
 def figure_words_unread_suspect(p) -> bool:
     """#1053: a figure crop on the page holds no native word, so its words are unread."""
     return bool(getattr(p, "figure_words_unread", False))
+
+
+def text_ink_unread_suspect(p) -> bool:
+    """#1050: trusted-native ink looks like text with no visible layer over it."""
+    return bool(getattr(p, "text_ink_unread", False))
+
+
+def text_coverage_unknown_suspect(p) -> bool:
+    """#1050: the coverage check could not run or decide."""
+    return bool(getattr(p, "text_coverage_unknown", False))
 
 
 def _reaches_structure_class_branch(p) -> bool:
@@ -2023,7 +2035,14 @@ def rejection_of_reading(p, digests, *, exclude=None) -> PageOutput | None:
         rejection = getattr(att, "rejection_class", None)
         if rejection and rejection != REJECTION_VERIFIER_ERROR:
             return att
-        if getattr(att, "judge_outcome", "") == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
+        jo = getattr(att, "judge_outcome", "")
+        # #1126-r6 / #1126-r9: source-evidence reject is a completed refusal only when
+        # the witness could read and contradicted (``table_disputed``). An unverifiable
+        # check (``table_unverifiable``) is unknown, not a refusal — it must not retire
+        # a credentialed timeout stand-in on the same bytes.
+        if jo == JUDGE_OUTCOME_SOURCE_EVIDENCE and not getattr(att, "table_unverifiable", ""):
+            return att
+        if jo == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
             return att
     return None
 
@@ -2729,8 +2748,45 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     if not text_layer_trusted(native_region_text(prose_words)):
         return None
 
+    # #1143: the page image is EMBEDDED exactly once, under the banner, and
+    # every withheld run LINKS it. Forney 1988 p22 withholds twelve runs, and
+    # this lane used to append ``marker_line + "\n\n" + png_ref`` to each of
+    # them, so the same whole-page render shipped twelve times ("I see the
+    # figure repeated all the time" -- owner, review of main 25daab9f,
+    # 2026-10-14).
+    #
+    # Under the BANNER, not at the first withheld run. ``png_ref`` is a
+    # whole-page render and the banner is the page's own page-level line, so the
+    # two belong together. The geometry lane puts its one embed at the first
+    # failed table (``splice_failed_table_regions``'s ``first_failed_ordinal``)
+    # because there the first failed ordinal IS a table; here nothing does.
+    # Argon's review, 2026-10-14: this branch runs with
+    # ``detected_table_count == 0``, the withheld unit is a contiguous run of
+    # numeric bands, and run 1 is routinely a single prose line carrying a year
+    # or a percentage (the case the per-run marker exists for, below) while the
+    # page's real table is run 8. An embed at run 1 would split that paragraph
+    # over a stray digit and leave the table itself with a link pointing
+    # backwards. At the top it is where a page-level artefact belongs and every
+    # marker is byte-identical, which is also what ``page_unchecked_mark``
+    # (one embed, on the page's first line) and ``disputed_table_mark`` (a plain
+    # ``[page image](...)`` link per table) already ship.
+    #
+    # No run loses its marker, so #649 round 2's reason for the per-run marker
+    # -- a withheld prose line elided mid-paragraph must be visible where it
+    # happened -- is untouched; only the duplicated picture goes. The links
+    # resolve after a replay into another directory because the embed is on this
+    # same page, so the PNG stays a recorded asset (manifest asset discovery
+    # collects embeds only; see ``page_unchecked_mark``).
+    #
+    # NOT per-run crops: there is no bbox on this page at all (see the caller's
+    # comment), a withheld run can be one prose line rather than a table, and a
+    # crop per run is one more render each plus a new way to clip the numbers
+    # the floor exists to protect.
     blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
-    marker_block = f"{marker_line}\n\n{png_ref}" if png_ref else marker_line
+    if png_ref:
+        blocks.append(png_ref)
+    page_image = page_image_link(png_ref)
+    marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
     paragraph: list[str] = []
     in_withheld_run = False
 
@@ -3255,6 +3311,25 @@ def _select_page_output_tagged(
                     status=PageStatus.WARNING,
                     failure_mode=(
                         FailureMode.FIGURE_WORDS_UNREAD
+                        if winner.failure_mode is FailureMode.NONE
+                        else winner.failure_mode
+                    ),
+                )
+            # #1050: uncovered text-like ink, or the check could not decide.
+            if (
+                (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p))
+                and winning_engine.startswith(_NATIVE_TEXT_LANES)
+                and winner.status is PageStatus.SUCCESS
+            ):
+                winner = replace(
+                    winner,
+                    status=PageStatus.WARNING,
+                    failure_mode=(
+                        (
+                            FailureMode.TEXT_COVERAGE_UNKNOWN
+                            if text_coverage_unknown_suspect(p)
+                            else FailureMode.TEXT_INK_UNREAD
+                        )
                         if winner.failure_mode is FailureMode.NONE
                         else winner.failure_mode
                     ),
@@ -3830,7 +3905,17 @@ def _select_page_output_tagged(
         # #960: garbled math ships demoted whether or not a recovery attempt ran (a
         # providerless run, or a ladder that never started, leaves no attempts).
         garbled_math = garbled_math_suspect(p)
-        native_demoted = native_is_fallback or grid_rejected or table_flattened or garbled_math
+        # #1050: a structure-class page skips the passing-best_output
+        # short-circuit (native is distrusted for the GRID) and lands here.
+        # Coverage flags must demote this synthetic SUCCESS the same way.
+        coverage_unread = text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p)
+        native_demoted = (
+            native_is_fallback
+            or grid_rejected
+            or table_flattened
+            or garbled_math
+            or coverage_unread
+        )
         # #1004: the model read was never judged (page judge timeout) and the native layer
         # is known bad. Demote by status and failure mode only: ``audit_passed`` selects
         # the winner and is left exactly as the fallback leaves it.
@@ -3844,6 +3929,29 @@ def _select_page_output_tagged(
         # deterministic --native-only path, which is exactly the path this
         # ticket is about.
         fallback_text = _native_text_with_appends(p)
+        if text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p):
+            from socr.core.text_coverage import (
+                uncovered_text_marker,
+                uncovered_text_marker_no_image,
+            )
+
+            mark = uncovered_text_marker(page_num)
+            no_img = uncovered_text_marker_no_image(page_num)
+            bo_text = (p.best_output.text or "") if p.best_output is not None else ""
+            have = fallback_text or ""
+            if mark in bo_text:
+                # Keep the equation sidecar (or any later native append).
+                # bo_text has the mark and crop links; it may be an earlier
+                # attempt that apply decorated before the sidecar landed.
+                suffix = bo_text[bo_text.index(mark) :]
+                if mark not in have:
+                    fallback_text = have.rstrip() + "\n\n" + suffix
+                    if not fallback_text.endswith("\n"):
+                        fallback_text += "\n"
+            elif mark not in have and no_img not in have:
+                # apply never saved a crop. Selection stays pure: the
+                # no-image mark goes on the returned text only.
+                fallback_text = have.rstrip() + "\n\n" + no_img + "\n"
         return PageOutput(
             page_num=page_num,
             text=fallback_text,
@@ -3877,7 +3985,15 @@ def _select_page_output_tagged(
                             else (
                                 FailureMode.TABLE_NOT_RECONSTRUCTED
                                 if table_flattened
-                                else FailureMode.NONE
+                                else (
+                                    FailureMode.TEXT_COVERAGE_UNKNOWN
+                                    if text_coverage_unknown_suspect(p)
+                                    else (
+                                        FailureMode.TEXT_INK_UNREAD
+                                        if text_ink_unread_suspect(p)
+                                        else FailureMode.NONE
+                                    )
+                                )
                             )
                         )
                     )
@@ -4173,13 +4289,54 @@ DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)
 _IMAGE_REF_PATH_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 
 
-def disputed_table_mark(values: str, png_ref: str) -> str:
+def page_image_link(png_ref: str) -> str:
+    """A plain LINK to the page image that an EMBED elsewhere on the page records.
+
+    #1143. ``png_ref`` is a pre-rendered markdown EMBED
+    (``![Failed table page N](figures/failed_table_pN.png)``, built by
+    ``_render_d3_floor_png``); there is no typed logical path beside it, so the
+    path is read back out of it with the same regex ``disputed_table_mark`` and
+    ``page_unchecked_mark`` already use. Returns ``""`` when there is no ref to
+    link, so a caller can fall back to its bare marker.
+
+    A link, not a second embed: manifest asset discovery collects embeds only
+    (see ``page_unchecked_mark``), so this form is safe to repeat ONLY on a page
+    that also carries the embed itself -- otherwise a replay into another
+    directory leaves the link broken.
+    """
+    path = _IMAGE_REF_PATH_RE.search(png_ref or "")
+    return f"[page image]({path.group(1)})" if path else ""
+
+
+#: #1125: name this many disputed tokens in the in-text mark, then "+K more".
+#: Eight is a typical small two-column table (a handful of body rows) on one
+#: blockquote line; the full list stays on ``PageState.unchecked_table_values``
+#: / ``table_disputed_values``. Not a quality threshold — a display cap.
+DISPUTED_TABLE_MARK_VALUE_CAP = 8
+
+
+def _disputed_mark_values(values: Sequence[str] | str) -> list[str]:
+    """Tokens to name. A string is one blob — never split on ``", "``."""
+    if isinstance(values, str):
+        return [values] if values else []
+    return [v for v in values if v]
+
+
+def disputed_table_mark(values: Sequence[str] | str, png_ref: str) -> str:
     """The one-line disputed mark; the link is omitted when no page image was rendered."""
-    count = len([v for v in values.split(", ") if v]) if values else 0
+    items = _disputed_mark_values(values)
+    count = len(items)
+    if count > DISPUTED_TABLE_MARK_VALUE_CAP:
+        named = (
+            ", ".join(items[:DISPUTED_TABLE_MARK_VALUE_CAP])
+            + f" +{count - DISPUTED_TABLE_MARK_VALUE_CAP} more"
+        )
+    else:
+        named = ", ".join(items)
     path = _IMAGE_REF_PATH_RE.search(png_ref or "")
     link = f" [page image]({path.group(1)})" if path else ""
     noun = f"{count} value{'s' if count != 1 else ''}"
-    detail = f"disagrees with {noun}: {values}" if values else "disagrees with this table"
+    detail = f"disagrees with {noun}: {named}" if items else "disagrees with this table"
     return (
         f"> [table disputed: a second reading of the page (Tesseract) {detail}; "
         f"check them against the page image before citing.{link}]"
@@ -4208,7 +4365,14 @@ _HTML_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.IGNORECASE)
 
 
 def _table_start_lines(text: str, lines: list[str]) -> list[int]:
-    """Line index of every table in ``text``: markdown pipe blocks AND outermost HTML tables."""
+    """Line index of every table in ``text``: markdown pipe blocks AND outermost HTML tables.
+
+    Tables inside code fences are counted too, on purpose (#1124 r3-r4). Skipping them
+    needs a fence parser, and every one tried misread model output somewhere (a shorter
+    inner fence, a fence inside an HTML comment, an unclosed fence) and so hid the mark of
+    a real disputed table after it. An extra mark inside a code block is harmless; a
+    hidden dispute is not.
+    """
     from socr.tables.reconcile import find_table_blocks
 
     starts = {b.start for b in find_table_blocks(text)}
@@ -4245,16 +4409,30 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     """
     kind = getattr(p, "unchecked_table_kind", "") if p is not None else ""
     values = getattr(p, "unchecked_table_values", "") if p is not None else ""
+    value_list = list(getattr(p, "unchecked_table_value_list", None) or [])
     # #1099: born-digital pages are now checked against their own text layer, so a rejected
     # candidate there carries the doubt fields too. Those pages are never promoted (the
     # ladder end keeps its existing handling), so their candidates' fields must not mark them.
     scanned = p is None or not getattr(p, "is_born_digital", False)
-    if scanned and output.table_disputed:
-        kind, values = "disputed", output.table_disputed
+    use_output_disputed = scanned and output.table_disputed
+    if use_output_disputed:
+        kind = "disputed"
+        values = output.table_disputed
+        value_list = list(output.table_disputed_values)
+    if value_list:
+        mark_values: Sequence[str] | str = value_list
+    elif use_output_disputed and values:
+        # #1125.4: ``table_disputed`` without ``table_disputed_values`` is one blob.
+        mark_values = values
+    elif values:
+        # Pre-#1125.4 sidecars: only the comma-joined page-state string exists.
+        mark_values = [v for v in values.split(", ") if v]
+    else:
+        mark_values = []
     mark = UNVERIFIED_TABLE_MARK
     mark_re = UNVERIFIED_TABLE_MARK_RE
     if kind == "disputed":
-        mark = disputed_table_mark(values, getattr(p, "d3_floor_png_ref", ""))
+        mark = disputed_table_mark(mark_values, getattr(p, "d3_floor_png_ref", ""))
         mark_re = DISPUTED_TABLE_MARK_RE
     unverified = (
         kind in ("disputed", "unverified")
