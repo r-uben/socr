@@ -210,3 +210,16 @@ asserted, `src.count(anchor) == 1`):
 Full suite (round 4): 7499 passed, 2 skipped, 4 xfailed.
 Ruff 0.16.0 format `--check`: clean.
 
+## Hygiene (#1138 / #1139 softs / cubic on #1136)
+
+Test-only. No production edit.
+
+- **#1138 item 1.** `test_inner_timeout_error_is_wrapped_and_adopted`: a leaf raises builtin `TimeoutError` inside the deadline. It becomes `PageJudgeTimeoutError("page judge timeout: …")`, `on_timeout` fires, adopted writes stay. Mutant `inner_timeout_if_false` (`if isinstance(payload, TimeoutError)` → `if False`) re-raises the bare `TimeoutError`.
+- **#1139 softs.** Figure-step test now parametrises `unknown_via` like the table pin, and asserts the uncovered-text mark so apply actually ran. Dropped the implied `!=` on the two modes.
+- **cubic stub leak.** The tesseract probe runs in a subprocess with a 2 s outer timeout; the child is killed on expire, so a no-timeout mutant cannot leave a sleeping stub in this process's `sys.modules`. Still hermetic without pytesseract. `tesseract_no_timeout` still fails it.
+
+Full suite: 7506 passed, 2 skipped, 4 xfailed. Ruff 0.16.0 format
+`--check` clean. Mutants: `inner_timeout_if_false`,
+`tesseract_no_timeout`, `remove_figure_step`, `swap_table_and_figure`.
+
+
