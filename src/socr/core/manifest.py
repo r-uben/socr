@@ -2748,8 +2748,45 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     if not text_layer_trusted(native_region_text(prose_words)):
         return None
 
+    # #1143: the page image is EMBEDDED exactly once, under the banner, and
+    # every withheld run LINKS it. Forney 1988 p22 withholds twelve runs, and
+    # this lane used to append ``marker_line + "\n\n" + png_ref`` to each of
+    # them, so the same whole-page render shipped twelve times ("I see the
+    # figure repeated all the time" -- owner, review of main 25daab9f,
+    # 2026-10-14).
+    #
+    # Under the BANNER, not at the first withheld run. ``png_ref`` is a
+    # whole-page render and the banner is the page's own page-level line, so the
+    # two belong together. The geometry lane puts its one embed at the first
+    # failed table (``splice_failed_table_regions``'s ``first_failed_ordinal``)
+    # because there the first failed ordinal IS a table; here nothing does.
+    # Argon's review, 2026-10-14: this branch runs with
+    # ``detected_table_count == 0``, the withheld unit is a contiguous run of
+    # numeric bands, and run 1 is routinely a single prose line carrying a year
+    # or a percentage (the case the per-run marker exists for, below) while the
+    # page's real table is run 8. An embed at run 1 would split that paragraph
+    # over a stray digit and leave the table itself with a link pointing
+    # backwards. At the top it is where a page-level artefact belongs and every
+    # marker is byte-identical, which is also what ``page_unchecked_mark``
+    # (one embed, on the page's first line) and ``disputed_table_mark`` (a plain
+    # ``[page image](...)`` link per table) already ship.
+    #
+    # No run loses its marker, so #649 round 2's reason for the per-run marker
+    # -- a withheld prose line elided mid-paragraph must be visible where it
+    # happened -- is untouched; only the duplicated picture goes. The links
+    # resolve after a replay into another directory because the embed is on this
+    # same page, so the PNG stays a recorded asset (manifest asset discovery
+    # collects embeds only; see ``page_unchecked_mark``).
+    #
+    # NOT per-run crops: there is no bbox on this page at all (see the caller's
+    # comment), a withheld run can be one prose line rather than a table, and a
+    # crop per run is one more render each plus a new way to clip the numbers
+    # the floor exists to protect.
     blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
-    marker_block = f"{marker_line}\n\n{png_ref}" if png_ref else marker_line
+    if png_ref:
+        blocks.append(png_ref)
+    page_image = page_image_link(png_ref)
+    marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
     paragraph: list[str] = []
     in_withheld_run = False
 
@@ -4250,6 +4287,25 @@ UNVERIFIED_TABLE_MARK_RE = re.compile(r"^> \[table unverified: ", re.MULTILINE)
 #: the page image the floor already renders (``figures/failed_table_pN.png``).
 DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)
 _IMAGE_REF_PATH_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def page_image_link(png_ref: str) -> str:
+    """A plain LINK to the page image that an EMBED elsewhere on the page records.
+
+    #1143. ``png_ref`` is a pre-rendered markdown EMBED
+    (``![Failed table page N](figures/failed_table_pN.png)``, built by
+    ``_render_d3_floor_png``); there is no typed logical path beside it, so the
+    path is read back out of it with the same regex ``disputed_table_mark`` and
+    ``page_unchecked_mark`` already use. Returns ``""`` when there is no ref to
+    link, so a caller can fall back to its bare marker.
+
+    A link, not a second embed: manifest asset discovery collects embeds only
+    (see ``page_unchecked_mark``), so this form is safe to repeat ONLY on a page
+    that also carries the embed itself -- otherwise a replay into another
+    directory leaves the link broken.
+    """
+    path = _IMAGE_REF_PATH_RE.search(png_ref or "")
+    return f"[page image]({path.group(1)})" if path else ""
 
 
 #: #1125: name this many disputed tokens in the in-text mark, then "+K more".
