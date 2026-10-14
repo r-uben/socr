@@ -864,6 +864,53 @@ def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers, unkno
     assert on.status is DocumentStatus.AUDIT_FAILED
 
 
+@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
+def test_figure_words_unread_ranks_between_coverage_and_table(tmp_path: Path, providers) -> None:
+    """#1134: figure outranks coverage and loses to a flattened table.
+
+    Same-process pair: figure-suspect only vs figure+table. Removing the
+    figure step leaves coverage on the first run; swapping table and
+    figure leaves figure on the second.
+    """
+    pdf = _vector_unread_pdf(tmp_path / "fig-rank.pdf")
+
+    def _rec(*, table: bool, tag: str) -> dict:
+        pipe = _pipeline(check_text_coverage=True)
+        patches = [
+            patch(
+                "socr.pipeline.orchestrator.figure_words_unread_suspect",
+                return_value=True,
+            ),
+            patch("socr.core.manifest.figure_words_unread_suspect", return_value=True),
+        ]
+        if table:
+            patches.extend(
+                [
+                    patch(
+                        "socr.pipeline.orchestrator.table_not_reconstructed_suspect",
+                        return_value=True,
+                    ),
+                    patch(
+                        "socr.core.manifest.table_not_reconstructed_suspect",
+                        return_value=True,
+                    ),
+                ]
+            )
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            _run(pipe, pdf, tmp_path / tag, providers)
+        return json.loads(next((tmp_path / tag).rglob("pages/00001.json")).read_text())
+
+    figure_only = _rec(table=False, tag="fig")
+    both = _rec(table=True, tag="both")
+    assert figure_only["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
+    assert both["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
+    assert figure_only["failure_mode"] != both["failure_mode"]
+    assert figure_only["status"] == PageStatus.WARNING.value
+    assert both["status"] == PageStatus.WARNING.value
+
+
 def test_document_open_failure_is_unknown(tmp_path: Path) -> None:
     """A failed coverage_for_document must not leave the page SUCCESS."""
     pdf = _clean_text_pdf(tmp_path / "open.pdf")
