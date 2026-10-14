@@ -109,7 +109,11 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
 
     resumed = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed is None
-    assert "resume_ledger_audit_reject" in [ev.kind for ev in state.events if ev.page_num == 1]
+    kinds = [ev.kind for ev in state.events if ev.page_num == 1]
+    assert "resume_ledger_audit_reject" in kinds
+    pipeline._load_terminal_page(state, 1, out_dir)
+    after = [ev.kind for ev in state.events if ev.page_num == 1]
+    assert after.count("resume_ledger_audit_reject") == 1
 
 
 def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> None:
@@ -158,8 +162,6 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
     assert resumed is None, (
         f"A judge-rejected best-effort page must not be restored on resume: {resumed!r}"
     )
-    # #1129 demotes the winner to WARNING before flush; GH-161 fires only on
-    # SUCCESS + judge refusal, not on the demoted WARNING shape.
     assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]
 
 
@@ -179,7 +181,6 @@ def test_error_status_audit_false_emits_no_resume_ledger_event(tmp_path: Path) -
         status=PageStatus.ERROR,
         engine="qwen",
         audit_passed=False,
-        judge_accepted=False,
         error="VLM timeout",
     )
     ps.attempts.append(errored)
@@ -268,6 +269,7 @@ def test_native_fallback_warning_audit_false_emits_no_resume_ledger_event(
 def test_judge_accepted_table_unverified_warning_emits_no_resume_ledger_event(
     tmp_path: Path,
 ) -> None:
+    from socr.core.manifest import finalized_page_record
     from socr.core.result import JUDGE_OUTCOME_COMPLETED
 
     pdf_path = _real_pdf(tmp_path)
@@ -278,20 +280,22 @@ def test_judge_accepted_table_unverified_warning_emits_no_resume_ledger_event(
     ps = state.pages[1]
     ps.is_born_digital = False
     ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
-    demoted = PageOutput(
+    ps.best_output = PageOutput(
         page_num=1,
         text="judge accepted then ladder demoted",
-        status=PageStatus.WARNING,
+        status=PageStatus.SUCCESS,
         engine="qwen",
-        audit_passed=False,
+        audit_passed=True,
         judge_accepted=True,
         judge_reason="faithful",
         judge_outcome=JUDGE_OUTCOME_COMPLETED,
-        failure_mode=FailureMode.TABLE_UNVERIFIED,
     )
-    ps.attempts.append(demoted)
-    ps.best_output = demoted
-    pipeline._flush_page_fragment(state, 1, demoted.text, out_dir)
-    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    ps.attempts.append(ps.best_output)
+    record = finalized_page_record(state, 1)
+    demoted = record.output
+    assert demoted.status is PageStatus.WARNING
+    assert demoted.audit_passed is False
+    pipeline._flush_page_fragment(state, 1, demoted.text or "", out_dir)
+    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True, record=record)
     assert pipeline._load_terminal_page(state, 1, out_dir) is None
     assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]

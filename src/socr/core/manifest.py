@@ -3944,12 +3944,6 @@ def _select_page_output_tagged(
             status=PageStatus.SUCCESS if whole_doc.audit_passed else PageStatus.WARNING,
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
-            failure_mode=whole_doc.failure_mode,
-            judge_reason=whole_doc.judge_reason,
-            judge_outcome=whole_doc.judge_outcome,
-            judge_accepted=whole_doc.judge_accepted,
-            rejection_class=whole_doc.rejection_class,
-            error=whole_doc.error,
         ), SelectionProvenance.WHOLE_DOC_SECTION
     # A failed per-page attempt (content present, audit not passed) beats an
     # empty page so the manifest preserves what little we have.
@@ -4348,16 +4342,20 @@ def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
     return FailureMode.AUDIT_FAILED
 
 
-_UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES: frozenset[SelectionProvenance] = frozenset(
+#: Endings that already ship an equivalent top-of-page disclosure on refused bytes.
+#: Every other provenance gets the #1129 unaccepted banner when refusal evidence
+#: is present (fail-closed by default — new provenances are covered without an
+#: allowlist). Each member is pinned by a test that its own mark is present.
+_UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES: frozenset[SelectionProvenance] = frozenset(
     {
-        SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
-        SelectionProvenance.BEST_ATTEMPT_FLAGGED,
-        SelectionProvenance.WHOLE_DOC_SECTION,
-        # #259 / D3 model-kept endings ship judge-refused bytes with audit_passed
-        # still false on the attempt; refusal evidence is rejection_class or
-        # judge_accepted, not a separate top mark today.
-        SelectionProvenance.FLAGGED_MODEL_KEPT,
-        SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,
+        SelectionProvenance.NO_TEXT_MARKER,
+        SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED,
+        SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE,
+        SelectionProvenance.ROTATED_TEXT_SHREDDED,
+        SelectionProvenance.INVISIBLE_SCAN_UNREAD,
+        SelectionProvenance.STRUCTURE_CLASS_FLOOR,
+        SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
+        SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR,
     }
 )
 
@@ -4531,14 +4529,12 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
 def _apply_unaccepted_output_mark(
     output: PageOutput, provenance: SelectionProvenance | None, p=None
 ) -> PageOutput:
-    """#1129: demote and mark unaccepted model selections that ship judge-refused bytes.
+    """#1129: demote and mark judge-refused bytes unless the ending already discloses.
 
     Runs in ``_select_and_finalize_page`` so fragments, final ``.md``, manifest
-    and resume agree (#1048 pattern). Covers ``BEST_OUTPUT_UNVERIFIED``,
-    ``BEST_ATTEMPT_FLAGGED`` and ``WHOLE_DOC_SECTION`` alike.
+    and resume agree (#1048 pattern). Refusal evidence is required; provenance
+    is checked only to skip endings that already carry an equivalent top mark.
     """
-    if provenance not in _UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES:
-        return output
     if output.audit_passed is not False:
         return output
     text = output.text or ""
@@ -4547,6 +4543,8 @@ def _apply_unaccepted_output_mark(
     output = _finalize_best_output_unverified(output)
     reason = _unaccepted_mark_reason_from_output(output)
     if reason is None:
+        return output
+    if provenance in _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES:
         return output
     outcome = getattr(output, "judge_outcome", "") or ""
     mark = unaccepted_output_mark(reason, outcome=outcome)

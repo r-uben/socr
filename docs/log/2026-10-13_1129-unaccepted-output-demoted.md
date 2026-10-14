@@ -144,3 +144,16 @@ diffs vs the frozen baseline — all on page 3 (`D3_MODEL_KEPT`, sidecar
 **Tests:** `7481 passed` (`scratch/routing-baseline/exec/1129/pytest-r10.txt`).
 **Ruff:** `uvx ruff@0.16.0 format --check .` clean after oracle format.
 **Mutants:** `scratch/routing-baseline/exec/1129/mutants-r10.txt`.
+
+## Round 11 (2026-10-14)
+
+Reviews of f796d561 (Astra, Fable): do not merge.
+
+- **Fail-closed coverage.** The banner allowlist (`_UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES`) kept missing endings; round 10 missed `STRUCTURE_CLASS_GRID_FLAGGED` (Astra, reproduced). It is replaced by `_UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES`: any winner with refusal evidence gets the banner unless its ending already ships an equivalent top disclosure (failure markers, floors, invisible-scan and rotated-shred stubs). A new provenance is covered by default.
+- **GH-161 resume gate** reverted to origin/main's code (Fable's m4b showed main's gate passes every gh161 test). The legacy SUCCESS + audit_passed=false sidecar (demotion monkeypatched away) emits `resume_ledger_audit_reject` exactly once across two loads. A #1129-demoted WARNING page is not restored and emits nothing.
+- **`_rejudge_kept_candidate`** stamps `judge_accepted=True` on an accepting resume re-judge.
+- **The journal's `accepted`** keeps main's meaning (final acceptance), so GH-169's escalation trail is intact.
+- **Whole-document path** reverted to main. Not stamped with `judge_accepted`; the round-9 table row "WHOLE_DOC_SECTION | yes | banner" was wrong. A refused whole-document page ships WARNING without this banner and is covered by #1145's fail-closed fallback, which marks every WARNING page. Tests that seeded verdict fields on whole-document attempts were deleted.
+- **Not in this PR:** replaying outputs written before #1129 (#1153); the second disclosure on D3 model-kept pages (top banner plus in-body note), which #1145's coverage map decides.
+
+Mutants (executed in a copied tree, with a real `conftest.py` canary and a proof-of-copy mutant): every one fails its target test. Log: `scratch/routing-baseline/exec/1129/mutants-r11-run.txt`. Full suite: 7482 passed.

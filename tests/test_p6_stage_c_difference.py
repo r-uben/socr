@@ -328,7 +328,7 @@ class TestCleanAndFloorControls:
         self, current: dict[str, Any], prechange: dict[str, Any]
     ) -> None:
         """All control surfaces equal prechange after normalization."""
-        for p in (STRUCT_MODEL_PASSING_PAGE, STRUCT_FLOOR_PAGE, HYBRID_CLEAN_PAGE):
+        for p in (STRUCT_FLOOR_PAGE, HYBRID_CLEAN_PAGE):
             sidecar_key = f"p6_corpus/pages/{p:05d}.json"
             frag_key = f"p6_corpus/pages/{p:05d}.md"
 
@@ -341,12 +341,9 @@ class TestCleanAndFloorControls:
             manifest_p_old = prechange["manifest"][0]["entries"][str(p)]
             assert normalize_capture(manifest_p_curr) == normalize_capture(manifest_p_old)
 
-        # Tables trust for pages 8 and 10
+        # Tables trust for page 10 (page 8 changes under #1129 unaccepted mark)
         trust_curr = current["tables_trust"][0]["pages"]
         trust_old = prechange["tables_trust"][0]["pages"]
-        assert (
-            trust_curr[str(STRUCT_MODEL_PASSING_PAGE)] == trust_old[str(STRUCT_MODEL_PASSING_PAGE)]
-        )
         assert trust_curr[str(STRUCT_FLOOR_PAGE)] == trust_old[str(STRUCT_FLOOR_PAGE)]
 
 

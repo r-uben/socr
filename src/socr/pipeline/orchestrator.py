@@ -447,18 +447,16 @@ def _attempts_summary(ps) -> list[dict]:
     out: list[dict] = []
     for a in getattr(ps, "attempts", None) or []:
         reason = " ".join(str(a.judge_reason or "").split())
-        out.append(
-            {
-                "engine": a.engine or "",
-                "accepted": (
-                    a.judge_accepted
-                    if getattr(a, "judge_accepted", None) is not None
-                    else bool(a.audit_passed)
-                ),
-                "judge_outcome": a.judge_outcome or "",
-                "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
-            }
-        )
+        row: dict = {
+            "engine": a.engine or "",
+            "accepted": bool(a.audit_passed),
+            "judge_outcome": a.judge_outcome or "",
+            "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
+        }
+        ja = getattr(a, "judge_accepted", None)
+        if ja is not None:
+            row["judge_accepted"] = ja
+        out.append(row)
     return out
 
 
@@ -13974,6 +13972,7 @@ class UnifiedPipeline:
         # ``shipped`` is a copy of the snapshot the judge chain annotated (label
         # disclosure, corroboration, audit notes, status): never rebuilt from scratch.
         shipped.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        shipped.judge_accepted = True
         att = ProviderAttempt(
             engine=prof.engine,
             output=shipped,
@@ -14297,11 +14296,11 @@ class UnifiedPipeline:
             is_credentialed_judge_timeout = self._resume_credential_holds(state, winning)
 
             if not (is_ladder_rejected or is_credentialed_judge_timeout):
-                # Status MUST be SUCCESS before the GH-161 audit gate.  ERROR /
-                # cascade-halt pages with ``audit_passed=False`` must return None
-                # without ``resume_ledger_audit_reject`` (main behaviour).  #1129
-                # demoted pages are WARNING + audit false and are handled below.
-                if winning.get("status") == PageStatus.ERROR.value:
+                # Status MUST be SUCCESS.  A page written terminal at assemble time
+                # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
+                # whose best_output is the ERROR attempt, or a flagged native fallback)
+                # is NOT a clean result — re-OCR it, never skip it.
+                if winning.get("status") != PageStatus.SUCCESS.value:
                     return None
 
                 # GH-161: the audit verdict MUST be an explicit pass.  Status alone is
@@ -14319,17 +14318,7 @@ class UnifiedPipeline:
                 # WARNING) never needed.  Exactly ``True``, mirroring ``terminal``: a
                 # missing key or a non-bool is doubt, and doubt re-OCRs.
                 if winning.get("audit_passed") is not True:
-                    from socr.core.manifest import judge_refusal_evidence_from_winning
-
-                    if winning.get(
-                        "status"
-                    ) == PageStatus.SUCCESS.value and judge_refusal_evidence_from_winning(winning):
-                        self._record_ledger_audit_reject(state, page_num, winning)
-                    return None
-
-                # Other non-SUCCESS terminal shapes (native fallback WARNING, etc.)
-                # are not resume-skippable and do not emit the GH-161 event.
-                if winning.get("status") != PageStatus.SUCCESS.value:
+                    self._record_ledger_audit_reject(state, page_num, winning)
                     return None
 
             # Read the authoritative body fragment.

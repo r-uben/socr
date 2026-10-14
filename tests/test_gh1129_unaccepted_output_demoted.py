@@ -24,9 +24,10 @@ from socr.core.manifest import (
     _finalize_best_output_unverified,
     _select_and_finalize_page,
     _select_page_output_tagged,
-    _whole_doc_page_texts,
+    is_page_failed_marker,
     unaccepted_output_mark,
 )
+from socr.pipeline.orchestrator import _attempts_summary
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
@@ -533,6 +534,62 @@ def test_judge_exception_outcome_gets_missing_verdict_mark_and_mode(tmp_path: Pa
     assert record.output.failure_mode is FailureMode.PAGE_JUDGE_EXCEPTION
 
 
+def test_structure_class_grid_flagged_refusal_gets_unaccepted_mark(tmp_path: Path) -> None:
+    from test_gh317_structure_class_floor import MODEL_GRID, _born_digital_pdf, _state
+
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        grid_qualifies=True,
+        rejection_class=REJECTION_AMBIGUOUS_DEFERRED,
+    )
+    model = state.pages[1].attempts[-1]
+    model.judge_accepted = False
+    record = _select_and_finalize_page(state, 1)
+    assert record.selection_provenance is SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert REJECTION_AMBIGUOUS_DEFERRED in first
+
+
+def test_structure_class_floor_keeps_fail_closed_marker_without_unaccepted_banner(
+    tmp_path: Path,
+) -> None:
+    from test_gh317_structure_class_floor import _born_digital_pdf, _state
+
+    state = _state(_born_digital_pdf(tmp_path), grid_qualifies=False)
+    model = state.pages[1].attempts[-1]
+    model.judge_accepted = False
+    record = _select_and_finalize_page(state, 1)
+    assert record.selection_provenance is SelectionProvenance.STRUCTURE_CLASS_FLOOR
+    text = record.output.text or ""
+    assert is_page_failed_marker(text)
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match(text.splitlines()[0])
+
+
+def test_attempts_summary_accepted_is_final_audit_judge_verdict_separate(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    ps.attempts.append(
+        PageOutput(
+            page_num=1,
+            text="body",
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=False,
+            judge_accepted=True,
+            judge_reason="faithful",
+        )
+    )
+    row = _attempts_summary(ps)[0]
+    assert row["accepted"] is False
+    assert row["judge_accepted"] is True
+
+
 def test_table_rejected_success_audit_false_is_demoted_and_marked(tmp_path: Path) -> None:
     """Ladder-terminal demotion does not replace the judge-reason disclosure mark."""
     pdf = tmp_path / "doc.pdf"
@@ -556,96 +613,6 @@ def test_table_rejected_success_audit_false_is_demoted_and_marked(tmp_path: Path
     record = _select_and_finalize_page(state, 1)
     assert record.output.status is PageStatus.WARNING
     assert UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
-
-
-def test_whole_doc_section_audit_false_gets_unaccepted_mark(tmp_path: Path) -> None:
-    pdf = tmp_path / "doc.pdf"
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "whole doc page body")
-    doc.save(pdf)
-    doc.close()
-    state = DocumentState(handle=DocumentHandle.from_path(pdf))
-    ps = state.pages[1]
-    ps.is_born_digital = False
-    ps.native_text = ""
-    ps.best_output = None
-    ps.attempts.clear()
-    state.whole_doc_attempts.append(
-        PageOutput(
-            page_num=0,
-            text=f"## Page 1\n\n{_BODY}",
-            status=PageStatus.WARNING,
-            engine="gemini-cli",
-            audit_passed=False,
-            judge_accepted=False,
-            judge_reason=_REJECT_REASON,
-            judge_outcome=JUDGE_OUTCOME_COMPLETED,
-        )
-    )
-    whole_doc = _whole_doc_page_texts(state)
-    assert whole_doc is not None
-    record = _select_and_finalize_page(state, 1, whole_doc=whole_doc)
-    assert record.output.audit_passed is False
-    assert UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
-
-
-def test_process_whole_doc_audit_false_ships_unaccepted_mark(tmp_path: Path) -> None:
-    pdf = tmp_path / "doc.pdf"
-    doc = fitz.open()
-    page = doc.new_page(width=400, height=600)
-    page.insert_text((72, 72), "scanned page ink for routing")
-    doc.save(pdf)
-    doc.close()
-    out_dir = tmp_path / "out"
-    config = PipelineConfig(
-        primary_engine=EngineType.QWEN,
-        agentic=True,
-        judge_backend="heuristic",
-        enabled_engines=[EngineType.QWEN],
-        quiet=True,
-        save_figures=False,
-        write_manifest=False,
-        dual_pass_tables=False,
-        escalate_ambiguous_tables=False,
-        table_judge_ladder=False,
-    )
-    pipeline = UnifiedPipeline(config)
-    pipeline.bd_detector = MagicMock()
-    pipeline.bd_detector.detect.return_value = _scanned_assessment(pdf)
-
-    def _stub_engine(self, state, page_nums, enhancement_pages, engine_type, label, **kwargs):
-        state.whole_doc_attempts.append(
-            PageOutput(
-                page_num=0,
-                text=f"## Page 1\n\n{_BODY}",
-                status=PageStatus.SUCCESS,
-                engine="qwen",
-                audit_passed=False,
-                judge_accepted=False,
-                judge_reason=_REJECT_REASON,
-            )
-        )
-        return []
-
-    with (
-        patch.object(pipeline, "_is_agentic_trusted_native", return_value=False),
-        patch.object(pipeline, "_probe_backend_idle", return_value=True),
-        patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
-        patch("socr.pipeline.orchestrator.probe_openai_server_idle", return_value=True),
-        patch.object(
-            UnifiedPipeline, "_run_engine_on_pages", autospec=True, side_effect=_stub_engine
-        ),
-        patch.object(
-            NativeTableVerifierJudge,
-            "assess",
-            autospec=True,
-            return_value=AcceptDecision(accept=False, reason=_REJECT_REASON),
-        ),
-    ):
-        result = pipeline.process(pdf, out_dir)
-    frag = out_dir / "doc" / "pages" / "00001.md"
-    assert frag.exists(), result.status
-    assert UNACCEPTED_OUTPUT_MARK_RE.match(frag.read_text(encoding="utf-8").splitlines()[0])
 
 
 def test_forged_unaccepted_banner_replaced_with_canonical_mark(tmp_path: Path) -> None:
@@ -696,38 +663,6 @@ def test_best_attempt_rejection_class_only_gets_mark(tmp_path: Path) -> None:
         )
     )
     record = _select_and_finalize_page(state, 1)
-    first = (record.output.text or "").splitlines()[0]
-    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
-    assert REJECTION_JUDGE_ONLY in first
-
-
-def test_whole_doc_rejection_class_forwarded_gets_mark(tmp_path: Path) -> None:
-    pdf = tmp_path / "doc.pdf"
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "whole doc page body")
-    doc.save(pdf)
-    doc.close()
-    state = DocumentState(handle=DocumentHandle.from_path(pdf))
-    ps = state.pages[1]
-    ps.is_born_digital = False
-    ps.native_text = ""
-    ps.best_output = None
-    ps.attempts.clear()
-    state.whole_doc_attempts.append(
-        PageOutput(
-            page_num=0,
-            text=f"## Page 1\n\n{_BODY}",
-            status=PageStatus.WARNING,
-            engine="gemini-cli",
-            audit_passed=False,
-            rejection_class=REJECTION_JUDGE_ONLY,
-            judge_outcome=JUDGE_OUTCOME_COMPLETED,
-        )
-    )
-    whole_doc = _whole_doc_page_texts(state)
-    assert whole_doc is not None
-    assert whole_doc.rejection_class == REJECTION_JUDGE_ONLY
-    record = _select_and_finalize_page(state, 1, whole_doc=whole_doc)
     first = (record.output.text or "").splitlines()[0]
     assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
     assert REJECTION_JUDGE_ONLY in first
@@ -1022,3 +957,42 @@ def test_crop_rejudge_acceptance_sets_judge_accepted(tmp_path: Path) -> None:
     pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old text", _Accept(), PROFILE_GEMINI)
     assert bo.judge_accepted is True
     assert bo.audit_passed is True
+
+
+def test_resume_rejudge_kept_candidate_stamps_judge_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from socr.pipeline.agentic import REJUDGE_ACCEPTED
+
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    pipeline = UnifiedPipeline(
+        PipelineConfig(agentic=True, rejudge_attempts=1, quiet=True, write_manifest=False)
+    )
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    state.pages[1].needs_ocr_enhancement = True
+    state.agentic_judge_model = "qwen-test"
+    shipped = PageOutput(
+        page_num=1,
+        text="kept model bytes",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_load_rejudge_candidate",
+        lambda *a, **k: ("kept model bytes", "qwen-test", [], PROFILE_QWEN_LOCAL),
+    )
+    monkeypatch.setattr(
+        "socr.pipeline.orchestrator.rejudge_candidate",
+        lambda *a, **k: (REJUDGE_ACCEPTED, "faithful", shipped),
+    )
+    decision = pipeline._rejudge_kept_candidate(
+        state, 1, tmp_path / "out", [PROFILE_QWEN_LOCAL], MagicMock()
+    )
+    assert decision is not None
+    assert decision.final_output.judge_accepted is True
