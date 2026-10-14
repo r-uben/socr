@@ -449,6 +449,38 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
     )
 
 
+_COVERAGE_IMAGE_REF_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(")
+_COVERAGE_PAGE_MARK_RE = re.compile(r"^\[page \d+: uncovered text")
+
+
+def _coverage_parts(text: str) -> list[str]:
+    """Every #1050 part of *text*, in order: recovered blocks, region pictures, the mark.
+
+    A step-2 block placed in reading order sits BEFORE the page mark, so a
+    slice from the mark onward loses it (and, under ``--native-only``, the
+    page then ships with neither the recovered words nor the image).
+    """
+    from socr.core.text_recovery import RECOVERED_MARK_RE
+
+    parts: list[str] = []
+    for para in (text or "").split("\n\n"):
+        body = para.strip()
+        if not body:
+            continue
+        if (
+            RECOVERED_MARK_RE.search(body)
+            or _COVERAGE_IMAGE_REF_RE.match(body)
+            or _COVERAGE_PAGE_MARK_RE.match(body)
+        ):
+            parts.append(body)
+    return parts
+
+
+def _coverage_parts_to_carry(bo_text: str, have: str) -> list[str]:
+    """The coverage parts of *bo_text* that *have* does not already contain."""
+    return [part for part in _coverage_parts(bo_text) if part not in (have or "")]
+
+
 def _native_text_with_appends(p) -> str:
     """The native text INCLUDING content appended after extraction.
 
@@ -3944,16 +3976,21 @@ def _select_page_output_tagged(
             no_img = uncovered_text_marker_no_image(page_num)
             bo_text = (p.best_output.text or "") if p.best_output is not None else ""
             have = fallback_text or ""
-            if mark in bo_text:
-                # Keep the equation sidecar (or any later native append).
-                # bo_text has the mark and crop links; it may be an earlier
-                # attempt that apply decorated before the sidecar landed.
-                suffix = bo_text[bo_text.index(mark) :]
-                if mark not in have:
-                    fallback_text = have.rstrip() + "\n\n" + suffix
-                    if not fallback_text.endswith("\n"):
-                        fallback_text += "\n"
-            elif mark not in have and no_img not in have:
+            carried = _coverage_parts_to_carry(bo_text, have)
+            if carried:
+                # #1050 step 2: the decorated text carries recovered blocks and
+                # region pictures, and a step-2 block sits BEFORE the mark when
+                # it was placed in reading order. Slicing from the mark onward
+                # dropped exactly those, and the page shipped with neither the
+                # words nor the image. Carry every coverage part the frozen
+                # native snapshot lacks instead, keeping the equation sidecar
+                # (or any later native append) that lives in ``have``.
+                # Reading-order placement is NOT preserved here: this is the
+                # fallback, and the parts land at the page tail.
+                fallback_text = have.rstrip() + "\n\n" + "\n\n".join(carried)
+                if not fallback_text.endswith("\n"):
+                    fallback_text += "\n"
+            elif mark not in have and no_img not in have and not _coverage_parts(bo_text):
                 # apply never saved a crop. Selection stays pure: the
                 # no-image mark goes on the returned text only.
                 fallback_text = have.rstrip() + "\n\n" + no_img + "\n"

@@ -79,6 +79,9 @@ _LIVE = {
     # #1050: read by _prepare_text_coverage / _apply_text_coverage on every
     # trusted-native page. This fixture's PDF is real, so the check runs.
     "check_text_coverage",
+    # #1050 step 2: read by _prepare_text_coverage once per document, beside
+    # check_text_coverage, so it is acted on whether or not a page is flagged.
+    "recover_uncovered_text",
 }
 
 #: Hashed into the run fingerprint but never acted on. R174b DELETED every consumer

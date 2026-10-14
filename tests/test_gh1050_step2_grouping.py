@@ -1,0 +1,1295 @@
+"""#1050 step 2: one coherent uncovered block is ONE region, and its words ship.
+
+Step 1 cut Schoenegger p10's framed prompt box into 4 crops and Acosta p21's
+pasted clipping into 7. Grouping comes from the page's own geometry (an
+enclosing drawn rectangle or a placed raster), so every test here pins a
+DIFFERENCE between a page with the container and the same page without it --
+never an absolute region count, which depends on the ink filter's corpus cuts.
+
+Hermetic: no provider, no Tesseract, no network. The crop reader is stubbed.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import fitz
+import pytest
+
+from socr.core.config import EngineType, PipelineConfig
+from socr.core.providers import PROFILE_QWEN_LOCAL
+from socr.core.text_coverage import (
+    analyze_page,
+    preceding_text_snippet,
+    uncovered_text_image_ref,
+    uncovered_text_marker,
+)
+from socr.core.text_recovery import (
+    CONFIRMED_STYLE_RE,
+    FIGURE_TEXT_PREFIX,
+    PAGE_TEXT_PREFIX,
+)
+from socr.pipeline.orchestrator import UnifiedPipeline
+
+
+def test_loaded_source_is_this_checkout() -> None:
+    import socr
+
+    assert Path(socr.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
+
+
+# Real multi-line paragraphs: the native extractor joins two lone lines into one
+# paragraph however far apart they sit, and insertion is paragraph-granular.
+# Distinct tails: the anchor is the last words of the block above the region,
+# and an anchor that matches twice is refused rather than guessed at.
+_ABOVE_LINES = [f"Prose above the box, line {i}, stated before the drawn frame." for i in range(4)]
+_BELOW_LINES = [f"Prose below the box, line {i}, stated after the drawn frame." for i in range(4)]
+ABOVE = _ABOVE_LINES[0]
+BELOW = _BELOW_LINES[0]
+
+
+def _glyph_row(page, y: float, x0: float = 72.0, n: int = 8) -> None:
+    """Path-only 'letters' (same shape as the step-1 file's helper)."""
+    x = x0
+    widths = (3.0, 4.0, 5.0, 3.5, 4.5, 5.5, 3.2, 4.8)
+    for i in range(n):
+        w = widths[i % len(widths)]
+        page.draw_rect(fitz.Rect(x, y, x + w, y + 6.0), color=(0, 0, 0), width=0.6)
+        x += w + 2.0
+
+
+def _two_blocks_pdf(path: Path, *, container: str, rows=(150.0, 330.0), wide: bool = False) -> Path:
+    """Two unread glyph rows far apart, optionally inside one container.
+
+    The rows are separated by well over a glyph height, so step 1's row-linking
+    keeps them apart. ``container`` adds the thing that says they belong
+    together: ``"rect"`` a drawn frame, ``"page_rect"`` a frame that covers the
+    whole page, ``"raster"`` a placed image, ``"none"`` nothing.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    # Enough real prose that routing keeps the page in the native lane: a page
+    # that is mostly drawn paths is a chart page, and the chart lane rewrites
+    # the body this test is about.
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    if container == "raster":
+        inner = fitz.open()
+        ip = inner.new_page(width=400, height=300)
+        ip.draw_rect(fitz.Rect(0, 0, 400, 300), color=(1, 1, 1), fill=(1, 1, 1))
+        page.insert_image(
+            fitz.Rect(64, 90, 464, 390), pixmap=ip.get_pixmap(alpha=False), overlay=False
+        )
+        inner.close()
+    elif container == "rect":
+        page.draw_rect(fitz.Rect(64, 90, 464, 390), color=(0.4, 0.4, 0.4), width=0.8)
+    elif container == "page_rect":
+        page.draw_rect(page.rect, color=(0.4, 0.4, 0.4), width=0.8)
+    elif container == "page_raster":
+        inner = fitz.open()
+        ip = inner.new_page(width=600, height=780)
+        ip.draw_rect(fitz.Rect(0, 0, 600, 780), color=(1, 1, 1), fill=(1, 1, 1))
+        page.insert_image(
+            fitz.Rect(5, 5, 605, 785), pixmap=ip.get_pixmap(alpha=False), overlay=False
+        )
+        inner.close()
+    for row_y in rows:
+        _glyph_row(page, row_y, x0=10.0, n=96) if wide else _glyph_row(page, row_y)
+    y = 560.0
+    for line in _BELOW_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _regions(pdf: Path):
+    with fitz.open(pdf) as doc:
+        cov = analyze_page(doc[0])
+    return cov.regions
+
+
+@pytest.mark.parametrize("container", ["rect", "raster"])
+def test_a_container_merges_what_is_inside_it(tmp_path: Path, container: str) -> None:
+    """A drawn frame or a placed raster turns two separate regions into one."""
+    loose = _regions(_two_blocks_pdf(tmp_path / "loose.pdf", container="none"))
+    held = _regions(_two_blocks_pdf(tmp_path / f"held_{container}.pdf", container=container))
+    assert len(loose) > 1, "fixture must produce several regions without a container"
+    assert len(held) < len(loose)
+    assert sum(r.merged_from for r in held) == sum(r.merged_from for r in loose)
+    assert max(r.merged_from for r in held) > max(r.merged_from for r in loose)
+
+
+# Ink at both extremes of the page: the regions' own union is page-sized, so a
+# container around them would produce a whole-page crop.
+_SPANNING_ROWS = (20.0, 770.0)
+
+
+def test_a_page_sized_merge_is_refused(tmp_path: Path) -> None:
+    """The ink guard is on the merged INK, not on the container.
+
+    A page-sized RASTER must still group (Acosta's clipping scan is placed over
+    85% of the page); what must never happen is a merged crop that is itself
+    the page. Same container, same rows, moved apart until their union is
+    page-sized: the merge stops.
+    """
+    close = _regions(
+        _two_blocks_pdf(
+            tmp_path / "close.pdf", container="page_raster", rows=(150.0, 330.0), wide=True
+        )
+    )
+    spanning = _regions(
+        _two_blocks_pdf(
+            tmp_path / "wide.pdf", container="page_raster", rows=_SPANNING_ROWS, wide=True
+        )
+    )
+    assert max(r.merged_from for r in close) == 2, "a page-sized raster still groups"
+    assert max(r.merged_from for r in spanning) == 1, "a page-sized merge is refused"
+
+
+def test_a_page_sized_drawn_frame_is_not_a_container(tmp_path: Path) -> None:
+    """A border or background fill is furniture, not a box that groups its contents.
+
+    Unlike a placed raster, a drawn rect spanning the page contains every
+    region by construction, so it would merge unrelated ink across the prose
+    between them.
+    """
+    loose = _regions(_two_blocks_pdf(tmp_path / "loose.pdf", container="none"))
+    framed = _regions(_two_blocks_pdf(tmp_path / "framed.pdf", container="page_rect"))
+    assert [r.merged_from for r in framed] == [r.merged_from for r in loose]
+
+
+def test_the_merged_box_is_the_ink_not_the_container(tmp_path: Path) -> None:
+    """Acosta's clipping raster is 85% of the page; its ink is 5%. Crop the ink."""
+    pdf = _two_blocks_pdf(tmp_path / "raster.pdf", container="raster")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        raster = [fitz.Rect(i["bbox"]) for i in page.get_image_info() if i.get("bbox")]
+        merged = max(analyze_page(page).regions, key=lambda r: r.merged_from)
+    assert raster, "fixture must place a raster"
+    box = fitz.Rect(merged.pdf)
+    assert box in raster[0] or raster[0].contains(box)
+    assert box.get_area() < raster[0].get_area()
+
+
+def test_the_anchor_is_the_block_above_the_region(tmp_path: Path) -> None:
+    """Reading-order placement follows the page's own text blocks."""
+    pdf = _two_blocks_pdf(tmp_path / "rect.pdf", container="rect")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        merged = max(analyze_page(page).regions, key=lambda r: r.merged_from)
+        anchor = preceding_text_snippet(page, merged.pdf)
+    assert anchor
+    assert anchor in " ".join(_ABOVE_LINES)
+
+
+# --- the pipeline difference -------------------------------------------------
+
+
+def _pipeline(**overrides) -> UnifiedPipeline:
+    defaults = dict(
+        primary_engine=EngineType.QWEN,
+        local_engine=EngineType.QWEN,
+        enabled_engines=[EngineType.QWEN],
+        quiet=True,
+        recover_corrupt_math=False,
+        equation_region_lane=False,
+        describe_figure_crops=False,
+        judge_backend="heuristic",
+        check_text_coverage=True,
+    )
+    defaults.update(overrides)
+    return UnifiedPipeline(PipelineConfig(**defaults))
+
+
+def _page_text(out: Path) -> str:
+    return next(out.rglob("pages/00001.md")).read_text(encoding="utf-8")
+
+
+def _run(pdf: Path, out: Path, *, reading: str | None, chart_lane: bool = False, **cfg) -> str:
+    """Process *pdf* with the crop reader stubbed to return *reading*.
+
+    ``chart_lane=False`` holds the page in the plain native lane. The fixture's
+    stroked path-glyphs ARE vector chart marks, so without this the chart-asset
+    lane rebuilds the body (it joins the prose lines into one paragraph) and the
+    test would be measuring that lane instead of this one.
+    """
+    pipeline = _pipeline(**cfg)
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=lambda _p, _q: reading),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=chart_lane),
+    ):
+        pipeline.process(pdf, out)
+    return _page_text(out)
+
+
+RECOVERED = "Treatment Prompt\nIn this chat you are a superforecaster."
+
+
+def test_recovery_adds_the_words_and_changes_nothing_else(tmp_path: Path) -> None:
+    """The ONLY difference a reading makes is the recovered block and the mark.
+
+    Run twice in one process on one PDF, changing only what the crop reader
+    answers. Absolute statuses are not pinned: the provider ladder and the
+    witness differ between this host and CI.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    silent = _run(pdf, tmp_path / "o_silent", reading=None)
+    read = _run(pdf, tmp_path / "o_read", reading=RECOVERED)
+
+    assert uncovered_text_marker(1) in silent
+    assert PAGE_TEXT_PREFIX not in silent
+    assert "Treatment Prompt" in read
+    assert "In this chat you are a superforecaster." in read
+    # Native prose survives both runs, byte for byte.
+    for body in (silent, read):
+        assert ABOVE in body
+        assert BELOW in body
+
+
+def test_the_flag_off_is_exactly_step_one(tmp_path: Path) -> None:
+    """``recover_uncovered_text=False`` reproduces step 1, grouping included.
+
+    Round 2, item E: grouping exists to make ONE crop readable, so with the
+    reader off it only changes bytes. Off, the page must carry step 1's
+    SEPARATE crops and no recovered block. Byte-identity against main's own
+    output is verified on the real review pages, outside the suite.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    off = _run(pdf, tmp_path / "o_off", reading=RECOVERED, recover_uncovered_text=False)
+    assert PAGE_TEXT_PREFIX not in off
+    assert uncovered_text_marker(1) in off
+    assert uncovered_text_image_ref(1, 2) in off, "step 1's separate crops, not one merged crop"
+
+
+def test_an_unread_region_keeps_its_picture(tmp_path: Path) -> None:
+    """No reading -> step 1's picture link and page mark, unchanged."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    silent = _run(pdf, tmp_path / "o", reading=None)
+    assert uncovered_text_image_ref(1, 1) in silent
+
+
+def test_text_inside_a_figure_goes_beneath_the_figure_image(tmp_path: Path) -> None:
+    """2026-10-09 ruling: in a figure the image stays and the words sit under it."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="raster")
+    read = _run(pdf, tmp_path / "o", reading=RECOVERED)
+    ref = uncovered_text_image_ref(1, 1)
+    assert ref in read, "a figure region keeps its picture"
+    assert FIGURE_TEXT_PREFIX in read
+    assert read.index(ref) < read.index(FIGURE_TEXT_PREFIX)
+
+
+def test_a_region_outside_a_figure_lands_in_reading_order(tmp_path: Path) -> None:
+    """Text drawn as shapes is prose: it is substituted in place, not appended."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    read = _run(pdf, tmp_path / "o", reading=RECOVERED)
+    above = read.index(ABOVE)
+    below = read.index(BELOW)
+    assert above < read.index(PAGE_TEXT_PREFIX) < below
+
+
+def test_an_anchor_crash_does_not_cost_the_page_its_regions(tmp_path: Path) -> None:
+    """A raise while placing must leave step 1's behaviour, not `text_coverage_unknown`.
+
+    `_apply_text_coverage`'s outer try maps ANY escape to "could not decide",
+    which drops the regions step 1 would have shipped. Pinned as a difference:
+    the same page, same reading, with and without the anchor helper raising.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    ok = _run(pdf, tmp_path / "o_ok", reading=RECOVERED)
+    with patch("socr.core.text_coverage.preceding_text_snippet", side_effect=RuntimeError("boom")):
+        broken = _run(pdf, tmp_path / "o_broken", reading=RECOVERED)
+    # The words still ship, and the page keeps the uncovered-text mark rather
+    # than the "image unavailable" mark the unknown branch writes.
+    assert PAGE_TEXT_PREFIX in ok
+    assert PAGE_TEXT_PREFIX in broken
+    assert "image unavailable" not in broken
+    # The only difference is where the block landed.
+    assert ok != broken
+
+
+# --- fix round 1 (Astra + Fable, 2026-10-14) ---------------------------------
+
+
+def test_every_recovered_region_keeps_its_picture_and_says_unverified(
+    tmp_path: Path,
+) -> None:
+    """Owner ruling 2026-10-14: nothing is confirmed, and the picture always stays.
+
+    Token-containment confirmation kept passing wrong readings, so the label
+    was dropped rather than patched a fourth time. Pinned on the shipped page:
+    the words, the one unverified mark, the picture, and no confirmed-style
+    wording anywhere.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    read = _run(pdf, tmp_path / "o", reading=RECOVERED)
+    assert "Treatment Prompt" in read
+    assert PAGE_TEXT_PREFIX in read
+    assert uncovered_text_image_ref(1, 1) in read
+    assert not CONFIRMED_STYLE_RE.search(read), read
+
+
+def _unread_bands_around_a_native_line_pdf(path: Path) -> Path:
+    """Two uncovered bands with a native text line between them.
+
+    Merging them produces a crop containing that native line; the model then
+    reads it and the page ships it twice (item B).
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    page.draw_rect(fitz.Rect(64, 150, 464, 300), color=(0.4, 0.4, 0.4), width=0.8)
+    _glyph_row(page, 170.0)
+    page.insert_text((72, 230), "A native line trapped between the two uncovered bands.")
+    _glyph_row(page, 270.0)
+    y = 560.0
+    for line in _BELOW_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_merge_that_would_swallow_a_native_line_is_refused(tmp_path: Path) -> None:
+    """Item B: a crop must never contain text the page already ships.
+
+    Pinned as a difference against the same page with the trapped line removed:
+    without the line the two bands merge, with it they must not.
+    """
+    import fitz as _fitz
+
+    trapped = _unread_bands_around_a_native_line_pdf(tmp_path / "trapped.pdf")
+    free = _two_blocks_pdf(tmp_path / "free.pdf", container="rect", rows=(170.0, 270.0))
+    assert max(r.merged_from for r in _regions(free)) == 2, "fixture must merge without the line"
+    regions = _regions(trapped)
+    assert max(r.merged_from for r in regions) == 1, "the merge must be refused"
+    # And no region's box covers the trapped native line.
+    with _fitz.open(trapped) as doc:
+        page = doc[0]
+        line = next(b for b in page.get_text("blocks") if "trapped between" in str(b[4]))
+    for reg in regions:
+        x0, y0, x1, y1 = reg.pdf
+        assert not (line[0] < x1 and line[2] > x0 and line[1] < y1 and line[3] > y0)
+
+
+def _ruled_table_plus_unread_pdf(path: Path) -> Path:
+    """A closed ruled grid plus uncovered ink: selection takes the NATIVE FALLBACK.
+
+    Copied in shape from the step 1 file's fixture of the same name; the grid is
+    what pushes selection down the fallback branch this test is about.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 90), "See the specification for the estimates reported below.")
+    rows = (("Year", "Coefficient"), ("2019", "0.31"), ("2020", "0.42"), ("2021", "0.55"))
+    top, left, mid, right, pitch = 128.0, 68.0, 190.0, 320.0, 22.0
+    for i, (a, b) in enumerate(rows):
+        y = top + 16 + i * pitch
+        page.insert_text((left + 6, y), a, fontsize=10)
+        page.insert_text((mid + 6, y), b, fontsize=10)
+    bottom = top + pitch * len(rows)
+    for i in range(len(rows) + 1):
+        page.draw_line(fitz.Point(left, top + pitch * i), fitz.Point(right, top + pitch * i))
+    for x in (left, mid, right):
+        page.draw_line(fitz.Point(x, top), fitz.Point(x, bottom))
+    _glyph_row(page, 300.0)
+    _glyph_row(page, 312.0)
+    page.insert_text((60, 520), "A caption sits below the unread marks.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_the_native_fallback_carries_the_words_and_the_picture(tmp_path: Path) -> None:
+    """Item C: selection's fallback must not drop step 2's block or its picture.
+
+    The fallback rebuilds the page from the frozen native snapshot and used to
+    keep only the slice from the page mark onward. A step-2 block placed in
+    reading order sits BEFORE that mark, so the page shipped with neither the
+    words nor the image.
+
+    Driven at the selection seam rather than through ``process()``: the branch
+    needs a native attempt appended AFTER apply decorated the winner (the
+    equation sidecar), which a single synthetic page cannot produce on its own.
+    The same shape as the step 1 file's sidecar test, with a step-2 block added.
+    """
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
+    from socr.core.result import FailureMode, PageOutput, PageStatus
+    from socr.core.state import DocumentState, PageState
+    from socr.core.text_recovery import recovered_block
+
+    pdf = _two_blocks_pdf(tmp_path / "eq.pdf", container="rect")
+    base = "A clean paragraph of native body text on this page."
+    equation = "$$P(A \\cup B)=P(A)+P(B)$$"
+    mark = uncovered_text_marker(1)
+    link = uncovered_text_image_ref(1, 1)
+    block = recovered_block("Treatment Prompt", in_figure=False)
+    # Apply's shape since step 2: the block is INSIDE the prose, before the mark.
+    decorated = base + "\n\n" + block + "\n\n" + link + "\n\n" + mark + "\n"
+    bo = PageOutput(
+        page_num=1,
+        text=decorated,
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=True,
+        failure_mode=FailureMode.TEXT_INK_UNREAD,
+    )
+    eq = PageOutput(
+        page_num=1,
+        text=base + "\n\n" + equation + "\n",
+        status=PageStatus.SUCCESS,
+        engine="native+equations",
+        audit_passed=True,
+        failure_mode=FailureMode.NONE,
+    )
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.native_text = base
+    ps.has_tables = True
+    ps.attempts = [bo, eq]
+    ps.best_output = bo
+    ps.text_ink_unread = True
+    ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+    winner, provenance = _select_page_output_tagged(state, 1)
+    text = winner.text or ""
+    assert provenance is SelectionProvenance.NATIVE_FALLBACK
+    assert equation in text, "the later native append still survives"
+    assert mark in text
+    assert link in text, "the picture must survive the fallback"
+    assert block in text, "and so must the recovered words"
+
+
+def test_native_only_never_calls_the_crop_reader(tmp_path: Path) -> None:
+    """Item H: --native-only means no model on any page, step 2 included.
+
+    The figure describer already carries this gate
+    (`_crop_descriptions_enabled`); step 2 had none and called the reader
+    anyway, which is the one promise that flag makes. Pinned as a difference
+    over the flag with the SAME stubbed reader.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+
+    def run(out: str, native_only: bool) -> tuple[int, str]:
+        calls: list[str] = []
+
+        def ask(path, _prompt):
+            calls.append(str(path))
+            return RECOVERED
+
+        pipeline = _pipeline(native_only=native_only, table_judge_ladder=False)
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        ):
+            pipeline.process(pdf, tmp_path / out)
+        return len(calls), _page_text(tmp_path / out)
+
+    free_calls, free_text = run("o_free", False)
+    only_calls, only_text = run("o_only", True)
+    assert free_calls > 0, "the fixture must reach the reader when the flag is off"
+    assert only_calls == 0
+    assert PAGE_TEXT_PREFIX in free_text
+    assert PAGE_TEXT_PREFIX not in only_text
+    assert uncovered_text_marker(1) in only_text, "step 1's mark and picture remain"
+
+
+def test_a_spent_page_budget_skips_the_remaining_regions(tmp_path: Path) -> None:
+    """Item H: a page of many labels cannot hold the run for one deadline each.
+
+    Pinned as a difference over the budget only: same page, same reader, a
+    budget that is already gone versus one that is not.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+
+    def run(out: str, spent: bool) -> tuple[int, str]:
+        calls: list[str] = []
+
+        def ask(path, _prompt):
+            calls.append(str(path))
+            return RECOVERED
+
+        pipeline = _pipeline()
+        budget = pipeline._uncovered_text_budget
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+            patch.object(
+                pipeline,
+                "_uncovered_text_budget",
+                side_effect=lambda st, pn, rg: (
+                    _spend(budget(st, pn, rg)) if spent else budget(st, pn, rg)
+                ),
+            ),
+        ):
+            pipeline.process(pdf, tmp_path / out)
+        return len(calls), _page_text(tmp_path / out)
+
+    def _spend(b):
+        b.total_sec = 0.0
+        return b
+
+    live_calls, live_text = run("o_live", False)
+    spent_calls, spent_text = run("o_spent", True)
+    assert live_calls > 0
+    assert spent_calls == 0, "no region is read once the page's budget is gone"
+    assert PAGE_TEXT_PREFIX in live_text
+    assert PAGE_TEXT_PREFIX not in spent_text
+    assert uncovered_text_marker(1) in spent_text, "skipped regions ship as step 1 left them"
+
+
+def test_a_wedged_crop_reader_halts_the_document(tmp_path: Path) -> None:
+    """Item C / round 3: the READ's own outcome arms the halt, with no probe.
+
+    `_probe_backend_idle` asks `/api/tags`, which answers 200 in milliseconds on
+    a jammed GPU, so gating on it made this latch unreachable in the case it
+    exists for. Pinned as a difference over the failure KIND: a timeout wedges,
+    an ordinary failure is a refusal.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+
+    def run(out: str, error: Exception) -> bool:
+        def ask(_path, _prompt):
+            raise error
+
+        pipeline = _pipeline()
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        ):
+            pipeline.process(pdf, tmp_path / out)
+        return pipeline._recovery_backend_wedged
+
+    assert run("o_refused", ValueError("no model")) is False
+    assert run("o_wedged", TimeoutError("read timed out")) is True
+
+
+def test_the_real_adapters_swallowed_timeout_is_turned_back_into_one() -> None:
+    """Item C: `OllamaFigureEngine.ask` returns None on ANY failure.
+
+    The latch could only ever be armed by an exception injected ABOVE the
+    adapter, which is to say never in production. The wrapper turns a `None`
+    that consumed the engine's whole deadline back into a TimeoutError, which
+    is the one thing a refusal cannot do. Tested on the wrapper itself: through
+    `process()` a clock stub is consumed by the budget and the probe too, which
+    makes the measurement about the stub rather than the code.
+    """
+    from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC
+
+    pipeline = _pipeline()
+    with patch.object(pipeline, "_figure_description_ask", return_value=lambda _p, _q: None):
+        ask = pipeline._uncovered_text_ask()
+
+    ticks = iter([0.0, 0.0])
+    with patch("socr.pipeline.orchestrator.time.monotonic", side_effect=lambda: next(ticks)):
+        assert ask("x.png", "p") is None, "a quick None is a refusal, not a wedge"
+
+    ticks = iter([0.0, FIGURE_ASK_TIMEOUT_SEC])
+    with patch("socr.pipeline.orchestrator.time.monotonic", side_effect=lambda: next(ticks)):
+        with pytest.raises(TimeoutError):
+            ask("x.png", "p")
+
+
+def test_a_wedge_stops_the_rest_of_the_page(tmp_path: Path) -> None:
+    """Item C: the regions after a wedge must not be fired into a stuck GPU."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+    calls: list[str] = []
+
+    def ask(path, _prompt):
+        calls.append(str(path))
+        raise TimeoutError("read timed out")
+
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    assert pipeline._recovery_backend_wedged is True
+    assert len(calls) == 1, "only the region that wedged was read"
+
+
+def test_the_page_budget_does_not_grow_with_the_region_count(tmp_path: Path) -> None:
+    """Item D: 600s x (regions + 1) gave 23 labels 46 minutes. Not a bound."""
+    pipeline = _pipeline()
+    one = pipeline._uncovered_text_budget(None, 1, [object()])
+    many = pipeline._uncovered_text_budget(None, 1, [object()] * 23)
+    assert one.total_sec == many.total_sec
+    assert one.total_sec == pipeline._page_ladder_budget_sec([])
+
+
+@pytest.mark.parametrize("container", ["rect", "raster"])
+def test_recovery_off_does_not_group_at_all(tmp_path: Path, container: str) -> None:
+    """Item E: with no reader there is nothing to read, so step 2 is step 1.
+
+    Grouping exists to make ONE crop readable. Off, it only changes bytes.
+    Pinned as a difference over the flag, on both container shapes.
+    """
+    pdf = _two_blocks_pdf(tmp_path / f"doc_{container}.pdf", container=container)
+    grouped = _regions(pdf)
+    with fitz.open(pdf) as doc:
+        ungrouped = analyze_page(doc[0], group=False).regions
+    assert max(r.merged_from for r in grouped) > 1, "the fixture does group when asked"
+    assert all(r.merged_from == 1 for r in ungrouped)
+    assert all(r.figure_pdf is None for r in ungrouped)
+    assert len(ungrouped) > len(grouped)
+
+
+def test_the_picture_survives_into_the_final_document(tmp_path: Path) -> None:
+    """Item F: the fragment is not the artefact a reader opens.
+
+    Picture assertions elsewhere check `pages/00001.md`; this checks the
+    assembled document, which is what ships.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    out = tmp_path / "o"
+    _run(pdf, out, reading=RECOVERED)
+    final = next(p for p in out.rglob("*.md") if p.parent.name != "pages")
+    body = final.read_text(encoding="utf-8")
+    assert "Treatment Prompt" in body
+    assert uncovered_text_image_ref(1, 1) in body
+    assert PAGE_TEXT_PREFIX in body
+    assert not CONFIRMED_STYLE_RE.search(body), body
+
+
+def test_a_resumed_page_keeps_its_words_and_its_picture(tmp_path: Path) -> None:
+    """Item F: resume restores the fragment, so the recovery must survive it."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    out = tmp_path / "o"
+    first = _run(pdf, out, reading=RECOVERED)
+    calls: list[str] = []
+
+    def ask(path, _prompt):
+        calls.append(str(path))
+        return RECOVERED
+
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process(pdf, out)
+    second = _page_text(out)
+    assert second == first, "a resumed page ships the same bytes"
+    assert uncovered_text_image_ref(1, 1) in second
+
+
+def _two_pages_with_unread_ink_pdf(path: Path) -> Path:
+    """Two pages, each with native prose and uncovered ink."""
+    doc = fitz.open()
+    for _ in range(2):
+        page = doc.new_page()
+        y = 60.0
+        for line in _ABOVE_LINES:
+            page.insert_text((72, y), line)
+            y += 13.0
+        page.draw_rect(fitz.Rect(64, 120, 464, 420), color=(0.4, 0.4, 0.4), width=0.8)
+        _glyph_row(page, 150.0)
+        _glyph_row(page, 330.0)
+        y = 560.0
+        for line in _BELOW_LINES:
+            page.insert_text((72, y), line)
+            y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_wedge_on_page_one_stops_page_two(tmp_path: Path) -> None:
+    """Item C: the latch must be CONSUMED between pages, not merely set.
+
+    Setting `_recovery_backend_wedged` is useless unless the agentic loop reads
+    it at the top and halts. Pinned as a difference over the health probe: a
+    live backend processes both pages, a dead one stops after the first.
+    """
+    pdf = _two_pages_with_unread_ink_pdf(tmp_path / "two_pages.pdf")
+
+    def run(out: str, wedge: bool) -> tuple[int, bool]:
+        pages: set[int] = set()
+
+        # The model is handed a MASKED scratch crop, not the shipped picture,
+        # so the page number comes from the call order, not from the filename.
+        def ask(_path, _prompt):
+            pages.add(len(pages) + 1)
+            if wedge:
+                raise TimeoutError("read timed out")
+            return RECOVERED
+
+        pipeline = _pipeline()
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        ):
+            result = pipeline.process(pdf, tmp_path / out)
+        return len(pages), "PARTIAL_SAVE_VLM_TIMEOUT" in (result.error or "")
+
+    alive_pages, alive_halted = run("o_alive", wedge=False)
+    wedged_pages, wedged_halted = run("o_wedged", wedge=True)
+    assert alive_pages == 2, "a live backend reads both pages"
+    assert alive_halted is False
+    assert wedged_pages == 1, "page 2 is never fired into a stuck GPU"
+    assert wedged_halted is True, "and the document says why it stopped"
+
+
+# --- fix round 3, item 1: the reader never sees native text -------------------
+
+
+def _raster_under_prose_pdf(path: Path) -> Path:
+    """A placed raster whose box sits UNDER a native sentence.
+
+    The reproduced duplication shape: the crop contains a sentence the page's
+    text layer already carries, so the model transcribes it and the page ships
+    it twice.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    inner = fitz.open()
+    ip = inner.new_page(width=400, height=200)
+    ip.draw_rect(fitz.Rect(0, 0, 400, 200), color=(1, 1, 1), fill=(1, 1, 1))
+    for i, h in enumerate((80.0, 140.0, 60.0)):
+        x = 40.0 + i * 110
+        ip.draw_rect(fitz.Rect(x, 180 - h, x + 70, 180), color=(0, 0, 0), fill=(0.2, 0.4, 0.8))
+    page.insert_image(
+        fitz.Rect(72, 150, 472, 350), pixmap=ip.get_pixmap(alpha=False), overlay=False
+    )
+    inner.close()
+    _glyph_row(page, 170.0, x0=100.0)
+    page.insert_text((90, 330), DUPLICATED_SENTENCE)
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+DUPLICATED_SENTENCE = "This native sentence must appear exactly once on the page."
+
+
+def _echoing_reader():
+    """A reader that transcribes whatever ink it is shown, honestly.
+
+    It cannot see the mask, so if the crop still carries the native sentence it
+    reports it — which is exactly the duplication under test.
+    """
+    from PIL import Image
+
+    import pytesseract
+
+    def ask(path, _prompt):
+        with Image.open(path) as im:
+            return pytesseract.image_to_string(im) or None
+
+    return ask
+
+
+@pytest.mark.parametrize("fixture", ["raster_under_prose", "callout_with_icon", "two_column_chart"])
+def test_the_reader_never_sees_native_text(tmp_path: Path, fixture: str) -> None:
+    """Round 3, item 1: no recovered word may come from the page's text layer.
+
+    Rather than chase every shape that can enclose prose -- a raster under it,
+    a callout, a two-column chart box -- the crop handed to the model has every
+    visible native character painted out. The picture that ships stays
+    unmasked. Driven with a REAL reader (Tesseract) over the real crop, so the
+    test measures what the model would actually be shown.
+
+    The property, not the sentence: a GARBLED transcription of the native text
+    is the same duplication as a clean one, so the assertion is that no content
+    word of the recovered block appears among the page's native words.
+    """
+    pytest.importorskip("pytesseract")
+    import fitz as _fitz
+
+    from socr.tables.source_evidence import plain_text_tokens
+
+    builder = {
+        "raster_under_prose": _raster_under_prose_pdf,
+        "callout_with_icon": _framed_callout_pdf,
+        "two_column_chart": _right_column_chart_pdf,
+    }[fixture]
+    pdf = builder(tmp_path / f"{fixture}.pdf")
+
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=_echoing_reader()),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    body = _page_text(tmp_path / "o")
+
+    with _fitz.open(pdf) as doc:
+        native = plain_text_tokens(doc[0].get_text())[1]
+    recovered = "\n".join(
+        ln.lstrip("> ") for ln in body.splitlines() if ln.startswith(">") and "(OCR" not in ln
+    )
+    leaked = plain_text_tokens(recovered)[1] & native
+    assert not leaked, f"the reader saw native text: {sorted(leaked)}"
+
+
+def test_a_wedge_in_one_document_does_not_halt_the_next(tmp_path: Path) -> None:
+    """Round 3, item 2: the latch is per DOCUMENT, not per process.
+
+    `_recovery_backend_wedged` is a class attribute and `process_batch` reuses
+    one pipeline instance, so a single wedged document halted every document
+    after it. Pinned on two documents in one batch: the second must be read.
+    """
+    src = tmp_path / "in"
+    src.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        _two_blocks_pdf(src / name, container="rect")
+
+    seen: list[str] = []
+    wedge_once = {"done": False}
+
+    def ask(_path, _prompt):
+        seen.append("call")
+        if not wedge_once["done"]:
+            wedge_once["done"] = True
+            raise TimeoutError("read timed out")
+        return RECOVERED
+
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process_batch(src, tmp_path / "o")
+
+    assert len(seen) >= 2, "the second document is still read after the first wedged"
+    bodies = [p.read_text(encoding="utf-8") for p in (tmp_path / "o").rglob("pages/00001.md")]
+    assert any(PAGE_TEXT_PREFIX in b for b in bodies), "and it recovers its words"
+
+
+# --- the whole-figure rule (owner ruling 2026-10-14) --------------------------
+
+
+def _chart_with_labels_pdf(path: Path, *, plot_marks: bool) -> Path:
+    """A drawn cluster whose labels are vector-drawn.
+
+    With *plot_marks* it is a chart: bars sit inside the cluster, away from the
+    label ink. Without them the cluster is nothing but drawn TEXT in a frame --
+    Schoenegger p10's prompt box -- and must stay prose.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    page.draw_rect(fitz.Rect(64, 120, 464, 420), color=(0.4, 0.4, 0.4), width=0.8)
+    # A thin filled rect, not draw_line: a zero-height line gives an EMPTY
+    # fitz.Rect, which the figure test skips before the rule-thickness check.
+    page.draw_rect(fitz.Rect(80, 300, 448, 300.4), color=(0, 0, 0), fill=(0, 0, 0))
+    if plot_marks:
+        for i, h in enumerate((120.0, 80.0, 160.0, 60.0)):
+            x = 110.0 + i * 70
+            page.draw_rect(
+                fitz.Rect(x, 380 - h, x + 40, 380), color=(0, 0, 0), fill=(0.2, 0.4, 0.8)
+            )
+    _glyph_row(page, 150.0)
+    _glyph_row(page, 400.0)
+    y = 560.0
+    for line in _BELOW_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_labels_in_one_figure_become_one_whole_figure_crop(tmp_path: Path) -> None:
+    """Owner ruling: one picture per figure, not one per label.
+
+    Pinned as a difference over the plot marks alone: same page, same labels,
+    with and without bars inside the cluster.
+    """
+    from socr.core.text_coverage import crop_box
+
+    chart = _regions(_chart_with_labels_pdf(tmp_path / "chart.pdf", plot_marks=True))
+    assert len(chart) == 1
+    assert chart[0].merged_from > 1, "every label in the figure is one region"
+    assert chart[0].figure_pdf is not None, "and its crop is the whole figure"
+    fig = fitz.Rect(chart[0].figure_pdf)
+    assert fig.get_area() > fitz.Rect(chart[0].pdf).get_area()
+    assert crop_box(chart[0]) == chart[0].figure_pdf
+
+
+def test_a_box_of_drawn_text_is_not_a_figure(tmp_path: Path) -> None:
+    """The owner was explicit: the prompt box "is just text", not an image.
+
+    `chart_region_bboxes` returns one cluster for a chart AND for a box of
+    vector-drawn text, and `has_chart_marks` is False on both. The separation
+    is that a chart carries marks away from its label ink.
+    """
+    plain = _regions(_chart_with_labels_pdf(tmp_path / "text.pdf", plot_marks=False))
+    assert all(r.figure_pdf is None for r in plain)
+
+
+def test_the_saved_picture_is_the_whole_figure(tmp_path: Path) -> None:
+    """The crop on disk must be the figure, not the sliver of label ink."""
+    from PIL import Image
+
+    from socr.core.text_coverage import SCALE
+
+    pdf = _chart_with_labels_pdf(tmp_path / "chart.pdf", plot_marks=True)
+    _run(pdf, tmp_path / "o", reading=RECOVERED)
+    png = next((tmp_path / "o").rglob("figures/uncovered_text_p1_r1.png"))
+    region = _regions(pdf)[0]
+    with Image.open(png) as im:
+        width, height = im.size
+    fig = fitz.Rect(region.figure_pdf)
+    assert abs(width - fig.width * SCALE) <= 2
+    assert abs(height - fig.height * SCALE) <= 2
+    assert height > fitz.Rect(region.pdf).height * SCALE + 2
+
+
+def test_a_vector_figures_words_go_beneath_its_picture(tmp_path: Path) -> None:
+    """Item F: a matplotlib axes frame is a drawn rect, not a raster."""
+    chart = _chart_with_labels_pdf(tmp_path / "chart.pdf", plot_marks=True)
+    plain = _chart_with_labels_pdf(tmp_path / "text.pdf", plot_marks=False)
+    chart_text = _run(chart, tmp_path / "o_chart", reading=RECOVERED)
+    plain_text = _run(plain, tmp_path / "o_plain", reading=RECOVERED)
+    assert FIGURE_TEXT_PREFIX in chart_text, "a vector chart's words sit under its picture"
+    assert PAGE_TEXT_PREFIX in plain_text, "a text box's words are prose"
+    ref = uncovered_text_image_ref(1, 1)
+    assert chart_text.index(ref) < chart_text.index(FIGURE_TEXT_PREFIX)
+
+
+# --- fix round 2, items A and B ----------------------------------------------
+
+
+def _right_column_chart_pdf(path: Path) -> Path:
+    """A chart in the RIGHT column with ordinary prose in the left one."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 150.0
+    for i in range(8):
+        page.insert_text((60, y), f"Left line {i}, never duplicated.", fontsize=9)
+        y += 13.0
+    page.draw_rect(fitz.Rect(330, 140, 560, 340), color=(0.4, 0.4, 0.4), width=0.8)
+    for i, h in enumerate((80.0, 140.0, 60.0)):
+        x = 350.0 + i * 60
+        page.draw_rect(fitz.Rect(x, 320 - h, x + 40, 320), color=(0, 0, 0), fill=(0.2, 0.4, 0.8))
+    _glyph_row(page, 160.0, x0=350.0)
+    _glyph_row(page, 330.0, x0=350.0)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_right_column_chart_does_not_swallow_the_left_column(tmp_path: Path) -> None:
+    """Item A: the figure box is the figure's OWN extent, not the expanded rect."""
+    pdf = _right_column_chart_pdf(tmp_path / "two_col.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        figures = [r for r in analyze_page(page).regions if r.figure_pdf]
+        prose = [b for b in page.get_text("blocks") if b[6] == 0 and "Left line" in str(b[4])]
+    assert figures, "the chart is still a figure"
+    assert prose, "the fixture has left-column prose"
+    for reg in figures:
+        x0, y0, x1, y1 = reg.figure_pdf
+        for b in prose:
+            assert not (b[0] < x1 and b[2] > x0 and b[1] < y1 and b[3] > y0), (
+                "the figure crop reaches into the other column"
+            )
+
+
+def _framed_callout_pdf(path: Path) -> Path:
+    """A framed callout: an icon, a drawn heading, and an ordinary native sentence."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    page.draw_rect(fitz.Rect(64, 150, 464, 300), color=(0.4, 0.4, 0.4), width=0.8)
+    page.draw_circle(fitz.Point(90, 180), 10, color=(0, 0, 0), fill=(0.8, 0.2, 0.2))
+    _glyph_row(page, 170.0, x0=120.0)
+    page.insert_text((80, 240), "This callout sentence is ordinary native prose inside the frame.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_framed_callout_is_not_a_figure(tmp_path: Path) -> None:
+    """Item A: a frame plus an icon around native prose must not become a figure.
+
+    Pinned as a difference against the same frame whose native sentence is
+    removed: the sentence is the only thing that changes.
+    """
+    with_prose = _framed_callout_pdf(tmp_path / "callout.pdf")
+    bare = _framed_callout_pdf(tmp_path / "bare.pdf")
+    doc = fitz.open(with_prose)
+    bdoc = fitz.open(bare)
+    bare_page = bdoc[0]
+    bare_page.add_redact_annot(fitz.Rect(70, 225, 460, 255))
+    bare_page.apply_redactions()
+    assert all(r.figure_pdf is None for r in analyze_page(doc[0]).regions), (
+        "a callout around native prose is not a figure"
+    )
+    assert any(r.figure_pdf is not None for r in analyze_page(bare_page).regions), (
+        "the same frame and icon WITHOUT the sentence is one"
+    )
+    doc.close()
+    bdoc.close()
+
+
+def _raster_bar_chart_pdf(path: Path) -> Path:
+    """A bar chart placed as a RASTER, with its labels drawn as vector shapes."""
+    doc = fitz.open()
+    page = doc.new_page()
+    chart = fitz.open()
+    cp = chart.new_page(width=400, height=300)
+    cp.draw_rect(fitz.Rect(0, 0, 400, 300), color=(1, 1, 1), fill=(1, 1, 1))
+    for i, h in enumerate((120.0, 200.0, 90.0, 160.0)):
+        x = 40.0 + i * 85
+        cp.draw_rect(fitz.Rect(x, 260 - h, x + 55, 260), color=(0, 0, 0), fill=(0.2, 0.4, 0.8))
+    page.insert_image(
+        fitz.Rect(90, 150, 490, 450), pixmap=cp.get_pixmap(alpha=False), overlay=False
+    )
+    chart.close()
+    _glyph_row(page, 420.0, x0=120.0)
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_raster_chart_ships_one_picture_of_the_whole_image(tmp_path: Path) -> None:
+    """Item B: a placed image IS a figure; it has no vector marks to find."""
+    pdf = _raster_bar_chart_pdf(tmp_path / "raster.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        regions = analyze_page(page).regions
+        placed = [fitz.Rect(i["bbox"]) for i in page.get_image_info() if i.get("bbox")]
+    figures = [r for r in regions if r.figure_pdf]
+    assert figures, "a raster chart is a figure"
+    box = fitz.Rect(figures[0].figure_pdf)
+    assert box.get_area() > fitz.Rect(figures[0].pdf).get_area(), "not just the label strip"
+    assert any(abs(box.get_area() - p.get_area()) / p.get_area() < 0.05 for p in placed)
+
+
+# --- item K: the anchor stays in the region's own column ----------------------
+
+
+def _two_column_pdf(path: Path) -> Path:
+    """Unread ink low in the LEFT column, with native text in both columns."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for i in range(4):
+        page.insert_text((60, y), f"Left column line {i}, ending at the true anchor here.")
+        y += 13.0
+    y = 130.0
+    for i in range(4):
+        page.insert_text((330, y), f"Right column line {i}, the wrong anchor entirely.")
+        y += 13.0
+    _glyph_row(page, 230.0, x0=60.0)
+    _glyph_row(page, 242.0, x0=60.0)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_the_anchor_stays_in_the_regions_own_column(tmp_path: Path) -> None:
+    """Item K: a left-column region must not anchor on the right column."""
+    from socr.core.text_coverage import preceding_text_snippet
+
+    two_col = _two_column_pdf(tmp_path / "two.pdf")
+    with fitz.open(two_col) as doc:
+        page = doc[0]
+        region = max(analyze_page(page).regions, key=lambda r: r.merged_from)
+        anchor = preceding_text_snippet(page, region.pdf)
+    assert anchor, "the left column does precede the region"
+    assert "true anchor here." in anchor
+    assert "wrong anchor entirely." not in anchor
+
+
+# --- the two real pages the rule came from -----------------------------------
+#
+# Third-party PDFs in gitignored scratch, so this SKIPS in CI. The synthetic
+# pair above is the enforcement; this exists because the rule was derived from
+# these two pages.
+_SCRATCH = Path("/Users/rubenffuertes/repos/tools/socr/scratch/routing-baseline")
+_TEXT_BOX_PAGE = _SCRATCH / "review-pages/in/a_schoenegger_p10.pdf"
+_CHART_PAGE = (
+    _SCRATCH / "corpus/pdfs/2018__hansen_mcmahon_prat__transparency_and_delibertion"
+    "_within_the_fomc_a_computational_linguistics_approach__QJE.pdf"
+)
+
+
+@pytest.mark.skipif(
+    not (_TEXT_BOX_PAGE.is_file() and _CHART_PAGE.is_file()),
+    reason="third-party review PDFs live in gitignored scratch",
+)
+def test_the_two_real_pages_the_rule_came_from() -> None:
+    """Schoenegger p10 stays prose; Hansen p23 becomes one whole-figure picture."""
+    with fitz.open(_TEXT_BOX_PAGE) as doc:
+        text_box = analyze_page(doc[0]).regions
+    with fitz.open(_CHART_PAGE) as doc:
+        chart = analyze_page(doc[22]).regions
+    assert len(text_box) == 1 and text_box[0].merged_from == 4
+    assert text_box[0].figure_pdf is None, "the prompt box is text, not a figure"
+    assert len(chart) == 1 and chart[0].merged_from > 1
+    assert chart[0].figure_pdf is not None, "the chart's labels ship under one crop"
+
+
+# --- fix round 3, item 5 ------------------------------------------------------
+
+
+def test_an_unreachable_reader_does_not_group(tmp_path: Path) -> None:
+    """Round 3 (Fable #5 / Argon #9): no reader ⇒ step 1, grouping included.
+
+    Grouping exists to make ONE crop readable. On a host with no Ollama it only
+    changed bytes against main. Pinned as a difference over availability alone,
+    with the SAME reader injected in both arms.
+    """
+
+    def run(out: str, available: bool) -> str:
+        pipeline = _pipeline()
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=available),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=lambda *_: RECOVERED),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        ):
+            pipeline.process(tmp_path / "doc.pdf", tmp_path / out)
+        return _page_text(tmp_path / out)
+
+    _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    reachable = run("o_up", True)
+    unreachable = run("o_down", False)
+    assert reachable.count("![Uncovered text") == 1, "one merged crop when it can be read"
+    assert unreachable.count("![Uncovered text") == 2, "step 1's separate crops when it cannot"
+    assert PAGE_TEXT_PREFIX in reachable
+    assert PAGE_TEXT_PREFIX not in unreachable
+    assert uncovered_text_marker(1) in unreachable
+
+
+def test_applying_the_coverage_decoration_twice_is_idempotent(tmp_path: Path) -> None:
+    """Round 3 (Argon #8): the real piece spans paragraphs, so the guard missed it.
+
+    `_already_present` compared single paragraphs, and the shipped piece is a
+    block PLUS its picture — two paragraphs. A second apply inserted it again.
+    """
+    from socr.core.text_recovery import insert_after_anchor
+
+    piece = (
+        f"> {PAGE_TEXT_PREFIX}: hello\n\n"
+        "![Uncovered text page 1 region 1](figures/uncovered_text_p1_r1.png)"
+    )
+    body = "native line\n\nmore prose"
+    once, placed = insert_after_anchor(body, "native line", piece)
+    assert placed is True
+    twice, placed_again = insert_after_anchor(once, "native line", piece)
+    assert placed_again is True
+    assert twice == once, "the second apply changed the page"
+    assert twice.count("hello") == 1
+
+
+def test_the_metadata_is_unchanged_with_recovery_off(tmp_path: Path) -> None:
+    """Round 3 (Argon #9): the sidecar must not advertise step 2 when it is off."""
+    import json
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    _run(pdf, tmp_path / "o", reading=RECOVERED, recover_uncovered_text=False)
+    meta = json.loads(next((tmp_path / "o").rglob("metadata.json")).read_text(encoding="utf-8"))
+    blob = json.dumps(meta)
+    assert "OCR, not verified" not in blob
+    assert not CONFIRMED_STYLE_RE.search(blob), blob
+
+
+def test_a_call_may_not_start_unless_the_budget_holds_a_whole_one(tmp_path: Path) -> None:
+    """Round 3 (Argon #7): "> 0 left" is not a bound.
+
+    `PageLadderBudget` documents that a call starting inside the budget keeps
+    its own deadline, so a budget with one second left still admitted a
+    120-second read. Pinned at the boundary: just under a full call's worth is
+    refused, just over it is admitted.
+    """
+    from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+
+    def run(out: str, remaining: float) -> int:
+        calls: list[str] = []
+
+        def ask(path, _prompt):
+            calls.append(str(path))
+            return RECOVERED
+
+        pipeline = _pipeline()
+        budget = pipeline._uncovered_text_budget
+
+        def sized(state, page_num, regions):
+            made = budget(state, page_num, regions)
+            made.total_sec = remaining
+            return made
+
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+            patch.object(pipeline, "_uncovered_text_budget", side_effect=sized),
+        ):
+            pipeline.process(pdf, tmp_path / out)
+        return len(calls)
+
+    assert run("o_short", FIGURE_ASK_TIMEOUT_SEC - 1) == 0, "cannot hold a whole call"
+    assert run("o_ample", FIGURE_ASK_TIMEOUT_SEC * 4) > 0, "can"

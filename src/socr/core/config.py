@@ -212,6 +212,10 @@ class PipelineConfig:
     # Default on: a flagged page never ships plain SUCCESS. ``--no-text-coverage``
     # turns it off (tests pin the on/off difference).
     check_text_coverage: bool = True
+    #: #1050 step 2: read each uncovered region's crop with the local vision
+    #: model and place the words (marked) in the page. Off leaves step 1's
+    #: picture-and-mark behaviour exactly as it was.
+    recover_uncovered_text: bool = True
 
     # --- Math recovery (font-corrupted equations, default ON) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted

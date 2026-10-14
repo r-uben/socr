@@ -176,6 +176,14 @@ class GeminiAPIEngine:
         self.close()
 
 
+#: Total deadline for ONE ``OllamaFigureEngine`` HTTP call. Named, not changed:
+#: ``ask`` returns ``None`` on ANY failure, so a caller that must tell a timeout
+#: from a refusal has to compare its own elapsed time against this (#1050 step 2,
+#: round 2 item C -- the swallowed exception meant real timeouts never armed the
+#: cascade halt).
+FIGURE_ASK_TIMEOUT_SEC: float = 120.0
+
+
 class OllamaFigureEngine:
     """Local-first figure description engine using Ollama.
 
@@ -252,8 +260,8 @@ class OllamaFigureEngine:
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
-                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
-                120.0,
+                lambda: httpx.post(url, **extra, json=payload, timeout=FIGURE_ASK_TIMEOUT_SEC),
+                FIGURE_ASK_TIMEOUT_SEC,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
             raise_for_status_redacted(resp)
@@ -301,8 +309,8 @@ class OllamaFigureEngine:
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
-                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
-                120.0,
+                lambda: httpx.post(url, **extra, json=payload, timeout=FIGURE_ASK_TIMEOUT_SEC),
+                FIGURE_ASK_TIMEOUT_SEC,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
             raise_for_status_redacted(resp)

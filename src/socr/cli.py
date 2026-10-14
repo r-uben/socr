@@ -158,6 +158,15 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--no-recover-uncovered-text",
+        is_flag=True,
+        help=(
+            "#1050 step 2 kill switch: do not read an uncovered region's crop with the "
+            "local vision model. Recovery is ON by default; a region that is read ships "
+            "its words in a marked blockquote, and one that is not keeps step 1's picture."
+        ),
+    )(f)
+    f = click.option(
         "--no-equation-region-lane",
         is_flag=True,
         help=(
@@ -411,6 +420,7 @@ def build_config(
     no_equation_region_lane: bool = False,
     equation_region_lane: bool | None = None,
     no_text_coverage: bool = False,
+    no_recover_uncovered_text: bool = False,
     clean_equation_model: str | None = None,
     math_model: str | None = None,
     timeout: int = 1800,
@@ -594,6 +604,8 @@ def build_config(
         config.equation_region_lane = equation_region_lane
     if no_text_coverage:
         config.check_text_coverage = False
+    if no_recover_uncovered_text:
+        config.recover_uncovered_text = False
     if clean_equation_model is not None:
         config.clean_equation_model = clean_equation_model
     if math_model is not None:
