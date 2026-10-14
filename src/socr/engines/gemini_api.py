@@ -315,6 +315,12 @@ class OllamaFigureEngine:
             )
             raise_for_status_redacted(resp)
             return resp.json()["message"]["content"].strip() or None
+        except TotalDeadlineExceeded:
+            # #1050 step 2 round 4 (Argon #4): a fail-fast from ``_OUTSTANDING``
+            # raises this in under a millisecond, and folding it into the
+            # ``None`` below hid a wedge from every caller. Re-raised so a
+            # caller that must tell a timeout from a refusal can.
+            raise
         except Exception:
             return None
 

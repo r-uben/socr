@@ -136,6 +136,14 @@ from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
+class _MaskUnavailable(Exception):
+    """#1050 step 2 round 4: the native-text mask could not be built.
+
+    The crop must NOT be read unmasked -- that is the duplication this mask
+    closes -- so this degrades the region to step 1: picture and mark, no text.
+    """
+
+
 class _RecoveryBudgetSpent(Exception):
     """#1050 step 2 (item H): this page's crop-read budget is gone."""
 
@@ -147,9 +155,30 @@ def _is_timeout_error(exc: BaseException) -> bool:
     exception makes any message containing "timed out" look like a timeout.
     The type is checked first so a real ``TimeoutError`` always counts.
     """
+    # ``ollama_utils.TotalDeadlineExceeded`` already subclasses ``TimeoutError``,
+    # so the fail-fast from the outstanding-call guard lands here too (round 4,
+    # Argon #4). What had to change was the ENGINE, which folded it into None.
     if isinstance(exc, TimeoutError):
         return True
+
     return "timed out" in str(exc).lower() or "timeout" in type(exc).__name__.lower()
+
+
+def _strip_coverage_decoration(body: str, page_num: int) -> str:
+    """Remove whatever #1050 already wrote on this page body.
+
+    The page mark, the region pictures and the recovered blocks. Native prose
+    is untouched: only paragraphs that this feature itself emits are dropped,
+    each matched whole. Round 4, item 8 -- ``_apply_text_coverage`` appended
+    unconditionally, so applying twice duplicated the marker and the blocks.
+    """
+    from socr.core.manifest import coverage_parts
+
+    parts = set(coverage_parts(body))
+    if not parts:
+        return body
+    kept = [p for p in body.split("\n\n") if p.strip() not in parts]
+    return "\n\n".join(kept).rstrip()
 
 
 @dataclass(frozen=True)
@@ -11409,8 +11438,12 @@ class UnifiedPipeline:
         # (``_crop_descriptions_enabled``). --native-only means no model on any
         # page; step 2 had no such gate and called the reader anyway, which is
         # the one promise that flag makes.
+        # Round 4, item 6: ``check_text_coverage`` FIRST. The availability
+        # probe is an HTTP call, and with the coverage check off there is no
+        # flagged page to recover, so it bought nothing.
         self._recover_uncovered_text = (
-            bool(self.config.recover_uncovered_text)
+            bool(self.config.check_text_coverage)
+            and bool(self.config.recover_uncovered_text)
             and not bool(self.config.native_only)
             and self._uncovered_text_reader_available()
         )
@@ -11552,7 +11585,7 @@ class UnifiedPipeline:
         return ask
 
     @contextlib.contextmanager
-    def _masked_crop(self, page, reg, fallback):
+    def _masked_crop(self, page, reg):
         """The crop the MODEL reads: *reg*'s box with native words painted out.
 
         Yields a temporary path, removed afterwards -- it must never reach the
@@ -11566,7 +11599,6 @@ class UnifiedPipeline:
         from socr.core.text_coverage import crop_box, render_region_png
 
         tmp = None
-        read_path = fallback
         # The except must NOT wrap the yield: a @contextmanager catches whatever
         # the WITH BODY raises at the yield point, and that body is the model
         # read -- its TimeoutError is the cascade-halt signal, which this
@@ -11575,14 +11607,17 @@ class UnifiedPipeline:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
                 tmp = Path(handle.name)
             render_region_png(page, crop_box(reg), tmp, mask_native=True)
-            read_path = tmp
         except Exception as exc:
-            logger.debug("text recovery: masked crop failed, reading unmasked (%s)", exc)
-        try:
-            yield read_path
-        finally:
+            # Round 4, item 3: NO reading. Falling back to the unmasked crop
+            # reopened the duplication this mask exists to close, quietly and
+            # at debug level. Step 1's picture and mark are the honest answer.
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
+            raise _MaskUnavailable(str(exc)) from exc
+        try:
+            yield tmp
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _arm_recovery_halt(self, state, page_num: int) -> None:
         """#1050 step 2 (item H): a wedged crop reader halts the document.
@@ -11701,13 +11736,42 @@ class UnifiedPipeline:
             # chart box) at the source, instead of per shape. The masked file
             # is a scratch file and never ships; the unmasked one at
             # ``png_path`` is what the reader sees.
-            with self._masked_crop(page, reg, png_path) as read_path:
+            with self._masked_crop(page, reg) as read_path:
                 reading = clean_reading(ask(read_path, RECOVERY_PROMPT))
-        except _RecoveryBudgetSpent:
+        except _MaskUnavailable as exc:
+            logger.debug("text recovery: no mask p%d r%d, no reading (%s)", page_num, index, exc)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_mask_failed",
+                    engine="ollama-figure",
+                    detail=(
+                        f"region {index}: the native-text mask could not be built, so the "
+                        "crop was not read; step 1's picture and mark are kept"
+                    ),
+                    data={"region": index},
+                )
+            )
+            reading = None
+        except _RecoveryBudgetSpent as exc:
             # The page's cap is gone. Skip the remaining regions; they ship as
             # step 1 left them. Not a wedge: do not arm the document halt.
+            #
+            # Round 4, item 5: the refusal must COUNT as a skip and say so.
+            # ``PageLadderBudget.call`` only announces when its own clock is
+            # spent, so a region refused for want of a WHOLE call's room
+            # emitted nothing, while OUTPUT.md promised an event.
             if budget is not None:
-                budget.call("uncovered_text", "", lambda: None, lambda _m: None)
+                budget.skipped += 1
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_budget_exhausted",
+                    engine="ollama-figure",
+                    detail=f"region {index}: {exc}",
+                    data={"region": index},
+                )
+            )
             reading = None
         except Exception as exc:
             logger.debug("text recovery: read failed p%d r%d (%s)", page_num, index, exc)
@@ -11864,6 +11928,12 @@ class UnifiedPipeline:
             self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
             return
         body = (bo.text or "").rstrip()
+        # Round 4, item 8: a second apply must change nothing. The page mark and
+        # the tail pieces were appended unconditionally, so re-running the phase
+        # duplicated both. Anything this method already wrote is stripped first,
+        # and then written again from the current regions -- re-deriving rather
+        # than detecting makes the result independent of how often it ran.
+        body = _strip_coverage_decoration(body, page_num)
         tail: list[str] = []
         placed_any = False
         for rec in recoveries:

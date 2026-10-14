@@ -453,6 +453,18 @@ _COVERAGE_IMAGE_REF_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(
 _COVERAGE_PAGE_MARK_RE = re.compile(r"^\[page \d+: uncovered text")
 
 
+def coverage_parts(text: str) -> list[str]:
+    """Public seam over ``_coverage_parts`` (#1050 step 2, round 4 item 8).
+
+    ``_apply_text_coverage`` strips whatever this feature already wrote before
+    writing it again, so a second apply changes nothing. It needs the SAME
+    definition of "a coverage part" selection uses, or the two drift and the
+    fallback carries a paragraph the apply step just removed. Cross-package
+    imports of private names are forbidden (``test_package_layering``).
+    """
+    return _coverage_parts(text)
+
+
 def _coverage_parts(text: str) -> list[str]:
     """Every #1050 part of *text*, in order: recovered blocks, region pictures, the mark.
 

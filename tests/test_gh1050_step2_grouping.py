@@ -11,6 +11,8 @@ Hermetic: no provider, no Tesseract, no network. The crop reader is stubbed.
 
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1293,3 +1295,293 @@ def test_a_call_may_not_start_unless_the_budget_holds_a_whole_one(tmp_path: Path
 
     assert run("o_short", FIGURE_ASK_TIMEOUT_SEC - 1) == 0, "cannot hold a whole call"
     assert run("o_ample", FIGURE_ASK_TIMEOUT_SEC * 4) > 0, "can"
+
+
+# --- fix round 4: everything left sits in the mask ----------------------------
+
+
+def _invisible_layer_over_drawn_text_pdf(path: Path) -> Path:
+    """An alpha-0 OCR layer over vector-drawn words.
+
+    The sentence is not DRAWN by the text layer, but `get_text` returns it and
+    the shipped native prose contains it — so if the mask paints only visible
+    chars, the model reads it off the pixels and the page ships it twice.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    page.draw_rect(fitz.Rect(64, 150, 464, 300), color=(0.4, 0.4, 0.4), width=0.8)
+    _glyph_row(page, 170.0, x0=100.0)
+    # The ink is DRAWN (no visible text layer over it); the sentence exists only
+    # as an alpha-0 layer on top, exactly as an OCR layer over a raster does.
+    # Painting visible chars alone leaves this ink readable in the crop.
+    _glyph_row(page, 244.0, x0=90.0)
+    page.insert_text((90, 252), INVISIBLE_SENTENCE, fontsize=11, render_mode=3)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+INVISIBLE_SENTENCE = "An invisible layer carries this sentence already."
+
+
+def test_an_invisible_native_layer_is_masked_too(tmp_path: Path) -> None:
+    """Round 4, item 1: paint every char the shipped prose is built from.
+
+    An alpha-0 OCR layer over a raster or outlined text is not drawn, but
+    `get_text` returns it and the native text ships it. Painting only VISIBLE
+    chars left that ink readable in the crop, so the sentence shipped twice.
+
+    Measured on the mask itself rather than through a reader, because the
+    property is "this ink is gone", and an OCR engine's opinion of a synthetic
+    glyph row adds noise, not evidence.
+    """
+    import numpy as np
+
+    from socr.core import text_coverage as tc
+
+    pdf = _invisible_layer_over_drawn_text_pdf(tmp_path / "inv.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        mat = fitz.Matrix(tc.SCALE, tc.SCALE)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        visible, invisible = tc.visible_char_boxes(page)
+        assert invisible, "the fixture carries an alpha-0 layer"
+        masked = tc.native_ink_masked(page, mat, arr)
+        with patch.object(tc, "visible_char_boxes", return_value=(visible, [])):
+            visible_only = tc.native_ink_masked(page, mat, arr)
+
+    band = (
+        slice(int(243 * tc.SCALE), int(253 * tc.SCALE)),
+        slice(int(88 * tc.SCALE), int(200 * tc.SCALE)),
+    )
+    assert int((visible_only[band][..., 0] < 128).sum()) > 0, (
+        "painting visible chars alone leaves the covered ink readable"
+    )
+    assert int((masked[band][..., 0] < 128).sum()) == 0, (
+        "the invisible layer's ink reached the reader"
+    )
+
+
+def _drawn_number_below_a_baseline_pdf(path: Path) -> Path:
+    """Uncovered ink just under a native line, within its descender band."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 200), "Native line with a jpqy descender tail here.", fontsize=11)
+    # Drawn glyph-like marks a fifth of an em below that baseline.
+    x = 76.0
+    for w in (4.0, 3.2, 4.6, 3.8, 5.0, 4.1):
+        page.draw_rect(fitz.Rect(x, 202.2, x + w, 208.2), color=(0, 0, 0), width=0.6)
+        x += w + 2.0
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_uncovered_ink_under_a_baseline_is_not_painted_out(tmp_path: Path) -> None:
+    """Round 4, item 2: paint the covered INK, never the char box.
+
+    A char box spans ascender to descender, so box painting erased uncovered
+    ink just below a native line — a drawn "0.058" came back as "U.UD&". What
+    is painted is what step 1 classes as covered.
+    """
+    import numpy as np
+
+    from socr.core.text_coverage import SCALE, native_ink_masked
+
+    pdf = _drawn_number_below_a_baseline_pdf(tmp_path / "below.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        mat = fitz.Matrix(SCALE, SCALE)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        masked = native_ink_masked(page, mat, arr)
+        band = tuple(int(v) for v in fitz.Rect(70, 201.5, 130, 209) * page.rotation_matrix * mat)
+    ink_before = int((arr[band[1] : band[3], band[0] : band[2], 0] < 128).sum())
+    ink_after = int((masked[band[1] : band[3], band[0] : band[2], 0] < 128).sum())
+    assert ink_before > 0, "the fixture draws ink in that band"
+    assert ink_after >= ink_before * 0.9, "the mask ate the uncovered marks"
+
+
+def test_a_mask_failure_means_no_reading(tmp_path: Path) -> None:
+    """Round 4, item 3: never read an unmasked crop.
+
+    Falling back to the unmasked crop reopened the duplication the mask exists
+    to close, quietly and at debug level. Pinned as a difference over the mask
+    alone, with the SAME reader in both arms.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    calls: list[str] = []
+
+    def run(out: str, broken: bool) -> str:
+        ctx = (
+            patch("socr.core.text_coverage.native_ink_masked", side_effect=RuntimeError("boom"))
+            if broken
+            else nullcontext()
+        )
+        pipeline = _pipeline()
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+            patch.object(
+                pipeline,
+                "_uncovered_text_ask",
+                return_value=lambda *_: (calls.append("x"), RECOVERED)[1],
+            ),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+            ctx,
+        ):
+            pipeline.process(pdf, tmp_path / out)
+        return _page_text(tmp_path / out)
+
+    ok = run("o_ok", False)
+    broken = run("o_broken", True)
+    assert PAGE_TEXT_PREFIX in ok
+    assert PAGE_TEXT_PREFIX not in broken, "no mask must mean no reading, not an unmasked read"
+    assert uncovered_text_marker(1) in broken, "step 1's picture and mark are kept"
+
+
+def test_a_fail_fast_deadline_counts_as_a_wedge(tmp_path: Path) -> None:
+    """Round 4, item 4: a sub-millisecond deadline is still a wedge.
+
+    `TotalDeadlineExceeded` from the outstanding-call guard used to be folded
+    into `ask`'s `None`, so a wedge that shows up as a fail-fast was invisible.
+    """
+    from socr.core.ollama_utils import TotalDeadlineExceeded
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+
+    def ask(_path, _prompt):
+        raise TotalDeadlineExceeded("outstanding call")
+
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    assert pipeline._recovery_backend_wedged is True
+
+
+def test_coverage_off_never_probes_the_reader(tmp_path: Path) -> None:
+    """Round 4, item 6: no flagged pages means nothing to recover."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    pipeline = _pipeline(check_text_coverage=False)
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_uncovered_text_reader_available") as probe,
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    probe.assert_not_called()
+
+
+def test_applying_the_phase_twice_ships_the_same_bytes(tmp_path: Path) -> None:
+    """Round 4, item 8: a second apply must change nothing at all."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    captured: dict = {}
+    pipeline = _pipeline()
+    apply = pipeline._apply_text_coverage
+
+    def twice(state, page_num, ps, output_dir):
+        apply(state, page_num, ps, output_dir)
+        once = (ps.best_output.text or "") if ps.best_output else ""
+        apply(state, page_num, ps, output_dir)
+        captured["once"] = once
+        captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=lambda *_: RECOVERED),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    assert captured["once"], "the fixture decorates the page"
+    assert captured["twice"] == captured["once"]
+
+
+def test_a_budget_refusal_says_so(tmp_path: Path) -> None:
+    """Round 4, item 5: OUTPUT.md promises an event; the refusal emitted none.
+
+    `PageLadderBudget.call` only announces when its own clock is spent, so a
+    region refused for want of a WHOLE call's room was silent.
+    """
+    from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+    pipeline = _pipeline()
+    budget = pipeline._uncovered_text_budget
+
+    def sized(state, page_num, regions):
+        made = budget(state, page_num, regions)
+        made.total_sec = FIGURE_ASK_TIMEOUT_SEC - 1
+        return made
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=lambda *_: RECOVERED),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_uncovered_text_budget", side_effect=sized),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    events = json.loads(next((tmp_path / "o").rglob("audit_log.json")).read_text(encoding="utf-8"))
+    kinds = [
+        e.get("kind") for e in (events if isinstance(events, list) else events.get("events", []))
+    ]
+    assert "uncovered_text_budget_exhausted" in kinds
+
+
+def test_the_flag_off_page_is_byte_identical_to_main(tmp_path: Path) -> None:
+    """Round 4, item 7: the step-1 joiner mutant must die inside the suite.
+
+    With recovery off, step 2 must change NOTHING — including the single
+    newline step 1 used between picture links. Compared against the bytes
+    main's own code produces for the same page, generated here from the
+    un-grouped regions rather than trusted from a stored file.
+    """
+    from socr.core.text_coverage import (
+        analyze_page,
+        uncovered_text_image_ref,
+        uncovered_text_marker,
+    )
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    off = _run(pdf, tmp_path / "o_off", reading=RECOVERED, recover_uncovered_text=False)
+    with fitz.open(pdf) as doc:
+        regions = analyze_page(doc[0], group=False).regions
+    expected_tail = (
+        uncovered_text_marker(1)
+        + "\n\n"
+        + "\n".join(uncovered_text_image_ref(1, i) for i in range(1, len(regions) + 1))
+    )
+    assert off.rstrip().endswith(expected_tail), "step 1 joined picture links with a single newline"
+
+
+def test_the_metadata_matches_main_with_recovery_off(tmp_path: Path) -> None:
+    """Round 4, item 7 (Argon #7): the sidecar must not differ either."""
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    _run(pdf, tmp_path / "o_off", reading=RECOVERED, recover_uncovered_text=False)
+    meta = json.loads(next((tmp_path / "o_off").rglob("metadata.json")).read_text(encoding="utf-8"))
+    blob = json.dumps(meta)
+    assert "not verified" not in blob
+    assert "uncovered_text_recovered" not in blob

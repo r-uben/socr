@@ -918,12 +918,57 @@ def coverage_for_document(doc, *, group: bool = True) -> list[CoveragePage]:
     return [analyze_page(doc[i], group=group) for i in range(len(doc))]
 
 
+def native_ink_masked(page, mat, arr):
+    """*arr* with the page's NATIVE INK painted out, component by component.
+
+    Round 4, items 1 and 2. Two things this must get right, and the first
+    version got both wrong:
+
+    * **Every char the shipped prose is built from**, visible AND invisible. An
+      alpha-0 OCR layer over a raster is not drawn, but ``get_text`` returns it
+      and the native text ships it, so leaving it unpainted duplicated the
+      sentence (recovery ON 2, OFF 1).
+    * **The ink, not the box.** A char box spans ascender to descender, so
+      painting boxes erased uncovered ink just below a baseline -- a drawn
+      "0.058" came back as "U.UD& arawn pelow". What is painted is what step 1
+      already classes as COVERED: a connected ink component whose pixels lie
+      mostly under a native char box (``COVER_MAJORITY``). Uncovered ink -- the
+      very thing recovery exists to read -- is never painted.
+
+    Falls back to the unmasked array only for an empty page; any failure is the
+    caller's to handle, because reading an unmasked crop reopens duplication.
+    """
+    import cv2
+
+    out = arr.copy()
+    visible, invisible = visible_char_boxes(page)
+    native_boxes = [*visible, *invisible]
+    if not native_boxes:
+        return out
+    gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY) if out.shape[2] >= 3 else out[:, :, 0]
+    layer = _paint(gray.shape, native_boxes, page, mat)
+    for ink in _polarity_masks(gray):
+        count, labels, _stats, _c = cv2.connectedComponentsWithStats(
+            ink.astype(np.uint8), connectivity=8
+        )
+        if count < 2:
+            continue
+        hit = np.bincount(labels[layer], minlength=count).astype(np.float64)
+        total = np.bincount(labels.ravel(), minlength=count).astype(np.float64)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac = np.where(total > 0, hit / total, 0.0)
+        covered = np.zeros(count, dtype=bool)
+        covered[1:] = frac[1:] >= COVER_MAJORITY
+        out[covered[labels]] = 255
+    return out
+
+
 def crop_box(region: CoverageRegion) -> tuple[float, float, float, float]:
     """The box to CROP for *region*: the whole figure when it is in one.
 
-    One place decides this, because the saved picture, the model's crop and
-    the Tesseract witness must all look at the same pixels. A witness scored
-    against a different crop than the model read is not a witness.
+    One place decides this, because the saved picture and the model's crop
+    must come from the same box: a reader checking words against a different
+    crop than the model read is checking the wrong thing.
     """
     return region.figure_pdf or region.pdf
 
@@ -953,15 +998,7 @@ def render_region_png(
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if mask_native:
-        arr = arr.copy()
-        height, width = arr.shape[:2]
-        visible, _invisible = visible_char_boxes(page)
-        for box in visible:
-            bx0, by0, bx1, by1 = _to_pix(box, page, mat)
-            bx0, by0 = max(0, bx0), max(0, by0)
-            bx1, by1 = min(width, bx1), min(height, by1)
-            if bx1 > bx0 and by1 > by0:
-                arr[by0:by1, bx0:bx1] = 255
+        arr = native_ink_masked(page, mat, arr)
     x0, y0, x1, y1 = _to_pix(pdf_rect, page, mat)
     x0, y0 = max(0, x0), max(0, y0)
     x1, y1 = min(pix.width, x1), min(pix.height, y1)

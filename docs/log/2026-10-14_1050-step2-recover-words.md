@@ -294,7 +294,8 @@ class attribute and `process_batch` reuses one pipeline instance, so one wedged
 document halted every document after it. It is reset per document in
 `_prepare_text_coverage`, with a two-document batch test.
 
-**3. Equation sidecars on NATIVE_FALLBACK — NOT REAL.** Argon's claim was
+**3. Equation sidecars on NATIVE_FALLBACK — NOT REAL** (confirmed independently
+by Fable in round 4; Argon's static trace was wrong).** Argon's claim was
 static. Reproduced through the real selection seam
 (`scratch/1050s2/probe_sidecar.py`): with a reading-order block inserted, the
 equation, the recovered block, the picture and the page mark all survive
@@ -328,6 +329,53 @@ is missing.
   merged crops main would have shipped separately. Availability is resolved once
   per document and gates grouping: no reader, no grouping, step 1 exactly.
   `metadata.json` under `--no-recover-uncovered-text` is pinned clean too.
+
+## Fix round 4 (Fable reproduced + guided Argon) — everything left was in the mask
+
+**1. Invisible native text was not painted (P0).** The mask painted VISIBLE
+chars only, so an alpha-0 OCR layer over a raster or over outlined text left its
+ink readable in the crop and the sentence shipped twice (recovery ON 2, OFF 1).
+The mask now covers every char box the shipped prose is built from, visible and
+invisible — whatever `get_text` contributes.
+
+**2. Char boxes erased uncovered ink (P1).** A char box spans ascender to
+descender, so painting boxes wiped drawn marks just below a baseline: a drawn
+"0.058" came back as "U.UD& arawn pelow". The mask now paints what step 1
+already classes as COVERED — connected ink components whose pixels lie mostly
+under a native char box — so the ink recovery exists to read is never painted.
+`native_ink_masked` is that one function; its mutant (back to box painting)
+fails the below-the-baseline test.
+
+**3. A masking failure read the unmasked crop (P1).** Silently, at debug level,
+reopening the very duplication the mask closes. It now degrades to NO reading:
+step 1's picture and mark, plus an `uncovered_text_mask_failed` event.
+
+**4. A fail-fast deadline was swallowed (P1).** `OllamaFigureEngine.ask` caught
+`TotalDeadlineExceeded` — raised in under a millisecond by the outstanding-call
+guard — and returned `None`, so a wedge in that shape was invisible. It is
+re-raised. Nothing was needed on the orchestrator side:
+`ollama_utils.TotalDeadlineExceeded` already subclasses `TimeoutError`, so the
+existing test lands on it.
+
+**5. The budget refusal was silent (P2).** `PageLadderBudget.call` only
+announces when its own clock is spent, so a region refused for want of a WHOLE
+call's room emitted nothing while OUTPUT.md promised an event. It now counts as
+skipped and emits `uncovered_text_budget_exhausted`.
+
+**6. The reader was probed with coverage off (P2).** `check_text_coverage` is
+checked first: with no flagged page there is nothing to recover.
+
+**7. The flag-off identity check is in the suite (P2).** It derives step 1's
+expected tail from the un-grouped regions and compares bytes, so the "\n" vs
+"\n\n" joiner mutant now dies inside the suite rather than only against the real
+pages. `metadata.json` under `--no-recover-uncovered-text` is pinned too.
+
+**8. `_apply_text_coverage` was only half-idempotent (P2).** A second call
+duplicated the marker and the figure blocks. It now strips whatever the feature
+itself wrote before writing it again, so the result does not depend on how often
+the phase ran.
+
+**9. Stale docstrings (P2)** citing the deleted Tesseract witness are rewritten.
 
 ## Known limit (accepted, not a blocker)
 
