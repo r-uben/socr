@@ -86,3 +86,17 @@ Script: `scratch/routing-baseline/exec/1129/measure.py` on `runs_23117187/` side
 - **Docs:** ``OUTPUT.md`` lists ``BEST_ATTEMPT_FLAGGED`` and ``WHOLE_DOC_SECTION``; ERROR
   winners stay ERROR.
 - **Mutants (r5):** ``fallback-without-judge-evidence``, ``exception-as-refusal``.
+
+## Round 6 (PR #1142 reviewer r3)
+
+- **Blocker:** Refusal mark only on positive evidence — ``judge_reason`` or
+  ``rejection_class`` (`agentic.py` / ``orchestrator.py``). ``JUDGE_OUTCOME_COMPLETED``
+  is stamped on accept and completed refusal alike; C3 ``audit_passed=false`` on
+  ``TABLE_REJECTED`` is not refusal evidence. Removed ``_NO_JUDGE_REASON_RECORDED``.
+- **Tests:** ``_seed_and_flush`` seeds ``judge_outcome=page_judge_completed``; resume
+  byte-identity parametrized over judge-accepted vs judge-refused.
+- **385 replay:** all 385 SUCCESS+``audit_false`` sidecars still demote to WARNING with
+  the unaccepted mark (0 misses under stricter predicate).
+- **Docs / nits:** ``OUTPUT.md`` states the real banner rule; verifier-error outcome maps
+  to ``page_judge_exception``.
+- **Mutants (r6):** ``completed-without-evidence-as-refusal``, ``drop-judge-reason-evidence``.

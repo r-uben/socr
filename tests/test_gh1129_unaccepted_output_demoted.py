@@ -401,7 +401,32 @@ def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Pa
     assert second.output.text == first.output.text
 
 
-def test_audit_false_without_judge_fields_still_gets_mark(tmp_path: Path) -> None:
+def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(tmp_path: Path) -> None:
+    """``page_judge_completed`` alone is an accept stamp, not refusal evidence."""
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.best_output = PageOutput(
+        page_num=1,
+        text="plain body text here",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert first.startswith("plain body")
+
+
+def test_completed_refusal_with_judge_reason_still_gets_mark(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page()
@@ -417,12 +442,12 @@ def test_audit_false_without_judge_fields_still_gets_mark(tmp_path: Path) -> Non
         engine="qwen",
         audit_passed=False,
         judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        judge_reason=_REJECT_REASON,
     )
     record = _select_and_finalize_page(state, 1)
     first = (record.output.text or "").splitlines()[0]
     assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
-    assert "no reason was recorded" in first
-    assert "did not accept it" in first
+    assert _REJECT_REASON in first
 
 
 def test_judge_timeout_outcome_gets_missing_verdict_mark_and_mode(tmp_path: Path) -> None:

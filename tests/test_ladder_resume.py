@@ -31,7 +31,12 @@ import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.result import FailureMode, PageOutput, PageStatus
+from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    FailureMode,
+    PageOutput,
+    PageStatus,
+)
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -85,6 +90,7 @@ def _seed_and_flush(
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=True,
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
     )
     ps.attempts.append(accepted)
     ps.best_output = accepted
@@ -158,24 +164,57 @@ class TestRejectedSkipsAndKeeps:
 
         assert sidecar_path.read_bytes() == original_bytes
 
+    @pytest.mark.parametrize(
+        "judge_refused",
+        [False, True],
+        ids=["judge_accepted_ladder_rejected", "judge_refused_with_reason"],
+    )
     def test_table_rejected_resume_reflushes_byte_identical_md_and_sidecar(
-        self, tmp_path: Path
+        self, tmp_path: Path, judge_refused: bool
     ) -> None:
-        """Real resume path (#1142 r5): no ``audit_passed`` fixture overrides."""
-        from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+        """Real resume path (#1142 r6): production ``judge_outcome`` on the winner."""
+        from socr.core.manifest import (
+            UNACCEPTED_OUTPUT_MARK_RE,
+            _whole_doc_page_texts,
+            finalized_page_record,
+        )
 
+        _REJECT_REASON = "judge rejected: cuts off mid-sentence"
         pdf_path = _real_pdf(tmp_path)
         out_dir = tmp_path / "out"
         pipeline = _make_pipeline()
         pipeline._scan_root = pdf_path.parent
         state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        ps = state.pages[1]
+        body = "plausible, judge-accepted-as-extraction body text " * 3
+        winner = PageOutput(
+            page_num=1,
+            text=body,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=not judge_refused,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+            judge_reason=_REJECT_REASON if judge_refused else "",
+        )
+        ps.attempts.append(winner)
+        ps.best_output = winner
+        ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+        first_record = finalized_page_record(state, 1, _whole_doc_page_texts(state))
+        pipeline._flush_page_fragment(state, 1, first_record.output.text or "", out_dir)
+        sidecar_path = pipeline._flush_page_sidecar(
+            state, 1, out_dir, terminal=True, record=first_record
+        )
 
-        _seed_and_flush(pipeline, state, out_dir, FailureMode.TABLE_REJECTED)
         frag_path = pipeline._page_fragment_path(out_dir, state, 1)
-        sidecar_path = frag_path.with_suffix(".json")
         original_frag = frag_path.read_bytes()
         original_sidecar = sidecar_path.read_bytes()
         original_fp = json.loads(original_sidecar.decode())["page_fingerprint"]
+        if judge_refused:
+            first_line = (
+                json.loads(original_sidecar.decode())["winning_output"]["text"] or ""
+            ).splitlines()[0]
+            assert UNACCEPTED_OUTPUT_MARK_RE.match(first_line)
+            assert _REJECT_REASON in first_line
 
         resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
         resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)

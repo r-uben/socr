@@ -154,18 +154,21 @@ patch keeps them. Pages with only the ladder's `table_unverified` get no page-le
 #### The unaccepted-output mark (#1129)
 
 When selection keeps non-empty model text with `audit_passed=false`
-(`BEST_OUTPUT_UNVERIFIED`, `BEST_ATTEMPT_FLAGGED`, or `WHOLE_DOC_SECTION`), the
-page ships a SUCCESS winner demoted to `warning` (an existing `error` status is
-preserved; never plain `success` with `audit_passed` false) and its FIRST line is:
+(`BEST_OUTPUT_UNVERIFIED`, `BEST_ATTEMPT_FLAGGED`, or `WHOLE_DOC_SECTION`) **and**
+the page judge refused or did not finish (a recorded `judge_reason` or
+`rejection_class`, or a typed missing-verdict outcome — not `audit_passed=false`
+alone, and not `page_judge_completed` without refusal evidence), the page ships a
+SUCCESS winner demoted to `warning` (an existing `error` status is preserved;
+never plain `success` with `audit_passed` false) and its FIRST line is:
 
 ```
 > [page unaccepted: socr kept this model reading but the page judge did not accept it (<trimmed judge reason>); check against the page image before citing]
 ```
 
 Find it with `^> \[page unaccepted: `. The failure mode is usually `audit_failed`; when
-the typed judge outcome is a page-judge timeout or crash it is `page_judge_timeout` or
-`page_judge_exception`, and the banner says the judge did not finish (not that it
-rejected the reading). Written in
+the typed judge outcome is a page-judge timeout, crash, or verifier error it is
+`page_judge_timeout` or `page_judge_exception`, and the banner says the judge did not
+finish (not that it rejected the reading). Written in
 `_select_and_finalize_page` (`_apply_unaccepted_output_mark` in `core/manifest.py`), the
 same seam as the table marks above. `audit_passed` on the winning output is not flipped.
 

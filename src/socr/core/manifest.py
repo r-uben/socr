@@ -4257,9 +4257,6 @@ def _neutralise_unaccepted_mark_reason(reason: str) -> str:
     return f"`{safe}`"
 
 
-_NO_JUDGE_REASON_RECORDED = "the page judge did not accept this reading; no reason was recorded"
-
-
 def unaccepted_output_mark(judge_reason: str, *, outcome: str = "") -> str:
     """One-line blockquote for a kept model reading the page judge did not accept."""
     detail = _neutralise_unaccepted_mark_reason(judge_reason)
@@ -4278,21 +4275,40 @@ def unaccepted_output_mark(judge_reason: str, *, outcome: str = "") -> str:
     )
 
 
+def _positive_judge_refusal_evidence(output: PageOutput) -> bool:
+    """True when the page judge refused, not merely when C3 demoted the ladder winner.
+
+    ``route_page`` stamps ``JUDGE_OUTCOME_COMPLETED`` on both accept and completed
+    refusal (`agentic.py`); only ``judge_reason`` (from ``att.reason`` on every
+    attempt, ``orchestrator.py``) or a non-empty ``rejection_class`` (#262) names a
+    refusal.
+    """
+    if (getattr(output, "judge_reason", "") or "").strip():
+        return True
+    return bool(getattr(output, "rejection_class", "") or "")
+
+
 def _unaccepted_mark_reason_from_output(output: PageOutput) -> str | None:
     """Judge-evidence text for the mark, or None when the ladder guard alone demoted."""
-    reason = (getattr(output, "judge_reason", "") or output.error or "").strip()
+    outcome = getattr(output, "judge_outcome", "") or ""
+    if outcome == JUDGE_OUTCOME_TIMEOUT:
+        err = (output.error or "").strip()
+        base = "the page judge did not finish: timed out"
+        return f"{base}: {err}" if err else base
+    if outcome == JUDGE_OUTCOME_EXCEPTION:
+        err = (output.error or "").strip()
+        base = "the page judge did not finish: crashed"
+        return f"{base}: {err}" if err else base
+    if outcome == JUDGE_OUTCOME_VERIFIER_ERROR:
+        err = (output.error or "").strip()
+        base = "the page judge did not finish: verifier error"
+        return f"{base}: {err}" if err else base
+    if not _positive_judge_refusal_evidence(output):
+        return None
+    reason = (getattr(output, "judge_reason", "") or "").strip()
     if reason:
         return reason
-    outcome = getattr(output, "judge_outcome", "") or ""
-    if not outcome:
-        return None
-    if outcome == JUDGE_OUTCOME_TIMEOUT:
-        return "the page judge did not finish: timed out"
-    if outcome == JUDGE_OUTCOME_EXCEPTION:
-        return "the page judge did not finish: crashed"
-    if outcome == JUDGE_OUTCOME_VERIFIER_ERROR:
-        return "the page judge did not finish: verifier error"
-    return _NO_JUDGE_REASON_RECORDED
+    return (getattr(output, "rejection_class", "") or "").strip() or None
 
 
 def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
@@ -4301,6 +4317,8 @@ def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
     if outcome == JUDGE_OUTCOME_TIMEOUT:
         return FailureMode.PAGE_JUDGE_TIMEOUT
     if outcome == JUDGE_OUTCOME_EXCEPTION:
+        return FailureMode.PAGE_JUDGE_EXCEPTION
+    if outcome == JUDGE_OUTCOME_VERIFIER_ERROR:
         return FailureMode.PAGE_JUDGE_EXCEPTION
     if output.failure_mode is not FailureMode.NONE:
         return output.failure_mode
