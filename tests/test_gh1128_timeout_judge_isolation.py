@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -430,8 +432,15 @@ def test_tesseract_witness_timeout_fails_closed_without_hanging() -> None:
         time.sleep(30)
         return "hung"
 
+    # CI installs only the ``dev`` extra, without pytesseract (``scanned``), so the
+    # witness module is a stub injected into ``sys.modules``. Skipping instead
+    # would leave the no-timeout mutant alive in CI.
+    stub = types.ModuleType("pytesseract")
+    stub.image_to_string = fake_image_to_string
+    stub.TesseractNotFoundError = type("TesseractNotFoundError", (OSError,), {})
+
     def _call() -> tuple[str, str, str]:
-        with patch("pytesseract.image_to_string", fake_image_to_string):
+        with patch.dict(sys.modules, {"pytesseract": stub}):
             return classical_ocr_with_state(_Pix())
 
     assert TESSERACT_WITNESS_TIMEOUT_SEC > 0
