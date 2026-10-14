@@ -4257,13 +4257,12 @@ def _neutralise_unaccepted_mark_reason(reason: str) -> str:
     return f"`{safe}`"
 
 
-def _trim_unaccepted_mark_reason(reason: str) -> str:
-    return _neutralise_unaccepted_mark_reason(reason)
+_NO_JUDGE_REASON_RECORDED = "the page judge did not accept this reading; no reason was recorded"
 
 
 def unaccepted_output_mark(judge_reason: str) -> str:
     """One-line blockquote for a kept model reading the page judge did not accept."""
-    detail = _trim_unaccepted_mark_reason(judge_reason)
+    detail = _neutralise_unaccepted_mark_reason(judge_reason)
     return (
         "> [page unaccepted: socr kept this model reading but the page judge "
         f"did not accept it ({detail}); check against the page image before citing]"
@@ -4322,26 +4321,6 @@ def _with_page_top_banners(body: str, banner_lines: Sequence[str]) -> str:
     if not banner_lines:
         return body
     return "\n\n".join([*banner_lines, body]) if body else "\n\n".join(banner_lines)
-
-
-def _skip_unaccepted_mark_ladder_resume(p, output: PageOutput) -> bool:
-    """Skip duplicate judge-refusal banner when an equivalent top banner already shipped.
-
-    #1129 r3: ladder-terminal demotion alone is not a substitute for the judge-reason
-    mark. Skip only when #1048's page-level banner (or an existing unaccepted mark) is
-    already present at the top of the finalized text.
-    """
-    if p is None:
-        return False
-    banners, _ = _split_page_top_banners(output.text or "")
-    if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):
-        return True
-    disposition = getattr(p, "table_ladder_disposition", None)
-    if disposition in _LADDER_TERMINAL_FAILURE_MODES and any(
-        PAGE_UNCHECKED_MARK_RE.match(line) for line in banners
-    ):
-        return True
-    return False
 
 
 def _finalize_best_output_unverified(output: PageOutput) -> PageOutput:
@@ -4492,11 +4471,9 @@ def _apply_unaccepted_output_mark(
     if not text.strip() or is_page_failed_marker(text):
         return output
     output = _finalize_best_output_unverified(output)
-    if _skip_unaccepted_mark_ladder_resume(p, output):
-        return output
     reason = getattr(output, "judge_reason", "") or output.error or ""
     if not reason and not getattr(output, "judge_outcome", ""):
-        return output
+        reason = _NO_JUDGE_REASON_RECORDED
     mark = unaccepted_output_mark(reason)
     banners, body = _split_page_top_banners(output.text or "")
     if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):

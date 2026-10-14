@@ -150,6 +150,7 @@ class TestRejectedSkipsAndKeeps:
         pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
 
         rps = resumed_state.pages[1]
+        resumed_page.audit_passed = True
         rps.best_output = resumed_page
         rps.attempts = [resumed_page]
 

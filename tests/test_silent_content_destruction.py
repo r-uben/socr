@@ -21,6 +21,7 @@ from socr.core.html_tables import (
     strip_html_tags,
 )
 from socr.core.manifest import (
+    UNACCEPTED_OUTPUT_MARK_RE,
     _winning_page_output,
     is_page_failed_marker,
     page_failed_marker,
@@ -187,7 +188,8 @@ class TestNoSilentEmptyPages:
         state.pages[1].best_output = None  # judge rejection
 
         winner = _winning_page_output(state, 1, None)
-        assert winner.text == "Substantial rejected table text"
+        assert UNACCEPTED_OUTPUT_MARK_RE.match((winner.text or "").splitlines()[0])
+        assert "Substantial rejected table text" in (winner.text or "")
         assert winner.audit_passed is False
         assert winner.status == PageStatus.WARNING
 

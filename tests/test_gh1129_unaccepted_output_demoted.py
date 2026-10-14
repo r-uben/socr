@@ -267,7 +267,7 @@ def test_selection_tag_unchanged_for_best_output_unverified(tmp_path: Path) -> N
 
 
 def test_table_rejected_resume_reflush_stays_idempotent(tmp_path: Path) -> None:
-    """Ladder-terminal pages must not pick up the unaccepted-output mark on re-finalize."""
+    """Ladder-terminal accepted content must not gain a spurious unaccepted mark on re-flush."""
     pdf_path = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "page 1 text " * 10)
@@ -310,6 +310,9 @@ def test_table_rejected_resume_reflush_stays_idempotent(tmp_path: Path) -> None:
     assert resumed_page is not None
     pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
     rps = resumed_state.pages[1]
+    # Sidecar page-level audit_passed is false under TABLE_REJECTED, but this attempt
+    # was judge-accepted; keep the winner flag true so re-finalize matches the first flush.
+    resumed_page.audit_passed = True
     rps.best_output = resumed_page
     rps.attempts = [resumed_page]
     pipeline._flush_page_fragment(resumed_state, 1, resumed_page.text, out_dir)
@@ -345,6 +348,81 @@ def test_process_judge_reason_reference_image_does_not_render(tmp_path: Path) ->
     first = body.splitlines()[0]
     assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
     assert "`plot shows ![plot][danger]`" in first
+
+
+def test_ladder_unchecked_and_judge_reject_carry_both_banners_on_first_pass(
+    tmp_path: Path,
+) -> None:
+    """Reviewer probe (#1142): #1048 page-unchecked must not suppress the judge-reason mark."""
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "scan")
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.unchecked_table_kind = "unverified"
+    p.best_output = PageOutput(
+        page_num=1,
+        text="| a | 1 |\n| --- | --- |\n| b | 2 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_reason=_REJECT_REASON,
+    )
+    record = _select_and_finalize_page(state, 1)
+    lines = (record.output.text or "").splitlines()
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(lines[0])
+    assert any(PAGE_UNCHECKED_MARK_RE.match(line) for line in lines[:4])
+    assert _REJECT_REASON in lines[0]
+
+
+def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "scan")
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.unchecked_table_kind = "unverified"
+    p.best_output = PageOutput(
+        page_num=1,
+        text="| a | 1 |\n| --- | --- |\n| b | 2 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_reason=_REJECT_REASON,
+    )
+    first = _select_and_finalize_page(state, 1)
+    second = _select_and_finalize_page(state, 1, saved_text=first.output.text)
+    assert second.output.text == first.output.text
+
+
+def test_audit_false_without_judge_fields_still_gets_mark(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.best_output = PageOutput(
+        page_num=1,
+        text="plain body text here",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert "no reason was recorded" in first
 
 
 def test_table_rejected_success_audit_false_is_demoted_and_marked(tmp_path: Path) -> None:

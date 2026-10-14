@@ -61,3 +61,14 @@ Script: `scratch/routing-baseline/exec/1129/measure.py` on `runs_23117187/` side
   get a duplicate. Every changed page keeps its full original text. A sidecar-state replay
   does not prove full artifact byte identity.
 - **P2:** Judge reason embedded as Markdown inline code (reference-style `![x][y]` inert).
+
+## Round 4 (PR #1142 reviewer)
+
+- **Soft 1:** Removed `_skip_unaccepted_mark_ladder_resume` entirely; idempotency is the
+  existing unaccepted-mark check only. Ladder + `unchecked_table_kind` pages get both #1048
+  and judge-reason banners on the first finalize pass.
+- **Soft 2:** `audit_passed=false` with no judge signal still ships the unaccepted mark using
+  ``the page judge did not accept this reading; no reason was recorded``.
+- **Nit:** Dropped `_trim_unaccepted_mark_reason` alias.
+- **Mutants:** Reviewer's ``_skip`` always-false and ladder-branch-only mutants are **moot**
+  (helper deleted). New r4 mutants: ``restored-ladder-skip``, ``skip-no-mark-without-reason``.
