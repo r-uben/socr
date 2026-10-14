@@ -157,3 +157,24 @@ Reviews of f796d561 (Astra, Fable): do not merge.
 - **Not in this PR:** replaying outputs written before #1129 (#1153); the second disclosure on D3 model-kept pages (top banner plus in-body note), which #1145's coverage map decides.
 
 Mutants (executed in a copied tree, with a real `conftest.py` canary and a proof-of-copy mutant): every one fails its target test. Log: `scratch/routing-baseline/exec/1129/mutants-r11-run.txt`. Full suite: 7482 passed.
+
+## Round 12 (2026-10-14)
+
+Reviews of 06faa300 (Argon, Fable): do not merge.
+
+- **P1 — accept vetoes stale class.** `_positive_judge_refusal_evidence` checks `judge_accepted is True` before any `rejection_class` left on a #1048-promoted winner. Test: promoted table shape with `judge_accepted=True` + stale class → page-unchecked only, no unaccepted banner.
+- **P0/P2 — exclusion set is marker-first only; scanned floor carries judge fields.** Removed `UNVERIFIABLE_TABLE_SCANNED` from `_UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES` — that ending splices or recovers prose from the refused attempt, so line 1 is model-derived unless the top banner fires. The synthetic `PageOutput` now forwards `judge_reason`, `judge_outcome`, `judge_accepted`, `rejection_class` from `p.best_output`. Exclusion audit (each member: model text above its own mark? → excluded):
+  - `NO_TEXT_MARKER` — yes (marker-only)
+  - `UNVERIFIABLE_TABLE_NATIVE` — yes (native floor / marker pattern)
+  - `ROTATED_TEXT_SHREDDED`, `INVISIBLE_SCAN_UNREAD` — yes (stub markers)
+  - `STRUCTURE_CLASS_FLOOR`, `STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR`, `STRUCTURE_CLASS_TEXT_TABLE_FLOOR` — yes (fail-closed marker bodies)
+  - `UNVERIFIABLE_TABLE_SCANNED` — **no** (refused model prose or recovered native with inline marker; judge fields required)
+  - `STRUCTURE_CLASS_GRID_FLAGGED`, credentialed timeout, `NATIVE_FALLBACK`, `BEST_*` — not in exclusion set; banner when refusal evidence present
+- **P2 — finalize order.** `_apply_unaccepted_output_mark` computes `reason`, applies the provenance exclusion, then calls `_finalize_best_output_unverified` so `NATIVE_FALLBACK` lanes without refusal evidence keep `failure_mode=NONE`.
+- **P2 — #713 second disclosure.** Credentialed judge-timeout winners gain the top “did not finish” unaccepted banner beside the in-body TIMED OUT note (owner wants top mark). Pinned with resume-stable test.
+- **P2 tidy.** `_WholeDoc` dropped unused judge/error fields; `docs/OUTPUT.md` documents refusal-evidence rule and marker-first exclusion (no stale allowlist / `judge_reason` as evidence); `agentic` SOURCE_EVIDENCE refusal sets `judge_accepted=False`; dual-banner tests use production shape (`judge_accepted=True` on promoted winner).
+- **Not in this PR:** an escalated winner the page judge never saw still ships WARNING without this banner (banner would be untrue). #1145 adds `page_judge=UNKNOWN` for that cluster; legacy `judge_accepted=None` replay unchanged (#1153).
+
+**Tests:** `7486 passed` (`scratch/routing-baseline/exec/1129/pytest-r12.txt`).
+**Ruff:** `uvx ruff@0.16.0 format --check .`
+**Mutants:** `scratch/routing-baseline/exec/1129/mutants-r12.txt` (`run-mutants-r12.py`, conftest canary).

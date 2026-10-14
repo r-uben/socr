@@ -748,6 +748,7 @@ def route_page(
             # missing verdict — retire any credential without stamping page_judge_completed.
             output.judge_outcome = JUDGE_OUTCOME_SOURCE_EVIDENCE
             output.table_acceptance_credential = None
+            output.judge_accepted = False
         elif missing_verdict:
             # A missing verdict cannot retire another missing verdict either: an
             # already-typed timeout stands, so a verifier crashing on a LATER

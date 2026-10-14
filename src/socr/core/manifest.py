@@ -410,12 +410,6 @@ class _WholeDoc:
     texts: dict[int, str]
     engine: str
     audit_passed: bool
-    judge_reason: str = ""
-    judge_outcome: str = ""
-    judge_accepted: bool | None = None
-    rejection_class: str = ""
-    error: str = ""
-    failure_mode: FailureMode = FailureMode.NONE
 
 
 def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
@@ -452,12 +446,6 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
         texts={i: t for i, t in enumerate(pages, start=1)},
         engine=chosen.engine or "cli",
         audit_passed=bool(chosen.audit_passed),
-        judge_reason=getattr(chosen, "judge_reason", "") or "",
-        judge_outcome=getattr(chosen, "judge_outcome", "") or "",
-        judge_accepted=getattr(chosen, "judge_accepted", None),
-        rejection_class=getattr(chosen, "rejection_class", "") or "",
-        error=chosen.error or "",
-        failure_mode=chosen.failure_mode,
     )
 
 
@@ -3355,12 +3343,17 @@ def _select_page_output_tagged(
         if d3_text is None:
             d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
 
+        source = p.best_output
         return PageOutput(
             page_num=page_num,
             text=d3_text,
             status=PageStatus.ERROR,
-            engine=p.best_output.engine if p.best_output else "qwen",
+            engine=source.engine if source else "qwen",
             audit_passed=False,
+            judge_reason=getattr(source, "judge_reason", "") or "" if source else "",
+            judge_outcome=getattr(source, "judge_outcome", "") or "" if source else "",
+            judge_accepted=getattr(source, "judge_accepted", None) if source else None,
+            rejection_class=getattr(source, "rejection_class", "") or "" if source else "",
             # #649: the recovery is a fact about what shipped, so it is
             # recorded where the corpus reads it, not only in the bytes. The
             # page stays ERROR with its own failure mode either way -- prose
@@ -4280,23 +4273,26 @@ def unaccepted_output_mark(judge_reason: str, *, outcome: str = "") -> str:
 def _positive_judge_refusal_evidence(output: PageOutput) -> bool:
     """True when the page judge refused, not when C3 demoted a judge-accepted winner.
 
-    Refusal is proven only by ``rejection_class`` (#262) or ``judge_accepted is
-    False`` (stamped from ``AcceptDecision.accept`` in ``agentic.route_page`` at
-    judge time and never rewritten by #1124 demotion). ``judge_reason`` is banner
-    text only, never evidence. ``judge_accepted is None`` (legacy sidecars) never
-    claims a refusal.
+    ``judge_accepted is True`` vetoes any stale ``rejection_class`` left on a
+    #1048-promoted winner. Refusal is ``judge_accepted is False``, or
+    ``judge_accepted is None`` with a non-empty ``rejection_class`` (legacy
+    sidecars). ``judge_reason`` is banner text only, never evidence.
     """
-    if (getattr(output, "rejection_class", "") or "").strip():
+    if getattr(output, "judge_accepted", None) is True:
+        return False
+    if getattr(output, "judge_accepted", None) is False:
         return True
-    return getattr(output, "judge_accepted", None) is False
+    return bool((getattr(output, "rejection_class", "") or "").strip())
 
 
 def judge_refusal_evidence_from_winning(winning: dict) -> bool:
     """Sidecar ``winning_output`` dict variant of :func:`_positive_judge_refusal_evidence`."""
-    if (str(winning.get("rejection_class", "") or "")).strip():
-        return True
     ja = winning.get("judge_accepted")
-    return type(ja) is bool and ja is False
+    if type(ja) is bool and ja is True:
+        return False
+    if type(ja) is bool and ja is False:
+        return True
+    return bool((str(winning.get("rejection_class", "") or "")).strip())
 
 
 _JUDGE_REFUSAL_NO_REASON_RECORDED = "the page judge refused it; no reason was recorded"
@@ -4348,8 +4344,9 @@ def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
 #: allowlist). Each member is pinned by a test that its own mark is present.
 _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES: frozenset[SelectionProvenance] = frozenset(
     {
+        # Each member ships a fail-closed marker (or marker-first body) with no
+        # model text above it; judge fields on the synthetic PageOutput are absent.
         SelectionProvenance.NO_TEXT_MARKER,
-        SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED,
         SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE,
         SelectionProvenance.ROTATED_TEXT_SHREDDED,
         SelectionProvenance.INVISIBLE_SCAN_UNREAD,
@@ -4540,12 +4537,12 @@ def _apply_unaccepted_output_mark(
     text = output.text or ""
     if not text.strip() or is_page_failed_marker(text):
         return output
-    output = _finalize_best_output_unverified(output)
     reason = _unaccepted_mark_reason_from_output(output)
     if reason is None:
         return output
     if provenance in _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES:
         return output
+    output = _finalize_best_output_unverified(output)
     outcome = getattr(output, "judge_outcome", "") or ""
     mark = unaccepted_output_mark(reason, outcome=outcome)
     banners, body = _split_page_top_banners(output.text or "")

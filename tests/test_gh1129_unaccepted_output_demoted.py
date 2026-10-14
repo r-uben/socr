@@ -366,10 +366,10 @@ def test_process_judge_reason_reference_image_does_not_render(tmp_path: Path) ->
     assert "`plot shows ![plot][danger]`" in first
 
 
-def test_ladder_unchecked_and_judge_reject_carry_both_banners_on_first_pass(
+def test_ladder_unchecked_promoted_accept_keeps_unchecked_without_unaccepted_banner(
     tmp_path: Path,
 ) -> None:
-    """Reviewer probe (#1142): #1048 page-unchecked must not suppress the judge-reason mark."""
+    """#1048 promotion stamps ``judge_accepted=True``; stale ``rejection_class`` is not refusal."""
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "scan")
@@ -386,17 +386,17 @@ def test_ladder_unchecked_and_judge_reject_carry_both_banners_on_first_pass(
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
-        judge_accepted=False,
-        judge_reason=_REJECT_REASON,
+        judge_accepted=True,
+        rejection_class=REJECTION_JUDGE_ONLY,
+        judge_reason="faithful",
     )
     record = _select_and_finalize_page(state, 1)
     lines = (record.output.text or "").splitlines()
-    assert UNACCEPTED_OUTPUT_MARK_RE.match(lines[0])
-    assert any(PAGE_UNCHECKED_MARK_RE.match(line) for line in lines[:4])
-    assert _REJECT_REASON in lines[0]
+    assert not any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in lines[:4])
+    assert any(PAGE_UNCHECKED_MARK_RE.match(line) for line in lines[:6])
 
 
-def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Path) -> None:
+def test_ladder_unchecked_promoted_accept_unchecked_idempotent_on_replay(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "scan")
@@ -413,8 +413,9 @@ def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Pa
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
-        judge_accepted=False,
-        judge_reason=_REJECT_REASON,
+        judge_accepted=True,
+        rejection_class=REJECTION_JUDGE_ONLY,
+        judge_reason="faithful",
     )
     first = _select_and_finalize_page(state, 1)
     second = _select_and_finalize_page(state, 1, saved_text=first.output.text)
@@ -532,6 +533,113 @@ def test_judge_exception_outcome_gets_missing_verdict_mark_and_mode(tmp_path: Pa
     assert "did not finish: crashed" in first
     assert "did not accept it" not in first
     assert record.output.failure_mode is FailureMode.PAGE_JUDGE_EXCEPTION
+
+
+def test_promoted_table_judge_accept_vetoes_stale_rejection_class(tmp_path: Path) -> None:
+    """#1048 promotion: deep-copied refusal class + ``judge_accepted=True`` is not refusal."""
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "scan")
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.unchecked_table_kind = "unverified"
+    p.best_output = PageOutput(
+        page_num=1,
+        text="| a | 1 |\n| --- | --- |\n| b | 2 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=True,
+        rejection_class=REJECTION_JUDGE_ONLY,
+        judge_reason="faithful",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert any(
+        PAGE_UNCHECKED_MARK_RE.match(line) for line in (record.output.text or "").splitlines()[:4]
+    )
+
+
+def test_native_fallback_keeps_lane_failure_mode_without_refusal_finalize(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    ps.is_born_digital = True
+    ps.native_text = "Indicator | 2024\n--- | ---\nGDP | 2.1"
+    ps.needs_ocr_enhancement = True
+    ps.attempts.append(
+        PageOutput(
+            page_num=1,
+            text="model ocr attempt",
+            status=PageStatus.ERROR,
+            engine="qwen",
+            audit_passed=False,
+        )
+    )
+    record = _select_and_finalize_page(state, 1)
+    assert record.selection_provenance is SelectionProvenance.NATIVE_FALLBACK
+    assert record.output.failure_mode is FailureMode.NONE
+    assert record.output.failure_mode is not FailureMode.AUDIT_FAILED
+
+
+def test_scanned_table_floor_refusal_gets_unaccepted_banner(tmp_path: Path) -> None:
+    from pipeline.test_page_failed_marker_scope import (
+        GENUINE_ATTEMPT_MD,
+        NATIVE_WORDS,
+        _scanned_table_state,
+    )
+
+    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS)
+    ps.best_output.rejection_class = REJECTION_JUDGE_ONLY
+    ps.best_output.judge_accepted = False
+    ps.best_output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    state.pages[1] = ps
+    record = _select_and_finalize_page(state, 1)
+    assert record.selection_provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+
+
+def test_credentialed_judge_timeout_carries_top_unaccepted_banner(tmp_path: Path) -> None:
+    from test_gh713_judge_timeout_credential import (
+        MODEL_TABLE,
+        MODEL_TEXT,
+        _credential,
+        _pdf,
+        _state,
+    )
+
+    pdf = _pdf(tmp_path)
+    state = _state(pdf, credential=None)
+    state.pages[1].attempts[1].table_acceptance_credential = _credential(
+        state, candidate_text=MODEL_TEXT, tables=[MODEL_TABLE]
+    )
+    first = _select_and_finalize_page(state, 1)
+    assert (
+        first.selection_provenance is SelectionProvenance.STRUCTURE_CLASS_JUDGE_TIMEOUT_CREDENTIALED
+    )
+    lines = (first.output.text or "").splitlines()
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(lines[0])
+    assert "did not finish" in lines[0]
+    assert any("TIMED OUT" in line for line in lines)
+    second = _select_and_finalize_page(state, 1, saved_text=first.output.text)
+    assert second.output.text == first.output.text
 
 
 def test_structure_class_grid_flagged_refusal_gets_unaccepted_mark(tmp_path: Path) -> None:
