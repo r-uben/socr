@@ -150,7 +150,6 @@ class TestRejectedSkipsAndKeeps:
         pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
 
         rps = resumed_state.pages[1]
-        resumed_page.audit_passed = True
         rps.best_output = resumed_page
         rps.attempts = [resumed_page]
 
@@ -158,6 +157,41 @@ class TestRejectedSkipsAndKeeps:
         pipeline._flush_page_sidecar(resumed_state, 1, out_dir, terminal=True)
 
         assert sidecar_path.read_bytes() == original_bytes
+
+    def test_table_rejected_resume_reflushes_byte_identical_md_and_sidecar(
+        self, tmp_path: Path
+    ) -> None:
+        """Real resume path (#1142 r5): no ``audit_passed`` fixture overrides."""
+        from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+
+        pdf_path = _real_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        _seed_and_flush(pipeline, state, out_dir, FailureMode.TABLE_REJECTED)
+        frag_path = pipeline._page_fragment_path(out_dir, state, 1)
+        sidecar_path = frag_path.with_suffix(".json")
+        original_frag = frag_path.read_bytes()
+        original_sidecar = sidecar_path.read_bytes()
+        original_fp = json.loads(original_sidecar.decode())["page_fingerprint"]
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+        rps = resumed_state.pages[1]
+        rps.best_output = resumed_page
+        rps.attempts = [resumed_page]
+
+        record = finalized_page_record(resumed_state, 1, _whole_doc_page_texts(resumed_state))
+        pipeline._flush_page_fragment(resumed_state, 1, record.output.text or "", out_dir)
+        pipeline._flush_page_sidecar(resumed_state, 1, out_dir, terminal=True, record=record)
+
+        assert frag_path.read_bytes() == original_frag
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert json.loads(sidecar_path.read_text())["page_fingerprint"] == original_fp
 
     def test_rejected_page_with_changed_rung_identity_is_reprocessed(self, tmp_path: Path) -> None:
         """The run fingerprint already binds B1's ladder extras (rung

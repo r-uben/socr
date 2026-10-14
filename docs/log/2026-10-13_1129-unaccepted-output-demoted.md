@@ -72,3 +72,17 @@ Script: `scratch/routing-baseline/exec/1129/measure.py` on `runs_23117187/` side
 - **Nit:** Dropped `_trim_unaccepted_mark_reason` alias.
 - **Mutants:** Reviewer's ``_skip`` always-false and ladder-branch-only mutants are **moot**
   (helper deleted). New r4 mutants: ``restored-ladder-skip``, ``skip-no-mark-without-reason``.
+
+## Round 5 (PR #1142 reviewer r2)
+
+- **Blocker:** Restored the early return in ``_apply_unaccepted_output_mark`` when there is
+  no judge evidence (``judge_reason``, ``judge_outcome``, or ``error``). Round 4's
+  ``audit_passed=false``-alone fallback stamped a false refusal on ladder-terminal pages
+  whose C3 guard demoted a judge-accepted winner; resume then diverged from the first flush.
+  The round-4 ``resumed_page.audit_passed = True`` overrides in two tests **hid** that
+  regression and were **removed**.
+- **P2:** Typed missing-verdict outcomes use ``page_judge_timeout`` / ``page_judge_exception``
+  failure modes and "did not finish" banner wording (never "rejected").
+- **Docs:** ``OUTPUT.md`` lists ``BEST_ATTEMPT_FLAGGED`` and ``WHOLE_DOC_SECTION``; ERROR
+  winners stay ERROR.
+- **Mutants (r5):** ``fallback-without-judge-evidence``, ``exception-as-refusal``.

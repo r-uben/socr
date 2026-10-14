@@ -213,6 +213,10 @@ class FailureMode(str, Enum):
     #: not reached.
     CHART_GRID_CONTRADICTED = "chart_grid_contradicted"
     PAGE_JUDGE_TIMEOUT = "page_judge_timeout"
+    #: #713: the page judge raised before returning a verdict (infrastructure),
+    #: distinct from ``AUDIT_FAILED`` (a completed refusal) and from
+    #: ``PAGE_JUDGE_TIMEOUT``.
+    PAGE_JUDGE_EXCEPTION = "page_judge_exception"
     #: #713: the page judge timed out on a candidate whose EVERY emitted table
     #: was accepted by the table judge ladder, and a persisted acceptance
     #: credential binds that acceptance to these exact candidate bytes. The

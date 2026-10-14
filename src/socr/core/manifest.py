@@ -4260,13 +4260,39 @@ def _neutralise_unaccepted_mark_reason(reason: str) -> str:
 _NO_JUDGE_REASON_RECORDED = "the page judge did not accept this reading; no reason was recorded"
 
 
-def unaccepted_output_mark(judge_reason: str) -> str:
+def unaccepted_output_mark(judge_reason: str, *, outcome: str = "") -> str:
     """One-line blockquote for a kept model reading the page judge did not accept."""
     detail = _neutralise_unaccepted_mark_reason(judge_reason)
+    if outcome in (
+        JUDGE_OUTCOME_TIMEOUT,
+        JUDGE_OUTCOME_EXCEPTION,
+        JUDGE_OUTCOME_VERIFIER_ERROR,
+    ):
+        return (
+            "> [page unaccepted: socr kept this model reading but "
+            f"{detail}; check against the page image before citing]"
+        )
     return (
         "> [page unaccepted: socr kept this model reading but the page judge "
         f"did not accept it ({detail}); check against the page image before citing]"
     )
+
+
+def _unaccepted_mark_reason_from_output(output: PageOutput) -> str | None:
+    """Judge-evidence text for the mark, or None when the ladder guard alone demoted."""
+    reason = (getattr(output, "judge_reason", "") or output.error or "").strip()
+    if reason:
+        return reason
+    outcome = getattr(output, "judge_outcome", "") or ""
+    if not outcome:
+        return None
+    if outcome == JUDGE_OUTCOME_TIMEOUT:
+        return "the page judge did not finish: timed out"
+    if outcome == JUDGE_OUTCOME_EXCEPTION:
+        return "the page judge did not finish: crashed"
+    if outcome == JUDGE_OUTCOME_VERIFIER_ERROR:
+        return "the page judge did not finish: verifier error"
+    return _NO_JUDGE_REASON_RECORDED
 
 
 def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
@@ -4274,6 +4300,8 @@ def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
     outcome = getattr(output, "judge_outcome", "") or ""
     if outcome == JUDGE_OUTCOME_TIMEOUT:
         return FailureMode.PAGE_JUDGE_TIMEOUT
+    if outcome == JUDGE_OUTCOME_EXCEPTION:
+        return FailureMode.PAGE_JUDGE_EXCEPTION
     if output.failure_mode is not FailureMode.NONE:
         return output.failure_mode
     return FailureMode.AUDIT_FAILED
@@ -4471,10 +4499,11 @@ def _apply_unaccepted_output_mark(
     if not text.strip() or is_page_failed_marker(text):
         return output
     output = _finalize_best_output_unverified(output)
-    reason = getattr(output, "judge_reason", "") or output.error or ""
-    if not reason and not getattr(output, "judge_outcome", ""):
-        reason = _NO_JUDGE_REASON_RECORDED
-    mark = unaccepted_output_mark(reason)
+    reason = _unaccepted_mark_reason_from_output(output)
+    if reason is None:
+        return output
+    outcome = getattr(output, "judge_outcome", "") or ""
+    mark = unaccepted_output_mark(reason, outcome=outcome)
     banners, body = _split_page_top_banners(output.text or "")
     if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):
         return output

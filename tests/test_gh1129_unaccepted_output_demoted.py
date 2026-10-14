@@ -30,6 +30,7 @@ from socr.core.manifest import (
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
+    JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
     FailureMode,
     PageOutput,
@@ -310,9 +311,6 @@ def test_table_rejected_resume_reflush_stays_idempotent(tmp_path: Path) -> None:
     assert resumed_page is not None
     pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
     rps = resumed_state.pages[1]
-    # Sidecar page-level audit_passed is false under TABLE_REJECTED, but this attempt
-    # was judge-accepted; keep the winner flag true so re-finalize matches the first flush.
-    resumed_page.audit_passed = True
     rps.best_output = resumed_page
     rps.attempts = [resumed_page]
     pipeline._flush_page_fragment(resumed_state, 1, resumed_page.text, out_dir)
@@ -418,11 +416,63 @@ def test_audit_false_without_judge_fields_still_gets_mark(tmp_path: Path) -> Non
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
     )
     record = _select_and_finalize_page(state, 1)
     first = (record.output.text or "").splitlines()[0]
     assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
     assert "no reason was recorded" in first
+    assert "did not accept it" in first
+
+
+def test_judge_timeout_outcome_gets_missing_verdict_mark_and_mode(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.best_output = PageOutput(
+        page_num=1,
+        text="body kept after judge timeout",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_outcome=JUDGE_OUTCOME_TIMEOUT,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert "did not finish: timed out" in first
+    assert "did not accept it" not in first
+    assert record.output.failure_mode is FailureMode.PAGE_JUDGE_TIMEOUT
+
+
+def test_judge_exception_outcome_gets_missing_verdict_mark_and_mode(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.best_output = PageOutput(
+        page_num=1,
+        text="body kept after judge crash",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_outcome=JUDGE_OUTCOME_EXCEPTION,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert "did not finish: crashed" in first
+    assert "did not accept it" not in first
+    assert record.output.failure_mode is FailureMode.PAGE_JUDGE_EXCEPTION
 
 
 def test_table_rejected_success_audit_false_is_demoted_and_marked(tmp_path: Path) -> None:
