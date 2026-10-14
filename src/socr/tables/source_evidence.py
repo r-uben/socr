@@ -45,6 +45,19 @@ _MIN_CONTENT_TOKEN_LEN: int = 3
 # large images; the crop pass re-renders at this DPI before optional tesseract.
 _EVIDENCE_OCR_DPI: int = 150
 
+# Wall-clock bound for ONE pytesseract subprocess call (a page or a crop; a page
+# with several crops can spend this bound once per call). pytesseract 0.3.13
+# defaults ``timeout=0``, which is an unbounded ``proc.communicate()``; after
+# #1135 moved the witness outside the page-judge deadline a wedged tesseract
+# could hang the page. Derived 2026-10-13 from the 181 (doc, page) pairs in
+# ``scratch/routing-baseline/witness_detail_out.json``, rendered at
+# ``_EVIDENCE_OCR_DPI`` against ``witness-pdfs/``. All 181 pages timed
+# (min 0.095 s, p50 0.752 s, p95 1.568 s, p99 1.789 s, max 2.326 s).
+# Timeout is ``ceil(p99 * 2.0)`` — the 2.0 is the same headroom as
+# ``tables.extract._CROP_WALL_CLOCK_MULTIPLIER`` — which is 4 s and already
+# above ``ceil(max)``. Expire maps to ``WITNESS_EXEC_ERROR``.
+TESSERACT_WITNESS_TIMEOUT_SEC: float = 4.0
+
 # Alphabetic runs in evidence text: at least _MIN_CONTENT_TOKEN_LEN chars.
 _CONTENT_TOKEN_RE = re.compile(rf"[A-Za-z][A-Za-z0-9\-]{{{_MIN_CONTENT_TOKEN_LEN - 1},}}")
 
@@ -786,7 +799,7 @@ def classical_ocr_with_state(pix) -> tuple[str, str, str]:
         from PIL import Image
 
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        text = pytesseract.image_to_string(img) or ""
+        text = pytesseract.image_to_string(img, timeout=TESSERACT_WITNESS_TIMEOUT_SEC) or ""
     except Exception as exc:
         logger.debug("classical OCR failed: %s", exc)
         not_found = getattr(pytesseract, "TesseractNotFoundError", ())

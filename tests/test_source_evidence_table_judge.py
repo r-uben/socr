@@ -403,7 +403,10 @@ class TestBuildPageJudgeWiring:
 
         assert isinstance(judge, SourceEvidenceTableJudge)
         assert isinstance(judge._inner, NativeTableVerifierJudge)
-        assert isinstance(judge._inner._inner, HeuristicPageJudge)
+        # #1128/#1135: the model leaf sits inside the deadline; local
+        # evidence wrappers stay outside.
+        assert judge._inner._inner.__class__.__name__ == "_TimeoutJudge"
+        assert isinstance(judge._inner._inner._inner, HeuristicPageJudge)
 
 
 # --------------------------------------------------------------------------

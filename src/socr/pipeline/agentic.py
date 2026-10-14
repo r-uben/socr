@@ -245,9 +245,11 @@ def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
     """The chain inside ``SourceEvidenceTableJudge``, deadline kept.
 
     Peels only ``SourceEvidenceTableJudge`` (re-entering it would reject the
-    same table again). A ``_TimeoutJudge`` wrapper is rebuilt around the
-    peeled inner so the promotion call still has the deadline and the
-    timeout callback. Native + circuit-breaker stay inside that inner.
+    same table again). Production (#1128/#1135) is
+    ``SE(Native(_TimeoutJudge(leaf)))``: peeling SE leaves Native around the
+    leaf deadline. An older ``_TimeoutJudge(SE(...))`` wrap is still
+    collected and rebuilt around the peeled inner so promotion keeps the
+    deadline and the timeout callback. Native + circuit-breaker stay.
     """
     if judge is None:
         return None
