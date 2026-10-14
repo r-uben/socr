@@ -27,7 +27,7 @@ import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -158,13 +158,9 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
     assert resumed is None, (
         f"A judge-rejected best-effort page must not be restored on resume: {resumed!r}"
     )
-    assert [ev.kind for ev in state.events if ev.page_num == 1].count(
-        "resume_ledger_audit_reject"
-    ) == 1
-    pipeline._load_terminal_page(state, 1, out_dir)
-    assert [ev.kind for ev in state.events if ev.page_num == 1].count(
-        "resume_ledger_audit_reject"
-    ) == 1
+    # #1129 demotes the winner to WARNING before flush; GH-161 fires only on
+    # SUCCESS + judge refusal, not on the demoted WARNING shape.
+    assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]
 
 
 def test_error_status_audit_false_emits_no_resume_ledger_event(tmp_path: Path) -> None:
@@ -240,3 +236,62 @@ def test_audit_passed_success_page_is_still_resume_skippable(tmp_path: Path) -> 
     assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"], (
         "A clean page must not be reported as judge-rejected"
     )
+
+
+def test_native_fallback_warning_audit_false_emits_no_resume_ledger_event(
+    tmp_path: Path,
+) -> None:
+    pdf_path = _real_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = True
+    ps.native_text = "native fallback body"
+    fallback = PageOutput(
+        page_num=1,
+        text="native fallback body",
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=False,
+        failure_mode=FailureMode.NONE,
+    )
+    ps.attempts.append(fallback)
+    ps.best_output = fallback
+    pipeline._flush_page_fragment(state, 1, fallback.text, out_dir)
+    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    pipeline._load_terminal_page(state, 1, out_dir)
+    assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]
+
+
+def test_judge_accepted_table_unverified_warning_emits_no_resume_ledger_event(
+    tmp_path: Path,
+) -> None:
+    from socr.core.result import JUDGE_OUTCOME_COMPLETED
+
+    pdf_path = _real_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+    demoted = PageOutput(
+        page_num=1,
+        text="judge accepted then ladder demoted",
+        status=PageStatus.WARNING,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=True,
+        judge_reason="faithful",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        failure_mode=FailureMode.TABLE_UNVERIFIED,
+    )
+    ps.attempts.append(demoted)
+    ps.best_output = demoted
+    pipeline._flush_page_fragment(state, 1, demoted.text, out_dir)
+    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    assert pipeline._load_terminal_page(state, 1, out_dir) is None
+    assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]

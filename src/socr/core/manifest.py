@@ -4287,13 +4287,25 @@ def _positive_judge_refusal_evidence(output: PageOutput) -> bool:
     """True when the page judge refused, not when C3 demoted a judge-accepted winner.
 
     Refusal is proven only by ``rejection_class`` (#262) or ``judge_accepted is
-    False`` (stamped from ``att.accepted`` in ``orchestrator.py`` and never
-    rewritten by demotion). ``judge_reason`` is banner text only, never evidence.
-    ``judge_accepted is None`` (legacy sidecars) never claims a refusal.
+    False`` (stamped from ``AcceptDecision.accept`` in ``agentic.route_page`` at
+    judge time and never rewritten by #1124 demotion). ``judge_reason`` is banner
+    text only, never evidence. ``judge_accepted is None`` (legacy sidecars) never
+    claims a refusal.
     """
     if (getattr(output, "rejection_class", "") or "").strip():
         return True
     return getattr(output, "judge_accepted", None) is False
+
+
+def judge_refusal_evidence_from_winning(winning: dict) -> bool:
+    """Sidecar ``winning_output`` dict variant of :func:`_positive_judge_refusal_evidence`."""
+    if (str(winning.get("rejection_class", "") or "")).strip():
+        return True
+    ja = winning.get("judge_accepted")
+    return type(ja) is bool and ja is False
+
+
+_JUDGE_REFUSAL_NO_REASON_RECORDED = "the page judge refused it; no reason was recorded"
 
 
 def _unaccepted_mark_reason_from_output(output: PageOutput) -> str | None:
@@ -4316,7 +4328,10 @@ def _unaccepted_mark_reason_from_output(output: PageOutput) -> str | None:
     reason = (getattr(output, "judge_reason", "") or "").strip()
     if reason:
         return reason
-    return (getattr(output, "rejection_class", "") or "").strip() or None
+    rejection = (getattr(output, "rejection_class", "") or "").strip()
+    if rejection:
+        return rejection
+    return _JUDGE_REFUSAL_NO_REASON_RECORDED
 
 
 def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
@@ -4338,6 +4353,11 @@ _UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES: frozenset[SelectionProvenance] = froze
         SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
         SelectionProvenance.BEST_ATTEMPT_FLAGGED,
         SelectionProvenance.WHOLE_DOC_SECTION,
+        # #259 / D3 model-kept endings ship judge-refused bytes with audit_passed
+        # still false on the attempt; refusal evidence is rejection_class or
+        # judge_accepted, not a separate top mark today.
+        SelectionProvenance.FLAGGED_MODEL_KEPT,
+        SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,
     }
 )
 

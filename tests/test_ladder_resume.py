@@ -195,7 +195,7 @@ class TestRejectedSkipsAndKeeps:
             text=body,
             status=PageStatus.SUCCESS,
             engine="qwen",
-            audit_passed=False,
+            audit_passed=True,
             judge_accepted=True,
             judge_outcome=JUDGE_OUTCOME_COMPLETED,
             judge_reason=accept_reason,

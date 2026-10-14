@@ -33,6 +33,7 @@ import pytest
 
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
+    UNACCEPTED_OUTPUT_MARK_RE,
     _winning_page_output,
     canonical_page_texts,
     d3_floor_kept_model_output,
@@ -152,7 +153,8 @@ def test_cached_grid_ships_instead_of_the_d3_marker(tmp_path: Path) -> None:
     # assertion -- the model's reading is what ships, whole and unedited -- is
     # asserted exactly.
     assert MODEL_PAGE.strip() in winner.text, winner.text
-    assert winner.text.startswith(MODEL_PAGE.strip()), winner.text
+    lines = winner.text.splitlines()
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(lines[0]), winner.text
     assert winner.status != PageStatus.SUCCESS, winner.status
 
 

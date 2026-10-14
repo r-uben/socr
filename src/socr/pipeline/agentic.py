@@ -386,6 +386,7 @@ def promote_unchecked_table_attempt(
             failure_mode=FailureMode.NONE,
             error="",
             judge_outcome=JUDGE_OUTCOME_COMPLETED,
+            judge_accepted=True,
         )
         att.output = out
         att.accepted = True
@@ -756,6 +757,12 @@ def route_page(
         else:
             output.judge_outcome = JUDGE_OUTCOME_COMPLETED
             output.table_acceptance_credential = None
+        # #1129 r9: stamp the judge verdict here; #1124 may later set att.accepted
+        # False without changing what the judge said.
+        if decision.accept:
+            output.judge_accepted = True
+        elif not missing_verdict:
+            output.judge_accepted = False
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,

@@ -10077,7 +10077,6 @@ class UnifiedPipeline:
                         for att in decision.attempts:
                             att.output.cost_usd = att.cost_usd
                             att.output.audit_passed = att.accepted
-                            att.output.judge_accepted = att.accepted
                             att.output.provider_id = att.provider_id  # B3: agentic provenance
                             # GH-370: ``att.model``/``att.backend`` carry the rung's
                             # REGISTRY identity. The manifest's provenance fields must
@@ -12663,6 +12662,7 @@ class UnifiedPipeline:
             bo.failure_mode = candidate.failure_mode
             bo.rejection_class = candidate.rejection_class
             bo.audit_passed = True
+            bo.judge_accepted = True
             bo.judge_reason = decision.reason or ""
             # #713: a completed acceptance retires any earlier TYPED page-judge
             # outcome. Leaving a stale ``page_judge_timeout`` on an accepted
@@ -14319,7 +14319,12 @@ class UnifiedPipeline:
                 # WARNING) never needed.  Exactly ``True``, mirroring ``terminal``: a
                 # missing key or a non-bool is doubt, and doubt re-OCRs.
                 if winning.get("audit_passed") is not True:
-                    self._record_ledger_audit_reject(state, page_num, winning)
+                    from socr.core.manifest import judge_refusal_evidence_from_winning
+
+                    if winning.get(
+                        "status"
+                    ) == PageStatus.SUCCESS.value and judge_refusal_evidence_from_winning(winning):
+                        self._record_ledger_audit_reject(state, page_num, winning)
                     return None
 
                 # Other non-SUCCESS terminal shapes (native fallback WARNING, etc.)
@@ -14528,15 +14533,16 @@ class UnifiedPipeline:
             ):
                 return
             engine = str(winning.get("engine", "") or "")
+            status = str(winning.get("status", "") or "unknown")
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind=kind,
                     engine=engine,
                     detail=(
-                        "terminal ledger entry was SUCCESS but audit_passed=False "
-                        "(judge-rejected content); refusing the resume skip and "
-                        "re-OCRing the page"
+                        f"terminal ledger entry was {status} with audit_passed=False "
+                        "(the judge refused this content); refusing the resume skip "
+                        "and re-OCRing the page"
                     ),
                     data={
                         "status": str(winning.get("status", "")),

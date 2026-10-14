@@ -32,13 +32,21 @@ from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
+    REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     FailureMode,
     PageOutput,
     PageStatus,
 )
+from socr.core.providers import PROFILE_GEMINI
 from socr.core.state import DocumentState
-from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+from socr.pipeline.agentic import (
+    AcceptDecision,
+    NativeTableVerifierJudge,
+    PageDecision,
+    ProviderAttempt,
+    settle_scanned_table_decision,
+)
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 _REJECT_REASON = "judge rejected: cuts off mid-sentence"
@@ -213,6 +221,7 @@ def test_process_judge_rejects_every_rung_ships_warning_and_mark(tmp_path: Path)
     assert sidecar["status"] == PageStatus.WARNING.value
     assert sidecar["winning_output"]["audit_passed"] is False
     assert sidecar["winning_output"]["status"] == PageStatus.WARNING.value
+    assert sidecar["winning_output"]["judge_accepted"] is False
 
 
 def test_process_judge_raises_every_rung_ships_warning_and_mark(tmp_path: Path) -> None:
@@ -816,7 +825,7 @@ def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> 
         text="judge accepted, ladder rejected",
         status=PageStatus.SUCCESS,
         engine="qwen",
-        audit_passed=False,
+        audit_passed=True,
         judge_accepted=True,
         judge_reason="minor spacing",
         judge_outcome=JUDGE_OUTCOME_COMPLETED,
@@ -824,10 +833,11 @@ def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> 
     record = _select_and_finalize_page(state, 1)
     assert record.output.judge_accepted is True
     assert record.output.audit_passed is False
+    assert record.output.status is PageStatus.WARNING
     assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
 
 
-def test_judge_accepted_survives_best_attempt_and_whole_doc_paths(tmp_path: Path) -> None:
+def test_judge_accepted_survives_best_attempt_path(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page()
@@ -850,51 +860,59 @@ def test_judge_accepted_survives_best_attempt_and_whole_doc_paths(tmp_path: Path
     flagged = _select_and_finalize_page(state, 1)
     assert flagged.output.judge_accepted is True
 
-    state2 = DocumentState(handle=DocumentHandle.from_path(pdf))
-    ps2 = state2.pages[1]
-    ps2.best_output = None
-    state2.whole_doc_attempts.append(
-        PageOutput(
-            page_num=0,
-            text="## Page 1\n\nwhole doc",
-            status=PageStatus.WARNING,
-            engine="cli",
-            audit_passed=False,
-            judge_accepted=True,
-        )
-    )
-    whole = _whole_doc_page_texts(state2)
-    whole_record = _select_and_finalize_page(state2, 1, whole_doc=whole)
-    assert whole_record.output.judge_accepted is True
-
     round_tripped = PageOutput.from_dict(flagged.output.to_dict())
     assert round_tripped.judge_accepted is True
 
 
-def test_judge_accepted_none_with_reason_does_not_imply_refusal(tmp_path: Path) -> None:
-    pdf = tmp_path / "doc.pdf"
-    doc = fitz.open()
-    doc.new_page()
-    doc.save(pdf)
-    doc.close()
-    state = DocumentState(handle=DocumentHandle.from_path(pdf))
-    p = state.pages[1]
-    p.is_born_digital = False
-    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
-    p.best_output = PageOutput(
+def test_unaccepted_reason_fixed_when_refusal_has_no_text(tmp_path: Path) -> None:
+    from socr.core.manifest import _unaccepted_mark_reason_from_output
+
+    out = PageOutput(
         page_num=1,
-        text="legacy-shaped sidecar body",
+        text="body",
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
-        judge_reason="faithful",
-        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        judge_accepted=False,
+        judge_reason="",
+        rejection_class="",
     )
+    assert _unaccepted_mark_reason_from_output(out) == (
+        "the page judge refused it; no reason was recorded"
+    )
+
+
+def test_process_judge_refusal_empty_reason_still_marks(tmp_path: Path) -> None:
+    def _reject(self, output, provider):
+        return AcceptDecision(accept=False, reason="")
+
+    _result, out_dir, _pipeline, _pdf = _run_scanned_process(tmp_path, assess_side_effect=_reject)
+    body = (out_dir / "doc" / "pages" / "00001.md").read_text(encoding="utf-8")
+    first = body.splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert "no reason was recorded" in first
+
+
+def test_flagged_model_kept_judge_refusal_gets_unaccepted_mark(tmp_path: Path) -> None:
+    import test_gh259_flagged_model_table_wins as gh259
+
+    MODEL_TABLE = gh259.MODEL_TABLE
+    _born_digital_pdf = gh259._born_digital_pdf
+    _state = gh259._state
+
+    state = _state(_born_digital_pdf(tmp_path), model_text=MODEL_TABLE)
+    model = state.pages[1].best_output
+    model.judge_accepted = False
+    model.judge_reason = ""
     record = _select_and_finalize_page(state, 1)
-    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+    _out, tag = _select_page_output_tagged(state, 1)
+    assert tag is SelectionProvenance.FLAGGED_MODEL_KEPT
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert REJECTION_AMBIGUOUS_DEFERRED in first
 
 
-def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> None:
+def test_unverifiable_table_model_kept_judge_refusal_gets_mark(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page()
@@ -902,63 +920,105 @@ def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> 
     doc.close()
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
     p = state.pages[1]
-    p.is_born_digital = False
-    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
-    p.best_output = PageOutput(
+    p.is_born_digital = True
+    p.has_tables = True
+    p.native_table_structure_failed = True
+    p.native_table_unverifiable = True
+    p.native_text = "| n | v |\n| --- | --- |\n| 1 | 2 |"
+    model = PageOutput(
         page_num=1,
-        text="judge accepted, ladder rejected",
+        text="| n | v |\n| --- | --- |\n| 1 | 2 |",
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
+        rejection_class=REJECTION_AMBIGUOUS_DEFERRED,
+        judge_reason="",
+    )
+    p.attempts.append(model)
+    p.best_output = model
+    record = _select_and_finalize_page(state, 1)
+    _out, tag = _select_page_output_tagged(state, 1)
+    assert tag is SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT
+    assert UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+
+
+def test_settle_scanned_table_unaccept_does_not_rewrite_judge_accepted() -> None:
+    class _RejectInner:
+        def assess(self, output, provider):
+            return AcceptDecision(accept=False, reason="promotion refused")
+
+    winner = PageOutput(
+        page_num=1,
+        text="| a | 1 |\n| --- | --- |\n| b | 9.9 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        table_disputed=True,
+        table_disputed_values=("9.9",),
         judge_accepted=True,
-        judge_reason="minor spacing",
-        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        judge_reason="heuristics passed",
     )
-    record = _select_and_finalize_page(state, 1)
-    assert record.output.judge_accepted is True
-    assert record.output.audit_passed is False
-    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+    marked = PageOutput(
+        page_num=1,
+        text="| a | 1 |\n| --- | --- |\n| b | 9.9 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        table_disputed=True,
+        table_disputed_values=("9.9",),
+        judge_accepted=True,
+    )
+    decision = PageDecision(
+        page_num=1,
+        final_output=winner,
+        attempts=[
+            ProviderAttempt(
+                engine=EngineType.QWEN,
+                output=winner,
+                cost_usd=0.0,
+                accepted=True,
+                reason="heuristics passed",
+            ),
+            ProviderAttempt(
+                engine=EngineType.QWEN,
+                output=marked,
+                cost_usd=0.0,
+                accepted=False,
+                reason="table disputed",
+            ),
+        ],
+        accepted=True,
+    )
+    settle_scanned_table_decision(decision, inner=_RejectInner())
+    assert decision.attempts[0].accepted is False
+    assert decision.attempts[0].output.judge_accepted is True
 
 
-def test_judge_accepted_survives_best_attempt_and_whole_doc_paths(tmp_path: Path) -> None:
+def test_crop_rejudge_acceptance_sets_judge_accepted(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
-    doc.new_page()
+    doc.new_page().insert_text((72, 72), "crop page")
     doc.save(pdf)
     doc.close()
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
-    p = state.pages[1]
-    p.best_output = None
-    p.attempts.append(
-        PageOutput(
-            page_num=1,
-            text="flagged attempt",
-            status=PageStatus.WARNING,
-            engine="qwen",
-            audit_passed=False,
-            judge_accepted=True,
-            judge_reason="faithful",
-        )
+    ps = state.pages[1]
+    bo = PageOutput(
+        page_num=1,
+        text="patched table text after crop",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=False,
+        judge_reason="earlier refusal",
     )
-    flagged = _select_and_finalize_page(state, 1)
-    assert flagged.output.judge_accepted is True
+    ps.best_output = bo
 
-    state2 = DocumentState(handle=DocumentHandle.from_path(pdf))
-    ps2 = state2.pages[1]
-    ps2.best_output = None
-    state2.whole_doc_attempts.append(
-        PageOutput(
-            page_num=0,
-            text="## Page 1\n\nwhole doc",
-            status=PageStatus.WARNING,
-            engine="cli",
-            audit_passed=False,
-            judge_accepted=True,
-        )
+    class _Accept:
+        def assess(self, output, provider):
+            return AcceptDecision(accept=True, reason="heuristics passed")
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(agentic=True, judge_backend="heuristic", quiet=True, write_manifest=False)
     )
-    whole = _whole_doc_page_texts(state2)
-    whole_record = _select_and_finalize_page(state2, 1, whole_doc=whole)
-    assert whole_record.output.judge_accepted is True
-
-    round_tripped = PageOutput.from_dict(flagged.output.to_dict())
-    assert round_tripped.judge_accepted is True
+    pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old text", _Accept(), PROFILE_GEMINI)
+    assert bo.judge_accepted is True
+    assert bo.audit_passed is True
