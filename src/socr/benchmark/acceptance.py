@@ -27,7 +27,9 @@ Per lane (one function each, so a later per-page verdict record replaces them lo
 - ``qwen``: ``judge_outcome == page_judge_completed``; no disputed, unverifiable or
   label-unverified table; and not a table-only acceptance (``judge_reason`` starting
   ``native_table_verifier:`` means the page judge was bypassed).
-- ``native``: a native coverage witness event with ``data.result == pass``.
+- ``native``: the #1050 step-1 ink-vs-text-layer verdict ``text_coverage == passed`` on the
+  page sidecar (``socr.core.text_coverage.VERDICT_PASSED``). ``flagged``, ``unknown`` or absent
+  is not a check.
 - ``native+equations``: the native rule, and ``semantic_fidelity_verified`` true on every
   ``equation_region_reading_attached`` event.
 - ``native+math``: never CHECKED; it must be MARKED.
@@ -60,8 +62,8 @@ missing surface is UNKNOWN, which is a violation. ``metadata.json`` carries no p
 page counts today: that is the document-level class ``metadata_counts_missing``, kept out
 of the meter and the exit status.
 
-Evidence events are provisional names (``EVIDENCE_*``): no native or chart coverage
-witness exists in socr yet (#1050 step 1), so today every such page is a violation.
+The chart evidence events are provisional names (``EVIDENCE_*``): no chart coverage witness
+exists in socr yet, so today every such page is a violation.
 """
 
 from __future__ import annotations
@@ -93,6 +95,7 @@ from socr.core.manifest import (
     judge_timeout_note,
 )
 from socr.core.result import JUDGE_OUTCOME_COMPLETED, FailureMode, PageStatus
+from socr.core.text_coverage import VERDICT_PASSED
 
 # --- violation classes -----------------------------------------------------------------
 UNACCOUNTED = "unaccounted"
@@ -169,7 +172,6 @@ EVENT_BLANK_PAGE = "blank_page"
 EVENT_EQUATION_ATTACHED = "equation_region_reading_attached"
 EVENT_VALUES_NOT_TRANSCRIBED = "visual_values_not_transcribed"
 #: Provisional: #1050 step 1 and the verdict record have not landed. Absent today.
-EVIDENCE_NATIVE_COVERAGE = "native_coverage_witness"
 EVIDENCE_FIGURE_TEXT = "figure_text_coverage"
 EVIDENCE_CHART_VALUES = "chart_values_check"
 EVIDENCE_PASS = "pass"
@@ -464,7 +466,9 @@ def rule_qwen(page: Page) -> list[str]:
 
 
 def rule_native(page: Page) -> list[str]:
-    return [] if _evidence_passed(page, EVIDENCE_NATIVE_COVERAGE) else [NATIVE_UNCHECKED]
+    # The orchestrator writes the verdict sparsely (absent when the check did not run), so
+    # an absent key is no evidence, exactly like ``flagged`` and ``unknown``.
+    return [] if page.sidecar.get("text_coverage") == VERDICT_PASSED else [NATIVE_UNCHECKED]
 
 
 def rule_native_equations(page: Page) -> list[str]:

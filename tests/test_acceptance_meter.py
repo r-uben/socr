@@ -13,6 +13,7 @@ from socr.benchmark import acceptance as acc
 from socr.core.blank_page import blank_page_marker
 from socr.core.manifest import DISPUTED_TABLE_MARK_RE, page_failed_marker
 from socr.core.result import JUDGE_OUTCOME_COMPLETED
+from socr.core.text_coverage import VERDICT_FLAGGED, VERDICT_PASSED, VERDICT_UNKNOWN
 
 DISPOSITION = {"ending": "model_output", "primary_reason": "accepted_output"}
 PASS_EVENT = {"data": {"result": acc.EVIDENCE_PASS}}
@@ -36,6 +37,7 @@ def page(
     events: list[dict] | None = None,
     wo_extra: dict | None = None,
     doc_text: str | None = None,
+    text_coverage: str | None = None,
 ) -> dict:
     """One synthetic page: the sidecar fields the meter reads plus its two Markdown surfaces."""
     wo = {
@@ -64,14 +66,13 @@ def page(
             "disposition": DISPOSITION,
             "winning_output": wo,
             "audit_events": events or [],
+            **({"text_coverage": text_coverage} if text_coverage is not None else {}),
         },
     }
 
 
 def checked_native(text: str = "Native text.") -> dict:
-    return page(
-        text, engine="native", events=[{"kind": acc.EVIDENCE_NATIVE_COVERAGE, **PASS_EVENT}]
-    )
+    return page(text, engine="native", text_coverage=VERDICT_PASSED)
 
 
 def write_doc(root: Path, stem: str, pages: list[dict], *, metadata: dict | None = None) -> Path:
@@ -152,6 +153,15 @@ def test_native_success_without_witness_differs_from_with_witness(tmp_path: Path
     assert ids(rep, acc.NATIVE_UNCHECKED) == {"d:1"}
 
 
+@pytest.mark.parametrize("verdict", [VERDICT_FLAGGED, VERDICT_UNKNOWN, None])
+def test_only_a_passed_coverage_verdict_checks_a_native_page(tmp_path: Path, verdict) -> None:
+    """#1050 step 1 writes ``text_coverage`` sparsely: passed / flagged / unknown / absent."""
+    rep = run_meter(
+        tmp_path, {"d": [page(engine="native", text_coverage=verdict), checked_native()]}
+    )
+    assert ids(rep, acc.NATIVE_UNCHECKED) == {"d:1"}
+
+
 def test_native_equations_overlap_counts_once_in_meter(tmp_path: Path) -> None:
     unverified = {
         "kind": acc.EVENT_EQUATION_ATTACHED,
@@ -165,10 +175,10 @@ def test_native_equations_overlap_counts_once_in_meter(tmp_path: Path) -> None:
 
 def test_native_equations_verified_with_witness_is_checked(tmp_path: Path) -> None:
     events = [
-        {"kind": acc.EVIDENCE_NATIVE_COVERAGE, **PASS_EVENT},
         {"kind": acc.EVENT_EQUATION_ATTACHED, "data": {"semantic_fidelity_verified": True}},
     ]
-    rep = run_meter(tmp_path, {"d": [page(engine="native+equations", events=events)]})
+    eq = page(engine="native+equations", events=events, text_coverage=VERDICT_PASSED)
+    rep = run_meter(tmp_path, {"d": [eq]})
     assert rep.violating_ids() == set()
 
 
