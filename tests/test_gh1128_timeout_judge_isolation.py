@@ -437,12 +437,20 @@ def test_evidence_written_before_leaf_deadline_survives_stall(tmp_path: Path, mo
     assert _LABEL_NOTE in list(win.get("audit_notes") or [])
 
 
+# The hung stub's sleep, and the probe's outer bound. The bound covers interpreter
+# start plus ``import socr`` (fitz loads) on a slow CI runner, so it must be well
+# above that; it must stay below the hung stub's sleep so a no-timeout mutant is
+# still caught. Half the sleep satisfies both.
+_HUNG_STUB_SLEEP_SEC = 30
+_PROBE_OUTER_TIMEOUT_SEC = _HUNG_STUB_SLEEP_SEC / 2
+
+
 def test_tesseract_witness_timeout_fails_closed_without_hanging() -> None:
     """#1128 r4 P1: a finite witness timeout returns could-not-read; no hang.
 
     The child injects a pytesseract stub (CI has no ``scanned`` extra) that
     raises when ``timeout`` is passed and sleeps otherwise. Production
-    returns ``exec_error`` inside the outer 2 s bound. A no-timeout mutant
+    returns ``exec_error`` inside the outer bound (``_PROBE_OUTER_TIMEOUT_SEC``). A no-timeout mutant
     is killed with the child, so the stub never stays in this process's
     ``sys.modules``.
     """
@@ -466,7 +474,7 @@ class _Pix:
 def fake_image_to_string(img, timeout=0, **_kw):
     if timeout:
         raise RuntimeError("Tesseract process timeout")
-    time.sleep(30)
+    time.sleep(__HUNG_SLEEP__)
     return "hung"
 
 stub = types.ModuleType("pytesseract")
@@ -480,6 +488,7 @@ assert state == WITNESS_EXEC_ERROR
 assert "timeout" in detail.lower()
 print("OK", flush=True)
 """
+    child = child.replace("__HUNG_SLEEP__", str(_HUNG_STUB_SLEEP_SEC))
     env = {**os.environ, "PYTHONPATH": str(src)}
     proc = subprocess.Popen(
         [sys.executable, "-c", child],
@@ -489,7 +498,7 @@ print("OK", flush=True)
         text=True,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=2.0)
+        stdout, stderr = proc.communicate(timeout=_PROBE_OUTER_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()
