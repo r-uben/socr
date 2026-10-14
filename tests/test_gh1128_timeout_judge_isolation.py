@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
-import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,12 +34,7 @@ from socr.pipeline.agentic import (
 )
 from socr.pipeline import orchestrator as orch
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.tables.source_evidence import (
-    TESSERACT_WITNESS_TIMEOUT_SEC,
-    WITNESS_EXEC_ERROR,
-    SourceEvidenceResult,
-    classical_ocr_with_state,
-)
+from socr.tables.source_evidence import SourceEvidenceResult
 
 # See module docstring: counted on current main before the isolation change.
 _LATE_MUTATION_REPEATS = 15
@@ -109,6 +105,16 @@ class _OnTimeMutateJudge:
 class _BrokenLeaf:
     def assess(self, output, provider):
         raise RuntimeError("judge HTTP 404")
+
+
+class _InnerTimeoutLeaf:
+    """Finishes inside the wrapper deadline, then raises builtin TimeoutError."""
+
+    def assess(self, output, provider):
+        output.status = PageStatus.WARNING
+        output.failure_mode = FailureMode.HALLUCINATION
+        output.text = (output.text or "") + "\nINNER_TIMEOUT"
+        raise TimeoutError("leaf deadline")
 
 
 class _SuccessEngine:
@@ -236,6 +242,25 @@ def test_on_time_result_is_adopted() -> None:
     assert w.accept is p.accept is True
     assert live.text == direct.text
     assert "ON_TIME" in live.text
+    assert live.status is PageStatus.WARNING
+    assert live.failure_mode is FailureMode.HALLUCINATION
+
+
+def test_inner_timeout_error_is_wrapped_and_adopted() -> None:
+    """#1138: an inner builtin TimeoutError is wrapped; on_timeout fires; writes stay."""
+    fired: list[int] = []
+    live = PageOutput(page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen")
+    judge = UnifiedPipeline._TimeoutJudge(
+        _InnerTimeoutLeaf(),
+        timeout_sec=5.0,
+        on_timeout=lambda page_num: fired.append(page_num),
+    )
+    with pytest.raises(PageJudgeTimeoutError) as excinfo:
+        judge.assess(live, MagicMock())
+    assert str(excinfo.value).startswith("page judge timeout:")
+    assert "after " not in str(excinfo.value)
+    assert fired == [1]
+    assert "INNER_TIMEOUT" in live.text
     assert live.status is PageStatus.WARNING
     assert live.failure_mode is FailureMode.HALLUCINATION
 
@@ -415,56 +440,64 @@ def test_evidence_written_before_leaf_deadline_survives_stall(tmp_path: Path, mo
 def test_tesseract_witness_timeout_fails_closed_without_hanging() -> None:
     """#1128 r4 P1: a finite witness timeout returns could-not-read; no hang.
 
-    The stub raises immediately when ``timeout`` is passed (pytesseract's
-    expire) and sleeps otherwise. Production passes
-    ``TESSERACT_WITNESS_TIMEOUT_SEC``; a mutant that omits it hangs until the
-    watchdog fails the test rather than blocking CI.
+    The child injects a pytesseract stub (CI has no ``scanned`` extra) that
+    raises when ``timeout`` is passed and sleeps otherwise. Production
+    returns ``exec_error`` inside the outer 2 s bound. A no-timeout mutant
+    is killed with the child, so the stub never stays in this process's
+    ``sys.modules``.
     """
+    src = Path(__file__).resolve().parents[1] / "src"
+    child = r"""
+import sys
+import time
+import types
 
-    class _Pix:
-        width = 4
-        height = 4
-        samples = bytes(4 * 4 * 3)
+from socr.tables.source_evidence import (
+    TESSERACT_WITNESS_TIMEOUT_SEC,
+    WITNESS_EXEC_ERROR,
+    classical_ocr_with_state,
+)
 
-    def fake_image_to_string(img, timeout=0, **_kw):
-        if timeout:
-            raise RuntimeError("Tesseract process timeout")
-        time.sleep(30)
-        return "hung"
+class _Pix:
+    width = 4
+    height = 4
+    samples = bytes(4 * 4 * 3)
 
-    # CI installs only the ``dev`` extra, without pytesseract (``scanned``), so the
-    # witness module is a stub injected into ``sys.modules``. Skipping instead
-    # would leave the no-timeout mutant alive in CI.
-    stub = types.ModuleType("pytesseract")
-    stub.image_to_string = fake_image_to_string
-    stub.TesseractNotFoundError = type("TesseractNotFoundError", (OSError,), {})
+def fake_image_to_string(img, timeout=0, **_kw):
+    if timeout:
+        raise RuntimeError("Tesseract process timeout")
+    time.sleep(30)
+    return "hung"
 
-    def _call() -> tuple[str, str, str]:
-        with patch.dict(sys.modules, {"pytesseract": stub}):
-            return classical_ocr_with_state(_Pix())
-
-    assert TESSERACT_WITNESS_TIMEOUT_SEC > 0
-    # Daemon thread so a hung worker cannot hold pytest after the 2 s join.
-    box: list[tuple[str, str, str] | BaseException] = []
-
-    def _run() -> None:
-        try:
-            box.append(_call())
-        except BaseException as exc:
-            box.append(exc)
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-    worker.join(2.0)
-    if worker.is_alive():
+stub = types.ModuleType("pytesseract")
+stub.image_to_string = fake_image_to_string
+stub.TesseractNotFoundError = type("TesseractNotFoundError", (OSError,), {})
+sys.modules["pytesseract"] = stub
+assert TESSERACT_WITNESS_TIMEOUT_SEC > 0
+text, state, detail = classical_ocr_with_state(_Pix())
+assert text == ""
+assert state == WITNESS_EXEC_ERROR
+assert "timeout" in detail.lower()
+print("OK", flush=True)
+"""
+    env = {**os.environ, "PYTHONPATH": str(src)}
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         pytest.fail(
             "classical_ocr_with_state hung: image_to_string was called without a finite timeout"
         )
-    assert box and not isinstance(box[0], BaseException)
-    text, state, detail = box[0]
-    assert text == ""
-    assert state == WITNESS_EXEC_ERROR
-    assert "timeout" in detail.lower()
+    assert proc.returncode == 0, stderr or stdout
+    assert "OK" in stdout
 
 
 def test_contradicted_table_never_ships_success_unmarked(tmp_path: Path, monkeypatch) -> None:

@@ -865,16 +865,20 @@ def test_flattened_table_outranks_coverage_mode(tmp_path: Path, providers, unkno
 
 
 @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []])
-def test_figure_words_unread_ranks_between_coverage_and_table(tmp_path: Path, providers) -> None:
+@pytest.mark.parametrize("unknown_via", [None, "doc_open", "crop_save"])
+def test_figure_words_unread_ranks_between_coverage_and_table(
+    tmp_path: Path, providers, unknown_via
+) -> None:
     """#1134: figure outranks coverage and loses to a flattened table.
 
     Same-process pair: figure-suspect only vs figure+table. Removing the
     figure step leaves coverage on the first run; swapping table and
-    figure leaves figure on the second.
+    figure leaves figure on the second. The uncovered-text mark proves
+    the coverage branch ran (flagged and both unknown paths).
     """
     pdf = _vector_unread_pdf(tmp_path / "fig-rank.pdf")
 
-    def _rec(*, table: bool, tag: str) -> dict:
+    def _rec(*, table: bool, tag: str) -> tuple[dict, object]:
         pipe = _pipeline(check_text_coverage=True)
         patches = [
             patch(
@@ -896,19 +900,40 @@ def test_figure_words_unread_ranks_between_coverage_and_table(tmp_path: Path, pr
                     ),
                 ]
             )
+        if unknown_via == "doc_open":
+            patches.append(
+                patch(
+                    "socr.core.text_coverage.coverage_for_document",
+                    side_effect=RuntimeError("open boom"),
+                )
+            )
+        elif unknown_via == "crop_save":
+            patches.append(
+                patch(
+                    "socr.core.text_coverage.render_region_png",
+                    side_effect=RuntimeError("crop boom"),
+                )
+            )
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            _run(pipe, pdf, tmp_path / tag, providers)
-        return json.loads(next((tmp_path / tag).rglob("pages/00001.json")).read_text())
+            result = _run(pipe, pdf, tmp_path / tag, providers)
+        rec = json.loads(next((tmp_path / tag).rglob("pages/00001.json")).read_text())
+        return rec, result
 
-    figure_only = _rec(table=False, tag="fig")
-    both = _rec(table=True, tag="both")
+    figure_only, fig_doc = _rec(table=False, tag="fig")
+    both, both_doc = _rec(table=True, tag="both")
     assert figure_only["failure_mode"] == FailureMode.FIGURE_WORDS_UNREAD.value
     assert both["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
-    assert figure_only["failure_mode"] != both["failure_mode"]
     assert figure_only["status"] == PageStatus.WARNING.value
     assert both["status"] == PageStatus.WARNING.value
+    for doc in (fig_doc, both_doc):
+        text = doc.pages[0].text or ""
+        if unknown_via is None:
+            assert uncovered_text_marker(1) in text
+        else:
+            assert uncovered_text_marker_no_image(1) in text
+            assert uncovered_text_marker(1) not in text
 
 
 def test_document_open_failure_is_unknown(tmp_path: Path) -> None:
