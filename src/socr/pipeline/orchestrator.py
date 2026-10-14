@@ -450,7 +450,11 @@ def _attempts_summary(ps) -> list[dict]:
         out.append(
             {
                 "engine": a.engine or "",
-                "accepted": bool(a.audit_passed),
+                "accepted": (
+                    a.judge_accepted
+                    if getattr(a, "judge_accepted", None) is not None
+                    else bool(a.audit_passed)
+                ),
                 "judge_outcome": a.judge_outcome or "",
                 "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
             }
@@ -10073,6 +10077,7 @@ class UnifiedPipeline:
                         for att in decision.attempts:
                             att.output.cost_usd = att.cost_usd
                             att.output.audit_passed = att.accepted
+                            att.output.judge_accepted = att.accepted
                             att.output.provider_id = att.provider_id  # B3: agentic provenance
                             # GH-370: ``att.model``/``att.backend`` carry the rung's
                             # REGISTRY identity. The manifest's provenance fields must
@@ -14292,11 +14297,11 @@ class UnifiedPipeline:
             is_credentialed_judge_timeout = self._resume_credential_holds(state, winning)
 
             if not (is_ladder_rejected or is_credentialed_judge_timeout):
-                # Status MUST be SUCCESS.  A page written terminal at assemble time
-                # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
-                # whose best_output is the ERROR attempt, or a flagged native fallback)
-                # is NOT a clean result — re-OCR it, never skip it.
-                if winning.get("status") != PageStatus.SUCCESS.value:
+                # Status MUST be SUCCESS before the GH-161 audit gate.  ERROR /
+                # cascade-halt pages with ``audit_passed=False`` must return None
+                # without ``resume_ledger_audit_reject`` (main behaviour).  #1129
+                # demoted pages are WARNING + audit false and are handled below.
+                if winning.get("status") == PageStatus.ERROR.value:
                     return None
 
                 # GH-161: the audit verdict MUST be an explicit pass.  Status alone is
@@ -14315,6 +14320,11 @@ class UnifiedPipeline:
                 # missing key or a non-bool is doubt, and doubt re-OCRs.
                 if winning.get("audit_passed") is not True:
                     self._record_ledger_audit_reject(state, page_num, winning)
+                    return None
+
+                # Other non-SUCCESS terminal shapes (native fallback WARNING, etc.)
+                # are not resume-skippable and do not emit the GH-161 event.
+                if winning.get("status") != PageStatus.SUCCESS.value:
                     return None
 
             # Read the authoritative body fragment.

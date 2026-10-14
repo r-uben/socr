@@ -1,102 +1,58 @@
-# #1129 — judge-rejected best effort demoted and marked
+# GH-1129 — unaccepted output demoted (#1142)
 
-## Problem
+## Round 7 (2026-10-14)
 
-On corpus run `23117187`, 385 pages shipped `status=success`, `failure_mode=none`, no
-in-text mark, with `audit_passed=false` and `disposition.primary_reason=unaccepted_output_kept`.
-`_select_page_output_tagged` returned `p.best_output` verbatim on `BEST_OUTPUT_UNVERIFIED`.
+**P0 — refusal evidence.** `_positive_judge_refusal_evidence` no longer treats every
+non-empty `judge_reason` as refusal. Production stamps accept-route reasons on every
+accepted attempt (`faithful`, `heuristics passed`, `native_table_verifier: EXACT_PASS`
+from `agentic.py`); those are excluded via `_JUDGE_ACCEPT_ROUTE_REASONS`. Refusal is
+proven by `rejection_class` or a non-accept `judge_reason`.
 
-## Fix
+**P1 — fixtures.** `test_ladder_resume` and `test_completed_without_refusal_evidence_*`
+parametrised over the three accept reasons with production-shaped sidecars.
 
-- `_finalize_best_output_unverified`: on a copy, `SUCCESS` → `WARNING` when `audit_passed` is
-  false; failure mode `audit_failed`, or `page_judge_timeout` when `judge_outcome` is a timeout.
-  Does not flip `audit_passed`.
-- `_kept_judge_rejection_page`: skips demotion/mark when `table_ladder_disposition` is a GH-353
-  terminal or `unchecked_table_kind` is set — resume re-selection otherwise mis-tags ladder pages
-  as `BEST_OUTPUT_UNVERIFIED`.
-- `_apply_unaccepted_output_mark` at the `_select_and_finalize_page` seam (#1048 pattern): first-line
-  `> [page unaccepted: …]` with trimmed `judge_reason`.
+**P2.** (a) `rejection_class` forwarded on `BEST_ATTEMPT_FLAGGED` and `WHOLE_DOC_SECTION`;
+(b) GH-161 `resume_ledger_audit_reject` recorded before the WARNING status gate;
+(c) unaccepted banner idempotence replaces regex-matched forged lines with the canonical
+`unaccepted_output_mark` bytes; (d) HTML tag stripper uses a tag-aware pattern so
+`values <5 and >3 compared` is preserved.
 
-## Failure mode choice
+**Replay (run 23117187, worktree finalize):** `sidecars_scanned=17091`;
+`success_and_audit_false_before=385`; `success_and_audit_false_after_finalize=0`;
+868 pages change status/text on replay (385 success→demoted, 477 warning, 6 error).
+On the 385 cohort, all 385 still earn the unaccepted mark after finalize (0 accept-route-only
+rows in that historical slice — every sidecar carries a non-accept `judge_reason`, plus 28
+with `rejection_class`).
 
-Reused `FailureMode.AUDIT_FAILED` for completed judge refusals/crashes (the sibling
-`BEST_ATTEMPT_FLAGGED` path already forwards attempt modes). `PAGE_JUDGE_TIMEOUT` when the typed
-outcome is a timeout — distinct from provider `TIMEOUT`.
+**Tests:** `7467 passed` (`scratch/routing-baseline/exec/1129/pytest-r7.txt`).
+**Ruff:** `uvx ruff@0.16.0 format --check .` clean after format.
+**Mutants:** `exec/1129/mutants-r7.txt` — m1–m4 kill their target tests (manual
+`pytest -c` patches; copied-tree runner needs repair).
 
-## Tests
+## Round 8 (2026-10-14)
 
-`tests/test_gh1129_unaccepted_output_demoted.py` — unit demotion/mark, hermetic `process()` on a
-scanned page (reject vs raise), resume gate.
+**P0 — `judge_accepted`.** New persisted `PageOutput.judge_accepted: bool | None`
+set from `att.accepted` beside `audit_passed` in `orchestrator.py` (~10075) for
+every agentic attempt; never rewritten by C3 demotion. Serialized in sidecar /
+blob (`to_dict` / `from_dict`), forwarded on `_WholeDoc`, `BEST_ATTEMPT_FLAGGED`,
+and `WHOLE_DOC_SECTION`. Refusal evidence is `judge_accepted is False` or non-empty
+`rejection_class` only; `judge_reason` is banner text. Removed `_JUDGE_ACCEPT_ROUTE_REASONS`.
+`attempts_summary.accepted` prefers `judge_accepted` when set.
 
-## Measurement
+**P2 — resume gate.** ERROR terminal pages return before the GH-161 audit gate (no
+`resume_ledger_audit_reject`); WARNING + `audit_passed=False` (#1129 demotion) still
+emit the event.
 
-Script: `scratch/routing-baseline/exec/1129/measure.py` on `runs_23117187/` sidecars.
+**385 split (run 23117187, SUCCESS + `audit_passed=false`):** All **385** have
+`attempts_summary` (written at sidecar flush via `_attempts_summary`, after routing
+stamps each attempt's `audit_passed` from `att.accepted` at ~10075; per-attempt
+rows are not rewritten when C3 demotes the winner's status). Every row shows
+`accepted: false` → **385 judge-refused** on the journal, **0 judge-accept +
+table-ladder demote** in this slice (`table_ladder_disposition` absent on all 385).
+Legacy sidecars lack `judge_accepted`; R8 finalize marks only **67** of 385
+(28 `rejection_class`, 39 missing-verdict `judge_outcome`); **318** keep demoted
+bytes without the unaccepted banner (`judge_reason` alone is not evidence).
 
-## Round 2 (Astra review)
-
-- **P0:** Replaced blanket ladder-terminal exemption with `_skip_unaccepted_mark_ladder_resume`
-  (only when the winner is already `WARNING` with a ladder `failure_mode`). Demotion always runs
-  for `audit_passed=false`.
-- **P1:** Disclosure provenances are `BEST_OUTPUT_UNVERIFIED`, `BEST_ATTEMPT_FLAGGED`, and
-  `WHOLE_DOC_SECTION`; mark requires `judge_reason` / `judge_outcome` (or `error`). `BEST_ATTEMPT_FLAGGED`
-  forwards judge fields from the source attempt.
-- **P1:** `_split_page_top_banners` / `_with_page_top_banners` make page-level banners idempotent.
-- **P1:** Restored gh161 legacy SUCCESS + `audit_passed=false` sidecar test; fixed resume test
-  `doc_dir` / fingerprint pipeline reuse; `autospec` on judge stubs.
-- **P1:** `measure.py` replays `_select_and_finalize_page` and reports changes by original status.
-- **P2:** `_neutralise_unaccepted_mark_reason` strips markdown/HTML from embedded judge reasons.
-
-## Round 3 (Astra r2)
-
-- **P1 disclosure:** Ladder-rejected pages get the judge-reason mark; skip only when an
-  unaccepted or (#1048) page-unchecked banner is already at the top (ladder + page-unchecked
-  on resume). `_WholeDoc` / `WHOLE_DOC_SECTION` forward judge fields.
-- **P1 resume:** `test_resume_never_treats_demoted_page_as_clean_success` passes pipeline
-  `output_dir` (not `doc/`); positive control proves accepted terminal pages still skip.
-- **P1 measurement:** Full replay over all **17,091** winners of run 23117187 (Astra's
-  round-3 replay of this final code): `success` + `audit_passed=false` **385 -> 0**;
-  **757** pages change (385 SUCCESS, 367 WARNING, 5 ERROR by original status) and
-  **16,334** are unchanged on text/status/failure_mode. The round-2 figures (759 changed,
-  7 ERROR) are historical: two ERROR pages already carry a recognised banner and no longer
-  get a duplicate. Every changed page keeps its full original text. A sidecar-state replay
-  does not prove full artifact byte identity.
-- **P2:** Judge reason embedded as Markdown inline code (reference-style `![x][y]` inert).
-
-## Round 4 (PR #1142 reviewer)
-
-- **Soft 1:** Removed `_skip_unaccepted_mark_ladder_resume` entirely; idempotency is the
-  existing unaccepted-mark check only. Ladder + `unchecked_table_kind` pages get both #1048
-  and judge-reason banners on the first finalize pass.
-- **Soft 2:** `audit_passed=false` with no judge signal still ships the unaccepted mark using
-  ``the page judge did not accept this reading; no reason was recorded``.
-- **Nit:** Dropped `_trim_unaccepted_mark_reason` alias.
-- **Mutants:** Reviewer's ``_skip`` always-false and ladder-branch-only mutants are **moot**
-  (helper deleted). New r4 mutants: ``restored-ladder-skip``, ``skip-no-mark-without-reason``.
-
-## Round 5 (PR #1142 reviewer r2)
-
-- **Blocker:** Restored the early return in ``_apply_unaccepted_output_mark`` when there is
-  no judge evidence (``judge_reason``, ``judge_outcome``, or ``error``). Round 4's
-  ``audit_passed=false``-alone fallback stamped a false refusal on ladder-terminal pages
-  whose C3 guard demoted a judge-accepted winner; resume then diverged from the first flush.
-  The round-4 ``resumed_page.audit_passed = True`` overrides in two tests **hid** that
-  regression and were **removed**.
-- **P2:** Typed missing-verdict outcomes use ``page_judge_timeout`` / ``page_judge_exception``
-  failure modes and "did not finish" banner wording (never "rejected").
-- **Docs:** ``OUTPUT.md`` lists ``BEST_ATTEMPT_FLAGGED`` and ``WHOLE_DOC_SECTION``; ERROR
-  winners stay ERROR.
-- **Mutants (r5):** ``fallback-without-judge-evidence``, ``exception-as-refusal``.
-
-## Round 6 (PR #1142 reviewer r3)
-
-- **Blocker:** Refusal mark only on positive evidence — ``judge_reason`` or
-  ``rejection_class`` (`agentic.py` / ``orchestrator.py``). ``JUDGE_OUTCOME_COMPLETED``
-  is stamped on accept and completed refusal alike; C3 ``audit_passed=false`` on
-  ``TABLE_REJECTED`` is not refusal evidence. Removed ``_NO_JUDGE_REASON_RECORDED``.
-- **Tests:** ``_seed_and_flush`` seeds ``judge_outcome=page_judge_completed``; resume
-  byte-identity parametrized over judge-accepted vs judge-refused.
-- **385 replay:** all 385 SUCCESS+``audit_false`` sidecars still demote to WARNING with
-  the unaccepted mark (0 misses under stricter predicate).
-- **Docs / nits:** ``OUTPUT.md`` states the real banner rule; verifier-error outcome maps
-  to ``page_judge_exception``.
-- **Mutants (r6):** ``completed-without-evidence-as-refusal``, ``drop-judge-reason-evidence``.
+**Tests:** `7473 passed` (`scratch/routing-baseline/exec/1129/pytest-r8.txt`).
+**Ruff:** `uvx ruff@0.16.0 format --check .` clean.
+**Mutants:** `exec/1129/mutants-r8.txt`.

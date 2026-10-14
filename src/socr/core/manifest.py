@@ -412,6 +412,8 @@ class _WholeDoc:
     audit_passed: bool
     judge_reason: str = ""
     judge_outcome: str = ""
+    judge_accepted: bool | None = None
+    rejection_class: str = ""
     error: str = ""
     failure_mode: FailureMode = FailureMode.NONE
 
@@ -452,6 +454,8 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
         audit_passed=bool(chosen.audit_passed),
         judge_reason=getattr(chosen, "judge_reason", "") or "",
         judge_outcome=getattr(chosen, "judge_outcome", "") or "",
+        judge_accepted=getattr(chosen, "judge_accepted", None),
+        rejection_class=getattr(chosen, "rejection_class", "") or "",
         error=chosen.error or "",
         failure_mode=chosen.failure_mode,
     )
@@ -3943,6 +3947,8 @@ def _select_page_output_tagged(
             failure_mode=whole_doc.failure_mode,
             judge_reason=whole_doc.judge_reason,
             judge_outcome=whole_doc.judge_outcome,
+            judge_accepted=whole_doc.judge_accepted,
+            rejection_class=whole_doc.rejection_class,
             error=whole_doc.error,
         ), SelectionProvenance.WHOLE_DOC_SECTION
     # A failed per-page attempt (content present, audit not passed) beats an
@@ -3975,6 +3981,8 @@ def _select_page_output_tagged(
             provider_backend=attempt.provider_backend,
             judge_reason=getattr(attempt, "judge_reason", "") or "",
             judge_outcome=getattr(attempt, "judge_outcome", "") or "",
+            judge_accepted=getattr(attempt, "judge_accepted", None),
+            rejection_class=getattr(attempt, "rejection_class", "") or "",
             error=attempt.error or "",
         ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
@@ -4242,7 +4250,7 @@ UNACCEPTED_OUTPUT_MARK_RE = re.compile(r"^> \[page unaccepted: ")
 _UNACCEPTED_OUTPUT_MARK_REASON_CAP = 160
 
 
-_HTML_TAG_IN_REASON_RE = re.compile(r"<[^>]+>")
+_HTML_TAG_IN_REASON_RE = re.compile(r"<(?:/[A-Za-z]|[A-Za-z])[A-Za-z0-9:-]*[^>]*>")
 
 
 def _neutralise_unaccepted_mark_reason(reason: str) -> str:
@@ -4276,16 +4284,16 @@ def unaccepted_output_mark(judge_reason: str, *, outcome: str = "") -> str:
 
 
 def _positive_judge_refusal_evidence(output: PageOutput) -> bool:
-    """True when the page judge refused, not merely when C3 demoted the ladder winner.
+    """True when the page judge refused, not when C3 demoted a judge-accepted winner.
 
-    ``route_page`` stamps ``JUDGE_OUTCOME_COMPLETED`` on both accept and completed
-    refusal (`agentic.py`); only ``judge_reason`` (from ``att.reason`` on every
-    attempt, ``orchestrator.py``) or a non-empty ``rejection_class`` (#262) names a
-    refusal.
+    Refusal is proven only by ``rejection_class`` (#262) or ``judge_accepted is
+    False`` (stamped from ``att.accepted`` in ``orchestrator.py`` and never
+    rewritten by demotion). ``judge_reason`` is banner text only, never evidence.
+    ``judge_accepted is None`` (legacy sidecars) never claims a refusal.
     """
-    if (getattr(output, "judge_reason", "") or "").strip():
+    if (getattr(output, "rejection_class", "") or "").strip():
         return True
-    return bool(getattr(output, "rejection_class", "") or "")
+    return getattr(output, "judge_accepted", None) is False
 
 
 def _unaccepted_mark_reason_from_output(output: PageOutput) -> str | None:
@@ -4523,9 +4531,11 @@ def _apply_unaccepted_output_mark(
     outcome = getattr(output, "judge_outcome", "") or ""
     mark = unaccepted_output_mark(reason, outcome=outcome)
     banners, body = _split_page_top_banners(output.text or "")
-    if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):
+    rest = [b for b in banners if not UNACCEPTED_OUTPUT_MARK_RE.match(b)]
+    new_banners = [mark, *rest]
+    if banners == new_banners:
         return output
-    text = _with_page_top_banners(body, [mark, *banners])
+    text = _with_page_top_banners(body, new_banners)
     return replace(output, text=text)
 
 

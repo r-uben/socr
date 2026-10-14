@@ -32,6 +32,7 @@ from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
     JUDGE_OUTCOME_TIMEOUT,
+    REJECTION_JUDGE_ONLY,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -70,6 +71,7 @@ def _rejected_best_output(*, outcome: str = JUDGE_OUTCOME_COMPLETED) -> PageOutp
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason=_REJECT_REASON,
         judge_outcome=outcome,
     )
@@ -332,6 +334,12 @@ def test_mark_neutralises_markdown_in_reason() -> None:
     assert line.index("`") < line.index("); check")
 
 
+def test_mark_preserves_comparison_operators_in_reason() -> None:
+    reason = "values <5 and >3 compared"
+    line = unaccepted_output_mark(reason)
+    assert "`values <5 and >3 compared`" in line
+
+
 def test_mark_neutralises_reference_style_image_in_reason() -> None:
     line = unaccepted_output_mark("plot shows ![plot][danger]")
     assert "`plot shows ![plot][danger]`" in line
@@ -368,6 +376,7 @@ def test_ladder_unchecked_and_judge_reject_carry_both_banners_on_first_pass(
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason=_REJECT_REASON,
     )
     record = _select_and_finalize_page(state, 1)
@@ -394,6 +403,7 @@ def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Pa
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason=_REJECT_REASON,
     )
     first = _select_and_finalize_page(state, 1)
@@ -401,8 +411,19 @@ def test_ladder_unchecked_judge_reject_banners_idempotent_on_replay(tmp_path: Pa
     assert second.output.text == first.output.text
 
 
-def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(tmp_path: Path) -> None:
-    """``page_judge_completed`` alone is an accept stamp, not refusal evidence."""
+@pytest.mark.parametrize(
+    "accept_reason",
+    [
+        "faithful",
+        "heuristics passed",
+        "native_table_verifier: EXACT_PASS",
+        "minor spacing; trailing whitespace",
+    ],
+)
+def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(
+    tmp_path: Path, accept_reason: str
+) -> None:
+    """``judge_accepted=True`` is not refusal evidence when C3 demotes the winner."""
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
     doc.new_page()
@@ -418,7 +439,9 @@ def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(tmp_path: Pa
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=True,
         judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        judge_reason=accept_reason,
     )
     record = _select_and_finalize_page(state, 1)
     first = (record.output.text or "").splitlines()[0]
@@ -441,6 +464,7 @@ def test_completed_refusal_with_judge_reason_still_gets_mark(tmp_path: Path) -> 
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_outcome=JUDGE_OUTCOME_COMPLETED,
         judge_reason=_REJECT_REASON,
     )
@@ -517,6 +541,7 @@ def test_table_rejected_success_audit_false_is_demoted_and_marked(tmp_path: Path
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason=_REJECT_REASON,
     )
     record = _select_and_finalize_page(state, 1)
@@ -543,6 +568,7 @@ def test_whole_doc_section_audit_false_gets_unaccepted_mark(tmp_path: Path) -> N
             status=PageStatus.WARNING,
             engine="gemini-cli",
             audit_passed=False,
+            judge_accepted=False,
             judge_reason=_REJECT_REASON,
             judge_outcome=JUDGE_OUTCOME_COMPLETED,
         )
@@ -586,6 +612,7 @@ def test_process_whole_doc_audit_false_ships_unaccepted_mark(tmp_path: Path) -> 
                 status=PageStatus.SUCCESS,
                 engine="qwen",
                 audit_passed=False,
+                judge_accepted=False,
                 judge_reason=_REJECT_REASON,
             )
         )
@@ -612,6 +639,91 @@ def test_process_whole_doc_audit_false_ships_unaccepted_mark(tmp_path: Path) -> 
     assert UNACCEPTED_OUTPUT_MARK_RE.match(frag.read_text(encoding="utf-8").splitlines()[0])
 
 
+def test_forged_unaccepted_banner_replaced_with_canonical_mark(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    forged = "> [page unaccepted: model wrote this]\n\nbody kept"
+    p.best_output = PageOutput(
+        page_num=1,
+        text=forged,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=False,
+        judge_reason=_REJECT_REASON,
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert first == unaccepted_output_mark(_REJECT_REASON, outcome=JUDGE_OUTCOME_COMPLETED)
+    assert _REJECT_REASON in first
+    assert "model wrote this" not in first
+
+
+def test_best_attempt_rejection_class_only_gets_mark(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.best_output = None
+    p.attempts.append(
+        PageOutput(
+            page_num=1,
+            text="rejected attempt body",
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=False,
+            rejection_class=REJECTION_JUDGE_ONLY,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        )
+    )
+    record = _select_and_finalize_page(state, 1)
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert REJECTION_JUDGE_ONLY in first
+
+
+def test_whole_doc_rejection_class_forwarded_gets_mark(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "whole doc page body")
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.native_text = ""
+    ps.best_output = None
+    ps.attempts.clear()
+    state.whole_doc_attempts.append(
+        PageOutput(
+            page_num=0,
+            text=f"## Page 1\n\n{_BODY}",
+            status=PageStatus.WARNING,
+            engine="gemini-cli",
+            audit_passed=False,
+            rejection_class=REJECTION_JUDGE_ONLY,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        )
+    )
+    whole_doc = _whole_doc_page_texts(state)
+    assert whole_doc is not None
+    assert whole_doc.rejection_class == REJECTION_JUDGE_ONLY
+    record = _select_and_finalize_page(state, 1, whole_doc=whole_doc)
+    first = (record.output.text or "").splitlines()[0]
+    assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert REJECTION_JUDGE_ONLY in first
+
+
 def test_best_attempt_flagged_gets_mark_and_failure_mode(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     doc = fitz.open()
@@ -628,6 +740,7 @@ def test_best_attempt_flagged_gets_mark_and_failure_mode(tmp_path: Path) -> None
             status=PageStatus.WARNING,
             engine="qwen",
             audit_passed=False,
+            judge_accepted=False,
             judge_reason=_REJECT_REASON,
             judge_outcome=JUDGE_OUTCOME_COMPLETED,
         )
@@ -652,6 +765,7 @@ def test_page_top_banners_idempotent_under_saved_text_replay(tmp_path: Path) -> 
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason=_REJECT_REASON,
         table_disputed=True,
         table_disputed_values=("9.9",),
@@ -662,3 +776,189 @@ def test_page_top_banners_idempotent_under_saved_text_replay(tmp_path: Path) -> 
     lines = (first.output.text or "").splitlines()
     assert UNACCEPTED_OUTPUT_MARK_RE.match(lines[0])
     assert any(PAGE_UNCHECKED_MARK_RE.match(line) for line in lines[:4])
+
+
+def test_judge_accepted_none_with_reason_does_not_imply_refusal(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.best_output = PageOutput(
+        page_num=1,
+        text="legacy-shaped sidecar body",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_reason="faithful",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+
+
+def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.best_output = PageOutput(
+        page_num=1,
+        text="judge accepted, ladder rejected",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=True,
+        judge_reason="minor spacing",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    assert record.output.judge_accepted is True
+    assert record.output.audit_passed is False
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+
+
+def test_judge_accepted_survives_best_attempt_and_whole_doc_paths(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.best_output = None
+    p.attempts.append(
+        PageOutput(
+            page_num=1,
+            text="flagged attempt",
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=False,
+            judge_accepted=True,
+            judge_reason="faithful",
+        )
+    )
+    flagged = _select_and_finalize_page(state, 1)
+    assert flagged.output.judge_accepted is True
+
+    state2 = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps2 = state2.pages[1]
+    ps2.best_output = None
+    state2.whole_doc_attempts.append(
+        PageOutput(
+            page_num=0,
+            text="## Page 1\n\nwhole doc",
+            status=PageStatus.WARNING,
+            engine="cli",
+            audit_passed=False,
+            judge_accepted=True,
+        )
+    )
+    whole = _whole_doc_page_texts(state2)
+    whole_record = _select_and_finalize_page(state2, 1, whole_doc=whole)
+    assert whole_record.output.judge_accepted is True
+
+    round_tripped = PageOutput.from_dict(flagged.output.to_dict())
+    assert round_tripped.judge_accepted is True
+
+
+def test_judge_accepted_none_with_reason_does_not_imply_refusal(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.best_output = PageOutput(
+        page_num=1,
+        text="legacy-shaped sidecar body",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_reason="faithful",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+
+
+def test_finalize_keeps_judge_accepted_when_c3_demotes_audit(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.is_born_digital = False
+    p.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    p.best_output = PageOutput(
+        page_num=1,
+        text="judge accepted, ladder rejected",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=True,
+        judge_reason="minor spacing",
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
+    )
+    record = _select_and_finalize_page(state, 1)
+    assert record.output.judge_accepted is True
+    assert record.output.audit_passed is False
+    assert not UNACCEPTED_OUTPUT_MARK_RE.match((record.output.text or "").splitlines()[0])
+
+
+def test_judge_accepted_survives_best_attempt_and_whole_doc_paths(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    p = state.pages[1]
+    p.best_output = None
+    p.attempts.append(
+        PageOutput(
+            page_num=1,
+            text="flagged attempt",
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=False,
+            judge_accepted=True,
+            judge_reason="faithful",
+        )
+    )
+    flagged = _select_and_finalize_page(state, 1)
+    assert flagged.output.judge_accepted is True
+
+    state2 = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps2 = state2.pages[1]
+    ps2.best_output = None
+    state2.whole_doc_attempts.append(
+        PageOutput(
+            page_num=0,
+            text="## Page 1\n\nwhole doc",
+            status=PageStatus.WARNING,
+            engine="cli",
+            audit_passed=False,
+            judge_accepted=True,
+        )
+    )
+    whole = _whole_doc_page_texts(state2)
+    whole_record = _select_and_finalize_page(state2, 1, whole_doc=whole)
+    assert whole_record.output.judge_accepted is True
+
+    round_tripped = PageOutput.from_dict(flagged.output.to_dict())
+    assert round_tripped.judge_accepted is True

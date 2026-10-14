@@ -94,6 +94,7 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
     )
     ps.attempts.append(rejected)
     ps.best_output = rejected
@@ -133,6 +134,7 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_accepted=False,
         judge_reason="table values disagree with the page image",
     )
     ps.attempts.append(rejected)
@@ -156,6 +158,41 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
     assert resumed is None, (
         f"A judge-rejected best-effort page must not be restored on resume: {resumed!r}"
     )
+    assert [ev.kind for ev in state.events if ev.page_num == 1].count(
+        "resume_ledger_audit_reject"
+    ) == 1
+    pipeline._load_terminal_page(state, 1, out_dir)
+    assert [ev.kind for ev in state.events if ev.page_num == 1].count(
+        "resume_ledger_audit_reject"
+    ) == 1
+
+
+def test_error_status_audit_false_emits_no_resume_ledger_event(tmp_path: Path) -> None:
+    """Cascade-halt ERROR pages must not gain ``resume_ledger_audit_reject`` (main behaviour)."""
+    pdf_path = _real_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.native_text = ""
+    errored = PageOutput(
+        page_num=1,
+        text="partial body before cascade halt",
+        status=PageStatus.ERROR,
+        engine="qwen",
+        audit_passed=False,
+        judge_accepted=False,
+        error="VLM timeout",
+    )
+    ps.attempts.append(errored)
+    ps.best_output = errored
+    pipeline._flush_page_fragment(state, 1, errored.text, out_dir)
+    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    resumed = pipeline._load_terminal_page(state, 1, out_dir)
+    assert resumed is None
+    assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]
 
 
 def test_audit_passed_success_page_is_still_resume_skippable(tmp_path: Path) -> None:
