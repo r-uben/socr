@@ -245,10 +245,13 @@ class TestSparseRoutingEndToEnd:
         with patch.object(DocumentHandle, "__post_init__", lambda self: None):
             handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
         judge = pipeline._build_page_judge(DocumentState(handle=handle))
-        # GH-90: SourceEvidenceTableJudge wraps NativeTableVerifierJudge wraps inner.
+        # GH-90: SourceEvidenceTableJudge wraps NativeTableVerifierJudge wraps
+        # the leaf. #1128/#1135: the leaf sits inside _TimeoutJudge.
         assert isinstance(judge, SourceEvidenceTableJudge)
         assert isinstance(judge._inner, NativeTableVerifierJudge)
-        inner = judge._inner._inner
+        timed = judge._inner._inner
+        assert timed.__class__.__name__ == "_TimeoutJudge"
+        inner = timed._inner
         assert isinstance(inner, HeuristicPageJudge)
         assert inner._sparse_ok == pipeline._sparse_page_ok
 

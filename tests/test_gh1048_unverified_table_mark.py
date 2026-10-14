@@ -1063,7 +1063,13 @@ def test_route_page_clears_credential_on_source_evidence_reject() -> None:
 
 
 def test_promotion_inner_judge_peels_production_page_judge(tmp_path) -> None:
-    """#1126-r6: promotion must not re-enter ``SourceEvidenceTableJudge``."""
+    """#1126-r6: promotion must not re-enter ``SourceEvidenceTableJudge``.
+
+    #1128/#1135: production is SE(Native(_TimeoutJudge(leaf))), so peel
+    ``built`` directly. The extra outer Timeout wrap is gone; the deadline
+    stays on the leaf. Intent unchanged: no SE on the peeled chain, deadline
+    still present.
+    """
     from socr.pipeline.agentic import _promotion_inner_judge
 
     pdf = _scan_pdf(tmp_path / "peel.pdf")
@@ -1079,18 +1085,18 @@ def test_promotion_inner_judge_peels_production_page_judge(tmp_path) -> None:
     state.pages[1] = PageState(page_num=1)
     built = pipe._build_page_judge(state)
     assert isinstance(built, SourceEvidenceTableJudge)
-    wrapped = pipe._TimeoutJudge(built, 30.0)
-    peeled = _promotion_inner_judge(wrapped)
+    peeled = _promotion_inner_judge(built)
     assert peeled is not None
 
-    def _has_source_evidence(judge) -> bool:
+    def _has_class(judge, name: str) -> bool:
         if judge is None:
             return False
-        if judge.__class__.__name__ == "SourceEvidenceTableJudge":
+        if judge.__class__.__name__ == name:
             return True
-        return _has_source_evidence(getattr(judge, "_inner", None))
+        return _has_class(getattr(judge, "_inner", None), name)
 
-    assert not _has_source_evidence(peeled)
+    assert not _has_class(peeled, "SourceEvidenceTableJudge")
+    assert _has_class(peeled, "_TimeoutJudge")
 
 
 def test_legacy_sidecar_comma_values_use_mark_cap() -> None:

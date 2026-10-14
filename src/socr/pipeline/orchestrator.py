@@ -7,6 +7,7 @@ structured loop that operates on the DocumentState blackboard.
 
 from __future__ import annotations
 
+import copy
 import functools
 import logging
 import math
@@ -16,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -9230,10 +9231,10 @@ class UnifiedPipeline:
         message still says "timeout" for the humans reading the audit trail.
 
         BOTH timeout branches leave as this one type: our own deadline, and a
-        timeout the inner judge raised itself (which arrives here as the same
-        exception class, since ``concurrent.futures.TimeoutError`` IS builtin
-        ``TimeoutError`` from 3.11). The inner one used to be re-raised verbatim
-        and reached the trail wearing the judge's own words.
+        timeout the inner judge raised itself. The inner one used to be
+        re-raised verbatim and reached the trail wearing the judge's own words.
+        Inner exceptions are tagged return values so ``result(timeout=)``
+        raising TimeoutError cannot mean "the judge raised TimeoutError".
 
         #713 round 2 (Astra P1-3): it used to return
         ``AcceptDecision(accept=False, reason="judge timeout")`` instead. That
@@ -9244,6 +9245,20 @@ class UnifiedPipeline:
 
         ``timeout_sec`` is a soft wall-clock bound in seconds.  ``None``
         disables the wrapper (forward to the inner judge directly).
+
+        #1128 / #1135: wraps only the model leaf. Local evidence
+        (``SourceEvidenceTableJudge``, ``NativeTableVerifierJudge``) runs on
+        the live ``PageOutput`` before this adapter, so a timeout cannot
+        skip or erase a witness result. The worker judges a deep copy.
+        Fields come back when the worker finished inside the deadline,
+        whether it returned or raised. A late result is discarded and
+        noted. ``result(timeout=)`` raising TimeoutError is always OUR
+        deadline — inner exceptions come back as tagged values, so
+        lateness is never re-read from ``future.done()``. Peer deadline
+        sites already discard an abandoned return value (they never share
+        a live ``PageOutput``): ``route_page``'s provider
+        ``submit_daemon``, escalation ``submit_daemon``, crop
+        ``_read_with_deadline``, and ``killable.run`` (child process).
         """
 
         def __init__(self, inner, timeout_sec: float | None, owner=None, on_timeout=None) -> None:
@@ -9258,6 +9273,12 @@ class UnifiedPipeline:
             # construct it directly); the pipeline always passes itself.
             self._owner = owner
 
+        @staticmethod
+        def _adopt_judged_output(live, judged) -> None:
+            """Copy the on-time worker's fields onto the caller's object."""
+            for f in fields(judged):
+                setattr(live, f.name, getattr(judged, f.name))
+
         def assess(self, output, provider):
             import concurrent.futures
 
@@ -9268,68 +9289,72 @@ class UnifiedPipeline:
 
             owner = self._owner
             binding = owner._current_judge_binding() if owner is not None else None
+            probe = copy.deepcopy(output)
 
             def _run():
-                if owner is not None:
-                    owner._bind_judge_events(binding)
-                    try:
-                        return self._inner.assess(output, provider)
-                    finally:
-                        owner._bind_judge_events(None)
-                return self._inner.assess(output, provider)
+                # Return exceptions as values so ``result(timeout=)`` raising
+                # TimeoutError means only OUR deadline — never re-read
+                # ``future.done()`` for that decision (#1128 r2).
+                try:
+                    if owner is not None:
+                        owner._bind_judge_events(binding)
+                        try:
+                            return ("ok", self._inner.assess(probe, provider))
+                        finally:
+                            owner._bind_judge_events(None)
+                    return ("ok", self._inner.assess(probe, provider))
+                except Exception as exc:
+                    return ("err", exc)
 
             if owner is not None:
                 owner._enter_judge_call()
             future = submit_daemon(_run)  # GH-974: daemon, abandonable
             try:
-                result = future.result(timeout=self._timeout_sec)
-                return result
-            except concurrent.futures.TimeoutError as exc:
-                # ``concurrent.futures.TimeoutError`` IS builtin ``TimeoutError``
-                # since 3.11, so this one clause catches both OUR deadline and a
-                # timeout the inner judge raised itself. ``future.done()``
-                # separates them: on our deadline the worker is still running.
-                # Either way the outcome is a timeout, and either way it must
-                # leave as an exception so ``route_page`` types it.
-                inner_raised = future.done()
-                future.cancel()
-                if isinstance(exc, PageJudgeCircuitOpenError):
-                    # #987: the breaker answered, the judge was never called. Already
-                    # typed and worded; do not re-probe, re-wrap or call it a timeout.
+                try:
+                    kind, payload = future.result(timeout=self._timeout_sec)
+                except concurrent.futures.TimeoutError as exc:
+                    # Worker did not finish inside the deadline. A completion
+                    # that lands after this raise is late; do not ask done().
+                    future.cancel()
+                    note = "late page-judge result discarded"
+                    if note not in output.audit_notes:
+                        output.audit_notes.append(note)
+                    if self._on_timeout is not None:
+                        try:
+                            self._on_timeout(output.page_num)
+                        except Exception as probe_exc:  # never mask the timeout itself
+                            logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
+                    logger.warning(
+                        "judge timed out on page %s (%.2fs) — no verdict",
+                        output.page_num,
+                        self._timeout_sec,
+                    )
+                    raise PageJudgeTimeoutError(
+                        f"page judge timeout after {self._timeout_sec:.2f}s"
+                    ) from exc
+                # Worker finished inside the deadline: adopt what it wrote,
+                # whether it returned or raised (#1128 r2).
+                self._adopt_judged_output(output, probe)
+                if kind == "ok":
+                    return payload
+                if isinstance(payload, PageJudgeCircuitOpenError):
                     logger.info(
                         "page judge circuit open on page %s — failing closed without waiting",
                         output.page_num,
                     )
-                    raise
-                if self._on_timeout is not None:
-                    try:
-                        self._on_timeout(output.page_num)
-                    except Exception as probe_exc:  # never mask the timeout itself
-                        logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
-                if inner_raised:
-                    # #713 round 3 (Astra P2): WRAPPED, not re-raised unchanged.
-                    # Both branches are the same outcome -- a page judge that
-                    # produced no verdict because time ran out -- so both must
-                    # leave this adapter as the same type carrying the same
-                    # vocabulary. Re-raising the inner exception verbatim let a
-                    # judge that raised builtin ``TimeoutError("timed out")``
-                    # reach the audit trail as "judge raised: timed out", which
-                    # every human-readable timeout surface then failed to
-                    # recognise. The original is chained, so nothing about its
-                    # identity is lost.
+                    raise payload
+                if isinstance(payload, TimeoutError):
+                    if self._on_timeout is not None:
+                        try:
+                            self._on_timeout(output.page_num)
+                        except Exception as probe_exc:
+                            logger.warning("judge circuit-breaker probe failed: %s", probe_exc)
                     logger.warning(
                         "judge timed out on page %s (raised by the judge) — no verdict",
                         output.page_num,
                     )
-                    raise PageJudgeTimeoutError(f"page judge timeout: {exc}") from exc
-                logger.warning(
-                    "judge timed out on page %s (%.2fs) — no verdict",
-                    output.page_num,
-                    self._timeout_sec,
-                )
-                raise PageJudgeTimeoutError(
-                    f"page judge timeout after {self._timeout_sec:.2f}s"
-                ) from exc
+                    raise PageJudgeTimeoutError(f"page judge timeout: {payload}") from payload
+                raise payload
             finally:
                 # Decremented in the CALLER exactly once, including on timeout:
                 # from here on nothing is waiting on that worker, so anything it
@@ -9365,8 +9390,9 @@ class UnifiedPipeline:
           6. Provisional fragment + sidecar flush (``terminal=False``).
 
         Cascade HALT (fork B / judge-guard):
-          - The judge is wrapped in ``_TimeoutJudge`` so a wedged VLM judge
-            cannot block the orchestrator thread.
+          - The model leaf is wrapped in ``_TimeoutJudge`` so a wedged VLM
+            judge cannot block the orchestrator thread. Local evidence
+            checks run outside that deadline (#1135).
           - When ``route_page`` records a provider timeout AND ``probe_ollama_idle``
             reports the backend is NOT responding, the document-level
             ``backend_degraded`` latch is set: pages processed so far are already
@@ -9705,17 +9731,20 @@ class UnifiedPipeline:
         # getattr override without a field on PipelineConfig backing it.
         provider_timeout = DEFAULT_PROVIDER_TIMEOUTS
 
-        # Wrap the judge in a deadline adapter so a wedged VLM judge cannot
-        # block the orchestrator thread (fork B: orchestrator-side adapter).
-        # Use the maximum configured provider timeout as the judge bound.
-        _judge_timeout: float | None = None
-        if provider_timeout:
-            _judge_timeout = max(provider_timeout.values()) if provider_timeout else None
-        judge = self._TimeoutJudge(
-            _inner_judge,
-            _judge_timeout,
-            owner=self,
-            on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+        # #1128/#1135: ``_build_page_judge`` wraps the model leaf. A replacement
+        # that omitted the leaf adapter still gets a deadline (tests; the
+        # ``se_inside_deadline`` mutant). Do not wrap again when the leaf
+        # adapter is already in the chain — that would put local evidence
+        # back inside the deadline.
+        judge = (
+            _inner_judge
+            if self._judge_chain_has_leaf_deadline(_inner_judge)
+            else self._TimeoutJudge(
+                _inner_judge,
+                self._page_judge_leaf_timeout_sec(),
+                owner=self,
+                on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+            )
         )
 
         if not self.config.quiet:
@@ -13247,13 +13276,30 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  [yellow]{detail}[/yellow]")
 
+    def _page_judge_leaf_timeout_sec(self) -> float | None:
+        """Wall-clock bound for the model leaf only (#1128/#1135)."""
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
+
+        return max(DEFAULT_PROVIDER_TIMEOUTS.values()) if DEFAULT_PROVIDER_TIMEOUTS else None
+
+    @staticmethod
+    def _judge_chain_has_leaf_deadline(judge) -> bool:
+        cur = judge
+        while cur is not None:
+            if any(cls.__name__ == "_TimeoutJudge" for cls in type(cur).__mro__):
+                return True
+            cur = getattr(cur, "_inner", None)
+        return False
+
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
 
-        The returned judge is always wrapped in NativeTableVerifierJudge, which
-        runs a deterministic two-tier PyMuPDF geometry check on born-digital
-        table pages BEFORE the inner judge is called (Consilium decision
-        20260615T170212Z-0362, Option C).  Scanned pages bypass cleanly.
+        Chain (outside → inside): ``SourceEvidenceTableJudge`` (Tesseract
+        witness, live output), ``NativeTableVerifierJudge`` (local PyMuPDF
+        geometry + ``verify_native_table``; no model call), then
+        ``_TimeoutJudge`` around the model leaf (VLM / heuristic, plus the
+        circuit breaker). Local checks therefore finish even when the leaf
+        times out (#1128/#1135).
         """
         from socr.core.audit_log import AuditEvent
         from socr.pipeline.agentic import (
@@ -13385,8 +13431,17 @@ class UnifiedPipeline:
         def record_event(event) -> None:
             self._record_judge_event(state, event)
 
+        # #1128/#1135: deadline wraps the MODEL leaf only. Local
+        # SourceEvidenceTableJudge and NativeTableVerifierJudge run on the
+        # live output before this adapter.
+        timed_leaf = self._TimeoutJudge(
+            inner_judge,
+            self._page_judge_leaf_timeout_sec(),
+            owner=self,
+            on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+        )
         native_judge = NativeTableVerifierJudge(
-            inner=inner_judge,
+            inner=timed_leaf,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
