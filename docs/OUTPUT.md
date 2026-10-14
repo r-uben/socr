@@ -151,6 +151,22 @@ replacement of the incumbent cannot ship unmarked. A crop re-judge that passes t
 source-evidence check clears the state, the marks and the rejected disposition; a refused
 patch keeps them. Pages with only the ladder's `table_unverified` get no page-level line.
 
+#### The unaccepted-output mark (#1129)
+
+When the page judge refused or crashed on every rung but socr still keeps the best
+model reading (`BEST_OUTPUT_UNVERIFIED`, disposition `unaccepted_output_kept`), the
+page ships `warning` (never plain `success` with `audit_passed` false) and its FIRST
+line is:
+
+```
+> [page unaccepted: socr kept this model reading but the page judge did not accept it (<trimmed judge reason>); check against the page image before citing]
+```
+
+Find it with `^> \[page unaccepted: `. The failure mode is usually `audit_failed`; when
+the typed judge outcome is a page-judge timeout it is `page_judge_timeout`. Written in
+`_select_and_finalize_page` (`_apply_unaccepted_output_mark` in `core/manifest.py`), the
+same seam as the table marks above. `audit_passed` on the winning output is not flipped.
+
 #### The disputed-table mark
 
 A scanned table that the source-evidence check CHECKED and found unsupported (its numbers

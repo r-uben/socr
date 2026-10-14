@@ -59,6 +59,58 @@ def _real_pdf(tmp_path: Path) -> Path:
     return path
 
 
+def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH-161 / #1129 r2: old sidecars stayed SUCCESS with audit_passed=false.
+
+    The WARNING status gate alone does not cover them; ``audit_passed is True`` must
+    still refuse the skip. Prove the audit gate is load-bearing by flushing without
+    the #1129 demotion/mark guards.
+    """
+    from socr.core import manifest as manifest_mod
+
+    monkeypatch.setattr(manifest_mod, "_finalize_best_output_unverified", lambda output: output)
+    monkeypatch.setattr(
+        manifest_mod,
+        "_apply_unaccepted_output_mark",
+        lambda output, *args, **kwargs: output,
+    )
+
+    pdf_path = _real_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.native_text = ""
+
+    rejected = PageOutput(
+        page_num=1,
+        text="plausible but judge-rejected body text without demotion guards",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    ps.attempts.append(rejected)
+    ps.best_output = rejected
+
+    pipeline._flush_page_fragment(state, 1, rejected.text, out_dir)
+    pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+    sidecar = next(out_dir.rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+    assert meta["winning_output"]["status"] == PageStatus.SUCCESS.value
+    assert meta["winning_output"]["audit_passed"] is False
+
+    resumed = pipeline._load_terminal_page(state, 1, out_dir)
+    assert resumed is None
+    assert "resume_ledger_audit_reject" in [ev.kind for ev in state.events if ev.page_num == 1]
+
+
 def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> None:
     pdf_path = _real_pdf(tmp_path)
     out_dir = tmp_path / "out"
@@ -81,6 +133,7 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
+        judge_reason="table values disagree with the page image",
     )
     ps.attempts.append(rejected)
     ps.best_output = rejected
@@ -91,34 +144,17 @@ def test_judge_rejected_success_page_is_not_resume_skippable(tmp_path: Path) -> 
     sidecar = next(out_dir.rglob("pages/00001.json"))
     meta = json.loads(sidecar.read_text())
 
-    # Preconditions: the sidecar really is the SUCCESS + audit_passed=False shape,
-    # written terminal with the current fingerprint.  If any of these fail the
-    # setup is wrong and the gate assertion below would be vacuous.
+    # Preconditions: terminal sidecar with a judge-rejected winner.  #1129 demotes
+    # the finalized winner to WARNING (never SUCCESS + audit_passed=False).
     assert meta["terminal"] is True, meta
     assert meta["run_fingerprint"] == pipeline._run_fingerprint(), meta
-    assert meta["winning_output"]["status"] == PageStatus.SUCCESS.value, meta["winning_output"]
     assert meta["winning_output"]["audit_passed"] is False, meta["winning_output"]
+    assert meta["winning_output"]["status"] == PageStatus.WARNING.value, meta["winning_output"]
+    assert meta["winning_output"]["text"].splitlines()[0].startswith("> [page unaccepted:")
 
-    # The defect: the only thing standing between resume and the rejected text is
-    # the audit verdict, and the gate does not read it.
     resumed = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed is None, (
-        "A judge-rejected page (status=SUCCESS, audit_passed=False) was treated as "
-        f"terminally clean and restored on resume: {resumed!r}"
-    )
-
-    # Cardinal rule: the refusal must not be silent.  The event carries the page,
-    # so it reaches the page sidecar, audit_log.json and the CLI summary line.
-    kinds = [ev.kind for ev in state.events if ev.page_num == 1]
-    assert "resume_ledger_audit_reject" in kinds, (
-        f"The refused resume left no audit trail; page-1 events were {kinds}"
-    )
-    # Idempotent: the gate runs twice per OCR page (the pre-pass over ocr_pages
-    # and again in the main loop), so one page must not yield two events.
-    pipeline._load_terminal_page(state, 1, out_dir)
-    after = [ev.kind for ev in state.events if ev.page_num == 1]
-    assert after.count("resume_ledger_audit_reject") == 1, (
-        f"The ledger-reject event was recorded more than once for one page: {after}"
+        f"A judge-rejected best-effort page must not be restored on resume: {resumed!r}"
     )
 
 

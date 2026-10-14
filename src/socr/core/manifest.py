@@ -410,6 +410,10 @@ class _WholeDoc:
     texts: dict[int, str]
     engine: str
     audit_passed: bool
+    judge_reason: str = ""
+    judge_outcome: str = ""
+    error: str = ""
+    failure_mode: FailureMode = FailureMode.NONE
 
 
 def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
@@ -446,6 +450,10 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
         texts={i: t for i, t in enumerate(pages, start=1)},
         engine=chosen.engine or "cli",
         audit_passed=bool(chosen.audit_passed),
+        judge_reason=getattr(chosen, "judge_reason", "") or "",
+        judge_outcome=getattr(chosen, "judge_outcome", "") or "",
+        error=chosen.error or "",
+        failure_mode=chosen.failure_mode,
     )
 
 
@@ -3932,6 +3940,10 @@ def _select_page_output_tagged(
             status=PageStatus.SUCCESS if whole_doc.audit_passed else PageStatus.WARNING,
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
+            failure_mode=whole_doc.failure_mode,
+            judge_reason=whole_doc.judge_reason,
+            judge_outcome=whole_doc.judge_outcome,
+            error=whole_doc.error,
         ), SelectionProvenance.WHOLE_DOC_SECTION
     # A failed per-page attempt (content present, audit not passed) beats an
     # empty page so the manifest preserves what little we have.
@@ -3961,6 +3973,9 @@ def _select_page_output_tagged(
             provider_id=attempt.provider_id,
             provider_model=attempt.provider_model,
             provider_backend=attempt.provider_backend,
+            judge_reason=getattr(attempt, "judge_reason", "") or "",
+            judge_outcome=getattr(attempt, "judge_outcome", "") or "",
+            error=attempt.error or "",
         ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
     # a silent gap between page headers -- B1 / #591: unless native prose
@@ -4219,6 +4234,130 @@ def disputed_table_mark(values: Sequence[str] | str, png_ref: str) -> str:
 
 PAGE_UNCHECKED_MARK_RE = re.compile(r"^> \[page unchecked: ")
 
+#: #1129: first-line mark when the page judge refused or crashed but the model
+#: reading still ships via ``BEST_OUTPUT_UNVERIFIED``. Machine-findable by
+#: ``UNACCEPTED_OUTPUT_MARK_RE``; documented in docs/OUTPUT.md.
+UNACCEPTED_OUTPUT_MARK_RE = re.compile(r"^> \[page unaccepted: ")
+#: Cap embedded judge reason length so one blockquote line stays readable.
+_UNACCEPTED_OUTPUT_MARK_REASON_CAP = 160
+
+
+_HTML_TAG_IN_REASON_RE = re.compile(r"<[^>]+>")
+
+
+def _neutralise_unaccepted_mark_reason(reason: str) -> str:
+    """Render judge reason as inert inline code inside the blockquote (#1129 r3)."""
+    text = _HTML_TAG_IN_REASON_RE.sub("", reason or "")
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        collapsed = "judge did not accept this reading"
+    if len(collapsed) > _UNACCEPTED_OUTPUT_MARK_REASON_CAP:
+        collapsed = collapsed[: _UNACCEPTED_OUTPUT_MARK_REASON_CAP - 3].rstrip() + "..."
+    safe = collapsed.replace("\\", "\\\\").replace("`", "'")
+    return f"`{safe}`"
+
+
+def _trim_unaccepted_mark_reason(reason: str) -> str:
+    return _neutralise_unaccepted_mark_reason(reason)
+
+
+def unaccepted_output_mark(judge_reason: str) -> str:
+    """One-line blockquote for a kept model reading the page judge did not accept."""
+    detail = _trim_unaccepted_mark_reason(judge_reason)
+    return (
+        "> [page unaccepted: socr kept this model reading but the page judge "
+        f"did not accept it ({detail}); check against the page image before citing]"
+    )
+
+
+def _failure_mode_for_kept_judge_rejection(output: PageOutput) -> FailureMode:
+    """Failure mode for ``BEST_OUTPUT_UNVERIFIED`` when ``audit_passed`` is false."""
+    outcome = getattr(output, "judge_outcome", "") or ""
+    if outcome == JUDGE_OUTCOME_TIMEOUT:
+        return FailureMode.PAGE_JUDGE_TIMEOUT
+    if output.failure_mode is not FailureMode.NONE:
+        return output.failure_mode
+    return FailureMode.AUDIT_FAILED
+
+
+_UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES: frozenset[SelectionProvenance] = frozenset(
+    {
+        SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
+        SelectionProvenance.BEST_ATTEMPT_FLAGGED,
+        SelectionProvenance.WHOLE_DOC_SECTION,
+    }
+)
+
+_PAGE_TOP_BANNER_RES: tuple[re.Pattern[str], ...] = (
+    UNACCEPTED_OUTPUT_MARK_RE,
+    PAGE_UNCHECKED_MARK_RE,
+)
+
+
+def _split_page_top_banners(text: str) -> tuple[list[str], str]:
+    """Leading page-level blockquote banners (and blank lines between), then body."""
+    lines = text.splitlines(keepends=True)
+    banners: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not stripped:
+            if banners:
+                banners.append(lines[idx])
+                idx += 1
+                continue
+            break
+        if any(pat.match(stripped) for pat in _PAGE_TOP_BANNER_RES):
+            banners.append(lines[idx])
+            idx += 1
+            continue
+        break
+    body = "".join(lines[idx:])
+    return [line.rstrip("\n") for line in banners if line.strip()], body
+
+
+def _with_page_top_banners(body: str, banner_lines: Sequence[str]) -> str:
+    """Prepend banner lines once; ``body`` must not already include them."""
+    body = body.lstrip("\n")
+    if not banner_lines:
+        return body
+    return "\n\n".join([*banner_lines, body]) if body else "\n\n".join(banner_lines)
+
+
+def _skip_unaccepted_mark_ladder_resume(p, output: PageOutput) -> bool:
+    """Skip duplicate judge-refusal banner when an equivalent top banner already shipped.
+
+    #1129 r3: ladder-terminal demotion alone is not a substitute for the judge-reason
+    mark. Skip only when #1048's page-level banner (or an existing unaccepted mark) is
+    already present at the top of the finalized text.
+    """
+    if p is None:
+        return False
+    banners, _ = _split_page_top_banners(output.text or "")
+    if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):
+        return True
+    disposition = getattr(p, "table_ladder_disposition", None)
+    if disposition in _LADDER_TERMINAL_FAILURE_MODES and any(
+        PAGE_UNCHECKED_MARK_RE.match(line) for line in banners
+    ):
+        return True
+    return False
+
+
+def _finalize_best_output_unverified(output: PageOutput) -> PageOutput:
+    """Demote a kept best-effort winner the judge did not accept (#1129).
+
+    ``audit_passed`` is winner selection and is never flipped here (#252).
+    """
+    if output.audit_passed is not False:
+        return output
+    mode = _failure_mode_for_kept_judge_rejection(output)
+    if output.status is PageStatus.SUCCESS:
+        return replace(output, status=PageStatus.WARNING, failure_mode=mode)
+    if output.failure_mode is FailureMode.NONE:
+        return replace(output, failure_mode=mode)
+    return output
+
 
 def page_unchecked_mark(png_ref: str) -> str:
     """The first line of a page that shipped a rejected, unchecked table (#1048)."""
@@ -4327,10 +4466,43 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
         lines[start:start] = insert
         changed = True
     text = "".join(lines)
-    if kind and not PAGE_UNCHECKED_MARK_RE.match(text):
-        text = page_unchecked_mark(getattr(p, "d3_floor_png_ref", "")) + "\n\n" + text
-        changed = True
+    if kind:
+        banners, body = _split_page_top_banners(text)
+        unchecked = page_unchecked_mark(getattr(p, "d3_floor_png_ref", ""))
+        if not any(PAGE_UNCHECKED_MARK_RE.match(line) for line in banners):
+            text = _with_page_top_banners(body, [*banners, unchecked])
+            changed = True
     return replace(output, text=text) if changed else output
+
+
+def _apply_unaccepted_output_mark(
+    output: PageOutput, provenance: SelectionProvenance | None, p=None
+) -> PageOutput:
+    """#1129: demote and mark unaccepted model selections that ship judge-refused bytes.
+
+    Runs in ``_select_and_finalize_page`` so fragments, final ``.md``, manifest
+    and resume agree (#1048 pattern). Covers ``BEST_OUTPUT_UNVERIFIED``,
+    ``BEST_ATTEMPT_FLAGGED`` and ``WHOLE_DOC_SECTION`` alike.
+    """
+    if provenance not in _UNACCEPTED_MODEL_DISCLOSURE_PROVENANCES:
+        return output
+    if output.audit_passed is not False:
+        return output
+    text = output.text or ""
+    if not text.strip() or is_page_failed_marker(text):
+        return output
+    output = _finalize_best_output_unverified(output)
+    if _skip_unaccepted_mark_ladder_resume(p, output):
+        return output
+    reason = getattr(output, "judge_reason", "") or output.error or ""
+    if not reason and not getattr(output, "judge_outcome", ""):
+        return output
+    mark = unaccepted_output_mark(reason)
+    banners, body = _split_page_top_banners(output.text or "")
+    if any(UNACCEPTED_OUTPUT_MARK_RE.match(line) for line in banners):
+        return output
+    text = _with_page_top_banners(body, [mark, *banners])
+    return replace(output, text=text)
 
 
 def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
@@ -4638,6 +4810,7 @@ def _select_and_finalize_page(
       9b. _apply_scanned_figure_guard (#1030)
       9c. _apply_native_paragraphs (#1074)
       9d. _apply_unverified_table_mark (#1048)
+      9e. _apply_unaccepted_output_mark (#1129)
       10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -4660,6 +4833,7 @@ def _select_and_finalize_page(
         output = _apply_scanned_figure_guard(output, p)
         output = _apply_native_paragraphs(output, p, state.native_vocabulary)
         output = _apply_unverified_table_mark(output, p)
+    output = _apply_unaccepted_output_mark(output, provenance, p)
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``
