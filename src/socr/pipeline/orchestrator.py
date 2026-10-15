@@ -158,10 +158,11 @@ def _is_timeout_error(exc: BaseException) -> bool:
     # ``ollama_utils.TotalDeadlineExceeded`` already subclasses ``TimeoutError``,
     # so the fail-fast from the outstanding-call guard lands here too (round 4,
     # Argon #4). What had to change was the ENGINE, which folded it into None.
-    if isinstance(exc, TimeoutError):
-        return True
-
-    return "timed out" in str(exc).lower() or "timeout" in type(exc).__name__.lower()
+    # Type only (round 6, repo soft 4). ``TotalDeadlineExceeded`` and the
+    # wrapper in ``_uncovered_text_ask`` both subclass ``TimeoutError``, so the
+    # wording fallback this used to carry could only ever fire on an exception
+    # whose MESSAGE happened to say "timed out" -- #713's lesson, in miniature.
+    return isinstance(exc, TimeoutError)
 
 
 def _prior_recoveries(body: str, page_num: int, regions) -> dict:
@@ -181,15 +182,17 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
         if ref not in paragraphs:
             continue
         at = paragraphs.index(ref)
-        block = next(
-            (
-                para
-                for para in (paragraphs[at - 1 : at] + paragraphs[at + 1 : at + 2])
-                if RECOVERED_MARK_RE.search(para)
-            ),
-            None,
-        )
         in_figure = reg.figure_pdf is not None or reg.kind == "raster"
+        # Round 6, item 3: look where this region's block ACTUALLY goes. In a
+        # figure the image leads and the words follow (at + 1); elsewhere the
+        # words lead and the image follows (at - 1). Searching both directions
+        # could pair a region with its NEIGHBOUR's block.
+        neighbour = paragraphs[at + 1 : at + 2] if in_figure else paragraphs[at - 1 : at]
+        block = next((para for para in neighbour if RECOVERED_MARK_RE.search(para)), None)
+        if block is None and not in_figure and at == 0:
+            # A prose region whose words were never placed (the anchor was
+            # refused) sits alone at the page tail.
+            block = None
         piece = None
         if block is not None:
             piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)
@@ -10018,12 +10021,6 @@ class UnifiedPipeline:
             # (previously timed out AND failed the health probe), halt for ALL
             # subsequent pages — native OR OCR.  No page after the wedge may be
             # processed or flushed; saving pages 0..N-1 is the invariant.
-            # #1050 step 2 (item H): the crop reader runs AFTER this check, in
-            # the page's apply step, so a wedge it finds arms the same latch
-            # through the pipeline rather than through this local.
-            if self._recovery_backend_wedged:
-                backend_degraded = True
-                halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
             if backend_degraded:
                 if not self.config.quiet:
                     console.print(
@@ -11682,12 +11679,21 @@ class UnifiedPipeline:
         finally:
             tmp.unlink(missing_ok=True)
 
-    def _arm_recovery_halt(self, state, page_num: int) -> None:
-        """#1050 step 2 (item H): a wedged crop reader halts the document.
+    def _stop_recovery_for_document(self, state, page_num: int) -> None:
+        """A slow crop read turns RECOVERY off for this document, nothing more.
 
-        Same latch as the OCR ladder's: the next page must not be fired into a
-        stuck GPU. The loop reads ``_recovery_backend_wedged`` at the top and
-        sets its own ``backend_degraded``, so there is ONE halt path, not two.
+        Round 6 BLOCKER. This used to arm the ladder's cascade halt, so ONE read
+        that took its full deadline ended the document and every later page
+        shipped ``not_processed_after_halt`` -- on main a native document never
+        halts at all. The causes are mundane (a cold model load, a repetition
+        runaway, a stray fail-fast from the shared outstanding-call label), and
+        none of them is a reason to stop reading a page's own native text.
+
+        The original purpose -- not firing call after call into a stuck GPU --
+        still holds: no further crop is read in this document. The remaining
+        regions ship exactly as step 1 left them, picture and mark, their pages
+        stay WARNING, and processing continues. A page that genuinely needs the
+        VLM still goes through the ladder's own halt.
         """
         from socr.core.audit_log import AuditEvent
 
@@ -11697,18 +11703,19 @@ class UnifiedPipeline:
         state.events.append(
             AuditEvent(
                 page_num=page_num,
-                kind="partial_save_vlm_timeout",
+                kind="uncovered_text_reader_stopped",
                 engine="ollama-figure",
                 detail=(
-                    f"crop reader unresponsive after timeout on p{page_num}; "
-                    "halting — pages processed so far are saved"
+                    f"crop reader timed out on p{page_num}; word recovery is off for the "
+                    "rest of this document and the remaining regions ship as pictures"
                 ),
+                data={"page": page_num},
             )
         )
         if not self.config.quiet:
             console.print(
-                f"  [red]p{page_num}: crop reader unresponsive after timeout; "
-                "halting document (PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
+                f"  [yellow]p{page_num}: crop reader timed out; word recovery off for "
+                "the rest of this document[/yellow]"
             )
 
     def _uncovered_text_budget(self, state, page_num, regions):
@@ -11773,7 +11780,10 @@ class UnifiedPipeline:
             piece=None,
             merged_from=reg.merged_from,
         )
-        if not getattr(self, "_recover_uncovered_text", True):
+        # Fail CLOSED (round 6, repo soft 3): absent means "not prepared", and
+        # recovering without the document-level preparation is the unsafe way
+        # round. ``_prepare_text_coverage`` always sets it.
+        if not getattr(self, "_recover_uncovered_text", False):
             return rec
         if self._recovery_backend_wedged:
             # Item C: once the reader is wedged, the REST of this page stops too.
@@ -11788,10 +11798,16 @@ class UnifiedPipeline:
         # event. Byte idempotency was not enough on its own: the reader cost and
         # the audit trail were duplicated every time the phase ran again. The
         # PLACEMENT is still re-derived below, so the page lands identically.
-        reused = already.piece if already is not None else None
+        # An UNREAD prior (piece is None) still counts as done: it was already
+        # offered to the reader and declined, so a second apply must not pay
+        # for it again (round 6, item 3). ``_prior_recoveries`` only records a
+        # region whose picture is already on the page.
+        if already is not None:
+            return self._place_recovery(
+                reg, image_ref, already.piece, in_figure, page, page_num, index
+            )
+
         budget = getattr(self, "_recovery_budget", None)
-        if reused is not None:
-            return self._place_recovery(reg, image_ref, reused, in_figure, page, page_num, index)
         try:
             # Round 3 (Argon #7): a call may not START unless the budget can
             # hold a whole one. ``PageLadderBudget`` documents that a call
@@ -11859,7 +11875,7 @@ class UnifiedPipeline:
             # exists for. A read that consumed its whole deadline IS the
             # evidence; a fast failure is a refusal and stays "no reading".
             if _is_timeout_error(exc):
-                self._arm_recovery_halt(state, page_num)
+                self._stop_recovery_for_document(state, page_num)
         seconds = round(time.perf_counter() - t0, 2)
         if not reading:
             state.events.append(
@@ -12035,6 +12051,11 @@ class UnifiedPipeline:
         # are paragraphs and need the blank line. Matching step 1 exactly when
         # step 2 produced nothing is what makes "no reader is exactly step 1"
         # a true statement rather than a nearly-true one.
+        # Item J: with NO reading anywhere, every tail entry is a bare picture
+        # link and step 1 joined those with a single newline, so the page is
+        # byte-identical to main. Round 6 item 3: that joiner is ONLY correct
+        # when every entry really is a bare link; a recovered block is a
+        # paragraph and needs the blank line.
         nothing_recovered = all(r.piece is None for r in recoveries)
         joiner = "\n" if nothing_recovered else "\n\n"
         extra = mark if not tail else mark + "\n\n" + joiner.join(tail)

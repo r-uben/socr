@@ -546,6 +546,13 @@ def _native_text_with_appends(p) -> str:
         # text's own single newline to a blank line so the block reads as its
         # own paragraph. Removing the block cannot put that newline back, so an
         # exact prefix test would fail on the separator alone.
+        # Only when a coverage part was ACTUALLY removed (round 6, repo soft 2).
+        # Collapsing whitespace is safe for a text this feature just edited; on
+        # an untouched attempt it would also collapse the line breaks that carry
+        # meaning in a Markdown table, and accept a text that is not a true
+        # extension of the snapshot.
+        if stripped == text:
+            continue
         if _collapsed(stripped).startswith(_collapsed(base)) and len(stripped) > len(base):
             return text
     return base

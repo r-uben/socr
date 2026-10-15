@@ -990,7 +990,7 @@ def native_ink_masked(page, mat, arr):
     paint = np.zeros(gray.shape, dtype=bool)
     protect = np.zeros(gray.shape, dtype=bool)
     for ink in _polarity_masks(gray):
-        count, labels, _stats, _c = cv2.connectedComponentsWithStats(
+        count, labels, stats, _c = cv2.connectedComponentsWithStats(
             ink.astype(np.uint8), connectivity=8
         )
         if count < 2:
@@ -999,12 +999,29 @@ def native_ink_masked(page, mat, arr):
         total = np.bincount(labels.ravel(), minlength=count).astype(np.float64)
         with np.errstate(invalid="ignore", divide="ignore"):
             frac = np.where(total > 0, hit / total, 0.0)
+        # A component whose pixels are mostly under a char box IS a glyph: it
+        # is painted whole, as before.
         covered = np.zeros(count, dtype=bool)
         covered[1:] = frac[1:] >= COVER_MAJORITY
+        # Round 6 item 2: a glyph printed over hatching, dots or grain MERGES
+        # into the texture's own component, so the majority test failed and the
+        # label stayed legible in the crop. Such a component touches a char box
+        # but is far bigger than any glyph can be -- bounded by the corpus
+        # percentiles the ink filter already uses -- and for it only the ink
+        # INSIDE the char boxes is painted; the texture itself is left alone.
+        # A GLYPH-SIZED component that merely overlaps a char box is the other
+        # case entirely: a drawn mark under a descender, which must survive
+        # (round 4 item 2), so it is protected rather than painted.
+        short = np.minimum(stats[:, 2], stats[:, 3])
+        long = np.maximum(stats[:, 2], stats[:, 3])
+        glyph_sized = (short <= GLYPH_H_P98_PX) & (long <= WORD_W_P98_PX)
+        texture = np.zeros(count, dtype=bool)
+        texture[1:] = (hit[1:] > 0) & ~covered[1:] & ~glyph_sized[1:]
         paint |= covered[labels]
-        uncovered = np.zeros(count, dtype=bool)
-        uncovered[1:] = frac[1:] < COVER_MAJORITY
-        protect |= uncovered[labels]
+        paint |= texture[labels] & layer
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = ~covered[1:] & ~texture[1:]
+        protect |= keep[labels]
     if paint.any():
         out = _fill_with_local_background(out, paint, protect & ~paint)
     return out

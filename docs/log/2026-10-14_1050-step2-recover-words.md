@@ -67,8 +67,10 @@ A region with no reading is exactly step 1: picture and mark, no text.
 
 ## 3. The witness, and the rule it produced
 
-Tesseract on the same crop (`source_evidence.crop_witness_reading`, a new
-public seam over the existing renderer + reader).
+Tesseract on the same crop, through a public seam over the existing renderer
+and reader. **Superseded:** the witness and that seam were deleted in round 5's
+item G; nothing is verified now. Kept here because the measurements below were
+taken with it.
 
 **Measured 2026-10-14**, 91 regions on 22 pages (the 2 review pages plus a
 seeded sample of 20 step-1-flagged silent-SUCCESS native pages from run
@@ -95,7 +97,8 @@ content-token length and is not numeric, so containment held over two EMPTY
 sets and the reading confirmed itself. A reading with no comparable token at
 all now cannot confirm (`no_comparable_token`).
 
-**Outcome on the 91 regions, re-scored with the FINAL rule:** 23 confirmed, 63
+**Outcome on those same 91 regions (22 pages, pre-dating the whole-figure
+rule, the dropped label and the mask), re-scored with the FINAL rule:** 23 confirmed, 63
 unconfirmed, 5 unread, out of 1,075 words recovered. The two-sided and
 order-sensitive rules and the unclassified-token rule cost 5 confirmations
 against the first-round rule, every one of them a case the old rule could not
@@ -189,7 +192,7 @@ picture. Regions inside one figure now ship as ONE whole-figure crop, read once.
 | Hansen et al. 2018 p23 | 23 | 1 (whole figure) |
 | Bugel et al. 2026 p23 | 18 | 1 (whole figure) |
 | Schoenegger p10 | 4 | 1 (text, not a figure) |
-| Acosta p21 | 7 | 1 (figure) |
+| Acosta p21 | 7 regions (5 crops shipped) | 1 (figure) |
 
 Both halves of "inside one figure" are existing detectors —
 `figures.extractor.figure_boxes` (raster) and `tables.reconstruct.chart_region_bboxes`
@@ -386,7 +389,11 @@ prevent. Measured with the reviewer's metric (contrast pixels inside the native
 char boxes, against the fill), white painting left **395% on a 0.6 grey and 389%
 on a dark fill** -- MORE legible than before masking. Each covered component is
 now filled with the MEDIAN of a ring around it, so a gradient is followed rather
-than flattened: **0% on all four fills** (0.92, 0.85, 0.6, dark-with-white-text).
+than flattened: **0% on all four flat fills** (0.92, 0.85, 0.6, and
+dark-with-white-text). On a vertical GRADIENT the same metric, taken against a
+row-local background, is also 0% -- but the fill is one colour per component,
+so on a steeper ramp than the one measured a faint flat word-shaped patch can
+remain. Named as a limit below rather than claimed as solved.
 `cv2.inpaint` was tried first and reverted: it reconstructs a ghost from the
 anti-aliased boundary and left 119% on a near-white fill.
 
@@ -447,13 +454,18 @@ tiny scatter markers, line axes without a frame, and a frame drawn as four
 separate rule segments (LaTeX `\fbox`, `mdframed`), whose segments enclose
 nothing so its contents never group.
 
+Also accepted (round 6): on a steep vertical GRADIENT the ring-median fill is
+one colour per component, so a faint flat word-shaped patch can remain where the
+background ramps across a glyph. Measured 0% local contrast on the gradient
+tested; a per-pixel background estimate would close it and was not attempted.
+
 Also accepted (round 5): drawn capitals that OVERLAP a native descender lose
 about 32% of their ink to the mask, because the covered-component rule cannot
 separate two touching strokes. A fast `None` mid-document keeps step-1 crops.
 
 ## Not measured
 
- cluster (vLLM) run: the reader path is the Ollama figure engine.
+- No cluster (vLLM) run: the reader path is the Ollama figure engine.
 - Recovery is not applied to the `text_coverage_unknown` branch.
 - A figure region's picture is still appended at the page tail, not placed at
   its own reading-order position.

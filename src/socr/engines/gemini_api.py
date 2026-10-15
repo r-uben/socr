@@ -285,7 +285,14 @@ class OllamaFigureEngine:
             )
 
     def ask(self, image: Image.Image, prompt: str) -> str | None:
-        """Send *prompt* with *image* and return the RAW answer, or ``None`` on any failure.
+        """Send *prompt* with *image*; return the RAW answer, or ``None`` on failure.
+
+        One exception to "any failure": ``TotalDeadlineExceeded`` PROPAGATES
+        (#1050 step 2). A fail-fast from the outstanding-call guard is the only
+        signal a caller has that the backend is wedged rather than merely
+        unhelpful, and folding it into ``None`` hid that from every caller.
+        Callers that must never raise -- the number-free figure describer --
+        catch it themselves.
 
         Unlike ``describe_figure`` this neither wraps the text in the caption marker nor
         folds an error into the description string: the number-free describer must be able

@@ -6,7 +6,11 @@ enclosing drawn rectangle or a placed raster), so every test here pins a
 DIFFERENCE between a page with the container and the same page without it --
 never an absolute region count, which depends on the ink filter's corpus cuts.
 
-Hermetic: no provider, no Tesseract, no network. The crop reader is stubbed.
+Hermetic: no provider and no network. The crop reader is stubbed, except where
+a test says it drives the real engine with the HTTP layer patched. A few tests
+use Tesseract as a stand-in READER (to measure what the model would be shown);
+they skip when it is absent. Nothing here verifies a reading — step 2 confirms
+nothing (owner ruling 2026-10-14).
 """
 
 from __future__ import annotations
@@ -736,22 +740,25 @@ def _two_pages_with_unread_ink_pdf(path: Path) -> Path:
     return path
 
 
-def test_a_wedge_on_page_one_stops_page_two(tmp_path: Path) -> None:
-    """Item C: the latch must be CONSUMED between pages, not merely set.
+def test_a_slow_read_on_page_one_does_not_cut_the_document_short(tmp_path: Path) -> None:
+    """Round 6 BLOCKER: a slow crop read must not halt a native document.
 
-    Setting `_recovery_backend_wedged` is useless unless the agentic loop reads
-    it at the top and halts. Pinned as a difference over the health probe: a
-    live backend processes both pages, a dead one stops after the first.
+    One read taking its full deadline used to arm the ladder's cascade halt, so
+    every later page shipped `not_processed_after_halt` — on main a native
+    document never halts at all. The causes are mundane (a cold model load, a
+    repetition runaway, a stray fail-fast from the shared outstanding-call
+    label) and none is a reason to stop reading a page's own native text.
+
+    Pinned against the ALIVE run: page 2's native text must be identical, and
+    the document must not carry the halt reason.
     """
     pdf = _two_pages_with_unread_ink_pdf(tmp_path / "two_pages.pdf")
 
-    def run(out: str, wedge: bool) -> tuple[int, bool]:
-        pages: set[int] = set()
+    def run(out: str, wedge: bool) -> tuple[str, bool, int]:
+        calls: list[str] = []
 
-        # The model is handed a MASKED scratch crop, not the shipped picture,
-        # so the page number comes from the call order, not from the filename.
         def ask(_path, _prompt):
-            pages.add(len(pages) + 1)
+            calls.append("x")
             if wedge:
                 raise TimeoutError("read timed out")
             return RECOVERED
@@ -767,14 +774,47 @@ def test_a_wedge_on_page_one_stops_page_two(tmp_path: Path) -> None:
             patch.object(pipeline, "_is_chart_asset_page", return_value=False),
         ):
             result = pipeline.process(pdf, tmp_path / out)
-        return len(pages), "PARTIAL_SAVE_VLM_TIMEOUT" in (result.error or "")
+        page_two = (tmp_path / out).rglob("pages/00002.md")
+        body = next(page_two).read_text(encoding="utf-8")
+        return body, "PARTIAL_SAVE_VLM_TIMEOUT" in (result.error or ""), len(calls)
 
-    alive_pages, alive_halted = run("o_alive", wedge=False)
-    wedged_pages, wedged_halted = run("o_wedged", wedge=True)
-    assert alive_pages == 2, "a live backend reads both pages"
+    alive, alive_halted, alive_calls = run("o_alive", wedge=False)
+    wedged, wedged_halted, wedged_calls = run("o_wedged", wedge=True)
+
     assert alive_halted is False
-    assert wedged_pages == 1, "page 2 is never fired into a stuck GPU"
-    assert wedged_halted is True, "and the document says why it stopped"
+    assert wedged_halted is False, "a slow read must not halt the document"
+    assert wedged_calls == 1, "and no further crop is read in it"
+    # Page 2 still ships, and its NATIVE text is what the alive run shipped.
+    for line in _ABOVE_LINES + _BELOW_LINES:
+        assert line in wedged, "page 2 lost its native text"
+        assert alive.count(line) == wedged.count(line) == 1
+    # The difference is only the recovery: alive has the words, wedged the picture.
+    assert PAGE_TEXT_PREFIX in alive
+    assert PAGE_TEXT_PREFIX not in wedged
+    assert uncovered_text_marker(2) in wedged
+
+
+def test_a_stopped_reader_says_so_once(tmp_path: Path) -> None:
+    """One event per document, not one per skipped region."""
+    pdf = _two_pages_with_unread_ink_pdf(tmp_path / "two_pages.pdf")
+    pipeline = _pipeline()
+
+    def ask(_path, _prompt):
+        raise TimeoutError("read timed out")
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    log = json.loads(next((tmp_path / "o").rglob("audit_log.json")).read_text(encoding="utf-8"))
+    events = log if isinstance(log, list) else log.get("events", [])
+    kinds = [e.get("kind") for e in events]
+    assert kinds.count("uncovered_text_reader_stopped") == 1
+    assert "partial_save_vlm_timeout" not in kinds
 
 
 # --- fix round 3, item 1: the reader never sees native text -------------------
@@ -1819,3 +1859,238 @@ def test_the_figure_describer_still_never_raises() -> None:
             assert describe(png, "prompt") is None, "the describer path must not raise"
         finally:
             png.unlink(missing_ok=True)
+
+
+# --- fix round 6 --------------------------------------------------------------
+
+
+def _label_over_texture_pdf(path: Path, kind: str) -> Path:
+    """A native label printed over a TEXTURED raster, plus an uncovered strip.
+
+    A glyph crossing hatching, diagonals or grain merges into the texture's own
+    connected component, so a majority-covered test never fires for it.
+    """
+    import numpy as np
+
+    doc = fitz.open()
+    page = doc.new_page()
+    inner = fitz.open()
+    ip = inner.new_page(width=400, height=200)
+    ip.draw_rect(fitz.Rect(0, 0, 400, 200), color=(1, 1, 1), fill=(1, 1, 1))
+    if kind == "hatch":
+        for x in range(0, 400, 6):
+            ip.draw_line(fitz.Point(x, 0), fitz.Point(x, 200), color=(0, 0, 0), width=1)
+    elif kind == "diagonal":
+        for x in range(-200, 400, 8):
+            ip.draw_line(fitz.Point(x, 0), fitz.Point(x + 200, 200), color=(0, 0, 0), width=1)
+    else:
+        rng = np.random.default_rng(7)
+        for _ in range(4000):
+            x, y = int(rng.integers(0, 400)), int(rng.integers(0, 200))
+            ip.draw_rect(fitz.Rect(x, y, x + 2, y + 2), color=(0, 0, 0), fill=(0, 0, 0))
+    page.insert_image(fitz.Rect(72, 150, 472, 350), pixmap=ip.get_pixmap(alpha=False))
+    inner.close()
+    page.insert_text((100, 250), "NATIVE LABEL OVER TEXTURE", fontsize=16, color=(0, 0, 0))
+    # An UNCOVERED drawn strip inside the same raster: it must survive.
+    x = 110.0
+    for width in (4.0, 3.2, 4.6, 3.8, 5.0, 4.1):
+        page.draw_rect(fitz.Rect(x, 300, x + width, 308), color=(0, 0, 0), width=0.6)
+        x += width + 2.0
+    page.insert_text((72, 60), "Prose above, with a text layer.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("kind", ["hatch", "diagonal", "noise"])
+def test_a_label_over_a_texture_is_masked(tmp_path: Path, kind: str) -> None:
+    """Round 6, item 2: a glyph that merges with a texture must still be painted.
+
+    The majority rule asked whether most of a COMPONENT lies under a char box.
+    A glyph crossing hatching joins the texture's component, which is almost
+    entirely outside, so the glyph stayed legible in the crop. What is painted
+    now is the ink INSIDE the char boxes for any component bigger than a glyph
+    that touches one — and a GLYPH-SIZED component that merely overlaps a box
+    is the opposite case, a drawn mark, which must survive.
+    """
+    import numpy as np
+
+    from socr.core import text_coverage as tc
+
+    pdf = _label_over_texture_pdf(tmp_path / f"{kind}.pdf", kind)
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        mat = fitz.Matrix(tc.SCALE, tc.SCALE)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        masked = tc.native_ink_masked(page, mat, arr)
+        visible, _inv = tc.visible_char_boxes(page)
+        label_boxes = [b for b in visible if 200 < b[1] < 300]
+
+        def dark(img, boxes) -> int:
+            total = 0
+            for box in boxes:
+                x0, y0, x1, y1 = tc._to_pix(box, page, mat)
+                total += int((img[y0:y1, x0:x1, 0] < 100).sum())
+            return total
+
+        strip = tc._to_pix((105, 298, 180, 310), page, mat)
+
+        def strip_dark(img) -> int:
+            return int((img[strip[1] : strip[3], strip[0] : strip[2], 0] < 100).sum())
+
+        before, after = dark(arr, label_boxes), dark(masked, label_boxes)
+        strip_before, strip_after = strip_dark(arr), strip_dark(masked)
+
+    assert before > 0, "the fixture prints a label on the texture"
+    assert after <= before * 0.02, "the label is still legible after masking"
+    assert strip_before > 0, "and draws an uncovered strip"
+    assert strip_after == strip_before, "which the mask must not touch"
+
+
+def test_prior_recoveries_pair_each_region_with_its_own_block(tmp_path: Path) -> None:
+    """Round 6, item 3: look where the block ACTUALLY goes, per region kind.
+
+    In a figure the image leads and the words follow; elsewhere the words lead
+    and the image follows. Searching both directions could pair a region with
+    its NEIGHBOUR's block, so a second apply would re-attribute the readings.
+    Pinned on a read/unread pair: applying twice must change nothing.
+    """
+    pdf = _chart_with_labels_pdf(tmp_path / "chart.pdf", plot_marks=True)
+    captured: dict = {}
+    reads: list[str] = []
+    pipeline = _pipeline()
+    apply = pipeline._apply_text_coverage
+
+    def twice(state, page_num, ps, output_dir):
+        apply(state, page_num, ps, output_dir)
+        captured["once"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_once"] = len(reads)
+        apply(state, page_num, ps, output_dir)
+        captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_twice"] = len(reads)
+
+    answers = iter([RECOVERED, None, RECOVERED, None])
+
+    def ask(_path, _prompt):
+        reads.append("x")
+        return next(answers, None)
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+
+    assert captured["once"], "the fixture decorates the page"
+    assert captured["twice"] == captured["once"], "a second apply re-attributed the readings"
+    assert captured["reads_twice"] == captured["reads_once"], (
+        "an UNREAD prior must not be read again either"
+    )
+
+
+def test_the_collapsed_prefix_test_only_runs_on_a_text_we_edited() -> None:
+    """Round 6 (repo soft 2): line breaks carry meaning in a Markdown table.
+
+    The whitespace-collapsed prefix test is safe on a text THIS feature just
+    edited, because inserting a block promotes a newline to a blank line. On an
+    untouched attempt it would also collapse the row breaks of a table and
+    accept a text that is not a true extension of the snapshot.
+    """
+    from socr.core.manifest import _native_text_with_appends
+    from socr.core.result import PageOutput, PageStatus
+    from socr.core.state import PageState
+
+    # The snapshot is a two-row table; the attempt has the SAME words with the
+    # row break lost. Collapsed they match; as Markdown they are different
+    # tables, and this attempt carries no coverage part to justify collapsing.
+    base = "| a | b |\n| 1 | 2 |"
+    mangled = "| a | b | | 1 | 2 | plus a trailing sentence that makes it longer."
+    ps = PageState(page_num=1)
+    ps.native_text = base
+    ps.attempts = [
+        PageOutput(
+            page_num=1,
+            text=mangled,
+            status=PageStatus.SUCCESS,
+            engine="native",
+            audit_passed=True,
+        )
+    ]
+    assert len(mangled) > len(base)
+    assert " ".join(mangled.split()).startswith(" ".join(base.split()))
+    assert _native_text_with_appends(ps) == base, (
+        "an untouched attempt must face the EXACT prefix test"
+    )
+
+
+def _two_figures_pdf(path: Path) -> Path:
+    """Two separate vector charts on one page, each with a drawn label."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    for line in _ABOVE_LINES:
+        page.insert_text((72, y), line)
+        y += 13.0
+    for top in (140.0, 420.0):
+        page.draw_rect(fitz.Rect(64, top, 464, top + 200), color=(0.4, 0.4, 0.4), width=0.8)
+        for i, h in enumerate((80.0, 140.0, 60.0)):
+            x = 110.0 + i * 90
+            page.draw_rect(
+                fitz.Rect(x, top + 180 - h, x + 50, top + 180),
+                color=(0, 0, 0),
+                fill=(0.2, 0.4, 0.8),
+            )
+        _glyph_row(page, top + 15.0, x0=110.0)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_each_figure_keeps_its_own_words_on_a_second_apply(tmp_path: Path) -> None:
+    """Round 6, item 3: pair a region with ITS block, not its neighbour's.
+
+    In a figure the image leads and the words follow. Searching both directions
+    finds the PREVIOUS figure's block first, so a second apply re-attributed
+    the readings. Pinned on two figures where only the first was read: applying
+    twice must change nothing, and must not re-read the unread one.
+    """
+    pdf = _two_figures_pdf(tmp_path / "two_figs.pdf")
+    regions = _regions(pdf)
+    assert len([r for r in regions if r.figure_pdf]) == 2, "the fixture has two figures"
+
+    captured: dict = {}
+    reads: list[str] = []
+    answers = iter([RECOVERED, None])
+    pipeline = _pipeline()
+    apply = pipeline._apply_text_coverage
+
+    def ask(_path, _prompt):
+        reads.append("x")
+        return next(answers, None)
+
+    def twice(state, page_num, ps, output_dir):
+        apply(state, page_num, ps, output_dir)
+        captured["once"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_once"] = len(reads)
+        apply(state, page_num, ps, output_dir)
+        captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_twice"] = len(reads)
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+
+    assert captured["once"].count(RECOVERED.splitlines()[0]) == 1, "one figure was read"
+    assert captured["twice"] == captured["once"], "a second apply re-attributed the readings"
+    assert captured["reads_twice"] == captured["reads_once"], "the unread figure was read again"

@@ -215,9 +215,11 @@ def test_two_regions_under_one_anchor_keep_their_order() -> None:
     """The second block goes after the first, not before it."""
     from socr.core import text_recovery
 
-    body, _ = text_recovery.insert_after_anchor("alpha line\nbeta line", "alpha line", "> ONE")
-    body, _ = text_recovery.insert_after_anchor(body, "alpha line", "> TWO")
-    assert body.index("> ONE") < body.index("> TWO") < body.index("beta line")
+    one = text_recovery.recovered_block("ONE", in_figure=False)
+    two = text_recovery.recovered_block("TWO", in_figure=False)
+    body, _ = text_recovery.insert_after_anchor("alpha line\nbeta line", "alpha line", one)
+    body, _ = text_recovery.insert_after_anchor(body, "alpha line", two)
+    assert body.index("ONE") < body.index("TWO") < body.index("beta line")
 
 
 def test_an_anchor_ending_in_punctuation_still_matches() -> None:
@@ -248,9 +250,11 @@ def test_two_regions_above_all_native_text_keep_page_order() -> None:
     """
     from socr.core import text_recovery
 
-    body, _ = text_recovery.insert_after_anchor("native prose", "", "> FIRST")
-    body, _ = text_recovery.insert_after_anchor(body, "", "> SECOND")
-    assert body.index("> FIRST") < body.index("> SECOND") < body.index("native prose")
+    first = text_recovery.recovered_block("FIRST", in_figure=False)
+    second = text_recovery.recovered_block("SECOND", in_figure=False)
+    body, _ = text_recovery.insert_after_anchor("native prose", "", first)
+    body, _ = text_recovery.insert_after_anchor(body, "", second)
+    assert body.index("FIRST") < body.index("SECOND") < body.index("native prose")
 
 
 def test_a_block_is_never_separated_from_its_own_picture() -> None:
@@ -261,13 +265,19 @@ def test_a_block_is_never_separated_from_its_own_picture() -> None:
     """
     from socr.core import text_recovery
 
-    first = "> ONE\n\n![Uncovered text page 1 region 1](figures/uncovered_text_p1_r1.png)"
-    second = "> TWO\n\n![Uncovered text page 1 region 2](figures/uncovered_text_p1_r2.png)"
+    first = (
+        text_recovery.recovered_block("ONE", in_figure=False)
+        + "\n\n![Uncovered text page 1 region 1](figures/uncovered_text_p1_r1.png)"
+    )
+    second = (
+        text_recovery.recovered_block("TWO", in_figure=False)
+        + "\n\n![Uncovered text page 1 region 2](figures/uncovered_text_p1_r2.png)"
+    )
     body, _ = text_recovery.insert_after_anchor("alpha line\nbeta line", "alpha line", first)
     body, placed = text_recovery.insert_after_anchor(body, "alpha line", second)
     assert placed is True
-    assert body.index("> ONE") < body.index("region 1") < body.index("> TWO")
-    assert body.index("> TWO") < body.index("region 2") < body.index("beta line")
+    assert body.index("ONE") < body.index("region 1") < body.index("TWO")
+    assert body.index("TWO") < body.index("region 2") < body.index("beta line")
 
 
 def test_a_lead_in_is_stripped_not_used_to_drop_the_reading() -> None:
@@ -299,3 +309,34 @@ def test_only_a_refusal_drops_the_reading() -> None:
         "Sorry, the image is unreadable.",
     ):
         assert text_recovery.clean_reading(refusal) is None, refusal
+
+
+def test_a_native_blockquote_is_not_mistaken_for_a_placed_part() -> None:
+    """Round 6 (cubic): a leading ">" does not make a paragraph ours.
+
+    A native page may quote, and socr's own unverified-table mark is a
+    blockquote too. Treating every quoted paragraph as a placed part moved the
+    insertion point PAST text that is not ours to step over, so the recovered
+    words landed below someone else's quote.
+    """
+    from socr.core import text_recovery
+
+    native_quote = "> the author is quoting someone here"
+    body = f"anchor line\n\n{native_quote}\n\nfollowing prose"
+    block = text_recovery.recovered_block("Recovered words", in_figure=False)
+    new_body, placed = text_recovery.insert_after_anchor(body, "anchor line", block)
+    assert placed is True
+    # Ours goes immediately after the anchor, BEFORE the native quote.
+    assert new_body.index(block) < new_body.index(native_quote)
+
+
+def test_our_own_placed_block_is_still_stepped_over() -> None:
+    """The other half: a real recovery block IS ours, so the next one follows it."""
+    from socr.core import text_recovery
+
+    first = text_recovery.recovered_block("FIRST", in_figure=False)
+    second = text_recovery.recovered_block("SECOND", in_figure=False)
+    body, _ = text_recovery.insert_after_anchor("anchor line\n\ntail", "anchor line", first)
+    body, placed = text_recovery.insert_after_anchor(body, "anchor line", second)
+    assert placed is True
+    assert body.index("FIRST") < body.index("SECOND") < body.index("tail")

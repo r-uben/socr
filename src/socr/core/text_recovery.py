@@ -200,9 +200,15 @@ _PLACED_IMAGE_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(")
 
 
 def _is_placed_part(paragraph: str) -> bool:
-    """True when *paragraph* is a block or picture step 2 already placed."""
+    """True when *paragraph* is a block or picture step 2 already placed.
+
+    Identified by THIS feature's own mark, not by a leading ``>`` (round 6,
+    cubic): a native page may quote, and an unverified-table mark is also a
+    blockquote. Treating every quoted paragraph as ours moved the insertion
+    point past text that is not ours to step over.
+    """
     head = paragraph.lstrip()
-    return head.startswith(">") or bool(_PLACED_IMAGE_RE.match(head))
+    return bool(RECOVERED_MARK_RE.search(head)) or bool(_PLACED_IMAGE_RE.match(head))
 
 
 def _after_placed_parts(body: str, cut: int) -> int:
