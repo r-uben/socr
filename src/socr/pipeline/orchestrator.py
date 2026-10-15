@@ -15476,17 +15476,6 @@ class UnifiedPipeline:
             ps.equation_sidecar_skipped = bool(
                 getattr(ps, "equation_sidecar_skipped", False)
             ) or bool(meta.get("equation_sidecar_skipped", False))
-            # #1145 resume rule (b): take the verdict this page's ORIGINAL run
-            # published; never recompute one. ``_rewrite_all_fragments`` re-runs the
-            # whole seam at assemble over every page including the skipped ones, and a
-            # skipped page's ``attempts`` is the single frozen winner -- so any clause
-            # whose input is not in the sidecar would be silently lost and the fragment
-            # would come back from a resume cleaner than it left.
-            # ``PageOutput.table_label_unverified`` is exactly such a field today.
-            # Assigned, not OR-ed, unlike the flags above: the published verdict is a
-            # whole statement about one set of bytes, and the bytes are the restored
-            # ones. Rule (a) above has already refused a sidecar without one, so this
-            # is never a silent None.
             # GH-817: max-restore, not OR, because this is a COUNT (how many
             # fabricated refs were redacted from this page), not a disposition
             # flag -- a plain OR would boolean-ise it and silently change the

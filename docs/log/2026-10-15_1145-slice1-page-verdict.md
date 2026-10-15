@@ -153,6 +153,118 @@ test now reaches it with a region-scoped published verdict, the one input that e
 suppression; and the first `strip-helper-hides-body-change` mutant was an equivalent
 implementation rather than a hiding one.
 
+## Review round 2 (PR #1165, head a9f6ef5c)
+
+The repo reviewer said merge once CI was green, with three softs. Fable said do not merge,
+and independently replayed all 17,091 sidecars to the same 4,170/550/2,064 → 0/0/0 with
+10,731 CHECKED pages byte-identical. The core held; **two marks could state something
+false**, and one gate fixes both.
+
+Both reproduced before being accepted:
+
+1. **`page_judge=FAIL` on bytes the judge never saw.** The #649/#652 prose-recovery endings
+   REBUILD the shipped body from the page's own text layer and then copy the refused MODEL
+   attempt's `judge_accepted` / `rejection_class` onto it, so the refusal evidence is real
+   and it is about bytes that did not ship. #1142 skips its banner on exactly this
+   provenance set for exactly this reason; `_judge_refusal_clause` had no provenance input
+   and wrote "the page judge did not accept the bytes that ship" above both recovery
+   banners. `FAIL` asserts the check RAN on these bytes. It did not.
+2. **`native_glyphs=FAIL` on a model-reading winner.** `_native_glyph_clause` read
+   `has_unmapped_math_glyphs` with no engine gate, while the guard it mirrors
+   (`_apply_unresolved_math_guard`) gates on `native_math_damage_ships(output, provenance)`.
+   The review reported seven corpus pages. **Measured over all 17,091 terminal sidecars:
+   259**, every one with a `qwen` winner, and on every one of them the false line was
+   VISIBLE — the two counts (clause set changed, shipped bytes changed) came out identical,
+   so none of the 259 was a page where another mark already covered the line. The review's
+   finding was right and its magnitude was an undercount by a factor of thirty-seven; the
+   number in this log is the replayed one, not the reported one.
+
+**One fix: the ENDING is threaded into the seam.** `provenance` now reaches
+`_apply_verdict_marks` → `build_page_verdict` → `derive_clauses`. The judge clause returns
+`page_judge=UNKNOWN; reason=the bytes that ship were rebuilt after the judge ran and were
+never judged` for an excluded ending — UNKNOWN rather than silence, because something true
+is left to say, and it is the same FAIL-versus-UNKNOWN distinction this module carries
+everywhere else. The glyph clause CALLS `native_math_damage_ships` rather than restating it;
+that predicate is not a one-liner (an unknown ending and every ending that may carry native
+bytes answer True, and a model body still carrying the codepoints answers True too, so it
+errs toward keeping the warning).
+
+The judge case is a reachability fix: 0 pages on this run, reachable on any fresh run where
+the ladder refuses the model table. The glyph case is not — it was live on 259 pages.
+Measured by running the seam twice per page in one process, once live and once with both
+gates disabled (which is exactly the pre-fix behaviour), and diffing the clause set and the
+shipped bytes:
+
+```
+pages_whose_clause_set_the_gate_changed = 259
+clauses_withdrawn                       = {native_glyphs=FAIL: 259}
+clauses_added                           = {}
+pages_whose_SHIPPED_BYTES_changed       = 259   (by winning engine: qwen 259)
+```
+
+`clauses_added` being empty is the other half: the gate only ever WITHDRAWS a false
+statement here, and the `page_judge=UNKNOWN` replacement fired on no page of this run, which
+is consistent with the judge case being reachable rather than live.
+
+### The three softs
+
+* **Page-strict canonical match.** `_is_restored_prose_recovery` used `CANONICAL_MARK_RE`,
+  which matches any page number, so a line about page 9 above page 4's banner would have
+  been skipped and the banner trusted. Now `is_canonical_mark(head, page_num)`, which is
+  the rule the comment already claimed.
+* **A canonical line now covers only its own `(check, scope)`.** It was mapped to
+  `frozenset(Check)`, so the first line written to a two-clause page silenced the second:
+  the page kept line one and lost line two for ever. `parse_canonical_mark` reads the pair
+  off the line; the family is out of the blanket map, and an unparseable or wrong-page line
+  covers nothing, which is the fail-closed direction. Idempotence is unchanged because
+  `leading_mark_blocks` returns EVERY leading mark line, so once both are present each
+  covers its own pair.
+* **A published verdict that says CHECKED on a non-SUCCESS page falls back.** "Not SUCCESS
+  means at least one clause" is the invariant the ticket rests on, and it must hold at the
+  point of use rather than depend on resume rule (a) — a rule in another module that a
+  future skip path could widen without touching `core/verdict.py`. The page now falls
+  through to the fail-closed clause with a warning logged.
+
+### Fable's P2s
+
+The orphaned rule-(b) comment block in `pipeline/orchestrator.py` is removed (its content
+lives at the assignment). The three surviving test-helper mutants — a whitespace-normalising
+compare, `required` disabled, the clean-arm assertion dropped — are each pinned by a named
+test and each now dies. The whitespace one matters because `_with_page_top_banners` does
+`body.lstrip("\n")`, so a body that began with a blank line comes back without it: that is
+a genuine byte difference the helper must REPORT rather than absorb, and the test pins both
+directions. The gh317 fixture now says in the test that its fragment/verdict pair is not
+one production writes, and why deriving the fragment through the seam would be the fixture
+edit that hid a regression on #1142.
+
+### Round-2 measurement
+
+Suite **7,727 passed, 2 skipped, 4 xfailed, 0 failed**. ruff 0.16.0 format clean, 947 files.
+**23 mutants, 23 killed**, each by a named test — the 16 from round 1 plus eight for the
+round-2 changes, with several round-1 anchors refreshed where the new code moved them.
+Corpus replay unchanged: 4,170/550/2,064 → 0/0/0, 0 CHECKED pages whose bytes changed, 0
+SUCCESS pages demoted, 0 pages whose status moved. The replay now also reports the clause
+mix, which is the first per-check picture of the corpus:
+
+| check | pages |
+| --- | --- |
+| `native_table_verifier` | 1,153 |
+| `equation_fidelity` | 1,118 |
+| `native_coverage` | 1,080 |
+| `table_structure` | 972 |
+| `native_glyphs` | 883 (was 1,142 before the gate) |
+| `page_judge` | 438 |
+| `chart_region` | 410 |
+| `unknown` (fail-closed) | 398 |
+| `figure_text` | 388 |
+| `source_evidence` | 37 |
+| `table_label` | 8 |
+
+`equation_fidelity` at 1,118 matches the design's measured count for the corrupt-math
+hybrid class exactly, which is the independent check that round 1's `AUDIT_FAILED` fix
+landed on the right population. The 398 fail-closed pages are the ones where socr still
+cannot name its own reason; narrowing that number is future work, not a slice-1 goal.
+
 ## Known readability cost
 
 On a page like P6 page 3 the fact "the native table region failed verification" is now stated

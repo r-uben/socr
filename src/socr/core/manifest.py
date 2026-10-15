@@ -56,6 +56,7 @@ from socr.core.marks import (
     UNVERIFIED_TABLE_MARK_RE,
     Check,
     CheckResult,
+    is_canonical_mark,
 )
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
@@ -2609,9 +2610,10 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # That is the same resume loss #649 round 2 closed, reached through a new door, and it
     # is content loss: the prose this lane exists to save.
     #
-    # Only this module's OWN canonical lines are skipped, matched by the grammar's regex
-    # with this page's number in it -- not "any leading line", which would be the forgeable
-    # rule the docstring above rejects. A model echoing the banner mid-body is still not
+    # Only this module's OWN canonical lines are skipped, and only lines carrying THIS
+    # page's number: ``is_canonical_mark`` is page-strict, where ``CANONICAL_MARK_RE`` alone
+    # matches any page number and so would skip a line about page 9 above page 4's banner.
+    # Not "any leading line", which would be the forgeable rule the docstring above rejects. A model echoing the banner mid-body is still not
     # reached, because the first non-canonical line is what is tested.
     body = text
     while True:
@@ -2619,7 +2621,7 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
         if not head.strip():
             body = rest if sep else ""
             continue
-        if CANONICAL_MARK_RE.match(head.strip()):
+        if is_canonical_mark(head.strip(), page_num):
             body = rest if sep else ""
             continue
         break
@@ -4749,7 +4751,11 @@ def _apply_unaccepted_output_mark(
 
 
 def _apply_verdict_marks(
-    output: PageOutput, p, page_num: int, published: PageVerdict | None = None
+    output: PageOutput,
+    p,
+    page_num: int,
+    published: PageVerdict | None = None,
+    provenance: SelectionProvenance | None = None,
 ) -> tuple[PageOutput, PageVerdict]:
     """#1145: build this page's verdict and put its marks first on the page.
 
@@ -4766,7 +4772,9 @@ def _apply_verdict_marks(
     """
     text = output.text or ""
     leading, _ = _split_page_top_banners(text)
-    verdict = build_page_verdict(page_num=page_num, output=output, p=p, published=published)
+    verdict = build_page_verdict(
+        page_num=page_num, output=output, p=p, published=published, provenance=provenance
+    )
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
     # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
     # whole page or only for the table it stands in place of.
@@ -5133,7 +5141,15 @@ def _select_and_finalize_page(
     # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so
     # the page would come back from a resume looking cleaner than it left.
     output, verdict = _apply_verdict_marks(
-        output, p, page_num, published=getattr(p, "published_verdict", None)
+        output,
+        p,
+        page_num,
+        published=getattr(p, "published_verdict", None),
+        # #1145 round 2: the ENDING, not only the output. Two clauses are about who authored
+        # the shipped bytes -- a judge refusal recorded on a body the judge never saw, and
+        # native glyph damage on a page a model reading replaced -- and neither can be
+        # decided from the output alone.
+        provenance=provenance,
     )
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after

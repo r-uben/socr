@@ -33,11 +33,13 @@ Two deliberate differences from the guards
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
 from socr.core.marks import (
     SCOPE_PAGE,
+    parse_canonical_mark,
     Check,
     CheckResult,
     FAMILY_COVERAGE,
@@ -46,6 +48,8 @@ from socr.core.marks import (
     page_unchecked_clause_mark,
 )
 from socr.core.result import FailureMode, PageOutput, PageStatus
+
+logger = logging.getLogger(__name__)
 
 #: The engine label the crop-backed corrupt-math region lane stamps on its attempt
 #: (``pipeline/orchestrator.py``), and the exact token
@@ -299,7 +303,9 @@ def _scanned_figure_clause(p: Any) -> VerdictClause | None:
     )
 
 
-def _native_glyph_clause(p: Any) -> VerdictClause | None:
+def _native_glyph_clause(
+    p: Any, output: PageOutput, provenance: Any = None
+) -> VerdictClause | None:
     """``native_glyphs=FAIL`` from the PUA class -- and NOT from the math-font class.
 
     The two signals are routinely confused and only one belongs here. An earlier draft of
@@ -323,6 +329,18 @@ def _native_glyph_clause(p: Any) -> VerdictClause | None:
     """
     if not _flag(p, "has_unmapped_math_glyphs"):
         return None
+    from socr.core.manifest import native_math_damage_ships
+
+    if not native_math_damage_ships(output, provenance):
+        # The accounting describes the NATIVE text. When a model reading replaced it, the
+        # page owes that damage nothing: it takes the shipping reading's own status. Reusing
+        # #1005's predicate rather than restating it -- the guard this clause mirrors
+        # (``_apply_unresolved_math_guard``) gates on the same call, and it is not a
+        # one-liner: an unknown ending and every ending that may carry native bytes answer
+        # True, and a MODEL body that still carries private-use codepoints answers True too,
+        # so it errs toward keeping the warning. Measured: 7 corpus pages with a qwen winner
+        # were being told their mathematics is unrecovered PUA while a model reading ships.
+        return None
     return VerdictClause(
         Check.NATIVE_GLYPHS,
         CheckResult.FAIL,
@@ -331,7 +349,7 @@ def _native_glyph_clause(p: Any) -> VerdictClause | None:
     )
 
 
-def _judge_refusal_clause(output: PageOutput) -> VerdictClause | None:
+def _judge_refusal_clause(output: PageOutput, provenance: Any = None) -> VerdictClause | None:
     """``page_judge=FAIL``, from the ONE predicate that decides a judge refusal.
 
     ``_positive_judge_refusal_evidence`` is CALLED, never restated. It is subtler than it
@@ -347,10 +365,33 @@ def _judge_refusal_clause(output: PageOutput) -> VerdictClause | None:
     ``judge_accepted``, no ``judge_outcome`` -- no refusal, and #1129's own banner stays
     silent on it for that reason.
     """
-    from socr.core.manifest import _positive_judge_refusal_evidence
+    from socr.core.manifest import (
+        _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES,
+        _positive_judge_refusal_evidence,
+    )
 
     if not _positive_judge_refusal_evidence(output):
         return None
+    if provenance in _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES:
+        # ``FAIL`` would be a FALSE statement here, and this is why the clause needs the
+        # ending and not only the output. These endings REBUILD the shipped body -- the
+        # #649/#652 prose recovery ships the page's own text layer -- and then copy the
+        # refused MODEL attempt's ``judge_accepted`` / ``rejection_class`` onto it
+        # (``core/manifest.py``, the prose-recovery branch). So the refusal evidence is
+        # real, but it is about bytes that did not ship. #1142 skips its banner on exactly
+        # this set for exactly this reason; the clause had no provenance input and so wrote
+        # "the page judge did not accept the bytes that ship" above both recovery banners.
+        #
+        # UNKNOWN rather than silence, because something true is left to say: no judge ever
+        # looked at what shipped. That is the state the reader needs, and it is the same
+        # distinction ``FAIL`` versus ``UNKNOWN`` carries everywhere else in this module --
+        # the check decided against the page, or the check never decided.
+        return VerdictClause(
+            Check.PAGE_JUDGE,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            "the bytes that ship were rebuilt after the judge ran and were never judged",
+        )
     return VerdictClause(
         Check.PAGE_JUDGE,
         CheckResult.FAIL,
@@ -416,7 +457,7 @@ def silent_success_clauses(output: PageOutput, p: Any) -> tuple[VerdictClause, .
     return ()
 
 
-def derive_clauses(output: PageOutput, p: Any) -> tuple[VerdictClause, ...]:
+def derive_clauses(output: PageOutput, p: Any, provenance: Any = None) -> tuple[VerdictClause, ...]:
     """Every check that did not pass on this page, from the fields that record it.
 
     The fail-closed fallback is NOT added here. It belongs after suppression, because a
@@ -430,8 +471,8 @@ def derive_clauses(output: PageOutput, p: Any) -> tuple[VerdictClause, ...]:
     for clause in (
         _mode_clause(output),
         _corrupt_math_hybrid_clause(output),
-        _judge_refusal_clause(output),
-        _native_glyph_clause(p),
+        _judge_refusal_clause(output, provenance),
+        _native_glyph_clause(p, output, provenance),
         _chart_region_clause(p),
         _table_label_clause(output),
         _scanned_figure_clause(p),
@@ -450,20 +491,32 @@ def derive_clauses(output: PageOutput, p: Any) -> tuple[VerdictClause, ...]:
     return tuple(clauses)
 
 
-def _covered_checks(leading: list[str], page_num: int, ships_nothing_else: bool) -> set[Check]:
-    """Which checks the marks ALREADY at the top of this page state.
+def _covered_checks(
+    leading: list[str], page_num: int, ships_nothing_else: bool
+) -> tuple[set[Check], set[tuple[Check, str]]]:
+    """What the marks ALREADY at the top of this page state, in two parts.
 
-    Region-blind on purpose at this stage: every legacy family states a page-level or
-    single-table fact, and none of them carries a region ordinal, so the caller cannot
-    know which table a legacy line is about. A clause whose scope names a region is
-    therefore never suppressed -- see ``suppress_covered``.
+    The first set is the checks a LEGACY line states. Those are region-blind: every legacy
+    family states a page-level or single-table fact and none carries a region ordinal, so
+    the caller cannot know which table one is about, and a clause whose scope names a region
+    is therefore never suppressed by them.
+
+    The second set is the exact ``(check, scope)`` pairs the CANONICAL lines state, read off
+    the lines themselves. A canonical line names one check about one region and may suppress
+    only that pair -- it used to be mapped to ``frozenset(Check)``, which let the first line
+    written to a two-clause page silence the second.
     """
     covered: set[Check] = set()
+    pairs: set[tuple[Check, str]] = set()
     matched_any = False
     for line in leading:
         for family in families_of(line, page_num):
             matched_any = True
-            if family == "page_failed":
+            if family == "canonical_unchecked":
+                parsed = parse_canonical_mark(line, page_num)
+                if parsed is not None:
+                    pairs.add(parsed)
+            elif family == "page_failed":
                 covered |= page_failed_coverage(ships_nothing_else)
             else:
                 covered |= FAMILY_COVERAGE.get(family, frozenset())
@@ -476,7 +529,7 @@ def _covered_checks(leading: list[str], page_num: int, ships_nothing_else: bool)
         # the page reading as one. The verdict still RECORDS the fallback clause; only its
         # line is withheld, which is why this lives in emission and not in derivation.
         covered.add(Check.UNKNOWN_CHECK)
-    return covered
+    return covered, pairs
 
 
 def build_page_verdict(
@@ -484,6 +537,7 @@ def build_page_verdict(
     output: PageOutput,
     p: Any,
     published: PageVerdict | None = None,
+    provenance: Any = None,
 ) -> PageVerdict:
     """What is TRUE about this page: every check that did not pass.
 
@@ -503,8 +557,23 @@ def build_page_verdict(
     the base disposition its original run published.
     """
     if published is not None:
-        return replace(published, page_num=page_num)
-    clauses = derive_clauses(output, p)
+        if published.clauses or output.status is PageStatus.SUCCESS:
+            return replace(published, page_num=page_num)
+        # A published verdict that says CHECKED on a page that is NOT SUCCESS cannot both
+        # be true. "Not SUCCESS means at least one clause" is the invariant the whole
+        # ticket rests on, and it must hold by construction here rather than depend on
+        # resume rule (a) having refused every sidecar that could carry such a pair -- a
+        # rule in another module, which a future skip path could widen without ever
+        # touching this file. So the page falls through to the fail-closed clause and the
+        # reader is told the page is unconfirmed, which is the conservative direction.
+        logger.warning(
+            "#1145: p%d carried a published verdict with no clause while shipping %s; "
+            "falling back to the fail-closed clause",
+            page_num,
+            output.status.value,
+        )
+        return PageVerdict(page_num=page_num, clauses=(_fallback_clause(output),))
+    clauses = derive_clauses(output, p, provenance)
     if not clauses and output.status is not PageStatus.SUCCESS:
         # Fail-closed: not CHECKED, and nothing named why. 34 pages of run 23117187 reach
         # this. Deleting it is a mutant the suite must kill.
@@ -528,7 +597,11 @@ def marks_to_write(
     Idempotent by construction: on a second pass the canonical line itself is in *leading*,
     ``canonical_unchecked`` covers every check, and nothing is written.
     """
-    covered = _covered_checks(leading, verdict.page_num, ships_nothing_else)
-    wanted = [c for c in verdict.clauses if c.scope != SCOPE_PAGE or c.check not in covered]
+    covered, pairs = _covered_checks(leading, verdict.page_num, ships_nothing_else)
+    wanted = [
+        c
+        for c in verdict.clauses
+        if (c.check, c.scope) not in pairs and (c.scope != SCOPE_PAGE or c.check not in covered)
+    ]
     ordered = sorted(wanted, key=lambda c: (c.check.value, c.scope))
     return [c.mark(verdict.page_num) for c in ordered]

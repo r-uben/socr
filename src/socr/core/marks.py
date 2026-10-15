@@ -333,6 +333,38 @@ def page_unchecked_clause_mark(
     )
 
 
+#: The canonical line's own fields, for reading back what one already on the page STATES.
+_CANONICAL_FIELDS_RE = re.compile(
+    r"^> \[page (?P<page>\d+) unchecked: (?P<check>[a-z_]+)=(?P<result>[A-Z]+); "
+    r"scope=(?P<scope>[^;\]]+); reason="
+)
+
+
+def parse_canonical_mark(line: str, page_num: int) -> tuple[Check, str] | None:
+    """The ``(check, scope)`` a canonical line names, or ``None`` if it is not one.
+
+    Why parse rather than treat the family as covering everything: a canonical line states
+    exactly ONE check about ONE region, and that is all it may suppress. Covering
+    ``frozenset(Check)`` meant the first line written to a two-clause page silenced the
+    second -- on a re-finalization the page would keep line one and lose line two, and the
+    reader would never learn the second fact.
+
+    Idempotence is unchanged, and this is why: ``leading_mark_blocks`` returns EVERY leading
+    mark line, so on a second pass both lines are present and each covers its own pair.
+
+    An unparseable or wrong-page line covers nothing, which is the fail-closed direction:
+    the clause gets its line rather than being silently swallowed.
+    """
+    m = _CANONICAL_FIELDS_RE.match(line.strip())
+    if m is None or int(m.group("page")) != page_num:
+        return None
+    try:
+        check = Check(m.group("check"))
+    except ValueError:
+        return None
+    return check, m.group("scope").strip()
+
+
 # --- what a legacy mark already states --------------------------------------------------
 #: Which checks each family's line actually DISCLOSES, so a clause it already states is not
 #: repeated. FAIL-CLOSED on purpose, in the shape of #1129's
@@ -353,7 +385,10 @@ _TABLE_CHECKS: frozenset[Check] = frozenset(
 )
 
 FAMILY_COVERAGE: dict[str, frozenset[Check]] = {
-    "canonical_unchecked": frozenset(Check),
+    # "canonical_unchecked" is deliberately ABSENT: a canonical line states one check about
+    # one region and may suppress only that pair, which ``parse_canonical_mark`` reads off
+    # the line itself. It was ``frozenset(Check)``, which let the first line written to a
+    # two-clause page silence the second.
     "table_disputed_or_unverified": _TABLE_CHECKS,
     "page_unchecked": _TABLE_CHECKS,
     "flagged_table_kept": _TABLE_CHECKS,

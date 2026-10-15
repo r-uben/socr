@@ -717,6 +717,238 @@ def test_a_canonical_line_above_a_recovery_banner_does_not_un_recognise_it(banne
 
 
 # ---------------------------------------------------------------------------
+# Review round 2: two marks that could be FALSE, and one provenance gate
+# ---------------------------------------------------------------------------
+
+
+def test_a_rebuilt_recovery_body_is_never_reported_as_judge_refused() -> None:
+    """``FAIL`` means the check ran on THESE bytes. On a rebuilt body it did not.
+
+    The #649/#652 prose-recovery endings build the shipped body from the page's own text
+    layer and then copy the refused MODEL attempt's ``judge_accepted`` / ``rejection_class``
+    onto it. So the refusal evidence is real and it is about bytes that did not ship. #1142
+    skips its banner on exactly this provenance set for exactly this reason; the clause had
+    no provenance input and wrote "the page judge did not accept the bytes that ship" above
+    both recovery banners.
+
+    UNKNOWN, not silence: no judge ever looked at what shipped, and that is worth saying.
+    The CONTROL is the same output with a non-excluded ending, which must still be FAIL --
+    without it this test would pass on a clause that never reports a refusal at all.
+    """
+    from socr.core.manifest import SelectionProvenance
+    from socr.core.result import REJECTION_JUDGE_ONLY
+
+    refused = replace(
+        _output("The page's own text layer, which no judge saw."),
+        judge_accepted=False,
+        rejection_class=REJECTION_JUDGE_ONLY,
+    )
+
+    _, rebuilt = _apply_verdict_marks(
+        refused, _Flags(), 1, provenance=SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    )
+    judge = [c for c in rebuilt.clauses if c.check is Check.PAGE_JUDGE]
+    assert len(judge) == 1, rebuilt
+    assert judge[0].result is CheckResult.UNKNOWN, (
+        "a rebuilt body is reported as judge-REFUSED; the judge never saw these bytes"
+    )
+    assert "never judged" in judge[0].reason, judge[0].reason
+
+    _, kept = _apply_verdict_marks(
+        refused, _Flags(), 1, provenance=SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT
+    )
+    kept_judge = [c for c in kept.clauses if c.check is Check.PAGE_JUDGE]
+    assert len(kept_judge) == 1 and kept_judge[0].result is CheckResult.FAIL, (
+        "the control lost its refusal, so the arm above proves nothing"
+    )
+
+
+def test_native_glyph_damage_is_not_charged_to_a_model_reading() -> None:
+    """The accounting describes the NATIVE text. A model reading replaced it.
+
+    Measured: 7 corpus pages with a qwen winner were told their mathematics is unrecovered
+    private-use codepoints while a model reading ships. The gate is #1005's own predicate,
+    ``native_math_damage_ships``, which the guard this clause mirrors already uses -- and it
+    is not a one-liner: an unknown ending, and any ending that may carry native bytes,
+    answer True, and a MODEL body that still carries such codepoints answers True too.
+
+    Three arms, because the gate has three outcomes worth pinning.
+    """
+    from socr.core.manifest import SelectionProvenance
+
+    model_clean = replace(_output("A model reading with no damaged glyph in it."), engine="qwen")
+    _, verdict = _apply_verdict_marks(
+        model_clean, _PuaFlags(), 1, provenance=SelectionProvenance.PASSING_BEST_OUTPUT
+    )
+    assert Check.NATIVE_GLYPHS not in {c.check for c in verdict.clauses}, (
+        "a model reading is being charged with the native layer's glyph damage"
+    )
+
+    # A model body that STILL carries the codepoints shipped the damage, whoever authored it.
+    model_damaged = replace(_output("A model reading carrying \uf766\uf766 anyway."), engine="qwen")
+    _, damaged = _apply_verdict_marks(
+        model_damaged, _PuaFlags(), 1, provenance=SelectionProvenance.PASSING_BEST_OUTPUT
+    )
+    assert Check.NATIVE_GLYPHS in {c.check for c in damaged.clauses}, damaged
+
+    # And a native winner is the plain case.
+    native = replace(_output("The native layer itself."), engine="native")
+    _, kept = _apply_verdict_marks(
+        native, _PuaFlags(), 1, provenance=SelectionProvenance.PASSING_BEST_OUTPUT
+    )
+    assert Check.NATIVE_GLYPHS in {c.check for c in kept.clauses}, kept
+
+
+def test_a_canonical_line_suppresses_only_its_own_check_and_scope() -> None:
+    """One canonical line states one check about one region, and may silence only that.
+
+    It was mapped to ``frozenset(Check)``, so the first line written to a two-clause page
+    silenced the second: the page kept line one, lost line two for ever, and the reader
+    never learned the second fact. Idempotence is unaffected, and the second half here is
+    why -- ``leading_mark_blocks`` returns EVERY leading mark line, so once both are on the
+    page each covers its own pair and nothing is rewritten.
+    """
+    chart = VerdictClause(Check.CHART_REGION, CheckResult.FAIL, SCOPE_PAGE, "chart")
+    glyphs = VerdictClause(Check.NATIVE_GLYPHS, CheckResult.FAIL, SCOPE_PAGE, "glyphs")
+    verdict = PageVerdict(page_num=2, clauses=(chart, glyphs))
+
+    still_wanted = marks_to_write(verdict, [chart.mark(2)], ships_nothing_else=False)
+    assert still_wanted == [glyphs.mark(2)], (
+        f"the chart line silenced the glyph clause: {still_wanted!r}"
+    )
+
+    # Both present: nothing left to write. This is the idempotence half.
+    assert marks_to_write(verdict, [chart.mark(2), glyphs.mark(2)], ships_nothing_else=False) == []
+
+    # A line about ANOTHER page covers nothing here.
+    assert marks_to_write(verdict, [chart.mark(9)], ships_nothing_else=False) == [
+        chart.mark(2),
+        glyphs.mark(2),
+    ]
+
+
+def test_a_published_checked_verdict_on_a_non_success_page_falls_back() -> None:
+    """ "Not SUCCESS means at least one clause" must hold HERE, not elsewhere.
+
+    A published verdict saying CHECKED on a page that is not SUCCESS cannot both be true.
+    Resume rule (a) refuses such sidecars today, but that rule lives in another module and a
+    future skip path could widen it without anyone touching this file. So the contradiction
+    is resolved conservatively at the point of use: the page falls through to the fail-closed
+    clause and the reader is told it is unconfirmed.
+    """
+    empty = PageVerdict(page_num=1, clauses=())
+
+    _, warned = _apply_verdict_marks(_output("Prose."), _Flags(), 1, published=empty)
+    assert [c.check for c in warned.clauses] == [Check.UNKNOWN_CHECK], warned
+
+    # The control: on a SUCCESS page an empty published verdict is simply the truth.
+    checked = _output("Prose.", status=PageStatus.SUCCESS)
+    out_ok, ok = _apply_verdict_marks(checked, _Flags(), 1, published=empty)
+    assert ok.checked and out_ok.text == checked.text
+
+
+def test_the_recovery_gate_skips_only_this_pages_own_canonical_lines() -> None:
+    """Page-strict, because the stated rule is "this module's own lines for THIS page".
+
+    ``CANONICAL_MARK_RE`` alone matches any page number, so a line about page 9 sitting
+    above page 4's recovery banner would be skipped and the banner trusted. ``is_canonical_mark``
+    is page-strict and refuses it, which is the fail-closed direction: the page is
+    reprocessed rather than vouched for on a line that is not about it.
+    """
+    import socr.core.manifest as manifest
+
+    from socr.core.manifest import _is_restored_prose_recovery
+
+    banner = manifest.SCANNED_PROSE_RECOVERED_FLAG.format(page_num=4)
+    body = banner + "\n\nThe paragraphs this lane recovered."
+    own = VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, "never judged").mark(4)
+    other = VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, "never judged").mark(9)
+
+    class _P:
+        best_output = None
+
+    def page_with(text: str):
+        holder = _P()
+        holder.best_output = replace(
+            _output(text), scanned_prose_recovered=True, status=PageStatus.WARNING
+        )
+        return holder
+
+    assert _is_restored_prose_recovery(page_with(_with_page_top_banners(body, [own])), 4), (
+        "this page's own canonical line is not being skipped"
+    )
+    assert not _is_restored_prose_recovery(page_with(_with_page_top_banners(body, [other])), 4), (
+        "a canonical line about ANOTHER page was skipped and the banner trusted"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The helper's own three guards (Fable round 1, P2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_strip_helper_does_not_normalise_whitespace() -> None:
+    """Exact bytes, because the one real difference here is a whitespace one.
+
+    ``_with_page_top_banners`` does ``body.lstrip("\n")``, so a body that began with a blank
+    line comes back from the seam without it. That is a genuine byte difference and the
+    helper must REPORT it, not absorb it: a comparison that stripped or collapsed whitespace
+    would hide exactly the class of change this seam is capable of making, and every one of
+    the converted tests runs through this helper.
+    """
+    from verdict_marks_helper import strip_verdict_marks
+
+    mark = VerdictClause(Check.CHART_REGION, CheckResult.FAIL, SCOPE_PAGE, "chart").mark(1)
+
+    for body in ("Prose.\n", "Prose.  \n", "  Prose."):
+        assert strip_verdict_marks(_with_page_top_banners(body, [mark]), 1) == body, body
+
+    leading_blank = "\nProse.\n"
+    assert strip_verdict_marks(_with_page_top_banners(leading_blank, [mark]), 1) != leading_blank, (
+        "the helper absorbed the leading newline the seam's lstrip removed"
+    )
+
+
+def test_the_strip_helper_refuses_a_page_with_no_mark() -> None:
+    """``required=True`` is not decoration: without it every conversion is a tautology.
+
+    Thirteen tests compare bodies through this helper. If it returned the text unchanged
+    when no canonical line was found, the mark could stop being emitted ENTIRELY and all
+    thirteen would still pass.
+    """
+    from verdict_marks_helper import strip_verdict_marks
+
+    with pytest.raises(AssertionError, match="expected a canonical #1145 mark block"):
+        strip_verdict_marks("Prose with no mark at all.\n", 1)
+
+    # And the opt-out still works where a test parametrises over both arms itself.
+    assert strip_verdict_marks("Prose with no mark at all.\n", 1, required=False) == (
+        "Prose with no mark at all.\n"
+    )
+
+
+def test_the_asymmetry_helper_refuses_a_mark_on_the_clean_arm() -> None:
+    """The half that catches a mark landing on a page socr DID confirm.
+
+    ``assert_differs_only_by_marks`` asserts three things, and this is the one a reader
+    would not think to check: dropping it would let the helper pass while BOTH arms carried
+    a canonical line, which is the failure mode where #1145 marks a CHECKED page.
+    """
+    mark = VerdictClause(Check.CHART_REGION, CheckResult.FAIL, SCOPE_PAGE, "chart").mark(1)
+    body = "Prose.\n"
+    marked = _with_page_top_banners(body, [mark])
+
+    # Control: the real pair passes.
+    assert_differs_only_by_marks(marked, body, 1)
+
+    with pytest.raises(AssertionError, match="carries a canonical mark"):
+        assert_differs_only_by_marks(marked, marked, 1)
+
+    with pytest.raises(AssertionError, match="carries no canonical mark"):
+        assert_differs_only_by_marks(body, body, 1)
+
+
+# ---------------------------------------------------------------------------
 # T5 -- resume rule (a): no verdict is doubt, and doubt reprocesses
 # ---------------------------------------------------------------------------
 
