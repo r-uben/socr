@@ -170,6 +170,15 @@ class OutputNormalizer:
         text = self._RE_LATEX_END.sub("", text)
         return text
 
+    @classmethod
+    def is_engine_blank_page_sentinel(cls, text: str) -> bool:
+        """True when ``text`` is only Marker's own "this page is empty" sentinel.
+
+        The engine declared the page blank; that is its reading of the page, not a
+        failed answer, so a page that cleans to nothing because of it is not failed.
+        """
+        return bool(cls._RE_MISSING_PAGE_EMPTY.fullmatch(text.strip()))
+
     def _clean_marker(self, text: str) -> str:
         """Strip Marker [MISSING_PAGE_*] markers."""
         text = self._RE_MISSING_PAGE.sub("", text)

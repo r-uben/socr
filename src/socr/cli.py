@@ -345,6 +345,15 @@ def common_options(f):
         help="Write a replayable manifest + blob cache",
     )(f)
     f = click.option(
+        "--retry-failed-pages",
+        is_flag=True,
+        help=(
+            "After the page loop, run each page that went through the OCR provider "
+            "ladder and failed once more in the same run, ladder reversed; each retry "
+            "is recorded on its page. Not available with --hpc-sequential"
+        ),
+    )(f)
+    f = click.option(
         "--table-judge-ladder/--no-table-judge-ladder",
         "table_judge_ladder",
         default=None,
@@ -439,6 +448,7 @@ def build_config(
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     write_manifest: bool = False,
+    retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
 ) -> PipelineConfig:
     """Build PipelineConfig from CLI options."""
@@ -662,6 +672,8 @@ def build_config(
         config.cost_budget = cost_budget
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
+    if _explicitly_given("retry_failed_pages"):
+        config.retry_failed_pages = retry_failed_pages
     # P1 (owner ruling Q3): tri-state. Now that the config default is True,
     # a plain boolean CLI parameter could no longer express "the user said
     # nothing" -- an omitted flag would arrive as False and clobber a YAML
@@ -845,6 +857,10 @@ def process(
     """
     allow_missing = kwargs.pop("allow_missing", ())
     config = build_config(output_dir=output_dir, **kwargs)
+    # HPCPipeline has no agentic page loop, so the option would do nothing there.
+    # Refused before --dry-run returns, so a dry run does not preview a lie.
+    if (hpc_sequential or config.hpc.enabled) and config.retry_failed_pages:
+        raise click.UsageError("--retry-failed-pages is not supported with --hpc-sequential.")
 
     # GH-368: --dry-run was consulted only inside process_batch, so
     # `socr process <pdf> --dry-run` ran the full real pipeline -- a supposedly

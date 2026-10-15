@@ -68,6 +68,9 @@ EXPECTED_RESUME_KINDS = frozenset(
         "rejudge_timeout",
         "visual_values_not_transcribed",
         "blank_page",
+        # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
+        "provider_empty_response",
+        "page_retry",
     }
 )
 
@@ -78,5 +81,6 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused;
-    # 50 with #1144's table_escalation_refused.
-    assert len(EXPECTED_RESUME_KINDS) == 50
+    # 51 with PR #1160's provider_empty_response and page_retry;
+    # 52 with #1144's table_escalation_refused.
+    assert len(EXPECTED_RESUME_KINDS) == 52

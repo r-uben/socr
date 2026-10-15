@@ -155,6 +155,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "describe_figures": (AGENTIC, "gates the caption engine in the figure phase"),
     "figure_descriptions": (AGENTIC, "describe_figure_crops; read by _describe_crop_refs"),
     "write_manifest": (AGENTIC, "manifest is written after assemble"),
+    "retry_failed_pages": (AGENTIC, "_phase_agentic re-runs failed OCR-ladder pages once"),
     "primary": (AGENTIC, "primary_engine; the ladder's starting rung"),
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),
     "qwen_vllm_model": (AGENTIC, "resolved model for the vLLM qwen rung"),
