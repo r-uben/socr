@@ -979,16 +979,46 @@ def test_the_1050_recovered_block_is_not_a_mark_and_its_page_gets_a_clause() -> 
     assert [c.check for c in verdict.clauses] == [Check.NATIVE_COVERAGE], verdict
     assert canonical_marks(out.text, 3), "a #1050 page shipped with no disclosure at all"
 
-    # #1050's own mark covers it, so the page keeps its bytes.
+    # Where production actually PUTS that mark, which is the correction Fable's round 2
+    # made to this test. The first version of this half put the line on line 1 and
+    # concluded the page keeps its bytes. It does not: #1050 places its note AFTER the
+    # recovered block, so the note is never in the leading block, suppression (which reads
+    # the leading block only) does not fire, and the page gains a top
+    # ``native_coverage=FAIL`` line -- stating the same fact twice.
+    #
+    # Measured on run 23192118: 1,387 pages carry #1050's mark and on ZERO of them is it in
+    # the leading block, so this is the behaviour of the whole class, not an edge. Accepted
+    # rather than fixed, because the alternative undoes the ticket: covering the clause
+    # wherever the note sits would return all 1,387 pages to "marked, but not at the top",
+    # which is the state the owner's ruling exists to remove. The top line says the page is
+    # not confirmed; #1050's note says which block, where the block is. See the readability
+    # cost recorded in docs/log/2026-10-15_1145-slice1-page-verdict.md.
     disclosed = "[page 3: uncovered text — see image]"
     assert line_is_mark(disclosed, 3)
-    body = disclosed + "\n\nRecovered text."
+    production_shaped = "Recovered text.\n\n" + disclosed
+    assert leading_marks(production_shaped, 3) == [], (
+        "the fixture now has the note on top, which is not where #1050 writes it"
+    )
     out2, verdict2 = _apply_verdict_marks(
-        _output(body, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
+        _output(production_shaped, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
     )
     assert [c.check for c in verdict2.clauses] == [Check.NATIVE_COVERAGE], verdict2
-    assert canonical_marks(out2.text, 3) == [], "a second line was added above #1050's own"
-    assert out2.text == body
+    top = canonical_marks(out2.text, 3)
+    assert len(top) == 1 and f"{Check.NATIVE_COVERAGE.value}=" in top[0], top
+    assert disclosed in out2.text, "#1050's own note was displaced or dropped"
+    assert out2.text.endswith(disclosed), "the note moved out of the position #1050 chose"
+
+    # And the suppression half still holds where a mark IS on top: a page whose leading
+    # block carries the note keeps its bytes. That is the shape #1050 would have if it ever
+    # moved its note up, and it is the half that proves suppression is not simply dead.
+    on_top = disclosed + "\n\nRecovered text."
+    assert leading_marks(on_top, 3) == [disclosed]
+    out3, verdict3 = _apply_verdict_marks(
+        _output(on_top, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
+    )
+    assert [c.check for c in verdict3.clauses] == [Check.NATIVE_COVERAGE], verdict3
+    assert canonical_marks(out3.text, 3) == [], "a second line was added above #1050's own"
+    assert out3.text == on_top
 
 
 def test_every_prose_recovery_banner_form_is_skipped_by_the_recovery_gate() -> None:

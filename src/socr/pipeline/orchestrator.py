@@ -19065,10 +19065,53 @@ class UnifiedPipeline:
             failure_mode=FailureMode.UNREADABLE_INPUT,
             error=detail,
         )
-        self._write_metadata(state, result, out_dir, has_text=False)
+        # #1145 slice 2: a failed document must SAY SO where a reader looks.
+        #
+        # Until now this path wrote no ``.md`` at all and left ``output_path`` empty
+        # (measured on ``2022__costain_nuno_thomas/metadata.json``). The failure was
+        # recorded in ``metadata.json`` and the root index -- which is what #871 fixed --
+        # but a reader or a downstream tool that opens the document's markdown found
+        # nothing, and "no file" is indistinguishable from "not processed yet". The
+        # document-level analogue of this ticket's page rule: every artifact socr did not
+        # CHECK carries one visible mark at the top, and for a document whose pages could
+        # not be loaded the whole artifact is that mark.
+        #
+        # Deliberately NOT a status change: the record stays FAILED, so the resume gate
+        # still refuses it and the next run retries the file. Only ``output_path`` and the
+        # file itself are new.
+        written = self._write_document_failed_mark(pdf_path, out_dir, detail)
+        self._write_metadata(state, result, out_dir, has_text=False, markdown_written=written)
         if not self.config.quiet:
             console.print(f"[red]Unreadable PDF:[/red] {pdf_path.name} -- {detail}")
         return result
+
+    def _write_document_failed_mark(self, pdf_path: Path, out_dir: Path, detail: str) -> bool:
+        """Write ``<stem>.md`` = one ``[document failed: …]`` line. True if it landed.
+
+        Uses the contract's own ``doc_dir_for`` / ``markdown_path_for``, so the file is at
+        the exact path ``_write_metadata`` is about to record and a normal run would have
+        used -- not a second convention that could drift from it.
+
+        Non-fatal, like the metadata write beside it: a document that cannot be written to
+        disk must still be REFUSED and recorded rather than crashing the batch. The return
+        value is what keeps ``output_path`` honest -- it names the file only when the file
+        is there.
+        """
+        from ocr_output_contract import doc_dir_for, markdown_path_for, relative_key
+
+        try:
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            doc_dir = doc_dir_for(out_dir, rel_key)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            md_path = markdown_path_for(doc_dir, rel_key)
+            # The grammar's ``]`` terminator: a detail containing one would end the mark
+            # early and the rest would read as prose. Same escape the page grammar uses.
+            md_path.write_text(f"[document failed: {detail.replace(']', ')')}]\n", "utf-8")
+            return True
+        except OSError as exc:
+            logger.debug("#1145: could not write the document mark for %s (%s)", pdf_path, exc)
+            return False
 
     def _write_metadata(
         self,
@@ -19077,6 +19120,7 @@ class UnifiedPipeline:
         output_dir: Path,
         has_text: bool,
         provisional: bool = False,
+        markdown_written: bool | None = None,
     ) -> None:
         """Write canonical per-doc + root-index ``metadata.json`` via the contract.
 
@@ -19130,7 +19174,14 @@ class UnifiedPipeline:
                 backend="socr",
                 processing_time=result.processing_time,
                 timestamp=utc_timestamp(),
-                output_path=str(md_path) if has_text else "",
+                # #1145 slice 2: ``has_text`` decides the STATUS; whether a markdown file
+                # exists is a separate question, and the unreadable-input refusal is the one
+                # caller for which the two differ -- it writes a one-line document mark and
+                # has no text at all. Defaulting to ``has_text`` leaves every other caller's
+                # behaviour byte-identical.
+                output_path=str(md_path)
+                if (has_text if markdown_written is None else markdown_written)
+                else "",
                 pages=state.handle.page_count,
                 error=result.error or None,
                 # Run-config fingerprint: a re-run under a different model / task /
