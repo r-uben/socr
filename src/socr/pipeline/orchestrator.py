@@ -183,6 +183,16 @@ _RESUME_REPLAYED: dict[str, str] = {
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
     ),
+    "table_escalation_refused": (
+        "#1144: same emitter and the same consequence -- the shipped table is the "
+        "unescalated incumbent, and tables_trust reads this kind to keep the page "
+        'untrusted. The reason given here in rounds 1-2 ("a credentialed page can now '
+        'SHIP carrying it") was WRONG and is corrected: that credential path was '
+        "reverted and table_escalation_refused is still in "
+        "CREDENTIAL_BLOCKING_EVENT_KINDS. The kind is replayed because its emitter "
+        "_escalate_table_page is skipped by a terminal resumed page while tables_trust "
+        "still reads it, exactly as its GH-851 siblings are, not because of #1144"
+    ),
     "table_ladder_budget_exhausted": (
         "GH-974: the page's ladder budget ran out; the page is UNVERIFIED and this event "
         "is the record of WHY (the per-table unverified events only say rungs gave no verdict)"

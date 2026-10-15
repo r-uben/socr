@@ -343,7 +343,11 @@ def baseline_bands(words: list) -> list[_NativeBand]:
 #: value below 1 exists, and any value above it would ship printed numbers.
 PROSE_BAND_MAX_NUMERIC_TOKENS: int = 0
 
-_DIGIT_RE = re.compile(r"[0-9]")
+#: #1144: Unicode DECIMAL digits (category Nd), which is what ``\d`` matches on
+#: a ``str`` pattern -- NOT the ASCII ``[0-9]`` this was until the #1144 corpus
+#: replay found three pages shipping printed values as prose, nor the wider
+#: ``isnumeric()`` class. See ``bears_printed_numeral`` for both boundaries.
+_DIGIT_RE = re.compile(r"\d")
 
 
 def bears_printed_numeral(text: str) -> bool:
@@ -369,11 +373,97 @@ def bears_printed_numeral(text: str) -> bool:
     Deliberately NOT used for row matching, which still needs the narrower
     predicate: this one would count a page number and a footnote marker as
     table rows.
+
+    #1144: the digit class is Unicode DECIMAL (category Nd), not ASCII. The
+    corpus replay over run 23192118's 1,794 floored pages found three pages
+    whose recovered prose carried a printed value the ASCII class could not
+    see -- "𝒑= 𝑨 = 𝟎. 𝟒%" (mathematical bold digits), "(𝒂𝒋 (𝒓−𝟏)...)", and
+    Tamil/Oriya digits in a garbled maths layer. Nd closes all three.
+
+    It stops at Nd and does NOT use ``isnumeric()``, which also admits
+    superscripts (``¹ ² ³``) and vulgar fractions (``½``). Those appear in
+    ordinary prose as FOOTNOTE MARKERS, so counting them would withhold a large
+    share of genuine prose lines -- a mass over-withholding traded for a narrow
+    gain, and this lane exists to stop prose being destroyed.
+
+    The accepted residual, stated rather than hidden: a band whose only printed
+    value is a vulgar fraction (``½``) or a superscript digit still ships as
+    prose. That is a real printed value and this predicate does not catch it.
+    It is accepted because the alternative withholds every footnote-marked
+    sentence, and because the marker and the page image sit beside the band
+    either way. Not measured on the corpus; if it is ever measured and the rate
+    is non-trivial, the fix is a fraction/superscript-only addition, never a
+    jump to ``isnumeric()``.
+
+    The only live consumer is ``partition_prose_bands``, where a True raises a
+    band's numeral count and so moves the band toward being WITHHELD. Widening
+    this predicate can therefore only withhold more, never ship more -- checked
+    across every consumer before the change (#1144).
     """
     return bool(_DIGIT_RE.search(text or ""))
 
 
-def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
+#: #1144: the cell vocabulary of a categorical table row. A regression table's
+#: specification block prints these and nothing else -- "Industry FE Yes Yes Yes
+#: Yes", "Date fixed effects No Yes No Yes No", "Bond FE NO YES YES YES YES".
+#: Case-folded, so YES/Yes/yes are one token.
+_CATEGORICAL_CELL_WORDS = frozenset({"yes", "no"})
+
+#: How many such cells make a ROW rather than a sentence. TWO, because two
+#: cells side by side is the definition of a row of cells -- a table needs at
+#: least two columns to be a table. This is not a tuned threshold and there is
+#: no measurement behind the number itself: at one it would withhold every
+#: sentence ending "... the answer is no", which is ordinary prose.
+_CATEGORICAL_ROW_MIN_CELLS = 2
+
+
+def bears_categorical_row(band) -> bool:
+    """Whether *band* is a row of categorical table CELLS rather than prose.
+
+    #1144 (owner ruling, 2026-10-15, applying the standing rule that nothing
+    from a table ships as loose text and no answer lands next to the wrong
+    question). The numeral count above cannot see a table whose cells are
+    WORDS, and a detected box only covers the tables the detector found: on
+    ``arce_bengui_bianchi`` p48 four boxes sit at y>=438 while the leaking
+    table's row is at y=325, so the page passes #1144's box gate and shipped
+    "Clustered SE Yes Yes Yes Yes" -- four columns collapsed into one line,
+    under no heading at all.
+
+    The shape is a RUN of ``_CATEGORICAL_ROW_MIN_CELLS`` or more adjacent
+    Yes/No-class tokens. Adjacency is what makes it a row: a label followed by
+    one such word is a sentence, several in a row is a specification block.
+
+    Measured before adopting (run 23192118, all 1,794 fail-closed floor pages):
+    361 bands across 147 pages match, and of ~90 read by hand EVERY one is a
+    regression table's own row -- "Industry FE Yes Yes Yes Yes", "Year dummies
+    yes yes yes yes yes", "Firm controls no yes yes yes yes". None was prose.
+    Only ONE of those pages reaches a lane that ships its bands, so the
+    observed cost of the rule is a single withheld row; the rest were already
+    behind the bare marker. Not every one of the 361 was read.
+
+    Deliberately lives beside ``bears_printed_numeral`` and is consumed by the
+    same ``partition_prose_bands``, so there is ONE withholding predicate
+    family rather than a second path in front of it (the wrapper shape that has
+    blinded this repo's consumers before).
+    """
+    run = 0
+    for word in band:
+        token = str(word[4]).strip().strip(".,;:()[]").casefold()
+        if token in _CATEGORICAL_CELL_WORDS:
+            run += 1
+            if run >= _CATEGORICAL_ROW_MIN_CELLS:
+                return True
+        elif token:
+            run = 0
+    return False
+
+
+def partition_prose_bands(
+    words: list,
+    row_shape_min: int | None = None,
+    *,
+    table_boxes: list | None = None,
+) -> list[tuple[bool, list]]:
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
 
     Bands run top of page to bottom, words left to right inside each band --
@@ -430,12 +520,54 @@ def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list
     """
     if row_shape_min is None:
         row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
+    boxes = [tuple(float(v) for v in box[:4]) for box in (table_boxes or []) if len(box) >= 4]
     bands: list[tuple[bool, list]] = []
     for band in cluster_band_words(words):
         numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
         ordered = sorted(band, key=lambda w: w[0])
-        bands.append((numeral_count < row_shape_min, ordered))
+        is_prose = numeral_count < row_shape_min
+        if is_prose and bears_categorical_row(ordered):
+            # #1144: a row of categorical CELLS is table content whatever its
+            # digits say and whatever geometry the detector found.
+            is_prose = False
+        if is_prose and _band_meets_a_box(ordered, boxes):
+            # #1144 (owner ruling, 2026-10-14): a band inside a DETECTED table
+            # box is table content and is withheld whatever its digits say.
+            is_prose = False
+        bands.append((is_prose, ordered))
     return bands
+
+
+def _band_meets_a_box(band: list, boxes: list[tuple[float, float, float, float]]) -> bool:
+    """Whether any word of *band* sits inside one of *boxes*.
+
+    #1144. The numeral count above cannot see a table with no printed numerals
+    in it -- Coca-Cola CDP 2022 p77's C8.2b question/answer grid is Yes/No --
+    so such a table shipped as loose text and its answers landed beside the
+    wrong questions. A DETECTED box is independent of the parser whose output
+    the floor is refusing (``find_tables()`` runs before reconstruction), which
+    is the same evidence GH-520 trusts for its coverage check.
+
+    Deliberately NOT the rejected rule in ``partition_prose_bands``' docstring
+    ("withhold every zero-token band inside the WITHHELD BANDS' y-span"), which
+    swallows a paragraph printed between two tables. This asks about a box the
+    detector drew, not about a span inferred from the withholding itself, so a
+    paragraph between two tables falls outside both boxes and still ships.
+
+    Containment of a word's CENTRE, so a box edge clipping a glyph decides
+    nothing, and no threshold is introduced: a point is inside a rectangle or
+    it is not. Any word inside is enough -- a band straddling a box edge is
+    table content on one side, and this lane withholds rather than guesses.
+    """
+    if not boxes:
+        return False
+    for word in band:
+        cx = (float(word[0]) + float(word[2])) / 2.0
+        cy = (float(word[1]) + float(word[3])) / 2.0
+        for x0, y0, x1, y1 in boxes:
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                return True
+    return False
 
 
 #: A GFM separator/rule cell: optional leading/trailing ':' around one or

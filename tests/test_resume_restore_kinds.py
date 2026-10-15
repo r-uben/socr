@@ -45,6 +45,14 @@ EXPECTED_RESUME_KINDS = frozenset(
         "table_binding_boundary_unresolved",
         "table_ditto_unresolved",
         "table_furniture_removed",
+        # #1144 added this kind. The reason first given here -- "a credentialed page
+        # can now SHIP carrying it" -- was WRONG: that credential path was reverted and
+        # table_escalation_refused is still in CREDENTIAL_BLOCKING_EVENT_KINDS. It is
+        # replayed for the same reason as its GH-851 sibling below: _escalate_table_page
+        # is skipped by a terminal resumed page while tables_trust still reads the kind,
+        # so a resumed run that dropped it would report the page as more trusted than
+        # the first run did.
+        "table_escalation_refused",
         "table_escalation_timeout",
         "table_escalation_withheld",
         "table_ladder_accepted",
@@ -73,5 +81,6 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused;
-    # 51 with PR #1160's provider_empty_response and page_retry.
-    assert len(EXPECTED_RESUME_KINDS) == 51
+    # 51 with PR #1160's provider_empty_response and page_retry;
+    # 52 with #1144's table_escalation_refused.
+    assert len(EXPECTED_RESUME_KINDS) == 52

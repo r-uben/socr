@@ -87,8 +87,15 @@ from socr.core.blank_page import blank_page_marker
 from socr.core.manifest import (
     DISPUTED_TABLE_MARK_RE,
     PAGE_UNCHECKED_MARK_RE,
-    SCANNED_NATIVE_TEXT_FLAG,
-    SCANNED_PROSE_RECOVERED_FLAG,
+    NATIVE_TEXT_FLAGS,
+    PROSE_RECOVERED_FLAGS,
+    # #1144: re-exported, not used here. ``_scanned_flag_mark`` reads the
+    # tuples above; these two names are referenced THROUGH this module by
+    # ``tests/test_acceptance_meter.py`` and dropping them would be a second,
+    # unrelated break. Marked noqa rather than deleted, and listed in
+    # ``__all__`` below so the re-export is deliberate and visible.
+    SCANNED_NATIVE_TEXT_FLAG,  # noqa: F401
+    SCANNED_PROSE_RECOVERED_FLAG,  # noqa: F401
     SOCR_MARKER_RE,
     UNVERIFIED_TABLE_MARK_RE,
     d3_superseded_note,
@@ -221,11 +228,24 @@ def _fixed_note_mark(n: int, line: str) -> bool:
 
 
 def _scanned_flag_mark(n: int, line: str) -> bool:
-    """``[page N: unverified scan — …]`` banners (SCANNED_*_FLAG templates)."""
-    return line in {
-        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=n),
-        SCANNED_NATIVE_TEXT_FLAG.format(page_num=n),
-    }
+    """Every prose-recovery banner this module's lane can stamp.
+
+    #1144: this listed the two SCANNED_* templates by name, which was complete
+    while the lane only served scans. It now serves structure-class floors on
+    BORN-DIGITAL pages, whose banner says "unverified extraction" instead -- and
+    all 138 pages #1144 recovers are born-digital, so the meter counted every
+    one of them ``error_unmarked``. Merging that would have turned 138 MARKED
+    pages into violations of the very rule the meter measures (Fable, PR #1158
+    round 5).
+
+    Read from ``manifest.PROSE_RECOVERED_FLAGS`` and ``NATIVE_TEXT_FLAGS`` --
+    the enumerations the emitters themselves use -- rather than re-listed here,
+    so a banner added later cannot be marked by the lane and unmarked by the
+    meter. ``tests/test_acceptance_meter.py`` pins every member.
+    """
+    return any(
+        line == flag.format(page_num=n) for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
+    )
 
 
 #: #1050 step 2 (not emitted yet): recognised so the meter keeps working once it ships.
@@ -239,6 +259,13 @@ def _uncovered_text_mark(n: int, line: str) -> bool:
 #: Every visible mark family, with its emitter. The blank receipt (``[socr: blank page]``,
 #: core/blank_page.py) and the fabricated-image receipt (core/url_provenance.py) are
 #: receipts of what socr did, not statements that a check did not run: not marks.
+#: #1144: the banner templates this module re-exports for its callers. Named so
+#: the re-export is deliberate rather than an import that looks unused.
+__all__ = [
+    "SCANNED_NATIVE_TEXT_FLAG",
+    "SCANNED_PROSE_RECOVERED_FLAG",
+]
+
 MARK_FAMILIES: dict[str, Callable[[int, str], bool]] = {
     "canonical_unchecked": _canonical_mark,  # #1130 grammar, not emitted yet
     "page_failed": _failed_mark,  # core/manifest.py page_failed_marker + floors
@@ -246,7 +273,7 @@ MARK_FAMILIES: dict[str, Callable[[int, str], bool]] = {
     "page_unchecked": _page_unchecked_mark,  # core/manifest.py page_unchecked_mark
     "flagged_table_kept": _flagged_table_mark,  # core/manifest.py kept_table_flag_note
     "fixed_note": _fixed_note_mark,  # judge_timeout_note (#713), d3_superseded_note
-    "scanned_flag": _scanned_flag_mark,  # SCANNED_*_FLAG banners
+    "scanned_flag": _scanned_flag_mark,  # every prose-recovery banner (#1144)
     "uncovered_text": _uncovered_text_mark,  # #1050 step 2
 }
 
