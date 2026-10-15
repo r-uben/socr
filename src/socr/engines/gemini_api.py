@@ -176,6 +176,14 @@ class GeminiAPIEngine:
         self.close()
 
 
+#: Total deadline for ONE ``OllamaFigureEngine`` HTTP call. Named, not changed:
+#: ``ask`` returns ``None`` on ANY failure, so a caller that must tell a timeout
+#: from a refusal has to compare its own elapsed time against this (#1050 step 2,
+#: round 2 item C -- the swallowed exception meant real timeouts never armed the
+#: cascade halt).
+FIGURE_ASK_TIMEOUT_SEC: float = 120.0
+
+
 class OllamaFigureEngine:
     """Local-first figure description engine using Ollama.
 
@@ -252,8 +260,8 @@ class OllamaFigureEngine:
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
-                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
-                120.0,
+                lambda: httpx.post(url, **extra, json=payload, timeout=FIGURE_ASK_TIMEOUT_SEC),
+                FIGURE_ASK_TIMEOUT_SEC,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
             raise_for_status_redacted(resp)
@@ -277,7 +285,14 @@ class OllamaFigureEngine:
             )
 
     def ask(self, image: Image.Image, prompt: str) -> str | None:
-        """Send *prompt* with *image* and return the RAW answer, or ``None`` on any failure.
+        """Send *prompt* with *image*; return the RAW answer, or ``None`` on failure.
+
+        One exception to "any failure": ``TotalDeadlineExceeded`` PROPAGATES
+        (#1050 step 2). A fail-fast from the outstanding-call guard is the only
+        signal a caller has that the backend is wedged rather than merely
+        unhelpful, and folding it into ``None`` hid that from every caller.
+        Callers that must never raise -- the number-free figure describer --
+        catch it themselves.
 
         Unlike ``describe_figure`` this neither wraps the text in the caption marker nor
         folds an error into the description string: the number-free describer must be able
@@ -301,12 +316,18 @@ class OllamaFigureEngine:
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
-                lambda: httpx.post(url, **extra, json=payload, timeout=120.0),
-                120.0,
+                lambda: httpx.post(url, **extra, json=payload, timeout=FIGURE_ASK_TIMEOUT_SEC),
+                FIGURE_ASK_TIMEOUT_SEC,
                 label=f"ollama figure {safe_host_label(self.host)}/api/chat ({self.model})",
             )
             raise_for_status_redacted(resp)
             return resp.json()["message"]["content"].strip() or None
+        except TotalDeadlineExceeded:
+            # #1050 step 2 round 4 (Argon #4): a fail-fast from ``_OUTSTANDING``
+            # raises this in under a millisecond, and folding it into the
+            # ``None`` below hid a wedge from every caller. Re-raised so a
+            # caller that must tell a timeout from a refusal can.
+            raise
         except Exception:
             return None
 

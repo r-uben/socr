@@ -449,6 +449,71 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
     )
 
 
+_COVERAGE_IMAGE_REF_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(")
+_COVERAGE_PAGE_MARK_RE = re.compile(r"^\[page \d+: uncovered text")
+
+
+def coverage_parts(text: str) -> list[str]:
+    """Public seam over ``_coverage_parts`` (#1050 step 2, round 4 item 8).
+
+    ``_apply_text_coverage`` strips whatever this feature already wrote before
+    writing it again, so a second apply changes nothing. It needs the SAME
+    definition of "a coverage part" selection uses, or the two drift and the
+    fallback carries a paragraph the apply step just removed. Cross-package
+    imports of private names are forbidden (``test_package_layering``).
+    """
+    return _coverage_parts(text)
+
+
+def _coverage_parts(text: str) -> list[str]:
+    """Every #1050 part of *text*, in order: recovered blocks, region pictures, the mark.
+
+    A step-2 block placed in reading order sits BEFORE the page mark, so a
+    slice from the mark onward loses it (and, under ``--native-only``, the
+    page then ships with neither the recovered words nor the image).
+    """
+    from socr.core.text_recovery import RECOVERED_MARK_RE
+
+    parts: list[str] = []
+    for para in (text or "").split("\n\n"):
+        body = para.strip()
+        if not body:
+            continue
+        if (
+            RECOVERED_MARK_RE.search(body)
+            or _COVERAGE_IMAGE_REF_RE.match(body)
+            or _COVERAGE_PAGE_MARK_RE.match(body)
+        ):
+            parts.append(body)
+    return parts
+
+
+def _coverage_parts_to_carry(bo_text: str, have: str) -> list[str]:
+    """The coverage parts of *bo_text* that *have* does not already contain.
+
+    Counted, not merely tested (round 7, cubic). Two regions on one page can
+    produce the SAME reading -- a repeated axis label, a "Source:" line -- and
+    a membership test treated one copy in *have* as proof that both were
+    there, so the second was silently dropped. Each part in *have* accounts for
+    exactly one occurrence.
+    """
+    from collections import Counter
+
+    remaining = Counter(_coverage_parts(have or ""))
+    carry: list[str] = []
+    for part in _coverage_parts(bo_text):
+        if remaining.get(part, 0):
+            remaining[part] -= 1
+            continue
+        carry.append(part)
+    return carry
+
+
+def _collapsed(text: str) -> str:
+    """*text* with every run of whitespace reduced to one space."""
+    return " ".join(text.split())
+
+
 def _native_text_with_appends(p) -> str:
     """The native text INCLUDING content appended after extraction.
 
@@ -476,9 +541,36 @@ def _native_text_with_appends(p) -> str:
         return base
     for attempt in reversed(p.attempts or ()):
         text = attempt.text or ""
-        if (attempt.engine or "").startswith("native") and len(text) > len(base):
-            if text.startswith(base):
-                return text
+        if not (attempt.engine or "").startswith("native") or len(text) <= len(base):
+            continue
+        # #1050 step 2 round 5, item 2: a recovered block is inserted INTO the
+        # prose, at its reading-order position, so the decorated attempt no
+        # longer starts with the snapshot and this test rejected it -- silently
+        # dropping the GH-36b equation-crop sidecar from the fragment and the
+        # final .md alike. The test runs on the attempt with this feature's own
+        # paragraphs removed; what is RETURNED still carries them, so neither
+        # the appends nor the coverage parts are lost.
+        if text.startswith(base):
+            return text
+        stripped = text
+        for part in coverage_parts(text):
+            for sep in ("\n\n" + part, part + "\n\n", part):
+                if sep in stripped:
+                    stripped = stripped.replace(sep, "", 1)
+                    break
+        # Whitespace-normalised, because inserting a block promotes the native
+        # text's own single newline to a blank line so the block reads as its
+        # own paragraph. Removing the block cannot put that newline back, so an
+        # exact prefix test would fail on the separator alone.
+        # Only when a coverage part was ACTUALLY removed (round 6, repo soft 2).
+        # Collapsing whitespace is safe for a text this feature just edited; on
+        # an untouched attempt it would also collapse the line breaks that carry
+        # meaning in a Markdown table, and accept a text that is not a true
+        # extension of the snapshot.
+        if stripped == text:
+            continue
+        if _collapsed(stripped).startswith(_collapsed(base)) and len(stripped) > len(base):
+            return text
     return base
 
 
@@ -4210,16 +4302,21 @@ def _select_page_output_tagged(
             no_img = uncovered_text_marker_no_image(page_num)
             bo_text = (p.best_output.text or "") if p.best_output is not None else ""
             have = fallback_text or ""
-            if mark in bo_text:
-                # Keep the equation sidecar (or any later native append).
-                # bo_text has the mark and crop links; it may be an earlier
-                # attempt that apply decorated before the sidecar landed.
-                suffix = bo_text[bo_text.index(mark) :]
-                if mark not in have:
-                    fallback_text = have.rstrip() + "\n\n" + suffix
-                    if not fallback_text.endswith("\n"):
-                        fallback_text += "\n"
-            elif mark not in have and no_img not in have:
+            carried = _coverage_parts_to_carry(bo_text, have)
+            if carried:
+                # #1050 step 2: the decorated text carries recovered blocks and
+                # region pictures, and a step-2 block sits BEFORE the mark when
+                # it was placed in reading order. Slicing from the mark onward
+                # dropped exactly those, and the page shipped with neither the
+                # words nor the image. Carry every coverage part the frozen
+                # native snapshot lacks instead, keeping the equation sidecar
+                # (or any later native append) that lives in ``have``.
+                # Reading-order placement is NOT preserved here: this is the
+                # fallback, and the parts land at the page tail.
+                fallback_text = have.rstrip() + "\n\n" + "\n\n".join(carried)
+                if not fallback_text.endswith("\n"):
+                    fallback_text += "\n"
+            elif mark not in have and no_img not in have and not _coverage_parts(bo_text):
                 # apply never saved a crop. Selection stays pure: the
                 # no-image mark goes on the returned text only.
                 fallback_text = have.rstrip() + "\n\n" + no_img + "\n"

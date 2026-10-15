@@ -227,6 +227,13 @@ def _pipeline(**overrides) -> UnifiedPipeline:
         describe_figure_crops=False,
         judge_backend="heuristic",
         check_text_coverage=True,
+        # #1050 step 2 is OFF in this file. These tests pin STEP 1's output --
+        # the mark, the picture links, the statuses. Step 2 rewrites exactly
+        # those when the crop reader answers, so leaving it on would make every
+        # assertion here depend on whether the host has a reachable Ollama
+        # (the CLAUDE.md no-provider trap: green on the Mac, different in CI).
+        # Step 2's own file pins the DIFFERENCE between the two settings.
+        recover_uncovered_text=False,
     )
     defaults.update(overrides)
     return UnifiedPipeline(PipelineConfig(**defaults))
