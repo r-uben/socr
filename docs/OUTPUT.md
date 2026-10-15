@@ -471,3 +471,28 @@ The full list of ship-gate predicates, with what each one checks, is in the modu
 docstring of `src/socr/tables/ship_gate.py`. Predicate names are the module
 constants there (`SIGN_DETACHED`, `ROW_ORDER`, and so on) and appear in
 `native_ship_gate_deferred` events under `data.predicates`.
+
+## 7. The acceptance meter (`socr-acceptance`)
+
+```
+uv run socr-acceptance <run_dir> --inputs corpus/manifest.csv --report acceptance.json
+```
+
+CPU only. Prints `METER = <violating pages> of <input pages>` (target 0), per-class
+counts, a surface-agreement section, and writes the page ids per class to the JSON
+report. Exit 1 when the meter, the surface section or a document-level finding (an unlisted
+document, a non-canonical file in `pages/`) is non-zero. The meter is the union of violating
+page ids; classes overlap, and document-level findings are not page ids.
+
+Every input page must be CHECKED (a named check ran and passed: judged `qwen` page, a
+blank page with its event, a native page with a coverage witness, ...) or MARKED. MARKED is
+position-fixed: one or more recognised mark lines make up the FIRST rendered block of the
+page `.md` (a paragraph, or a quote opening with one), judged by the CommonMark parser, and
+the same mark is the first rendered block under that page's `## Page N` heading in the
+document `.md`. A mark in a comment, a code fence, a reference definition, or lower on the
+page is not a mark, and neither is the blank receipt. The document `.md` must also equal the
+assembly of its page fragments, ignoring only trailing whitespace on each line and
+surrounding blank lines. The rules per lane and the exact classes are in the docstring of
+`src/socr/benchmark/acceptance.py`; the decision log is
+`docs/log/2026-10-13_1130-acceptance-meter.md`. Native and chart SUCCESS pages need
+witnesses that do not exist yet (#1050), so they all count as violations today.
