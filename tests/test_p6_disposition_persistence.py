@@ -310,6 +310,8 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "structure_class_model_kept",
         "table_ladder_disposition",
         "table_ladder_incomplete",
+        # Additive: see tests/test_marker_page_record_drops_stale_table_verdict.py.
+        "table_ladder_superseded",
         "binding_adjudication",
         "audit_events",
         "figure_refs",

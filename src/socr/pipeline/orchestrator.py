@@ -932,6 +932,38 @@ def _table_ladder_terminal(p) -> FailureMode | None:
     return fm if fm in _LADDER_TERMINAL_MODES else None
 
 
+def _recorded_table_ladder_verdicts(
+    ps, disposition: PageDisposition | None, page_events: list[dict]
+) -> tuple[str | None, str | None]:
+    """``(table_ladder_disposition, table_ladder_superseded)`` for a page record.
+
+    The ladder judges a model reading. When the page then ends on the fail-closed
+    marker, that reading never ships and its verdict describes bytes that are not in
+    the page: the scope3 harvest read ``table_unverified`` on dozens of marker-only
+    pages, and on others a ``table_ladder_accepted`` event with no disposition, which
+    it took for "table checked". On such a page the record's verdict is ``None`` (no
+    table text ships) and the ladder's verdict moves to ``table_ladder_superseded``
+    (``"accepted"`` when only accepted events stand), so it is kept but cannot be read
+    as the page's. ``table_rejected`` and ``table_withheld`` stay where they are: both
+    are true of a marker page, and both are content terminals the resume gate reads.
+    ``table_unverified`` grants no resume skip, so dropping it changes no resume.
+    In memory nothing changes; this is the record only.
+    """
+    current = getattr(ps, "table_ladder_disposition", None) if ps else None
+    recorded = current.value if current is not None else None
+    if disposition is None or disposition.ending is not PageEnding.FAIL_CLOSED_MARKER:
+        return recorded, None
+    if current in (FailureMode.TABLE_REJECTED, FailureMode.TABLE_WITHHELD):
+        return recorded, None
+    if recorded is not None:
+        return None, recorded
+    from socr.judge.table_verdict import TABLE_LADDER_ACCEPTED_KIND
+
+    if any(ev.get("kind") == TABLE_LADDER_ACCEPTED_KIND for ev in page_events):
+        return None, "accepted"
+    return None, None
+
+
 _ORTHOGONAL_ASSEMBLE_BUCKET_NAMES = (
     "native_only_distrust_pages",
     "value_drift_pages",
@@ -13825,6 +13857,10 @@ class UnifiedPipeline:
             if hasattr(ev, "page_num") and ev.page_num == page_num
         ]
 
+        recorded_ladder_disposition, superseded_ladder_verdict = _recorded_table_ladder_verdicts(
+            ps, disp, page_events
+        )
+
         # Figure refs emitted by the description phase and stored on EngineResult.
         # We record only the page-local subset here.
         # GH-171: figures reach the sidecar from TWO places, and only the first
@@ -14016,11 +14052,10 @@ class UnifiedPipeline:
             # verdict on resume (``page_events`` below already carries the
             # per-table audit trail; this field is the page-level reduction
             # ``reduce_page_ladder`` produced from it).
-            "table_ladder_disposition": (
-                ps.table_ladder_disposition.value
-                if ps and ps.table_ladder_disposition is not None
-                else None
-            ),
+            "table_ladder_disposition": recorded_ladder_disposition,
+            # The ladder's verdict on a reading the page did not ship (it ended on the
+            # fail-closed marker); ``None`` everywhere else. Provenance only.
+            "table_ladder_superseded": superseded_ladder_verdict,
             # GH-359 (cubic P1): an emitted table on this page reached
             # assemble with no ladder terminal. Persisted so a resumed run
             # refuses D1b's REJECTED skip-and-keep for THIS page -- the
