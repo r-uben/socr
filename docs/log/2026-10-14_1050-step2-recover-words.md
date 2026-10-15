@@ -518,6 +518,30 @@ its picture and a prose region the one BEFORE its own, so the only collision is
 collisions, i.e. an equivalent mutant. The guard is deleted: an untestable line
 hides whether the rule above it is right.
 
+## Fix round 9 (the repo reviewer's soft 1, which also closed Fable's P2)
+
+A block is claimed by its own MARK, not by a neighbouring region's kind.
+Rounds 6 to 8 asked "is the NEXT REGION prose?", which is the wrong question
+twice over: the paragraph after a picture belongs to whoever wrote it, not to
+whoever comes next in the region list, and the two orders can disagree. A
+figure's block carries the in-figure mark and a prose block the other one, so
+the block is asked directly:
+
+```python
+if in_figure:
+    neighbour = [p for p in paragraphs[at + 1 : at + 2] if p.startswith("> " + FIGURE_TEXT_PREFIX)]
+else:
+    neighbour = [p for p in paragraphs[at - 1 : at] if p.startswith("> " + PAGE_TEXT_PREFIX)]
+```
+
+`kinds` and `steals_next` are deleted with it. Three arrangements are pinned,
+each applied TWICE because a misattribution only shows on the second apply:
+a read figure with an unread prose region; an unread figure with a read prose
+region; and three regions of mixed kinds where the prose region's anchor was
+refused, so its block sits at the tail. Mutants: restoring `steals_next`
+(`R9_steals_next`), dropping the prefix test (`R9_prefix_test`) and dropping
+the direction (`R6_direction`, rebuilt for this code) all die.
+
 ## Known limit (accepted, not a blocker)
 
 Charts the whole-figure rule rejects fall back to per-region pictures. Nothing

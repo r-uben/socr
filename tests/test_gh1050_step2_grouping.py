@@ -2410,3 +2410,83 @@ def test_an_earlier_prose_region_does_not_take_the_next_ones_words() -> None:
     assert found[2].piece is not None and "SECOND REGION WORDS" in found[2].piece, (
         "region 2 was starved of its own words"
     )
+
+
+# --- fix round 9: a block is claimed by its own MARK ---------------------------
+
+
+class _FakeRegion:
+    """A region of a given kind, for `_prior_recoveries` alone."""
+
+    merged_from = 1
+
+    def __init__(self, in_figure: bool) -> None:
+        self.figure_pdf = (0.0, 0.0, 1.0, 1.0) if in_figure else None
+        self.kind = "raster" if in_figure else "vector_or_bare"
+
+
+def _pair_twice(body: str, regions: list) -> list[dict]:
+    """`_prior_recoveries` applied twice, as a second apply would."""
+    from socr.pipeline.orchestrator import _prior_recoveries
+
+    out = []
+    for _ in range(2):
+        found = _prior_recoveries(body, 1, regions)
+        out.append({i: (rec.piece or "") for i, rec in found.items()})
+    return out
+
+
+def test_a_figures_block_and_a_prose_block_are_told_apart_by_their_marks() -> None:
+    """Round 9: ask the BLOCK which kind it is, not the next region.
+
+    Round 7 asked whether the NEXT REGION was prose — the wrong question twice
+    over: the paragraph after a picture belongs to whoever wrote it, not to
+    whoever comes next in the region list, and the two orders can disagree.
+    Each case is applied twice, because a second apply is where a
+    misattribution shows up.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import recovered_block
+
+    fig_block = recovered_block("FIGURE WORDS", in_figure=True)
+    prose_block = recovered_block("PROSE WORDS", in_figure=False)
+    pic1, pic2 = uncovered_text_image_ref(1, 1), uncovered_text_image_ref(1, 2)
+
+    # (a) a READ figure then an UNREAD prose region.
+    body_a = "\n\n".join(["native prose", pic1, fig_block, pic2])
+    for found in _pair_twice(body_a, [_FakeRegion(True), _FakeRegion(False)]):
+        assert "FIGURE WORDS" in found[1], "the figure lost its own words"
+        assert found[2] == "", "the unread prose region was handed the figure's words"
+
+    # (b) an UNREAD figure then a READ prose region.
+    body_b = "\n\n".join(["native prose", pic1, prose_block, pic2])
+    for found in _pair_twice(body_b, [_FakeRegion(True), _FakeRegion(False)]):
+        assert found[1] == "", "the unread figure claimed the prose region's words"
+        assert "PROSE WORDS" in found[2], "the prose region was starved of its own words"
+
+
+def test_three_regions_of_mixed_kinds_keep_their_own_words() -> None:
+    """Round 9 (c): an unread figure, a read figure, and a read prose region.
+
+    The prose region's anchor was refused, so its block sits at the tail with
+    its picture — the arrangement where a kind-based rule goes wrong.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import recovered_block
+
+    fig_block = recovered_block("SECOND FIGURE WORDS", in_figure=True)
+    prose_block = recovered_block("THIRD REGION WORDS", in_figure=False)
+    pics = [uncovered_text_image_ref(1, i) for i in (1, 2, 3)]
+    body = "\n\n".join(["native prose", pics[0], pics[1], fig_block, prose_block, pics[2]])
+
+    regions = [_FakeRegion(True), _FakeRegion(True), _FakeRegion(False)]
+    for found in _pair_twice(body, regions):
+        assert found[1] == "", "the unread figure took someone else's words"
+        assert "SECOND FIGURE WORDS" in found[2]
+        assert "THIRD REGION WORDS" not in found[2], "figure 2 took the prose region's words"
+        assert "THIRD REGION WORDS" in found[3]
+        assert "SECOND FIGURE WORDS" not in found[3], "the prose region took figure 2's words"
+    # And no block is handed to two regions at once.
+    first = _pair_twice(body, regions)[0]
+    for words in ("SECOND FIGURE WORDS", "THIRD REGION WORDS"):
+        assert sum(1 for piece in first.values() if words in piece) == 1, words

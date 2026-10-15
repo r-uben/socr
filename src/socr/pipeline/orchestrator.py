@@ -181,7 +181,7 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
     A region whose picture and block are already in the body is done.
     """
     from socr.core.text_coverage import uncovered_text_image_ref
-    from socr.core.text_recovery import RECOVERED_MARK_RE
+    from socr.core.text_recovery import FIGURE_TEXT_PREFIX, PAGE_TEXT_PREFIX
 
     found: dict = {}
     # Round 7 added a ``claimed`` set so no paragraph could be taken twice.
@@ -191,9 +191,6 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
     # ``steals_next`` below already refuses. Enumerated over every arrangement
     # of two and three regions: zero collisions. An untestable guard hides
     # whether the rule above it is right, so it goes.
-    #: is each region in a figure? ``kinds[i]`` is region i+1, so ``kinds[index]``
-    #: is the region AFTER the one at 1-based ``index``.
-    kinds = [r.figure_pdf is not None or r.kind == "raster" for r in regions]
     # Round 7, item 2: split on blank lines AND on bare picture links. An
     # all-unread page joins its refs with a SINGLE newline (that is what makes
     # it byte-identical to step 1), so splitting on blank lines alone saw one
@@ -221,24 +218,25 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
         in_figure = reg.figure_pdf is not None or reg.kind == "raster"
         # Round 6, item 3: look where this region's block ACTUALLY goes. In a
         # figure the image leads and the words follow (at + 1); elsewhere the
-        # words lead and the image follows (at - 1). Searching both directions
-        # could pair a region with its NEIGHBOUR's block.
+        # words lead and the image follows (at - 1).
+        #
+        # Round 9: and the candidate must carry the MARK of that same kind.
+        # Round 7's version asked whether the NEXT REGION was prose, which is
+        # the wrong question twice over -- the paragraph after a picture
+        # belongs to whoever wrote it, not to whoever comes next in the region
+        # list, and the two orders can disagree. The block says which it is, so
+        # ask the block.
         if in_figure:
-            # Round 7, item 5: the paragraph after a figure's picture is its
-            # block UNLESS the next region is a PROSE one, whose block sits
-            # immediately before its own picture. An unread figure followed by
-            # a read prose region would otherwise claim that region's words.
-            candidate = at + 1
-            next_is_prose = index < len(kinds) and not kinds[index]
-            steals_next = (
-                next_is_prose
-                and candidate + 1 < len(paragraphs)
-                and _PLACED_IMAGE_RE.match(paragraphs[candidate + 1]) is not None
-            )
-            neighbour = [] if steals_next else paragraphs[candidate : candidate + 1]
+            neighbour = [
+                para
+                for para in paragraphs[at + 1 : at + 2]
+                if para.startswith("> " + FIGURE_TEXT_PREFIX)
+            ]
         else:
-            neighbour = paragraphs[at - 1 : at]
-        block = next((para for para in neighbour if RECOVERED_MARK_RE.search(para)), None)
+            neighbour = [
+                para for para in paragraphs[at - 1 : at] if para.startswith("> " + PAGE_TEXT_PREFIX)
+            ]
+        block = neighbour[0] if neighbour else None
         piece = None
         if block is not None:
             piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)
