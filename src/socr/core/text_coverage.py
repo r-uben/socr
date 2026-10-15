@@ -490,23 +490,46 @@ def _drawn_marks_px(page, mat) -> list[tuple[int, int, int, int]]:
     return out
 
 
-def _cluster_own_extent(box, marks) -> tuple[int, int, int, int] | None:
-    """Shrink *box* to the union of the drawn marks inside it.
+def _overlaps(a, b) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
 
-    #1050 step 2 round 2, item A. ``chart_region_bboxes`` expands a cluster to
-    the page's LEFT EDGE and by a row margin, so on a two-column page a
-    right-hand chart's rect reaches across the left column. Cropping that, and
-    reading it, duplicates the left column's prose. The figure's own extent is
-    what it actually drew.
+
+def _cluster_own_extent(box, marks, region_px=()) -> tuple[int, int, int, int] | None:
+    """The extent of the drawing cluster the region ink belongs to, inside *box*.
+
+    ``chart_region_bboxes`` expands a cluster to the page's LEFT EDGE and by a
+    row margin, so on a two-column page a right-hand chart's rect reaches
+    across the left column. Round 2 shrank it to the marks inside that rect --
+    which is still too much: an UNRELATED drawing in the left column sits
+    inside the rect too, and was swallowed (round 7, cubic).
+
+    The extent is therefore grown from the marks that touch this page's
+    uncovered ink, by overlap, and never jumps a gap. A disjoint blob elsewhere
+    in the expanded rect is not part of this figure and is left out.
     """
     inside = [m for m in marks if _inside(m, box)]
     if not inside:
         return None
+    seeds = [m for m in inside if any(_overlaps(m, r) for r in region_px)]
+    if not seeds:
+        # No ink to grow from (the caller filters these out later anyway):
+        # fall back to every mark in the rect rather than inventing a cluster.
+        seeds = inside
+    cluster = list(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for mark in inside:
+            if mark in cluster:
+                continue
+            if any(_overlaps(mark, member) for member in cluster):
+                cluster.append(mark)
+                changed = True
     return (
-        min(m[0] for m in inside),
-        min(m[1] for m in inside),
-        max(m[2] for m in inside),
-        max(m[3] for m in inside),
+        min(m[0] for m in cluster),
+        min(m[1] for m in cluster),
+        max(m[2] for m in cluster),
+        max(m[3] for m in cluster),
     )
 
 
@@ -583,7 +606,7 @@ def figure_boxes_px(page, mat, region_px=()) -> list[tuple[int, int, int, int]]:
 
         for rect in chart_region_bboxes(page) or ():
             candidate = _to_pix((rect.x0, rect.y0, rect.x1, rect.y1), page, mat)
-            own = _cluster_own_extent(candidate, marks)
+            own = _cluster_own_extent(candidate, marks, region_px)
             if own is None:
                 continue
             if not _cluster_has_marks_beyond_the_ink(own, marks, region_px):
@@ -1022,6 +1045,14 @@ def native_ink_masked(page, mat, arr):
         keep = np.zeros(count, dtype=bool)
         keep[1:] = ~covered[1:] & ~texture[1:]
         protect |= keep[labels]
+        # Round 7 item 1, a regression I introduced in round 6: a texture
+        # component was dropped from ``protect`` entirely, so the fill's
+        # MAX_THICK_PX halo could shave the part of it that lies OUTSIDE the
+        # char boxes -- uncovered ink. Measured: tick labels on an axis rule
+        # under a native line came back as "2U19 U.U58 2U2U". Only the ink
+        # under a char box is this feature's to paint; the rest of the same
+        # component is protected exactly like any other uncovered ink.
+        protect |= texture[labels] & ~layer
     if paint.any():
         out = _fill_with_local_background(out, paint, protect & ~paint)
     return out

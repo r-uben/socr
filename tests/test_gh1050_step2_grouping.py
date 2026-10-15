@@ -572,13 +572,16 @@ def test_a_spent_page_budget_skips_the_remaining_regions(tmp_path: Path) -> None
     assert uncovered_text_marker(1) in spent_text, "skipped regions ship as step 1 left them"
 
 
-def test_a_wedged_crop_reader_halts_the_document(tmp_path: Path) -> None:
-    """Item C / round 3: the READ's own outcome arms the halt, with no probe.
+def test_a_timed_out_read_stops_recovery_not_the_document(tmp_path: Path) -> None:
+    """The READ's own outcome stops recovery, with no health probe.
 
     `_probe_backend_idle` asks `/api/tags`, which answers 200 in milliseconds on
     a jammed GPU, so gating on it made this latch unreachable in the case it
-    exists for. Pinned as a difference over the failure KIND: a timeout wedges,
-    an ordinary failure is a refusal.
+    exists for. Pinned as a difference over the failure KIND: a timeout stops
+    recovery for the document, an ordinary failure is just a refusal.
+
+    Renamed in round 7: it never halted the document after round 6, and the old
+    name said it did.
     """
     pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
 
@@ -2094,3 +2097,259 @@ def test_each_figure_keeps_its_own_words_on_a_second_apply(tmp_path: Path) -> No
     assert captured["once"].count(RECOVERED.splitlines()[0]) == 1, "one figure was read"
     assert captured["twice"] == captured["once"], "a second apply re-attributed the readings"
     assert captured["reads_twice"] == captured["reads_once"], "the unread figure was read again"
+
+
+# --- fix round 7 --------------------------------------------------------------
+
+
+def _ticks_under_a_native_line_pdf(path: Path) -> Path:
+    """Drawn tick labels on an axis rule, with a native line 2 pt above them."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 200), "Native caption line sits just above the axis.", fontsize=10)
+    page.draw_rect(fitz.Rect(72, 203, 400, 204), color=(0, 0, 0), fill=(0, 0, 0))
+    x = 80.0
+    for width in (4.0, 3.2, 4.6, 3.8, 5.0, 4.1, 3.6, 4.4):
+        page.draw_rect(fitz.Rect(x, 205, x + width, 212), color=(0, 0, 0), width=0.6)
+        x += width + 2.0
+    page.insert_text((72, 60), "Prose above, with a text layer.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_textures_own_ink_outside_a_char_box_is_protected(tmp_path: Path) -> None:
+    """Round 7, item 1 — a regression introduced in round 6.
+
+    A component big enough to be a texture was dropped from `protect`
+    altogether, so the fill's halo could shave the part of it OUTSIDE the char
+    boxes — which is uncovered ink. Measured on an axis rule whose drawn tick
+    labels sit 2 pt under a native line: "2019 0.058 2020" came back as
+    "2U19 U.U58 2U2U". Only the ink under a char box is this feature's to
+    paint; the rest of the same component is protected like any other.
+    """
+    import numpy as np
+
+    from socr.core import text_coverage as tc
+
+    pdf = _ticks_under_a_native_line_pdf(tmp_path / "ticks.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        mat = fitz.Matrix(tc.SCALE, tc.SCALE)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        masked = tc.native_ink_masked(page, mat, arr)
+        band = tc._to_pix((70, 204.5, 200, 213), page, mat)
+
+    def dark(img) -> int:
+        return int((img[band[1] : band[3], band[0] : band[2], 0] < 128).sum())
+
+    assert dark(arr) > 0, "the fixture draws tick labels under the native line"
+    assert dark(masked) == dark(arr), "the halo shaved the tick labels"
+
+
+def test_an_all_unread_page_is_not_re_read_on_a_second_apply(tmp_path: Path) -> None:
+    """Round 7, item 2: I reported this covered in round 6. It was not.
+
+    An all-unread page joins its picture links with a SINGLE newline — that is
+    what makes it byte-identical to step 1. `_prior_recoveries` split on blank
+    lines only, so it saw one paragraph holding every ref, matched none, and a
+    second apply re-read every crop and doubled `uncovered_text_unread`.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+    captured: dict = {}
+    reads: list[str] = []
+    pipeline = _pipeline()
+    apply = pipeline._apply_text_coverage
+
+    def ask(_path, _prompt):
+        reads.append("x")
+        return None  # nothing is ever read: the all-unread page
+
+    def twice(state, page_num, ps, output_dir):
+        def unread_events() -> int:
+            return sum(1 for e in state.events if e.kind == "uncovered_text_unread")
+
+        apply(state, page_num, ps, output_dir)
+        captured["once"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_once"], captured["events_once"] = len(reads), unread_events()
+        apply(state, page_num, ps, output_dir)
+        captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_twice"], captured["events_twice"] = len(reads), unread_events()
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+
+    assert captured["reads_once"] >= 2, "the fixture offers several crops to the reader"
+    assert "\n\n![Uncovered text page 1 region 2]" not in captured["once"], (
+        "the all-unread page must keep step 1's single-newline join"
+    )
+    assert captured["twice"] == captured["once"]
+    assert captured["reads_twice"] == captured["reads_once"], "the crops were read again"
+    assert captured["events_twice"] == captured["events_once"], "the events were doubled"
+
+
+def test_a_mid_page_stop_does_not_lose_the_reading_already_shipped(tmp_path: Path) -> None:
+    """Round 7, item 4: the prior short-cut must be consulted BEFORE the latch.
+
+    A reader that stops mid-page leaves earlier regions with a shipped
+    reading. Checking the stop latch first discarded those on the second
+    apply, so the page lost words it had already recovered.
+    """
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="none", rows=(150.0, 330.0))
+    captured: dict = {}
+    answers = iter([RECOVERED])
+    pipeline = _pipeline()
+    apply = pipeline._apply_text_coverage
+
+    def ask(_path, _prompt):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise TimeoutError("read timed out") from None
+
+    def twice(state, page_num, ps, output_dir):
+        apply(state, page_num, ps, output_dir)
+        captured["once"] = (ps.best_output.text or "") if ps.best_output else ""
+        apply(state, page_num, ps, output_dir)
+        captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_uncovered_text_ask", return_value=ask),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+
+    assert pipeline._recovery_backend_wedged is True, "the fixture stops the reader mid-page"
+    assert "Treatment Prompt" in captured["once"], "region 1 was read before the stop"
+    assert captured["twice"] == captured["once"], "the second apply dropped the shipped reading"
+
+
+def test_the_real_reader_path_stops_on_a_timeout(tmp_path: Path) -> None:
+    """Round 7, item 3: I reported this done in round 4. It was not.
+
+    Every stop test stubbed `_uncovered_text_ask`, so wrapping `engine.ask` in
+    `except TimeoutError: return None` survived them all. This drives the REAL
+    `_uncovered_text_ask` → `engine.ask` path, patching only the HTTP layer.
+    """
+    from socr.core.ollama_utils import TotalDeadlineExceeded
+
+    pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
+    pipeline = _pipeline()
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
+        patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+        patch("socr.engines.gemini_api.OllamaFigureEngine.is_available", return_value=True),
+        patch(
+            "socr.engines.gemini_api.call_with_total_deadline",
+            side_effect=TotalDeadlineExceeded("outstanding call"),
+        ),
+    ):
+        pipeline.process(pdf, tmp_path / "o")
+    assert pipeline._recovery_backend_wedged is True, (
+        "a timeout from the real engine must stop recovery for the document"
+    )
+    body = _page_text(tmp_path / "o")
+    assert PAGE_TEXT_PREFIX not in body
+    assert uncovered_text_marker(1) in body, "step 1's picture and mark are kept"
+
+
+def test_an_unread_figure_does_not_claim_the_next_regions_words(tmp_path: Path) -> None:
+    """Round 7, item 5 (repo reviewer, latent): a mixed figure-then-prose tail.
+
+    A figure's block follows its picture; a prose region's block PRECEDES its
+    own. So the paragraph after an UNREAD figure's picture is the next prose
+    region's block — and pairing by direction alone handed it to the figure.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import recovered_block
+    from socr.pipeline.orchestrator import _prior_recoveries
+
+    class _Region:
+        def __init__(self, in_figure: bool) -> None:
+            self.figure_pdf = (0.0, 0.0, 1.0, 1.0) if in_figure else None
+            self.kind = "raster" if in_figure else "vector_or_bare"
+            self.merged_from = 1
+
+    prose_block = recovered_block("PROSE WORDS", in_figure=False)
+    body = "\n\n".join(
+        [
+            "native prose",
+            uncovered_text_image_ref(1, 1),  # an UNREAD figure: picture only
+            prose_block,  # the PROSE region's words...
+            uncovered_text_image_ref(1, 2),  # ...then its picture
+        ]
+    )
+    found = _prior_recoveries(body, 1, [_Region(True), _Region(False)])
+    assert found[1].piece is None, "the unread figure claimed the prose region's words"
+    assert found[2].piece is not None and "PROSE WORDS" in found[2].piece
+
+
+def test_a_repeated_reading_is_carried_once_per_region() -> None:
+    """Round 7 addendum (cubic): count the parts, do not merely test membership.
+
+    Two regions on a page can produce the SAME reading — a repeated axis
+    label, a "Source:" line. Treating one copy in the snapshot as proof that
+    both were there dropped the second silently.
+    """
+    from socr.core.manifest import _coverage_parts_to_carry
+    from socr.core.text_recovery import recovered_block
+
+    block = recovered_block("Same words", in_figure=False)
+    decorated = "\n\n".join(["prose", block, block, uncovered_text_marker(1)])
+    have = "prose\n\n" + block
+    carried = _coverage_parts_to_carry(decorated, have)
+    assert sum(1 for part in carried if "Same words" in part) == 1, (
+        "the second identical reading was dropped"
+    )
+
+
+def _right_column_chart_with_a_left_blob_pdf(path: Path) -> Path:
+    """A right-column chart, and an UNRELATED drawing in the left column."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.draw_rect(fitz.Rect(40, 160, 120, 260), color=(0, 0, 0), fill=(0.9, 0.1, 0.1))
+    page.draw_rect(fitz.Rect(330, 140, 560, 340), color=(0.4, 0.4, 0.4), width=0.8)
+    for i, h in enumerate((80.0, 140.0, 60.0)):
+        x = 350.0 + i * 60
+        page.draw_rect(fitz.Rect(x, 320 - h, x + 40, 320), color=(0, 0, 0), fill=(0.2, 0.4, 0.8))
+    _glyph_row(page, 160.0, x0=350.0)
+    page.insert_text((60, 100), "Prose with a text layer.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_figures_extent_stops_at_its_own_cluster(tmp_path: Path) -> None:
+    """Round 7 addendum (cubic): an expanded rect is not the figure.
+
+    `chart_region_bboxes` stretches a cluster to the page's left edge, so an
+    unrelated drawing in the left column sits inside the candidate rect. The
+    extent is grown from the marks that touch this page's uncovered ink and
+    never jumps a gap, so the blob is left out.
+    """
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    pdf = _right_column_chart_with_a_left_blob_pdf(tmp_path / "blob.pdf")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        candidates = [(r.x0, r.y0, r.x1, r.y1) for r in (chart_region_bboxes(page) or ())]
+        figures = [r for r in analyze_page(page).regions if r.figure_pdf]
+
+    assert candidates and candidates[0][0] < 40, "the candidate rect does reach the left column"
+    assert figures, "the chart is a figure"
+    x0 = figures[0].figure_pdf[0]
+    assert x0 >= 300, f"the extent swallowed the left-column blob (x0={x0})"

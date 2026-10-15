@@ -169,6 +169,10 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return isinstance(exc, TimeoutError)
 
 
+#: A picture link this feature placed, as ``uncovered_text_image_ref`` writes it.
+_PLACED_IMAGE_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(")
+
+
 def _prior_recoveries(body: str, page_num: int, regions) -> dict:
     """What a previous apply already wrote for each region, by index.
 
@@ -180,7 +184,30 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
     from socr.core.text_recovery import RECOVERED_MARK_RE
 
     found: dict = {}
-    paragraphs = [para.strip() for para in body.split("\n\n") if para.strip()]
+    # No paragraph may be claimed by two regions (round 7, item 5).
+    claimed: set[str] = set()
+    #: is each region in a figure? ``kinds[i]`` is region i+1, so ``kinds[index]``
+    #: is the region AFTER the one at 1-based ``index``.
+    kinds = [r.figure_pdf is not None or r.kind == "raster" for r in regions]
+    # Round 7, item 2: split on blank lines AND on bare picture links. An
+    # all-unread page joins its refs with a SINGLE newline (that is what makes
+    # it byte-identical to step 1), so splitting on blank lines alone saw one
+    # paragraph holding every ref, matched none of them, and a second apply
+    # re-read every crop and doubled ``uncovered_text_unread``.
+    paragraphs: list[str] = []
+    for para in body.split("\n\n"):
+        chunk: list[str] = []
+        for line in para.split("\n"):
+            if _PLACED_IMAGE_RE.match(line.strip()):
+                if chunk:
+                    paragraphs.append("\n".join(chunk).strip())
+                    chunk = []
+                paragraphs.append(line.strip())
+            else:
+                chunk.append(line)
+        if chunk and "\n".join(chunk).strip():
+            paragraphs.append("\n".join(chunk).strip())
+    paragraphs = [para for para in paragraphs if para]
     for index, reg in enumerate(regions, start=1):
         ref = uncovered_text_image_ref(page_num, index)
         if ref not in paragraphs:
@@ -191,12 +218,27 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
         # figure the image leads and the words follow (at + 1); elsewhere the
         # words lead and the image follows (at - 1). Searching both directions
         # could pair a region with its NEIGHBOUR's block.
-        neighbour = paragraphs[at + 1 : at + 2] if in_figure else paragraphs[at - 1 : at]
-        block = next((para for para in neighbour if RECOVERED_MARK_RE.search(para)), None)
-        if block is None and not in_figure and at == 0:
-            # A prose region whose words were never placed (the anchor was
-            # refused) sits alone at the page tail.
-            block = None
+        if in_figure:
+            # Round 7, item 5: the paragraph after a figure's picture is its
+            # block UNLESS the next region is a PROSE one, whose block sits
+            # immediately before its own picture. An unread figure followed by
+            # a read prose region would otherwise claim that region's words.
+            candidate = at + 1
+            next_is_prose = index < len(kinds) and not kinds[index]
+            steals_next = (
+                next_is_prose
+                and candidate + 1 < len(paragraphs)
+                and _PLACED_IMAGE_RE.match(paragraphs[candidate + 1]) is not None
+            )
+            neighbour = [] if steals_next else paragraphs[candidate : candidate + 1]
+        else:
+            neighbour = paragraphs[at - 1 : at]
+        block = next(
+            (para for para in neighbour if RECOVERED_MARK_RE.search(para) and para not in claimed),
+            None,
+        )
+        if block is not None:
+            claimed.add(block)
         piece = None
         if block is not None:
             piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)
@@ -12058,27 +12100,28 @@ class UnifiedPipeline:
         # round. ``_prepare_text_coverage`` always sets it.
         if not getattr(self, "_recover_uncovered_text", False):
             return rec
+        # Round 5, item 5: this page already carries this region's parts, so a
+        # second apply must not re-read the crop or append a second copy of the
+        # event. The PLACEMENT is still re-derived below, so the page lands
+        # identically. An UNREAD prior (piece is None) counts as done too: it
+        # was offered to the reader and declined (round 6, item 3).
+        #
+        # Round 7, item 4: this is checked BEFORE the stop latch. A reader that
+        # stopped mid-page left earlier regions with a shipped reading, and
+        # consulting the latch first discarded those on the second apply --
+        # the page lost words it had already recovered.
+        if already is not None:
+            return self._place_recovery(
+                reg, image_ref, already.piece, in_figure, page, page_num, index
+            )
         if self._recovery_backend_wedged:
-            # Item C: once the reader is wedged, the REST of this page stops too.
-            # Firing the next region into a stuck GPU is the same mistake as
+            # Once the reader has stopped, the REST of this page stops too:
+            # firing the next region into a stuck GPU is the same mistake as
             # firing the next page into one.
             return rec
 
         t0 = time.perf_counter()
         reading = None
-        # Round 5, item 5: this page already carries this region's parts, so a
-        # second apply must not re-read the crop or append a second copy of the
-        # event. Byte idempotency was not enough on its own: the reader cost and
-        # the audit trail were duplicated every time the phase ran again. The
-        # PLACEMENT is still re-derived below, so the page lands identically.
-        # An UNREAD prior (piece is None) still counts as done: it was already
-        # offered to the reader and declined, so a second apply must not pay
-        # for it again (round 6, item 3). ``_prior_recoveries`` only records a
-        # region whose picture is already on the page.
-        if already is not None:
-            return self._place_recovery(
-                reg, image_ref, already.piece, in_figure, page, page_num, index
-            )
 
         budget = getattr(self, "_recovery_budget", None)
         try:
@@ -12137,16 +12180,18 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.debug("text recovery: read failed p%d r%d (%s)", page_num, index, exc)
             reading = None
-            # Cascade-halt (CLAUDE.md): a wedged local VLM must stop the
-            # document, not have the next page fired into a stuck GPU. Reuse
-            # the existing latch rather than a second halt path.
+            # A slow read turns RECOVERY off for the rest of this document and
+            # nothing else: see ``_stop_recovery_for_document``. It does NOT
+            # arm the ladder's cascade halt, which it used to -- on main a
+            # native document never halts, and one slow crop read is no reason
+            # to stop reading a page's own native text (round 6 BLOCKER).
             #
-            # Round 3 (Argon #6): armed from the READING CALL's own outcome, with
-            # no health probe. ``_probe_backend_idle`` asks ``/api/tags``, which
-            # is blind to a wedge -- it answers 200 in 0.03 s on a jammed GPU --
-            # so gating on it made this latch unreachable in exactly the case it
-            # exists for. A read that consumed its whole deadline IS the
-            # evidence; a fast failure is a refusal and stays "no reading".
+            # The trigger is the READING CALL's own outcome, with no health
+            # probe: ``_probe_backend_idle`` asks ``/api/tags``, which answers
+            # 200 in 0.03 s on a jammed GPU, so gating on it made this
+            # unreachable in exactly the case it exists for. A read that
+            # consumed its whole deadline IS the evidence; a fast failure is a
+            # refusal and stays "no reading".
             if _is_timeout_error(exc):
                 self._stop_recovery_for_document(state, page_num)
         seconds = round(time.perf_counter() - t0, 2)

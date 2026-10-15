@@ -445,6 +445,49 @@ captured at import before any fixture runs. Same shape as
 `magicmock-makes-negative-assertions-vacuous`: the mutant was the only thing
 that could have found it.
 
+## Fix round 7 (Fable reproduced + the repo reviewer + cubic)
+
+**1. A regression I introduced in round 6 (P1).** Making the mask paint a
+texture's ink inside char boxes, I dropped texture components from `protect`
+entirely, so the fill's halo could shave the part of the SAME component that
+lies outside those boxes -- uncovered ink. Measured on an axis rule whose drawn
+tick labels sit 2 pt below a native line: "2019 0.058 2020" came back as
+"2U19 U.U58 2U2U". One line: `protect |= texture[labels] & ~layer`.
+
+**2 and 3: two items I reported DONE that were not.** Both were caught by the
+reviewer, not by me, and both had the same shape -- I credited an existing test
+that pins something adjacent.
+- The all-unread join: `_prior_recoveries` split on blank lines, but an
+  all-unread page joins its refs with a SINGLE newline (that is what makes it
+  byte-identical to step 1), so it saw one paragraph, matched nothing, and a
+  second apply re-read every crop and doubled `uncovered_text_unread`. It now
+  splits on bare picture links too.
+- The real-engine stop path: every stop test stubbed `_uncovered_text_ask`, so
+  wrapping `engine.ask` in `except TimeoutError: return None` survived them all.
+  One test now drives the real path with only the HTTP layer patched.
+
+**4. The stop latch was consulted before the prior short-cut.** A reader that
+stops mid-page leaves earlier regions with a shipped reading, and checking the
+latch first discarded those on the second apply -- the page lost words it had
+already recovered.
+
+**5. A mixed figure-then-prose tail.** A figure's block follows its picture, a
+prose region's precedes its own, so the paragraph after an UNREAD figure's
+picture is the next prose region's block -- and pairing by direction alone
+handed it over. No paragraph may now be claimed twice.
+
+### Addendum (cubic), both reproduced before fixing
+
+- `_coverage_parts_to_carry` tested membership, so one copy of a repeated
+  reading in the snapshot was taken as proof that BOTH were there and the
+  second was dropped. It now counts occurrences.
+- A vector chart's extent was the union of every mark inside the expanded
+  candidate rect -- which reaches the page's left edge, so an unrelated
+  left-column drawing was swallowed (measured: extent x0 = 40 instead of 330).
+  The extent is now grown from the marks that touch this page's uncovered ink
+  and never jumps a gap. Hansen p23, Bugel p23 and Schoenegger p10 are
+  unchanged.
+
 ## Known limit (accepted, not a blocker)
 
 Charts the whole-figure rule rejects fall back to per-region pictures. Nothing
@@ -462,6 +505,11 @@ tested; a per-pixel background estimate would close it and was not attempted.
 Also accepted (round 5): drawn capitals that OVERLAP a native descender lose
 about 32% of their ink to the mask, because the covered-component rule cannot
 separate two touching strokes. A fast `None` mid-document keeps step-1 crops.
+
+Also accepted (round 7): a glyph-sized drawn mark that TOUCHES a native glyph
+leaks that glyph into the crop, because the two share a component and the
+glyph-sized test protects it. And a periodic texture leaves flat rectangles
+with stripe stubs where the ring median met the stripes.
 
 ## Not measured
 

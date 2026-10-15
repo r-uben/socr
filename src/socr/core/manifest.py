@@ -489,8 +489,24 @@ def _coverage_parts(text: str) -> list[str]:
 
 
 def _coverage_parts_to_carry(bo_text: str, have: str) -> list[str]:
-    """The coverage parts of *bo_text* that *have* does not already contain."""
-    return [part for part in _coverage_parts(bo_text) if part not in (have or "")]
+    """The coverage parts of *bo_text* that *have* does not already contain.
+
+    Counted, not merely tested (round 7, cubic). Two regions on one page can
+    produce the SAME reading -- a repeated axis label, a "Source:" line -- and
+    a membership test treated one copy in *have* as proof that both were
+    there, so the second was silently dropped. Each part in *have* accounts for
+    exactly one occurrence.
+    """
+    from collections import Counter
+
+    remaining = Counter(_coverage_parts(have or ""))
+    carry: list[str] = []
+    for part in _coverage_parts(bo_text):
+        if remaining.get(part, 0):
+            remaining[part] -= 1
+            continue
+        carry.append(part)
+    return carry
 
 
 def _collapsed(text: str) -> str:
