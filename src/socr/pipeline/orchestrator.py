@@ -164,6 +164,45 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return "timed out" in str(exc).lower() or "timeout" in type(exc).__name__.lower()
 
 
+def _prior_recoveries(body: str, page_num: int, regions) -> dict:
+    """What a previous apply already wrote for each region, by index.
+
+    Round 5, item 5. ``_apply_text_coverage`` is byte-idempotent, but a second
+    call re-read every crop and appended a second copy of every audit event.
+    A region whose picture and block are already in the body is done.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import RECOVERED_MARK_RE
+
+    found: dict = {}
+    paragraphs = [para.strip() for para in body.split("\n\n") if para.strip()]
+    for index, reg in enumerate(regions, start=1):
+        ref = uncovered_text_image_ref(page_num, index)
+        if ref not in paragraphs:
+            continue
+        at = paragraphs.index(ref)
+        block = next(
+            (
+                para
+                for para in (paragraphs[at - 1 : at] + paragraphs[at + 1 : at + 2])
+                if RECOVERED_MARK_RE.search(para)
+            ),
+            None,
+        )
+        in_figure = reg.figure_pdf is not None or reg.kind == "raster"
+        piece = None
+        if block is not None:
+            piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)
+        found[index] = _RegionRecovery(
+            image_ref=ref,
+            anchor="",
+            at_reading_order=False,
+            piece=piece,
+            merged_from=reg.merged_from,
+        )
+    return found
+
+
 def _strip_coverage_decoration(body: str, page_num: int) -> str:
     """Remove whatever #1050 already wrote on this page body.
 
@@ -1639,7 +1678,16 @@ class UnifiedPipeline:
             # #1050 step 2: recovery rewrites a flagged page's body (OCR'd words
             # placed in the prose or under the figure). Toggling it must not
             # resume a page written under the other setting.
-            "recover_uncovered_text": getattr(cfg, "recover_uncovered_text", True),
+            # Round 5, item 6: only when it is ON. The flag changes a page's
+            # bytes only by recovering words; with it OFF the page is exactly
+            # what main produces, so hashing the flag made every OFF run
+            # invalidate main's fragments and forced a needless reprocess --
+            # the GH-142 failure shape, in the other direction.
+            **(
+                {"recover_uncovered_text": True}
+                if getattr(cfg, "recover_uncovered_text", True)
+                else {}
+            ),
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
@@ -11570,9 +11618,24 @@ class UnifiedPipeline:
         which is the one thing a refusal cannot do. Timing, not the exception,
         because the exception is gone by the time it gets here.
         """
-        from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC
+        from PIL import Image
 
-        inner = self._figure_description_ask()
+        from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC, OllamaFigureEngine
+
+        engine = OllamaFigureEngine()
+        available: bool | None = None
+
+        def inner(path, prompt):
+            nonlocal available
+            if available is None:
+                available = engine.is_available()
+            if not available:
+                return None
+            with Image.open(path) as im:
+                im.load()
+                # NOT the describer's wrapper: a deadline must reach the caller
+                # here, because that is the wedge signal (round 5, item 3).
+                return engine.ask(im, prompt)
 
         def ask(path, prompt):
             start = time.monotonic()
@@ -11581,7 +11644,7 @@ class UnifiedPipeline:
                 raise TimeoutError(f"crop reader gave no answer in {FIGURE_ASK_TIMEOUT_SEC:g}s")
             return answer
 
-        ask.model = getattr(inner, "model", "")  # type: ignore[attr-defined]
+        ask.model = engine.model  # type: ignore[attr-defined]
         return ask
 
     @contextlib.contextmanager
@@ -11682,7 +11745,7 @@ class UnifiedPipeline:
         # gave 23 labels 46 minutes, which is not a bound.
         return PageLadderBudget(self._page_ladder_budget_sec([]), on_exhausted=_exhausted)
 
-    def _recover_one_region(self, state, page_num, page, reg, index, png_path, ask):
+    def _recover_one_region(self, state, page_num, page, reg, index, png_path, ask, already=None):
         """Read one uncovered region and decide how it ships. Never raises.
 
         A model or witness failure must leave the page exactly as step 1 left
@@ -11717,9 +11780,18 @@ class UnifiedPipeline:
             # Firing the next region into a stuck GPU is the same mistake as
             # firing the next page into one.
             return rec
+
         t0 = time.perf_counter()
         reading = None
+        # Round 5, item 5: this page already carries this region's parts, so a
+        # second apply must not re-read the crop or append a second copy of the
+        # event. Byte idempotency was not enough on its own: the reader cost and
+        # the audit trail were duplicated every time the phase ran again. The
+        # PLACEMENT is still re-derived below, so the page lands identically.
+        reused = already.piece if already is not None else None
         budget = getattr(self, "_recovery_budget", None)
+        if reused is not None:
+            return self._place_recovery(reg, image_ref, reused, in_figure, page, page_num, index)
         try:
             # Round 3 (Argon #7): a call may not START unless the budget can
             # hold a whole one. ``PageLadderBudget`` documents that a call
@@ -11806,6 +11878,22 @@ class UnifiedPipeline:
         # elsewhere the words lead and the image follows as the thing to check
         # the words against.
         piece = (image_ref + "\n\n" + block) if in_figure else (block + "\n\n" + image_ref)
+        rec = self._place_recovery(reg, image_ref, piece, in_figure, page, page_num, index)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="uncovered_text_recovered",
+                engine="ollama-figure",
+                detail=f"region {index}: read from the crop; ships marked not verified",
+                data={"region": index, "in_figure": in_figure, "seconds": seconds},
+            )
+        )
+        return rec
+
+    def _place_recovery(self, reg, image_ref, piece, in_figure, page, page_num, index):
+        """Where a region's piece goes: reading order outside a figure, else the tail."""
+        from socr.core.text_coverage import preceding_text_snippet
+
         anchor = ""
         in_prose = not in_figure
         try:
@@ -11819,23 +11907,13 @@ class UnifiedPipeline:
             # so its words go first.
             logger.debug("text recovery: anchor failed p%d r%d (%s)", page_num, index, exc)
             in_prose = False
-        rec = _RegionRecovery(
+        return _RegionRecovery(
             image_ref=image_ref,
             anchor=anchor,
             at_reading_order=in_prose,
             piece=piece,
             merged_from=reg.merged_from,
         )
-        state.events.append(
-            AuditEvent(
-                page_num=page_num,
-                kind="uncovered_text_recovered",
-                engine="ollama-figure",
-                detail=f"region {index}: read from the crop; ships marked not verified",
-                data={"region": index, "in_figure": in_figure, "seconds": seconds},
-            )
-        )
-        return rec
 
     def _apply_text_coverage(
         self,
@@ -11892,6 +11970,7 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         fig_dir = doc_dir / "figures"
         recoveries: list[_RegionRecovery] = []
+        prior = _prior_recoveries(bo.text or "", page_num, kept)
         self._recovery_budget = self._uncovered_text_budget(state, page_num, kept)
         try:
             with open_pdf(str(state.handle.path)) as doc:
@@ -11913,7 +11992,9 @@ class UnifiedPipeline:
                     # whole figure exactly as the page draws it.
                     render_region_png(page, crop_box(reg), dest)
                     recoveries.append(
-                        self._recover_one_region(state, page_num, page, reg, i, dest, ask)
+                        self._recover_one_region(
+                            state, page_num, page, reg, i, dest, ask, already=prior.get(i)
+                        )
                     )
         except Exception as exc:
             logger.debug("text coverage: crop save failed p%d: %s", page_num, exc)
@@ -19293,7 +19374,19 @@ class UnifiedPipeline:
                 return None
             with Image.open(path) as im:
                 im.load()
-                return engine.ask(im, prompt)
+                try:
+                    return engine.ask(im, prompt)
+                except TimeoutError:
+                    # Round 5, item 3. ``ask`` now re-raises a fail-fast
+                    # deadline so #1050's crop reader can see a wedge. The
+                    # DESCRIBER's contract is that this callable never raises
+                    # (``crop_descriptions.describe_number_free``), and its
+                    # caller catches once per DOCUMENT -- so one fail-fast
+                    # would drop every figure description on that document.
+                    # The describer path keeps the old contract; #1050 wraps
+                    # the engine itself and is unaffected.
+                    logger.debug("figure describer: reader deadline, description dropped")
+                    return None
 
         ask.model = engine.model  # type: ignore[attr-defined]
         return ask

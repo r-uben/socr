@@ -377,6 +377,67 @@ the phase ran.
 
 **9. Stale docstrings (P2)** citing the deleted Tesseract witness are rewritten.
 
+## Fix round 5 (Fable reproduced + guided Argon)
+
+**1. The mask painted glyphs WHITE (P0).** On a grey or dark fill -- a chart
+exported as a raster with native labels over it -- that handed the model fat
+white words, which it read: the mask created the duplication it exists to
+prevent. Measured with the reviewer's metric (contrast pixels inside the native
+char boxes, against the fill), white painting left **395% on a 0.6 grey and 389%
+on a dark fill** -- MORE legible than before masking. Each covered component is
+now filled with the MEDIAN of a ring around it, so a gradient is followed rather
+than flattened: **0% on all four fills** (0.92, 0.85, 0.6, dark-with-white-text).
+`cv2.inpaint` was tried first and reverted: it reconstructs a ghost from the
+anti-aliased boundary and left 119% on a near-white fill.
+
+**2. Silent loss: the equation sidecar on NATIVE_FALLBACK (P1).**
+`_native_text_with_appends` accepts an attempt only if it STARTS with the native
+snapshot. A recovered block inserted at its reading-order position sits
+mid-prose, so the decorated attempt failed that test and the GH-36b
+`![equation crop]` sidecar was dropped -- from fragment and final `.md` alike,
+with no event. The test now runs with this feature's own paragraphs spliced out,
+and whitespace-normalised: inserting a block deliberately promotes the native
+text's single newline to a blank line, which an exact prefix test cannot survive.
+
+My round-3 probe missed this because it anchored at the TAIL, which keeps the
+prefix. My first round-5 test missed it too, for a second reason worth
+recording: it left an UNDECORATED attempt carrying the equation, and the plain
+prefix test matched that one instead. A fixture that still passes with the fix
+removed is not a test of the fix.
+
+**3. The engine change was unguarded (P2).** Its test stubbed above the engine,
+so deleting the `gemini_api` change survived. It now drives the real
+`OllamaFigureEngine.ask` with the HTTP layer patched. Collateral, as the
+reviewer predicted: `ask` re-raising broke `crop_descriptions`'s documented
+never-raise contract, and its caller catches once per DOCUMENT -- one fail-fast
+would have dropped every figure description on that document. The describer path
+catches and returns `None`; #1050 wraps the engine itself and is unaffected.
+
+**4. The below-baseline test is exact (P2).** 0% loss, not 90%. The halo
+dilation that catches a glyph's anti-aliased edge never enters an UNCOVERED ink
+component, so a drawn mark within a rule's width of a native glyph survives.
+
+**5. Events and reader calls are idempotent (P2).** Byte idempotency was not
+enough: a second apply re-read every crop and appended a second copy of every
+event. A region whose picture and block are already in the body is reused; its
+PLACEMENT is still re-derived, so the page lands identically.
+
+**6. The flag no longer changes a run's identity when OFF (P2).** Hashing it
+unconditionally made every OFF run invalidate main's fragments and force a
+reprocess that changes nothing -- the GH-142 failure shape in the other
+direction. The test inspects the fingerprint PAYLOAD, because a test on the
+digest alone cannot fail: both configs would carry the key and still agree.
+
+### A vacuous test, caught only by its mutant
+
+`test_the_figure_describer_still_never_raises` passed against a mutant that
+removed the guard entirely. conftest's autouse
+`_figure_description_model_is_absent` replaces `_figure_description_ask` for
+EVERY test, so the test measured the stub. It now reinstalls the real method,
+captured at import before any fixture runs. Same shape as
+`magicmock-makes-negative-assertions-vacuous`: the mutant was the only thing
+that could have found it.
+
 ## Known limit (accepted, not a blocker)
 
 Charts the whole-figure rule rejects fall back to per-region pictures. Nothing
@@ -385,6 +446,10 @@ picture is a sliver rather than the figure. Four shapes: hairline step charts,
 tiny scatter markers, line axes without a frame, and a frame drawn as four
 separate rule segments (LaTeX `\fbox`, `mdframed`), whose segments enclose
 nothing so its contents never group.
+
+Also accepted (round 5): drawn capitals that OVERLAP a native descender lose
+about 32% of their ink to the mask, because the covered-component rule cannot
+separate two touching strokes. A fast `None` mid-document keeps step-1 crops.
 
 ## Not measured
 

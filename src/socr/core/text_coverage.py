@@ -918,6 +918,46 @@ def coverage_for_document(doc, *, group: bool = True) -> list[CoveragePage]:
     return [analyze_page(doc[i], group=group) for i in range(len(doc))]
 
 
+def _fill_with_local_background(arr, paint, protect):
+    """Replace the pixels in *paint* with the colour that surrounds them.
+
+    Round 5, item 1. Painting covered glyphs WHITE was itself a signal: on a
+    grey or dark fill -- a chart exported as a raster with native labels over
+    it -- the model was handed fat white words and read them, so the mask
+    created the duplication it exists to prevent. Measured with Fable's metric
+    (contrast pixels inside the native char boxes, against the fill): white
+    painting left 395% on a 0.6 grey and 389% on a dark fill.
+
+    Each covered component is filled with the MEDIAN of the pixels in a ring
+    around it -- a per-component estimate, so a gradient is followed rather
+    than flattened. The mask is first dilated by ``MAX_THICK_PX``
+    (image_locate's rule thickness, already used by the ink filter, so no new
+    number) because a glyph's anti-aliased halo lies just outside the component
+    and reads as the glyph's own edge if it is left behind.
+    """
+    import cv2
+
+    radius = max(1, int(round(MAX_THICK_PX)))
+    kernel = np.ones((radius * 2 + 1, radius * 2 + 1), np.uint8)
+    solid = cv2.dilate(paint.astype(np.uint8), kernel).astype(bool) & ~protect
+    solid |= paint
+    out = arr.copy()
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(
+        solid.astype(np.uint8), connectivity=8
+    )
+    height, width = solid.shape
+    for i in range(1, count):
+        x, y, w, h = (int(stats[i, j]) for j in range(4))
+        x0, y0 = max(0, x - radius), max(0, y - radius)
+        x1, y1 = min(width, x + w + radius), min(height, y + h + radius)
+        window = out[y0:y1, x0:x1]
+        ring = ~solid[y0:y1, x0:x1]
+        if not ring.any():
+            continue
+        out[y0:y1, x0:x1][labels[y0:y1, x0:x1] == i] = np.median(window[ring], axis=0)
+    return out
+
+
 def native_ink_masked(page, mat, arr):
     """*arr* with the page's NATIVE INK painted out, component by component.
 
@@ -947,6 +987,8 @@ def native_ink_masked(page, mat, arr):
         return out
     gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY) if out.shape[2] >= 3 else out[:, :, 0]
     layer = _paint(gray.shape, native_boxes, page, mat)
+    paint = np.zeros(gray.shape, dtype=bool)
+    protect = np.zeros(gray.shape, dtype=bool)
     for ink in _polarity_masks(gray):
         count, labels, _stats, _c = cv2.connectedComponentsWithStats(
             ink.astype(np.uint8), connectivity=8
@@ -959,7 +1001,12 @@ def native_ink_masked(page, mat, arr):
             frac = np.where(total > 0, hit / total, 0.0)
         covered = np.zeros(count, dtype=bool)
         covered[1:] = frac[1:] >= COVER_MAJORITY
-        out[covered[labels]] = 255
+        paint |= covered[labels]
+        uncovered = np.zeros(count, dtype=bool)
+        uncovered[1:] = frac[1:] < COVER_MAJORITY
+        protect |= uncovered[labels]
+    if paint.any():
+        out = _fill_with_local_background(out, paint, protect & ~paint)
     return out
 
 

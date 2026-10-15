@@ -34,6 +34,11 @@ from socr.core.text_recovery import (
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+#: conftest's autouse `_figure_description_model_is_absent` replaces this method
+#: for EVERY test, so a test of the describer path must reinstall the real one
+#: or it measures the stub. Captured at import, before any fixture runs.
+_REAL_FIGURE_DESCRIPTION_ASK = UnifiedPipeline._figure_description_ask
+
 
 def test_loaded_source_is_this_checkout() -> None:
     import socr
@@ -1408,7 +1413,10 @@ def test_uncovered_ink_under_a_baseline_is_not_painted_out(tmp_path: Path) -> No
     ink_before = int((arr[band[1] : band[3], band[0] : band[2], 0] < 128).sum())
     ink_after = int((masked[band[1] : band[3], band[0] : band[2], 0] < 128).sum())
     assert ink_before > 0, "the fixture draws ink in that band"
-    assert ink_after >= ink_before * 0.9, "the mask ate the uncovered marks"
+    # Round 5, item 4: EXACT. The halo dilation that catches a glyph's
+    # anti-aliased edge never enters an uncovered ink component, so a drawn
+    # mark within a rule's width of a native glyph survives whole.
+    assert ink_after == ink_before, "the mask ate the uncovered marks"
 
 
 def test_a_mask_failure_means_no_reading(tmp_path: Path) -> None:
@@ -1495,27 +1503,43 @@ def test_applying_the_phase_twice_ships_the_same_bytes(tmp_path: Path) -> None:
     """Round 4, item 8: a second apply must change nothing at all."""
     pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
     captured: dict = {}
+    reads: list[str] = []
     pipeline = _pipeline()
     apply = pipeline._apply_text_coverage
 
     def twice(state, page_num, ps, output_dir):
+        def recovery_events() -> int:
+            return sum(1 for e in state.events if str(e.kind).startswith("uncovered_text"))
+
         apply(state, page_num, ps, output_dir)
         once = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads_after_first"] = len(reads)
+        captured["events_after_first"] = recovery_events()
         apply(state, page_num, ps, output_dir)
         captured["once"] = once
         captured["twice"] = (ps.best_output.text or "") if ps.best_output else ""
+        captured["reads"] = len(reads)
+        captured["events"] = recovery_events()
 
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch.object(pipeline, "_uncovered_text_reader_available", return_value=True),
-        patch.object(pipeline, "_uncovered_text_ask", return_value=lambda *_: RECOVERED),
+        patch.object(
+            pipeline,
+            "_uncovered_text_ask",
+            return_value=lambda *_: (reads.append("x"), RECOVERED)[1],
+        ),
         patch.object(pipeline, "_is_chart_asset_page", return_value=False),
         patch.object(pipeline, "_apply_text_coverage", side_effect=twice),
     ):
         pipeline.process(pdf, tmp_path / "o")
     assert captured["once"], "the fixture decorates the page"
     assert captured["twice"] == captured["once"]
+    # Round 5, item 5: not just the bytes. A second apply must not re-read the
+    # crop, nor append a second copy of the region's audit event.
+    assert captured["reads"] == captured["reads_after_first"], "the crop was read again"
+    assert captured["events"] == captured["events_after_first"], "the event was logged twice"
 
 
 def test_a_budget_refusal_says_so(tmp_path: Path) -> None:
@@ -1577,11 +1601,221 @@ def test_the_flag_off_page_is_byte_identical_to_main(tmp_path: Path) -> None:
     assert off.rstrip().endswith(expected_tail), "step 1 joined picture links with a single newline"
 
 
-def test_the_metadata_matches_main_with_recovery_off(tmp_path: Path) -> None:
-    """Round 4, item 7 (Argon #7): the sidecar must not differ either."""
+def test_the_metadata_matches_main_with_recovery_off() -> None:
+    """Round 5, item 6: the flag must leave a run's identity alone when it is off.
+
+    Hashing `recover_uncovered_text` unconditionally made every OFF run
+    invalidate main's fragments and force a reprocess that changes nothing —
+    the GH-142 failure shape in the other direction. Load-bearing: it inspects
+    the fingerprint PAYLOAD, so restoring the unconditional key fails it. A
+    test on the digest alone cannot, because both configs then carry the key
+    and still agree with each other.
+    """
+    captured: dict = {}
+
+    def capture(*args, **kwargs):
+        captured.update(kwargs.get("extra") or {})
+        return "fp:stub"
+
+    for flag in (True, False):
+        pipeline = _pipeline(recover_uncovered_text=flag)
+        captured.clear()
+        with patch("ocr_output_contract.run_fingerprint", side_effect=capture):
+            pipeline._run_fingerprint()
+        present = "recover_uncovered_text" in captured
+        assert present is flag, (
+            "ON must change the run's identity; OFF must leave it exactly as main's"
+        )
+
+
+# --- fix round 5 --------------------------------------------------------------
+
+
+def _native_label_on_a_fill_pdf(path: Path, fill, color) -> Path:
+    """A native label over a coloured fill, as a raster chart's labels sit."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.draw_rect(fitz.Rect(64, 130, 464, 400), color=fill, fill=fill)
+    page.insert_text((90, 200), "HUGE 40 BIG NATIVE words on the fill", fontsize=18, color=color)
+    page.insert_text((72, 60), "Ordinary prose above, with a text layer.")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize(
+    ("tag", "fill", "color"),
+    [
+        ("ggplot_panel", (0.92, 0.92, 0.92), (0, 0, 0)),
+        ("shaded", (0.85, 0.85, 0.85), (0, 0, 0)),
+        ("mid_grey", (0.6, 0.6, 0.6), (0, 0, 0)),
+        ("dark_white_text", (0.2, 0.2, 0.2), (1, 1, 1)),
+    ],
+)
+def test_the_mask_leaves_no_contrast_on_a_coloured_fill(
+    tmp_path: Path, tag: str, fill, color
+) -> None:
+    """Round 5, item 1: painting covered glyphs WHITE was itself a signal.
+
+    On a grey or dark fill — a chart exported as a raster with native labels
+    over it — white painting handed the model fat white words, which it read.
+    Measured with the reviewer's metric: contrast pixels inside the native char
+    boxes, against the fill's own grey. Pinned as a difference against white
+    painting on the same page.
+    """
+    import numpy as np
+
+    from socr.core import text_coverage as tc
+
+    pdf = _native_label_on_a_fill_pdf(tmp_path / f"{tag}.pdf", fill, color)
+
+    def white(arr, paint, _protect):
+        out = arr.copy()
+        out[paint] = 255
+        return out
+
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        mat = fitz.Matrix(tc.SCALE, tc.SCALE)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        visible, _inv = tc.visible_char_boxes(page)
+        boxes = [b for b in visible if b[1] > 130 and b[3] < 400]
+        masked = tc.native_ink_masked(page, mat, arr)
+        with patch.object(tc, "_fill_with_local_background", side_effect=white):
+            whitened = tc.native_ink_masked(page, mat, arr)
+
+        grey = int(round(255 * fill[0]))
+
+        def contrast(img) -> int:
+            total = 0
+            for box in boxes:
+                x0, y0, x1, y1 = tc._to_pix(box, page, mat)
+                total += int((np.abs(img[y0:y1, x0:x1, 0].astype(int) - grey) > 40).sum())
+            return total
+
+        before, after, white_after = contrast(arr), contrast(masked), contrast(whitened)
+
+    assert before > 0, "the fixture puts a native label on the fill"
+    assert after == 0, "the label is still legible after masking"
+    if fill[0] < 0.8:
+        assert white_after > before, "white painting made the label MORE visible"
+
+
+def test_a_recovered_block_mid_prose_keeps_the_equation_sidecar(tmp_path: Path) -> None:
+    """Round 5, item 2: silent content loss on NATIVE_FALLBACK.
+
+    `_native_text_with_appends` accepts an attempt only if it STARTS with the
+    native snapshot. A recovered block inserted at its reading-order position
+    sits mid-prose, so the decorated attempt failed that test and the GH-36b
+    equation-crop sidecar was dropped — from the fragment and the final .md,
+    with no event. My round-3 probe anchored at the tail, which keeps the
+    prefix, and so missed it.
+    """
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
+    from socr.core.result import FailureMode, PageOutput, PageStatus
+    from socr.core.state import DocumentState, PageState
+    from socr.core.text_recovery import insert_after_anchor, recovered_block
+
     pdf = _two_blocks_pdf(tmp_path / "doc.pdf", container="rect")
-    _run(pdf, tmp_path / "o_off", reading=RECOVERED, recover_uncovered_text=False)
-    meta = json.loads(next((tmp_path / "o_off").rglob("metadata.json")).read_text(encoding="utf-8"))
-    blob = json.dumps(meta)
-    assert "not verified" not in blob
-    assert "uncovered_text_recovered" not in blob
+    base = "\n".join(_ABOVE_LINES + _BELOW_LINES)
+    equation = "![equation crop](equations/p001_eq1.png)"
+    block = recovered_block("Treatment Prompt", in_figure=False)
+    link = uncovered_text_image_ref(1, 1)
+    mark = uncovered_text_marker(1)
+
+    # The attempt that carries the sidecar is ALSO the one apply decorated: the
+    # sidecar landed first, then the coverage block went in MID-prose. A fixture
+    # where some other attempt still carries the equation passes without the
+    # fix, because the plain prefix test matches that one instead.
+    decorated, placed = insert_after_anchor(
+        base + "\n\n" + equation,
+        " ".join(_ABOVE_LINES[-1].split()[-8:]),
+        block + "\n\n" + link,
+    )
+    assert placed, "the fixture inserts mid-prose"
+    assert not decorated.startswith(base), "which is what breaks the prefix test"
+    decorated = decorated.rstrip() + "\n\n" + mark + "\n"
+
+    bo = PageOutput(
+        page_num=1,
+        text=decorated,
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=True,
+        failure_mode=FailureMode.TEXT_INK_UNREAD,
+    )
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.native_text = base
+    ps.has_tables = True
+    ps.attempts = [bo]
+    ps.best_output = bo
+    ps.text_ink_unread = True
+    ps.text_coverage_verdict = "flagged"
+    state = DocumentState(handle=DocumentHandle(path=pdf))
+    state.pages[1] = ps
+
+    winner, provenance = _select_page_output_tagged(state, 1)
+    text = winner.text or ""
+    assert provenance is SelectionProvenance.NATIVE_FALLBACK
+    assert equation in text, "the equation sidecar was dropped"
+    assert block in text, "and the recovered words must survive too"
+    assert link in text
+
+
+def test_the_real_engine_surfaces_a_fail_fast_deadline() -> None:
+    """Round 5, item 3: tested through the REAL engine, not a stub above it.
+
+    The previous test stubbed the orchestrator's own reader, so deleting the
+    `gemini_api` change survived it. This patches the HTTP layer, which is the
+    only thing below `ask`.
+    """
+    from PIL import Image
+
+    from socr.core.ollama_utils import TotalDeadlineExceeded
+    from socr.engines.gemini_api import OllamaFigureEngine
+
+    engine = OllamaFigureEngine()
+    image = Image.new("RGB", (8, 8), "white")
+    with patch(
+        "socr.engines.gemini_api.call_with_total_deadline",
+        side_effect=TotalDeadlineExceeded("outstanding call"),
+    ):
+        with pytest.raises(TotalDeadlineExceeded):
+            engine.ask(image, "transcribe")
+    # Any OTHER failure still folds into None, as the contract says.
+    with patch(
+        "socr.engines.gemini_api.call_with_total_deadline", side_effect=ValueError("broken")
+    ):
+        assert engine.ask(image, "transcribe") is None
+
+
+def test_the_figure_describer_still_never_raises() -> None:
+    """Round 5, item 3, collateral: the describer's contract must hold.
+
+    `crop_descriptions.describe_number_free` documents that its `ask` never
+    raises, and the orchestrator catches once per DOCUMENT — so a fail-fast
+    leaking through would drop every figure description on that document.
+    """
+    from socr.core.ollama_utils import TotalDeadlineExceeded
+
+    pipeline = _pipeline()
+    with (
+        patch.object(UnifiedPipeline, "_figure_description_ask", _REAL_FIGURE_DESCRIPTION_ASK),
+        patch("socr.engines.gemini_api.OllamaFigureEngine.is_available", return_value=True),
+        patch(
+            "socr.engines.gemini_api.OllamaFigureEngine.ask",
+            side_effect=TotalDeadlineExceeded("outstanding call"),
+        ),
+    ):
+        describe = pipeline._figure_description_ask()
+        png = Path(__file__).parent / "_describer_probe.png"
+        from PIL import Image
+
+        Image.new("RGB", (8, 8), "white").save(png)
+        try:
+            assert describe(png, "prompt") is None, "the describer path must not raise"
+        finally:
+            png.unlink(missing_ok=True)

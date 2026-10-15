@@ -493,6 +493,11 @@ def _coverage_parts_to_carry(bo_text: str, have: str) -> list[str]:
     return [part for part in _coverage_parts(bo_text) if part not in (have or "")]
 
 
+def _collapsed(text: str) -> str:
+    """*text* with every run of whitespace reduced to one space."""
+    return " ".join(text.split())
+
+
 def _native_text_with_appends(p) -> str:
     """The native text INCLUDING content appended after extraction.
 
@@ -520,9 +525,29 @@ def _native_text_with_appends(p) -> str:
         return base
     for attempt in reversed(p.attempts or ()):
         text = attempt.text or ""
-        if (attempt.engine or "").startswith("native") and len(text) > len(base):
-            if text.startswith(base):
-                return text
+        if not (attempt.engine or "").startswith("native") or len(text) <= len(base):
+            continue
+        # #1050 step 2 round 5, item 2: a recovered block is inserted INTO the
+        # prose, at its reading-order position, so the decorated attempt no
+        # longer starts with the snapshot and this test rejected it -- silently
+        # dropping the GH-36b equation-crop sidecar from the fragment and the
+        # final .md alike. The test runs on the attempt with this feature's own
+        # paragraphs removed; what is RETURNED still carries them, so neither
+        # the appends nor the coverage parts are lost.
+        if text.startswith(base):
+            return text
+        stripped = text
+        for part in coverage_parts(text):
+            for sep in ("\n\n" + part, part + "\n\n", part):
+                if sep in stripped:
+                    stripped = stripped.replace(sep, "", 1)
+                    break
+        # Whitespace-normalised, because inserting a block promotes the native
+        # text's own single newline to a blank line so the block reads as its
+        # own paragraph. Removing the block cannot put that newline back, so an
+        # exact prefix test would fail on the separator alone.
+        if _collapsed(stripped).startswith(_collapsed(base)) and len(stripped) > len(base):
+            return text
     return base
 
 
