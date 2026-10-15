@@ -45,6 +45,12 @@ EXPECTED_RESUME_KINDS = frozenset(
         "table_binding_boundary_unresolved",
         "table_ditto_unresolved",
         "table_furniture_removed",
+        # #1144 added this kind: before it, a page carrying table_escalation_refused
+        # always failed closed, so losing the event on resume changed nothing. A
+        # credentialed page can now SHIP carrying it, and tables_trust reads the kind to
+        # keep that page untrusted, so a resumed run that dropped it would silently
+        # upgrade the page's trust. Replayed for the same reason as its sibling below.
+        "table_escalation_refused",
         "table_escalation_timeout",
         "table_escalation_withheld",
         "table_ladder_accepted",
@@ -69,5 +75,6 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
-    # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused.
-    assert len(EXPECTED_RESUME_KINDS) == 49
+    # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused;
+    # 50 with #1144's table_escalation_refused.
+    assert len(EXPECTED_RESUME_KINDS) == 50

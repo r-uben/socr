@@ -171,6 +171,13 @@ _RESUME_REPLAYED: dict[str, str] = {
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
     ),
+    "table_escalation_refused": (
+        "#1144: same emitter and the same consequence -- the shipped table is the "
+        "unescalated incumbent, and tables_trust reads this kind to keep the page "
+        "untrusted. Before #1144 the page always failed closed, so losing the event on "
+        "resume changed nothing; now a credentialed page can SHIP carrying it, and a "
+        "resumed run that dropped it would silently upgrade that page's trust"
+    ),
     "table_ladder_budget_exhausted": (
         "GH-974: the page's ladder budget ran out; the page is UNVERIFIED and this event "
         "is the record of WHY (the per-table unverified events only say rungs gave no verdict)"

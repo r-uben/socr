@@ -189,6 +189,18 @@ class PageState:
     #: of the fragments -- unreadable fragments under a SUCCESS are exactly the
     #: silent loss the cardinal rule forbids.
     native_rotated_text_shredded: bool = False
+    #: #1144: GH-147 A2 refused this page's native table lane because its
+    #: dominant text direction is ROTATED. Set once in ``apply_born_digital``
+    #: from the assessment flag of the same name, never re-derived (the
+    #: ``text_is_rotated and has_tables`` conjunction fires on rotated SCANS
+    #: too, where the refusal branch never ran -- see the note at
+    #: ``orchestrator.py:2125``). Read by ``manifest.table_floor_text_for_source``,
+    #: which refuses prose recovery on such a page: its ``get_text()`` order is
+    #: not the page's reading order, so the "prose" comes back as confetti
+    #: ("content despite / genuine / grid / sentence a / as rotated"), measured
+    #: on GH-147's own fixture. ``native_rotated_text_shredded`` does NOT cover
+    #: this shape -- it is False on that page.
+    native_table_lane_refused_rotated: bool = False
     native_table_structure_failed: bool = False  # native table text lost its grid
     #: Backward-compatible aggregate of GH-226 raw emission, GH-190 raw
     #: content, and GH-151 parsed grid-shape defects. Deliberately a SEPARATE
@@ -813,6 +825,12 @@ class DocumentState:
                     # surface can refuse the confetti.
                     ps.native_rotated_text_shredded = getattr(
                         pa, "native_rotated_text_shredded", False
+                    )
+                    # #1144: carry GH-147's rotation refusal for the same
+                    # reason -- the prose floor must refuse a page whose
+                    # reading order is not the page's.
+                    ps.native_table_lane_refused_rotated = bool(
+                        getattr(pa, "native_table_lane_refused", False)
                     )
 
     # ------------------------------------------------------------------

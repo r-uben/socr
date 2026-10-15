@@ -2304,7 +2304,9 @@ def structure_class_floor_text(p, page_num: int) -> str:
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """
-    return table_floor_text_for_source(p, page_num, getattr(p, "native_text", "") or "")
+    return table_floor_text_for_source(
+        p, page_num, getattr(p, "native_text", "") or "", prose_recovery=True
+    )
 
 
 def _table_bbox_sane(p) -> bool:
@@ -2386,7 +2388,12 @@ def table_bbox_sanity_verdict(p) -> bool:
 
 
 def table_floor_text_for_source(
-    p, page_num: int, source_text: str, *, fallback_marker: str | None = None
+    p,
+    page_num: int,
+    source_text: str,
+    *,
+    fallback_marker: str | None = None,
+    prose_recovery: bool = False,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
 
@@ -2419,33 +2426,95 @@ def table_floor_text_for_source(
         else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
     )
 
+    def _refused() -> str:
+        """#1144: what ships when the GH-520 splice is refused.
+
+        The splice needs each detected table paired with a parsed block, and on
+        a page where reconstruction produced no region at all (Coca-Cola CDP
+        2022 p77: ``native_table_region_count == 0`` against two detected
+        tables) no pairing exists, so it is refused -- correctly. Until now the
+        refusal also destroyed the page's PROSE, which no table ever touched:
+        p77 shipped ~100 bytes of marker in place of 1,053 exact characters.
+
+        ``native_prose_floor_text`` is the owner's own mechanism for exactly
+        that (#649 / #652, ratified 2026-09-10), and it needs no pairing: it
+        withholds by the page's own baseline bands, and since #1144 by the
+        page's detected table BOXES as well, so no table content ships as loose
+        text. It is offered only to the NATIVE caller (``prose_recovery=True``
+        from ``structure_class_floor_text``). P1's withhold path passes a model
+        winner's text and must not reach it -- shipping a model's prose from a
+        floored page is the design the owner closed unmerged in PR #1047.
+        """
+        if not prose_recovery:
+            return whole_page
+        # #1144: a page whose native table lane GH-147 refused for rotation has
+        # a ``get_text()`` order that is not its reading order, so this lane's
+        # "prose" is confetti. Measured on GH-147's own rotated fixture, which
+        # recovered "content despite / genuine / grid / sentence a / as rotated"
+        # -- and whose ``native_rotated_text_shredded`` is False, so #263's
+        # guard does not cover it. The bare marker is the honest floor there.
+        if getattr(p, "native_table_lane_refused_rotated", False) or getattr(
+            p, "native_rotated_text_shredded", False
+        ):
+            return whole_page
+        # #1144 (owner ruling, 2026-10-15): the recovery runs ONLY when the page
+        # has at least one detected table box.
+        #
+        # What withholds table content here is the box rule in
+        # ``partition_prose_bands`` -- the band's numeral count cannot see a
+        # table whose cells are words ("Yes"/"No", a fixed-effects row), so the
+        # BOX is the only thing standing between such a table and shipping as
+        # loose text with its columns collapsed. With no box the rule is not
+        # merely weaker, it is absent.
+        #
+        # Measured on run 23192118's 808 structure-class floors: of the 674
+        # pages the ungated recovery gave prose to, 430 (64%) had
+        # ``detected_table_count == 0``, and 41 of those shipped a flattened
+        # categorical row -- "Call FE Yes Yes Yes Yes Yes"
+        # (gow_larcker_zakolyukina p53), "Date fixed effects No Yes No Yes No"
+        # (binsbergen_grotteria p59). 41 is a floor: the detector behind it
+        # requires two adjacent Yes/No tokens and sees nothing of a table whose
+        # cells are other short words. socr's own GH-520 note already says a
+        # borderless table "contributes no bbox and is not counted at all, so
+        # zero is common", so this is the normal case, not a corner.
+        #
+        # The boxes themselves are the predicate, not ``detected_table_count``:
+        # they are what the withholding rule consumes, and resume clears both
+        # together when the geometry is unusable (``orchestrator.py:15054``).
+        # A page with no box keeps today's bare marker plus page image -- no
+        # worse than main, and fail-closed.
+        if not (getattr(p, "detected_table_bboxes", None) or []):
+            return whole_page
+        recovered = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+        return recovered if recovered else whole_page
+
     source_text = source_text or ""
     if not source_text.strip():
-        return whole_page
+        return _refused()
 
     detected_count = getattr(p, "detected_table_count", 0)
     detected_bboxes = getattr(p, "detected_table_bboxes", []) or []
     if type(detected_count) is not int or detected_count <= 0:
-        return whole_page
+        return _refused()
     if len(detected_bboxes) != detected_count:
-        return whole_page
+        return _refused()
     # Every detected table reconstructed. Not circular: the count on the right
     # comes from the detector, not from the parser being audited (cubic P1 on
     # #571 -- block counting alone is satisfied by coincidence).
     if getattr(p, "native_table_region_count", 0) != detected_count:
-        return whole_page
+        return _refused()
 
     from socr.tables.reconcile import find_table_blocks
 
     blocks = find_table_blocks(source_text)
     if len(blocks) != detected_count:
-        return whole_page
+        return _refused()
 
     if not _table_bbox_sane(p):
-        return whole_page
+        return _refused()
 
     spliced = splice_all_table_regions(source_text, d3_marker, png_ref)
-    return spliced if spliced else whole_page
+    return spliced if spliced else _refused()
 
 
 def native_region_text(words: list) -> str:
@@ -2486,7 +2555,10 @@ def _page_prose_partition(p) -> list:
     words = getattr(p, "native_words", None) or []
     if not words:
         return []
-    return partition_prose_bands(words)
+    # #1144: the page's DETECTED table boxes withhold the bands inside them
+    # outright, so a numeral-free table (p77's Yes/No grid) cannot ship as
+    # loose text. A page with no boxes partitions exactly as it did before.
+    return partition_prose_bands(words, table_boxes=getattr(p, "detected_table_bboxes", None))
 
 
 #: Banner stamped above prose recovered by ``native_prose_floor_text``. The
@@ -2495,10 +2567,31 @@ def _page_prose_partition(p) -> list:
 #: and ``is_page_failed_marker``, which correctly stops calling this page
 #: marker-only -- that these paragraphs are unverified. Deliberately NOT
 #: matched by ``_PAGE_FAILED_ANY_RE``: this page ships content.
-SCANNED_PROSE_RECOVERED_FLAG = (
-    "[page {page_num}: unverified scan — the paragraphs below are this page's own "
-    "text layer; every numeric row is withheld]"
+#: #1144: the page-KIND word. The lane now serves structure-class floors on
+#: BORN-DIGITAL pages (Coca-Cola CDP 2022 p77, and the 674 corpus pages the
+#: replay found), where "scan" is simply false -- Herbst-Johannsen p43 is a
+#: born-digital page of three charts and opened "unverified scan". The rest of
+#: the sentence is identical, so the two banners mean the same thing about the
+#: same evidence; only the noun tracks the page type.
+_PROSE_RECOVERY_TAIL = (
+    " — the paragraphs below are this page's own text layer; every numeric row is withheld]"
 )
+SCANNED_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified scan" + _PROSE_RECOVERY_TAIL
+BORN_DIGITAL_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified extraction" + _PROSE_RECOVERY_TAIL
+#: Every form of the withholding banner. ``core.table_counts`` counts a
+#: prose-recovery page by matching this banner, and it built its pattern from
+#: the scan form's literal text -- so a second form added without touching it
+#: would have gone UNCOUNTED, silently, on exactly the 674 pages #1144 adds.
+#: Enumerated here, matched by an alternation there, and pinned by a test that
+#: every member matches, so a third form cannot be invisible either.
+PROSE_RECOVERED_FLAGS = (SCANNED_PROSE_RECOVERED_FLAG, BORN_DIGITAL_PROSE_RECOVERED_FLAG)
+
+
+def prose_recovered_flag(page_num: int, *, born_digital: bool) -> str:
+    """The withholding banner for this page's TYPE (#1144)."""
+    template = BORN_DIGITAL_PROSE_RECOVERED_FLAG if born_digital else SCANNED_PROSE_RECOVERED_FLAG
+    return template.format(page_num=page_num)
+
 
 #: Banner for the OTHER shape ``native_prose_floor_text`` recovers: a scan that
 #: reached the table floor whose native layer prints no numeral anywhere, so
@@ -2510,10 +2603,22 @@ SCANNED_PROSE_RECOVERED_FLAG = (
 #: claims nothing about a table having been read, which is the claim the
 #: withholding banner's "every numeric row is withheld" would falsely imply on
 #: a page that withheld nothing.
-SCANNED_NATIVE_TEXT_FLAG = (
-    "[page {page_num}: unverified scan — the lines below are this page's own text "
-    "layer, verbatim and unverified; no table on this page could be verified]"
+_NATIVE_TEXT_TAIL = (
+    " — the lines below are this page's own text layer, verbatim and unverified; "
+    "no table on this page could be verified]"
 )
+SCANNED_NATIVE_TEXT_FLAG = "[page {page_num}: unverified scan" + _NATIVE_TEXT_TAIL
+BORN_DIGITAL_NATIVE_TEXT_FLAG = "[page {page_num}: unverified extraction" + _NATIVE_TEXT_TAIL
+#: Both forms of the no-numeral banner, for the same reason as
+#: ``PROSE_RECOVERED_FLAGS`` above.
+NATIVE_TEXT_FLAGS = (SCANNED_NATIVE_TEXT_FLAG, BORN_DIGITAL_NATIVE_TEXT_FLAG)
+
+
+def native_text_flag(page_num: int, *, born_digital: bool) -> str:
+    """The no-numeral banner for this page's TYPE (#1144)."""
+    template = BORN_DIGITAL_NATIVE_TEXT_FLAG if born_digital else SCANNED_NATIVE_TEXT_FLAG
+    return template.format(page_num=page_num)
+
 
 #: Audit note recorded on the rebuilt output, so the recovery is visible in the
 #: page sidecar and not only in the bytes.
@@ -2565,9 +2670,14 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # run, which is the exact resume loss #649 round 2 closed for the other
     # shape. Both are this module's own bytes and neither is forgeable by a
     # model attempt, because the typed credential above gates them both.
-    return text.startswith(
-        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)
-    ) or text.startswith(SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num))
+    # #1144: EVERY form of both banners, not only the "scan" wording. A
+    # born-digital prose recovery whose banner this failed to recognise would be
+    # replaced by the bare marker on the next run -- the exact resume loss #649
+    # round 2 closed for the other shape, reopened by adding a second noun.
+    return any(
+        text.startswith(flag.format(page_num=page_num))
+        for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
+    )
 
 
 def _band_line(band) -> str:
@@ -2602,13 +2712,15 @@ _NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 #: An ORDERED list marker (``1.``) needs no rule: it is digit-bearing, and only
 #: PROSE bands are escaped in either lane. A prose band is one carrying fewer
 #: than ``row_shape_min`` numeral-bearing tokens, counted by
-#: :func:`~socr.tables.row_corroboration.bears_printed_numeral`, which matches
-#: any ASCII digit; at the shipping value of 1 that means none at all, so no
-#: escaped line can open with an ASCII digit. A line opening with a digit of
-#: another script (Arabic-Indic ``\u0661.``) can still be tagged prose, but
-#: CommonMark recognises only ASCII digits in an ordered-list marker, so it is
-#: not a list either way. If that floor is ever loosened, this set needs the
-#: ordered form added.
+#: :func:`~socr.tables.row_corroboration.bears_printed_numeral`, which since
+#: #1144 matches any Unicode DECIMAL digit (category Nd), not only ASCII; at the
+#: shipping value of 1 that means none at all, so no escaped line can open with
+#: a decimal digit of ANY script. The pre-#1144 note here said an Arabic-Indic
+#: ``\u0661.`` could still be tagged prose and leaned on CommonMark recognising
+#: only ASCII digits in an ordered-list marker; that crutch is no longer needed.
+#: A superscript or vulgar fraction (``\u00bd``) is category No and still not
+#: counted, but neither opens an ordered list. If that floor is ever loosened,
+#: this set needs the ordered form added.
 _NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
 
 
@@ -2640,7 +2752,9 @@ def _escaped_native_line(line: str) -> str:
     return "".join(out)
 
 
-def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+def _all_native_text(
+    bands, page_num: int, *, marker_line: str, png_ref: str, born_digital: bool = False
+) -> str | None:
     """The whole page's native text, flagged, when no band can be withheld.
 
     #652 round 11 (Astra's ruling, 2026-09-10). This is the no-numeral scan:
@@ -2676,7 +2790,7 @@ def _all_native_text(bands, page_num: int, *, marker_line: str, png_ref: str) ->
     if not text_layer_trusted("\n".join(lines)):
         return None
 
-    blocks = [SCANNED_NATIVE_TEXT_FLAG.format(page_num=page_num)]
+    blocks = [native_text_flag(page_num, born_digital=born_digital)]
     blocks.append(f"{marker_line}\n\n{png_ref}" if png_ref else marker_line)
     blocks.append("\n".join(_escaped_native_line(line) for line in lines))
     return "\n\n".join(blocks)
@@ -2742,7 +2856,13 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     if not prose_bands:
         return None
     if all(is_prose for is_prose, _band in bands):
-        return _all_native_text(bands, page_num, marker_line=marker_line, png_ref=png_ref)
+        return _all_native_text(
+            bands,
+            page_num,
+            marker_line=marker_line,
+            png_ref=png_ref,
+            born_digital=bool(getattr(p, "is_born_digital", False)),
+        )
 
     prose_words = [word for band in prose_bands for word in band]
     if not text_layer_trusted(native_region_text(prose_words)):
@@ -2782,7 +2902,8 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     # comment), a withheld run can be one prose line rather than a table, and a
     # crop per run is one more render each plus a new way to clip the numbers
     # the floor exists to protect.
-    blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
+    born_digital = bool(getattr(p, "is_born_digital", False))
+    blocks: list[str] = [prose_recovered_flag(page_num, born_digital=born_digital)]
     if png_ref:
         blocks.append(png_ref)
     page_image = page_image_link(png_ref)

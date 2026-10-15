@@ -1,0 +1,760 @@
+"""#1144: a floored table page must stop destroying the page's own prose.
+
+Coca-Cola CDP 2022 p77 is born-digital and its text layer is EXACT -- 1,053
+characters, every number present. On main 25daab9f it shipped ~100 bytes of
+whole-page marker: both tables AND all the C8.2b/C8.2c prose, lost to a table
+nothing could verify.
+
+Round 1 of this ticket tried to admit the model reading by waiving the
+``table_escalation_refused`` event for #713's credential stand-in. Three
+reviewers rejected it and I reproduced all three faults: the waiver's evidence
+was not replayed on resume (so run 2 destroyed what run 1 shipped), its
+detected-count condition failed open on 0/None, and ``table_not_scorable`` --
+which it read as "nothing measured wrong" -- means, in its own source comment,
+"the score is not evidence either way" (``table_grid.py:446-452``). The waiver
+is reverted in full. p77 has no sound positive evidence for its tables: the page
+judge never answered, the ladder judged a shared whole-page crop with no
+mechanical binding, and the grid could not be graded.
+
+Owner ruling 2026-10-14: ship the page's own PDF text with every table withheld,
+via ``native_prose_floor_text`` -- socr's existing ratified mechanism for this
+(#649 / #652) -- and withhold every band inside a DETECTED table box, numeric or
+not, so no answer can land beside the wrong question. A page with no boxes
+behaves exactly as it did before.
+
+Every test pins a DIFFERENCE between two runs in the same process, per this
+repo's CI rule.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+import pytest
+
+from socr.core.result import PageOutput, PageStatus
+
+#: Lines of the fixture's numeral-free question/answer grid. Shipping any of
+#: these as loose text is the defect the box rule exists to stop: the answer
+#: lands beside the wrong question.
+_ANSWER_RE = re.compile(r"(?:^| )(?:Yes|No)(?: |$)", re.M)
+#: A sentence outside both table boxes. It must survive.
+_PROSE = "State how much fuel your organization consumed, excluding"
+#: The model's reading, which is NOT what ships here -- the native layer is.
+_MODEL = "Energy totals.\n\n| metric | 2022 |\n| --- | --- |\n| purchased steam | 42,548 |\n"
+_NUMBERS = ("42,548", "228", "42,776", "2,993,732")
+
+
+def test_loaded_source_is_this_checkout() -> None:
+    import socr
+
+    assert Path(socr.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
+
+
+def _p77_like(path: Path) -> Path:
+    """A born-digital page with p77's shape: a numeric grid AND a Yes/No grid.
+
+    Verified to reproduce p77's detection exactly -- ``has_tables`` true and
+    TWO ``detected_table_bboxes`` -- which is what makes the box rule testable
+    at all. The second grid carries no printed numeral anywhere, so the band
+    partition's numeral count cannot see it; only its box can.
+    """
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "(C8.2a) Report your organization's energy consumption totals.")
+    rows = [
+        ["purchased steam", "42,548", "228", "42,776"],
+        ["self-generated", "4,070", "", "4,070"],
+        ["total consumption", "524,332", "2,469,400", "2,993,732"],
+    ]
+    for r, cells in enumerate(rows):
+        for c, cell in enumerate(cells):
+            page.insert_text((80 + c * 110, 110 + r * 22), cell, fontsize=9)
+    for r in range(4):
+        page.draw_line(fitz.Point(76, 96 + r * 22), fitz.Point(516, 96 + r * 22))
+    for c in range(5):
+        page.draw_line(fitz.Point(76 + c * 110, 96), fitz.Point(76 + c * 110, 96 + 3 * 22))
+
+    page.insert_text((72, 200), "Select the applications of your consumption of fuel.")
+    qa = [
+        ("Indicate whether your organization undertakes this", ""),
+        ("generation of electricity", "Yes"),
+        ("generation of heat", "Yes"),
+        ("generation of steam", "No"),
+        ("generation of cooling", "No"),
+    ]
+    for r, (q, a) in enumerate(qa):
+        page.insert_text((80, 230 + r * 22), q, fontsize=9)
+        if a:
+            page.insert_text((400, 230 + r * 22), a, fontsize=9)
+    for r in range(6):
+        page.draw_line(fitz.Point(76, 216 + r * 22), fitz.Point(516, 216 + r * 22))
+    for c in (0, 320, 440):
+        page.draw_line(fitz.Point(76 + c, 216), fitz.Point(76 + c, 216 + 5 * 22))
+
+    page.insert_text((72, 380), _PROSE)
+    page.insert_text((72, 394), "feedstocks, by fuel type. Sustainable biomass heating value.")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+class _GridEngine:
+    name = "qwen"
+
+    def is_available(self) -> bool:
+        return True
+
+    def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+        return [
+            PageOutput(page_num=n, text=_MODEL, status=PageStatus.SUCCESS, engine="qwen")
+            for n in page_nums
+        ]
+
+
+class _SleepyLeaf:
+    """A page judge that never answers inside the deadline (a real timeout)."""
+
+    def assess(self, output, provider):  # pragma: no cover - the wrapper kills it
+        time.sleep(5)
+        raise AssertionError("the deadline must fire first")
+
+
+def _pipeline():
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+            native_first=False,
+            write_manifest=False,
+            judge_backend="heuristic",
+            table_judge_ladder=False,
+            dual_pass_tables=False,
+            detect_equations=False,
+            save_figures=False,
+        )
+    )
+    pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+    pipe._resolve_judge_model = lambda *a, **k: ""
+    pipe._resolve_crop_vlm_model = lambda: None
+    pipe._build_page_judge = lambda state: UnifiedPipeline._TimeoutJudge(
+        _SleepyLeaf(), 0.05, owner=pipe
+    )
+    return pipe
+
+
+def _ship(tmp_path: Path, tag: str, monkeypatch, *, drop_boxes: bool = False):
+    """One ``process()`` run over the fixture; returns (body, sidecar, out_dir).
+
+    Hermetic: the ladder, the judge model and the crop model are all pinned, so
+    nothing reaches Ollama. ``drop_boxes`` is the control arm -- it clears the
+    page's detected boxes right after assessment, which is exactly the state a
+    page with no detectable table geometry reaches, and the state p77 would be
+    in if the box rule were not there.
+    """
+    from socr.pipeline import orchestrator as orch
+
+    work = tmp_path / tag
+    work.mkdir(parents=True, exist_ok=True)
+    pdf = _p77_like(work / "doc.pdf")
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+
+    if drop_boxes:
+        # The detector is the seam: a page whose table geometry it cannot see
+        # reports no bbox, which is the state ``partition_prose_bands`` falls
+        # back to (and the state p77 would be in without the box rule). Patched
+        # at the detector rather than on PageState so the control arm travels the
+        # same assignment path (state.py:801-803) the real page does.
+        from socr.core.born_digital import BornDigitalDetector
+
+        _real_detect = BornDigitalDetector.detect
+
+        def _no_boxes(self, pdf_path, *a, **kw):
+            assessment = _real_detect(self, pdf_path, *a, **kw)
+            for pa in assessment.pages:
+                pa.detected_table_bboxes = []
+            return assessment
+
+        monkeypatch.setattr(BornDigitalDetector, "detect", _no_boxes)
+
+    out = work / "out"
+    pipe.process(pdf, output_dir=out)
+    body = next(iter(out.rglob("pages/00001.md"))).read_text()
+    sidecar = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    return body, sidecar, out
+
+
+# ---------------------------------------------------------------------------
+# 1. The ticket: the prose survives, the tables do not ship.
+# ---------------------------------------------------------------------------
+
+
+def test_process_ships_the_prose_and_withholds_both_tables(tmp_path: Path, monkeypatch) -> None:
+    """The owner's four acceptance points, through the real ``process()``.
+
+    On main this page shipped the bare whole-page marker and nothing else.
+    """
+    from socr.core.manifest import (
+        BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+        SCANNED_PROSE_RECOVERED_FLAG,
+    )
+
+    body, sidecar, _ = _ship(tmp_path, "main", monkeypatch)
+
+    # the page's own prose ships
+    assert _PROSE in body
+    # both tables are withheld, behind a marker and the page image
+    assert "failed: unverifiable table" in body
+    assert ".png)" in body
+    # no table content ships as loose text -- not a number, not an answer
+    assert _ANSWER_RE.search(body) is None, "an answer shipped beside a question"
+    for number in _NUMBERS:
+        assert number not in body
+    # and the page says what it is
+    # The fixture is BORN-DIGITAL, so the banner must not call it a scan
+    # (#1144 round 4: Herbst-Johannsen p43, a born-digital page of three charts,
+    # opened "unverified scan").
+    assert BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1) in body
+    assert SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1) not in body
+    assert "unverified scan" not in body
+    assert sidecar["status"] == "error"
+    assert sidecar["failure_mode"] == "page_judge_timeout"
+    assert sidecar["disposition"]["ending"] == "fail_closed_marker"
+
+
+def test_a_box_withholds_its_table_and_a_table_with_no_box_is_the_residual(
+    tmp_path: Path,
+) -> None:
+    """What the box rule does, and precisely where it still falls short.
+
+    DIFFERENCE: which of the fixture's two tables the page's single detected box
+    covers. Both arms pass the #1144 gate (each has a box), so the gate is held
+    fixed and only the box's COVERAGE varies.
+
+    * box over the Yes/No grid -> its rows are withheld;
+    * box over the numeric grid only -> the Yes/No grid is outside every box,
+      its cells carry no printed numeral, and its row ships as loose text.
+
+    The second arm is a KNOWN RESIDUAL, pinned rather than hidden. The gate
+    (owner, 2026-10-15) removes the 430 no-box pages from this lane entirely,
+    but a page with one box and two tables still reaches it. The corpus re-run
+    counts how many gated-in pages ship such a row; if any do, that is this
+    shape and it is the owner's to rule on, not something to paper over here.
+    """
+    from socr.core.manifest import table_floor_text_for_source
+
+    numeric_box = (76.0, 96.0, 516.0, 162.0)
+    qa_box = (76.0, 216.0, 516.0, 326.0)
+
+    def _arm(name: str, boxes: list[tuple[float, float, float, float]]):
+        ps = _floor_state(tmp_path / name)
+        ps.detected_table_count = len(boxes)
+        ps.detected_table_bboxes = boxes
+        return table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+
+    covers_qa = _arm("qa", [qa_box])
+    covers_numeric_only = _arm("num", [numeric_box])
+
+    assert _ANSWER_RE.search(covers_qa) is None, "a box over the grid must withhold its rows"
+    assert _ANSWER_RE.search(covers_numeric_only) is not None, (
+        "the residual must be visible; if this stops happening the fixture no longer "
+        "reproduces an uncovered word-cell table and the pin is vacuous"
+    )
+    # Both arms still recover the page's genuine prose.
+    assert _PROSE in covers_qa
+    assert _PROSE in covers_numeric_only
+
+
+# ---------------------------------------------------------------------------
+# 2. Resume. Round 1's waiver shipped on run 1 and floored on run 2; this lane
+#    reads only PDF-derived state, and that must be demonstrated, not argued.
+# ---------------------------------------------------------------------------
+
+
+def test_the_recovered_page_is_byte_identical_on_resume(tmp_path: Path, monkeypatch) -> None:
+    """Full lifecycle, not set membership -- which is what missed it in round 1.
+
+    The lane reads ``native_words``, ``native_text`` and
+    ``detected_table_bboxes``; the first two are re-derived from the PDF on every
+    run and the third is restored from the sidecar. A second ``process()`` into
+    the SAME output directory must reproduce the fragment and the sidecar's
+    shipped fields exactly.
+    """
+    from socr.pipeline import orchestrator as orch
+
+    body, sidecar, out = _ship(tmp_path, "resume", monkeypatch)
+
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+    pipe.process(out.parent / "doc.pdf", output_dir=out)
+    again = next(iter(out.rglob("pages/00001.md"))).read_text()
+    again_sidecar = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+
+    assert again == body, "a resume changed the shipped bytes"
+    for field in ("status", "failure_mode", "disposition"):
+        assert again_sidecar[field] == sidecar[field]
+    assert _ANSWER_RE.search(again) is None
+    assert _PROSE in again
+
+
+# ---------------------------------------------------------------------------
+# 3. The recovery is offered to the NATIVE caller only.
+# ---------------------------------------------------------------------------
+
+
+def test_prose_recovery_is_off_by_default_so_a_model_winner_never_reaches_it(
+    tmp_path: Path,
+) -> None:
+    """P1's withhold path passes a MODEL winner's text and must floor bare.
+
+    Shipping a model's prose from a floored page is the design the owner closed
+    unmerged in PR #1047 (#1043): corroborating it against a noisy text layer
+    recovered 1 of 109 pages. DIFFERENCE: the ``prose_recovery`` flag alone,
+    over one page state.
+    """
+    import fitz
+
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import table_floor_text_for_source
+    from socr.core.state import DocumentState
+
+    pdf = _p77_like(tmp_path / "doc.pdf")
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    doc = fitz.open(pdf)
+    ps.native_text = doc[0].get_text()
+    ps.native_words = doc[0].get_text("words")
+    doc.close()
+    ps.is_born_digital = True
+    ps.has_tables = True
+    ps.detected_table_count = 2
+    ps.detected_table_bboxes = [(76.0, 96.0, 516.0, 162.0), (76.0, 216.0, 516.0, 326.0)]
+    ps.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
+
+    off = table_floor_text_for_source(ps, 1, _MODEL)
+    on = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+
+    assert _PROSE not in off, "the default must not recover prose"
+    assert _PROSE in on
+    assert _ANSWER_RE.search(on) is None
+
+
+def _floor_state(tmp_path: Path):
+    """A page state carrying the fixture's native layer and its detected boxes."""
+    import fitz
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _p77_like(tmp_path / "doc.pdf")
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    doc = fitz.open(pdf)
+    ps.native_text = doc[0].get_text()
+    ps.native_words = doc[0].get_text("words")
+    doc.close()
+    ps.is_born_digital = True
+    ps.has_tables = True
+    ps.detected_table_count = 2
+    ps.detected_table_bboxes = [(76.0, 96.0, 516.0, 162.0), (76.0, 216.0, 516.0, 326.0)]
+    ps.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
+    return ps
+
+
+@pytest.mark.parametrize(
+    "flag", ["native_table_lane_refused_rotated", "native_rotated_text_shredded"]
+)
+def test_a_rotated_page_gets_the_bare_marker_not_confetti(tmp_path: Path, flag: str) -> None:
+    """A rotated page's ``get_text()`` order is not its reading order.
+
+    Found by GH-147's own hermetic ``process()`` test, which this change broke
+    before the gate existed: its rotated fixture recovered "content despite /
+    genuine / grid / sentence a / as rotated" -- the page's words, in the wrong
+    order. Shipping that is a WRONG text, which this repo ranks below a missing
+    one. ``native_rotated_text_shredded`` does not cover it (False on that
+    page), so GH-147's own rotation refusal is carried onto the page state and
+    read here.
+
+    DIFFERENCE: the rotation flag alone, over one page state.
+    """
+    from socr.core.manifest import table_floor_text_for_source
+
+    upright = _floor_state(tmp_path / "upright")
+    rotated = _floor_state(tmp_path / "rotated")
+    setattr(rotated, flag, True)
+
+    recovered = table_floor_text_for_source(upright, 1, upright.native_text, prose_recovery=True)
+    refused = table_floor_text_for_source(rotated, 1, rotated.native_text, prose_recovery=True)
+
+    assert _PROSE in recovered
+    assert _PROSE not in refused, "a rotated page must not ship its text layer as prose"
+    assert "failed: unverifiable table" in refused
+    assert _ANSWER_RE.search(refused) is None
+
+
+# ---------------------------------------------------------------------------
+# 3a. The recovery runs ONLY where a detected box exists (owner, 2026-10-15).
+# ---------------------------------------------------------------------------
+
+#: A row of a BORDERLESS categorical table -- the shape the corpus replay caught
+#: shipping as loose text on 41 pages ("Call FE Yes Yes Yes Yes Yes").
+_CATEGORICAL_ROW = re.compile(r"\b(?:Yes|No)\b(?:\W+\b(?:Yes|No)\b){1,}", re.I)
+_BORDERLESS_PROSE = "This paragraph of ordinary prose must survive the floor intact."
+
+
+def _borderless_pdf(path: Path) -> Path:
+    """Prose plus a BORDERLESS word-cell table: no rules, so no detected box.
+
+    Verified against the real detector: `detected_table_count == 0`, boxes empty.
+    This is the population the gate exists for -- 430 of the 674 pages the
+    ungated recovery gave prose to had no box at all, and 41 of those shipped a
+    row like this flattened, with its five columns collapsed into one line.
+    """
+    fitz = pytest.importorskip("fitz")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), _BORDERLESS_PROSE)
+    page.insert_text((72, 74), "It continues on a second line with no printed value anywhere.")
+    rows = [
+        ("Call FE", ("Yes", "Yes", "Yes", "Yes", "Yes")),
+        ("Firm FE", ("Yes", "Yes", "No", "Yes", "No")),
+        ("Controls", ("No", "Yes", "No", "Yes", "No")),
+    ]
+    for r, (label, cells) in enumerate(rows):
+        page.insert_text((80, 140 + r * 18), label, fontsize=9)
+        for c, cell in enumerate(cells):
+            page.insert_text((260 + c * 48, 140 + r * 18), cell, fontsize=9)
+    page.insert_text((72, 230), "A closing paragraph, also free of any printed digit at all.")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_a_page_with_no_detected_box_keeps_the_bare_marker(tmp_path: Path) -> None:
+    """The gate, and the harm it exists to stop.
+
+    DIFFERENCE: the page's detected boxes, nothing else. The ruled fixture has
+    two and recovers its prose; the BORDERLESS fixture has none and keeps
+    today's bare marker.
+
+    Dropping the gate makes the borderless arm ship
+    "Call FE Yes Yes Yes Yes Yes" -- the table's own row as loose text, five
+    columns collapsed, an answer under no heading at all. That is the mutant the
+    owner asked for, and this is the test it must fail.
+    """
+    import fitz
+
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import table_floor_text_for_source
+    from socr.core.state import DocumentState
+
+    def _state(pdf: Path):
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        ps = state.pages[1]
+        doc = fitz.open(pdf)
+        ps.native_text = doc[0].get_text()
+        ps.native_words = doc[0].get_text("words")
+        doc.close()
+        ps.is_born_digital = True
+        # A real page of this shape carries has_tables=True with NO box:
+        # Barrot-Sauvagnat p25 floored as structure_class with
+        # detected_table_count == 0, because has_tables comes from lane
+        # co-occupancy rather than from the bbox pass.
+        ps.has_tables = True
+        ps.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
+        return ps
+
+    boxed_dir = tmp_path / "boxed"
+    boxed_dir.mkdir(parents=True, exist_ok=True)
+    boxed = _state(_p77_like(boxed_dir / "doc.pdf"))
+    boxed.detected_table_count = 2
+    boxed.detected_table_bboxes = [(76.0, 96.0, 516.0, 162.0), (76.0, 216.0, 516.0, 326.0)]
+
+    borderless = _state(_borderless_pdf(tmp_path / "bare" / "doc.pdf"))
+    borderless.detected_table_count = 0
+    borderless.detected_table_bboxes = []
+    # The fixture must really carry the harmful row, or the mutant proves nothing.
+    assert _CATEGORICAL_ROW.search(borderless.native_text)
+
+    recovered = table_floor_text_for_source(boxed, 1, boxed.native_text, prose_recovery=True)
+    gated = table_floor_text_for_source(borderless, 1, borderless.native_text, prose_recovery=True)
+
+    assert _PROSE in recovered
+    assert _ANSWER_RE.search(recovered) is None
+
+    # The gated arm is today's floor: the marker, the image, and nothing else.
+    assert _BORDERLESS_PROSE not in gated
+    assert _CATEGORICAL_ROW.search(gated) is None
+    assert "failed: unverifiable table" in gated
+    assert "unverified extraction" not in gated and "unverified scan" not in gated
+
+
+# ---------------------------------------------------------------------------
+# 3a2. A row of categorical CELLS is table content, whatever the geometry says.
+# ---------------------------------------------------------------------------
+
+
+def _band(*tokens: str, y: float = 100.0):
+    return [
+        (72.0 + 40.0 * i, y, 100.0 + 40.0 * i, y + 10.0, t, 0, 0, i) for i, t in enumerate(tokens)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tokens", "is_row"),
+    [
+        # The measured corpus shapes.
+        (("Clustered", "SE", "Yes", "Yes", "Yes", "Yes"), True),
+        (("Industry", "FE", "Yes", "Yes", "Yes", "Yes"), True),
+        (("Bond", "FE", "NO", "YES", "YES"), True),
+        (("Firm", "controls", "no", "yes", "yes"), True),
+        # Prose that merely CONTAINS the words. One cell is a sentence.
+        (("and", "the", "answer", "is", "no."), False),
+        (("Yes,", "it", "does", "apply", "here"), False),
+        (("No", "single", "cell", "is", "a", "row"), False),
+        # Two of them, but not adjacent: adjacency is what makes it a row.
+        (("Controls", "Yes", "and", "Industry", "No"), False),
+    ],
+)
+def test_a_categorical_row_is_two_or_more_adjacent_cells(tokens, is_row: bool) -> None:
+    """The shape, both ways. Two ADJACENT cells, because two columns make a row.
+
+    Measured on run 23192118: 361 bands across 147 pages match, and of ~90 read
+    by hand every one is a regression table's own specification row. The
+    non-matching cases here are the reason the rule needs adjacency and a run of
+    two -- at one cell it would withhold any sentence ending "the answer is no".
+    """
+    from socr.tables.row_corroboration import bears_categorical_row
+
+    assert bears_categorical_row(_band(*tokens)) is is_row
+
+
+def test_a_categorical_row_is_withheld_even_with_no_box_over_it(tmp_path: Path) -> None:
+    """The arce_bengui_bianchi p48 shape, which the box gate does not catch.
+
+    That page has FOUR detected boxes, so it passes #1144's gate, but all four
+    sit at y>=438 while the leaking table's row is at y=325. Boxes exist; they
+    are not over the table that leaks.
+
+    DIFFERENCE: the categorical-row rule alone, over one band list, with the
+    boxes held fixed and deliberately placed away from the row. A mutant that
+    disables the rule puts "Clustered SE Yes Yes Yes Yes" back in the prose set
+    and fails this.
+    """
+    from socr.tables.row_corroboration import partition_prose_bands
+
+    words = [
+        *_band("A", "sentence", "of", "ordinary", "prose", y=100.0),
+        *_band("Clustered", "SE", "Yes", "Yes", "Yes", "Yes", y=325.0),
+        *_band("Another", "ordinary", "sentence", "here", y=600.0),
+    ]
+    # Boxes exist, and none of them covers y=325 -- the real page's geometry.
+    boxes = [(59.9, 438.9, 562.6, 639.9), (95.6, 453.7, 302.5, 617.9)]
+
+    prose = {
+        " ".join(w[4] for w in band)
+        for is_prose, band in partition_prose_bands(words, table_boxes=boxes)
+        if is_prose
+    }
+    assert "A sentence of ordinary prose" in prose
+    assert not any("Clustered" in line for line in prose), (
+        "a categorical row must be withheld even where no box covers it"
+    )
+    # The band below the boxes is inside one, so the box rule still does its job.
+    assert not any("Another ordinary sentence" in line for line in prose)
+
+
+# ---------------------------------------------------------------------------
+# 3b. The numeral class the withholding decision rests on.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("token", "counts"),
+    [
+        ("0", True),  # ASCII, the only class before #1144
+        ("\U0001d7f6", True),  # MATHEMATICAL BOLD DIGIT ZERO -- the real corpus leak
+        ("٥", True),  # ARABIC-INDIC DIGIT FIVE
+        ("௧", True),  # TAMIL DIGIT ONE
+        ("୧", True),  # ORIYA DIGIT ONE
+        ("¹", False),  # SUPERSCRIPT ONE -- a footnote marker, not a value
+        ("⁰", False),  # SUPERSCRIPT ZERO
+        ("₁", False),  # SUBSCRIPT ONE
+        ("½", False),  # VULGAR FRACTION ONE HALF -- the accepted residual
+        ("A", False),
+        ("", False),
+    ],
+)
+def test_the_withholding_digit_class_is_unicode_decimal_not_ascii_nor_numeric(
+    token: str, counts: bool
+) -> None:
+    """#1144: category Nd exactly -- wider than ASCII, narrower than isnumeric.
+
+    The corpus replay over run 23192118's 1,794 floored pages found three pages
+    whose recovered prose carried a printed value the ASCII class could not see
+    (mathematical bold digits, and Tamil/Oriya digits in a garbled maths layer).
+    Nd closes those. ``isnumeric()`` would also admit superscripts and vulgar
+    fractions, which appear in ordinary prose as footnote markers, so adopting
+    it would withhold a large share of genuine prose -- the loss this lane
+    exists to stop. Both boundaries are pinned, so neither can drift.
+    """
+    from socr.tables.row_corroboration import bears_printed_numeral
+
+    assert bears_printed_numeral(token) is counts
+
+
+def test_widening_the_digit_class_can_only_withhold_more() -> None:
+    """The direction check that licensed the widening.
+
+    ``partition_prose_bands`` is the only live consumer, and a True there raises
+    a band's numeral count, which moves ``is_prose`` toward False. So the prose
+    set under the wider class must be a SUBSET of the prose set under the
+    narrower one -- never a page shipping more.
+
+    The word list is built directly rather than through a PDF: the base-14
+    fonts cannot encode MATHEMATICAL BOLD DIGIT ZERO, so inserting it produced a
+    page that did not contain it and the first version of this test could not
+    tell the two classes apart. It said so and failed rather than passing
+    vacuously; this is the fixed fixture.
+    """
+    import re as _re
+
+    from socr.tables import row_corroboration as rc
+
+    def _word(y: float, x: float, text: str):
+        return (x, y, x + 8.0 * len(text), y + 10.0, text, 0, 0, 0)
+
+    words = [
+        _word(50.0, 72.0, "A"),
+        _word(50.0, 90.0, "plain"),
+        _word(50.0, 130.0, "sentence"),
+        # One band whose only printed value is a mathematical bold digit.
+        _word(80.0, 72.0, "Share"),
+        _word(80.0, 120.0, "\U0001d7f6.\U0001d7fa"),
+        _word(80.0, 180.0, "per"),
+        _word(80.0, 210.0, "cent"),
+        _word(110.0, 72.0, "Another"),
+        _word(110.0, 130.0, "sentence"),
+    ]
+
+    def _prose(pattern) -> set[str]:
+        real = rc._DIGIT_RE
+        try:
+            rc._DIGIT_RE = pattern
+            return {
+                " ".join(w[4] for w in band)
+                for is_prose, band in rc.partition_prose_bands(words)
+                if is_prose
+            }
+        finally:
+            rc._DIGIT_RE = real
+
+    ascii_only = _prose(_re.compile(r"[0-9]"))
+    unicode_nd = _prose(_re.compile(r"\d"))
+
+    assert unicode_nd < ascii_only, "the wider class must withhold strictly more, never ship more"
+    assert any("Share" in line for line in ascii_only)
+    assert not any("Share" in line for line in unicode_nd)
+    # The genuine prose bands are untouched by the widening.
+    assert {ln for ln in ascii_only if "Share" not in ln} == unicode_nd
+
+
+# ---------------------------------------------------------------------------
+# 3c. The banner must describe the PAGE TYPE, and every form must stay counted.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("born_digital", [True, False])
+def test_the_banner_says_scan_only_for_a_scan(tmp_path: Path, born_digital: bool) -> None:
+    """DIFFERENCE: ``is_born_digital`` alone, over one page state.
+
+    Before #1144 this lane only ever served scans, so "unverified scan" was
+    always true. It now serves structure-class floors on born-digital pages, and
+    on those the word is false. Everything after the noun is identical, so the
+    two banners make the same claim about the same evidence.
+    """
+    from socr.core.manifest import table_floor_text_for_source
+
+    ps = _floor_state(tmp_path / f"bd-{born_digital}")
+    ps.is_born_digital = born_digital
+    body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+
+    assert _PROSE in body
+    if born_digital:
+        assert "unverified extraction" in body
+        assert "unverified scan" not in body
+    else:
+        assert "unverified scan" in body
+        assert "unverified extraction" not in body
+    # The claim itself does not change with the page type.
+    assert "every numeric row is withheld" in body
+
+
+def test_every_banner_form_is_still_counted_as_a_prose_recovery() -> None:
+    """A second banner form must not become invisible to the table metric.
+
+    ``core.table_counts`` recognises a prose-recovery page by matching this
+    banner, and its pattern was built from the single "unverified scan" form's
+    literal text. The born-digital form #1144 adds would have gone UNCOUNTED on
+    all 674 pages it affects. The forms are enumerated in
+    ``manifest.PROSE_RECOVERED_FLAGS`` and this pins that every one of them --
+    including any added later -- matches the counter's pattern.
+    """
+    from socr.core.manifest import (
+        NATIVE_TEXT_FLAGS,
+        PROSE_RECOVERED_FLAGS,
+        native_text_flag,
+        prose_recovered_flag,
+    )
+    from socr.core.table_counts import _PROSE_RECOVERY_RE
+
+    assert len(PROSE_RECOVERED_FLAGS) >= 2
+    for flag in PROSE_RECOVERED_FLAGS:
+        assert _PROSE_RECOVERY_RE.search(flag.format(page_num=7)), flag
+    # Both accessors return a member of their own enumeration, so a caller
+    # cannot emit a form the guard above does not cover.
+    for bd in (True, False):
+        assert any(
+            prose_recovered_flag(7, born_digital=bd) == f.format(page_num=7)
+            for f in PROSE_RECOVERED_FLAGS
+        )
+        assert any(
+            native_text_flag(7, born_digital=bd) == f.format(page_num=7) for f in NATIVE_TEXT_FLAGS
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4. The one piece of round 1 that survives: the resume hardening.
+# ---------------------------------------------------------------------------
+
+
+def test_the_escalation_refusal_survives_resume() -> None:
+    """``tables_trust`` reads this kind to keep a page untrusted, and
+    ``_escalate_table_page`` is skipped by a terminal resumed page, so the event
+    must be replayed or a resumed run reports a page as more trusted than the
+    first run did. Round 1 added it; it is kept.
+    """
+    from socr.core.tables_trust import TABLE_DISTRUST_KINDS
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    replayed = UnifiedPipeline.resume_restore_kinds()
+    assert "table_escalation_refused" in TABLE_DISTRUST_KINDS
+    assert "table_escalation_refused" in replayed
+    # Its GH-851 siblings, which were already replayed, still are.
+    assert "table_escalation_timeout" in replayed
+    assert "table_escalation_withheld" in replayed
