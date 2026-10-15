@@ -587,7 +587,8 @@ def test_a_rotated_page_is_refused_because_its_boxes_are_in_another_space(
     assert fitz is not None  # the fixture needs pymupdf importable
 
 
-def test_a_real_rotated_pdf_is_refused_end_to_end(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_a_real_rotated_pdf_is_refused_end_to_end(tmp_path: Path, rotation: int) -> None:
     """#1144 round 5 (Fable P1): the rotation WIRING, not a hand-set flag.
 
     The earlier test set ``page_rotation`` directly, so mutants on the two
@@ -597,7 +598,9 @@ def test_a_real_rotated_pdf_is_refused_end_to_end(tmp_path: Path) -> None:
     ``detect_page`` -> ``apply_born_digital`` -> the floor. Nothing is set by
     hand, so breaking any link in the chain fails this.
 
-    DIFFERENCE: ``set_rotation(90)`` on the same page, nothing else.
+    DIFFERENCE: ``set_rotation(rotation)`` on the same page, nothing else.
+    Parametrised over all three rotations (#1144 round 7, Fable P2) so an
+    ``== 90`` comparison dies here; the corpus has 6 pages at /Rotate 270.
     """
     import fitz
 
@@ -627,16 +630,77 @@ def test_a_real_rotated_pdf_is_refused_end_to_end(tmp_path: Path) -> None:
         return body, int(getattr(ps, "page_rotation", -1))
 
     upright, upright_rot = _ship(0)
-    turned, turned_rot = _ship(90)
+    turned, turned_rot = _ship(rotation)
 
     # The wiring itself: the value reached PageState from the real detector.
     assert upright_rot == 0
-    assert turned_rot == 90, "page_rotation did not reach PageState through apply_born_digital"
+    assert turned_rot == rotation, (
+        "page_rotation did not reach PageState through apply_born_digital"
+    )
     # And the floor acted on it.
     assert _PROSE in upright
     assert _PROSE not in turned
     assert _ANSWER_RE.search(turned) is None
     assert "failed: unverifiable table" in turned
+
+
+def test_the_box_gate_fails_closed_when_count_and_boxes_disagree(tmp_path: Path) -> None:
+    """#1144 round 7 (repo reviewer, three times; cubic P1 4284621795).
+
+    The gate asked only whether the box list was non-empty, which FAILS OPEN on
+    the very disagreement that routes a page into this branch:
+    ``len(detected_bboxes) != detected_count`` is one of the refusal paths, so a
+    page with count=2 and ONE box arrives with a non-empty list and its unboxed
+    table's word cells ship as prose.
+
+    DIFFERENCE: ``detected_table_count`` alone, with the SAME single box.
+    """
+    from socr.core.manifest import table_floor_text_for_source
+
+    qa_box = (76.0, 216.0, 516.0, 326.0)
+
+    agreeing = _floor_state(tmp_path / "agree")
+    agreeing.detected_table_count = 1
+    agreeing.detected_table_bboxes = [qa_box]
+    shipped = table_floor_text_for_source(agreeing, 1, agreeing.native_text, prose_recovery=True)
+
+    disagreeing = _floor_state(tmp_path / "disagree")
+    disagreeing.detected_table_count = 2  # the detector saw two; only one box survived
+    disagreeing.detected_table_bboxes = [qa_box]
+    refused = table_floor_text_for_source(
+        disagreeing, 1, disagreeing.native_text, prose_recovery=True
+    )
+
+    assert _PROSE in shipped
+    assert _PROSE not in refused, "a page whose box count disagrees must fail closed"
+    assert _ANSWER_RE.search(refused) is None
+    assert "failed: unverifiable table" in refused
+
+
+def test_the_order_gate_fails_closed_on_text_it_cannot_tokenise(tmp_path: Path) -> None:
+    """#1144 round 7: non-Latin text normalised to NOTHING and shipped unchecked.
+
+    ``_order_tokens`` used an ASCII class, so Cyrillic, Greek and CJK produced an
+    empty token list and the gate returned True for anything. Measured before
+    fixing: a REVERSED Cyrillic sentence passed its own ground truth, and a CJK
+    body passed against unrelated ground truth.
+
+    DIFFERENCE: the same Cyrillic sentence, in order vs reversed.
+    """
+    from socr.core.manifest import _order_tokens, _prose_follows_native_order
+
+    native = "Инфляция выросла на процентов в текущем году"
+    assert len(_order_tokens(native)) == 7, "the tokeniser must see non-Latin words"
+
+    assert _prose_follows_native_order(native, native) is True
+    assert _prose_follows_native_order(" ".join(reversed(native.split())), native) is False
+    # Greek and CJK too, not only Cyrillic.
+    greek = "Η πληθωρισμός αυξήθηκε σημαντικά"
+    assert _prose_follows_native_order(" ".join(reversed(greek.split())), greek) is False
+    # A body with LINES but no comparable tokens is unverifiable, not in order.
+    assert _prose_follows_native_order("··· ---", "anything at all") is False
+    # A body with no lines at all has nothing to ship; the caller governs.
+    assert _prose_follows_native_order("", "anything at all") is True
 
 
 # ---------------------------------------------------------------------------

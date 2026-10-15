@@ -89,11 +89,13 @@ from socr.core.manifest import (
     PAGE_UNCHECKED_MARK_RE,
     NATIVE_TEXT_FLAGS,
     PROSE_RECOVERED_FLAGS,
-    # Still imported though ``_scanned_flag_mark`` now reads the tuples above:
-    # callers and tests reference these names through this module, and dropping
-    # the re-export would be a second, unrelated break (#1144 round 5).
-    SCANNED_NATIVE_TEXT_FLAG,
-    SCANNED_PROSE_RECOVERED_FLAG,
+    # #1144: re-exported, not used here. ``_scanned_flag_mark`` reads the
+    # tuples above; these two names are referenced THROUGH this module by
+    # ``tests/test_acceptance_meter.py`` and dropping them would be a second,
+    # unrelated break. Marked noqa rather than deleted, and listed in
+    # ``__all__`` below so the re-export is deliberate and visible.
+    SCANNED_NATIVE_TEXT_FLAG,  # noqa: F401
+    SCANNED_PROSE_RECOVERED_FLAG,  # noqa: F401
     SOCR_MARKER_RE,
     UNVERIFIED_TABLE_MARK_RE,
     d3_superseded_note,
@@ -257,6 +259,13 @@ def _uncovered_text_mark(n: int, line: str) -> bool:
 #: Every visible mark family, with its emitter. The blank receipt (``[socr: blank page]``,
 #: core/blank_page.py) and the fabricated-image receipt (core/url_provenance.py) are
 #: receipts of what socr did, not statements that a check did not run: not marks.
+#: #1144: the banner templates this module re-exports for its callers. Named so
+#: the re-export is deliberate rather than an import that looks unused.
+__all__ = [
+    "SCANNED_NATIVE_TEXT_FLAG",
+    "SCANNED_PROSE_RECOVERED_FLAG",
+]
+
 MARK_FAMILIES: dict[str, Callable[[int, str], bool]] = {
     "canonical_unchecked": _canonical_mark,  # #1130 grammar, not emitted yet
     "page_failed": _failed_mark,  # core/manifest.py page_failed_marker + floors

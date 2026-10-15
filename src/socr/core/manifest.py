@@ -2483,7 +2483,19 @@ def table_floor_text_for_source(
         # together when the geometry is unusable (``orchestrator.py:15054``).
         # A page with no box keeps today's bare marker plus page image -- no
         # worse than main, and fail-closed.
-        if not (getattr(p, "detected_table_bboxes", None) or []):
+        # #1144 round 7 (repo reviewer, raised three times; cubic P1 4284621795).
+        # This asked only "is the box list non-empty", which FAILS OPEN on the
+        # very disagreement that routes a page here: ``_refused()`` is reached
+        # from ``len(detected_bboxes) != detected_count`` below, so a page with
+        # count=2 and ONE box arrives with a non-empty list and its unboxed
+        # table's word cells ship as prose. ``_detect_table_regions``'s own
+        # contract is to fail closed when the two disagree, and GH-520 already
+        # requires ``count == len(bboxes)`` for the splice; the recovery lane
+        # needs the same, because the box rule can only withhold what a box
+        # covers.
+        _boxes = getattr(p, "detected_table_bboxes", None) or []
+        _count = getattr(p, "detected_table_count", 0)
+        if not (type(_count) is int and _count > 0 and len(_boxes) == _count):
             return whole_page
         # #1144 round 4, P0 (Fable, PR #1158). ``native_words`` are
         # ``get_text("words")`` -- UNROTATED coordinates -- while
@@ -2583,7 +2595,13 @@ def _order_tokens(text: str) -> list[str]:
     """
     out = []
     for raw in (text or "").split():
-        tok = re.sub(r"[^0-9a-z]+", "", raw.replace("\\", "").casefold())
+        # #1144 round 7: ``[^0-9a-z]`` is ASCII-only, so Cyrillic, Greek and CJK
+        # normalised to NOTHING -- the token list came back empty and the gate
+        # returned True unchecked. Measured: a reversed Cyrillic sentence passed,
+        # and a CJK body passed against unrelated ground truth. ``[\W_]+`` is
+        # Unicode-aware on a ``str`` pattern, so it strips punctuation and
+        # separators while keeping every script's letters and digits.
+        tok = re.sub(r"[\W_]+", "", raw.replace("\\", "").casefold())
         if tok:
             out.append(tok)
     return out
@@ -2622,7 +2640,17 @@ def _prose_follows_native_order(body: str, native_text: str) -> bool:
         )
     )
     if not wanted:
-        return True
+        # #1144 round 7: "no comparable tokens" is not "in order". It used to
+        # return True, which shipped any body the normaliser could not read --
+        # and before the Unicode fix above, that was every non-Latin page. A
+        # body with non-furniture LINES but no tokens is unverifiable, so it
+        # fails closed; a body with no lines at all has nothing to ship and the
+        # caller's own emptiness check governs.
+        has_lines = any(
+            line.strip() and not _RECOVERED_FURNITURE_RE.match(line)
+            for line in (body or "").splitlines()
+        )
+        return not has_lines
     truth = iter(_order_tokens(native_text))
     return all(tok in truth for tok in wanted)
 
