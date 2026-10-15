@@ -345,6 +345,14 @@ def common_options(f):
         help="Write a replayable manifest + blob cache",
     )(f)
     f = click.option(
+        "--retry-failed-pages",
+        is_flag=True,
+        help=(
+            "After the page loop, run every page that failed once more in the same "
+            "run, provider ladder reversed; each retry is recorded on its page"
+        ),
+    )(f)
+    f = click.option(
         "--table-judge-ladder/--no-table-judge-ladder",
         "table_judge_ladder",
         default=None,
@@ -439,6 +447,7 @@ def build_config(
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     write_manifest: bool = False,
+    retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
 ) -> PipelineConfig:
     """Build PipelineConfig from CLI options."""
@@ -662,6 +671,8 @@ def build_config(
         config.cost_budget = cost_budget
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
+    if _explicitly_given("retry_failed_pages"):
+        config.retry_failed_pages = retry_failed_pages
     # P1 (owner ruling Q3): tri-state. Now that the config default is True,
     # a plain boolean CLI parameter could no longer express "the user said
     # nothing" -- an omitted flag would arrive as False and clobber a YAML

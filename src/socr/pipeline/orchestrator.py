@@ -9994,6 +9994,42 @@ class UnifiedPipeline:
             state.handle.path, output_dir
         )
 
+        # -- --retry-failed-pages ---------------------------------------------------
+        # The loop walks every page once; then, lazily (after that pass, so the
+        # failures are known), each page the OCR ladder handled and that failed is
+        # walked once more, with the ladder reversed. The page is redone inside its
+        # own document, so every document-level signal it reads is unchanged. Its
+        # state is reset to what it was before its first attempt; the first
+        # attempt's audit events move into ``PageState.page_retry``, and its spend
+        # stays on the page.
+        _retry_failed = bool(self.config.retry_failed_pages)
+        _routed_pages: set[int] = set()
+        _before_page: dict[int, tuple[PageState, int]] = {}
+
+        def _pages_in_order():
+            nonlocal ladder
+            for _pn in sorted(state.pages):
+                if _retry_failed:
+                    _before_page[_pn] = (copy.deepcopy(state.pages[_pn]), len(state.events))
+                yield _pn
+            if not _retry_failed or backend_degraded or not ladder:
+                return
+            failed = self._failed_pages(state, _routed_pages)
+            if not failed:
+                return
+            ladder = list(reversed(ladder))
+            if not self.config.quiet:
+                console.print(
+                    f"  retrying {len(failed)} failed page(s) "
+                    f"{', '.join(str(p) for p in failed)}; ladder: "
+                    + " -> ".join(p.engine.value for p in ladder)
+                )
+            for _pn, _record in failed.items():
+                _snapshot, _event_mark = _before_page[_pn]
+                self._reset_page_for_retry(state, _pn, _snapshot, _event_mark, _record, ladder)
+                yield _pn
+            self._record_page_retries(state, list(failed))
+
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
         # Native-trusted pages are finalized in-place; OCR pages go through
@@ -10001,7 +10037,7 @@ class UnifiedPipeline:
         # at the end of its lifecycle (salvage-only; authoritative bytes come
         # from _rewrite_all_fragments at assemble time — fork A).
         # ====================================================================
-        for page_num in sorted(state.pages):
+        for page_num in _pages_in_order():
             ps = state.pages[page_num]
             is_native = self._is_agentic_trusted_native(page_num, ps)
             _route_table_signal = False
@@ -10185,6 +10221,7 @@ class UnifiedPipeline:
                                 if total_cost is None
                                 else max(self.config.cost_budget - total_cost, 0.0)
                             )
+                        _routed_pages.add(page_num)
                         # #1013: a candidate the judge timed out on last run is re-judged
                         # first; only an accepting verdict skips the ladder.
                         decision = self._rejudge_kept_candidate(
@@ -10937,6 +10974,98 @@ class UnifiedPipeline:
         # _phase_assemble can propagate the reason into EngineResult.error.
         if halt_reason:
             state.pp2_halt_reason = halt_reason
+
+    @staticmethod
+    def _failed_pages(state: DocumentState, routed: set[int]) -> dict[int, FinalizedPageRecord]:
+        """Pages the OCR ladder handled whose selected output is an ERROR page, with it.
+
+        The same selection the provisional flush and assemble use, so "failed" means
+        what the page would ship: no usable reading, or the fail-closed marker.
+        """
+        from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+
+        whole_doc = _whole_doc_page_texts(state)
+        failed: dict[int, FinalizedPageRecord] = {}
+        for page_num in sorted(routed):
+            record = finalized_page_record(state, page_num, whole_doc)
+            if record.output.status == PageStatus.ERROR:
+                failed[page_num] = record
+        return failed
+
+    @staticmethod
+    def _reset_page_for_retry(
+        state: DocumentState,
+        page_num: int,
+        snapshot: PageState,
+        event_mark: int,
+        first: FinalizedPageRecord,
+        ladder: list[ProviderProfile],
+    ) -> None:
+        """Put ``page_num`` back where it stood before its first attempt, keeping a record.
+
+        ``snapshot`` is the page's state before the loop reached it and ``event_mark``
+        the length of ``state.events`` then; every later event about this page belongs
+        to the first attempt. Those events leave the run's audit stream (they describe
+        a reading that is being replaced) and are counted by kind in ``page_retry``.
+        Spend is a recorded fact, so the first attempt's cost stays on the page.
+        """
+        spent = state.pages[page_num].page_cost_usd
+        first_events = [
+            ev for ev in state.events[event_mark:] if getattr(ev, "page_num", None) == page_num
+        ]
+        moved = {id(ev) for ev in first_events}
+        state.events[:] = [ev for ev in state.events if id(ev) not in moved]
+        kinds: dict[str, int] = {}
+        for ev in first_events:
+            kinds[ev.kind] = kinds.get(ev.kind, 0) + 1
+        fresh = copy.deepcopy(snapshot)
+        fresh.page_cost_usd = spent
+        fresh.page_retry = {
+            "first_attempt": {
+                "status": first.output.status.value,
+                "failure_mode": first.output.failure_mode.value,
+                "engine": first.output.engine,
+                "ending": first.disposition.ending.value,
+                "primary_reason": first.disposition.primary_reason.value,
+                "audit_events": kinds,
+            },
+            "retry_ladder": [p.id or p.engine.value for p in ladder],
+        }
+        state.pages[page_num] = fresh
+
+    def _record_page_retries(self, state: DocumentState, pages: list[int]) -> None:
+        """One ``page_retry`` audit event per retried page, naming both outcomes."""
+        from socr.core.audit_log import PAGE_RETRY_KIND, AuditEvent
+        from socr.core.manifest import _whole_doc_page_texts, finalized_page_record
+
+        whole_doc = _whole_doc_page_texts(state)
+        recovered = 0
+        for page_num in pages:
+            ps = state.pages[page_num]
+            first = (ps.page_retry or {}).get("first_attempt", {})
+            second = finalized_page_record(state, page_num, whole_doc).output
+            recovered += second.status != PageStatus.ERROR
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=PAGE_RETRY_KIND,
+                    engine=second.engine,
+                    detail=(
+                        f"page {page_num} failed its first pass "
+                        f"({first.get('failure_mode', '')}) and was run once more: "
+                        f"{second.status.value}"
+                    ),
+                    data={
+                        "first_status": first.get("status", ""),
+                        "first_failure_mode": first.get("failure_mode", ""),
+                        "retry_status": second.status.value,
+                        "retry_failure_mode": second.failure_mode.value,
+                        "retry_ladder": (ps.page_retry or {}).get("retry_ladder", []),
+                    },
+                )
+            )
+        if not self.config.quiet:
+            console.print(f"  retried {len(pages)} page(s); {recovered} no longer failed")
 
     def _agentic_math_recovery_page(
         self,
@@ -14056,6 +14185,8 @@ class UnifiedPipeline:
             # The ladder's verdict on a reading the page did not ship (it ended on the
             # fail-closed marker); ``None`` everywhere else. Provenance only.
             "table_ladder_superseded": superseded_ladder_verdict,
+            # --retry-failed-pages: the first attempt of a page that was run twice.
+            "page_retry": ps.page_retry if ps else None,
             # GH-359 (cubic P1): an emitted table on this page reached
             # assemble with no ladder terminal. Persisted so a resumed run
             # refuses D1b's REJECTED skip-and-keep for THIS page -- the
@@ -15305,6 +15436,7 @@ class UnifiedPipeline:
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
+            ps.page_retry = meta.get("page_retry") or None
             ps.timings_s = coerce_page_timings(meta.get("timings_s"))
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
