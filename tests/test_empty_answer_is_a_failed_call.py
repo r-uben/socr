@@ -236,6 +236,28 @@ def test_an_engine_sentinel_is_not_an_empty_provider_answer(tmp_path, monkeypatc
     pdf = _pdf(tmp_path / "m.pdf")
     out = _MarkerLikeEngine().process_pages(pdf, [1], PipelineConfig(timeout=30))[0]
     assert out.failure_mode is not FailureMode.EMPTY_RESPONSE
+    # The engine's own blank-page reading still ships as it did before.
+    assert out.status == PageStatus.SUCCESS
+
+
+def test_an_answer_that_cleans_to_nothing_fails_without_counting_as_empty(
+    tmp_path, monkeypatch
+) -> None:
+    """r-uben on 7eabcf39: an answer whose bytes are not blank but which cleaning reduces
+    to nothing must not ship SUCCESS with no text. It is not an empty provider answer
+    (the provider said something), so it fails as EMPTY_OUTPUT, not EMPTY_RESPONSE."""
+    monkeypatch.setattr(
+        _GeminiLikeEngine,
+        "_clean_output",
+        lambda self, text, engine: "" if "FENCE" in text else text,
+    )
+    real = _read_back(tmp_path, monkeypatch, REAL_TEXT, 0, "")
+    cleaned_away = _read_back(tmp_path, monkeypatch, "FENCE", 0, "")
+
+    assert real.status == PageStatus.SUCCESS
+    assert cleaned_away.status == PageStatus.ERROR
+    assert cleaned_away.failure_mode is FailureMode.EMPTY_OUTPUT
+    assert not cleaned_away.audit_passed
 
 
 def test_the_stderr_match_names_the_whole_image_file(tmp_path, monkeypatch) -> None:

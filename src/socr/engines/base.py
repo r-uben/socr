@@ -477,6 +477,24 @@ class BaseEngine(ABC):
                             ),
                         )
                     )
+                elif (
+                    text
+                    and not self._clean_output(text, self.name).strip()
+                    and not (OutputNormalizer.is_engine_blank_page_sentinel(text))
+                ):
+                    # The engine answered, but cleaning left nothing (a bare code fence,
+                    # think tags, ...). Not an empty provider answer -- the provider said
+                    # something -- and not a page: fail it, never SUCCESS with no text.
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.EMPTY_OUTPUT,
+                            audit_passed=False,
+                            error=f"answer for page {page_num} held no text after cleaning",
+                        )
+                    )
                 elif text:
                     text = self._clean_output(text, self.name)
                     outputs.append(
