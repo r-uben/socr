@@ -2723,12 +2723,22 @@ class UnifiedPipeline:
             )
 
         # Render pages to images → CLI processes images → per-page results
+        call_started = time.monotonic()
         page_outputs = engine.process_pages(
             pdf_path=state.handle.path,
             page_nums=page_nums,
             config=run_config,
             dpi=run_config.render_dpi,
             subprocess_timeout=subprocess_timeout_sec,
+        )
+        page_outputs = self._retry_empty_answers(
+            state,
+            engine,
+            run_config,
+            page_outputs,
+            None
+            if subprocess_timeout_sec is None
+            else subprocess_timeout_sec - (time.monotonic() - call_started),
         )
 
         # For enhancement pages where OCR failed, fall back to native text
@@ -2754,6 +2764,83 @@ class UnifiedPipeline:
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
 
         return final
+
+    def _retry_empty_answers(
+        self,
+        state: DocumentState,
+        engine,
+        run_config: PipelineConfig,
+        page_outputs: list[PageOutput],
+        remaining_timeout_sec: float | None,
+    ) -> list[PageOutput]:
+        """Repeat, once, every call whose answer came back empty; count each empty answer.
+
+        An empty answer is a failed call (``FailureMode.EMPTY_RESPONSE``), not a reading
+        of the page, so it gets the second try a transient failure deserves. The second
+        call shares the first call's deadline: with no time left it is not made, so a
+        retry can never push the call past the bound ``route_page`` reports as a timeout.
+        """
+        from socr.core.audit_log import PROVIDER_EMPTY_RESPONSE_KIND, AuditEvent
+
+        empty = [
+            po.page_num for po in page_outputs if po.failure_mode is FailureMode.EMPTY_RESPONSE
+        ]
+        if not empty:
+            return page_outputs
+        can_retry = remaining_timeout_sec is None or remaining_timeout_sec > 0
+        retried: dict[int, PageOutput] = {}
+        if can_retry:
+            logger.warning(
+                "%s returned an empty answer for page(s) %s; retrying once", engine.name, empty
+            )
+            retried = {
+                po.page_num: po
+                for po in engine.process_pages(
+                    pdf_path=state.handle.path,
+                    page_nums=empty,
+                    config=run_config,
+                    dpi=run_config.render_dpi,
+                    subprocess_timeout=remaining_timeout_sec,
+                )
+            }
+        for page_num in empty:
+            second = retried.get(page_num)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=PROVIDER_EMPTY_RESPONSE_KIND,
+                    engine=engine.name,
+                    detail=(
+                        f"{engine.name} answered page {page_num} with no text; "
+                        + (
+                            "retried once"
+                            if can_retry
+                            else "not retried: the call's deadline had passed"
+                        )
+                    ),
+                    data={"retried": can_retry, "attempt": 1},
+                )
+            )
+            if second is not None and second.failure_mode is FailureMode.EMPTY_RESPONSE:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=PROVIDER_EMPTY_RESPONSE_KIND,
+                        engine=engine.name,
+                        detail=f"{engine.name} answered page {page_num} with no text again",
+                        data={"retried": False, "attempt": 2},
+                    )
+                )
+            if not self.config.quiet:
+                outcome = (
+                    "no retry (deadline passed)"
+                    if second is None
+                    else "retry: " + ("ok" if second.status == PageStatus.SUCCESS else "failed")
+                )
+                console.print(
+                    f"  [yellow]p{page_num}: {engine.name} empty answer; {outcome}[/yellow]"
+                )
+        return [retried.get(po.page_num, po) for po in page_outputs]
 
     def _emit_native_table_structure_events(self, state, assessment) -> None:
         """Record one durable audit event per page with a native table defect.
