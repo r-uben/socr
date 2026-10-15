@@ -111,6 +111,11 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
         "attempts_summary",
         # #1030: additive sidecar key (empty on every page without a scanned figure).
         "scanned_figure_png_ref",
+        # Additive sidecar keys, None on every page of this corpus: the superseded table
+        # verdict of a marker page (tests/test_marker_page_record_drops_stale_table_verdict.py)
+        # and the --retry-failed-pages record (tests/test_retry_failed_pages.py).
+        "table_ladder_superseded",
+        "page_retry",
     }
 )
 

@@ -49,6 +49,10 @@ class FailureMode(str, Enum):
     TIMEOUT = "timeout"
     CLI_ERROR = "cli_error"
     EMPTY_OUTPUT = "empty_output"
+    #: The provider answered the call but the answer held no text (Gemini: HTTP 200,
+    #: empty candidate). A failed call, not a reading of a blank page:
+    #: ``_run_engine_on_pages`` repeats it once and counts it.
+    EMPTY_RESPONSE = "empty_response"
     API_ERROR = "api_error"
     MODEL_UNAVAILABLE = "model_unavailable"
     AUDIT_FAILED = "audit_failed"

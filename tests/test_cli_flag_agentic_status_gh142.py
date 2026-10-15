@@ -140,6 +140,9 @@ _UNEXERCISED = {
     # tests/test_gh1013_rejudge_timed_out_candidate.py::test_rejudge_attempts_is_bounded_by_config
     # (0 / 1 / 3 attempts -> 0 / 1 / 3 judge calls on the kept bytes).
     "rejudge_attempts",
+    # Only changes behaviour for a page that FAILS its first pass, which this fixture's
+    # pages never do. Observed in tests/test_retry_failed_pages.py (off vs on legs).
+    "retry_failed_pages",
     "enabled_engines",  # consumed by _available_engines_for_agentic, stubbed here
     "escalation_timeout_sec",  # escalation lane needs a 2nd ladder rung
     "hpc",
