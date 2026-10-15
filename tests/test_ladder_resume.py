@@ -97,7 +97,20 @@ def _seed_and_flush(
     ps.table_ladder_disposition = disposition
     ps.table_ladder_incomplete = incomplete
 
-    pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
+    # The fragment must be written from the FINALIZED record, as production does. Every
+    # production call site of ``_flush_page_fragment`` passes finalized text --
+    # ``_record.output.text`` (orchestrator.py:10791), ``finalized_page_record(...)``
+    # (:11587), and the canonical ``page_texts`` (:15878) -- so the fragment and the
+    # sidecar always carry the same bytes. Passing ``accepted.text`` here wrote the RAW
+    # attempt to the fragment and the finalized text to the sidecar, a disagreement
+    # production cannot produce; it was invisible until #1145 made finalization add a line.
+    # Fixing it keeps this helper's assertions at full strength: the test still compares
+    # the fragment against the sidecar byte for byte, and now does so on the bytes
+    # production would have written.
+    from socr.core.manifest import finalized_page_record
+
+    finalized = finalized_page_record(state, 1, None).output
+    pipeline._flush_page_fragment(state, 1, finalized.text or "", out_dir)
     sidecar_path = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
     return sidecar_path
 

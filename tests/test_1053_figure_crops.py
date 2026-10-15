@@ -334,7 +334,22 @@ def _page_text(tmp_path, tag) -> str:
 
 
 def _native_lines(text: str) -> list[str]:
-    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("![")]
+    """The page's own text: not image refs, and not socr's marks about what it did.
+
+    #1145 added a page-level mark to this page (it ships WARNING /
+    ``figure_words_unread``, so it is not CHECKED and must say so). A mark is socr's own
+    prose, never document content -- the contract ``SOCR_MARKER_RE`` documents -- so it is
+    excluded here via production's own ``line_is_mark`` rather than a local pattern that
+    could drift from it. The assertion keeps its full force: any native line this change
+    dropped, altered or reordered still fails it.
+    """
+    from socr.core.marks import line_is_mark
+
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip() and not ln.startswith("![") and not line_is_mark(ln.strip(), 1)
+    ]
 
 
 @pytest.mark.parametrize("provider", [True, False])

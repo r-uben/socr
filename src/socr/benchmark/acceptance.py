@@ -79,29 +79,39 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from markdown_it import MarkdownIt
-from markdown_it.token import Token
 from ocr_output_contract import assemble_pages
 
 from socr.core.blank_page import blank_page_marker
-from socr.core.manifest import (
-    DISPUTED_TABLE_MARK_RE,
-    PAGE_UNCHECKED_MARK_RE,
-    NATIVE_TEXT_FLAGS,
-    PROSE_RECOVERED_FLAGS,
-    # #1144: re-exported, not used here. ``_scanned_flag_mark`` reads the
-    # tuples above; these two names are referenced THROUGH this module by
-    # ``tests/test_acceptance_meter.py`` and dropping them would be a second,
-    # unrelated break. Marked noqa rather than deleted, and listed in
-    # ``__all__`` below so the re-export is deliberate and visible.
-    SCANNED_NATIVE_TEXT_FLAG,  # noqa: F401
-    SCANNED_PROSE_RECOVERED_FLAG,  # noqa: F401
-    SOCR_MARKER_RE,
-    UNVERIFIED_TABLE_MARK_RE,
+
+# Re-exported, not used here: ``tests/test_acceptance_meter.py`` reaches these through this
+# module, and #1145's move must not change its surface. The test caught exactly that.
+# #1144 added the two born-digital banner templates to the same re-export, and listed all
+# four in ``__all__`` so the re-export is deliberate rather than an import that looks
+# unused. The TUPLES those templates belong to are read by ``core/marks.py``'s
+# ``scanned_flag`` family, which is where the grammar now lives, so they are not imported
+# here at all.
+from socr.core.manifest import (  # noqa: F401
+    BORN_DIGITAL_NATIVE_TEXT_FLAG,
+    BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+    SCANNED_NATIVE_TEXT_FLAG,
+    SCANNED_PROSE_RECOVERED_FLAG,
     d3_superseded_note,
     judge_timeout_note,
 )
+from socr.core.marks import (
+    DOCUMENT_FAILED_MARK_RE,
+    MARK_FAMILIES,
+    families_of,
+    first_block_lines,
+    first_block_marks,
+    has_any_mark_line,
+    leading_marks,
+    leaks_raw_html,
+    line_is_mark,
+    parse_blocks,
+)
 from socr.core.result import JUDGE_OUTCOME_COMPLETED, FailureMode, PageStatus
+from socr.core.verdict import ENGINE_NATIVE_MATH
 from socr.core.text_coverage import VERDICT_PASSED
 
 # --- violation classes -----------------------------------------------------------------
@@ -171,7 +181,6 @@ METADATA_COUNTS_FIELD = "pages_by_status"
 ENGINE_QWEN = "qwen"
 ENGINE_NATIVE = "native"
 ENGINE_NATIVE_EQUATIONS = "native+equations"
-ENGINE_NATIVE_MATH = "native+math"
 ENGINE_CHART = "chart_asset"
 ENGINE_BLANK = "blank"
 
@@ -192,170 +201,30 @@ UNREADABLE_INPUT_PREFIX = "unreadable_input"
 DOC_FAILED = "failed"
 
 
-# --- mark recognition ------------------------------------------------------------------
-def _canonical_mark(n: int, line: str) -> bool:
-    """The #1130 grammar: ``> [page N unchecked: <check>=FAIL|UNKNOWN; scope=S; reason=R]``."""
-    pattern = rf"> \[page {n} unchecked: [^\];=]+=(?:FAIL|UNKNOWN); scope=[^\];]+; reason=.+\]"
-    return re.fullmatch(pattern, line) is not None
+# --- mark recognition -------------------------------------------------------------------
+# MOVED to ``socr.core.marks`` by #1145, and imported above. ``core`` emits these marks
+# now, so the grammar cannot live in ``benchmark``: an emitter and a meter with separate
+# copies is exactly how a page comes to be marked by one and unmarked by the other.
+# This module's behaviour is unchanged by the move; ``tests/test_acceptance_meter.py``
+# passing unchanged is the pin. The one intended difference is the new
+# ``unaccepted_output`` family, so #1142's ``> [page unaccepted: …]`` counts as a mark.
+#
+# #1144 landed on the pre-move copy of this section, and all of it is kept -- in
+# ``core/marks.py``. Its change was that ``_scanned_flag_mark`` must read the emitters' own
+# enumerations (``PROSE_RECOVERED_FLAGS`` / ``NATIVE_TEXT_FLAGS``) rather than listing the
+# two SCANNED_* templates by name: the lane now serves structure-class floors on
+# BORN-DIGITAL pages, whose banner says "unverified extraction", and all 138 pages #1144
+# recovers are born-digital, so the by-name version counted every one of them
+# ``error_unmarked``. That reading is now in the moved family, over all four templates.
 
-
-def _failed_mark(n: int, line: str) -> bool:
-    """``[page N failed: …]`` (page_failed_marker and the D3/TR-3/invisible-scan floors)."""
-    m = SOCR_MARKER_RE.fullmatch(line)
-    return bool(m) and line.startswith(f"[page {n} failed:")
-
-
-def _table_mark(_n: int, line: str) -> bool:
-    return bool(DISPUTED_TABLE_MARK_RE.match(line) or UNVERIFIED_TABLE_MARK_RE.match(line))
-
-
-def _page_unchecked_mark(_n: int, line: str) -> bool:
-    return bool(PAGE_UNCHECKED_MARK_RE.match(line))
-
-
-#: ``[page N: flagged table kept — …]`` (kept_table_flag_note, #259): the variable tail has
-#: no constant, so the fixed prefix is the recogniser.
-FLAGGED_TABLE_PREFIX = "flagged table kept — "
-
-
-def _flagged_table_mark(n: int, line: str) -> bool:
-    return line.startswith(f"[page {n}: {FLAGGED_TABLE_PREFIX}") and line.endswith("]")
-
-
-def _fixed_note_mark(n: int, line: str) -> bool:
-    """Notes whose whole line is a function of the page number."""
-    return line in {judge_timeout_note(n), d3_superseded_note(n)}
-
-
-def _scanned_flag_mark(n: int, line: str) -> bool:
-    """Every prose-recovery banner this module's lane can stamp.
-
-    #1144: this listed the two SCANNED_* templates by name, which was complete
-    while the lane only served scans. It now serves structure-class floors on
-    BORN-DIGITAL pages, whose banner says "unverified extraction" instead -- and
-    all 138 pages #1144 recovers are born-digital, so the meter counted every
-    one of them ``error_unmarked``. Merging that would have turned 138 MARKED
-    pages into violations of the very rule the meter measures (Fable, PR #1158
-    round 5).
-
-    Read from ``manifest.PROSE_RECOVERED_FLAGS`` and ``NATIVE_TEXT_FLAGS`` --
-    the enumerations the emitters themselves use -- rather than re-listed here,
-    so a banner added later cannot be marked by the lane and unmarked by the
-    meter. ``tests/test_acceptance_meter.py`` pins every member.
-    """
-    return any(
-        line == flag.format(page_num=n) for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
-    )
-
-
-#: #1050 step 2 (not emitted yet): recognised so the meter keeps working once it ships.
-UNCOVERED_TEXT_NOTE = "uncovered text — see image"
-
-
-def _uncovered_text_mark(n: int, line: str) -> bool:
-    return line.startswith(f"[page {n}: {UNCOVERED_TEXT_NOTE}") and line.endswith("]")
-
-
-#: Every visible mark family, with its emitter. The blank receipt (``[socr: blank page]``,
-#: core/blank_page.py) and the fabricated-image receipt (core/url_provenance.py) are
-#: receipts of what socr did, not statements that a check did not run: not marks.
-#: #1144: the banner templates this module re-exports for its callers. Named so
-#: the re-export is deliberate rather than an import that looks unused.
+#: #1144: the banner templates this module re-exports for its callers. Named so the
+#: re-export is deliberate rather than an import that looks unused.
 __all__ = [
+    "BORN_DIGITAL_NATIVE_TEXT_FLAG",
+    "BORN_DIGITAL_PROSE_RECOVERED_FLAG",
     "SCANNED_NATIVE_TEXT_FLAG",
     "SCANNED_PROSE_RECOVERED_FLAG",
 ]
-
-MARK_FAMILIES: dict[str, Callable[[int, str], bool]] = {
-    "canonical_unchecked": _canonical_mark,  # #1130 grammar, not emitted yet
-    "page_failed": _failed_mark,  # core/manifest.py page_failed_marker + floors
-    "table_disputed_or_unverified": _table_mark,  # core/manifest.py #1048
-    "page_unchecked": _page_unchecked_mark,  # core/manifest.py page_unchecked_mark
-    "flagged_table_kept": _flagged_table_mark,  # core/manifest.py kept_table_flag_note
-    "fixed_note": _fixed_note_mark,  # judge_timeout_note (#713), d3_superseded_note
-    "scanned_flag": _scanned_flag_mark,  # every prose-recovery banner (#1144)
-    "uncovered_text": _uncovered_text_mark,  # #1050 step 2
-}
-
-
-def line_is_mark(line: str, page_num: int) -> bool:
-    return any(fam(page_num, line) for fam in MARK_FAMILIES.values())
-
-
-# Visibility is settled by the CommonMark reference parser socr already uses (GH-189's chart
-# reconciler, crop descriptions), not by rules of ours: reference definitions produce no tokens,
-# HTML blocks and code are not text. Same setup as ``figures/crop_descriptions._parse_blocks``.
-_PARSER = MarkdownIt("commonmark").enable("table")
-
-
-def parse_blocks(text: str) -> list[Token]:
-    return _PARSER.parse(text)
-
-
-def first_block_lines(tokens: list[Token]) -> list[str]:
-    """The visible text lines of the FIRST rendered block, or [].
-
-    Only a paragraph, or a block quote opening with a paragraph, counts. Quote lines are given
-    back with their ``> `` prefix (the mark grammars include it). An HTML block, a fence, a
-    heading yields []; a reference definition produces no tokens at all, so it never gets here.
-    """
-    if not tokens:
-        return []
-    if tokens[0].type == "paragraph_open" and len(tokens) > 1:
-        prefix, inline = "", tokens[1]
-    elif (
-        tokens[0].type == "blockquote_open"
-        and len(tokens) > 2
-        and tokens[1].type == "paragraph_open"
-    ):
-        prefix, inline = "> ", tokens[2]
-    else:
-        return []
-    return [prefix + line.rstrip() for line in inline.content.split("\n")]
-
-
-def first_block_marks(tokens: list[Token], page_num: int) -> list[str]:
-    """The mark lines of the first rendered block when EVERY line of it is a mark, else []."""
-    lines = first_block_lines(tokens)
-    return lines if lines and all(line_is_mark(ln, page_num) for ln in lines) else []
-
-
-def leading_marks(text: str, page_num: int) -> list[str]:
-    """MARKED is position-fixed: the first rendered block of *text* is made of mark lines."""
-    return first_block_marks(parse_blocks(text), page_num)
-
-
-_RAW_HTML_ENDS = (
-    (re.compile(r"<!--"), "-->"),
-    (re.compile(r"<\?"), "?>"),
-    (re.compile(r"<!\[CDATA\["), "]]>"),
-    (re.compile(r"<![A-Za-z]"), ">"),
-)
-_RAW_HTML_TAG_RE = re.compile(r"<(script|pre|style|textarea)(?:\s|>|$)", re.IGNORECASE)
-
-
-def leaks_raw_html(tokens: list[Token]) -> bool:
-    """True when the last HTML block is a comment or raw block that never closes: it would
-    swallow whatever follows the fragment in the assembled document."""
-    html = [t for t in tokens if t.type == "html_block"]
-    if not html:
-        return False
-    body = html[-1].content.lstrip()
-    for start, end in _RAW_HTML_ENDS:
-        if start.match(body):
-            return end not in body
-    m = _RAW_HTML_TAG_RE.match(body)
-    return bool(m) and f"</{m.group(1).lower()}>" not in body.lower()
-
-
-def has_any_mark_line(text: str, page_num: int) -> bool:
-    """A mark-shaped line anywhere (used for the contradiction and mark_not_at_top checks)."""
-    return any(line_is_mark(raw.rstrip(), page_num) for raw in text.split("\n"))
-
-
-#: Provisional document-wide failure mark (no emitter exists yet): a failed document's pages
-#: are MARKED only by this at the top of its document .md, never by a page or table mark.
-DOCUMENT_FAILED_MARK_RE = re.compile(r"\[document failed: [^\]\r\n]+\]")
 
 
 def has_document_failure_mark(text: str) -> bool:

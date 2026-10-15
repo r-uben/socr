@@ -44,6 +44,20 @@ from ocr_output_contract import (
 
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
+from socr.core.marks import (
+    CANONICAL_MARK_RE,
+    DISPUTED_TABLE_MARK_RE,
+    leading_mark_blocks,
+    DOCUMENT_FAILED_MARK_RE,
+    PAGE_UNCHECKED_MARK_RE,
+    SOCR_MARKER_RE,
+    UNACCEPTED_OUTPUT_MARK_RE,
+    UNVERIFIED_TABLE_MARK,
+    UNVERIFIED_TABLE_MARK_RE,
+    Check,
+    CheckResult,
+    is_canonical_mark,
+)
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
@@ -58,6 +72,12 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.native_paragraphs import NativeVocabulary, reflow_native_prose
+from socr.core.verdict import (
+    ENGINE_NATIVE_MATH,
+    PageVerdict,
+    build_page_verdict,
+    marks_to_write,
+)
 from socr.core.state import DocumentState, PageState
 
 logger = logging.getLogger(__name__)
@@ -182,10 +202,10 @@ def page_failed_marker(page_num: int) -> str:
 #: adds content": a subtractive step that replaces an invented image reference
 #: with a note has removed content and added a receipt for the removal.
 #:
-#: Defined here, beside ``is_page_failed_marker``, so there is ONE recognizer.
-#: A second copy would drift, and a drifted copy is how a real addition gets
-#: waved through as "just a marker".
-SOCR_MARKER_RE = re.compile(r"\[socr:[^\]\r\n]*\]|\[page \d+ failed:[^\]\r\n]+\]")
+#: There is ONE recognizer. A second copy would drift, and a drifted copy is how
+#: a real addition gets waved through as "just a marker" -- which is why #1145
+#: moved it, with every other mark shape, to ``core/marks.py`` and re-exports it
+#: here so no caller's import changed.
 
 
 def socr_marker(note: str) -> str:
@@ -2832,6 +2852,18 @@ def native_text_flag(page_num: int, *, born_digital: bool) -> str:
     return template.format(page_num=page_num)
 
 
+#: Both recovery shapes together, for the consumers that do not care which it is.
+#:
+#: ``PROSE_RECOVERED_FLAGS`` and ``NATIVE_TEXT_FLAGS`` are #1144's (two members each: the
+#: scan wording and the born-digital "unverified extraction" one). #1145 had declared
+#: single-member versions of the same two names on its own branch, for the same reason, and
+#: #1144's superseded them in the merge -- the point of both was that every consumer asking
+#: "is this line one of this lane's banners" iterates a TUPLE rather than naming members,
+#: because the failure is silent in both directions: a form the meter does not recognise
+#: makes a marked page count as unmarked, and a form the restore path does not recognise
+#: replaces a recovered page's prose with the bare failed-table marker on the next run.
+PROSE_RECOVERY_FLAGS: tuple[str, ...] = (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
+
 #: Audit note recorded on the rebuilt output, so the recovery is visible in the
 #: page sidecar and not only in the bytes.
 SCANNED_PROSE_RECOVERED_NOTE = (
@@ -2882,24 +2914,51 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # run, which is the exact resume loss #649 round 2 closed for the other
     # shape. Both are this module's own bytes and neither is forgeable by a
     # model attempt, because the typed credential above gates them both.
-    # #1144: EVERY form of both banners, not only the "scan" wording. A
-    # born-digital prose recovery whose banner this failed to recognise would be
-    # replaced by the bare marker on the next run -- the exact resume loss #649
-    # round 2 closed for the other shape, reopened by adding a second noun.
+    # #1144: EVERY form of both banners, not only the "scan" wording. A born-digital prose
+    # recovery whose banner this failed to recognise would be replaced by the bare marker on
+    # the next run -- the exact resume loss #649 round 2 closed for the other shape,
+    # reopened by adding a second noun.
     return _is_prose_recovery_body(text, page_num)
 
 
 def _is_prose_recovery_body(text: str, page_num: int) -> bool:
     """Whether *text* is a body this module's prose-recovery lane authored.
 
-    #1144 round 4: factored out of ``_is_restored_prose_recovery`` so the
-    structure-class ending can record the recovery from the SAME evidence the
-    restore path reads -- the banner this module stamps, in every one of its
-    forms -- rather than from a separate flag that could disagree with the bytes.
-    These banners are socr's own and no model attempt can forge them.
+    #1144 round 4: factored out of ``_is_restored_prose_recovery`` so the structure-class
+    ending can record the recovery from the SAME evidence the restore path reads -- the
+    banner this module stamps, in every one of its forms -- rather than from a separate flag
+    that could disagree with the bytes. These banners are socr's own and no model attempt
+    can forge them.
+
+    #1145: the banner must be at the top of the BODY, not at byte 0 of the text, and the fix
+    lives HERE rather than in the restore path alone so both callers get it. This lane's
+    page ships real prose, and the ``scanned_flag`` family covers only the four table checks
+    -- so an uncovered clause (a judge refusal, measured on the #1129 fixture in
+    ``tests/test_gh649_scanned_prose_recovery.py``) writes a canonical line above the
+    banner, and a bare ``startswith`` would then call the page NOT a recovery and replace
+    its whole recovered text with the bare failed-table marker on the next run. That is the
+    same resume loss #649 round 2 closed, reached through a new door, and it is content
+    loss: the prose this lane exists to save.
+
+    Only this module's OWN canonical lines are skipped, and only lines carrying THIS page's
+    number: ``is_canonical_mark`` is page-strict, where ``CANONICAL_MARK_RE`` alone matches
+    any page number and so would skip a line about page 9 above page 4's banner. Not "any
+    leading line", which would be the forgeable rule the caller's docstring rejects -- a
+    model echoing a banner mid-body is still not reached, because the first non-canonical
+    line is what is tested.
     """
+    body = text or ""
+    while True:
+        head, sep, rest = body.partition("\n")
+        if not head.strip():
+            body = rest if sep else ""
+            continue
+        if is_canonical_mark(head.strip(), page_num):
+            body = rest if sep else ""
+            continue
+        break
     return any(
-        (text or "").startswith(flag.format(page_num=page_num))
+        body.startswith(flag.format(page_num=page_num))
         for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
     )
 
@@ -3501,6 +3560,9 @@ class _FinalizedPageRecord:
     output: PageOutput
     disposition: PageDisposition
     selection_provenance: SelectionProvenance
+    #: #1145: why this page is not CHECKED, and the marks that say so. ``None`` only on
+    #: records built outside the seam; the seam always sets it.
+    verdict: PageVerdict | None = None
 
 
 FinalizedPageRecord = _FinalizedPageRecord
@@ -3558,7 +3620,7 @@ def _select_page_output_tagged(
         and not getattr(p, "native_rotated_text_shredded", False)
         and not math_hybrid_blocked_by_table
         and math_hybrid in p.attempts
-        and (math_hybrid.engine or "") == "native+math"
+        and (math_hybrid.engine or "") == ENGINE_NATIVE_MATH
     ):
         return replace(
             math_hybrid,
@@ -4650,15 +4712,9 @@ def _apply_label_unverified_guard(output: PageOutput) -> PageOutput:
 #: rendered Markdown. Machine-findable by ``UNVERIFIED_TABLE_MARK_RE``; the text
 #: is fixed (the reason lives in the audit events and ``tables_trust.json``) so a
 #: consumer can count marks with one grep. Documented in docs/OUTPUT.md.
-UNVERIFIED_TABLE_MARK: str = (
-    "> [table unverified: socr could not check this table against the page; "
-    "verify it against the page image before citing]"
-)
-UNVERIFIED_TABLE_MARK_RE = re.compile(r"^> \[table unverified: ", re.MULTILINE)
-#: #1048 (owner ruling 2026-10-12): the stronger mark for a scanned table whose numbers or
-#: labels a second reading (Tesseract) disputes. It names the first disputed values and links
-#: the page image the floor already renders (``figures/failed_table_pN.png``).
-DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)
+#: ``UNVERIFIED_TABLE_MARK`` / ``_RE`` and ``DISPUTED_TABLE_MARK_RE`` (#1048, owner
+#: ruling 2026-10-12: the stronger mark for a scanned table whose numbers or labels a
+#: second reading disputes) moved to ``core/marks.py`` in #1145 and are imported above.
 _IMAGE_REF_PATH_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 
 
@@ -4716,12 +4772,10 @@ def disputed_table_mark(values: Sequence[str] | str, png_ref: str) -> str:
     )
 
 
-PAGE_UNCHECKED_MARK_RE = re.compile(r"^> \[page unchecked: ")
-
-#: #1129: first-line mark when the page judge refused or crashed but the model
-#: reading still ships via ``BEST_OUTPUT_UNVERIFIED``. Machine-findable by
-#: ``UNACCEPTED_OUTPUT_MARK_RE``; documented in docs/OUTPUT.md.
-UNACCEPTED_OUTPUT_MARK_RE = re.compile(r"^> \[page unaccepted: ")
+#: ``PAGE_UNCHECKED_MARK_RE`` (#1048) and ``UNACCEPTED_OUTPUT_MARK_RE`` (#1129: the
+#: first-line mark when the page judge refused or crashed but the model reading still
+#: ships via ``BEST_OUTPUT_UNVERIFIED``) moved to ``core/marks.py`` in #1145 and are
+#: imported above. Both are documented in docs/OUTPUT.md.
 #: Cap embedded judge reason length so one blockquote line stays readable.
 _UNACCEPTED_OUTPUT_MARK_REASON_CAP = 160
 
@@ -4846,6 +4900,10 @@ _KEPT_JUDGE_REJECTION_FAILURE_MODE_PROVENANCES: frozenset[SelectionProvenance] =
 _PAGE_TOP_BANNER_RES: tuple[re.Pattern[str], ...] = (
     UNACCEPTED_OUTPUT_MARK_RE,
     PAGE_UNCHECKED_MARK_RE,
+    #: #1145's canonical line. Listed here and NOWHERE looser: a rule that treated any
+    #: leading blockquote as a banner would reorder a page whose body legitimately opens
+    #: with a quotation.
+    CANONICAL_MARK_RE,
 )
 
 
@@ -5054,6 +5112,61 @@ def _apply_unaccepted_output_mark(
         return output
     text = _with_page_top_banners(body, new_banners)
     return replace(output, text=text)
+
+
+def _apply_verdict_marks(
+    output: PageOutput,
+    p,
+    page_num: int,
+    published: PageVerdict | None = None,
+    provenance: SelectionProvenance | None = None,
+) -> tuple[PageOutput, PageVerdict]:
+    """#1145: build this page's verdict and put its marks first on the page.
+
+    Runs at the ``_select_and_finalize_page`` seam, after every guard, so the fragments,
+    the final ``.md``, the manifest and a resume all see one text (the #1048/#1129 pattern).
+
+    Two things keep CHECKED pages byte-identical:
+
+    * the gate is the UNCOVERED-mark list, never the clause list. A WARNING page whose
+      leading block already states its only clause has a NON-empty clause list and must
+      still emit nothing -- gating on the clauses would run ``_with_page_top_banners``
+      over it and renormalise separators it was not asked to touch.
+    * a CHECKED page has no clause at all, so ``replace`` is never reached.
+    """
+    text = output.text or ""
+    leading, _ = _split_page_top_banners(text)
+    verdict = build_page_verdict(
+        page_num=page_num, output=output, p=p, published=published, provenance=provenance
+    )
+    # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
+    # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
+    # whole page or only for the table it stands in place of.
+    marks = [
+        m
+        for m in marks_to_write(
+            verdict, leading_mark_blocks(text, page_num), is_page_failed_marker(text)
+        )
+        if m not in leading
+    ]
+    if not marks:
+        return output, verdict
+    if is_page_failed_marker(text):
+        # NEVER put a line above a whole-page failure marker. ``is_page_failed_marker``
+        # tests the FIRST line (GH-371), so a line above it makes the page stop reading as
+        # a marker to every consumer -- selection's disposition classifier, the scanned
+        # figure guard, the resume gate. The page is already MARKED by that marker, and
+        # ``page_failed_coverage`` says so, so this is belt-and-braces: it holds even if a
+        # future clause is scoped to a region and so escapes suppression.
+        return output, verdict
+    banners, body = _split_page_top_banners(text)
+    # Canonical lines go AFTER any banner already at the top, not above it. #1129's
+    # ``> [page unaccepted: …]`` is the specific headline for a judge refusal and its
+    # contract (docs/OUTPUT.md, and its own tests) is that it is the page's FIRST line; the
+    # canonical clause line is the general form and must not displace it. Both land in the
+    # same leading block, so the page is MARKED either way -- the meter asks that the first
+    # rendered BLOCK be all marks, not that one particular line be first.
+    return replace(output, text=_with_page_top_banners(body, [*banners, *marks])), verdict
 
 
 def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
@@ -5362,6 +5475,8 @@ def _select_and_finalize_page(
       9c. _apply_native_paragraphs (#1074)
       9d. _apply_unverified_table_mark (#1048)
       9e. _apply_unaccepted_output_mark (#1129)
+      9f. _apply_verdict_marks (#1145) -- LAST, so the verdict sees the final bytes and
+          every mark an earlier step already put at the top.
       10. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -5385,6 +5500,21 @@ def _select_and_finalize_page(
         output = _apply_native_paragraphs(output, p, state.native_vocabulary)
         output = _apply_unverified_table_mark(output, p)
     output = _apply_unaccepted_output_mark(output, provenance, p)
+    # #1145 step 9f. A resumed page takes the verdict its original run PUBLISHED: two
+    # clause inputs (``table_label_unverified``; slice 3's escalation predicate, which
+    # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so
+    # the page would come back from a resume looking cleaner than it left.
+    output, verdict = _apply_verdict_marks(
+        output,
+        p,
+        page_num,
+        published=getattr(p, "published_verdict", None),
+        # #1145 round 2: the ENDING, not only the output. Two clauses are about who authored
+        # the shipped bytes -- a judge refusal recorded on a body the judge never saw, and
+        # native glyph damage on a page a model reading replaced -- and neither can be
+        # decided from the output alone.
+        provenance=provenance,
+    )
 
     # #713: stamp the finalized body's digest onto the credential, HERE, after
     # every guard above has had its say. The credential's ``candidate_sha256``
@@ -5478,6 +5608,7 @@ def _select_and_finalize_page(
         output=output,
         disposition=disposition,
         selection_provenance=provenance,
+        verdict=verdict,
     )
 
 

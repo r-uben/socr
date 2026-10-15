@@ -20,6 +20,8 @@ from socr.core.html_tables import (
     convert_html_tables,
     strip_html_tags,
 )
+from verdict_marks_helper import strip_verdict_marks
+
 from socr.core.manifest import (
     _winning_page_output,
     is_page_failed_marker,
@@ -187,7 +189,11 @@ class TestNoSilentEmptyPages:
         state.pages[1].best_output = None  # judge rejection
 
         winner = _winning_page_output(state, 1, None)
-        assert winner.text == "Substantial rejected table text"
+        # #1145: the page is not CHECKED, so it carries a canonical mark block first. The
+        # body comparison below is the ORIGINAL one, byte for byte, on the stripped text;
+        # ``strip_verdict_marks`` asserts the block was there and well-formed, so this
+        # cannot pass if the mark stops being emitted.
+        assert strip_verdict_marks(winner.text, 1) == "Substantial rejected table text"
         assert winner.audit_passed is False
         assert winner.status == PageStatus.WARNING
 

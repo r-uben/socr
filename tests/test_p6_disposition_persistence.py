@@ -259,7 +259,11 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
     meta = json.loads(sidecar_path.read_text())
 
     assert "disposition" in meta
-    without_disp = {k: v for k, v in meta.items() if k != "disposition"}
+    # #1145 adds ``verdict`` as a second additive key, so the "pre-additive" view strips
+    # both. The pair is pinned by the final assertion below, which still fails if any
+    # THIRD key appears.
+    assert "verdict" in meta
+    without_disp = {k: v for k, v in meta.items() if k not in ("disposition", "verdict")}
 
     # Canonical pre-disposition sidecar key set
     expected_pre_keys = {
@@ -321,7 +325,11 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "attempts_summary",
     }
     assert set(without_disp.keys()) == expected_pre_keys
-    assert set(meta.keys()) - expected_pre_keys == {"disposition"}
+    # #1145 adds a second additive key, ``verdict`` (why the page is not CHECKED and the
+    # marks that say so). Like ``judge_accepted`` it is omitted when absent, so an
+    # already-terminal page's content-addressed fingerprint does not move. The assertion
+    # keeps its force: any THIRD key appearing here still fails it.
+    assert set(meta.keys()) - expected_pre_keys == {"disposition", "verdict"}
 
 
 def test_flush_page_sidecar_accepts_record_and_never_serializes_provenance(tmp_path: Path) -> None:

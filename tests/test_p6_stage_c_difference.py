@@ -105,14 +105,25 @@ class TestStageCCompleteExactDelta:
         norm_old = normalize_capture(prechange)
         norm_new = normalize_capture(current)
 
-        for entry in EXPECTED_STAGE_C_DIFFERENCE_ENTRIES:
-            curr_old = norm_old
-            for step in entry.path:
-                curr_old = curr_old[step]
+        def walk(obj: Any, path: tuple) -> Any:
+            """Follow *path*, reading an absent dict key as ``None``.
 
-            curr_new = norm_new
-            for step in entry.path:
-                curr_new = curr_new[step]
+            ``compute_leaf_diff`` reports a key present on one side only as
+            ``(None, value)``, so an entry for an ADDED key (#1145's ``verdict``) carries
+            ``old_value=None``. Walking with ``[]`` would raise ``KeyError`` there and the
+            per-entry check could not cover added keys at all. Only a MISSING key reads as
+            None: a key present with value ``None`` is indistinguishable from it here, and
+            that is exactly the equivalence ``compute_leaf_diff`` already makes.
+            """
+            for step in path:
+                if isinstance(obj, dict) and step not in obj:
+                    return None
+                obj = obj[step]
+            return obj
+
+        for entry in EXPECTED_STAGE_C_DIFFERENCE_ENTRIES:
+            curr_old = walk(norm_old, entry.path)
+            curr_new = walk(norm_new, entry.path)
 
             assert curr_old == entry.old_value, (
                 f"Old value mismatch at {entry.path}: "
@@ -325,25 +336,35 @@ class TestCleanAndFloorControls:
         )
 
     def test_controls_sidecar_audit_log_trust_manifest_and_markdown(
-        self, current: dict[str, Any], prechange: dict[str, Any]
+        self, current: dict[str, Any], patched_prechange: dict[str, Any]
     ) -> None:
-        """All control surfaces equal prechange after normalization."""
+        """All control surfaces equal the ORACLE-PATCHED prechange after normalization.
+
+        The baseline moved from the raw capture to the patched one under #1145, for the
+        same reason page 8 already sat outside the tables-trust check below under #1129:
+        page 11 (``hybrid_clean``) is a corrupt-math hybrid winner, which is a page socr
+        did not CHECK, so it now carries the canonical unchecked line, and both control
+        pages gain the additive ``verdict`` key. Strictness is unchanged -- the patch is
+        the enumerated oracle, so anything these surfaces do beyond those entries still
+        fails here.
+        """
         for p in (STRUCT_FLOOR_PAGE, HYBRID_CLEAN_PAGE):
             sidecar_key = f"p6_corpus/pages/{p:05d}.json"
             frag_key = f"p6_corpus/pages/{p:05d}.md"
 
             assert normalize_capture(current["sidecars"][sidecar_key]) == normalize_capture(
-                prechange["sidecars"][sidecar_key]
+                patched_prechange["sidecars"][sidecar_key]
             )
-            assert current["markdown"][frag_key] == prechange["markdown"][frag_key]
+            assert current["markdown"][frag_key] == patched_prechange["markdown"][frag_key]
 
             manifest_p_curr = current["manifest"][0]["entries"][str(p)]
-            manifest_p_old = prechange["manifest"][0]["entries"][str(p)]
+            manifest_p_old = patched_prechange["manifest"][0]["entries"][str(p)]
             assert normalize_capture(manifest_p_curr) == normalize_capture(manifest_p_old)
 
-        # Tables trust for page 10 (page 8 changes under #1129 unaccepted mark)
+        # Tables trust for page 10 (page 8 changes under #1129 unaccepted mark). #1145
+        # moves no tables-trust leaf, so the patched and raw baselines agree here.
         trust_curr = current["tables_trust"][0]["pages"]
-        trust_old = prechange["tables_trust"][0]["pages"]
+        trust_old = patched_prechange["tables_trust"][0]["pages"]
         assert trust_curr[str(STRUCT_FLOOR_PAGE)] == trust_old[str(STRUCT_FLOOR_PAGE)]
 
 

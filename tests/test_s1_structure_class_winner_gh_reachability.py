@@ -74,6 +74,7 @@ from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
+from verdict_marks_helper import strip_verdict_marks
 
 # Written as LITERALS, not imported: importing the constants would make this
 # file fail at the pre-S1 baseline with an ImportError instead of on
@@ -1075,7 +1076,8 @@ def test_reaches_branch_is_false_for_a_prose_page_with_a_refused_model_attempt(
     )
     winner = _winning_page_output(state, 1)
     assert winner.engine == "native", winner.engine
-    assert winner.text == NATIVE_FLATTENED, (
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winner.text, 1) == NATIVE_FLATTENED, (
         f"a non-table page must ship native's OWN text, demoted via the "
         f"pre-existing legacy path -- never the model's grid attempt; "
         f"got: {winner.text!r}"

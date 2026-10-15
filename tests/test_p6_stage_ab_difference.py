@@ -59,6 +59,7 @@ import pytest
 from conftest import P6_BUCKET_NAMES, assert_stage_c_disposition_buckets, old_disposition_buckets
 from p6_corpus_fixture import build_corpus_state, capture, make_pdf
 from p6_stage_c_oracle import (
+    ADDITIVE_SIDECAR_KEYS,
     VOLATILE_KEYS,
     apply_stage_c_patch,
     assert_capture_diff_matches_oracle,
@@ -340,14 +341,20 @@ class TestPreChangeByteIdentity:
         """
         raw = json.loads(PRECHANGE.read_text())
         for name, sidecar in current["sidecars"].items():
-            gained = set(sidecar) - set(raw["sidecars"][name]) - VOLATILE_KEYS
+            gained = (
+                set(sidecar) - set(raw["sidecars"][name]) - VOLATILE_KEYS - ADDITIVE_SIDECAR_KEYS
+            )
             lost = set(raw["sidecars"][name]) - set(sidecar)
             assert not gained and not lost, (name, gained, lost)
             assert "disposition" in sidecar
+            # Every enumerated addition must actually BE there, on every page. Subtracting
+            # the set without this would turn the allowance into a hole: a key that is
+            # listed as additive but emitted on only some pages would pass silently.
+            assert ADDITIVE_SIDECAR_KEYS <= set(sidecar), (name, ADDITIVE_SIDECAR_KEYS)
         entries = current["manifest"][0]["entries"]
         old_entries = raw["manifest"][0]["entries"]
         for page_key, entry in entries.items():
-            gained = set(entry) - set(old_entries[page_key]) - VOLATILE_KEYS
+            gained = set(entry) - set(old_entries[page_key]) - VOLATILE_KEYS - ADDITIVE_SIDECAR_KEYS
             lost = set(old_entries[page_key]) - set(entry)
             assert not gained and not lost, (page_key, gained, lost)
             assert "disposition" in entry

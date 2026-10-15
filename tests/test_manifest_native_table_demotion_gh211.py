@@ -17,6 +17,7 @@ from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import _winning_page_output  # noqa: E402
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState  # noqa: E402
+from verdict_marks_helper import strip_verdict_marks
 
 
 def _make_pdf(path):
@@ -80,7 +81,8 @@ def test_demoted_native_table_preserves_appended_equation_sidecar(tmp_path) -> N
         "demoting the native table's trust discarded content appended after "
         "native capture (GH-36b equation sidecar) -- silent content loss"
     )
-    assert winning.text.startswith("| A | B |")
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winning.text, 1).startswith("| A | B |")
     assert winning.status is PageStatus.WARNING
     assert winning.audit_passed is False
     assert winning.failure_mode is FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
@@ -91,7 +93,8 @@ def test_demoted_native_table_without_sidecar_ships_native_text(tmp_path) -> Non
 
     winning = _winning_page_output(state, 1)
 
-    assert winning.text == "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winning.text, 1) == "| A | B |\n| --- | --- |\n| 1 | 2 |"
     assert winning.status is PageStatus.WARNING
     assert winning.audit_passed is False
 
@@ -196,7 +199,8 @@ def test_ocr_attempt_text_never_substitutes_for_native(tmp_path) -> None:
 
     winning = _winning_page_output(state, 1)
 
-    assert winning.text == native_text
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winning.text, 1) == native_text
     assert "OCR EXTRA" not in winning.text
     assert "COMPLETELY DIFFERENT" not in winning.text
 

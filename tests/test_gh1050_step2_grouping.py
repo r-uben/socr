@@ -912,8 +912,18 @@ def test_the_reader_never_sees_native_text(tmp_path: Path, fixture: str) -> None
 
     with _fitz.open(pdf) as doc:
         native = plain_text_tokens(doc[0].get_text())[1]
+    # #1145: a MARK is socr's own disclosure, not recovered content, and it is quoted --
+    # so a blockquote filter alone now sweeps up the canonical unchecked line, whose own
+    # wording ("this page", "native_coverage") is then counted as native text the reader
+    # saw. Excluded through PRODUCTION's recogniser, so a mark that stops being recognised
+    # fails this test rather than silently widening the exclusion. The assertion keeps its
+    # full strength: every genuinely recovered word is still compared.
+    from socr.core.marks import line_is_mark
+
     recovered = "\n".join(
-        ln.lstrip("> ") for ln in body.splitlines() if ln.startswith(">") and "(OCR" not in ln
+        ln.lstrip("> ")
+        for ln in body.splitlines()
+        if ln.startswith(">") and "(OCR" not in ln and not line_is_mark(ln.rstrip(), 1)
     )
     leaked = plain_text_tokens(recovered)[1] & native
     assert not leaked, f"the reader saw native text: {sorted(leaked)}"

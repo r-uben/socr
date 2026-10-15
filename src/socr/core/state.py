@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from socr.core.born_digital import DocumentAssessment
 from socr.core.document import DocumentHandle
@@ -160,6 +161,13 @@ class PageState:
     equation_region_evidence: dict | None = None
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
+    #: #1145: the ``PageVerdict`` this page's ORIGINAL run wrote to its sidecar, set only
+    #: by the resume reader. When present the seam uses it instead of recomputing: two
+    #: clause inputs do not survive a resume (``PageOutput.table_label_unverified`` is not
+    #: serialized; slice 3's escalation predicate reads ``attempts``, which resume rebuilds
+    #: as the single frozen winner), so a recomputed verdict would silently drop them.
+    #: Typed ``Any`` to keep this module free of a ``core.verdict`` import.
+    published_verdict: Any = None
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax
     #: is not a mathematical-fidelity oracle). Read only by final winner selection.

@@ -296,7 +296,15 @@ def test_every_prose_recovery_banner_is_recognised_as_a_mark() -> None:
     assert len(flags) == 4, "two banners x two page kinds; update this pin deliberately"
     for flag in flags:
         line = flag.format(page_num=7)
-        assert acceptance._scanned_flag_mark(7, line), line
+        # #1145 moved the family out of ``benchmark`` into ``core.marks``, because ``core``
+        # now EMITS these marks and an emitter and a meter with separate copies of the
+        # grammar is how a page comes to be marked by one and unmarked by the other. So the
+        # question is asked through the meter's public surface rather than through a private
+        # function name: ``_scanned_flag_mark`` is private to another package now, and
+        # ``tests/test_package_layering.py`` rightly refuses that import. ``families_of``
+        # and ``line_is_mark`` are the same question, and are what the meter itself calls.
+        assert "scanned_flag" in acceptance.families_of(line, 7), line
+        assert acceptance.line_is_mark(line, 7), line
     # The born-digital wording specifically, since that is the one that was missing.
     assert any("unverified extraction" in f for f in flags)
     assert any("unverified scan" in f for f in flags)

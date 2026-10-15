@@ -74,6 +74,7 @@ __all__ = [
     "STAGE_C_PAGE_LABELS",
     "STAGE_C_PAGE_COUNT",
     "VOLATILE_KEYS",
+    "ADDITIVE_SIDECAR_KEYS",
     "LeafPath",
     "ExpectedDiff",
     "normalize_capture",
@@ -90,6 +91,8 @@ __all__ = [
     "CLI_DIFFERENCES",
     "RESULT_ERROR_DIFFERENCES",
     "METADATA_DIFFERENCES",
+    "PAGE_TOP_MARK_1145_DIFFERENCES",
+    "VERDICT_SIDECAR_1145_DIFFERENCES",
 ]
 
 #: Volatile keys excluded from canonical byte comparison.
@@ -116,6 +119,22 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
         # and the --retry-failed-pages record (tests/test_retry_failed_pages.py).
         "table_ladder_superseded",
         "page_retry",
+    }
+)
+
+#: Sidecar keys that did not exist at the frozen pre-change baseline and do now.
+#:
+#: Deliberately SEPARATE from ``VOLATILE_KEYS``: a volatile key is excised from the
+#: comparison entirely, whereas each key here is compared in full, value by value, through
+#: a real ``ExpectedDiff`` entry per page (``VERDICT_SIDECAR_1145_DIFFERENCES``). This set
+#: exists only so the "no key moved" pin can say which additions are accounted for. A key
+#: added without an entry here still fails that pin, and a key here without entries still
+#: fails the oracle, so neither half can be satisfied alone.
+ADDITIVE_SIDECAR_KEYS: frozenset[str] = frozenset(
+    {
+        # #1145: the per-page verdict. Pinned per page by
+        # VERDICT_SIDECAR_1145_DIFFERENCES and by tests/test_gh1145_*.py.
+        "verdict",
     }
 )
 
@@ -234,6 +253,14 @@ def apply_stage_c_patch(
             else:
                 curr = curr[step]
         last_step = path[-1]
+        # An entry whose old value is None may be an ADDED key: #1145's ``verdict`` does
+        # not exist on the pre-change sidecars at all, and ``compute_leaf_diff`` already
+        # reports an absent key as ``(None, new)``, so the two agree. Only an absent key
+        # is tolerated here -- a key that is PRESENT with an unexpected value still
+        # raises, so the patch cannot paper over a changed value.
+        if expected_old is None and isinstance(curr, dict) and last_step not in curr:
+            curr[last_step] = copy.deepcopy(new_val)
+            continue
         current_val = curr[last_step]
         if current_val != expected_old:
             raise ValueError(
@@ -972,95 +999,302 @@ METADATA_DIFFERENCES: list[ExpectedDiff] = [
         description="Per-document metadata.json error string matches result_error delta.",
     ),
 ]
-UNACCEPTED_OUTPUT_1129_DIFFERENCES: list[ExpectedDiff] = [
+#: #1129's eleven entries ALL moved into ``PAGE_TOP_MARK_1145_DIFFERENCES`` below.
+#:
+#: Not a deletion of #1129's ledger: every one of its leaves (pages 3 and 8, their
+#: fragments, the assembled ``.md``, their sidecar text and fingerprint, and their manifest
+#: blob_ref) is a leaf #1145 ALSO changes, because the canonical unchecked line lands in the
+#: same leading block as the unaccepted banner. A leaf can hold one value, so it gets one
+#: entry, and each moved entry's description names both tickets. Kept as an empty list, with
+#: this note, so the #1129 provenance stays findable at the name a reader will grep for.
+UNACCEPTED_OUTPUT_1129_DIFFERENCES: list[ExpectedDiff] = []
+
+
+#: #1145 slice 1: the canonical unchecked line, and the leaves it moves.
+#:
+#: Every entry below is the measured delta from the frozen pre-change capture, not a
+#: regenerated fixture. Eleven of them SUPERSEDE a #1129 entry at the same leaf path:
+#: pages 3 and 8 carry #1129's unaccepted banner AND a canonical line in the same
+#: leading block, so the leaf's value is the product of both changes and can only be
+#: enumerated once. Those eleven moved here out of the #1129 list so that exactly one
+#: entry owns each path and the granular per-entry check stays load-bearing.
+PAGE_TOP_MARK_1145_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "11", "blob_ref"),
+        old_value="598c3fdb3e3dc058f30918b66b553aa48db7c83ae000fcaeb0f94b17e76afd66",
+        new_value="828f07f460a5428fa6ba3c3e8e36311ae13566dfe5f8bb25658bb87491f8011d",
+        description="#1145: page 11 (hybrid_clean) gains the canonical unchecked line as its first rendered block. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00011.md"),
+        old_value="native prose plus crop-backed region candidate",
+        new_value="> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate",
+        description="#1145: page 11 (hybrid_clean) gains the canonical unchecked line as its first rendered block. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 10, "winning_output", "text"),
+        old_value="native prose plus crop-backed region candidate",
+        new_value="> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate",
+        description="#1145: page 11 (hybrid_clean) gains the canonical unchecked line as its first rendered block. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00011.json", "page_fingerprint"),
+        old_value="sha256:598c3fdb3e3dc058f30918b66b553aa48db7c83ae000fcaeb0f94b17e76afd66",
+        new_value="sha256:828f07f460a5428fa6ba3c3e8e36311ae13566dfe5f8bb25658bb87491f8011d",
+        description="#1145: page 11 (hybrid_clean) gains the canonical unchecked line as its first rendered block. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00011.json", "winning_output", "text"),
+        old_value="native prose plus crop-backed region candidate",
+        new_value="> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate",
+        description="#1145: page 11 (hybrid_clean) gains the canonical unchecked line as its first rendered block. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
     ExpectedDiff(
         path=("manifest", 0, "entries", "3", "blob_ref"),
         old_value="2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
-        new_value="135dd862913ea83fdb9e2242567e5eff6dd345c96068071728eb0ebb57004d71",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
-    ),
-    ExpectedDiff(
-        path=("markdown", "p6_corpus/p6_corpus.md"),
-        old_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
-        new_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
-    ),
-    ExpectedDiff(
-        path=("markdown", "p6_corpus/pages/00003.md"),
-        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
-    ),
-    ExpectedDiff(
-        path=("page_contract", 2, "winning_output", "text"),
-        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
-    ),
-    ExpectedDiff(
-        path=("sidecars", "p6_corpus/pages/00003.json", "page_fingerprint"),
-        old_value="sha256:2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
-        new_value="sha256:135dd862913ea83fdb9e2242567e5eff6dd345c96068071728eb0ebb57004d71",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
-    ),
-    ExpectedDiff(
-        path=("sidecars", "p6_corpus/pages/00003.json", "winning_output", "text"),
-        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+        new_value="8e145ec962b4e7c4166aea9f0210504628c470ec06f40e3352590fe25facb1c8",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
     ),
     ExpectedDiff(
         path=("manifest", 0, "entries", "8", "blob_ref"),
         old_value="9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
-        new_value="7a5726d64f7bb069899de7868b3ad0e8f357c584c5de9c8c8f921a5331ea7fc9",
-        description=(
-            "#1129: structure-class grid-flagged page 8 (rejection_class=ambiguous_deferred) "
-            "gains the unaccepted-output blockquote."
-        ),
+        new_value="597b18ef36a1a1eb1fc26e544f827b0c90f5e630a4d750cb0dff0f16ef6c21e0",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/p6_corpus.md"),
+        old_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
+        new_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\n> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00003.md"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
     ),
     ExpectedDiff(
         path=("markdown", "p6_corpus/pages/00008.md"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value=(
-            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
-            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
-            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
-        ),
-        description=(
-            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
-        ),
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 2, "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
     ),
     ExpectedDiff(
         path=("page_contract", 7, "winning_output", "text"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value=(
-            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
-            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
-            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
-        ),
-        description=(
-            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
-        ),
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "page_fingerprint"),
+        old_value="sha256:2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
+        new_value="sha256:8e145ec962b4e7c4166aea9f0210504628c470ec06f40e3352590fe25facb1c8",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00008.json", "page_fingerprint"),
         old_value="sha256:9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
-        new_value="sha256:7a5726d64f7bb069899de7868b3ad0e8f357c584c5de9c8c8f921a5331ea7fc9",
-        description=(
-            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
-        ),
+        new_value="sha256:597b18ef36a1a1eb1fc26e544f827b0c90f5e630a4d750cb0dff0f16ef6c21e0",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00008.json", "winning_output", "text"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value=(
-            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
-            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
-            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
-        ),
-        description=(
-            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
-        ),
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+    ),
+]
+
+#: #1145 slice 1: the additive ``verdict`` sidecar key, enumerated page by page.
+#:
+#: NOT added to ``VOLATILE_KEYS``. The #1027/#1030 precedent put additive sidecar keys
+#: there, but ``verdict`` is deterministic, it is the field this ticket is ABOUT, and
+#: excising it would make the oracle blind to a wrong verdict on any page. Enumerated,
+#: it is the opposite: the table below is the whole per-page result of the clause
+#: derivation on this corpus, and a clause that changes, appears or disappears fails
+#: here with its page named.
+VERDICT_SIDECAR_1145_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00001.json", "verdict"),
+        old_value=None,
+        new_value={"page_num": 1, "clauses": []},
+        description="#1145: page 1 (clean_born_digital) gains the additive ``verdict`` sidecar key. CHECKED: no clause, so no mark and byte-identical output.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 2,
+            "clauses": [
+                {
+                    "check": "table_structure",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "this page's native table structure could not be read",
+                }
+            ],
+        },
+        description="#1145: page 2 (d3_floor) gains the additive ``verdict`` sidecar key. the D3-floor page withheld its table; its whole body is the [page 2 failed: ...] marker, so page_failed_coverage suppresses the line and the bytes do not move.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 3,
+            "clauses": [
+                {
+                    "check": "native_table_verifier",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "a model table ships here over a native floor that failed verification",
+                },
+                {
+                    "check": "page_judge",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "the page judge did not accept the bytes that ship",
+                },
+            ],
+        },
+        description="#1145: page 3 (d3_model_kept) gains the additive ``verdict`` sidecar key. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "verdict"),
+        old_value=None,
+        new_value={"page_num": 4, "clauses": []},
+        description="#1145: page 4 (cold_review_shape_one) gains the additive ``verdict`` sidecar key. CHECKED: the D3 flags are on the native candidate, but the model reading that ships was accepted by the judge, so no check failed on the shipped bytes.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "verdict"),
+        old_value=None,
+        new_value={"page_num": 5, "clauses": []},
+        description="#1145: page 5 (cold_review_shape_two) gains the additive ``verdict`` sidecar key. CHECKED, same shape as page 4.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00006.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 6,
+            "clauses": [
+                {
+                    "check": "unknown",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                    "reason": "socr did not confirm this page and did not record which check failed (status error, failure mode none)",
+                }
+            ],
+        },
+        description="#1145: page 6 (no_text_failure) gains the additive ``verdict`` sidecar key. ERROR with failure_mode=none: no field names the failed check, so the fail-closed fallback fires. The body is the [page 6 failed: ...] marker, so no line is written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "verdict"),
+        old_value=None,
+        new_value={"page_num": 7, "clauses": []},
+        description="#1145: page 7 (passing_model) gains the additive ``verdict`` sidecar key. CHECKED: a passing model reading.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00008.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 8,
+            "clauses": [
+                {
+                    "check": "native_table_verifier",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "no table-ladder rung accepted this page's table and the model reading still ships",
+                },
+                {
+                    "check": "page_judge",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "the page judge did not accept the bytes that ship",
+                },
+            ],
+        },
+        description="#1145: page 8 (struct_model_passing) gains the additive ``verdict`` sidecar key. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00009.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 9,
+            "clauses": [
+                {
+                    "check": "table_structure",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "a table on this page cannot be represented faithfully and was withheld",
+                },
+                {
+                    "check": "page_judge",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "the page judge did not accept the bytes that ship",
+                },
+            ],
+        },
+        description="#1145: page 9 (struct_model_rewritten) gains the additive ``verdict`` sidecar key. the table was withheld as an invalid emission and the judge refused; the body is the [page 9 failed: ...] marker, so neither clause writes a line.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 10,
+            "clauses": [
+                {
+                    "check": "native_table_verifier",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "every rung of the table ladder was exhausted without accepting this page's grid",
+                }
+            ],
+        },
+        description="#1145: page 10 (struct_floor) gains the additive ``verdict`` sidecar key. the struct-floor page exhausted every ladder rung; its body is the [page 10 failed: ...] marker, so no line is written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00011.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 11,
+            "clauses": [
+                {
+                    "check": "equation_fidelity",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "a corrupt equation candidate ships on this page without a verified reading",
+                }
+            ],
+        },
+        description="#1145: page 11 (hybrid_clean) gains the additive ``verdict`` sidecar key. the corrupt-math hybrid winner (engine native+math, AUDIT_FAILED with no judge refusal evidence at all). equation_fidelity, NOT page_judge: see verdict._judge_refusal_clause. Its leading block is prose, so the line IS written.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00012.json", "verdict"),
+        old_value=None,
+        new_value={
+            "page_num": 12,
+            "clauses": [
+                {
+                    "check": "table_structure",
+                    "result": "FAIL",
+                    "scope": "page",
+                    "reason": "a table on this page cannot be represented faithfully and was withheld",
+                }
+            ],
+        },
+        description="#1145: page 12 (hybrid_rewritten) gains the additive ``verdict`` sidecar key. the table was withheld as an invalid emission; the body is the [page 12 failed: ...] marker, so no line is written.",
     ),
 ]
 
@@ -1079,7 +1313,18 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *RESULT_ERROR_DIFFERENCES,
     *METADATA_DIFFERENCES,
     *UNACCEPTED_OUTPUT_1129_DIFFERENCES,
+    *PAGE_TOP_MARK_1145_DIFFERENCES,
+    *VERDICT_SIDECAR_1145_DIFFERENCES,
 ]
+
+#: Exactly one entry per leaf path. The dict below would silently keep only the last entry
+#: at a duplicated path, and ``test_granular_differences_match_enumerated_surfaces`` would
+#: then check a stale value and fail -- which is how a superseded #1129 entry would be
+#: caught. Asserted here so the failure names the cause instead.
+_PATHS = [entry.path for entry in EXPECTED_STAGE_C_DIFFERENCE_ENTRIES]
+assert len(_PATHS) == len(set(_PATHS)), sorted(
+    path for path in set(_PATHS) if _PATHS.count(path) > 1
+)
 
 EXPECTED_STAGE_C_DIFFERENCES: dict[LeafPath, tuple[Any, Any]] = {
     entry.path: entry.as_pair() for entry in EXPECTED_STAGE_C_DIFFERENCE_ENTRIES

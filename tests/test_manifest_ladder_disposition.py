@@ -24,6 +24,7 @@ from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output, finalized_page_outputs
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
+from verdict_marks_helper import strip_verdict_marks
 
 
 def _fake_handle(page_count: int = 1) -> DocumentHandle:
@@ -120,7 +121,8 @@ def test_passing_best_output_preserves_disposition(mode):
     assert winner.audit_passed is False
     assert winner.status is not PageStatus.SUCCESS
     assert winner.failure_mode is mode
-    assert winner.text == "model reading of the page"
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winner.text, 1) == "model reading of the page"
 
 
 def test_disposition_backfills_failure_mode_when_already_non_passing():

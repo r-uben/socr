@@ -31,6 +31,7 @@ from socr.core.manifest import (  # noqa: E402
 )
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState  # noqa: E402
+from verdict_marks_helper import strip_verdict_marks
 
 NATIVE_BODY = "NATIVE BODY, a real text layer with enough words to be a page."
 REJECTED_MODEL_BODY = "REJECTED MODEL BODY, the reading the ladder refused."
@@ -135,7 +136,8 @@ class TestFinding1SelectorIsNotWidenedByALadderDisposition:
         with_ladder = finalized_page_record(
             self._page(tmp_path, ladder=FailureMode.TABLE_REJECTED, has_tables=False), 1
         ).output
-        assert with_ladder.text == without.text
+        # #1145 adds the mark block; the body comparison below is the original one.
+        assert strip_verdict_marks(with_ladder.text, 1) == strip_verdict_marks(without.text, 1)
         assert with_ladder.engine == without.engine
 
     def test_the_backfill_shape_keeps_its_sidecar_engine_and_status(self, tmp_path: Path) -> None:

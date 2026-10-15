@@ -23,6 +23,7 @@ from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.reconstruct import MIN_TABLE_ROWS
+from verdict_marks_helper import assert_differs_only_by_marks
 
 _PROSE = (
     "The estimated effect of the policy change on output is reported below for each "
@@ -265,7 +266,9 @@ def test_e2e_fire_demotes_page_and_document_text_unchanged(
     assert on.status is not DocumentStatus.SUCCESS
     # No re-routing: identical engine calls, identical text.
     assert eng_on.calls == eng_off.calls
-    assert _page_text(tmp_path, "on") == _page_text(tmp_path, "off")
+    # #1145: the demoted arm gains the mark block, the SUCCESS arm carries nothing, and
+    # the bodies underneath are still byte-identical -- the original assertion.
+    assert_differs_only_by_marks(_page_text(tmp_path, "on"), _page_text(tmp_path, "off"), 1)
     assert "Baseline" in _page_text(tmp_path, "on")
 
 
@@ -342,7 +345,9 @@ def test_chart_asset_lane_demotes_but_keeps_body_and_audit_passed(tmp_path, monk
     assert b["status"] == "warning"
     assert b["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
     assert b["winning_output"]["audit_passed"] is a["winning_output"]["audit_passed"] is True
-    assert _page_text(tmp_path, "con") == _page_text(tmp_path, "coff")
+    # #1145: the demoted arm gains the mark block, the SUCCESS arm carries nothing, and
+    # the bodies underneath are still byte-identical -- the original assertion.
+    assert_differs_only_by_marks(_page_text(tmp_path, "con"), _page_text(tmp_path, "coff"), 1)
     assert "estimated effect" in _page_text(tmp_path, "con")
     assert on.status is not DocumentStatus.SUCCESS
 

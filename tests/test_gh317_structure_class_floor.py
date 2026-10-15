@@ -646,12 +646,31 @@ def _flush_legacy_sidecar(
     argument); this is a test fixture built on top of it, not a second one.
     """
     from socr.core.manifest import FinalizedPageRecord, finalized_page_record
+    from socr.core.verdict import build_page_verdict
 
     base = finalized_page_record(state, page_num)
     record = FinalizedPageRecord(
         output=output,
         disposition=base.disposition,
         selection_provenance=base.selection_provenance,
+        # #1145: the verdict for the INJECTED output, not ``base``'s. Same argument as the
+        # disposition above, one field over: production writes a verdict on every page
+        # (``_select_and_finalize_page`` always sets it, and ``_flush_page_sidecar`` always
+        # serialises it), and ``_load_terminal_page`` now refuses to skip a page whose
+        # sidecar has none -- so a fixture without one would be testing #1145's resume gate
+        # instead of the D1b exception these tests are about. Derived from the injected
+        # output by the production function, never hand-written, so the record cannot vouch
+        # for a verdict the real code would not produce for these bytes.
+        #
+        # NOT a pair production writes, and that is deliberate (#1145 review round 2). The
+        # verdict here is derived from the injected output while the FRAGMENT is the
+        # fixture's own bytes, which carry no canonical line -- production would have
+        # written one, because the seam marks and flushes together. These tests are about
+        # whether the D1b exception grants a resume, and they need a sidecar whose verdict
+        # gate passes; they say nothing about the mark. Deriving the fragment through the
+        # seam instead would change the bytes every assertion below is written against,
+        # which is the fixture edit that hid a regression on #1142.
+        verdict=build_page_verdict(page_num=page_num, output=output, p=state.pages.get(page_num)),
     )
     path = _flush_terminal_sidecar(pipeline, state, page_num, out_dir, record=record)
     meta = json.loads(path.read_text(encoding="utf-8"))

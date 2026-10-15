@@ -26,6 +26,7 @@ from socr.core.manifest import (  # noqa: E402
 )
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState  # noqa: E402
+from verdict_marks_helper import strip_verdict_marks
 
 
 def _pdf(tmp_path):
@@ -277,7 +278,8 @@ def test_content_only_emission_demotion_preserves_selected_disposition(tmp_path)
     rec = finalized_page_records(state)[0]
     assert rec.output.status is PageStatus.ERROR
     assert rec.output.failure_mode is FailureMode.TABLE_EMISSION_INVALID
-    assert rec.output.text == empty_table_text
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(rec.output.text, 1) == empty_table_text
     # Disposition is NOT converted to INVALID_TABLE_EMISSION marker
     assert rec.disposition.ending is PageEnding.MODEL_OUTPUT
     assert rec.disposition.primary_reason is PagePrimaryReason.ACCEPTED_OUTPUT
