@@ -594,8 +594,13 @@ def marks_to_write(
     a region ordinal, so a withheld Table 1's marker must not be read as covering a
     rendered, corrupted Table 2 (measured: 192 pages ship prose beside such a marker).
 
-    Idempotent by construction: on a second pass the canonical line itself is in *leading*,
-    ``canonical_unchecked`` covers every check, and nothing is written.
+    Idempotent by construction, and NOT because a canonical line covers everything -- it
+    covers exactly the ``(check, scope)`` it names, which is what round 2 corrected. On a
+    second pass each line already written is in *leading*, ``parse_canonical_mark`` reads
+    its own pair back off it, and so every clause already disclosed is suppressed by its own
+    line and nothing is written. That is why ``leading_mark_blocks`` must return EVERY
+    leading mark line rather than the first block: with per-pair coverage, a second clause
+    whose line sat in the second block would otherwise be re-emitted on every pass.
     """
     covered, pairs = _covered_checks(leading, verdict.page_num, ships_nothing_else)
     wanted = [

@@ -1265,6 +1265,32 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
+def _is_document_failed_stub(md_path: Path) -> bool:
+    """Is this file one THIS code wrote -- a document-failed mark and nothing else?
+
+    #1145 review round 2. The overwrite refusal was "a markdown file already exists", which
+    is right for real text and wrong for a previous run's own stub: a FAILED record is
+    retried every batch, so on the second run the refusal fired on the stub itself, the
+    writer reported False, ``output_path`` went empty, and the WARNING claimed existing text
+    was kept when there was none -- a log line that would send someone looking for text that
+    does not exist.
+
+    ``fullmatch`` on the whole stripped file, not a search: a document whose real text merely
+    CONTAINS such a line (a paper quoting one, a hand-written note) must still be protected.
+    Unreadable or oversized files answer False, so the caller keeps them -- doubt protects
+    content, which is the direction this whole guard runs in.
+    """
+    from socr.core.marks import DOCUMENT_FAILED_MARK_RE
+
+    try:
+        if md_path.stat().st_size > 4096:
+            return False
+        body = md_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -19065,10 +19091,87 @@ class UnifiedPipeline:
             failure_mode=FailureMode.UNREADABLE_INPUT,
             error=detail,
         )
-        self._write_metadata(state, result, out_dir, has_text=False)
+        # #1145 slice 2: a failed document must SAY SO where a reader looks.
+        #
+        # Until now this path wrote no ``.md`` at all and left ``output_path`` empty
+        # (measured on ``2022__costain_nuno_thomas/metadata.json``). The failure was
+        # recorded in ``metadata.json`` and the root index -- which is what #871 fixed --
+        # but a reader or a downstream tool that opens the document's markdown found
+        # nothing, and "no file" is indistinguishable from "not processed yet". The
+        # document-level analogue of this ticket's page rule: every artifact socr did not
+        # CHECK carries one visible mark at the top, and for a document whose pages could
+        # not be loaded the whole artifact is that mark.
+        #
+        # Deliberately NOT a status change: the record stays FAILED, so the resume gate
+        # still refuses it and the next run retries the file. Only ``output_path`` and the
+        # file itself are new.
+        written = self._write_document_failed_mark(pdf_path, out_dir, detail)
+        self._write_metadata(state, result, out_dir, has_text=False, markdown_written=written)
         if not self.config.quiet:
             console.print(f"[red]Unreadable PDF:[/red] {pdf_path.name} -- {detail}")
         return result
+
+    def _write_document_failed_mark(self, pdf_path: Path, out_dir: Path, detail: str) -> bool:
+        """Write ``<stem>.md`` = one ``[document failed: …]`` line. True if it landed.
+
+        Uses the contract's own ``doc_dir_for`` / ``markdown_path_for``, so the file is at
+        the exact path ``_write_metadata`` is about to record and a normal run would have
+        used -- not a second convention that could drift from it.
+
+        Non-fatal, like the metadata write beside it: a document that cannot be written to
+        disk must still be REFUSED and recorded rather than crashing the batch. The return
+        value is what keeps ``output_path`` honest -- it names the file only when the file
+        is there.
+        """
+        from ocr_output_contract import doc_dir_for, markdown_path_for, relative_key
+
+        try:
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            doc_dir = doc_dir_for(out_dir, rel_key)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            md_path = markdown_path_for(doc_dir, rel_key)
+            if md_path.exists() and not _is_document_failed_stub(md_path):
+                # NEVER destroy prior content. ``probe_page_loads`` can fail transiently --
+                # a file being rewritten, a network mount hiccup -- and this path runs
+                # before anything else looks at the input. Overwriting then replaced an
+                # earlier successful run's real text with a one-line failure mark while its
+                # ``pages/`` stayed on disk, so the document became a stale MIX: the meter
+                # reports ``document_not_assembly``, and the text was gone until the next
+                # run restored it. A window rather than a permanent loss, but silent, and
+                # the loss was of the only copy in that directory.
+                #
+                # Refusing is the whole fix, and deliberately the smallest one. Writing the
+                # stub alongside under another name would invent a second convention no
+                # reader or tool knows, and reconciling the stale ``pages/`` is a larger
+                # problem that PREDATES this change: the FAILED metadata record already
+                # overwrites the earlier COMPLETED one here (#871), and that is not this
+                # ticket's to redesign. The failure stays recorded in ``metadata.json``
+                # exactly as before slice 2, and ``output_path`` stays empty, also as before.
+                logger.warning(
+                    "#1145: %s already holds text; the document-failed mark is NOT written "
+                    "and the existing text is kept",
+                    md_path,
+                )
+                return False
+            # Two things in the detail can break the mark, and escaping only the first is
+            # how the second got missed. ``]`` is the grammar's terminator: one in the
+            # detail ends the mark early and the rest reads as prose. A NEWLINE is worse --
+            # ``DOCUMENT_FAILED_MARK_RE`` excludes ``\r`` and ``\n``, so a multi-line
+            # detail produces a file with no recognised mark in it at all, and the document
+            # counts ``document_failed_unmarked`` exactly as it did before this change. The
+            # detail interpolates a PyMuPDF error string, which socr does not author and
+            # which is free to contain either.
+            #
+            # Flattened the way the page grammar flattens a reason
+            # (``core/marks.clean_reason``): collapse all whitespace to single spaces, then
+            # neutralise the terminator.
+            flat = " ".join(detail.split()).replace("]", ")")
+            md_path.write_text(f"[document failed: {flat}]\n", "utf-8")
+            return True
+        except OSError as exc:
+            logger.debug("#1145: could not write the document mark for %s (%s)", pdf_path, exc)
+            return False
 
     def _write_metadata(
         self,
@@ -19077,6 +19180,7 @@ class UnifiedPipeline:
         output_dir: Path,
         has_text: bool,
         provisional: bool = False,
+        markdown_written: bool | None = None,
     ) -> None:
         """Write canonical per-doc + root-index ``metadata.json`` via the contract.
 
@@ -19130,7 +19234,14 @@ class UnifiedPipeline:
                 backend="socr",
                 processing_time=result.processing_time,
                 timestamp=utc_timestamp(),
-                output_path=str(md_path) if has_text else "",
+                # #1145 slice 2: ``has_text`` decides the STATUS; whether a markdown file
+                # exists is a separate question, and the unreadable-input refusal is the one
+                # caller for which the two differ -- it writes a one-line document mark and
+                # has no text at all. Defaulting to ``has_text`` leaves every other caller's
+                # behaviour byte-identical.
+                output_path=str(md_path)
+                if (has_text if markdown_written is None else markdown_written)
+                else "",
                 pages=state.handle.page_count,
                 error=result.error or None,
                 # Run-config fingerprint: a re-run under a different model / task /

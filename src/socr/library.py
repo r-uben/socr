@@ -251,7 +251,19 @@ def list_pdfs(cfg: LibraryConfig) -> list[Path]:
 
 
 def has_text(cfg: LibraryConfig, stem: str) -> bool:
-    return cfg.markdown_path(cfg.text_doc_dir(stem), stem).is_file()
+    """Does the library hold TEXT for *stem*, as opposed to a record of a failure?
+
+    A fourth site asking the same question as ``has_installable_text``, found by auditing
+    every ``markdown_path(...).is_file()`` in this module rather than by review. It decides
+    whether ``pending_pdfs`` still offers the PDF, so a ``[document failed: …]`` stub sitting
+    in ``text/<stem>/`` would read as "done" and the document would never be looked at again.
+    Nothing installs a stub through ``install_staged`` or ``promote`` any more, but an
+    already-installed one (a run from before that gate, or a hand-placed directory) must
+    recover rather than stay invisible: with the gate, such a stem has a text dir and no
+    installable text, which ``pending_pdfs`` surfaces as BLOCKED for a human to look at,
+    which is the right end state for a directory nobody can explain.
+    """
+    return has_installable_text(cfg, cfg.text_doc_dir(stem), stem)
 
 
 def pending_pdfs(cfg: LibraryConfig) -> tuple[list[Path], list[Path]]:
@@ -351,7 +363,7 @@ def staged_stems(cfg: LibraryConfig) -> list[str]:
     return sorted(
         d.name
         for d in cfg.staging_dir.iterdir()
-        if d.is_dir() and cfg.markdown_path(d, d.name).is_file()
+        if d.is_dir() and has_installable_text(cfg, d, d.name)
     )
 
 
@@ -635,12 +647,61 @@ def _rename_durable(src: Path, dst: Path) -> None:
         _fsync_dir(src.parent)
 
 
+#: The document status that means socr could not read the input at all
+#: (``ocr_output_contract.Status.FAILED``). Such a run is never installed.
+_FAILED_DOC_STATUS = "failed"
+
+
+def has_installable_text(cfg: LibraryConfig, doc_dir: Path, stem: str) -> bool:
+    """Does *doc_dir* hold text worth installing, as opposed to a record of a failure?
+
+    THE one gate, because three call sites asked this question in three places and a fix
+    applied to one of them left the other two open. ``install_staged``, ``staged_stems`` and
+    ``check_promote`` all used to test ``markdown_path(...).is_file()`` alone, which until
+    #1145 slice 2 doubled as "socr got something out of this document": an unreadable PDF
+    produced no markdown at all. Slice 2 gives such a document a one-line
+    ``[document failed: …]`` stub so the failure is VISIBLE, which satisfied the file test
+    at every one of those sites. Fixing ``install_staged`` alone left ``--promote`` able to
+    ARCHIVE the real ``text/<stem>/`` and install the stub over it, after the CLI had
+    invited exactly that with "awaiting approval".
+
+    Two conditions, and both are needed. The file must exist -- unchanged. And the recorded
+    status must not be ``failed``: read from what the pipeline WROTE, never inferred from
+    what is on disk, which is the mistake this function exists to stop being repeated. Only
+    an exact ``failed`` is refused, so a ``partial`` run that produced real text still
+    installs (the library's own rule: best available text, listed unverified), and a legacy
+    run with no status at all is unaffected.
+    """
+    if not cfg.markdown_path(doc_dir, stem).is_file():
+        return False
+    meta = _read_json(doc_dir / cfg.metadata)
+    recorded = meta.get("status") if isinstance(meta, dict) else None
+    return not (isinstance(recorded, str) and recorded == _FAILED_DOC_STATUS)
+
+
 def install_staged(cfg: LibraryConfig, stem: str) -> Path:
-    """Move a finished staged document into text/. Never replaces an existing dir."""
+    """Move a finished staged document into text/. Never replaces an existing dir.
+
+    Two gates, and the second exists because the first stopped being sufficient. Until
+    #1145 slice 2 an unreadable PDF produced no markdown at all, so "a markdown file is
+    here" doubled as "socr got something out of this document": install raised, the stem
+    stayed in ``missing_text``, and the next run re-queued it. Slice 2 gives such a document
+    a one-line ``[document failed: …]`` stub so the failure is VISIBLE -- which satisfied
+    the file check and installed the document, reported it as Installed, dropped it out of
+    ``pending_pdfs`` for ever and filed it under ``unverified`` beside documents that do
+    have text.
+
+    So the status is read from what the pipeline RECORDED, not inferred from what exists on
+    disk. A ``failed`` record is refused here exactly as a missing file was, which keeps the
+    stem in ``missing_text`` and re-queued, which is the behaviour the stub must not change.
+    """
     src = cfg.staging_dir / stem
     dst = cfg.text_doc_dir(stem)
-    if not cfg.markdown_path(src, stem).is_file():
-        raise LibraryError(f"{src} has no {cfg.markdown.format(stem=stem)}; not installed")
+    if not has_installable_text(cfg, src, stem):
+        raise LibraryError(
+            f"{src} has no installable {cfg.markdown.format(stem=stem)}; not installed "
+            f"(absent, or its markdown is a failure mark rather than text)"
+        )
     _mkdir_durable(cfg.text_dir)
     _rename_durable(src, dst)
     return dst
@@ -769,6 +830,13 @@ def recover_promotion(cfg: LibraryConfig) -> str | None:
     if target.name != stem or staged.name != stem:
         raise refuse("names paths that do not match its stem")
     t, s = os.path.lexists(target), os.path.lexists(staged)
+    # #1145: deliberately the FILE check, not ``has_installable_text``. This is crash
+    # recovery finishing a promote that was already approved and begun, and the journal says
+    # the rename is half done. The question here is "is the staged dir intact enough to
+    # finish", not "should this be promoted" -- that was decided by ``check_promote`` before
+    # the journal was written. Refusing on status mid-recovery could leave the library with
+    # the target absent and the staged dir refused, which is no text dir at all: strictly
+    # worse than finishing a rename whose approval is on record.
     if s and not cfg.markdown_path(staged, stem).is_file():
         raise refuse(f"names a staged dir {staged} without {cfg.markdown.format(stem=stem)}")
     a = archived is not None and os.path.lexists(archived)
@@ -803,7 +871,7 @@ def check_promote(cfg: LibraryConfig, stem: str) -> Path:
     """The refusals of ``promote`` without promoting; returns the staged dir. Read-only."""
     _stem(stem)
     staged = cfg.staging_dir / stem
-    if not (staged.is_dir() and cfg.markdown_path(staged, stem).is_file()):
+    if not (staged.is_dir() and has_installable_text(cfg, staged, stem)):
         raise LibraryError(f"nothing staged for {stem!r} under {cfg.staging_dir}")
     return staged
 

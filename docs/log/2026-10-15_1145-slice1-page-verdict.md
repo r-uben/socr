@@ -172,12 +172,9 @@ Both reproduced before being accepted:
 2. **`native_glyphs=FAIL` on a model-reading winner.** `_native_glyph_clause` read
    `has_unmapped_math_glyphs` with no engine gate, while the guard it mirrors
    (`_apply_unresolved_math_guard`) gates on `native_math_damage_ships(output, provenance)`.
-   The review reported seven corpus pages. **Measured over all 17,091 terminal sidecars:
-   259**, every one with a `qwen` winner, and on every one of them the false line was
-   VISIBLE — the two counts (clause set changed, shipped bytes changed) came out identical,
-   so none of the 259 was a page where another mark already covered the line. The review's
-   finding was right and its magnitude was an undercount by a factor of thirty-seven; the
-   number in this log is the replayed one, not the reported one.
+   **Three corpus pages**, every one with a `qwen` winner, and on all three the false line
+   was visible (the clause-set count and the shipped-bytes count agree). See the correction
+   below: this log first said 259, and that number was an artefact of how it was measured.
 
 **One fix: the ENDING is threaded into the seam.** `provenance` now reaches
 `_apply_verdict_marks` → `build_page_verdict` → `derive_clauses`. The judge clause returns
@@ -189,22 +186,51 @@ that predicate is not a one-liner (an unknown ending and every ending that may c
 bytes answer True, and a model body still carrying the codepoints answers True too, so it
 errs toward keeping the warning).
 
-The judge case is a reachability fix: 0 pages on this run, reachable on any fresh run where
-the ladder refuses the model table. The glyph case is not — it was live on 259 pages.
-Measured by running the seam twice per page in one process, once live and once with both
-gates disabled (which is exactly the pre-fix behaviour), and diffing the clause set and the
-shipped bytes:
+Both are reachability fixes on this corpus. The judge case is 0 pages here and reachable on
+any fresh run where the ladder refuses the model table; the glyph case is 3 pages.
+
+Measured by running the seam twice per page in one process, once live and once with the two
+CLAUSE BUILDERS replaced by ungated copies, and diffing the clause set, the shipped bytes
+and the status:
 
 ```
-pages_whose_clause_set_the_gate_changed = 259
-clauses_withdrawn                       = {native_glyphs=FAIL: 259}
-clauses_added                           = {}
-pages_whose_SHIPPED_BYTES_changed       = 259   (by winning engine: qwen 259)
+pages_whose_clause_set_the_gate_changed  = 3
+clauses_withdrawn                        = {native_glyphs=FAIL: 3}
+clauses_added                            = {}
+pages_whose_SHIPPED_BYTES_changed        = 3   (by winning engine: qwen 3)
+pages_whose_STATUS_differs_between_arms  = 0
 ```
 
-`clauses_added` being empty is the other half: the gate only ever WITHDRAWS a false
-statement here, and the `page_judge=UNKNOWN` replacement fired on no page of this run, which
-is consistent with the judge case being reachable rather than live.
+`clauses_added` empty is one half: the gate only ever WITHDRAWS a false statement, and the
+`page_judge=UNKNOWN` replacement fired on no page of this run. The status line is the other
+half, and it is the assertion the first version of this measurement failed.
+
+### Correction: this log said 259, and the method was wrong
+
+Round 2's first measurement reported **259** pages, and that figure reached this log, a
+message to the orchestrator and PR #1165. It is an artefact. Fable found it in review round
+2 and it reproduces.
+
+The pre-fix arm was built by patching `manifest.native_math_damage_ships` to return True.
+That function is not only the gate this clause added: `_apply_unresolved_math_guard` (#1005)
+calls the same predicate and DEMOTES SUCCESS pages on its answer. Forcing it True therefore
+demoted ~256 qwen SUCCESS pages in the "pre-fix" arm alone, and every one of them appeared
+as a clause-set difference that had nothing to do with #1145. The real figure is 3.
+
+Two things follow, and the second is the reusable one:
+
+* **The claim was also argued the wrong way round.** The review said 7, this measurement
+  said 259, and 259 was reported over it on the strength of being measured. Being measured
+  is not the same as being measured correctly, and a number that disagrees with a reviewer
+  by a factor of thirty-seven is a reason to re-examine the instrument, not to publish.
+* **To measure what one function does, replace THAT function, not a predicate it shares
+  with production.** The corrected arm patches `_native_glyph_clause` and
+  `_judge_refusal_clause` themselves and leaves every guard alone. It also now asserts
+  `pages_whose_STATUS_differs_between_arms == 0` — a check the broken version would have
+  failed on 256 pages, which is the cheap canary this whole class of measurement needs and
+  did not have.
+
+
 
 ### The three softs
 
@@ -252,7 +278,7 @@ mix, which is the first per-check picture of the corpus:
 | `equation_fidelity` | 1,118 |
 | `native_coverage` | 1,080 |
 | `table_structure` | 972 |
-| `native_glyphs` | 883 (was 1,142 before the gate) |
+| `native_glyphs` | 883 (886 before the gate) |
 | `page_judge` | 438 |
 | `chart_region` | 410 |
 | `unknown` (fail-closed) | 398 |
@@ -315,6 +341,64 @@ bytes. Both halves are pinned, because getting either backwards is silent.
 Post-merge: suite **7,879 passed, 2 skipped, 4 xfailed, 0 failed**; ruff clean (953 files);
 **25 mutants, 25 killed**; corpus replay unchanged at 4,170/550/2,064 → 0/0/0 with 0
 CHECKED-byte changes, 0 demotions and 0 status moves.
+
+## Known readability cost — measured, and bigger than first stated
+
+The P6 page-3 example in this log understated this. **Measured on run 23192118: 1,387 pages
+carry #1050's `[page N: uncovered text — see image]` note, and on ZERO of them is it in the
+leading block** — #1050 places it after the recovered block, which is where it belongs, next
+to the thing it is about. All 1,387 are WARNING. Suppression reads the leading block only,
+so every one of those pages now also carries a top `native_coverage=FAIL` line, stating the
+same fact twice.
+
+**Accepted, and the alternative is worse.** Covering the clause wherever the note sits would
+return all 1,387 pages to "marked, but not at the top" — which is precisely the state the
+owner's ruling exists to remove, and precisely what the meter's `mark_not_at_top` class
+counts. The division of labour is: the top line says THIS PAGE is not confirmed, which is
+what a reader scanning page headings needs; #1050's note says WHICH BLOCK, where the block
+is, which is what a reader citing a number needs. They are not redundant for a reader doing
+different things, but they are redundant read end to end.
+
+**For the owner, as a real decision rather than a nit**, since the population is 1,387 pages
+and not the handful the P6 example implied. Three options, in increasing cost:
+
+1. Accept as is. Costs nothing; the duplication stays.
+2. Reword the top line's `reason` for a clause another mark already states lower down, so
+   it points rather than repeats ("…see the note at the recovered block"). Cheap, but it
+   changes bytes on those pages and needs the pointer to be true, which means the emission
+   step has to know a non-leading mark exists.
+3. Let a non-leading mark suppress the top line, and accept `mark_not_at_top` going back to
+   1,387. This is the option that contradicts the ruling, and is listed only so the trade
+   is explicit.
+
+My recommendation is (1) for now and (2) as its own ticket, because (2) is the only one that
+reduces what the reader sees without giving up the thing the ticket bought. Settled
+(orchestrator, 2026-10-15): ship as accepted, open (2) as its own ticket. Text for it:
+
+> **feat(marks): the top line should POINT at a disclosure lower on the page, not repeat it**
+>
+> #1145 puts one canonical line at the top of every page socr did not CHECK. Where the page
+> already discloses the same fact further down — #1050's `[page N: uncovered text — see
+> image]` after the recovered block, or a D3 `[page N: unverifiable table …]` note where a
+> table was withheld — the reader now sees it twice. Measured on run 23192118: **1,387
+> pages** for #1050's note alone, on none of which the note is in the leading block.
+>
+> Suppression deliberately reads the LEADING block only, and must keep doing so: covering a
+> clause from a non-leading mark would return those pages to "marked, but not at the top",
+> which is the state #1145 exists to remove and what the meter's `mark_not_at_top` counts.
+> So the top line stays. What should change is its `reason`: when a mark lower on the page
+> states the same `(check, region)`, the top line should say so and point there, instead of
+> restating the fact.
+>
+> Requires the emission step to know a non-leading mark exists for that pair, which it
+> currently does not — `marks_to_write` is given only the leading block. The cheapest shape
+> is to pass the page's non-leading mark lines alongside, and have the clause choose a
+> pointer reason when one of them covers its pair.
+>
+> Needs: a test that a page with a matching non-leading mark gets the pointer wording and
+> one WITHOUT gets the full reason (the negative half is the test — a pointer that lies
+> about where to look is worse than a repetition); a mutant that always points, which the
+> negative half must kill; and a before/after count of pages whose top line changes.
 
 ## Known readability cost
 
