@@ -2630,6 +2630,8 @@ class PageAssessment:
     #: table has no usable bbox -- a table nobody can point at -- which a
     #: consumer mapping blocks onto regions must treat as fail-closed.
     detected_table_bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+    #: #1144: the page's /Rotate value (0 when absent or unreadable).
+    page_rotation: int = 0
     #: GH-195: one record per text-strategy grid rejected because a lane boundary
     #: split a native numeric token. The word-geometry fallback that replaced it
     #: is lossless, so this is a VISIBILITY signal about how the text was built,
@@ -3204,6 +3206,16 @@ class BornDigitalDetector:
         detected_count, detected_bboxes = self._detected_regions_this_page
         assessment.detected_table_count = detected_count
         assessment.detected_table_bboxes = list(detected_bboxes)
+        # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
+        # floor. ``get_text("words")`` reports UNROTATED coordinates while
+        # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two
+        # cannot be compared and the box rule silently matches nothing. Stamped
+        # here with the other detection signals rather than re-derived, for the
+        # reason the comment above gives.
+        try:
+            assessment.page_rotation = int(getattr(page, "rotation", 0) or 0)
+        except (TypeError, ValueError):
+            assessment.page_rotation = 0
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment

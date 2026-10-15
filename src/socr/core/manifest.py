@@ -2485,8 +2485,40 @@ def table_floor_text_for_source(
         # worse than main, and fail-closed.
         if not (getattr(p, "detected_table_bboxes", None) or []):
             return whole_page
+        # #1144 round 4, P0 (Fable, PR #1158). ``native_words`` are
+        # ``get_text("words")`` -- UNROTATED coordinates -- while
+        # ``detected_table_bboxes`` come from ``find_tables()`` in ROTATED ones.
+        # On a /Rotate 90 page the box rule therefore compares two different
+        # spaces and matches nothing, and the reproduction ships the Yes/No grid
+        # as prose: boxes at x=516..626, the answers at x=400. Both rotation
+        # flags above stay False because the TEXT is upright; only the page is
+        # turned. 31 of run 23192118's 808 structure-class floors are /Rotate 90
+        # (pdflscape appendix tables), 15 of them with a box.
+        #
+        # Refusing, not transforming. ``page.rotation_matrix`` would map the
+        # words into the boxes' space and is the better answer, but it is a new
+        # geometry path on a lane whose whole purpose is to not ship table
+        # content, and it is #1159's to make. Until then these pages keep the
+        # marker plus picture -- no worse than main.
+        if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
+            return whole_page
+        # #1144 round 4's two-column refusal lived here and is GONE. It asked
+        # ``reconstruct.page_column_gutter`` whether a prose band straddled the
+        # page's own gutter -- a proxy for "would this band weld two columns".
+        # Round 5's order gate below asks the question directly, against the
+        # page's own reading order, and measurement says the proxy adds nothing:
+        # over all 808 structure-class floors of run 23192118, the gutter check
+        # refuses ZERO pages the order gate would not. Two predicates for one
+        # property is the shape that drifts, so the proxy goes and the direct
+        # test stays. (It was also only partial: a full-width line makes the
+        # gutter detector fail closed by design, so jorda p9 passed it.)
         recovered = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
-        return recovered if recovered else whole_page
+        if not recovered:
+            return whole_page
+        # #1144 round 5: the last word belongs to the page's own reading order.
+        if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
+            return whole_page
+        return recovered
 
     source_text = source_text or ""
     if not source_text.strip():
@@ -2533,6 +2565,66 @@ def native_region_text(words: list) -> str:
         for band in cluster_band_words(words)
     ]
     return "\n".join(line for line in lines if line.strip())
+
+
+#: #1144 round 5: socr's own furniture in a recovered body -- the banner, the
+#: withheld-table marker, an image embed, a page-image link. Never the page's
+#: own words, so never part of the order check.
+_RECOVERED_FURNITURE_RE = re.compile(r"^\s*(?:\[page \b|!\[|\[page image\])")
+
+
+def _order_tokens(text: str) -> list[str]:
+    """*text* as comparable word tokens: case-folded, escapes and punctuation out.
+
+    #1144 round 5. The lane escapes active markdown characters on the way out
+    (``_escaped_native_line``), so a shipped word can carry backslashes the page
+    never printed. Normalising to letters and digits keeps the comparison about
+    ORDER, which is the question, rather than about punctuation.
+    """
+    out = []
+    for raw in (text or "").split():
+        tok = re.sub(r"[^0-9a-z]+", "", raw.replace("\\", "").casefold())
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _prose_follows_native_order(body: str, native_text: str) -> bool:
+    """#1144 round 5 (owner ruling, 2026-10-15): is the recovered prose in the
+    page's own READING ORDER?
+
+    The bands this lane ships are clustered on y ONLY, so on a page whose
+    columns, figure legends or axis labels do not run top-to-bottom, the shipped
+    order is not the page's. Measured over run 23192118: **89 of the 237** pages
+    the lane gave prose to shipped words in an order the page does not have --
+    bahdanau p3's "model can be used in two ways. One way is to use activation
+    function" welds two columns; hazell_hobler p13 puts a chart legend
+    ("Barclays Morgan Stanley Jefferies BNP") before the note it follows. This
+    repo ranks words in the wrong order BELOW missing ones, so such a page keeps
+    the bare marker.
+
+    Ground truth is the page's own ``native_text`` -- ``get_text()``, PyMuPDF
+    BLOCK order, which keeps columns apart. Checked: it and a fresh
+    ``get_text()`` differ by one trailing character and their WORD SEQUENCES are
+    identical, which is all this reads. No new heuristic and no threshold: the
+    recovered prose is a SUBSET of the page's words (bands are withheld), so the
+    test is whether it is an in-order SUBSEQUENCE, and any reordering fails it.
+
+    Verified not to be a normalisation artefact before being adopted as a gate:
+    on three failing pages the first divergent token exists in the ground truth
+    at an EARLIER position, so the order genuinely differs.
+    """
+    wanted = _order_tokens(
+        "\n".join(
+            line
+            for line in (body or "").splitlines()
+            if line.strip() and not _RECOVERED_FURNITURE_RE.match(line)
+        )
+    )
+    if not wanted:
+        return True
+    truth = iter(_order_tokens(native_text))
+    return all(tok in truth for tok in wanted)
 
 
 def _page_prose_partition(p) -> list:
@@ -2674,8 +2766,20 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # born-digital prose recovery whose banner this failed to recognise would be
     # replaced by the bare marker on the next run -- the exact resume loss #649
     # round 2 closed for the other shape, reopened by adding a second noun.
+    return _is_prose_recovery_body(text, page_num)
+
+
+def _is_prose_recovery_body(text: str, page_num: int) -> bool:
+    """Whether *text* is a body this module's prose-recovery lane authored.
+
+    #1144 round 4: factored out of ``_is_restored_prose_recovery`` so the
+    structure-class ending can record the recovery from the SAME evidence the
+    restore path reads -- the banner this module stamps, in every one of its
+    forms -- rather than from a separate flag that could disagree with the bytes.
+    These banners are socr's own and no model attempt can forge them.
+    """
     return any(
-        text.startswith(flag.format(page_num=page_num))
+        (text or "").startswith(flag.format(page_num=page_num))
         for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
     )
 
@@ -3964,12 +4068,25 @@ def _select_page_output_tagged(
             timed_out = page_judge_timeout_attempt(p) is not None
             text_table_declined = not timed_out and structure_class_text_table_declined(p)
             floor_text = structure_class_floor_text(p, page_num)
+            # #1144 round 4, P1 (Fable). The D3 lane records its recovery on the
+            # output (``audit_notes`` plus ``scanned_prose_recovered``) and this
+            # branch did not, so for every page #1144 adds the sidecar said
+            # ``scanned_prose_recovered=null``, ``audit_notes=[]``, the document
+            # note and the CLI line were silent, and
+            # ``_is_restored_prose_recovery`` was False on the page's own output
+            # -- which made the "every banner form accepted" fix inert exactly
+            # where it was added. Only the BYTES distinguished a recovered-prose
+            # ERROR from a bare-marker ERROR. Recorded the same way, from the
+            # same evidence: whether what shipped carries the recovery banner.
+            prose_recovered = _is_prose_recovery_body(floor_text, page_num)
             return PageOutput(
                 page_num=page_num,
                 text=floor_text,
                 status=PageStatus.ERROR,
                 engine="native",
                 audit_passed=False,
+                audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
+                scanned_prose_recovered=prose_recovered,
                 failure_mode=(
                     FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
                     if not (timed_out or text_table_declined)

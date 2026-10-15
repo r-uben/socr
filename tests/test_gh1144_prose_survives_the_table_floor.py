@@ -234,47 +234,59 @@ def test_process_ships_the_prose_and_withholds_both_tables(tmp_path: Path, monke
     assert sidecar["disposition"]["ending"] == "fail_closed_marker"
 
 
-def test_a_box_withholds_its_table_and_a_table_with_no_box_is_the_residual(
+def test_a_word_cell_grid_with_one_answer_column_is_the_known_residual(
     tmp_path: Path,
 ) -> None:
-    """What the box rule does, and precisely where it still falls short.
+    """What is withheld under each box coverage, and what is not.
 
-    DIFFERENCE: which of the fixture's two tables the page's single detected box
-    covers. Both arms pass the #1144 gate (each has a box), so the gate is held
-    fixed and only the box's COVERAGE varies.
+    DIFFERENCE: which of the fixture's two tables the single detected box
+    covers. Both arms pass #1144's box gate, so only coverage varies, and
+    NEITHER may ship the word-cell grid's row.
 
-    * box over the Yes/No grid -> its rows are withheld;
-    * box over the numeric grid only -> the Yes/No grid is outside every box,
-      its cells carry no printed numeral, and its row ships as loose text.
-
-    The second arm is a KNOWN RESIDUAL, pinned rather than hidden. The gate
-    (owner, 2026-10-15) removes the 430 no-box pages from this lane entirely,
-    but a page with one box and two tables still reaches it. The corpus re-run
-    counts how many gated-in pages ship such a row; if any do, that is this
-    shape and it is the owner's to rule on, not something to paper over here.
+    Deliberately asserts the property, not which rule delivers it. Three rules
+    can: the box rule when the box is over that grid, the categorical-row rule
+    anywhere, and (round 4) the two-column refusal when the page's own gutter
+    shows a band welding two columns. An earlier version of this test pinned the
+    uncovered-table case as a visible RESIDUAL; round 4's gutter refusal closed
+    it on this fixture, which is why the assertion is now about the outcome --
+    a pin on the mechanism would have to be rewritten every time another rule
+    reaches the same page.
     """
     from socr.core.manifest import table_floor_text_for_source
 
     numeric_box = (76.0, 96.0, 516.0, 162.0)
     qa_box = (76.0, 216.0, 516.0, 326.0)
 
-    def _arm(name: str, boxes: list[tuple[float, float, float, float]]):
+    def _arm(name: str, boxes: list[tuple[float, float, float, float]]) -> str:
         ps = _floor_state(tmp_path / name)
         ps.detected_table_count = len(boxes)
         ps.detected_table_bboxes = boxes
         return table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
 
-    covers_qa = _arm("qa", [qa_box])
-    covers_numeric_only = _arm("num", [numeric_box])
+    # Covered by a box, or by both: the grid's rows are withheld.
+    for name, boxes in (("qa", [qa_box]), ("both", [numeric_box, qa_box])):
+        body = _arm(name, boxes)
+        assert _ANSWER_RE.search(body) is None, f"a grid row shipped with boxes={name}"
 
-    assert _ANSWER_RE.search(covers_qa) is None, "a box over the grid must withhold its rows"
-    assert _ANSWER_RE.search(covers_numeric_only) is not None, (
-        "the residual must be visible; if this stops happening the fixture no longer "
-        "reproduces an uncovered word-cell table and the pin is vacuous"
+    # NOT covered, and only ONE answer column: a KNOWN RESIDUAL, pinned.
+    #
+    # Nothing catches this shape. The box rule needs a box over it; the
+    # categorical-row rule needs two or more ADJACENT cells and this grid prints
+    # one per row ("generation of electricity Yes"), which by that rule's own
+    # definition is a sentence, not a row; and the order gate passes because the
+    # order is correct -- only the BINDING is lost.
+    #
+    # Round 4's gutter check happened to refuse this fixture, which masked the
+    # residual; round 5 removed that check as subsumed by the order gate, which
+    # is true for ORDER and not for this. Pinned rather than hidden, with its
+    # corpus rate measured and reported.
+    uncovered = _arm("num", [numeric_box])
+    assert _ANSWER_RE.search(uncovered) is not None, (
+        "the residual must stay visible; if it stops, something now catches this "
+        "shape and this pin should become an assertion that it does"
     )
-    # Both arms still recover the page's genuine prose.
-    assert _PROSE in covers_qa
-    assert _PROSE in covers_numeric_only
+    # Even so, a MULTI-cell row never ships: that rule does not need geometry.
+    assert _CATEGORICAL_ROW.search(uncovered) is None
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +295,19 @@ def test_a_box_withholds_its_table_and_a_table_with_no_box_is_the_residual(
 # ---------------------------------------------------------------------------
 
 
-def test_the_recovered_page_is_byte_identical_on_resume(tmp_path: Path, monkeypatch) -> None:
-    """Full lifecycle, not set membership -- which is what missed it in round 1.
+def test_a_second_run_over_the_same_output_dir_is_byte_identical(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The lane is DETERMINISTIC across runs -- which is what this measures.
+
+    #1144 round 4 (Fable P2): the name said "on resume" and that is not what
+    happens. An ERROR page fails the ledger gate (``orchestrator.py``'s
+    ``_resume_skippable``) and is REPROCESSED, so nothing is restored from the
+    sidecar here. What the test does establish is the property the ticket needs
+    and round 1's waiver lacked: a second run over the same output directory
+    reproduces the bytes and the shipped fields, because this lane reads only
+    PDF-derived state. Renamed rather than deleted, and the claim narrowed to
+    what it proves.
 
     The lane reads ``native_words``, ``native_text`` and
     ``detected_table_bboxes``; the first two are re-derived from the PDF on every
@@ -294,7 +317,7 @@ def test_the_recovered_page_is_byte_identical_on_resume(tmp_path: Path, monkeypa
     """
     from socr.pipeline import orchestrator as orch
 
-    body, sidecar, out = _ship(tmp_path, "resume", monkeypatch)
+    body, sidecar, out = _ship(tmp_path, "rerun", monkeypatch)
 
     monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
     pipe = _pipeline()
@@ -302,7 +325,7 @@ def test_the_recovered_page_is_byte_identical_on_resume(tmp_path: Path, monkeypa
     again = next(iter(out.rglob("pages/00001.md"))).read_text()
     again_sidecar = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
 
-    assert again == body, "a resume changed the shipped bytes"
+    assert again == body, "a second run changed the shipped bytes"
     for field in ("status", "failure_mode", "disposition"):
         assert again_sidecar[field] == sidecar[field]
     assert _ANSWER_RE.search(again) is None
@@ -505,6 +528,125 @@ def test_a_page_with_no_detected_box_keeps_the_bare_marker(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# 3a1. Round 4: a rotated page, and a two-column page, are refused.
+# ---------------------------------------------------------------------------
+
+
+def test_a_rotated_page_is_refused_because_its_boxes_are_in_another_space(
+    tmp_path: Path,
+) -> None:
+    """#1144 round 4 P0 (Fable, PR #1158). Reproduced before fixing.
+
+    ``native_words`` are ``get_text("words")`` -- UNROTATED -- while
+    ``detected_table_bboxes`` come from ``find_tables()`` in ROTATED space. On
+    a /Rotate 90 page the box rule compares two different spaces and matches
+    nothing: measured on this fixture, boxes at x=516..626 while the answers sit
+    at x=400, and the Yes/No grid shipped as prose. Both earlier rotation flags
+    stay False because the TEXT is upright; only the page is turned.
+
+    DIFFERENCE: ``page_rotation`` alone, over one page state. A mutant dropping
+    the refusal ships the grid and fails this.
+    """
+    import fitz
+
+    from socr.core.manifest import table_floor_text_for_source
+
+    # Both arms carry the fixture's own, correct boxes; only ``page_rotation``
+    # differs, so the rotation is the single variable. (A contrived arm with the
+    # boxes moved into rotated space is not used: it changes the page's apparent
+    # layout as well, and the two-column refusal then fires instead, which would
+    # make this test pass for the wrong reason.)
+    ps = _floor_state(tmp_path / "rot")
+    rotated = _floor_state(tmp_path / "rot2")
+    rotated.page_rotation = 90
+
+    upright = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+    turned = table_floor_text_for_source(rotated, 1, rotated.native_text, prose_recovery=True)
+
+    # The upright arm recovers the page's prose; the rotated arm keeps the bare
+    # marker. (The grid's own rows no longer ship in EITHER arm: round 4's
+    # categorical-row rule withholds them whatever the geometry says, which is
+    # why this pins the rotation difference rather than the original leak.)
+    assert _PROSE in upright
+    assert _PROSE not in turned
+    assert _ANSWER_RE.search(turned) is None
+    assert "failed: unverifiable table" in turned
+    assert fitz is not None  # the fixture needs pymupdf importable
+
+
+# ---------------------------------------------------------------------------
+# 3a1b. Round 5: recovered prose must be in the page's own reading order.
+# ---------------------------------------------------------------------------
+
+
+def test_recovered_prose_must_be_an_in_order_subsequence_of_the_page(
+    tmp_path: Path,
+) -> None:
+    """#1144 round 5 (owner ruling, 2026-10-15), measured at 89 of 237 pages.
+
+    The bands are y-only, so a two-column page welds halves of both columns into
+    one line. DIFFERENCE: the same page text, shipped in the page's order vs
+    interleaved. Ground truth is the page's own ``get_text()`` block order.
+
+    bahdanau p3's real shape is reproduced literally: the left column's "model
+    can be used in two ways." and the right column's "activation function. The
+    update gate z selects" share a y-band, so the band line welds them.
+    """
+    from socr.core.manifest import _prose_follows_native_order
+
+    native = (
+        "model can be used in two ways. One way is to use\n"
+        "the model to generate a target sequence given an\n"
+        "activation function. The update gate z selects\n"
+        "whether the hidden state is to be updated with\n"
+    )
+    in_order = "model can be used in two ways. One way is to use\nactivation function. The update gate z selects\n"
+    interleaved = (
+        "model can be used in two ways. One way is to use activation function. "
+        "The update gate z selects\n"
+        "the model to generate a target sequence given an whether the hidden "
+        "state is to be updated with\n"
+    )
+
+    assert _prose_follows_native_order(in_order, native) is True
+    assert _prose_follows_native_order(interleaved, native) is False
+    # socr's own furniture is never part of the comparison.
+    furniture = (
+        "[page 3: unverified extraction — the paragraphs below are this page's own "
+        "text layer; every numeric row is withheld]\n\n"
+        "![Failed table page 3](figures/failed_table_p3.png)\n\n"
+        "[page 3 failed: unverifiable table — see image]\n\n"
+        "[page image](figures/failed_table_p3.png)\n\n" + in_order
+    )
+    assert _prose_follows_native_order(furniture, native) is True
+
+
+def test_the_order_gate_refuses_the_page_and_keeps_the_marker(tmp_path: Path) -> None:
+    """The gate at the floor, not only the predicate.
+
+    DIFFERENCE: the page's ``native_text`` ground truth alone. With the
+    fixture's real text the recovery ships; with a ground truth whose order the
+    recovered bands cannot follow, the page keeps the bare marker. A mutant that
+    drops the gate ships the out-of-order body and fails this.
+    """
+    from socr.core.manifest import table_floor_text_for_source
+
+    ok = _floor_state(tmp_path / "ok")
+    shipped = table_floor_text_for_source(ok, 1, ok.native_text, prose_recovery=True)
+
+    scrambled = _floor_state(tmp_path / "bad")
+    # Same words, reversed: nothing the bands ship can be an in-order
+    # subsequence of this, so the gate must refuse.
+    scrambled.native_text = " ".join(reversed((scrambled.native_text or "").split()))
+    refused = table_floor_text_for_source(scrambled, 1, scrambled.native_text, prose_recovery=True)
+
+    assert _PROSE in shipped
+    assert _PROSE not in refused
+    assert "failed: unverifiable table" in refused
+    assert "unverified extraction" not in refused
+
+
+# ---------------------------------------------------------------------------
 # 3a2. A row of categorical CELLS is table content, whatever the geometry says.
 # ---------------------------------------------------------------------------
 
@@ -703,6 +845,42 @@ def test_the_banner_says_scan_only_for_a_scan(tmp_path: Path, born_digital: bool
         assert "unverified extraction" not in body
     # The claim itself does not change with the page type.
     assert "every numeric row is withheld" in body
+
+
+def test_the_shipped_output_records_the_recovery_not_only_the_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1144 round 4 P1 (Fable). The structure-class ending recorded nothing.
+
+    The D3 lane sets ``scanned_prose_recovered`` and the audit note on its
+    output; this branch did not, so for every page #1144 adds the sidecar said
+    ``scanned_prose_recovered=null`` with ``audit_notes=[]``, the document note
+    and CLI line were silent, and ``_is_restored_prose_recovery`` was False on
+    the page's own output -- which made the "every banner form accepted" fix
+    inert exactly where it was added. Only the BYTES told a recovered-prose
+    ERROR from a bare-marker ERROR.
+
+    DIFFERENCE: the sidecar of a page that recovers prose vs one that does not,
+    through the real ``process()``.
+    """
+    from socr.core.manifest import SCANNED_PROSE_RECOVERED_NOTE
+
+    body, sidecar, _ = _ship(tmp_path, "recorded", monkeypatch)
+    bare, bare_sidecar, _ = _ship(tmp_path, "bare", monkeypatch, drop_boxes=True)
+
+    assert _PROSE in body
+    # Both land on the shipped output, which the sidecar carries as
+    # ``winning_output`` and which the document note and CLI line read via
+    # ``_scanned_prose_recovered_pages``.
+    won = sidecar.get("winning_output") or {}
+    assert won.get("scanned_prose_recovered") is True
+    assert SCANNED_PROSE_RECOVERED_NOTE in (won.get("audit_notes") or [])
+
+    # The gated page ships the bare marker and must claim no recovery.
+    assert _PROSE not in bare
+    bare_won = bare_sidecar.get("winning_output") or {}
+    assert bare_won.get("scanned_prose_recovered") is not True
+    assert SCANNED_PROSE_RECOVERED_NOTE not in (bare_won.get("audit_notes") or [])
 
 
 def test_every_banner_form_is_still_counted_as_a_prose_recovery() -> None:

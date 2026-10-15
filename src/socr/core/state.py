@@ -201,6 +201,15 @@ class PageState:
     #: on GH-147's own fixture. ``native_rotated_text_shredded`` does NOT cover
     #: this shape -- it is False on that page.
     native_table_lane_refused_rotated: bool = False
+    #: #1144 round 4: the page's /Rotate value. ``native_words`` are in
+    #: UNROTATED coordinates and ``detected_table_bboxes`` in rotated ones, so on
+    #: a non-zero rotation the prose floor's box rule compares two different
+    #: spaces and matches nothing -- a /Rotate 90 page shipped its Yes/No grid as
+    #: prose (Fable, PR #1158 round 4; 31 of 808 corpus floors are /Rotate 90, 15
+    #: with a box). Read by ``manifest.table_floor_text_for_source``, which
+    #: refuses the recovery rather than transforming coordinates: refusing is the
+    #: safe default, and the transform is #1159's improvement to make.
+    page_rotation: int = 0
     native_table_structure_failed: bool = False  # native table text lost its grid
     #: Backward-compatible aggregate of GH-226 raw emission, GH-190 raw
     #: content, and GH-151 parsed grid-shape defects. Deliberately a SEPARATE
@@ -832,6 +841,7 @@ class DocumentState:
                     ps.native_table_lane_refused_rotated = bool(
                         getattr(pa, "native_table_lane_refused", False)
                     )
+                    ps.page_rotation = int(getattr(pa, "page_rotation", 0) or 0)
 
     # ------------------------------------------------------------------
     # Read-only derived properties
