@@ -339,3 +339,159 @@ def test_the_stub_never_overwrites_an_earlier_runs_text(tmp_path: Path) -> None:
     assert (_doc_metadata(out_dir).get("output_path") or "") == "", (
         "output_path names a stub that was never written"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 on PR #1168 (Fable): the gate had three sites and I fixed one
+# ---------------------------------------------------------------------------
+
+
+def _library(tmp_path: Path):
+    """A real library config, and the stub-producing process the stub lane now leaves."""
+    import json as _json
+
+    import yaml
+    from test_gh964_library import _cfg_dict
+
+    from socr import library as lib
+
+    root = tmp_path / "lib"
+    root.mkdir(exist_ok=True)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(_cfg_dict(root)))
+    cfg = lib.load_library_config(cfg_path)
+
+    def failed_process(pdf: Path, out_root: Path):
+        d = out_root / pdf.stem
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{pdf.stem}.md").write_text("[document failed: unreadable_input: 0 of 64]\n")
+        (d / "metadata.json").write_text(
+            _json.dumps({"status": "failed", "error": "unreadable_input: 0 of 64", "pages": 64})
+        )
+
+        class R:
+            success = False
+            status = None
+
+        return R()
+
+    return lib, cfg, failed_process
+
+
+def test_promote_never_archives_real_text_for_a_failure_stub(tmp_path: Path) -> None:
+    """The route my first fix left open, end to end: rerun then promote.
+
+    I gated ``install_staged`` and stopped there. ``staged_stems`` and ``check_promote`` ask
+    the SAME question in their own words, so ``--rerun`` on a now-unreadable PDF staged the
+    stub, the CLI announced "awaiting approval: socr library --promote <stem>", and promote
+    ARCHIVED the real ``text/<stem>/`` and installed the stub over it. The approval was
+    invited by socr and the destruction was the approved action.
+
+    The assertion that matters is the last one: the real text is still readable at the end.
+    """
+    from test_gh964_library import _fake_doc, _pdf
+
+    lib, cfg, failed_process = _library(tmp_path)
+    pdf = _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(cfg.text_dir, "a", body="## Page 1\n\nReal text worth keeping.\n")
+    precious = (cfg.text_dir / "a" / "a.md").read_text()
+
+    # The rerun stages a failure, exactly as the lane now does.
+    failed_process(pdf, cfg.staging_dir)
+
+    assert lib.staged_stems(cfg) == [], (
+        "a failure stub is offered for approval; the CLI would invite a destructive promote"
+    )
+    with pytest.raises(lib.LibraryError, match="nothing staged"):
+        lib.check_promote(cfg, "a")
+    with pytest.raises(lib.LibraryError, match="nothing staged"):
+        lib.promote(cfg, "a")
+
+    assert (cfg.text_dir / "a" / "a.md").read_text() == precious, "the real text was replaced"
+    assert not list(cfg.text_dir.glob("a.archived*")), "the real text was archived away"
+
+    # Positive control: a staged run WITH real text is still offered and still promotes.
+    _fake_doc(cfg.staging_dir, "b", body="## Page 1\n\nNew text.\n", status="partial")
+    assert lib.staged_stems(cfg) == ["b"], lib.staged_stems(cfg)
+    assert lib.check_promote(cfg, "b").name == "b"
+
+
+def test_has_text_does_not_count_a_stub_as_text(tmp_path: Path) -> None:
+    """The fourth site, found by auditing every ``markdown_path(...).is_file()`` here.
+
+    ``has_text`` decides whether ``pending_pdfs`` still offers the PDF. A stub installed by
+    a run from before the gate would read as "done" and the document would never be looked
+    at again. With the gate such a stem has a text dir and no installable text, which
+    surfaces as BLOCKED -- the right end state for a directory nobody can explain.
+    """
+    from test_gh964_library import _fake_doc, _pdf
+
+    lib, cfg, _ = _library(tmp_path)
+    _pdf(cfg.pdf_dir / "a.pdf")
+    _fake_doc(
+        cfg.text_dir, "a", status="failed", body="[document failed: unreadable_input: 0 of 64]\n"
+    )
+
+    assert lib.has_text(cfg, "a") is False, "a failure stub counts as the library's text"
+    todo, blocked = lib.pending_pdfs(cfg)
+    assert [p.stem for p in blocked] == ["a"], (todo, blocked)
+
+    # Control: real text is text, whatever the status says.
+    _fake_doc(cfg.text_dir, "b", status="partial", body="## Page 1\n\nReal text.\n")
+    _pdf(cfg.pdf_dir / "b.pdf")
+    assert lib.has_text(cfg, "b") is True
+
+
+def test_a_rerun_rewrites_its_own_previous_stub(tmp_path: Path) -> None:
+    """A FAILED record is retried every batch, so run 2 meets run 1's stub.
+
+    The overwrite refusal was "a markdown file already exists", which is right for real text
+    and wrong for this code's own output: the writer returned False, ``output_path`` went
+    empty, and the WARNING claimed existing text was kept when there was none -- a log line
+    that sends someone looking for text that does not exist.
+    """
+    pdf = _unreadable_pdf(tmp_path / "broken.pdf")
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+    pipeline._scan_root = pdf.parent
+
+    pipeline.process(pdf, output_dir=out_dir)
+    first = _doc_metadata(out_dir).get("output_path") or ""
+    assert first, "run 1 did not record the stub"
+
+    pipeline.process(pdf, output_dir=out_dir)
+    second = _doc_metadata(out_dir).get("output_path") or ""
+    assert second == first, (
+        "run 2 refused to rewrite its own stub, so output_path went empty and the record "
+        "stopped naming the mark that is sitting right there"
+    )
+    body = Path(second).read_text()
+    assert DOCUMENT_FAILED_MARK_RE.fullmatch(body.strip()), body
+    assert body.count("\n") == 1, f"the stub was appended to rather than rewritten: {body!r}"
+
+
+def test_real_text_that_merely_quotes_the_grammar_is_still_protected(tmp_path: Path) -> None:
+    """``fullmatch`` on the whole file, not a search.
+
+    A paper that quotes a failure mark, or a hand-written note beside one, is real content.
+    Recognising the stub by substring would let the writer destroy it -- which is the exact
+    failure the refusal exists to prevent, reintroduced by the fix to the refusal.
+    """
+    from ocr_output_contract import doc_dir_for, markdown_path_for, relative_key
+
+    pdf = _unreadable_pdf(tmp_path / "broken.pdf")
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+    pipeline._scan_root = pdf.parent
+
+    rel = relative_key(pdf, pdf.parent)
+    doc_dir = doc_dir_for(out_dir, rel)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    md = markdown_path_for(doc_dir, rel)
+    quoting = (
+        "## Page 1\n\nThe tool emits `[document failed: unreadable_input: 0 of 2]` in that case.\n"
+    )
+    md.write_text(quoting)
+
+    assert pipeline._write_document_failed_mark(pdf, out_dir, "transient") is False
+    assert md.read_text() == quoting, "real text quoting the grammar was destroyed"

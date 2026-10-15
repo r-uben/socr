@@ -1265,6 +1265,32 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
+def _is_document_failed_stub(md_path: Path) -> bool:
+    """Is this file one THIS code wrote -- a document-failed mark and nothing else?
+
+    #1145 review round 2. The overwrite refusal was "a markdown file already exists", which
+    is right for real text and wrong for a previous run's own stub: a FAILED record is
+    retried every batch, so on the second run the refusal fired on the stub itself, the
+    writer reported False, ``output_path`` went empty, and the WARNING claimed existing text
+    was kept when there was none -- a log line that would send someone looking for text that
+    does not exist.
+
+    ``fullmatch`` on the whole stripped file, not a search: a document whose real text merely
+    CONTAINS such a line (a paper quoting one, a hand-written note) must still be protected.
+    Unreadable or oversized files answer False, so the caller keeps them -- doubt protects
+    content, which is the direction this whole guard runs in.
+    """
+    from socr.core.marks import DOCUMENT_FAILED_MARK_RE
+
+    try:
+        if md_path.stat().st_size > 4096:
+            return False
+        body = md_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -19105,7 +19131,7 @@ class UnifiedPipeline:
             doc_dir = doc_dir_for(out_dir, rel_key)
             doc_dir.mkdir(parents=True, exist_ok=True)
             md_path = markdown_path_for(doc_dir, rel_key)
-            if md_path.exists():
+            if md_path.exists() and not _is_document_failed_stub(md_path):
                 # NEVER destroy prior content. ``probe_page_loads`` can fail transiently --
                 # a file being rewritten, a network mount hiccup -- and this path runs
                 # before anything else looks at the input. Overwriting then replaced an
@@ -19123,8 +19149,8 @@ class UnifiedPipeline:
                 # ticket's to redesign. The failure stays recorded in ``metadata.json``
                 # exactly as before slice 2, and ``output_path`` stays empty, also as before.
                 logger.warning(
-                    "#1145: %s already has markdown; the document-failed mark is NOT "
-                    "written and the existing text is kept",
+                    "#1145: %s already holds text; the document-failed mark is NOT written "
+                    "and the existing text is kept",
                     md_path,
                 )
                 return False

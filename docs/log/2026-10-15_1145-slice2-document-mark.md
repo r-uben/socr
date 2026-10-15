@@ -49,9 +49,9 @@ the regex alone.
 mark. The "after" cannot come from a replay — a replay reconstructs pages, and this path has
 no page loop — so it is demonstrated by a fresh run over an unreadable PDF, which is T10.
 
-Suite: **7,887 passed, 2 skipped, 4 xfailed, 0 failed**. ruff 0.16.0 format clean (955
+Suite: **7,891 passed, 2 skipped, 4 xfailed, 0 failed**. ruff 0.16.0 format clean (955
 files).
-**32 mutants, 32 killed**, each by a named test; seven are new here (`no-document-mark`,
+**38 mutants, 38 killed**, each by a named test; thirteen are new here (`no-document-mark`,
 `document-mark-softens-the-status`, `document-mark-path-recorded-without-the-file`,
 `document-mark-terminator-unescaped`).
 
@@ -126,6 +126,72 @@ the refusal, the failure stays recorded in `metadata.json` exactly as before sli
 for such a document is that it no longer destroys the text. The writer returns `False`, so
 `output_path` cannot name a stub that was not written. Mutant
 `document-mark-overwrites-prior-text`.
+
+## Review round 2 on PR #1168 — I fixed one site of four
+
+Both reproduced. Round 1's P1 fix was applied to `install_staged` and nowhere else, and that
+was the error: three call sites asked the same question in their own words.
+
+**P1. `--promote` still installed the stub.** `staged_stems` and `check_promote` gated on
+the file alone, so `--rerun` on a now-unreadable PDF staged the stub, the CLI announced
+"awaiting approval: socr library --promote <stem>", and promote ARCHIVED the real
+`text/<stem>/` and installed the stub over it. socr invited the approval and the destruction
+was the approved action. Worse than round 1's finding, which only made a failure invisible.
+
+Fixed by factoring **one** predicate, `has_installable_text(cfg, doc_dir, stem)`, used by
+`install_staged`, `staged_stems` and `check_promote`. Each site has its own mutant that
+restores its own bare file check, so a future site that asks the question in its own words
+again is a failing test rather than a review catch.
+
+**A fourth site, found by auditing every `markdown_path(...).is_file()` in the module
+rather than by taking the review's list as complete.** `has_text` decides whether
+`pending_pdfs` still offers the PDF, so a stub already sitting in `text/<stem>/` — from a
+run before the gate, or a hand-placed directory — would read as "done" and the document
+would never be looked at again. It uses the shared gate now, which surfaces such a stem as
+BLOCKED: the right end state for a directory nobody can explain.
+
+**A fifth site is deliberately NOT gated**, and the comment says so at the line.
+`recover_promotion`'s journal check is crash recovery finishing a promote that was already
+approved and begun; the question there is "is the staged dir intact enough to finish", not
+"should this be promoted", which `check_promote` already decided before the journal was
+written. Refusing on status mid-recovery could leave the target absent and the staged dir
+refused — no text dir at all, strictly worse than finishing a rename whose approval is on
+record.
+
+**P2. The refusal fired on this code's own previous stub.** A FAILED record is retried every
+batch, so run 2 met run 1's stub, the writer returned `False`, `output_path` went empty, and
+the WARNING claimed existing text was kept when there was none — a log line that would send
+someone looking for text that does not exist. An existing file IS the stub when its whole
+stripped content `fullmatch`es the document-failed grammar, and such a file is rewritten.
+`fullmatch`, not `search`: a document whose real text merely CONTAINS such a line (a paper
+quoting one) must still be protected, and recognising by substring would reintroduce the
+destruction the refusal exists to prevent. Unreadable or oversized files answer False, so
+doubt keeps the content.
+
+## The status-consumer sweep, before slice 3
+
+Promised after round 1, because three findings in a row were this change being read by
+something I had not thought about, and slice 3 demotes 399 pages that currently look clean —
+a far wider change than one file in one directory.
+
+Consumers of a page's shipped STATUS, by grep over `src/socr/`:
+
+| consumer | what a SUCCESS→WARNING demotion does |
+| --- | --- |
+| `library._BAD_PAGE_STATUSES` (`:320`) | any warning/error page makes the DOCUMENT `unverified` — a library curation change, not just a mark |
+| `core/table_counts.py:110` | `verified = status == SUCCESS and …`, so a demoted page leaves `verified_text` and the `tables` block in `metadata.json` moves |
+| `review/html.py:79` | drops the page from "reported success but suspect", which is the point of the demotion |
+| `orchestrator.py:3012`, `hpc_pipeline.py`, `ui/*` | counters and display only |
+| the `manifest.py` `status is SUCCESS` guards | **not affected by ordering**: the verdict seam is step 9f, after every one of them, so no guard is skipped by the demotion |
+
+**Measured, for the library consumer, which is the one that changes curation: zero
+documents move.** The 399 `native+equations` SUCCESS pages sit in **108** documents, and
+**none** of those 108 is clean today — every one already carries at least one warning or
+error page, so all 108 are already `unverified`. The concern was real and the measurement
+closes it. (It also confirms the population independently: 399, matching the design.)
+
+Still to measure when slice 3 is built: the `table_counts` effect, which is a real surface
+rather than a display one.
 
 ## Not done here
 
