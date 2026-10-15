@@ -481,12 +481,42 @@ handed it over. No paragraph may now be claimed twice.
 - `_coverage_parts_to_carry` tested membership, so one copy of a repeated
   reading in the snapshot was taken as proof that BOTH were there and the
   second was dropped. It now counts occurrences.
-- A vector chart's extent was the union of every mark inside the expanded
-  candidate rect -- which reaches the page's left edge, so an unrelated
-  left-column drawing was swallowed (measured: extent x0 = 40 instead of 330).
-  The extent is now grown from the marks that touch this page's uncovered ink
-  and never jumps a gap. Hansen p23, Bugel p23 and Schoenegger p10 are
-  unchanged.
+- A vector chart's extent is the union of every mark inside the expanded
+  candidate rect, which reaches the page's left edge, so an unrelated
+  left-column drawing can be swallowed. **Round 7 narrowed this and round 8
+  REVERTED it; see below.** The claim made here that Hansen p23 was
+  "unchanged" was FALSE: its y0 moved 82.1 -> 84.0.
+
+## Fix round 8 (Fable, measured on the corpus)
+
+**1. The round-7 chart-extent narrowing is REVERTED.** It grew a figure's
+extent only from marks touching the page's uncovered ink, to exclude an
+unrelated drawing elsewhere in the expanded candidate rect. Measured old vs new
+over the **133 corpus pages where `chart_region_bboxes` fires**: 9 extents
+differed and **7 shrank**. Jorda AER p11 (a 2x3 IRF grid) lost x1 402.7 -> 367.2,
+cutting three right panels mid-plot; p15 lost y0 69 -> 167, keeping only the
+bottom panel; p10/p14/p16 and Schoenegger PMC p7/p9 lost 10-14 pt of y-axis
+labels. No tolerance restored them. A figure cut in half is a worse failure than
+an over-wide crop, and the owner's ruling is that the picture is the whole
+figure.
+
+The case that motivated the narrowing was measured on a SYNTHETIC fixture only
+("x0 = 40 instead of 330" are fixture coordinates); no real two-column chart
+page in the slice showed it. That is `synthetic-only-issues-need-a-corpus-rate-first`,
+and I should have asked for the rate before changing the extent rule. Jorda p11
+is now pinned so a future narrowing has to break a named page, not a synthetic
+one.
+
+**2. The PROSE direction branch was unpinned.** With both directions,
+`[pic1][block2][pic2]` hands region 2's words to region 1. Now pinned.
+
+**A guard removed rather than left untestable.** Round 7's `claimed` set stopped
+a paragraph being taken twice. Its mutant survived every test, so I enumerated
+every arrangement of two and three regions: a figure selects the paragraph AFTER
+its picture and a prose region the one BEFORE its own, so the only collision is
+`pic_figure, block, pic_prose`, which `steals_next` already refuses. Zero
+collisions, i.e. an equivalent mutant. The guard is deleted: an untestable line
+hides whether the rule above it is right.
 
 ## Known limit (accepted, not a blocker)
 
@@ -510,6 +540,12 @@ Also accepted (round 7): a glyph-sized drawn mark that TOUCHES a native glyph
 leaks that glyph into the crop, because the two share a component and the
 glyph-sized test protects it. And a periodic texture leaves flat rectangles
 with stripe stubs where the ring median met the stripes.
+
+Also accepted (round 8): on a two-column page a chart's extent can include an
+unrelated drawing in the other column, because the candidate rect reaches the
+page edge and the extent is every mark inside it. Synthetic only -- 0 of the
+133 corpus pages where `chart_region_bboxes` fires showed it -- and narrowing
+it cut 7 real figures.
 
 ## Not measured
 

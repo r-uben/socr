@@ -184,8 +184,13 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
     from socr.core.text_recovery import RECOVERED_MARK_RE
 
     found: dict = {}
-    # No paragraph may be claimed by two regions (round 7, item 5).
-    claimed: set[str] = set()
+    # Round 7 added a ``claimed`` set so no paragraph could be taken twice.
+    # REMOVED in round 8 as unreachable, not merely untested: a figure selects
+    # the paragraph AFTER its picture and a prose region the one BEFORE its
+    # own, so the only collision is ``pic_figure, block, pic_prose`` -- which
+    # ``steals_next`` below already refuses. Enumerated over every arrangement
+    # of two and three regions: zero collisions. An untestable guard hides
+    # whether the rule above it is right, so it goes.
     #: is each region in a figure? ``kinds[i]`` is region i+1, so ``kinds[index]``
     #: is the region AFTER the one at 1-based ``index``.
     kinds = [r.figure_pdf is not None or r.kind == "raster" for r in regions]
@@ -233,12 +238,7 @@ def _prior_recoveries(body: str, page_num: int, regions) -> dict:
             neighbour = [] if steals_next else paragraphs[candidate : candidate + 1]
         else:
             neighbour = paragraphs[at - 1 : at]
-        block = next(
-            (para for para in neighbour if RECOVERED_MARK_RE.search(para) and para not in claimed),
-            None,
-        )
-        if block is not None:
-            claimed.add(block)
+        block = next((para for para in neighbour if RECOVERED_MARK_RE.search(para)), None)
         piece = None
         if block is not None:
             piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)

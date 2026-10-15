@@ -2333,23 +2333,80 @@ def _right_column_chart_with_a_left_blob_pdf(path: Path) -> Path:
     return path
 
 
-def test_a_figures_extent_stops_at_its_own_cluster(tmp_path: Path) -> None:
-    """Round 7 addendum (cubic): an expanded rect is not the figure.
+def test_a_figures_extent_is_the_marks_inside_its_candidate_rect(tmp_path: Path) -> None:
+    """Round 8, item 1: the extent is the round-2 union, and over-inclusion is a LIMIT.
 
-    `chart_region_bboxes` stretches a cluster to the page's left edge, so an
-    unrelated drawing in the left column sits inside the candidate rect. The
-    extent is grown from the marks that touch this page's uncovered ink and
-    never jumps a gap, so the blob is left out.
+    Round 7 narrowed this, growing the extent only from marks that touch the
+    page's uncovered ink, so an unrelated drawing elsewhere in the expanded
+    candidate rect would be excluded. Measured over the 133 corpus pages where
+    `chart_region_bboxes` fires, that CUT REAL FIGURES: 9 extents differed, 7
+    shrank, and Jorda AER p11 lost three right panels mid-plot. A figure cut in
+    half is worse than an over-wide crop, so it was reverted.
+
+    What this pins is the behaviour that survived: the extent is every mark
+    inside the candidate rect. The known limit — a synthetic two-column page
+    whose unrelated left-column drawing is swallowed — is asserted here as a
+    LIMIT, so that a future narrowing has to come back and change this test
+    deliberately rather than by accident.
     """
-    from socr.tables.reconstruct import chart_region_bboxes
-
     pdf = _right_column_chart_with_a_left_blob_pdf(tmp_path / "blob.pdf")
     with fitz.open(pdf) as doc:
-        page = doc[0]
-        candidates = [(r.x0, r.y0, r.x1, r.y1) for r in (chart_region_bboxes(page) or ())]
-        figures = [r for r in analyze_page(page).regions if r.figure_pdf]
-
-    assert candidates and candidates[0][0] < 40, "the candidate rect does reach the left column"
+        figures = [r for r in analyze_page(doc[0]).regions if r.figure_pdf]
     assert figures, "the chart is a figure"
     x0 = figures[0].figure_pdf[0]
-    assert x0 >= 300, f"the extent swallowed the left-column blob (x0={x0})"
+    assert x0 < 300, (
+        "KNOWN LIMIT: the extent includes an unrelated left-column drawing. "
+        "Narrowing it cut real figures (round 8); see the decision log."
+    )
+
+
+_JORDA_PAGE = _SCRATCH / "corpus/pdfs/2005__jorda__AER.pdf"
+
+
+@pytest.mark.skipif(
+    not _JORDA_PAGE.is_file(), reason="third-party corpus PDFs live in gitignored scratch"
+)
+def test_a_real_multi_panel_figure_keeps_all_of_its_panels() -> None:
+    """Round 8, item 1: the page the narrowing broke.
+
+    Jorda AER p11 is a 2x3 IRF grid. The round-7 extent put x1 at 367.2 and cut
+    the three right panels mid-plot; the round-2 union puts it at 402.7.
+    """
+    with fitz.open(_JORDA_PAGE) as doc:
+        figures = [r for r in analyze_page(doc[10]).regions if r.figure_pdf]
+    assert figures, "p11 carries a figure"
+    x1 = figures[0].figure_pdf[2]
+    assert x1 == pytest.approx(402.7, abs=0.5), f"the right panels were cut (x1={x1})"
+
+
+def test_an_earlier_prose_region_does_not_take_the_next_ones_words() -> None:
+    """Round 8, item 2: the PROSE direction branch was never pinned.
+
+    A prose region's block precedes its own picture, so in
+    `[pic1][block2][pic2]` the paragraph after pic1 belongs to region 2.
+    Searching both directions hands it to region 1, and `claimed` then starves
+    region 2 of its own words — one reading lost, one misattributed.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import recovered_block
+    from socr.pipeline.orchestrator import _prior_recoveries
+
+    class _Region:
+        figure_pdf = None
+        kind = "vector_or_bare"
+        merged_from = 1
+
+    block_two = recovered_block("SECOND REGION WORDS", in_figure=False)
+    body = "\n\n".join(
+        [
+            "native prose",
+            uncovered_text_image_ref(1, 1),  # region 1: UNREAD, picture only
+            block_two,  # region 2's words...
+            uncovered_text_image_ref(1, 2),  # ...then its picture
+        ]
+    )
+    found = _prior_recoveries(body, 1, [_Region(), _Region()])
+    assert found[1].piece is None, "region 1 took region 2's words"
+    assert found[2].piece is not None and "SECOND REGION WORDS" in found[2].piece, (
+        "region 2 was starved of its own words"
+    )
