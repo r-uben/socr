@@ -58,6 +58,7 @@ from socr.math.accounting import (  # noqa: E402
     unresolved_math_detail,
 )
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
+from verdict_marks_helper import assert_differs_only_by_marks
 
 PUA = chr(0xF766)  # UniMath script-T, the exact shape #92's detector fingerprints
 
@@ -546,12 +547,18 @@ def test_the_body_is_byte_identical_with_and_without_the_damage_signal(tmp_path:
     _, _, damaged_result, damaged_dir = _run(tmp_path, damaged=True, tag="bytes_damaged")
     _, _, clean_result, clean_dir = _run(tmp_path, damaged=False, tag="bytes_clean")
 
-    assert damaged_result.pages[0].text == clean_result.pages[0].text
+    # #1145: the two arms are no longer symmetric, and that is the intended change. The
+    # damaged page is DEMOTED (it ships WARNING), so it is a page socr did not confirm and
+    # must say so; the clean page is SUCCESS and carries nothing. The guarantee this test
+    # exists for is what is still asserted: the damage signal never REWRITES the body, on
+    # the page fragment and on the assembled document alike. Only the disclosure is added,
+    # and the helper fails if that disclosure goes missing or appears on the clean arm.
+    assert_differs_only_by_marks(damaged_result.pages[0].text, clean_result.pages[0].text, 1)
 
     def final_md(d: Path) -> str:
         return next(p for p in d.rglob("*.md") if p.parent.name != "pages").read_text()
 
-    assert final_md(damaged_dir) == final_md(clean_dir)
+    assert_differs_only_by_marks(final_md(damaged_dir), final_md(clean_dir), 1)
 
 
 def test_finalizing_twice_adds_one_note_and_one_event(tmp_path: Path) -> None:

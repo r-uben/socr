@@ -26,6 +26,7 @@ from socr.core.result import (  # noqa: E402
     PageStatus,
 )
 from socr.core.state import DocumentState  # noqa: E402
+from verdict_marks_helper import strip_verdict_marks  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -439,7 +440,8 @@ def test_corrupt_math_hybrid_does_not_promote_rejected_whole_page_candidate(tmp_
     winner = _winning_page_output(state, 1)
 
     assert winner.engine == "native+math"
-    assert winner.text == hybrid.text
+    # #1145 adds the mark block; the body comparison below is the original one.
+    assert strip_verdict_marks(winner.text, 1) == hybrid.text
     assert winner.status == PageStatus.WARNING
     assert winner.audit_passed is False
     assert rejected.text not in winner.text

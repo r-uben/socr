@@ -24,6 +24,7 @@ from socr.core.state import DocumentState, PageState
 from socr.figures.extractor import ExtractionResult, ExtractedFigure
 from socr.math.recover import CORRUPT_MATH_PROMPT, CorruptMathRegion
 from socr.pipeline.orchestrator import UnifiedPipeline
+from verdict_marks_helper import canonical_marks, strip_verdict_marks
 
 
 # ---------------------------------------------------------------------------
@@ -1946,7 +1947,28 @@ class TestAgenticIntegration:
             "[corrupt equation unresolved: empty or whitespace-only LaTeX; "
             "see retained crop]"
         )
-        assert fragments[True] == fragments[False] + diagnostic_block
+        # #1145: the flip must stay additive in the MARKS too, not only in the body.
+        # Stripping both sides and comparing bodies would pass even if the two arms
+        # disclosed different things to the reader, which is precisely what this test
+        # exists to forbid, so the marks are compared explicitly first.
+        # The flip is additive in the BODY but not in the recorded reason, and #1145 makes
+        # that visible: with the lane ON the winner is the ``native+math`` hybrid at
+        # ``audit_failed``, so it discloses ``equation_fidelity=FAIL`` -- the mathematics is
+        # what went unverified, and a LaTeX candidate passing a syntax gate is not a proof
+        # that it says what the crop says. With the lane OFF the mode is ``none`` and the
+        # page falls to the fail-closed ``unknown=UNKNOWN`` clause. That asymmetry PREDATES
+        # #1145 -- the flip already set a different failure mode on each arm -- and this
+        # test never compared modes, so nothing caught it. It is pinned here as the exact
+        # known difference rather than stripped away: if either arm's disclosure changes,
+        # this fails.
+        on_marks = canonical_marks(fragments[True], 1)
+        off_marks = canonical_marks(fragments[False], 1)
+        assert len(on_marks) == 1 and "equation_fidelity=FAIL" in on_marks[0], on_marks
+        assert len(off_marks) == 1 and "unknown=UNKNOWN" in off_marks[0], off_marks
+        assert (
+            strip_verdict_marks(fragments[True], 1)
+            == strip_verdict_marks(fragments[False], 1) + diagnostic_block
+        )
 
     @pytest.mark.parametrize(
         ("config_overrides", "has_tables", "whole_page_runs"),

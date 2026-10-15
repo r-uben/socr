@@ -183,6 +183,69 @@ Find it with `^> \[page unaccepted: `. Written in `_select_and_finalize_page`
 (`_apply_unaccepted_output_mark` in `core/manifest.py`), the same seam as the table
 marks above. `audit_passed` on the winning output is not flipped.
 
+#### The page-verdict mark (#1145)
+
+**Every page socr did not CHECK carries one visible mark as its first rendered block.**
+CHECKED means no check on that page failed or went undecided; a CHECKED page carries
+nothing and its bytes are unchanged.
+
+The record is a per-page **verdict** (`core/verdict.py`), written to the page sidecar under
+`verdict`:
+
+```json
+{"page_num": 11, "clauses": [
+  {"check": "equation_fidelity", "result": "FAIL", "scope": "page",
+   "reason": "a corrupt equation candidate ships on this page without a verified reading"}
+]}
+```
+
+`clauses` empty means CHECKED. `check` names what did not pass (`page_judge`,
+`source_evidence`, `native_table_verifier`, `native_coverage`, `figure_text`,
+`chart_region`, `table_structure`, `native_glyphs`, `equation_fidelity`, `table_label`,
+`page_processed`, `unreadable_input`, or `unknown`). `result` is `FAIL` (the check ran and
+the page did not pass) or `UNKNOWN` (the check could not decide, or never ran). `scope` is
+`page`, `document`, or a region such as `table:2`.
+
+Each clause with no mark already covering it is rendered as one line:
+
+```
+> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]
+```
+
+Find it with `^> \[page \d+ unchecked: `. Lines are sorted by `(check, scope)`, so the
+bytes are stable across runs and across a resume. Written in `_select_and_finalize_page`
+(`_apply_verdict_marks` in `core/manifest.py`, step 9f -- after every other guard), so the
+page fragments, the final `.md`, the manifest and a resume all see one text.
+
+**Fail-closed.** A WARNING or ERROR page for which no field names a failed check still gets
+a clause: `check=unknown; result=UNKNOWN`, whose reason says socr did not confirm the page
+and did not record why. So a page cannot reach a reader unmarked merely because socr failed
+to name its own reason.
+
+**Coverage.** A mark already at the top suppresses only the clauses it actually states,
+about the region it is about:
+
+| mark already at the top | covers |
+| --- | --- |
+| `> [page unaccepted: …]` (#1129) | `page_judge` |
+| `> [page unchecked: …]`, `> [table unverified: …]`, `> [table disputed: …]`, `[page N: flagged table kept — …]`, `[page N: unverified scan — …]` | the four table checks, for that table |
+| `[page N failed: …]` where the body IS the marker (plus at most an image) | every check |
+| `[page N failed: …]` where the page also ships prose | the four table checks only |
+
+A clause whose `scope` names a REGION is never suppressed: no legacy mark carries a region
+ordinal, so a withheld Table 1's marker must not be read as vouching for a rendered,
+corrupted Table 2. A line is never put ABOVE a `[page N failed: …]` marker body:
+`is_page_failed_marker` reads the FIRST line, so prepending there would stop the page
+reading as a marker to the disposition classifier, the scanned-figure guard and the resume
+gate.
+
+**Resume.** A terminal page is skipped only if its sidecar carries a `verdict` that parses;
+a sidecar written before #1145 has none, so the page is re-OCR'd rather than shipped
+unmarked for ever. A verdict is never synthesised for an old sidecar. A page that IS
+restored takes the verdict its original run published, never a recomputed one: some clause
+inputs (`table_label_unverified`) are not serialized, and recomputing would let a page come
+back from a resume looking cleaner than it left.
+
 #### The disputed-table mark
 
 A scanned table that the source-evidence check CHECKED and found unsupported (its numbers

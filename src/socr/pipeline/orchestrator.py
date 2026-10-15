@@ -14071,6 +14071,19 @@ class UnifiedPipeline:
             # #1027: which rungs ran and what became of each, so a reader of a page that
             # shipped native/floor sees the attempts instead of "no attempts".
             "attempts_summary": _attempts_summary(state.pages.get(page_num)),
+            # #1145: why this page is not CHECKED, and the marks that say so. ADDITIVE and
+            # omitted when absent, like ``judge_accepted``: emitting it unconditionally
+            # would change the content-addressed fingerprint of every already-terminal
+            # page. A resumed page takes THIS verdict rather than a recomputed one --
+            # ``PageOutput.table_label_unverified`` is not serialized and slice 3's
+            # escalation predicate reads ``attempts``, which resume rebuilds as the single
+            # frozen winner, so recomputing would silently drop those clauses and the page
+            # would come back from a resume looking cleaner than it left.
+            **(
+                {"verdict": record.verdict.to_dict()}
+                if record is not None and record.verdict is not None
+                else {}
+            ),
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -14591,6 +14604,7 @@ class UnifiedPipeline:
             from ocr_output_contract import doc_dir_for, relative_key, safe_checksum
 
             from socr.core.manifest import is_page_failed_marker
+            from socr.core.verdict import PageVerdict
 
             scan_root = self._scan_root or state.handle.path.parent
             doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
@@ -14629,6 +14643,37 @@ class UnifiedPipeline:
             recorded_checksum = meta.get("input_checksum")
             current_checksum = safe_checksum(state.handle.path)
             if not recorded_checksum or recorded_checksum != current_checksum:
+                return None
+
+            # #1145 resume rule (a): a ``verdict`` MUST be present, and must be a dict.
+            # A sidecar written before #1145 has none, and many such pages are SUCCESS
+            # with ``audit_passed=True``, so every gate below would pass and the page
+            # would be skipped -- shipping unmarked for ever, which is the defect this
+            # ticket removes. No verdict is doubt, and doubt re-OCRs. The verdict is
+            # NEVER synthesised for an old sidecar: that would vouch for bytes no check
+            # on this build ever saw.
+            #
+            # In practice ``socr_source_digest`` inside ``run_fingerprint`` already
+            # forces this, since #1145 changes shipped source. This condition makes it
+            # true by construction rather than by a side effect, so a build that reaches
+            # these sidecars by some other route still reprocesses them.
+            # It must also PARSE. Validated here, in the one place that decides doubt,
+            # so the restore below can read it with no error path of its own: a restore
+            # that swallowed a parse failure would fall back to recomputing, which is
+            # exactly what rule (b) forbids.
+            if not isinstance(meta.get("verdict"), dict):
+                logger.debug(
+                    "#1145: p%d not resumed; its sidecar carries no page verdict", page_num
+                )
+                return None
+            try:
+                PageVerdict.from_dict(meta["verdict"])
+            except Exception as exc:
+                logger.debug(
+                    "#1145: p%d not resumed; its sidecar verdict does not parse (%s)",
+                    page_num,
+                    exc,
+                )
                 return None
 
             # P4-R (cold review round 1, finding 5): the sidecar was written by a
@@ -15212,6 +15257,35 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.debug("PP-5: sidecar unreadable for p%d (%s)", page_num, exc)
 
+        # #1145 resume rule (b): the restored page carries the verdict its ORIGINAL run
+        # published; the seam never recomputes one for it. ``_rewrite_all_fragments``
+        # re-runs the whole seam at assemble over every page including the skipped ones,
+        # and a skipped page's ``attempts`` is the single frozen winner -- so a clause
+        # whose input is not in the sidecar would be silently lost and the page would come
+        # back from a resume cleaner than it left. ``PageOutput.table_label_unverified``
+        # is exactly such a field today.
+        #
+        # Assigned, not OR-ed like the flags below: a verdict is one whole statement about
+        # one set of bytes, and the bytes are the restored ones.
+        #
+        # Deliberately placed OUTSIDE the flag-restore ``try`` below, whose handler aborts
+        # every remaining restore in that block: this assignment must not be able to cost
+        # a later one. ``_load_terminal_page`` has already refused the skip unless this
+        # key is a dict that PARSES, so the guard here only ever fires if the sidecar read
+        # above raced and lost -- which is logged, because the page is then re-marked from
+        # a recomputation rather than from its own record.
+        raw_verdict = meta.get("verdict")
+        if isinstance(raw_verdict, dict):
+            from socr.core.verdict import PageVerdict
+
+            ps.published_verdict = PageVerdict.from_dict(raw_verdict)
+        else:
+            logger.warning(
+                "#1145: p%d restored without its published verdict; the seam will "
+                "recompute one and any clause input missing from the sidecar is lost",
+                page_num,
+            )
+
         # Fold the resumed page's cost into total_cost (budget continuity).  An
         # EngineResult mirrors what the live route_page path appends per page.
         # A sidecar written before ``page_cost_usd`` existed falls back to the
@@ -15402,6 +15476,17 @@ class UnifiedPipeline:
             ps.equation_sidecar_skipped = bool(
                 getattr(ps, "equation_sidecar_skipped", False)
             ) or bool(meta.get("equation_sidecar_skipped", False))
+            # #1145 resume rule (b): take the verdict this page's ORIGINAL run
+            # published; never recompute one. ``_rewrite_all_fragments`` re-runs the
+            # whole seam at assemble over every page including the skipped ones, and a
+            # skipped page's ``attempts`` is the single frozen winner -- so any clause
+            # whose input is not in the sidecar would be silently lost and the fragment
+            # would come back from a resume cleaner than it left.
+            # ``PageOutput.table_label_unverified`` is exactly such a field today.
+            # Assigned, not OR-ed, unlike the flags above: the published verdict is a
+            # whole statement about one set of bytes, and the bytes are the restored
+            # ones. Rule (a) above has already refused a sidecar without one, so this
+            # is never a silent None.
             # GH-817: max-restore, not OR, because this is a COUNT (how many
             # fabricated refs were redacted from this page), not a disposition
             # flag -- a plain OR would boolean-ise it and silently change the

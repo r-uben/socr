@@ -49,6 +49,7 @@ from socr.pipeline.agentic import (
     settle_scanned_table_decision,
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
+from verdict_marks_helper import strip_verdict_marks
 
 _REJECT_REASON = "judge rejected: cuts off mid-sentence"
 _BODY = (
@@ -456,7 +457,8 @@ def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(
     )
     record = _select_and_finalize_page(state, 1)
     assert record.output.status is PageStatus.WARNING
-    first = (record.output.text or "").splitlines()[0]
+    # #1145 adds the mark block; the body comparison below is the original one.
+    first = strip_verdict_marks(record.output.text or "", 1).splitlines()[0]
     assert not UNACCEPTED_OUTPUT_MARK_RE.match(first)
     assert first.startswith("plain body")
 
