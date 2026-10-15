@@ -154,6 +154,35 @@ replacement of the incumbent cannot ship unmarked. A crop re-judge that passes t
 source-evidence check clears the state, the marks and the rejected disposition; a refused
 patch keeps them. Pages with only the ladder's `table_unverified` get no page-level line.
 
+#### The unaccepted-output mark (#1129)
+
+When selection keeps non-empty model text with `audit_passed=false` **and** refusal
+evidence is present, the page ships a demoted winner (an existing `error` status is
+preserved; never plain `success` with `audit_passed` false) and its FIRST line is:
+
+```
+> [page unaccepted: socr kept this model reading but the page judge did not accept it (<trimmed reason>); check against the page image before citing]
+```
+
+(or the variant that says the judge did not finish, when `judge_outcome` is a typed
+timeout, crash, or verifier error).
+
+**Refusal evidence** means `judge_accepted` is `false`, or `judge_accepted` is unset
+and `rejection_class` is non-empty. `judge_accepted=true` vetoes a stale
+`rejection_class` (for example after a #1048 table promotion). `judge_reason` is
+banner text only, not evidence. `audit_passed=false` alone (native demotion, C3
+table-unverified on a judge-accepted winner) is not refusal evidence.
+
+**Exclusion:** endings that already ship a fail-closed marker or native-recovery
+banner at the top with no model prose above it skip the banner (`NO_TEXT_MARKER`,
+`UNVERIFIABLE_TABLE_SCANNED` / native scanned floors, rotated-shred and
+invisible-scan stubs, structure-class floors). Every other ending gets the
+banner by default when refusal evidence is present.
+
+Find it with `^> \[page unaccepted: `. Written in `_select_and_finalize_page`
+(`_apply_unaccepted_output_mark` in `core/manifest.py`), the same seam as the table
+marks above. `audit_passed` on the winning output is not flipped.
+
 #### The disputed-table mark
 
 A scanned table that the source-evidence check CHECKED and found unsupported (its numbers

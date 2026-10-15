@@ -303,6 +303,43 @@ class TestTheRecoverySurvivesRestore:
         assert replayed.output.text == original.output.text
         assert replayed.output.audit_notes == original.output.audit_notes
 
+    def test_restored_page_keeps_recovered_prose_with_judge_refusal_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        """#1129: judge fields on ``best_output`` must not prepend a banner that
+        breaks ``_is_restored_prose_recovery`` (#649 round 2)."""
+        from test_gh659_label_unverified_finalization import _pipeline, _state
+
+        from socr.core.manifest import finalized_page_records
+        from socr.core.result import JUDGE_OUTCOME_COMPLETED, REJECTION_JUDGE_ONLY
+
+        pipeline = _pipeline()
+        ps = _page()
+        ps.best_output.judge_accepted = False
+        ps.best_output.rejection_class = REJECTION_JUDGE_ONLY
+        ps.best_output.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        state = _state(tmp_path, page_count=1)
+        state.pages[1] = ps
+
+        original = finalized_page_records(state)[0]
+        assert "policy directive" in original.output.text
+        assert not original.output.text.splitlines()[0].startswith("> [page unaccepted:")
+
+        sidecar = pipeline._flush_page_sidecar(state, 1, tmp_path, record=original)
+        assert sidecar.exists()
+
+        restored = _state(tmp_path, page_count=1)
+        pipeline._restore_terminal_page_state(
+            restored,
+            1,
+            PageOutput.from_dict(original.output.to_dict()),
+            tmp_path,
+        )
+        assert not restored.pages[1].native_words
+
+        replayed = finalized_page_records(restored)[0]
+        assert replayed.output.text == original.output.text
+
     def test_a_model_note_quoting_the_credential_cannot_forge_a_recovery(
         self, tmp_path: Path
     ) -> None:

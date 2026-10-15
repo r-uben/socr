@@ -450,14 +450,16 @@ def _attempts_summary(ps) -> list[dict]:
     out: list[dict] = []
     for a in getattr(ps, "attempts", None) or []:
         reason = " ".join(str(a.judge_reason or "").split())
-        out.append(
-            {
-                "engine": a.engine or "",
-                "accepted": bool(a.audit_passed),
-                "judge_outcome": a.judge_outcome or "",
-                "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
-            }
-        )
+        row: dict = {
+            "engine": a.engine or "",
+            "accepted": bool(a.audit_passed),
+            "judge_outcome": a.judge_outcome or "",
+            "rejection_reason": reason[:ATTEMPT_SUMMARY_REASON_MAX_CHARS],
+        }
+        ja = getattr(a, "judge_accepted", None)
+        if ja is not None:
+            row["judge_accepted"] = ja
+        out.append(row)
     return out
 
 
@@ -12878,6 +12880,7 @@ class UnifiedPipeline:
             bo.failure_mode = candidate.failure_mode
             bo.rejection_class = candidate.rejection_class
             bo.audit_passed = True
+            bo.judge_accepted = True
             bo.judge_reason = decision.reason or ""
             # #713: a completed acceptance retires any earlier TYPED page-judge
             # outcome. Leaving a stale ``page_judge_timeout`` on an accepted
@@ -14220,6 +14223,7 @@ class UnifiedPipeline:
         # ``shipped`` is a copy of the snapshot the judge chain annotated (label
         # disclosure, corroboration, audit notes, status): never rebuilt from scratch.
         shipped.judge_outcome = JUDGE_OUTCOME_COMPLETED
+        shipped.judge_accepted = True
         att = ProviderAttempt(
             engine=prof.engine,
             output=shipped,
@@ -14769,15 +14773,16 @@ class UnifiedPipeline:
             ):
                 return
             engine = str(winning.get("engine", "") or "")
+            status = str(winning.get("status", "") or "unknown")
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind=kind,
                     engine=engine,
                     detail=(
-                        "terminal ledger entry was SUCCESS but audit_passed=False "
-                        "(judge-rejected content); refusing the resume skip and "
-                        "re-OCRing the page"
+                        f"terminal ledger entry was {status} with audit_passed=False "
+                        "(the judge refused this content); refusing the resume skip "
+                        "and re-OCRing the page"
                     ),
                     data={
                         "status": str(winning.get("status", "")),

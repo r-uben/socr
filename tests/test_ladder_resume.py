@@ -31,7 +31,12 @@ import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.result import FailureMode, PageOutput, PageStatus
+from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    FailureMode,
+    PageOutput,
+    PageStatus,
+)
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -85,6 +90,7 @@ def _seed_and_flush(
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=True,
+        judge_outcome=JUDGE_OUTCOME_COMPLETED,
     )
     ps.attempts.append(accepted)
     ps.best_output = accepted
@@ -157,6 +163,131 @@ class TestRejectedSkipsAndKeeps:
         pipeline._flush_page_sidecar(resumed_state, 1, out_dir, terminal=True)
 
         assert sidecar_path.read_bytes() == original_bytes
+
+    @pytest.mark.parametrize(
+        "accept_reason",
+        [
+            "faithful",
+            "heuristics passed",
+            "native_table_verifier: EXACT_PASS",
+            "minor spacing; trailing whitespace",
+        ],
+    )
+    def test_judge_accepted_ladder_rejected_resume_byte_identical(
+        self, tmp_path: Path, accept_reason: str
+    ) -> None:
+        """``judge_accepted=True`` with free-text accept reasons must not gain the mark (#1142 r8)."""
+        from socr.core.manifest import (
+            UNACCEPTED_OUTPUT_MARK_RE,
+            _whole_doc_page_texts,
+            finalized_page_record,
+        )
+
+        pdf_path = _real_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        ps = state.pages[1]
+        body = "plausible, judge-accepted-as-extraction body text " * 3
+        winner = PageOutput(
+            page_num=1,
+            text=body,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+            judge_accepted=True,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+            judge_reason=accept_reason,
+        )
+        ps.attempts.append(winner)
+        ps.best_output = winner
+        ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+        first_record = finalized_page_record(state, 1, _whole_doc_page_texts(state))
+        first_line = (first_record.output.text or "").splitlines()[0]
+        assert not UNACCEPTED_OUTPUT_MARK_RE.match(first_line)
+        pipeline._flush_page_fragment(state, 1, first_record.output.text or "", out_dir)
+        sidecar_path = pipeline._flush_page_sidecar(
+            state, 1, out_dir, terminal=True, record=first_record
+        )
+
+        frag_path = pipeline._page_fragment_path(out_dir, state, 1)
+        original_frag = frag_path.read_bytes()
+        original_sidecar = sidecar_path.read_bytes()
+        original_fp = json.loads(original_sidecar.decode())["page_fingerprint"]
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+        rps = resumed_state.pages[1]
+        rps.best_output = resumed_page
+        rps.attempts = [resumed_page]
+
+        record = finalized_page_record(resumed_state, 1, _whole_doc_page_texts(resumed_state))
+        pipeline._flush_page_fragment(resumed_state, 1, record.output.text or "", out_dir)
+        pipeline._flush_page_sidecar(resumed_state, 1, out_dir, terminal=True, record=record)
+
+        assert frag_path.read_bytes() == original_frag
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert json.loads(sidecar_path.read_text())["page_fingerprint"] == original_fp
+
+    def test_judge_refused_ladder_rejected_resume_reflushes_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        from socr.core.manifest import (
+            UNACCEPTED_OUTPUT_MARK_RE,
+            _whole_doc_page_texts,
+            finalized_page_record,
+        )
+
+        _REJECT_REASON = "judge rejected: cuts off mid-sentence"
+        pdf_path = _real_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        ps = state.pages[1]
+        body = "plausible, judge-accepted-as-extraction body text " * 3
+        winner = PageOutput(
+            page_num=1,
+            text=body,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=False,
+            judge_accepted=False,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+            judge_reason=_REJECT_REASON,
+        )
+        ps.attempts.append(winner)
+        ps.best_output = winner
+        ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+        first_record = finalized_page_record(state, 1, _whole_doc_page_texts(state))
+        first_line = (first_record.output.text or "").splitlines()[0]
+        assert UNACCEPTED_OUTPUT_MARK_RE.match(first_line)
+        assert _REJECT_REASON in first_line
+        pipeline._flush_page_fragment(state, 1, first_record.output.text or "", out_dir)
+        sidecar_path = pipeline._flush_page_sidecar(
+            state, 1, out_dir, terminal=True, record=first_record
+        )
+        frag_path = pipeline._page_fragment_path(out_dir, state, 1)
+        original_frag = frag_path.read_bytes()
+        original_sidecar = sidecar_path.read_bytes()
+        original_fp = json.loads(original_sidecar.decode())["page_fingerprint"]
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+        rps = resumed_state.pages[1]
+        rps.best_output = resumed_page
+        rps.attempts = [resumed_page]
+        record = finalized_page_record(resumed_state, 1, _whole_doc_page_texts(resumed_state))
+        pipeline._flush_page_fragment(resumed_state, 1, record.output.text or "", out_dir)
+        pipeline._flush_page_sidecar(resumed_state, 1, out_dir, terminal=True, record=record)
+        assert frag_path.read_bytes() == original_frag
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert json.loads(sidecar_path.read_text())["page_fingerprint"] == original_fp
 
     def test_rejected_page_with_changed_rung_identity_is_reprocessed(self, tmp_path: Path) -> None:
         """The run fingerprint already binds B1's ladder extras (rung

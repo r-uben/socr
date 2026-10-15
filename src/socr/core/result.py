@@ -223,6 +223,10 @@ class FailureMode(str, Enum):
     #: not reached.
     CHART_GRID_CONTRADICTED = "chart_grid_contradicted"
     PAGE_JUDGE_TIMEOUT = "page_judge_timeout"
+    #: #713: the page judge raised before returning a verdict (infrastructure),
+    #: distinct from ``AUDIT_FAILED`` (a completed refusal) and from
+    #: ``PAGE_JUDGE_TIMEOUT``.
+    PAGE_JUDGE_EXCEPTION = "page_judge_exception"
     #: #713: the page judge timed out on a candidate whose EVERY emitted table
     #: was accepted by the table judge ladder, and a persisted acceptance
     #: credential binds that acceptance to these exact candidate bytes. The
@@ -501,6 +505,11 @@ class PageOutput:
     #: ``JUDGE_OUTCOME_TIMEOUT`` / ``JUDGE_OUTCOME_EXCEPTION`` above. "" means
     #: the page judge returned a verdict, or never ran.
     judge_outcome: str = ""
+    #: #1129: the page judge's accept/refuse verdict at route time.
+    #: Distinct from ``audit_passed``, which C3 and other demotions may clear on
+    #: the winner without changing whether the judge accepted the reading.
+    #: ``None`` means unknown (pre-field sidecars); never treated as refusal.
+    judge_accepted: bool | None = None
     #: #713: the persisted table-ladder acceptance credential for THIS
     #: candidate, or ``None``. Written only by
     #: ``orchestrator._mint_table_acceptance_credential`` when the ladder accepted
@@ -557,6 +566,8 @@ class PageOutput:
             "judge_reason": self.judge_reason,
             "rejection_class": self.rejection_class,
         }
+        if self.judge_accepted is not None:
+            d["judge_accepted"] = self.judge_accepted
         if self.table_corroboration is not None:
             d["table_corroboration"] = self.table_corroboration
         # #649: same omit-when-unset convention, same reason -- this field
@@ -627,6 +638,9 @@ class PageOutput:
             skip_reason=d.get("skip_reason", ""),
             judge_reason=d.get("judge_reason", ""),
             rejection_class=d.get("rejection_class", ""),
+            judge_accepted=(
+                d.get("judge_accepted") if type(d.get("judge_accepted")) is bool else None
+            ),
             table_corroboration=d.get("table_corroboration"),
             table_label_unverified=d.get("table_label_unverified", ""),
             table_unverifiable=d.get("table_unverifiable", ""),

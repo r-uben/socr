@@ -223,7 +223,7 @@ class TestRewrittenNamedCases:
         assert "5 page(s) produced no usable output: [2, 6, 9, 10, 12]" in cli
 
     def test_rewritten_cases_final_markdown_and_manifest_blobs(
-        self, current: dict[str, Any], prechange: dict[str, Any]
+        self, current: dict[str, Any], prechange: dict[str, Any], patched_prechange: dict[str, Any]
     ) -> None:
         """Markdown fragments, final markdown, and manifest blobs remain unchanged."""
         p9_frag_key = f"p6_corpus/pages/{STRUCT_MODEL_REWRITTEN_PAGE:05d}.md"
@@ -233,7 +233,7 @@ class TestRewrittenNamedCases:
         assert current["markdown"][p12_frag_key] == prechange["markdown"][p12_frag_key]
         assert (
             current["markdown"]["p6_corpus/p6_corpus.md"]
-            == prechange["markdown"]["p6_corpus/p6_corpus.md"]
+            == patched_prechange["markdown"]["p6_corpus/p6_corpus.md"]
         )
 
         manifest_entries = current["manifest"][0]["entries"]
@@ -328,7 +328,7 @@ class TestCleanAndFloorControls:
         self, current: dict[str, Any], prechange: dict[str, Any]
     ) -> None:
         """All control surfaces equal prechange after normalization."""
-        for p in (STRUCT_MODEL_PASSING_PAGE, STRUCT_FLOOR_PAGE, HYBRID_CLEAN_PAGE):
+        for p in (STRUCT_FLOOR_PAGE, HYBRID_CLEAN_PAGE):
             sidecar_key = f"p6_corpus/pages/{p:05d}.json"
             frag_key = f"p6_corpus/pages/{p:05d}.md"
 
@@ -341,12 +341,9 @@ class TestCleanAndFloorControls:
             manifest_p_old = prechange["manifest"][0]["entries"][str(p)]
             assert normalize_capture(manifest_p_curr) == normalize_capture(manifest_p_old)
 
-        # Tables trust for pages 8 and 10
+        # Tables trust for page 10 (page 8 changes under #1129 unaccepted mark)
         trust_curr = current["tables_trust"][0]["pages"]
         trust_old = prechange["tables_trust"][0]["pages"]
-        assert (
-            trust_curr[str(STRUCT_MODEL_PASSING_PAGE)] == trust_old[str(STRUCT_MODEL_PASSING_PAGE)]
-        )
         assert trust_curr[str(STRUCT_FLOOR_PAGE)] == trust_old[str(STRUCT_FLOOR_PAGE)]
 
 
@@ -362,10 +359,10 @@ class TestUnaffectedSurfaces:
         assert current["result_audit_passed"] == prechange["result_audit_passed"]
 
     def test_all_winning_output_bytes(
-        self, current: dict[str, Any], prechange: dict[str, Any]
+        self, current: dict[str, Any], patched_prechange: dict[str, Any]
     ) -> None:
         """All 12 pages retain byte-identical winning output text and attributes."""
-        for p_curr, p_old in zip(current["page_contract"], prechange["page_contract"]):
+        for p_curr, p_old in zip(current["page_contract"], patched_prechange["page_contract"]):
             assert p_curr["page_num"] == p_old["page_num"]
             assert p_curr["winning_output"]["text"] == p_old["winning_output"]["text"]
             assert p_curr["winning_output"]["engine"] == p_old["winning_output"]["engine"]
@@ -377,10 +374,12 @@ class TestUnaffectedSurfaces:
                 p_curr["winning_output"]["failure_mode"] == p_old["winning_output"]["failure_mode"]
             )
 
-    def test_manifest_replay_data(self, current: dict[str, Any], prechange: dict[str, Any]) -> None:
+    def test_manifest_replay_data(
+        self, current: dict[str, Any], patched_prechange: dict[str, Any]
+    ) -> None:
         """Replay data in manifest entries is unchanged except at enumerated diffs."""
         norm_curr_entries = normalize_capture(current["manifest"][0]["entries"])
-        norm_old_entries = normalize_capture(prechange["manifest"][0]["entries"])
+        norm_old_entries = normalize_capture(patched_prechange["manifest"][0]["entries"])
         assert norm_curr_entries == norm_old_entries
 
     def test_failed_pages_and_native_fallback_pages(

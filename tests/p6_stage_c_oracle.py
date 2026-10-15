@@ -967,6 +967,98 @@ METADATA_DIFFERENCES: list[ExpectedDiff] = [
         description="Per-document metadata.json error string matches result_error delta.",
     ),
 ]
+UNACCEPTED_OUTPUT_1129_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "3", "blob_ref"),
+        old_value="2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
+        new_value="135dd862913ea83fdb9e2242567e5eff6dd345c96068071728eb0ebb57004d71",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/p6_corpus.md"),
+        old_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
+        new_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00003.md"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 2, "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "page_fingerprint"),
+        old_value="sha256:2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
+        new_value="sha256:135dd862913ea83fdb9e2242567e5eff6dd345c96068071728eb0ebb57004d71",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129: D3 model-kept page 3 (rejection_class=judge_only in fixture) gains the unaccepted-output blockquote via manifest._apply_unaccepted_output_mark on UNVERIFIABLE_TABLE_MODEL_KEPT.",
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "8", "blob_ref"),
+        old_value="9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
+        new_value="7a5726d64f7bb069899de7868b3ad0e8f357c584c5de9c8c8f921a5331ea7fc9",
+        description=(
+            "#1129: structure-class grid-flagged page 8 (rejection_class=ambiguous_deferred) "
+            "gains the unaccepted-output blockquote."
+        ),
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00008.md"),
+        old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        new_value=(
+            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
+            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
+            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
+        ),
+        description=(
+            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
+        ),
+    ),
+    ExpectedDiff(
+        path=("page_contract", 7, "winning_output", "text"),
+        old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        new_value=(
+            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
+            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
+            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
+        ),
+        description=(
+            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00008.json", "page_fingerprint"),
+        old_value="sha256:9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
+        new_value="sha256:7a5726d64f7bb069899de7868b3ad0e8f357c584c5de9c8c8f921a5331ea7fc9",
+        description=(
+            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00008.json", "winning_output", "text"),
+        old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        new_value=(
+            "> [page unaccepted: socr kept this model reading but the page judge did not accept it "
+            "(`ambiguous_deferred`); check against the page image before citing]\n\n"
+            "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
+        ),
+        description=(
+            "#1129: structure-class grid-flagged page 8 gains the unaccepted-output blockquote."
+        ),
+    ),
+]
+
 
 # ---------------------------------------------------------------------------
 # Complete Unified EXPECTED_STAGE_C_DIFFERENCES Mapping
@@ -981,6 +1073,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *CLI_DIFFERENCES,
     *RESULT_ERROR_DIFFERENCES,
     *METADATA_DIFFERENCES,
+    *UNACCEPTED_OUTPUT_1129_DIFFERENCES,
 ]
 
 EXPECTED_STAGE_C_DIFFERENCES: dict[LeafPath, tuple[Any, Any]] = {
