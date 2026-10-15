@@ -67,7 +67,7 @@ _EMPTY_ANSWER_FINISH_REASONS = frozenset({"STOP", "FINISH_REASON_UNSPECIFIED"})
 def reports_empty_response(stderr: str, stem: str) -> bool:
     """True when the CLI's stderr says the model's answer for page ``stem`` was empty."""
     for line in stderr.splitlines():
-        if stem not in line or not _EMPTY_RESPONSE_STDERR.search(line):
+        if f"{stem}.png" not in line or not _EMPTY_RESPONSE_STDERR.search(line):
             continue
         reason = _FINISH_REASON.search(line)
         if reason is None or reason.group(1) in _EMPTY_ANSWER_FINISH_REASONS:
@@ -428,10 +428,11 @@ class BaseEngine(ABC):
                 # Fall back to the aggregated split when there is no per-page file.
                 if not text and aggregate is not None:
                     text = aggregate.get(page_num)
-                # An answer of whitespace, or one that cleaning reduces to nothing, is an
-                # empty answer: never a SUCCESS page with no text.
-                empty_answer = reports_empty_response(stderr_text, stem) or bool(
-                    text and not self._clean_output(text, self.name).strip()
+                # A page file holding nothing or only whitespace is an empty answer: never
+                # a SUCCESS page with no text. Judged on the raw bytes: an engine's own
+                # sentinel (Marker's ``[MISSING_PAGE_EMPTY:n]``) is not a provider failure.
+                empty_answer = reports_empty_response(stderr_text, stem) or (
+                    text is not None and not text.strip()
                 )
 
                 if empty_answer:

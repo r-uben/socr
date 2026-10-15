@@ -209,3 +209,106 @@ def test_retry_shares_the_first_calls_deadline(tmp_path, monkeypatch) -> None:
     (_, first), (_, second) = engine.calls
     assert first == 600.0
     assert second is not None and 0 < second <= first
+
+
+# --- review fixes (PR #1160) --------------------------------------------------------
+
+
+def test_a_zero_byte_page_file_is_an_empty_answer(tmp_path, monkeypatch) -> None:
+    zero = _read_back(tmp_path, monkeypatch, "", 0, "")
+    missing = _read_back(tmp_path, monkeypatch, None, 0, "")
+    assert zero.failure_mode is FailureMode.EMPTY_RESPONSE
+    assert missing.failure_mode is FailureMode.EMPTY_OUTPUT
+
+
+def test_an_engine_sentinel_is_not_an_empty_provider_answer(tmp_path, monkeypatch) -> None:
+    """Marker writes ``[MISSING_PAGE_EMPTY:n]``; cleaning removes it, but the engine
+    said something, so it is not counted or retried as an empty provider answer."""
+
+    class _MarkerLikeEngine(_GeminiLikeEngine):
+        @property
+        def name(self) -> str:
+            return "marker"  # the normaliser strips the sentinel for this engine only
+
+    monkeypatch.setattr(
+        "socr.engines.base.subprocess.run", _fake_run("[MISSING_PAGE_EMPTY:1]", 0, "")
+    )
+    pdf = _pdf(tmp_path / "m.pdf")
+    out = _MarkerLikeEngine().process_pages(pdf, [1], PipelineConfig(timeout=30))[0]
+    assert out.failure_mode is not FailureMode.EMPTY_RESPONSE
+
+
+def test_the_stderr_match_names_the_whole_image_file(tmp_path, monkeypatch) -> None:
+    longer = EMPTY_STDERR.replace("page_0001.png", "page_00010.png")
+    out = _read_back(tmp_path, monkeypatch, None, 1, longer)
+    assert out.failure_mode is FailureMode.CLI_ERROR
+
+
+def test_empty_answer_events_survive_a_resume(tmp_path, monkeypatch) -> None:
+    """A terminal resumed page is restored, not re-run, so its empty-answer events come
+    back only through the replay allowlist; without the entry the run summary loses them."""
+    import json
+
+    from socr.core.audit_log import PAGE_RETRY_KIND, AuditEvent
+    from socr.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self, *a, **kw: "")
+
+    def resumed_kinds(leg: str, replayed: dict) -> list[str]:
+        monkeypatch.setattr(orch, "_RESUME_REPLAYED", replayed)
+        pdf = _pdf(tmp_path / f"{leg}.pdf")
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+            )
+        )
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        state.pages[1] = PageState(page_num=1)
+        state.events.extend(
+            AuditEvent(page_num=1, kind=k, engine="gemini")
+            for k in (PROVIDER_EMPTY_RESPONSE_KIND, PAGE_RETRY_KIND)
+        )
+        out_dir = tmp_path / f"out-{leg}"
+        pipeline._scan_root = pdf.parent
+        sidecar = pipeline._flush_page_sidecar(state, 1, out_dir)
+        assert {e["kind"] for e in json.loads(sidecar.read_text())["audit_events"]} >= {
+            PROVIDER_EMPTY_RESPONSE_KIND,
+            PAGE_RETRY_KIND,
+        }
+        resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        resumed.pages[1] = PageState(page_num=1)
+        page_out = PageOutput(
+            page_num=1,
+            text=REAL_TEXT,
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            audit_passed=True,
+        )
+        pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
+        return [e.kind for e in resumed.events]
+
+    full = dict(orch._RESUME_REPLAYED)
+    without = {
+        k: v for k, v in full.items() if k not in (PROVIDER_EMPTY_RESPONSE_KIND, PAGE_RETRY_KIND)
+    }
+    kept = resumed_kinds("kept", full)
+    lost = resumed_kinds("lost", without)
+
+    assert PROVIDER_EMPTY_RESPONSE_KIND in kept and PAGE_RETRY_KIND in kept
+    assert PROVIDER_EMPTY_RESPONSE_KIND not in lost and PAGE_RETRY_KIND not in lost
+
+
+def test_retry_failed_pages_is_refused_with_hpc_sequential(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from socr.cli import cli
+
+    pdf = _pdf(tmp_path / "h.pdf")
+    result = CliRunner().invoke(
+        cli, ["process", str(pdf), "--hpc-sequential", "--retry-failed-pages", "--dry-run"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "--retry-failed-pages is not supported with --hpc-sequential" in result.output

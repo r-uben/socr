@@ -28,7 +28,11 @@ from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
-from socr.core.audit_log import VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+from socr.core.audit_log import (
+    PAGE_RETRY_KIND,
+    PROVIDER_EMPTY_RESPONSE_KIND,
+    VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
+)
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.daemon_call import submit_daemon
@@ -151,6 +155,14 @@ class _AbandonedEscalation:
 #: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
 #: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
 _RESUME_REPLAYED: dict[str, str] = {
+    PROVIDER_EMPTY_RESPONSE_KIND: (
+        "a provider answered this page with no text; emitted by the engine call, which a "
+        "terminal resumed page skips, and the run summary counts these events"
+    ),
+    PAGE_RETRY_KIND: (
+        "--retry-failed-pages ran this page twice; emitted after the retry pass, which a "
+        "terminal resumed page skips, and the run summary counts these events"
+    ),
     "scanned_figure_asset": (
         "#1030: emitted by the page loop's scanned-figure step, which a terminal resumed page "
         "skips; the document note and CLI line read this event"
@@ -10005,6 +10017,7 @@ class UnifiedPipeline:
         _retry_failed = bool(self.config.retry_failed_pages)
         _routed_pages: set[int] = set()
         _before_page: dict[int, tuple[PageState, int]] = {}
+        _retried_pages: list[int] = []
 
         def _pages_in_order():
             nonlocal ladder
@@ -10024,11 +10037,24 @@ class UnifiedPipeline:
                     f"{', '.join(str(p) for p in failed)}; ladder: "
                     + " -> ".join(p.engine.value for p in ladder)
                 )
+            # Collected for every failed page BEFORE any reset removes events: a removal
+            # shifts the list, so a later page's start offset would no longer hold.
+            first_events = {
+                _pn: [
+                    ev
+                    for ev in state.events[_before_page[_pn][1] :]
+                    if getattr(ev, "page_num", None) == _pn
+                ]
+                for _pn in failed
+            }
             for _pn, _record in failed.items():
-                _snapshot, _event_mark = _before_page[_pn]
-                self._reset_page_for_retry(state, _pn, _snapshot, _event_mark, _record, ladder)
+                if backend_degraded:  # a retry wedged the backend: reset no further page
+                    return
+                self._reset_page_for_retry(
+                    state, _pn, _before_page[_pn][0], first_events[_pn], _record, ladder
+                )
+                _retried_pages.append(_pn)
                 yield _pn
-            self._record_page_retries(state, list(failed))
 
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
@@ -10960,6 +10986,11 @@ class UnifiedPipeline:
                     ps.timings_s = clock.finalize()
                 self._page_clock = None
 
+        # Outside the generator, so a retry pass the halt cut short still records the
+        # pages it did retry.
+        if _retried_pages:
+            self._record_page_retries(state, _retried_pages)
+
         # -- Post-loop summary ---------------------------------------------------
         if not self.config.quiet:
             total_cost = state.total_cost
@@ -10997,27 +11028,21 @@ class UnifiedPipeline:
         state: DocumentState,
         page_num: int,
         snapshot: PageState,
-        event_mark: int,
+        first_events: list,
         first: FinalizedPageRecord,
         ladder: list[ProviderProfile],
     ) -> None:
         """Put ``page_num`` back where it stood before its first attempt, keeping a record.
 
-        ``snapshot`` is the page's state before the loop reached it and ``event_mark``
-        the length of ``state.events`` then; every later event about this page belongs
-        to the first attempt. Those events leave the run's audit stream (they describe
-        a reading that is being replaced) and are counted by kind in ``page_retry``.
-        Spend is a recorded fact, so the first attempt's cost stays on the page.
+        ``snapshot`` is the page's state before the loop reached it; ``first_events`` are
+        the events its first attempt emitted. They leave the run's audit stream (they
+        describe a reading that is being replaced) and are kept whole in ``page_retry``,
+        so nothing they said is lost, an empty provider answer included. Spend is a
+        recorded fact, so the first attempt's cost stays on the page.
         """
         spent = state.pages[page_num].page_cost_usd
-        first_events = [
-            ev for ev in state.events[event_mark:] if getattr(ev, "page_num", None) == page_num
-        ]
         moved = {id(ev) for ev in first_events}
         state.events[:] = [ev for ev in state.events if id(ev) not in moved]
-        kinds: dict[str, int] = {}
-        for ev in first_events:
-            kinds[ev.kind] = kinds.get(ev.kind, 0) + 1
         fresh = copy.deepcopy(snapshot)
         fresh.page_cost_usd = spent
         fresh.page_retry = {
@@ -11027,7 +11052,7 @@ class UnifiedPipeline:
                 "engine": first.output.engine,
                 "ending": first.disposition.ending.value,
                 "primary_reason": first.disposition.primary_reason.value,
-                "audit_events": kinds,
+                "audit_events": [ev.to_dict() for ev in first_events],
             },
             "retry_ladder": [p.id or p.engine.value for p in ladder],
         }

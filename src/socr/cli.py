@@ -348,8 +348,9 @@ def common_options(f):
         "--retry-failed-pages",
         is_flag=True,
         help=(
-            "After the page loop, run every page that failed once more in the same "
-            "run, provider ladder reversed; each retry is recorded on its page"
+            "After the page loop, run each page that went through the OCR provider "
+            "ladder and failed once more in the same run, ladder reversed; each retry "
+            "is recorded on its page. Not available with --hpc-sequential"
         ),
     )(f)
     f = click.option(
@@ -856,6 +857,10 @@ def process(
     """
     allow_missing = kwargs.pop("allow_missing", ())
     config = build_config(output_dir=output_dir, **kwargs)
+    # HPCPipeline has no agentic page loop, so the option would do nothing there.
+    # Refused before --dry-run returns, so a dry run does not preview a lie.
+    if (hpc_sequential or config.hpc.enabled) and config.retry_failed_pages:
+        raise click.UsageError("--retry-failed-pages is not supported with --hpc-sequential.")
 
     # GH-368: --dry-run was consulted only inside process_batch, so
     # `socr process <pdf> --dry-run` ran the full real pipeline -- a supposedly
