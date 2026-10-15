@@ -19105,9 +19105,43 @@ class UnifiedPipeline:
             doc_dir = doc_dir_for(out_dir, rel_key)
             doc_dir.mkdir(parents=True, exist_ok=True)
             md_path = markdown_path_for(doc_dir, rel_key)
-            # The grammar's ``]`` terminator: a detail containing one would end the mark
-            # early and the rest would read as prose. Same escape the page grammar uses.
-            md_path.write_text(f"[document failed: {detail.replace(']', ')')}]\n", "utf-8")
+            if md_path.exists():
+                # NEVER destroy prior content. ``probe_page_loads`` can fail transiently --
+                # a file being rewritten, a network mount hiccup -- and this path runs
+                # before anything else looks at the input. Overwriting then replaced an
+                # earlier successful run's real text with a one-line failure mark while its
+                # ``pages/`` stayed on disk, so the document became a stale MIX: the meter
+                # reports ``document_not_assembly``, and the text was gone until the next
+                # run restored it. A window rather than a permanent loss, but silent, and
+                # the loss was of the only copy in that directory.
+                #
+                # Refusing is the whole fix, and deliberately the smallest one. Writing the
+                # stub alongside under another name would invent a second convention no
+                # reader or tool knows, and reconciling the stale ``pages/`` is a larger
+                # problem that PREDATES this change: the FAILED metadata record already
+                # overwrites the earlier COMPLETED one here (#871), and that is not this
+                # ticket's to redesign. The failure stays recorded in ``metadata.json``
+                # exactly as before slice 2, and ``output_path`` stays empty, also as before.
+                logger.warning(
+                    "#1145: %s already has markdown; the document-failed mark is NOT "
+                    "written and the existing text is kept",
+                    md_path,
+                )
+                return False
+            # Two things in the detail can break the mark, and escaping only the first is
+            # how the second got missed. ``]`` is the grammar's terminator: one in the
+            # detail ends the mark early and the rest reads as prose. A NEWLINE is worse --
+            # ``DOCUMENT_FAILED_MARK_RE`` excludes ``\r`` and ``\n``, so a multi-line
+            # detail produces a file with no recognised mark in it at all, and the document
+            # counts ``document_failed_unmarked`` exactly as it did before this change. The
+            # detail interpolates a PyMuPDF error string, which socr does not author and
+            # which is free to contain either.
+            #
+            # Flattened the way the page grammar flattens a reason
+            # (``core/marks.clean_reason``): collapse all whitespace to single spaces, then
+            # neutralise the terminator.
+            flat = " ".join(detail.split()).replace("]", ")")
+            md_path.write_text(f"[document failed: {flat}]\n", "utf-8")
             return True
         except OSError as exc:
             logger.debug("#1145: could not write the document mark for %s (%s)", pdf_path, exc)

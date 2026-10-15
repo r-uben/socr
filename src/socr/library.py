@@ -635,12 +635,38 @@ def _rename_durable(src: Path, dst: Path) -> None:
         _fsync_dir(src.parent)
 
 
+#: The document status that means socr could not read the input at all
+#: (``ocr_output_contract.Status.FAILED``). Such a run is never installed.
+_FAILED_DOC_STATUS = "failed"
+
+
 def install_staged(cfg: LibraryConfig, stem: str) -> Path:
-    """Move a finished staged document into text/. Never replaces an existing dir."""
+    """Move a finished staged document into text/. Never replaces an existing dir.
+
+    Two gates, and the second exists because the first stopped being sufficient. Until
+    #1145 slice 2 an unreadable PDF produced no markdown at all, so "a markdown file is
+    here" doubled as "socr got something out of this document": install raised, the stem
+    stayed in ``missing_text``, and the next run re-queued it. Slice 2 gives such a document
+    a one-line ``[document failed: …]`` stub so the failure is VISIBLE -- which satisfied
+    the file check and installed the document, reported it as Installed, dropped it out of
+    ``pending_pdfs`` for ever and filed it under ``unverified`` beside documents that do
+    have text.
+
+    So the status is read from what the pipeline RECORDED, not inferred from what exists on
+    disk. A ``failed`` record is refused here exactly as a missing file was, which keeps the
+    stem in ``missing_text`` and re-queued, which is the behaviour the stub must not change.
+    """
     src = cfg.staging_dir / stem
     dst = cfg.text_doc_dir(stem)
     if not cfg.markdown_path(src, stem).is_file():
         raise LibraryError(f"{src} has no {cfg.markdown.format(stem=stem)}; not installed")
+    meta = _read_json(src / cfg.metadata)
+    recorded = meta.get("status") if isinstance(meta, dict) else None
+    if isinstance(recorded, str) and recorded == _FAILED_DOC_STATUS:
+        raise LibraryError(
+            f"{src} recorded status={recorded}; not installed "
+            f"(its markdown is a failure mark, not text)"
+        )
     _mkdir_durable(cfg.text_dir)
     _rename_durable(src, dst)
     return dst

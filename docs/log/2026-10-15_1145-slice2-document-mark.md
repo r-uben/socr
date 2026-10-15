@@ -49,9 +49,9 @@ the regex alone.
 mark. The "after" cannot come from a replay — a replay reconstructs pages, and this path has
 no page loop — so it is demonstrated by a fresh run over an unreadable PDF, which is T10.
 
-Suite: **7,884 passed, 2 skipped, 4 xfailed, 0 failed**. ruff 0.16.0 format clean (954
+Suite: **7,887 passed, 2 skipped, 4 xfailed, 0 failed**. ruff 0.16.0 format clean (955
 files).
-**29 mutants, 29 killed**, each by a named test; four are new here (`no-document-mark`,
+**32 mutants, 32 killed**, each by a named test; seven are new here (`no-document-mark`,
 `document-mark-softens-the-status`, `document-mark-path-recorded-without-the-file`,
 `document-mark-terminator-unescaped`).
 
@@ -80,6 +80,52 @@ selection can deliver such an output as the winner is unresolved, and it is 0 pa
 corpus. That is the same shape, the same evidence status and the same fix as the escalated
 never-judged winner: a SUCCESS demotion plus a mark, witnessable only by a constructed test.
 It therefore ships with slice 3, beside it, rather than being half-built here.
+
+## Review round 1 on PR #1168 — the stub reached further than it should have
+
+All three reproduced before being accepted. Each is the same shape: a one-line file added
+to a directory is read by more things than the reader it was written for.
+
+**P1, and it is a regression this change introduced.** `install_staged` gated on "a markdown
+file is here", which until slice 2 doubled as "socr got something out of this document": an
+unreadable PDF produced no markdown, so install raised, the stem stayed in `missing_text`,
+and the next run re-queued it. The stub satisfied that file check — so the document
+INSTALLED, was reported as `Installed`, left `pending_pdfs` for ever, and landed in
+`unverified` beside documents that do have text. A failure made invisible by the very change
+that exists to make failures visible.
+
+Fixed by reading the status the pipeline RECORDED rather than inferring it from what exists
+on disk: a `failed` record is refused exactly as a missing file was. Tested through
+`process_new`, with the positive control in the same test — a `partial` run that produced
+real text must still install, because that is the library's own rule (best available text,
+listed unverified), and without that half the test would pass on an install that refuses
+everything. Mutant `install-gates-on-file-existence-only`.
+
+**P2, the newline.** Only `]` was escaped. `DOCUMENT_FAILED_MARK_RE` excludes `\r` and
+`\n`, so a multi-line detail produced a file with no recognised mark in it at all and the
+document counted `document_failed_unmarked` exactly as before — the defect surviving its own
+fix, for the second time in this ticket. The detail interpolates a PyMuPDF error string socr
+does not author and which is free to contain either. Now flattened the way the page grammar
+flattens a reason (`core/marks.clean_reason`): collapse all whitespace, then neutralise the
+terminator. The test asserts the words survive the flattening, not merely that a mark
+matches.
+
+**P2, the overwrite window.** `probe_page_loads` can fail transiently, and this path runs
+before anything else looks at the input, so the stub replaced an earlier successful run's
+real text with a one-line mark while that run's `pages/` stayed on disk — a stale MIX the
+meter reports as `document_not_assembly`, restored on the next run, so a window rather than
+a permanent loss, but silent, and of the only copy in that directory.
+
+**Chosen behaviour: refuse to write when markdown already exists**, and say so at WARNING.
+Why this and not the alternatives: writing the stub alongside under another name would
+invent a second convention no reader or tool knows, and reconciling the stale `pages/` is a
+larger problem that PREDATES this change — the FAILED metadata record already overwrites the
+earlier COMPLETED one on this path (#871), and redesigning that is not this ticket's. With
+the refusal, the failure stays recorded in `metadata.json` exactly as before slice 2 and
+`output_path` stays empty, which is also exactly as before: the only thing slice 2 changes
+for such a document is that it no longer destroys the text. The writer returns `False`, so
+`output_path` cannot name a stub that was not written. Mutant
+`document-mark-overwrites-prior-text`.
 
 ## Not done here
 
