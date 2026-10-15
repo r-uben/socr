@@ -178,3 +178,17 @@ Reviews of 06faa300 (Argon, Fable): do not merge.
 **Tests:** `7486 passed` (`scratch/routing-baseline/exec/1129/pytest-r12.txt`).
 **Ruff:** `uvx ruff@0.16.0 format --check .`
 **Mutants:** `scratch/routing-baseline/exec/1129/mutants-r12.txt` (`run-mutants-r12.py`, conftest canary).
+
+## Round 13 (2026-10-14)
+
+Reviews of 79106d50 (Argon, Fable): do not merge.
+
+- **P0 — revert scanned-floor banner (round 12 regression).** `UNVERIFIABLE_TABLE_SCANNED` is back in `_UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES`. Since #652 r10 that ending ships native recovery or a marker, never model prose; the round-12 banner broke `_is_restored_prose_recovery` and lost #649 prose on resume. Judge fields on the synthetic `PageOutput` stay for sidecar/metadata only. Deleted `test_scanned_table_floor_refusal_gets_unaccepted_banner`; added `test_restored_page_keeps_recovered_prose_with_judge_refusal_metadata` in gh649.
+- **P1 — split status vs failure_mode.** `_warn_audit_failed_success_status` demotes every `SUCCESS` + `audit_passed=False` winner to `WARNING` before the refusal gate; `_stamp_kept_judge_rejection_failure_mode` runs only for `BEST_OUTPUT_UNVERIFIED` / `BEST_ATTEMPT_FLAGGED` when the banner path fires. Native / whole-doc lanes keep lane `failure_mode`.
+- **P0 — `STRUCTURE_CLASS_GRID_CORROBORATED`.** Argon’s review quoted an old exclusion allowlist; on this branch corroborated winners are **not** excluded. Shipped bytes are model grid text — `test_corroborated_grid_refusal_gets_unaccepted_mark` pins the top banner when refusal evidence is present while `HEADER_BINDING_UNVERIFIED` is unchanged.
+- **Tidy.** Removed dead `judge_refusal_evidence_from_winning`; P6 stage-C oracle mutant (`r13_p6_unenumerated_unaccepted`) confirms unenumerated #1129 drift fails `test_complete_exact_delta_matches_shared_oracle`.
+- **Not in this PR:** GH-96 escalated winners ship `SUCCESS` with default `audit_passed=True` on the fresh `PageOutput` until selection demotes — pre-existing; #1145’s `page_judge=UNKNOWN` cluster handles the unjudged case. Legacy `judge_accepted=None` replay unchanged (#1153).
+
+**Tests:** `7487 passed` (`scratch/routing-baseline/exec/1129/pytest-r13.txt`).
+**Ruff:** `uvx ruff@0.16.0 format --check .`
+**Mutants:** `scratch/routing-baseline/exec/1129/mutants-r13.txt` (`run-mutants-r13.py`, conftest canary).

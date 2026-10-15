@@ -170,10 +170,11 @@ and `rejection_class` is non-empty. `judge_accepted=true` vetoes a stale
 banner text only, not evidence. `audit_passed=false` alone (native demotion, C3
 table-unverified on a judge-accepted winner) is not refusal evidence.
 
-**Exclusion:** endings that already ship a fail-closed marker at the top with no
-model prose above it skip the banner (`NO_TEXT_MARKER`, native/scanned D3 floors,
-rotated-shred and invisible-scan stubs, structure-class floors). Every other
-ending gets the banner by default when refusal evidence is present.
+**Exclusion:** endings that already ship a fail-closed marker or native-recovery
+banner at the top with no model prose above it skip the banner (`NO_TEXT_MARKER`,
+`UNVERIFIABLE_TABLE_SCANNED` / native scanned floors, rotated-shred and
+invisible-scan stubs, structure-class floors). Every other ending gets the
+banner by default when refusal evidence is present.
 
 Find it with `^> \[page unaccepted: `. Written in `_select_and_finalize_page`
 (`_apply_unaccepted_output_mark` in `core/manifest.py`), the same seam as the table

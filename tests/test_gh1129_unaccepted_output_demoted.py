@@ -455,6 +455,7 @@ def test_completed_without_refusal_evidence_gets_no_unaccepted_mark(
         judge_reason=accept_reason,
     )
     record = _select_and_finalize_page(state, 1)
+    assert record.output.status is PageStatus.WARNING
     first = (record.output.text or "").splitlines()[0]
     assert not UNACCEPTED_OUTPUT_MARK_RE.match(first)
     assert first.startswith("plain body")
@@ -592,28 +593,32 @@ def test_native_fallback_keeps_lane_failure_mode_without_refusal_finalize(tmp_pa
     assert record.output.failure_mode is not FailureMode.AUDIT_FAILED
 
 
-def test_scanned_table_floor_refusal_gets_unaccepted_banner(tmp_path: Path) -> None:
-    from pipeline.test_page_failed_marker_scope import (
-        GENUINE_ATTEMPT_MD,
-        NATIVE_WORDS,
-        _scanned_table_state,
+def test_corroborated_grid_refusal_gets_unaccepted_mark(tmp_path: Path) -> None:
+    from test_a1c_header_binding_unverified_surfacing import (
+        GOOD_MD,
+        _corroboration_page,
+        _state_with_page,
     )
 
-    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS)
-    ps.best_output.rejection_class = REJECTION_JUDGE_ONLY
-    ps.best_output.judge_accepted = False
-    ps.best_output.judge_outcome = JUDGE_OUTCOME_COMPLETED
-    pdf = tmp_path / "doc.pdf"
-    doc = fitz.open()
-    doc.new_page()
-    doc.save(pdf)
-    doc.close()
-    state = DocumentState(handle=DocumentHandle.from_path(pdf))
-    state.pages[1] = ps
+    p = _corroboration_page(
+        winner_attempt=PageOutput(
+            page_num=1,
+            text=GOOD_MD,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=False,
+            judge_accepted=False,
+            rejection_class=REJECTION_JUDGE_ONLY,
+            judge_reason=_REJECT_REASON,
+            judge_outcome=JUDGE_OUTCOME_COMPLETED,
+        )
+    )
+    state = _state_with_page(tmp_path, p)
     record = _select_and_finalize_page(state, 1)
-    assert record.selection_provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    assert record.selection_provenance is SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED
     first = (record.output.text or "").splitlines()[0]
     assert UNACCEPTED_OUTPUT_MARK_RE.match(first)
+    assert record.output.failure_mode is FailureMode.HEADER_BINDING_UNVERIFIED
 
 
 def test_credentialed_judge_timeout_carries_top_unaccepted_banner(tmp_path: Path) -> None:
