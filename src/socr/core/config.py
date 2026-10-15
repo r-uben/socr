@@ -389,6 +389,13 @@ class PipelineConfig:
     max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     write_manifest: bool = False  # write reproducibility manifest + blob cache
+    # Agentic loop: after every page has run once, run each page that FAILED (its
+    # output is an ERROR page: no usable reading, or the fail-closed marker) once
+    # more within the same run and document, ladder reversed, and record the retry
+    # on the page. Off by default. Deliberately not in the run fingerprint: it never
+    # changes a page that succeeded, and the resume gate re-runs every failed page
+    # except a table content terminal (rejected / withheld), which it keeps as it is.
+    retry_failed_pages: bool = False
 
     # --- GH-353: table judge ladder ---
     # Two-rung table-page acceptance gate: CLI1 (ollama-cloud vision judge) -> CLI2

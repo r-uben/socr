@@ -59,6 +59,15 @@ _ESCALATION_MODES = {
 #: because a consumer counting the debt should not have to parse a sentence.
 VISUAL_VALUES_NOT_TRANSCRIBED_KIND = "visual_values_not_transcribed"
 
+#: A provider answered a page with no text (Gemini: HTTP 200, empty candidate).
+#: One event per empty answer, so the run summary's count is the number of empty
+#: calls, not of pages. ``data["retried"]`` says whether a second call followed.
+PROVIDER_EMPTY_RESPONSE_KIND = "provider_empty_response"
+
+#: ``--retry-failed-pages``: a page that failed its first pass was run once more
+#: in the same run, ladder reversed. ``data`` holds the first attempt and the outcome.
+PAGE_RETRY_KIND = "page_retry"
+
 
 @dataclass
 class AuditEvent:

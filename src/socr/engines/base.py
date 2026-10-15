@@ -53,6 +53,28 @@ CLI_FAILURE_PLACEHOLDERS: tuple[re.Pattern[str], ...] = (
 )
 
 
+#: gemini-ocr-cli logs an empty model answer (HTTP 200, no text) as
+#: ``Error processing <dir>/<stem>.png: Empty response: finish_reason...`` and then
+#: writes its failure placeholder for that page (Rorqual job 23180840, p.60).
+#: The same message carries the finish reason. A refusal (``RECITATION``, ``SAFETY``,
+#: ...) is reported this way too, but it is the model declining, handled as such below;
+#: only a finish reason that is absent, ``STOP`` or unspecified is an empty answer.
+_EMPTY_RESPONSE_STDERR = re.compile(r"empty response", re.IGNORECASE)
+_FINISH_REASON = re.compile(r"finish_reason=(?:FinishReason\.)?(\w+)")
+_EMPTY_ANSWER_FINISH_REASONS = frozenset({"STOP", "FINISH_REASON_UNSPECIFIED"})
+
+
+def reports_empty_response(stderr: str, stem: str) -> bool:
+    """True when the CLI's stderr says the model's answer for page ``stem`` was empty."""
+    for line in stderr.splitlines():
+        if f"{stem}.png" not in line or not _EMPTY_RESPONSE_STDERR.search(line):
+            continue
+        reason = _FINISH_REASON.search(line)
+        if reason is None or reason.group(1) in _EMPTY_ANSWER_FINISH_REASONS:
+            return True
+    return False
+
+
 def is_cli_failure_placeholder(text: str | None) -> bool:
     """True when ``text`` carries a CLI failure marker on a line of its own.
 
@@ -406,8 +428,32 @@ class BaseEngine(ABC):
                 # Fall back to the aggregated split when there is no per-page file.
                 if not text and aggregate is not None:
                     text = aggregate.get(page_num)
+                # A page file holding nothing or only whitespace is an empty answer: never
+                # a SUCCESS page with no text. Judged on the raw bytes: an engine's own
+                # sentinel (Marker's ``[MISSING_PAGE_EMPTY:n]``) is not a provider failure.
+                empty_answer = reports_empty_response(stderr_text, stem) or (
+                    text is not None and not text.strip()
+                )
 
-                if text and (
+                if empty_answer:
+                    logger.warning(
+                        f"[{self.name}] page {page_num}: empty answer"
+                        + (f" ({cli_error_note})" if cli_error_note else "")
+                    )
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.EMPTY_RESPONSE,
+                            audit_passed=False,
+                            error=(
+                                f"empty answer for page {page_num}"
+                                + (f" ({cli_error_note})" if cli_error_note else "")
+                            ),
+                        )
+                    )
+                elif text and (
                     is_cli_failure_placeholder(text)
                     or is_cli_failure_placeholder(self._clean_output(text, self.name))
                 ):
@@ -429,6 +475,24 @@ class BaseEngine(ABC):
                                 f"CLI reported OCR failure for page {page_num}"
                                 + (f" ({cli_error_note})" if cli_error_note else "")
                             ),
+                        )
+                    )
+                elif (
+                    text
+                    and not self._clean_output(text, self.name).strip()
+                    and not (OutputNormalizer.is_engine_blank_page_sentinel(text))
+                ):
+                    # The engine answered, but cleaning left nothing (a bare code fence,
+                    # think tags, ...). Not an empty provider answer -- the provider said
+                    # something -- and not a page: fail it, never SUCCESS with no text.
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.EMPTY_OUTPUT,
+                            audit_passed=False,
+                            error=f"answer for page {page_num} held no text after cleaning",
                         )
                     )
                 elif text:

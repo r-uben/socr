@@ -422,6 +422,10 @@ class PageState:
     #: ``audit_passed``/``failure_mode`` in place would make assemble
     #: discard the page's text -- the #252 round-1 rule).
     table_ladder_disposition: FailureMode | None = None
+    #: ``--retry-failed-pages``: the page failed its first pass and was run once more.
+    #: Holds the first attempt (status, failure mode, engine, ending, its audit event
+    #: kinds) and the ladder order of the retry; ``None`` for a page not retried.
+    page_retry: dict | None = None
     #: GH-359 (cubic P1): True when at least one emitted table on this page
     #: reached assemble with NO ladder terminal of its own. The disposition
     #: above is a page-level reduction, so a page holding one REJECTED table
