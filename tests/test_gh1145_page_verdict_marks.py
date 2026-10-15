@@ -949,6 +949,88 @@ def test_the_asymmetry_helper_refuses_a_mark_on_the_clean_arm() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The #1050 and #1144 seams, after merging main
+# ---------------------------------------------------------------------------
+
+
+def test_the_1050_recovered_block_is_not_a_mark_and_its_page_gets_a_clause() -> None:
+    """#1050 step 2 recovers text and labels it; that label is a RECEIPT, not a mark.
+
+    "(OCR, not verified)" says what socr did to a block. It does not say a check on this
+    page did not pass, and it is not in the grammar -- so it must not make a page count as
+    MARKED, or #1050's pages would read as disclosed while nothing told the reader the page
+    is unconfirmed. The clause is what does: the lane ships WARNING with
+    ``text_ink_unread``, which the table maps to ``native_coverage=FAIL``.
+
+    The other half is the real interaction: #1050's OWN mark,
+    ``[page N: uncovered text — see image]``, IS in the grammar and covers
+    ``native_coverage`` -- so on a page carrying it the clause is suppressed and the bytes
+    do not move. Both halves pinned, because getting either backwards is silent.
+    """
+    from socr.core.result import FailureMode
+
+    assert not line_is_mark("(OCR, not verified)", 3)
+    assert not line_is_mark("![p](figures/uncovered_p3.png)", 3)
+
+    ink = _output(
+        "Recovered text.\n\n(OCR, not verified)", failure_mode=FailureMode.TEXT_INK_UNREAD
+    )
+    out, verdict = _apply_verdict_marks(ink, _Flags(), 3)
+    assert [c.check for c in verdict.clauses] == [Check.NATIVE_COVERAGE], verdict
+    assert canonical_marks(out.text, 3), "a #1050 page shipped with no disclosure at all"
+
+    # #1050's own mark covers it, so the page keeps its bytes.
+    disclosed = "[page 3: uncovered text — see image]"
+    assert line_is_mark(disclosed, 3)
+    body = disclosed + "\n\nRecovered text."
+    out2, verdict2 = _apply_verdict_marks(
+        _output(body, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
+    )
+    assert [c.check for c in verdict2.clauses] == [Check.NATIVE_COVERAGE], verdict2
+    assert canonical_marks(out2.text, 3) == [], "a second line was added above #1050's own"
+    assert out2.text == body
+
+
+def test_every_prose_recovery_banner_form_is_skipped_by_the_recovery_gate() -> None:
+    """#1144 gave the lane four banner forms; the #1145 fix must work over all four.
+
+    The merge of #1144 turned two single-member tuples into two two-member ones. A form the
+    skip-own-lines fix did not cover would replace that page's recovered prose with the bare
+    marker on the next run -- the content loss the fix exists to stop, reopened for the
+    born-digital half of the lane only, which is the half that is 138 pages.
+    """
+    import socr.core.manifest as manifest
+
+    from socr.core.manifest import PROSE_RECOVERY_FLAGS, _is_restored_prose_recovery
+
+    assert len(PROSE_RECOVERY_FLAGS) == 4, (
+        f"the lane's banner forms changed ({len(PROSE_RECOVERY_FLAGS)}); update this pin "
+        "deliberately, and check the gate still covers every one"
+    )
+    assert any("unverified extraction" in f for f in PROSE_RECOVERY_FLAGS)
+    assert any("unverified scan" in f for f in PROSE_RECOVERY_FLAGS)
+
+    clause = VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, "never judged")
+
+    class _P:
+        best_output = None
+
+    for flag in PROSE_RECOVERY_FLAGS:
+        banner = flag.format(page_num=4)
+        body = banner + "\n\nThe paragraphs this lane recovered."
+        holder = _P()
+        holder.best_output = replace(
+            _output(_with_page_top_banners(body, [clause.mark(4)])),
+            scanned_prose_recovered=True,
+            status=PageStatus.WARNING,
+        )
+        assert _is_restored_prose_recovery(holder, 4), (
+            f"a canonical line above this banner un-recognised the recovery: {banner[:60]!r}"
+        )
+    assert manifest.PROSE_RECOVERY_FLAGS is PROSE_RECOVERY_FLAGS
+
+
+# ---------------------------------------------------------------------------
 # T5 -- resume rule (a): no verdict is doubt, and doubt reprocesses
 # ---------------------------------------------------------------------------
 

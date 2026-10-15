@@ -58,6 +58,7 @@ _FIELD_ALIASES = {
     # is loaded in order to store into it (cubic P2 on #516).
     "hpc_sequential": "hpc.enabled",
     "no_text_coverage": "check_text_coverage",
+    "no_recover_uncovered_text": "recover_uncovered_text",
 }
 
 # Flags that gate BY CONSTRUCTION rather than through a config read, with the
@@ -171,6 +172,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "no_text_coverage": (
         AGENTIC,
         "check_text_coverage; gates _prepare_text_coverage / _apply_text_coverage",
+    ),
+    "no_recover_uncovered_text": (
+        AGENTIC,
+        "recover_uncovered_text; read in _prepare_text_coverage, gates _recover_one_region",
     ),
     # -- non-agentic by design
     "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),

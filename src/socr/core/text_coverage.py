@@ -118,6 +118,13 @@ class CoverageRegion:
     glyphs: int
     band: str
     kind: str
+    #: #1050 step 2: how many pre-merge regions this one was built from.
+    merged_from: int = 1
+    #: #1050 step 2 (owner ruling 2026-10-14): the box of the FIGURE these
+    #: regions sit in, when they sit in one. The crop is then the whole figure,
+    #: not the ink: a lone "Quarters" label cut out of its chart cannot be
+    #: checked by eye. ``None`` for a region that is not in a figure.
+    figure_pdf: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -454,8 +461,431 @@ def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
     return regions
 
 
-def analyze_page(page) -> CoveragePage:
-    """Ink-vs-layer check on one page. Never raises; failures are ``unknown``."""
+def _page_fraction(pdf_box, page) -> float | None:
+    """Fraction of the page *pdf_box* covers, in PDF points."""
+    try:
+        rect = page.rect
+        page_area = float(rect.width) * float(rect.height)
+    except Exception:
+        return None
+    if page_area <= 0:
+        return None
+    x0, y0, x1, y1 = pdf_box
+    return (max(0.0, x1 - x0) * max(0.0, y1 - y0)) / page_area
+
+
+def _drawn_marks_px(page, mat) -> list[tuple[int, int, int, int]]:
+    """Every drawn path's box on the page, in pixmap coordinates."""
+    out: list[tuple[int, int, int, int]] = []
+    try:
+        drawings = page.get_drawings()
+    except Exception as exc:
+        logger.debug("text coverage: get_drawings failed (%s)", exc)
+        return out
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None or rect.is_empty:
+            continue
+        out.append(_to_pix(rect, page, mat))
+    return out
+
+
+def _cluster_own_extent(box, marks) -> tuple[int, int, int, int] | None:
+    """Shrink *box* to the union of the drawn marks inside it.
+
+    ``chart_region_bboxes`` expands a cluster to the page's LEFT EDGE and by a
+    row margin, so on a two-column page a right-hand chart's rect reaches
+    across the left column. Cropping that, and reading it, duplicates the left
+    column's prose. The figure's own extent is what it actually drew.
+
+    Round 7 tried to narrow this further, growing the extent only from marks
+    that touch the page's uncovered ink, to exclude an unrelated drawing
+    elsewhere in the expanded rect. REVERTED in round 8: measured old-vs-new on
+    the 133 corpus pages where ``chart_region_bboxes`` fires, 9 extents
+    differed and 7 SHRANK -- Jorda AER p11 lost three right panels mid-plot,
+    p15 lost its top two panels, several pages lost 10-14 pt of y-axis labels.
+    A figure cut in half is a worse failure than an over-wide crop, and no
+    tolerance restored them. The case that motivated it was measured on a
+    synthetic fixture only; see the known limit in the decision log.
+    """
+    inside = [m for m in marks if _inside(m, box)]
+    if not inside:
+        return None
+    return (
+        min(m[0] for m in inside),
+        min(m[1] for m in inside),
+        max(m[2] for m in inside),
+        max(m[3] for m in inside),
+    )
+
+
+def _native_prose_inside(page, mat, box, marks) -> bool:
+    """True when a native word sits in *box* but on none of its drawn marks.
+
+    Item A, second half. A framed callout is a drawn frame around ORDINARY
+    PROSE; a chart's own labels sit on its marks (or are drawn, and so have no
+    native word at all). A word floating inside the box and touching nothing
+    drawn is the page's text, and grouping it into a figure crop would ship it
+    twice.
+    """
+    try:
+        words = page.get_text("words") or []
+    except Exception as exc:
+        logger.debug("text coverage: words unavailable for figure test (%s)", exc)
+        return True
+    from socr.tables.source_evidence import plain_text_tokens
+
+    for wd in words:
+        if len(wd) < 5 or not str(wd[4]).strip():
+            continue
+        # Only a CONTENT word counts, by socr's existing definition (the table
+        # witness's content-token rule). Measured on Hansen p23: the only
+        # native words floating inside that chart are the panel labels "(A)"
+        # and "(B)", which are figure furniture, not prose. A framed callout's
+        # body is a sentence, and every word of it is a content token.
+        if not plain_text_tokens(str(wd[4]))[1]:
+            continue
+        wx0, wy0, wx1, wy1 = _to_pix(wd[:4], page, mat)
+        cx, cy = (wx0 + wx1) / 2, (wy0 + wy1) / 2
+        if not (box[0] <= cx <= box[2] and box[1] <= cy <= box[3]):
+            continue
+        # A FRAME is hollow, but its box covers everything it encloses, so
+        # every word inside a framed callout would look like it sits "on a
+        # mark". A mark that contains the whole cluster is the frame; it is
+        # skipped. Exact containment, not a coverage fraction.
+        if not any(
+            m[0] <= cx <= m[2] and m[1] <= cy <= m[3] and not _inside(box, m) for m in marks
+        ):
+            return True
+    return False
+
+
+def figure_boxes_px(page, mat, region_px=()) -> list[tuple[int, int, int, int]]:
+    """The page's FIGURE boxes, in pixmap coordinates (#1050 step 2).
+
+    Two halves, both from detectors socr already ships:
+
+    * **Raster** (``figures.extractor.figure_boxes``): a placed image IS a
+      figure by definition and its bbox IS the picture. Nothing further is
+      asked of it -- a raster bar chart has no vector marks to find, and
+      requiring them shipped a label strip without its bars (round 2, item B).
+    * **Vector** (``tables.reconstruct.chart_region_bboxes``): used only to
+      LOCATE a cluster. Its rect is expanded to the page's left edge and by a
+      row margin, so the figure's own extent is recomputed from the marks
+      inside it (item A).
+
+    A vector cluster must then look like a chart rather than like drawn text or
+    a framed callout: it must carry marks away from the uncovered ink, and no
+    native word may float inside it touching nothing drawn.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    try:
+        from socr.figures.extractor import figure_boxes
+
+        for bbox in figure_boxes(page) or ():
+            boxes.append(_to_pix(bbox, page, mat))
+    except Exception as exc:
+        logger.debug("text coverage: raster figure boxes unavailable (%s)", exc)
+    marks = _drawn_marks_px(page, mat)
+    try:
+        from socr.tables.reconstruct import chart_region_bboxes
+
+        for rect in chart_region_bboxes(page) or ():
+            candidate = _to_pix((rect.x0, rect.y0, rect.x1, rect.y1), page, mat)
+            own = _cluster_own_extent(candidate, marks)
+            if own is None:
+                continue
+            if not _cluster_has_marks_beyond_the_ink(own, marks, region_px):
+                continue
+            if _native_prose_inside(page, mat, own, marks):
+                continue
+            boxes.append(own)
+    except Exception as exc:
+        logger.debug("text coverage: vector chart boxes unavailable (%s)", exc)
+    return boxes
+
+
+def _cluster_has_marks_beyond_the_ink(box, marks, region_px) -> bool:
+    """True when *box* contains drawn paths that are NOT the uncovered text itself.
+
+    ``chart_region_bboxes`` clusters any drawing, so it cannot tell a chart
+    from a box of VECTOR-DRAWN TEXT: measured 2026-10-14, it returns one
+    cluster for Hansen p23's chart AND for Schoenegger p10's prompt box, which
+    the owner was explicit about ("we should not read that box as an image...
+    it's just text"). ``has_chart_marks`` is False on both.
+
+    The separation needs no new detector and no threshold, because the ink is
+    already segmented: a chart has drawn marks (axes, plot lines, ticks)
+    OUTSIDE its uncovered-text regions, while a box of drawn text has nothing
+    in it but the letters. A rule-thin mark counts only when it SPANS the
+    cluster (item B): a gridline is a mark, a page rule is not.
+    """
+    inside_regions = [r for r in region_px if _inside(r, box)]
+    for px in marks:
+        if not _inside(px, box):
+            continue
+        # A rule is not a plot mark (``MAX_THICK_PX`` is image_locate's own rule
+        # thickness, already used by the ink filter). Tested on the SHORT side,
+        # so a data polyline -- which rises and falls -- is never rule-thin;
+        # only a perfectly flat line is, and that is an axis. A spans-the-box
+        # exemption was tried and reverted: a framed text box's divider rule
+        # spans it too, and it flipped Schoenegger p10 to "figure".
+        if min(px[2] - px[0], px[3] - px[1]) <= MAX_THICK_PX:
+            continue
+        if not any(
+            px[0] < r[2] and px[2] > r[0] and px[1] < r[3] and px[3] > r[1] for r in inside_regions
+        ):
+            return True
+    return False
+
+
+def _container_boxes(page, mat) -> list[tuple[int, int, int, int]]:
+    """Drawn rectangles and raster placements, in pixmap coordinates.
+
+    #1050 step 2. These are the page's own statements about what belongs
+    together: a framed prompt box is one drawn rectangle (Schoenegger p10),
+    a pasted newspaper clipping is one placed raster (Acosta p21). Nothing
+    here is a threshold -- a container is whatever the PDF drew.
+    """
+    from socr.figures.crop_descriptions import is_page_sized
+
+    boxes: list[tuple[int, int, int, int]] = []
+    try:
+        for d in page.get_drawings():
+            rect = d.get("rect")
+            if rect is None or rect.is_empty:
+                continue
+            # A page-sized DRAWN rect is page furniture -- a border, a
+            # background fill -- and contains every region by construction, so
+            # it would merge unrelated ink across the prose between it. A
+            # page-sized RASTER is not furniture: it is one placed image, and
+            # everything inside it came from that one object (the Acosta
+            # clipping's scan is placed over 85% of the page). Hence the
+            # asymmetry: drawn containers must be smaller than the page,
+            # rasters need not be.
+            if is_page_sized(_page_fraction((rect.x0, rect.y0, rect.x1, rect.y1), page)):
+                continue
+            boxes.append(_to_pix(rect, page, mat))
+    except Exception as exc:  # a malformed content stream must not fail the page
+        logger.debug("text coverage: get_drawings failed (%s)", exc)
+    try:
+        for info in page.get_image_info():
+            bbox = info.get("bbox")
+            if bbox:
+                boxes.append(_to_pix(bbox, page, mat))
+    except Exception as exc:
+        logger.debug("text coverage: get_image_info failed (%s)", exc)
+    return boxes
+
+
+def _inside(inner: tuple[int, int, int, int], outer: tuple[int, int, int, int]) -> bool:
+    return (
+        inner[0] >= outer[0]
+        and inner[1] >= outer[1]
+        and inner[2] <= outer[2]
+        and inner[3] <= outer[3]
+    )
+
+
+def _swallows_native_text(box, native_px) -> bool:
+    """True when *box* overlaps a VISIBLE native character box.
+
+    #1050 step 2, item B. Two uncovered bands that sit above and below a native
+    line merge into a crop containing that line. The model then reads it, and
+    the page ships that line twice -- once as native prose, once as a recovered
+    block. The merge is refused instead, and the members stay separate: a few
+    extra crops cost nothing, a duplicated line is wrong text.
+    """
+    x0, y0, x1, y1 = box
+    for cx0, cy0, cx1, cy1 in native_px:
+        if cx0 < x1 and cx1 > x0 and cy0 < y1 and cy1 > y0:
+            return True
+    return False
+
+
+def merge_regions_by_figure(page, mat, regions: list[CoverageRegion]) -> list[CoverageRegion]:
+    """Owner ruling 2026-10-14: regions inside ONE figure are one region.
+
+    Before this, a chart's labels each became their own crop -- 23 on Hansen
+    et al. 2018 p23, 18 on Bugel et al. p23, almost all single labels such as
+    "Quarters" or "Top 1% share". A label cut out of its chart cannot be
+    checked by eye, which defeats keeping the picture at all.
+
+    The merged region's crop is the WHOLE FIGURE (``figure_pdf``), not the ink
+    union, and the model reads that one crop instead of one per label. The
+    native-text guard that applies to other containers is deliberately NOT
+    applied here: a chart's own axis labels have a text layer, and excluding
+    every figure that contains one would leave nothing.
+    """
+    if not regions:
+        return regions
+    boxes = figure_boxes_px(page, mat, [r.px for r in regions])
+    if not boxes:
+        return regions
+    claimed: set[int] = set()
+    merged: list[CoverageRegion] = []
+    for box in boxes:
+        members = [i for i, reg in enumerate(regions) if i not in claimed and _inside(reg.px, box)]
+        if not members:
+            continue
+        claimed.update(members)
+        px = (
+            min(regions[i].px[0] for i in members),
+            min(regions[i].px[1] for i in members),
+            max(regions[i].px[2] for i in members),
+            max(regions[i].px[3] for i in members),
+        )
+        merged.append(
+            CoverageRegion(
+                pdf=_from_pix(*px, page, mat),
+                px=px,
+                glyphs=sum(regions[i].glyphs for i in members),
+                band=_locate_band(page, mat, px),
+                kind=_locate_kind(page, mat, px),
+                merged_from=sum(regions[i].merged_from for i in members),
+                figure_pdf=_from_pix(*box, page, mat),
+            )
+        )
+    if not claimed:
+        return regions
+    merged.extend(regions[i] for i in range(len(regions)) if i not in claimed)
+    merged.sort(key=lambda r: (r.px[1], r.px[0]))
+    return merged
+
+
+def merge_regions_by_container(
+    page, mat, regions: list[CoverageRegion], native_px=()
+) -> list[CoverageRegion]:
+    """#1050 step 2: one coherent uncovered block is ONE region.
+
+    Step 1 cut Schoenegger p10's framed prompt box into 4 crops and Acosta
+    p21's pasted clipping into 7, because it links rows only when their
+    vertical gap is under a glyph height: a paragraph break or a column gap
+    inside one block starts a new region. Grouping is taken from the page's
+    own geometry instead of from a new gap threshold: two regions that lie
+    inside the SAME drawn rectangle or the SAME placed raster are one block.
+
+    The merged box is the union of the member regions, never the container.
+    Acosta's clipping raster is placed over 85% of the page because the scan
+    carries wide white margins; its ink is 5%. Cropping the container would
+    hand the model the whole page, native prose included.
+
+    Three refusals, each falling back to the separate member regions:
+
+    * the union would be page-sized (``PAGE_SIZED_BBOX_FRACTION``, measured for
+      crop descriptions), so no merge can produce a whole-page crop;
+    * the container is a page-sized DRAWN rect -- furniture, not a box (handled
+      in ``_container_boxes``; a page-sized raster IS still a container);
+    * the union would overlap a visible native character box, which would hand
+      the model a line the page already ships and have it ship twice.
+    """
+    if len(regions) < 2:
+        return regions
+    from socr.figures.crop_descriptions import is_page_sized
+
+    containers = _container_boxes(page, mat)
+    if not containers:
+        return regions
+    parent = list(range(len(regions)))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for box in containers:
+        members = [i for i, reg in enumerate(regions) if _inside(reg.px, box)]
+        if len(members) < 2:
+            continue
+        ux0 = min(regions[i].px[0] for i in members)
+        uy0 = min(regions[i].px[1] for i in members)
+        ux1 = max(regions[i].px[2] for i in members)
+        uy1 = max(regions[i].px[3] for i in members)
+        union_pdf = _from_pix(ux0, uy0, ux1, uy1, page, mat)
+        if is_page_sized(_page_fraction(union_pdf, page)):
+            continue
+        if _swallows_native_text((ux0, uy0, ux1, uy1), native_px):
+            continue
+        root = find(members[0])
+        for i in members[1:]:
+            other = find(i)
+            if other != root:
+                parent[other] = root
+    groups: dict[int, list[int]] = collections.defaultdict(list)
+    for i in range(len(regions)):
+        groups[find(i)].append(i)
+    merged: list[CoverageRegion] = []
+    for members in groups.values():
+        if len(members) == 1:
+            merged.append(regions[members[0]])
+            continue
+        px = (
+            min(regions[i].px[0] for i in members),
+            min(regions[i].px[1] for i in members),
+            max(regions[i].px[2] for i in members),
+            max(regions[i].px[3] for i in members),
+        )
+        pdf = _from_pix(*px, page, mat)
+        merged.append(
+            CoverageRegion(
+                pdf=pdf,
+                px=px,
+                glyphs=sum(regions[i].glyphs for i in members),
+                band=_locate_band(page, mat, px),
+                kind=_locate_kind(page, mat, px),
+                merged_from=sum(regions[i].merged_from for i in members),
+            )
+        )
+    merged.sort(key=lambda r: (r.px[1], r.px[0]))
+    return merged
+
+
+#: #1050 step 2: how many trailing words of the preceding native block are used
+#: to find the insertion point in the shipped page body. A MATCH WINDOW, not a
+#: quality threshold: long enough that the snippet is unlikely to occur twice on
+#: one page, short enough to survive the native extractor's paragraph rejoining.
+#: A snippet that is not found makes the caller fall back, never guess.
+ANCHOR_TAIL_WORDS = 8
+
+
+def preceding_text_snippet(page, region_pdf, *, tail_words: int = ANCHOR_TAIL_WORDS) -> str:
+    """Tail of the last native text block that ends above *region_pdf*.
+
+    #1050 step 2 places a recovered block at its reading-order position
+    (2026-10-09 ruling). The page's own text blocks say what precedes the
+    region; the caller locates this snippet in the shipped body. ``""`` means
+    nothing precedes it (the region is above all native text).
+    """
+    try:
+        blocks = [
+            b for b in page.get_text("blocks") if len(b) > 6 and b[6] == 0 and str(b[4]).strip()
+        ]
+    except Exception as exc:
+        logger.debug("text coverage: anchor blocks unavailable (%s)", exc)
+        return ""
+    x0, top, x1 = region_pdf[0], region_pdf[1], region_pdf[2]
+    # Item K: on a two-column page every right-column block also "ends above" a
+    # left-column region, and the lowest of them wins -- so the left column's
+    # words were anchored to the right column's text. A block only precedes the
+    # region if it shares some of the region's horizontal span. No threshold:
+    # any overlap at all counts, and a region that overlaps nothing above it
+    # has no anchor and goes to the page tail rather than to a guess.
+    above = [b for b in blocks if b[3] <= top and b[0] < x1 and b[2] > x0]
+    if not above:
+        return ""
+    best = max(above, key=lambda b: (b[3], b[1]))
+    words = str(best[4]).split()
+    return " ".join(words[-tail_words:])
+
+
+def analyze_page(page, *, group: bool = True) -> CoveragePage:
+    """Ink-vs-layer check on one page. Never raises; failures are ``unknown``.
+
+    ``group=False`` returns step 1's regions untouched. Grouping exists to make
+    ONE crop readable; with no reader there is nothing to read, and step 2 must
+    then be byte-identical to main (round 2, item E).
+    """
     import time
 
     t0 = time.perf_counter()
@@ -472,6 +902,12 @@ def analyze_page(page) -> CoveragePage:
                     continue
                 seen.add(reg.pdf)
                 regions.append(reg)
+        if group:
+            native_px = [_to_pix(b, page, mat) for b in vis]
+            # Figures first: a figure is the strongest statement the page makes
+            # about what belongs together, and its crop is the whole figure.
+            regions = merge_regions_by_figure(page, mat, regions)
+            regions = merge_regions_by_container(page, mat, regions, native_px)
         return CoveragePage(
             verdict=VERDICT_FLAGGED if regions else VERDICT_PASSED,
             regions=regions,
@@ -486,17 +922,155 @@ def analyze_page(page) -> CoveragePage:
         )
 
 
-def coverage_for_document(doc) -> list[CoveragePage]:
+def coverage_for_document(doc, *, group: bool = True) -> list[CoveragePage]:
     """Per-page verdicts for a whole PDF. No furniture suppression."""
-    return [analyze_page(doc[i]) for i in range(len(doc))]
+    return [analyze_page(doc[i], group=group) for i in range(len(doc))]
 
 
-def render_region_png(page, pdf_rect: tuple[float, float, float, float], dest) -> bool:
+def _fill_with_local_background(arr, paint, protect):
+    """Replace the pixels in *paint* with the colour that surrounds them.
+
+    Round 5, item 1. Painting covered glyphs WHITE was itself a signal: on a
+    grey or dark fill -- a chart exported as a raster with native labels over
+    it -- the model was handed fat white words and read them, so the mask
+    created the duplication it exists to prevent. Measured with Fable's metric
+    (contrast pixels inside the native char boxes, against the fill): white
+    painting left 395% on a 0.6 grey and 389% on a dark fill.
+
+    Each covered component is filled with the MEDIAN of the pixels in a ring
+    around it -- a per-component estimate, so a gradient is followed rather
+    than flattened. The mask is first dilated by ``MAX_THICK_PX``
+    (image_locate's rule thickness, already used by the ink filter, so no new
+    number) because a glyph's anti-aliased halo lies just outside the component
+    and reads as the glyph's own edge if it is left behind.
+    """
+    import cv2
+
+    radius = max(1, int(round(MAX_THICK_PX)))
+    kernel = np.ones((radius * 2 + 1, radius * 2 + 1), np.uint8)
+    solid = cv2.dilate(paint.astype(np.uint8), kernel).astype(bool) & ~protect
+    solid |= paint
+    out = arr.copy()
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(
+        solid.astype(np.uint8), connectivity=8
+    )
+    height, width = solid.shape
+    for i in range(1, count):
+        x, y, w, h = (int(stats[i, j]) for j in range(4))
+        x0, y0 = max(0, x - radius), max(0, y - radius)
+        x1, y1 = min(width, x + w + radius), min(height, y + h + radius)
+        window = out[y0:y1, x0:x1]
+        ring = ~solid[y0:y1, x0:x1]
+        if not ring.any():
+            continue
+        out[y0:y1, x0:x1][labels[y0:y1, x0:x1] == i] = np.median(window[ring], axis=0)
+    return out
+
+
+def native_ink_masked(page, mat, arr):
+    """*arr* with the page's NATIVE INK painted out, component by component.
+
+    Round 4, items 1 and 2. Two things this must get right, and the first
+    version got both wrong:
+
+    * **Every char the shipped prose is built from**, visible AND invisible. An
+      alpha-0 OCR layer over a raster is not drawn, but ``get_text`` returns it
+      and the native text ships it, so leaving it unpainted duplicated the
+      sentence (recovery ON 2, OFF 1).
+    * **The ink, not the box.** A char box spans ascender to descender, so
+      painting boxes erased uncovered ink just below a baseline -- a drawn
+      "0.058" came back as "U.UD& arawn pelow". What is painted is what step 1
+      already classes as COVERED: a connected ink component whose pixels lie
+      mostly under a native char box (``COVER_MAJORITY``). Uncovered ink -- the
+      very thing recovery exists to read -- is never painted.
+
+    Falls back to the unmasked array only for an empty page; any failure is the
+    caller's to handle, because reading an unmasked crop reopens duplication.
+    """
+    import cv2
+
+    out = arr.copy()
+    visible, invisible = visible_char_boxes(page)
+    native_boxes = [*visible, *invisible]
+    if not native_boxes:
+        return out
+    gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY) if out.shape[2] >= 3 else out[:, :, 0]
+    layer = _paint(gray.shape, native_boxes, page, mat)
+    paint = np.zeros(gray.shape, dtype=bool)
+    protect = np.zeros(gray.shape, dtype=bool)
+    for ink in _polarity_masks(gray):
+        count, labels, stats, _c = cv2.connectedComponentsWithStats(
+            ink.astype(np.uint8), connectivity=8
+        )
+        if count < 2:
+            continue
+        hit = np.bincount(labels[layer], minlength=count).astype(np.float64)
+        total = np.bincount(labels.ravel(), minlength=count).astype(np.float64)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac = np.where(total > 0, hit / total, 0.0)
+        # A component whose pixels are mostly under a char box IS a glyph: it
+        # is painted whole, as before.
+        covered = np.zeros(count, dtype=bool)
+        covered[1:] = frac[1:] >= COVER_MAJORITY
+        # Round 6 item 2: a glyph printed over hatching, dots or grain MERGES
+        # into the texture's own component, so the majority test failed and the
+        # label stayed legible in the crop. Such a component touches a char box
+        # but is far bigger than any glyph can be -- bounded by the corpus
+        # percentiles the ink filter already uses -- and for it only the ink
+        # INSIDE the char boxes is painted; the texture itself is left alone.
+        # A GLYPH-SIZED component that merely overlaps a char box is the other
+        # case entirely: a drawn mark under a descender, which must survive
+        # (round 4 item 2), so it is protected rather than painted.
+        short = np.minimum(stats[:, 2], stats[:, 3])
+        long = np.maximum(stats[:, 2], stats[:, 3])
+        glyph_sized = (short <= GLYPH_H_P98_PX) & (long <= WORD_W_P98_PX)
+        texture = np.zeros(count, dtype=bool)
+        texture[1:] = (hit[1:] > 0) & ~covered[1:] & ~glyph_sized[1:]
+        paint |= covered[labels]
+        paint |= texture[labels] & layer
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = ~covered[1:] & ~texture[1:]
+        protect |= keep[labels]
+        # Round 7 item 1, a regression I introduced in round 6: a texture
+        # component was dropped from ``protect`` entirely, so the fill's
+        # MAX_THICK_PX halo could shave the part of it that lies OUTSIDE the
+        # char boxes -- uncovered ink. Measured: tick labels on an axis rule
+        # under a native line came back as "2U19 U.U58 2U2U". Only the ink
+        # under a char box is this feature's to paint; the rest of the same
+        # component is protected exactly like any other uncovered ink.
+        protect |= texture[labels] & ~layer
+    if paint.any():
+        out = _fill_with_local_background(out, paint, protect & ~paint)
+    return out
+
+
+def crop_box(region: CoverageRegion) -> tuple[float, float, float, float]:
+    """The box to CROP for *region*: the whole figure when it is in one.
+
+    One place decides this, because the saved picture and the model's crop
+    must come from the same box: a reader checking words against a different
+    crop than the model read is checking the wrong thing.
+    """
+    return region.figure_pdf or region.pdf
+
+
+def render_region_png(
+    page, pdf_rect: tuple[float, float, float, float], dest, *, mask_native: bool = False
+) -> bool:
     """Write a DETECT_DPI crop of *pdf_rect* to *dest*.
 
     Uses the same pixmap transform as ``analyze_page`` (scale, then
     ``page.rotation`` via ``_to_pix``). Clipping unrotated coords on a
     rotated render produced an all-white 180° crop.
+
+    ``mask_native=True`` paints out every VISIBLE native character box first
+    (#1050 step 2, round 3). This decouples what the model READS from what the
+    reader SEES: the model is handed a crop containing only ink the text layer
+    does not already carry, so it cannot repeat a sentence the page already
+    ships, whatever the figure detection decided. The picture that SHIPS is
+    rendered without the mask. The whole duplication class -- a raster placed
+    under prose, a callout with an icon, a two-column chart box -- is closed
+    here rather than by chasing shapes.
     """
     import cv2
     import fitz
@@ -504,6 +1078,8 @@ def render_region_png(page, pdf_rect: tuple[float, float, float, float], dest) -
     mat = fitz.Matrix(SCALE, SCALE)
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if mask_native:
+        arr = native_ink_masked(page, mat, arr)
     x0, y0, x1, y1 = _to_pix(pdf_rect, page, mat)
     x0, y0 = max(0, x0), max(0, y0)
     x1, y1 = min(pix.width, x1), min(pix.height, y1)

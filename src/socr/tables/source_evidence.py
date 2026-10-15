@@ -701,6 +701,18 @@ def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
     return numeric, content
 
 
+def plain_text_tokens(text: str) -> tuple[Counter, set[str]]:
+    """Public seam over ``_tokens_from_plain_text`` (#1050 step 2).
+
+    ``socr.core.text_coverage`` asks whether a native word inside a candidate
+    figure is a CONTENT word, and must use the same definition the table
+    witness does rather than a second one that drifts. Cross-package imports of
+    private names are forbidden (``test_package_layering``), so the one
+    definition is exported here rather than copied.
+    """
+    return _tokens_from_plain_text(text)
+
+
 def _tokens_and_dash_led(text: str) -> tuple[Counter, set[str], int]:
     """As ``_tokens_from_plain_text``, plus how many dash-led numbers were dropped.
 

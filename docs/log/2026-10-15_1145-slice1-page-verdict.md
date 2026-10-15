@@ -265,6 +265,57 @@ hybrid class exactly, which is the independent check that round 1's `AUDIT_FAILE
 landed on the right population. The 398 fail-closed pages are the ones where socr still
 cannot name its own reason; narrowing that number is future work, not a slice-1 goal.
 
+## Merging main in: #1144 (PR #1158) and #1050 step 2 (PR #1161)
+
+Two conflicts, both in files this ticket rewrites. #1144's and #1050's work is kept whole in
+both.
+
+**`benchmark/acceptance.py`.** #1144 landed on the pre-move copy of the mark grammar. All of
+it is kept — in `core/marks.py`, where the grammar now lives. #1144's substantive change was
+that `_scanned_flag_mark` must read the EMITTERS' own enumerations rather than listing the
+two `SCANNED_*` templates by name: the lane now serves structure-class floors on
+born-digital pages, whose banner says "unverified extraction", and all 138 pages #1144
+recovers are born-digital, so the by-name version counted every one of them
+`error_unmarked`. The moved family reads `PROSE_RECOVERY_FLAGS` and so covers all four
+forms.
+
+**`core/manifest.py`.** #1144 factored `_is_prose_recovery_body` out of
+`_is_restored_prose_recovery` so the structure-class ending records a recovery from the same
+evidence the restore path reads. #1145's skip-own-canonical-lines fix moved INSIDE that
+shared helper rather than staying in the caller, so both paths get it over all four banner
+forms. #1145 had declared its own single-member `PROSE_RECOVERED_FLAGS` /
+`NATIVE_TEXT_FLAGS` for the same reason; #1144's two-member versions supersede them and the
+duplicates are gone.
+
+**#1050 step 2, checked rather than assumed.** Its recovered `(OCR, not verified)` block is
+NOT in the grammar, so it cannot make a page count as MARKED — correct, since it says what
+socr did to a block, not that a check did not pass. Its pages ship WARNING
+`text_ink_unread`, which the clause table maps to `native_coverage=FAIL`, so they are
+disclosed by a clause. And #1050's own mark, `[page N: uncovered text — see image]`, IS in
+the grammar and covers `native_coverage`, so a page carrying it is suppressed and keeps its
+bytes. Both halves are pinned, because getting either backwards is silent.
+
+### Two things the merge broke, and what they were
+
+* **A layering violation of mine.** To keep #1144's pin passing I re-exported
+  `_scanned_flag_mark` from `benchmark/acceptance.py`, and
+  `tests/test_package_layering.py::test_no_private_symbol_imported_across_packages` rightly
+  refused it: a private name must not cross `socr.*` packages. The shortcut is gone, and
+  #1144's pin now asks the same question through the meter's public surface
+  (`families_of` / `line_is_mark`), which is what the meter itself calls.
+* **#1050's leak test counted this ticket's mark as recovered content.** It collected every
+  `>`-prefixed line as the recovered block, and the canonical unchecked line is quoted — so
+  its own wording ("this page", `native_coverage`) was compared against the page's native
+  vocabulary and flagged as text the reader saw. Marks are now excluded through PRODUCTION's
+  `line_is_mark`, so a mark that stops being recognised fails the test rather than silently
+  widening the exclusion. **Proved still load-bearing** by the `1050-mask-disabled` mutant:
+  with #1050's native-text mask off, the echoing reader transcribes the page's own sentence
+  and the test still fails.
+
+Post-merge: suite **7,879 passed, 2 skipped, 4 xfailed, 0 failed**; ruff clean (953 files);
+**25 mutants, 25 killed**; corpus replay unchanged at 4,170/550/2,064 → 0/0/0 with 0
+CHECKED-byte changes, 0 demotions and 0 status moves.
+
 ## Known readability cost
 
 On a page like P6 page 3 the fact "the native table region failed verification" is now stated

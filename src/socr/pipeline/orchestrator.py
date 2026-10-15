@@ -7,6 +7,7 @@ structured loop that operates on the DocumentState blackboard.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
 import logging
@@ -139,6 +140,151 @@ from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
+class _MaskUnavailable(Exception):
+    """#1050 step 2 round 4: the native-text mask could not be built.
+
+    The crop must NOT be read unmasked -- that is the duplication this mask
+    closes -- so this degrades the region to step 1: picture and mark, no text.
+    """
+
+
+class _RecoveryBudgetSpent(Exception):
+    """#1050 step 2 (item H): this page's crop-read budget is gone."""
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """True for a reader timeout, by TYPE first and only then by wording.
+
+    #713's lesson: a reason string built by interpolating an arbitrary
+    exception makes any message containing "timed out" look like a timeout.
+    The type is checked first so a real ``TimeoutError`` always counts.
+    """
+    # ``ollama_utils.TotalDeadlineExceeded`` already subclasses ``TimeoutError``,
+    # so the fail-fast from the outstanding-call guard lands here too (round 4,
+    # Argon #4). What had to change was the ENGINE, which folded it into None.
+    # Type only (round 6, repo soft 4). ``TotalDeadlineExceeded`` and the
+    # wrapper in ``_uncovered_text_ask`` both subclass ``TimeoutError``, so the
+    # wording fallback this used to carry could only ever fire on an exception
+    # whose MESSAGE happened to say "timed out" -- #713's lesson, in miniature.
+    return isinstance(exc, TimeoutError)
+
+
+#: A picture link this feature placed, as ``uncovered_text_image_ref`` writes it.
+_PLACED_IMAGE_RE = re.compile(r"^!\[Uncovered text page \d+ region \d+\]\(")
+
+
+def _prior_recoveries(body: str, page_num: int, regions) -> dict:
+    """What a previous apply already wrote for each region, by index.
+
+    Round 5, item 5. ``_apply_text_coverage`` is byte-idempotent, but a second
+    call re-read every crop and appended a second copy of every audit event.
+    A region whose picture and block are already in the body is done.
+    """
+    from socr.core.text_coverage import uncovered_text_image_ref
+    from socr.core.text_recovery import FIGURE_TEXT_PREFIX, PAGE_TEXT_PREFIX
+
+    found: dict = {}
+    # Round 7 added a ``claimed`` set so no paragraph could be taken twice.
+    # REMOVED in round 8 as unreachable, not merely untested: a figure selects
+    # the paragraph AFTER its picture and a prose region the one BEFORE its
+    # own, so the only collision is ``pic_figure, block, pic_prose`` -- which
+    # ``steals_next`` below already refuses. Enumerated over every arrangement
+    # of two and three regions: zero collisions. An untestable guard hides
+    # whether the rule above it is right, so it goes.
+    # Round 7, item 2: split on blank lines AND on bare picture links. An
+    # all-unread page joins its refs with a SINGLE newline (that is what makes
+    # it byte-identical to step 1), so splitting on blank lines alone saw one
+    # paragraph holding every ref, matched none of them, and a second apply
+    # re-read every crop and doubled ``uncovered_text_unread``.
+    paragraphs: list[str] = []
+    for para in body.split("\n\n"):
+        chunk: list[str] = []
+        for line in para.split("\n"):
+            if _PLACED_IMAGE_RE.match(line.strip()):
+                if chunk:
+                    paragraphs.append("\n".join(chunk).strip())
+                    chunk = []
+                paragraphs.append(line.strip())
+            else:
+                chunk.append(line)
+        if chunk and "\n".join(chunk).strip():
+            paragraphs.append("\n".join(chunk).strip())
+    paragraphs = [para for para in paragraphs if para]
+    for index, reg in enumerate(regions, start=1):
+        ref = uncovered_text_image_ref(page_num, index)
+        if ref not in paragraphs:
+            continue
+        at = paragraphs.index(ref)
+        in_figure = reg.figure_pdf is not None or reg.kind == "raster"
+        # Round 6, item 3: look where this region's block ACTUALLY goes. In a
+        # figure the image leads and the words follow (at + 1); elsewhere the
+        # words lead and the image follows (at - 1).
+        #
+        # Round 9: and the candidate must carry the MARK of that same kind.
+        # Round 7's version asked whether the NEXT REGION was prose, which is
+        # the wrong question twice over -- the paragraph after a picture
+        # belongs to whoever wrote it, not to whoever comes next in the region
+        # list, and the two orders can disagree. The block says which it is, so
+        # ask the block.
+        if in_figure:
+            neighbour = [
+                para
+                for para in paragraphs[at + 1 : at + 2]
+                if para.startswith("> " + FIGURE_TEXT_PREFIX)
+            ]
+        else:
+            neighbour = [
+                para for para in paragraphs[at - 1 : at] if para.startswith("> " + PAGE_TEXT_PREFIX)
+            ]
+        block = neighbour[0] if neighbour else None
+        piece = None
+        if block is not None:
+            piece = (ref + "\n\n" + block) if in_figure else (block + "\n\n" + ref)
+        found[index] = _RegionRecovery(
+            image_ref=ref,
+            anchor="",
+            at_reading_order=False,
+            piece=piece,
+            merged_from=reg.merged_from,
+        )
+    return found
+
+
+def _strip_coverage_decoration(body: str, page_num: int) -> str:
+    """Remove whatever #1050 already wrote on this page body.
+
+    The page mark, the region pictures and the recovered blocks. Native prose
+    is untouched: only paragraphs that this feature itself emits are dropped,
+    each matched whole. Round 4, item 8 -- ``_apply_text_coverage`` appended
+    unconditionally, so applying twice duplicated the marker and the blocks.
+    """
+    from socr.core.manifest import coverage_parts
+
+    parts = set(coverage_parts(body))
+    if not parts:
+        return body
+    kept = [p for p in body.split("\n\n") if p.strip() not in parts]
+    return "\n\n".join(kept).rstrip()
+
+
+@dataclass(frozen=True)
+class _RegionRecovery:
+    """#1050 step 2: how one uncovered region ships.
+
+    ``piece`` is ``None`` when nothing was read -- then the caller ships step
+    1's picture link alone, unchanged. ``at_reading_order`` is True only for a
+    region that is NOT inside a figure: those are substituted into the prose at
+    ``anchor`` (2026-10-09 ruling), falling back to the page tail when the
+    anchor cannot be found in the shipped body.
+    """
+
+    image_ref: str
+    anchor: str
+    at_reading_order: bool
+    piece: str | None
+    merged_from: int = 1
+
+
 @dataclass(frozen=True)
 class _AbandonedEscalation:
     """An escalation call released at its outer deadline whose worker may still run."""
@@ -182,6 +328,16 @@ _RESUME_REPLAYED: dict[str, str] = {
     "table_escalation_timeout": (
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
+    ),
+    "table_escalation_refused": (
+        "#1144: same emitter and the same consequence -- the shipped table is the "
+        "unescalated incumbent, and tables_trust reads this kind to keep the page "
+        'untrusted. The reason given here in rounds 1-2 ("a credentialed page can now '
+        'SHIP carrying it") was WRONG and is corrected: that credential path was '
+        "reverted and table_escalation_refused is still in "
+        "CREDENTIAL_BLOCKING_EVENT_KINDS. The kind is replayed because its emitter "
+        "_escalate_table_page is skipped by a terminal resumed page while tables_trust "
+        "still reads it, exactly as its GH-851 siblings are, not because of #1144"
     ),
     "table_ladder_budget_exhausted": (
         "GH-974: the page's ladder budget ran out; the page is UNVERIFIED and this event "
@@ -1122,6 +1278,14 @@ class UnifiedPipeline:
     #: GH-974: the CURRENT page's table-ladder budget; None outside the gate.
     _ladder_budget = None
 
+    #: #1050 step 2: the CURRENT page's crop-read budget; None outside apply.
+    _recovery_budget = None
+
+    #: #1050 step 2 (item H): set when the crop reader timed out AND the backend
+    #: failed its health probe. Read at the top of the agentic loop, which arms
+    #: the existing cascade halt. Never cleared mid-document: a wedge is terminal.
+    _recovery_backend_wedged = False
+
     # Memoized judge-model resolution (#133). ``_resolve_judge_model`` probes
     # Ollama over HTTP once per entry in ``_JUDGE_MODEL_CANDIDATES``, and it is
     # consulted from ``_run_fingerprint``, which runs ONCE PER PAGE via
@@ -1608,6 +1772,19 @@ class UnifiedPipeline:
             # #1050: the coverage check rewrites flagged pages (WARNING + mark +
             # PNG). Toggling it must not resume a SUCCESS page as clean.
             "check_text_coverage": getattr(cfg, "check_text_coverage", True),
+            # #1050 step 2: recovery rewrites a flagged page's body (OCR'd words
+            # placed in the prose or under the figure). Toggling it must not
+            # resume a page written under the other setting.
+            # Round 5, item 6: only when it is ON. The flag changes a page's
+            # bytes only by recovering words; with it OFF the page is exactly
+            # what main produces, so hashing the flag made every OFF run
+            # invalidate main's fragments and forced a needless reprocess --
+            # the GH-142 failure shape, in the other direction.
+            **(
+                {"recover_uncovered_text": True}
+                if getattr(cfg, "recover_uncovered_text", True)
+                else {}
+            ),
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
@@ -11615,8 +11792,29 @@ class UnifiedPipeline:
         blank_pages: set[int],
     ) -> None:
         """#1050: run the ink-vs-layer check once per document (trusted-native frame)."""
+        # Round 3, item 2: per-DOCUMENT state. ``_recovery_backend_wedged`` is a
+        # class attribute, and ``process_batch`` reuses one pipeline instance,
+        # so one wedged document halted every document after it. Reset here,
+        # where the document's coverage state is prepared, rather than relying
+        # on the instance being fresh.
+        self._recovery_backend_wedged = False
         self._text_coverage_pages = {}
         self._text_coverage_output_dir = output_dir
+        # #1050 step 2: read once per document, beside the step 1 switch, so the
+        # setting is consulted on every run and not only on a flagged page.
+        # ``and not native_only``: the same gate the figure describer uses
+        # (``_crop_descriptions_enabled``). --native-only means no model on any
+        # page; step 2 had no such gate and called the reader anyway, which is
+        # the one promise that flag makes.
+        # Round 4, item 6: ``check_text_coverage`` FIRST. The availability
+        # probe is an HTTP call, and with the coverage check off there is no
+        # flagged page to recover, so it bought nothing.
+        self._recover_uncovered_text = (
+            bool(self.config.check_text_coverage)
+            and bool(self.config.recover_uncovered_text)
+            and not bool(self.config.native_only)
+            and self._uncovered_text_reader_available()
+        )
         if not self.config.check_text_coverage:
             return
         from socr.core.pdf import open_pdf
@@ -11630,7 +11828,9 @@ class UnifiedPipeline:
             return
         try:
             with open_pdf(str(src)) as doc:
-                pages = coverage_for_document(doc)
+                # Item E: with no reader, grouping changes the output for no
+                # benefit -- the crops are never read. Off, step 2 is step 1.
+                pages = coverage_for_document(doc, group=self._recover_uncovered_text)
         except Exception as exc:
             logger.debug("text coverage: document open failed: %s", exc)
             for page_num, ps in state.pages.items():
@@ -11699,6 +11899,364 @@ class UnifiedPipeline:
             changes["text"] = text
         return self._decorate_coverage_winner(ps, bo, **changes)
 
+    def _uncovered_text_reader_available(self) -> bool:
+        """Is the crop reader reachable at all? Resolved ONCE per document.
+
+        Round 3 (Fable #5 / Argon #9): with no reader, grouping still ran, so a
+        host with no Ollama shipped merged crops that main would have shipped
+        separately -- a difference for no benefit, since nothing was ever read.
+        Grouping exists to make ONE crop readable; if nothing can read it, step
+        2 must be step 1.
+
+        One probe per document, the same ``is_available`` the figure describer
+        uses. Failure is "not available": an unreachable reader and a broken
+        one lead to the same place.
+        """
+        try:
+            from socr.engines.gemini_api import OllamaFigureEngine
+
+            return bool(OllamaFigureEngine().is_available())
+        except Exception as exc:
+            logger.debug("text recovery: reader availability unknown (%s)", exc)
+            return False
+
+    def _uncovered_text_ask(self):
+        """The crop reader behind #1050 step 2: ``(png_path, prompt) -> str | None``.
+
+        The SAME local reader the number-free figure describer already uses
+        (``qwen3-vl:30b-a3b-instruct`` over the run's Ollama backend); no new
+        client, and so correct under ``--strict-local`` and a zero cost cap
+        without an extra branch. ``None`` when the model is unreachable, which
+        is exactly step 1's behaviour: picture and mark, no text. Overridable
+        in tests.
+
+        Round 2, item C: ``OllamaFigureEngine.ask`` swallows EVERY exception and
+        returns ``None``, so a real timeout never reached the cascade-halt
+        handler -- the latch could only ever be armed by an injected exception,
+        which is to say never in production. The reader is wrapped here to
+        raise ``TimeoutError`` when a ``None`` took the engine's whole deadline,
+        which is the one thing a refusal cannot do. Timing, not the exception,
+        because the exception is gone by the time it gets here.
+        """
+        from PIL import Image
+
+        from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC, OllamaFigureEngine
+
+        engine = OllamaFigureEngine()
+        available: bool | None = None
+
+        def inner(path, prompt):
+            nonlocal available
+            if available is None:
+                available = engine.is_available()
+            if not available:
+                return None
+            with Image.open(path) as im:
+                im.load()
+                # NOT the describer's wrapper: a deadline must reach the caller
+                # here, because that is the wedge signal (round 5, item 3).
+                return engine.ask(im, prompt)
+
+        def ask(path, prompt):
+            start = time.monotonic()
+            answer = inner(path, prompt)
+            if answer is None and time.monotonic() - start >= FIGURE_ASK_TIMEOUT_SEC:
+                raise TimeoutError(f"crop reader gave no answer in {FIGURE_ASK_TIMEOUT_SEC:g}s")
+            return answer
+
+        ask.model = engine.model  # type: ignore[attr-defined]
+        return ask
+
+    @contextlib.contextmanager
+    def _masked_crop(self, page, reg):
+        """The crop the MODEL reads: *reg*'s box with native words painted out.
+
+        Yields a temporary path, removed afterwards -- it must never reach the
+        output directory, because the picture a reader checks against has to be
+        the page as drawn. Falls back to the unmasked crop if masking fails:
+        a missing mask is a duplication risk, not a lost page, and the caller's
+        own guards still apply.
+        """
+        import tempfile
+
+        from socr.core.text_coverage import crop_box, render_region_png
+
+        tmp = None
+        # The except must NOT wrap the yield: a @contextmanager catches whatever
+        # the WITH BODY raises at the yield point, and that body is the model
+        # read -- its TimeoutError is the cascade-halt signal, which this
+        # swallowed. Masking failures are caught here, before the yield.
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+                tmp = Path(handle.name)
+            render_region_png(page, crop_box(reg), tmp, mask_native=True)
+        except Exception as exc:
+            # Round 4, item 3: NO reading. Falling back to the unmasked crop
+            # reopened the duplication this mask exists to close, quietly and
+            # at debug level. Step 1's picture and mark are the honest answer.
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+            raise _MaskUnavailable(str(exc)) from exc
+        try:
+            yield tmp
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _stop_recovery_for_document(self, state, page_num: int) -> None:
+        """A slow crop read turns RECOVERY off for this document, nothing more.
+
+        Round 6 BLOCKER. This used to arm the ladder's cascade halt, so ONE read
+        that took its full deadline ended the document and every later page
+        shipped ``not_processed_after_halt`` -- on main a native document never
+        halts at all. The causes are mundane (a cold model load, a repetition
+        runaway, a stray fail-fast from the shared outstanding-call label), and
+        none of them is a reason to stop reading a page's own native text.
+
+        The original purpose -- not firing call after call into a stuck GPU --
+        still holds: no further crop is read in this document. The remaining
+        regions ship exactly as step 1 left them, picture and mark, their pages
+        stay WARNING, and processing continues. A page that genuinely needs the
+        VLM still goes through the ladder's own halt.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        if self._recovery_backend_wedged:
+            return
+        self._recovery_backend_wedged = True
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="uncovered_text_reader_stopped",
+                engine="ollama-figure",
+                detail=(
+                    f"crop reader timed out on p{page_num}; word recovery is off for the "
+                    "rest of this document and the remaining regions ship as pictures"
+                ),
+                data={"page": page_num},
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                f"  [yellow]p{page_num}: crop reader timed out; word recovery off for "
+                "the rest of this document[/yellow]"
+            )
+
+    def _uncovered_text_budget(self, state, page_num, regions):
+        """A total wall-clock budget for ONE page's crop reads (#1050 step 2, item H).
+
+        Each region is one model call, exactly as each rung is one call in the
+        table ladder, so the page's cap is derived with the SAME function the
+        ladder uses (``_page_ladder_budget_sec``) rather than from a new number.
+        A page of 23 chart labels could otherwise hold the run for as long as
+        23 per-call deadlines allow.
+
+        Once spent, the remaining regions are skipped and ship exactly as step
+        1 left them: picture and mark, no text.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.ladder_budget import PageLadderBudget
+
+        def _exhausted(message: str) -> None:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_budget_exhausted",
+                    engine="ollama-figure",
+                    detail=message,
+                )
+            )
+            if not self.config.quiet:
+                console.print(f"  [yellow]p{page_num}: {message}[/yellow]")
+
+        # Item D: the TOTAL reader time on the page, not a per-region
+        # allowance. ``_page_ladder_budget_sec([])`` is the page budget with no
+        # rungs -- the same number the table ladder uses for a page -- so the
+        # cap does not grow with the region count. Multiplying by the regions
+        # gave 23 labels 46 minutes, which is not a bound.
+        return PageLadderBudget(self._page_ladder_budget_sec([]), on_exhausted=_exhausted)
+
+    def _recover_one_region(self, state, page_num, page, reg, index, png_path, ask, already=None):
+        """Read one uncovered region and decide how it ships. Never raises.
+
+        A model or witness failure must leave the page exactly as step 1 left
+        it -- not ``unknown`` -- so every failure here degrades to "no reading".
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.text_coverage import (
+            crop_box,
+            preceding_text_snippet,
+            uncovered_text_image_ref,
+        )
+        from socr.core.text_recovery import clean_reading, recovered_block
+        from socr.engines.gemini_api import FIGURE_ASK_TIMEOUT_SEC
+        from socr.core.text_recovery import PROMPT as RECOVERY_PROMPT
+
+        image_ref = uncovered_text_image_ref(page_num, index)
+        # Item F: a vector chart is a figure too. A matplotlib axes frame is a
+        # drawn rect, so keying only on "raster" put outlined axis labels into
+        # the prose. ``figure_pdf`` is set by the figure merge for both halves.
+        in_figure = reg.figure_pdf is not None or reg.kind == "raster"
+        rec = _RegionRecovery(
+            image_ref=image_ref,
+            anchor="",
+            at_reading_order=False,
+            piece=None,
+            merged_from=reg.merged_from,
+        )
+        # Fail CLOSED (round 6, repo soft 3): absent means "not prepared", and
+        # recovering without the document-level preparation is the unsafe way
+        # round. ``_prepare_text_coverage`` always sets it.
+        if not getattr(self, "_recover_uncovered_text", False):
+            return rec
+        # Round 5, item 5: this page already carries this region's parts, so a
+        # second apply must not re-read the crop or append a second copy of the
+        # event. The PLACEMENT is still re-derived below, so the page lands
+        # identically. An UNREAD prior (piece is None) counts as done too: it
+        # was offered to the reader and declined (round 6, item 3).
+        #
+        # Round 7, item 4: this is checked BEFORE the stop latch. A reader that
+        # stopped mid-page left earlier regions with a shipped reading, and
+        # consulting the latch first discarded those on the second apply --
+        # the page lost words it had already recovered.
+        if already is not None:
+            return self._place_recovery(
+                reg, image_ref, already.piece, in_figure, page, page_num, index
+            )
+        if self._recovery_backend_wedged:
+            # Once the reader has stopped, the REST of this page stops too:
+            # firing the next region into a stuck GPU is the same mistake as
+            # firing the next page into one.
+            return rec
+
+        t0 = time.perf_counter()
+        reading = None
+
+        budget = getattr(self, "_recovery_budget", None)
+        try:
+            # Round 3 (Argon #7): a call may not START unless the budget can
+            # hold a whole one. ``PageLadderBudget`` documents that a call
+            # beginning inside the budget keeps its own deadline, so "> 0 left"
+            # let a 180 s budget reach ~300 s. Requiring a full call's worth
+            # makes the page budget an actual bound; the regions that do not
+            # fit ship exactly as step 1 left them.
+            if budget is not None and budget.remaining() < FIGURE_ASK_TIMEOUT_SEC:
+                raise _RecoveryBudgetSpent(budget.message())
+            # Round 3, item 1: the model reads a MASKED crop -- every visible
+            # native character painted out -- so it can only transcribe ink the
+            # text layer does not already carry. That closes the whole
+            # duplication class (a raster under prose, a callout, a two-column
+            # chart box) at the source, instead of per shape. The masked file
+            # is a scratch file and never ships; the unmasked one at
+            # ``png_path`` is what the reader sees.
+            with self._masked_crop(page, reg) as read_path:
+                reading = clean_reading(ask(read_path, RECOVERY_PROMPT))
+        except _MaskUnavailable as exc:
+            logger.debug("text recovery: no mask p%d r%d, no reading (%s)", page_num, index, exc)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_mask_failed",
+                    engine="ollama-figure",
+                    detail=(
+                        f"region {index}: the native-text mask could not be built, so the "
+                        "crop was not read; step 1's picture and mark are kept"
+                    ),
+                    data={"region": index},
+                )
+            )
+            reading = None
+        except _RecoveryBudgetSpent as exc:
+            # The page's cap is gone. Skip the remaining regions; they ship as
+            # step 1 left them. Not a wedge: do not arm the document halt.
+            #
+            # Round 4, item 5: the refusal must COUNT as a skip and say so.
+            # ``PageLadderBudget.call`` only announces when its own clock is
+            # spent, so a region refused for want of a WHOLE call's room
+            # emitted nothing, while OUTPUT.md promised an event.
+            if budget is not None:
+                budget.skipped += 1
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_budget_exhausted",
+                    engine="ollama-figure",
+                    detail=f"region {index}: {exc}",
+                    data={"region": index},
+                )
+            )
+            reading = None
+        except Exception as exc:
+            logger.debug("text recovery: read failed p%d r%d (%s)", page_num, index, exc)
+            reading = None
+            # A slow read turns RECOVERY off for the rest of this document and
+            # nothing else: see ``_stop_recovery_for_document``. It does NOT
+            # arm the ladder's cascade halt, which it used to -- on main a
+            # native document never halts, and one slow crop read is no reason
+            # to stop reading a page's own native text (round 6 BLOCKER).
+            #
+            # The trigger is the READING CALL's own outcome, with no health
+            # probe: ``_probe_backend_idle`` asks ``/api/tags``, which answers
+            # 200 in 0.03 s on a jammed GPU, so gating on it made this
+            # unreachable in exactly the case it exists for. A read that
+            # consumed its whole deadline IS the evidence; a fast failure is a
+            # refusal and stays "no reading".
+            if _is_timeout_error(exc):
+                self._stop_recovery_for_document(state, page_num)
+        seconds = round(time.perf_counter() - t0, 2)
+        if not reading:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_unread",
+                    engine="ollama-figure",
+                    detail=f"region {index}: no reading; step 1's picture and mark are kept",
+                    data={"region": index, "seconds": seconds},
+                )
+            )
+            return rec
+        block = recovered_block(reading, in_figure=in_figure)
+        # Owner ruling 2026-10-14: every region keeps its picture. In a figure
+        # the image leads (2026-10-09 ruling: the words go BENEATH it);
+        # elsewhere the words lead and the image follows as the thing to check
+        # the words against.
+        piece = (image_ref + "\n\n" + block) if in_figure else (block + "\n\n" + image_ref)
+        rec = self._place_recovery(reg, image_ref, piece, in_figure, page, page_num, index)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="uncovered_text_recovered",
+                engine="ollama-figure",
+                detail=f"region {index}: read from the crop; ships marked not verified",
+                data={"region": index, "in_figure": in_figure, "seconds": seconds},
+            )
+        )
+        return rec
+
+    def _place_recovery(self, reg, image_ref, piece, in_figure, page, page_num, index):
+        """Where a region's piece goes: reading order outside a figure, else the tail."""
+        from socr.core.text_coverage import preceding_text_snippet
+
+        anchor = ""
+        in_prose = not in_figure
+        try:
+            if in_prose:
+                anchor = preceding_text_snippet(page, reg.pdf)
+        except Exception as exc:
+            # The caller's outer try maps ANY escape to text_coverage_unknown,
+            # which would throw away regions step 1 would have shipped. A failed
+            # anchor means "page tail", not "could not decide". An EMPTY anchor
+            # is different and still reading-order: nothing precedes the region,
+            # so its words go first.
+            logger.debug("text recovery: anchor failed p%d r%d (%s)", page_num, index, exc)
+            in_prose = False
+        return _RegionRecovery(
+            image_ref=image_ref,
+            anchor=anchor,
+            at_reading_order=in_prose,
+            piece=piece,
+            merged_from=reg.merged_from,
+        )
+
     def _apply_text_coverage(
         self,
         state: DocumentState,
@@ -11722,12 +12280,13 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
         from socr.core.pdf import open_pdf
         from socr.core.text_coverage import (
+            crop_box,
             render_region_png,
-            uncovered_text_image_ref,
             uncovered_text_marker,
             uncovered_text_marker_no_image,
             uncovered_text_png_name,
         )
+        from socr.core.text_recovery import insert_after_anchor
 
         if ps.text_coverage_unknown:
             no_img = uncovered_text_marker_no_image(page_num)
@@ -11752,14 +12311,33 @@ class UnifiedPipeline:
         scan_root = self._scan_root or state.handle.path.parent
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         fig_dir = doc_dir / "figures"
-        links: list[str] = []
+        recoveries: list[_RegionRecovery] = []
+        prior = _prior_recoveries(bo.text or "", page_num, kept)
+        self._recovery_budget = self._uncovered_text_budget(state, page_num, kept)
         try:
             with open_pdf(str(state.handle.path)) as doc:
                 page = doc[page_num - 1]
+                try:
+                    ask = self._uncovered_text_ask()
+                except Exception as exc:
+                    # Building the reader must never cost the page its verdict:
+                    # this outer try maps a failure to text_coverage_unknown,
+                    # and "no reader" is step 1, not "could not decide".
+                    logger.debug("text recovery: reader unavailable p%d: %s", page_num, exc)
+
+                    def ask(_path, _prompt):
+                        return None
+
                 for i, reg in enumerate(kept, start=1):
                     dest = fig_dir / uncovered_text_png_name(page_num, i)
-                    render_region_png(page, reg.pdf, dest)
-                    links.append(uncovered_text_image_ref(page_num, i))
+                    # The picture that SHIPS: unmasked, so a reader sees the
+                    # whole figure exactly as the page draws it.
+                    render_region_png(page, crop_box(reg), dest)
+                    recoveries.append(
+                        self._recover_one_region(
+                            state, page_num, page, reg, i, dest, ask, already=prior.get(i)
+                        )
+                    )
         except Exception as exc:
             logger.debug("text coverage: crop save failed p%d: %s", page_num, exc)
             ps.text_ink_unread = False
@@ -11772,9 +12350,41 @@ class UnifiedPipeline:
                 extra = body.rstrip() + "\n\n" + no_img + "\n"
             self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_COVERAGE_UNKNOWN, extra)
             return
-        mark = uncovered_text_marker(page_num)
         body = (bo.text or "").rstrip()
-        extra = mark if not links else mark + "\n\n" + "\n".join(links)
+        # Round 4, item 8: a second apply must change nothing. The page mark and
+        # the tail pieces were appended unconditionally, so re-running the phase
+        # duplicated both. Anything this method already wrote is stripped first,
+        # and then written again from the current regions -- re-deriving rather
+        # than detecting makes the result independent of how often it ran.
+        body = _strip_coverage_decoration(body, page_num)
+        tail: list[str] = []
+        placed_any = False
+        for rec in recoveries:
+            if rec.piece is None:
+                tail.append(rec.image_ref)
+                continue
+            if rec.at_reading_order:
+                body, ok = insert_after_anchor(body, rec.anchor, rec.piece)
+                if ok:
+                    placed_any = True
+                    continue
+            tail.append(rec.piece)
+        # One page mark, step 1's. It must never say "recovered" as if the
+        # words had been checked (owner ruling 2026-10-14).
+        mark = uncovered_text_marker(page_num)
+        # Item J: with NO reading anywhere, every tail entry is a bare picture
+        # link and step 1 joined those with a single newline. Recovered parts
+        # are paragraphs and need the blank line. Matching step 1 exactly when
+        # step 2 produced nothing is what makes "no reader is exactly step 1"
+        # a true statement rather than a nearly-true one.
+        # Item J: with NO reading anywhere, every tail entry is a bare picture
+        # link and step 1 joined those with a single newline, so the page is
+        # byte-identical to main. Round 6 item 3: that joiner is ONLY correct
+        # when every entry really is a bare link; a recovered block is a
+        # paragraph and needs the blank line.
+        nothing_recovered = all(r.piece is None for r in recoveries)
+        joiner = "\n" if nothing_recovered else "\n\n"
+        extra = mark if not tail else mark + "\n\n" + joiner.join(tail)
         new_text = body + "\n\n" + extra + "\n"
         self._coverage_stamp_winner(ps, bo, FailureMode.TEXT_INK_UNREAD, new_text)
         state.events.append(
@@ -11785,6 +12395,9 @@ class UnifiedPipeline:
                 detail="text-like ink with no visible text layer; native prose kept; regions saved",
                 data={
                     "n_regions": len(kept),
+                    "merged_from": [r.merged_from for r in kept],
+                    "recovered": sum(1 for r in recoveries if r.piece is not None),
+                    "placed_in_prose": placed_any,
                     "suppressed_repeat": getattr(cov, "suppressed_repeat", 0) if cov else 0,
                     "suppressed_furniture": getattr(cov, "suppressed_furniture", 0) if cov else 0,
                 },
@@ -19188,7 +19801,19 @@ class UnifiedPipeline:
                 return None
             with Image.open(path) as im:
                 im.load()
-                return engine.ask(im, prompt)
+                try:
+                    return engine.ask(im, prompt)
+                except TimeoutError:
+                    # Round 5, item 3. ``ask`` now re-raises a fail-fast
+                    # deadline so #1050's crop reader can see a wedge. The
+                    # DESCRIBER's contract is that this callable never raises
+                    # (``crop_descriptions.describe_number_free``), and its
+                    # caller catches once per DOCUMENT -- so one fail-fast
+                    # would drop every figure description on that document.
+                    # The describer path keeps the old contract; #1050 wraps
+                    # the engine itself and is unaffected.
+                    logger.debug("figure describer: reader deadline, description dropped")
+                    return None
 
         ask.model = engine.model  # type: ignore[attr-defined]
         return ask

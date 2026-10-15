@@ -560,6 +560,15 @@ class PipelineConfig:
     # named function, or its own factory.
     chart_constraint_hook: Callable[[str, str, dict], str] | None = None
 
+    #: #1050 step 2: read each uncovered region's crop with the local vision
+    #: model and place the words (marked) in the page. Off leaves step 1's
+    #: picture-and-mark behaviour exactly as it was.
+    #:
+    #: APPENDED, never inserted (round 6, cubic): this is a dataclass, so a
+    #: field added in the middle shifts every positional binding after it and
+    #: silently rebinds any caller that builds the config positionally.
+    recover_uncovered_text: bool = True
+
     def __post_init__(self) -> None:
         if isinstance(self.output_dir, str):
             self.output_dir = Path(self.output_dir)

@@ -85,7 +85,14 @@ from socr.core.blank_page import blank_page_marker
 
 # Re-exported, not used here: ``tests/test_acceptance_meter.py`` reaches these through this
 # module, and #1145's move must not change its surface. The test caught exactly that.
+# #1144 added the two born-digital banner templates to the same re-export, and listed all
+# four in ``__all__`` so the re-export is deliberate rather than an import that looks
+# unused. The TUPLES those templates belong to are read by ``core/marks.py``'s
+# ``scanned_flag`` family, which is where the grammar now lives, so they are not imported
+# here at all.
 from socr.core.manifest import (  # noqa: F401
+    BORN_DIGITAL_NATIVE_TEXT_FLAG,
+    BORN_DIGITAL_PROSE_RECOVERED_FLAG,
     SCANNED_NATIVE_TEXT_FLAG,
     SCANNED_PROSE_RECOVERED_FLAG,
     d3_superseded_note,
@@ -94,6 +101,7 @@ from socr.core.manifest import (  # noqa: F401
 from socr.core.marks import (
     DOCUMENT_FAILED_MARK_RE,
     MARK_FAMILIES,
+    families_of,
     first_block_lines,
     first_block_marks,
     has_any_mark_line,
@@ -200,6 +208,23 @@ DOC_FAILED = "failed"
 # This module's behaviour is unchanged by the move; ``tests/test_acceptance_meter.py``
 # passing unchanged is the pin. The one intended difference is the new
 # ``unaccepted_output`` family, so #1142's ``> [page unaccepted: …]`` counts as a mark.
+#
+# #1144 landed on the pre-move copy of this section, and all of it is kept -- in
+# ``core/marks.py``. Its change was that ``_scanned_flag_mark`` must read the emitters' own
+# enumerations (``PROSE_RECOVERED_FLAGS`` / ``NATIVE_TEXT_FLAGS``) rather than listing the
+# two SCANNED_* templates by name: the lane now serves structure-class floors on
+# BORN-DIGITAL pages, whose banner says "unverified extraction", and all 138 pages #1144
+# recovers are born-digital, so the by-name version counted every one of them
+# ``error_unmarked``. That reading is now in the moved family, over all four templates.
+
+#: #1144: the banner templates this module re-exports for its callers. Named so the
+#: re-export is deliberate rather than an import that looks unused.
+__all__ = [
+    "BORN_DIGITAL_NATIVE_TEXT_FLAG",
+    "BORN_DIGITAL_PROSE_RECOVERED_FLAG",
+    "SCANNED_NATIVE_TEXT_FLAG",
+    "SCANNED_PROSE_RECOVERED_FLAG",
+]
 
 
 def has_document_failure_mark(text: str) -> bool:
