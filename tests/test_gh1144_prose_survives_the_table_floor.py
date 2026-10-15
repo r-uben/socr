@@ -234,7 +234,7 @@ def test_process_ships_the_prose_and_withholds_both_tables(tmp_path: Path, monke
     assert sidecar["disposition"]["ending"] == "fail_closed_marker"
 
 
-def test_a_word_cell_grid_with_one_answer_column_is_the_known_residual(
+def test_a_boxless_word_cell_row_of_any_vocabulary_is_the_known_residual(
     tmp_path: Path,
 ) -> None:
     """What is withheld under each box coverage, and what is not.
@@ -268,25 +268,38 @@ def test_a_word_cell_grid_with_one_answer_column_is_the_known_residual(
         body = _arm(name, boxes)
         assert _ANSWER_RE.search(body) is None, f"a grid row shipped with boxes={name}"
 
-    # NOT covered, and only ONE answer column: a KNOWN RESIDUAL, pinned.
+    # NOT covered by a box: a KNOWN RESIDUAL, pinned.
     #
-    # Nothing catches this shape. The box rule needs a box over it; the
-    # categorical-row rule needs two or more ADJACENT cells and this grid prints
-    # one per row ("generation of electricity Yes"), which by that rule's own
-    # definition is a sentence, not a row; and the order gate passes because the
-    # order is correct -- only the BINDING is lost.
+    # The hole is wider than this fixture's Yes/No vocabulary, which is why the
+    # pin is named for the general shape (Fable, PR #1158 round 5): ANY boxless
+    # row of short word cells passes every rule -- "Sample Full Full Restricted
+    # Full", "Estimator OLS IV OLS IV" as much as "generation of electricity
+    # Yes". The box rule needs a box over it; the categorical-row rule only
+    # knows the Yes/No vocabulary, and here only ONE cell per row anyway, which
+    # by that rule's own definition is a sentence; and the order gate passes
+    # because the order is right and only the BINDING is lost.
     #
-    # Round 4's gutter check happened to refuse this fixture, which masked the
+    # Round 4's gutter check happened to refuse this fixture, masking the
     # residual; round 5 removed that check as subsumed by the order gate, which
-    # is true for ORDER and not for this. Pinned rather than hidden, with its
-    # corpus rate measured and reported.
+    # is true for ORDER and not for this. Measured rather than argued: 0 of the
+    # 138 gaining pages ship such a row, with the WIDE vocabulary (Fable
+    # measured the same). Pinned, not hidden.
     uncovered = _arm("num", [numeric_box])
     assert _ANSWER_RE.search(uncovered) is not None, (
         "the residual must stay visible; if it stops, something now catches this "
         "shape and this pin should become an assertion that it does"
     )
-    # Even so, a MULTI-cell row never ships: that rule does not need geometry.
+    # Even so, a MULTI-cell Yes/No row never ships: that rule needs no geometry.
     assert _CATEGORICAL_ROW.search(uncovered) is None
+    # And the general shape is what is unguarded, not just this vocabulary: a
+    # row of any short word cells would pass the same three rules.
+    generic = "Estimator OLS IV OLS IV"
+    from socr.tables.row_corroboration import bears_categorical_row
+
+    assert bears_categorical_row(_band(*generic.split())) is False, (
+        "if this ever becomes True the residual has narrowed and this pin should "
+        "become an assertion that the row is withheld"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +585,58 @@ def test_a_rotated_page_is_refused_because_its_boxes_are_in_another_space(
     assert _ANSWER_RE.search(turned) is None
     assert "failed: unverifiable table" in turned
     assert fitz is not None  # the fixture needs pymupdf importable
+
+
+def test_a_real_rotated_pdf_is_refused_end_to_end(tmp_path: Path) -> None:
+    """#1144 round 5 (Fable P1): the rotation WIRING, not a hand-set flag.
+
+    The earlier test set ``page_rotation`` directly, so mutants on the two
+    carrying sites -- the stamp in ``born_digital._assess_page`` and the copy in
+    ``state.apply_born_digital`` -- and on the ``% 360`` comparison all SURVIVED.
+    This drives a real /Rotate 90 PDF through the production path:
+    ``detect_page`` -> ``apply_born_digital`` -> the floor. Nothing is set by
+    hand, so breaking any link in the chain fails this.
+
+    DIFFERENCE: ``set_rotation(90)`` on the same page, nothing else.
+    """
+    import fitz
+
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import table_floor_text_for_source
+    from socr.core.state import DocumentState
+
+    def _ship(rotation: int) -> tuple[str, int]:
+        work = tmp_path / f"rot{rotation}"
+        work.mkdir(parents=True, exist_ok=True)
+        pdf = _p77_like(work / "doc.pdf")
+        if rotation:
+            doc = fitz.open(pdf)
+            doc[0].set_rotation(rotation)
+            doc.saveIncr()
+            doc.close()
+        assessment = BornDigitalDetector().detect(pdf)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        state.apply_born_digital(assessment)
+        ps = state.pages[1]
+        doc = fitz.open(pdf)
+        ps.native_words = doc[0].get_text("words")
+        doc.close()
+        ps.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
+        body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+        return body, int(getattr(ps, "page_rotation", -1))
+
+    upright, upright_rot = _ship(0)
+    turned, turned_rot = _ship(90)
+
+    # The wiring itself: the value reached PageState from the real detector.
+    assert upright_rot == 0
+    assert turned_rot == 90, "page_rotation did not reach PageState through apply_born_digital"
+    # And the floor acted on it.
+    assert _PROSE in upright
+    assert _PROSE not in turned
+    assert _ANSWER_RE.search(turned) is None
+    assert "failed: unverifiable table" in turned
 
 
 # ---------------------------------------------------------------------------

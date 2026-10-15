@@ -87,6 +87,11 @@ from socr.core.blank_page import blank_page_marker
 from socr.core.manifest import (
     DISPUTED_TABLE_MARK_RE,
     PAGE_UNCHECKED_MARK_RE,
+    NATIVE_TEXT_FLAGS,
+    PROSE_RECOVERED_FLAGS,
+    # Still imported though ``_scanned_flag_mark`` now reads the tuples above:
+    # callers and tests reference these names through this module, and dropping
+    # the re-export would be a second, unrelated break (#1144 round 5).
     SCANNED_NATIVE_TEXT_FLAG,
     SCANNED_PROSE_RECOVERED_FLAG,
     SOCR_MARKER_RE,
@@ -221,11 +226,24 @@ def _fixed_note_mark(n: int, line: str) -> bool:
 
 
 def _scanned_flag_mark(n: int, line: str) -> bool:
-    """``[page N: unverified scan — …]`` banners (SCANNED_*_FLAG templates)."""
-    return line in {
-        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=n),
-        SCANNED_NATIVE_TEXT_FLAG.format(page_num=n),
-    }
+    """Every prose-recovery banner this module's lane can stamp.
+
+    #1144: this listed the two SCANNED_* templates by name, which was complete
+    while the lane only served scans. It now serves structure-class floors on
+    BORN-DIGITAL pages, whose banner says "unverified extraction" instead -- and
+    all 138 pages #1144 recovers are born-digital, so the meter counted every
+    one of them ``error_unmarked``. Merging that would have turned 138 MARKED
+    pages into violations of the very rule the meter measures (Fable, PR #1158
+    round 5).
+
+    Read from ``manifest.PROSE_RECOVERED_FLAGS`` and ``NATIVE_TEXT_FLAGS`` --
+    the enumerations the emitters themselves use -- rather than re-listed here,
+    so a banner added later cannot be marked by the lane and unmarked by the
+    meter. ``tests/test_acceptance_meter.py`` pins every member.
+    """
+    return any(
+        line == flag.format(page_num=n) for flag in (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
+    )
 
 
 #: #1050 step 2 (not emitted yet): recognised so the meter keeps working once it ships.
@@ -246,7 +264,7 @@ MARK_FAMILIES: dict[str, Callable[[int, str], bool]] = {
     "page_unchecked": _page_unchecked_mark,  # core/manifest.py page_unchecked_mark
     "flagged_table_kept": _flagged_table_mark,  # core/manifest.py kept_table_flag_note
     "fixed_note": _fixed_note_mark,  # judge_timeout_note (#713), d3_superseded_note
-    "scanned_flag": _scanned_flag_mark,  # SCANNED_*_FLAG banners
+    "scanned_flag": _scanned_flag_mark,  # every prose-recovery banner (#1144)
     "uncovered_text": _uncovered_text_mark,  # #1050 step 2
 }
 
