@@ -36,7 +36,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
+from socr.core.manifest import PROSE_RECOVERED_FLAGS
 from socr.core.result import FailureMode, PageStatus
 from socr.tables.reconcile import find_table_blocks
 
@@ -49,8 +49,15 @@ _WITHHELD_MARKER_RE = re.compile(
 #: The banner of a prose-recovery page. Its markers are one per contiguous withheld RUN,
 #: which the producer itself says is not a table count, so such a page withholds at
 #: least one table and no more is claimed.
+#: #1144: an ALTERNATION over every banner form. This was built from the single
+#: "unverified scan" form's literal text, so the born-digital form #1144 adds
+#: would have gone uncounted on all 674 pages it affects -- a new emit site
+#: invisible from the happy path. ``manifest.PROSE_RECOVERED_FLAGS`` enumerates
+#: the forms and a test pins that every member matches this pattern.
 _PROSE_RECOVERY_RE = re.compile(
-    r"\[page \d+" + re.escape(SCANNED_PROSE_RECOVERED_FLAG.split("{page_num}", 1)[1])
+    "|".join(
+        r"\[page \d+" + re.escape(flag.split("{page_num}", 1)[1]) for flag in PROSE_RECOVERED_FLAGS
+    )
 )
 
 _UNVERIFIED_TRUST_KIND = "table_ladder_unverified"

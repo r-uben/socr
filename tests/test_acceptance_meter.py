@@ -278,6 +278,30 @@ def test_blank_without_its_event_is_unchecked(tmp_path: Path) -> None:
     assert ids(rep, acc.SUCCESS_UNCHECKED) == {"d:1"}
 
 
+def test_every_prose_recovery_banner_is_recognised_as_a_mark() -> None:
+    """#1144 round 5 (Fable, PR #1158): a banner the lane stamps but the meter
+    does not know is a MARKED page counted as a violation.
+
+    `_scanned_flag_mark` listed the two SCANNED_* templates by name, which was
+    complete while that lane only served scans. #1144 serves structure-class
+    floors on BORN-DIGITAL pages, whose banner says "unverified extraction", and
+    all 138 pages it recovers are born-digital -- so every one of them counted
+    `error_unmarked`. Pinned over the EMITTERS' own enumerations, so a banner
+    added later fails here instead of silently becoming a violation.
+    """
+    from socr.benchmark import acceptance
+    from socr.core.manifest import NATIVE_TEXT_FLAGS, PROSE_RECOVERED_FLAGS
+
+    flags = (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
+    assert len(flags) == 4, "two banners x two page kinds; update this pin deliberately"
+    for flag in flags:
+        line = flag.format(page_num=7)
+        assert acceptance._scanned_flag_mark(7, line), line
+    # The born-digital wording specifically, since that is the one that was missing.
+    assert any("unverified extraction" in f for f in flags)
+    assert any("unverified scan" in f for f in flags)
+
+
 def test_every_legacy_mark_family_is_recognised() -> None:
     disputed = "> [table disputed: a second reading (Tesseract) disagrees; check]"
     assert DISPUTED_TABLE_MARK_RE.match(disputed)
