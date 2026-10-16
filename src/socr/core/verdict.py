@@ -58,6 +58,31 @@ logger = logging.getLogger(__name__)
 #: that branch's ``AUDIT_FAILED`` from every other page carrying the same mode.
 ENGINE_NATIVE_MATH = "native+math"
 
+#: The deterministic native-table verifier's record that it reached EXACT_PASS on this
+#: page: row counts matched and every paired row's numeric multiset was clean, so
+#: ``pipeline/agentic.py`` accepted the page at ``confidence=1.0`` with NO judge call.
+NATIVE_TABLE_EXACT_PASS_KIND = "native_table_verifier_exact_pass"
+
+#: The accepting decision's own reason on that path (``pipeline/agentic.py``), which
+#: survives onto the shipped output as ``judge_reason`` and is the exact string the
+#: acceptance meter reads (``benchmark/acceptance.py``: ``TABLE_ONLY_JUDGE_REASON_PREFIX``
+#: plus ``audit_passed``). Required IN ADDITION to the event, and that is Fable's finding
+#: on the diagnosis: the event is emitted BEFORE ``_apply_structural_gate``, which on a
+#: header-attribution abstain delegates to the inner judge (#245) -- so a page can carry
+#: the event and still ship on a model-JUDGED attempt. Keying on the event alone would
+#: mark such a page with a reason that is false of it.
+EXACT_PASS_ACCEPT_REASON = "native_table_verifier: EXACT_PASS"
+
+#: One sentence, stating what was compared and what was not. It deliberately never says
+#: the table was verified: the check is a per-row numeric MULTISET
+#: (``tables/native_verifier.py``: ``Counter`` equality), so it is blind to which column a
+#: value sits in and to which label a row carries -- measured on a synthetic page, where a
+#: within-row column swap and a row-label swap both still reach EXACT_PASS.
+EXACT_PASS_UNJUDGED_REASON = (
+    "no judge saw this page; only the numbers within each table row were compared, "
+    "not their columns or row labels, and nothing outside the table"
+)
+
 #: Failure modes that name their own failed check. A mode absent from this map falls to
 #: ``_fallback_clause`` rather than being guessed at.
 _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
@@ -158,6 +183,15 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         CheckResult.UNKNOWN,
         "this page's chart ships as an image and the labels and values drawn in it were "
         "never transcribed -- read them off the image before citing",
+    ),
+    #: #1181. Same purpose as the two rows above: the clause comes from the EXACT_PASS
+    #: audit event on the first pass and from here on every later one, so a re-finalized
+    #: page publishes the verdict it already had. The wording must not imply the table was
+    #: verified -- see ``_exact_pass_unjudged_clause``.
+    FailureMode.MODEL_OUTPUT_UNJUDGED: (
+        Check.PAGE_JUDGE,
+        CheckResult.UNKNOWN,
+        EXACT_PASS_UNJUDGED_REASON,
     ),
     FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
         Check.EQUATION_FIDELITY,
@@ -532,6 +566,23 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
 )
 
 
+#: Checks whose clause a REPROCESS could still resolve, so a page carrying one must never
+#: be admitted to the resume skip-and-keep exception however its mode reads.
+#:
+#: #1181, found by Fable on this diff. The mode-only test above rests on a reachability
+#: argument -- "a page carrying one of these modes cannot also be carrying a clause from
+#: another source" -- which held while each silent-SUCCESS class was the only one on its
+#: page. #1181 adds a third class whose resolvability DIFFERS: a judge may run on a later
+#: pass, so its page must stay eligible for reprocessing (see ``MODEL_OUTPUT_UNJUDGED``).
+#: A results page with a table and a display equation under ``--detect-equations`` carries
+#: both clauses, and ``_merge_clause``'s mode arbitration records the EQUATION mode, which
+#: IS permanent -- so the page was skip-and-kept for ever with its table still unjudged.
+#: Measured through the seam: ``_resume_verdict_is_permanently_unverifiable`` returned True.
+#: This is the clause-level check the chart slice deleted as unreachable, restored to
+#: exactly the one case that reaches it.
+REPROCESSABLE_CLAUSE_CHECKS: frozenset[Check] = frozenset({Check.PAGE_JUDGE})
+
+
 #: The chart lane's record that the values drawn in a chart were never transcribed.
 #:
 #: Keyed on this event ALONE, not on ``chart_asset_page`` beside it, and that is a checked
@@ -593,6 +644,46 @@ def _equation_fidelity_clause(event_kinds: frozenset[str]) -> VerdictClause | No
     )
 
 
+def _exact_pass_unjudged_clause(
+    output: PageOutput, event_kinds: frozenset[str]
+) -> VerdictClause | None:
+    """``page_judge=UNKNOWN`` on a page the deterministic table verifier shipped unjudged.
+
+    #1181. On the EXACT_PASS accept no judge is called at all, so the page ships SUCCESS,
+    ``audit_passed=true``, ``verdict.clauses=[]`` and no mark, while everything outside its
+    tables is unexamined. Measured on run 23319732: 5 pages of 17,091 ship on this path --
+    3 of them SUCCESS and unmarked, which is the whole of the acceptance meter's
+    ``table_only_acceptance`` class -- and 5 of 5 carry content outside their tables.
+
+    UNKNOWN, not FAIL: nothing read the caption or the prose and found it wrong; nothing
+    read it. Two conditions, both required: the lane's own event, and the accepting reason
+    that proves no judge was consulted (see ``EXACT_PASS_ACCEPT_REASON``).
+
+    **Every page accepted through that exit, with no further predicate**, and that is the
+    ruling (owner/orchestrator 2026-10-16) after Fable argued it twice. An earlier version
+    fired only when the page shipped non-blank content outside its table syntax. Three
+    reasons it is gone. The acceptance meter flags EVERY bypassed SUCCESS page
+    (``benchmark/acceptance.rule_qwen``: bypassed and ``audit_passed`` -> a violation), so
+    the predicate left exactly the hole the meter exists to catch. The binding of values to
+    columns and row labels is unchecked on ALL of these pages, table-only ones included,
+    because the oracle that could refute it (``tables/binding.py``) is reached only from
+    the table-ladder path, which ran on none of the 5 in run 23319732. And 5 of 5 carry
+    content outside their tables, so the predicate's negative branch had no corpus
+    instance: code no page exercises is code to delete. The mark's wording is true of a
+    table-only page unchanged.
+    """
+    if NATIVE_TABLE_EXACT_PASS_KIND not in event_kinds:
+        return None
+    if (getattr(output, "judge_reason", "") or "").strip() != EXACT_PASS_ACCEPT_REASON:
+        return None
+    return VerdictClause(
+        Check.PAGE_JUDGE,
+        CheckResult.UNKNOWN,
+        SCOPE_PAGE,
+        EXACT_PASS_UNJUDGED_REASON,
+    )
+
+
 def silent_success_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
 ) -> tuple[VerdictClause, ...]:
@@ -609,6 +700,7 @@ def silent_success_clauses(
     for clause in (
         _equation_fidelity_clause(event_kinds),
         _chart_values_clause(event_kinds),
+        _exact_pass_unjudged_clause(output, event_kinds),
     ):
         if clause is not None:
             clauses.append(clause)

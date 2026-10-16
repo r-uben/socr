@@ -70,6 +70,11 @@ EXPECTED_RESUME_KINDS = frozenset(
         "rejudge_rejected",
         "rejudge_timeout",
         "visual_values_not_transcribed",
+        # #1181: the deterministic EXACT_PASS accept. An ADDITION, declared here rather
+        # than left to drift. Emitted by the audit gate inside the page loop, which a
+        # terminal resumed page skips, and the page_judge=UNKNOWN clause keys on it -- so a
+        # resumed run that dropped it would un-mark a page the first run marked.
+        "native_table_verifier_exact_pass",
         "blank_page",
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
@@ -108,5 +113,6 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 52 with #1144's table_escalation_refused;
     # 54 with #1145 slice 3's two legacy-equation-seam kinds (equation_latex_accepted and
     # equation_latex_rejected_kept_crop), which were never replayed and are explained at
-    # their lines above.
-    assert len(EXPECTED_RESUME_KINDS) == 54
+    # their lines above;
+    # 55 with #1181's native_table_verifier_exact_pass.
+    assert len(EXPECTED_RESUME_KINDS) == 55

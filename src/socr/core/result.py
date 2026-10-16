@@ -221,6 +221,22 @@ class FailureMode(str, Enum):
     #: lane has no transcriber to run. ``core/verdict._MODE_CLAUSES`` maps it back
     #: to the same ``figure_text=UNKNOWN`` clause the event produces.
     VISUAL_VALUES_UNTRANSCRIBED = "visual_values_untranscribed"
+    #: #1181: the native table verifier reached EXACT_PASS, so the page was ACCEPTED
+    #: without any judge seeing it, at ``confidence=1.0``, while content outside the
+    #: table (caption, panel heading, notes, prose, a chart shipped as an image) ships
+    #: unexamined. The shipped bytes are a model reading -- ``engine=qwen`` on all 5 such
+    #: pages of run 23319732 -- so this is not "no model wrote it" but "nothing checked
+    #: what the model wrote": the one deterministic check that ran compared the numbers
+    #: within each table row, and the oracle that could refute their binding
+    #: (``tables/binding.py``) is reached only from the table-ladder path, which did not
+    #: run on any of them (``table_ladder_disposition: null``).
+    #:
+    #: Like the two modes above, it exists so the demotion explains itself, and
+    #: ``core/verdict._MODE_CLAUSES`` maps it back to the same ``page_judge=UNKNOWN``
+    #: clause the audit event produces on the first pass. NOT in
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: a later run may route the page to a judge, so
+    #: such a page must stay eligible for reprocessing.
+    MODEL_OUTPUT_UNJUDGED = "model_output_unjudged"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

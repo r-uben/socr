@@ -278,7 +278,14 @@ def test_an_admissible_mode_is_only_ever_set_by_the_verdict_demotion() -> None:
 
     import socr
 
-    NAMES = {"EQUATION_FIDELITY_UNVERIFIED", "VISUAL_VALUES_UNTRANSCRIBED"}
+    # #1181 adds the third silent-success mode, and it is admitted to this guard rather
+    # than left outside it: the argument the guard protects ("one writer, so the demotion
+    # and the clause cannot drift") is exactly as load-bearing for it.
+    NAMES = {
+        "EQUATION_FIDELITY_UNVERIFIED",
+        "VISUAL_VALUES_UNTRANSCRIBED",
+        "MODEL_OUTPUT_UNJUDGED",
+    }
     root = _Path(socr.__file__).parent
     functions: dict[str, set[str]] = {}
     for path in sorted(root.rglob("*.py")):
