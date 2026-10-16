@@ -3622,6 +3622,27 @@ class UnifiedPipeline:
         {
             "equation_region_reading_attached",
             "equation_region_reading_rejected",
+            # #1145 slice 3: the LEGACY seam's accept record
+            # (``_attach_equation_latex_sidecars``, under --detect-equations
+            # --recover-clean-equations). It splices a model's reading into the
+            # page exactly as the region lane does, and it was absent from this
+            # allowlist -- so by this set's own docstring it "disappears from
+            # audit_log.json the moment the page resumes", which was already the
+            # #252 shape for that seam and is independent of #1145. #1145 makes
+            # it load-bearing too: the unverified-equation clause keys on it, and
+            # a clause whose evidence is dropped on resume would silently
+            # un-demote the page on the next run.
+            "equation_latex_accepted",
+            # Its sibling, by the GH-522 argument already made for the region
+            # lane's own refusal record two entries down: "refusing a reading is
+            # only acceptable BECAUSE the crop survives for a human to check;
+            # without this the record was dropped on resume and the guarantee
+            # held only until the next run". Exactly as true for the legacy
+            # seam's refusal, which also retains a crop. Surfaced by widening
+            # ``_emitted_equation_kinds``'s scanner to see a kind assigned to a
+            # local -- the shape that had hidden this whole family from the
+            # guard in both directions.
+            "equation_latex_rejected_kept_crop",
             # GH-522 (cubic P1 on #537): the refusal record and, with it, the
             # `crop_path` pointing at the evidence. Refusing a reading is only
             # acceptable BECAUSE the crop survives for a human to check; without
@@ -15562,8 +15583,21 @@ class UnifiedPipeline:
             # it -- so reprocessing cannot change the answer and buys nothing but cost. A
             # page carrying any OTHER clause alongside is NOT admitted: that clause may well
             # be an infra doubt, and this exception must not become a general "WARNING pages
-            # resume" rule. Everything else the gate checks still applies: fingerprint,
-            # input checksum, the verdict's presence, the fragment digest.
+            # resume" rule.
+            #
+            # What this branch is protected by, stated exactly, because the first draft of
+            # this comment claimed "the fragment digest" and that was wrong: the fragment
+            # digest check below runs only under ``is_credentialed_judge_timeout``. This
+            # branch has the run fingerprint (which hashes every shipped ``socr`` source
+            # file, so any change to this logic re-OCRs the page), the input checksum, the
+            # verdict's presence AND successful parse, the non-empty-body and
+            # failed-marker-body refusals, and the label-canonicalisation check -- the same
+            # protections the ordinary SUCCESS path has, and no more. A hand-edited or
+            # truncated fragment therefore restores verbatim here exactly as it does on the
+            # SUCCESS path: a property of the ledger that predates this branch rather than
+            # one it introduces. Closing it properly needs a finalized-body digest recorded
+            # for this class, which nothing records today; #713 had to mint a credential to
+            # get one. Noted rather than half-built.
             is_permanently_unverifiable = _resume_verdict_is_permanently_unverifiable(
                 meta.get("verdict")
             )

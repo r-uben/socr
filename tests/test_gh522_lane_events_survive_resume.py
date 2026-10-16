@@ -41,25 +41,58 @@ _NOT_REPLAYED: dict[str, str] = {
 
 
 def _emitted_equation_kinds() -> set[str]:
-    """Every `kind="equation_*"` literal the orchestrator constructs.
+    """Every `equation_*` event kind the orchestrator constructs, however it gets there.
 
     Read from the parse tree rather than by grep, so a mention in a comment,
     docstring or test name cannot be mistaken for an emit.
+
+    TWO shapes, and the second was a blind spot this guard had until #1145 slice 3. A
+    keyword argument (`kind="equation_region_reading_attached"`) is the region lane's. The
+    LEGACY seam -- `_attach_equation_latex_sidecars`, under `--detect-equations
+    --recover-clean-equations` -- picks its kind in a branch and assigns it to a local
+    (`kind = "equation_latex_accepted"`), then passes `kind=kind`. The scanner saw no
+    literal, so that whole family was invisible to this guard in BOTH directions: the
+    allowlist had no entry for it and "every emitted kind is replayed or explicitly not"
+    passed anyway. That is how `equation_latex_accepted` came to be dropped on every resume
+    (the #252 shape) with a guard in place that exists to catch exactly that.
     """
     tree = ast.parse(_ORCHESTRATOR.read_text())
     kinds: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for keyword in node.keywords:
-            if (
-                keyword.arg == "kind"
-                and isinstance(keyword.value, ast.Constant)
-                and isinstance(keyword.value.value, str)
-                and keyword.value.value.startswith("equation_")
-            ):
-                kinds.add(keyword.value.value)
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "kind"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                    and keyword.value.value.startswith("equation_")
+                ):
+                    kinds.add(keyword.value.value)
+        # ``kind = "equation_..."`` -- a kind chosen in a branch and passed on as a variable.
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            value = node.value.value
+            if not (isinstance(value, str) and value.startswith("equation_")):
+                continue
+            if any(isinstance(target, ast.Name) and target.id == "kind" for target in node.targets):
+                kinds.add(value)
     return kinds
+
+
+def test_the_scanner_sees_a_kind_assigned_to_a_variable() -> None:
+    """#1145: the blind spot above, pinned, so narrowing the scanner fails here.
+
+    Without this the scanner could go back to keyword-only and every guard in this file
+    would stay green while a whole family of events was once again invisible to them --
+    which is what happened, and is why `equation_latex_accepted` was dropped on resume.
+    The kind is NAMED rather than read from the scanner's own output, which would be a
+    tautology.
+    """
+    emitted = _emitted_equation_kinds()
+    assert "equation_latex_accepted" in emitted, (
+        "the legacy seam assigns its kind to a local before passing it, and the scanner "
+        "cannot see that shape -- so this file's guards do not cover that seam"
+    )
+    assert "equation_region_reading_attached" in emitted, emitted
 
 
 def test_every_emitted_lane_event_is_replayed_or_explicitly_not() -> None:

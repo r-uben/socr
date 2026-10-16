@@ -5114,7 +5114,7 @@ def _apply_unaccepted_output_mark(
     return replace(output, text=text)
 
 
-def _warn_success_status_for_verdict(output: PageOutput) -> PageOutput:
+def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutput:
     """SUCCESS becomes WARNING for a page with an unresolved check. Nothing else moves.
 
     ``audit_passed`` is deliberately left alone. It is not a spare "is this page fine"
@@ -5122,8 +5122,40 @@ def _warn_success_status_for_verdict(output: PageOutput) -> PageOutput:
     refusal evidence, and `_warn_audit_failed_success_status` keys on it), and flipping it
     to flag a page makes assemble discard that page's text. The status is the demotion
     surface; the clause is the reason.
+
+    The failure MODE is set when the page has none, so the demotion explains itself. Not
+    cosmetic: a status-only demotion left the page indistinguishable from one demoted by a
+    guard that names nothing, and then re-running this seam over it (which
+    ``_rewrite_all_fragments`` does to every page at assemble) could not tell whether the
+    silent-success clause justified the status or whether the status was unexplained -- so
+    either the fail-closed fallback fired on a page whose reason WAS named, breaking
+    idempotence, or it stayed silent on a page whose reason was not, which is the hole
+    Fable found. An existing, more specific mode is never overwritten: it says more.
     """
-    return replace(output, status=PageStatus.WARNING)
+    mode = (
+        _verdict_demotion_mode(clauses)
+        if output.failure_mode is FailureMode.NONE
+        else output.failure_mode
+    )
+    return replace(output, status=PageStatus.WARNING, failure_mode=mode)
+
+
+def _verdict_demotion_mode(clauses) -> FailureMode:
+    """The mode that records WHY a silent-success clause demoted this page.
+
+    One row per silent-success class, keyed on the clause so the mode and the clause cannot
+    drift apart. ``NONE`` for anything unmapped, which leaves the page demoted with its
+    reason carried by the clause alone -- the state this helper exists to avoid, so a class
+    added without a row here is caught by the idempotence test rather than shipped.
+    """
+    by_check = {
+        Check.EQUATION_FIDELITY: FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+    }
+    for clause in clauses:
+        mode = by_check.get(clause.check)
+        if mode is not None:
+            return mode
+    return FailureMode.NONE
 
 
 def _apply_verdict_marks(
@@ -5174,7 +5206,7 @@ def _apply_verdict_marks(
     # about -- the difference, and the whole point, is that it now carries a verdict naming
     # the check.
     if verdict.clauses and output.status is PageStatus.SUCCESS:
-        output = _warn_success_status_for_verdict(output)
+        output = _warn_success_status_for_verdict(output, verdict.clauses)
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
     # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
     # whole page or only for the table it stands in place of.

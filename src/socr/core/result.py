@@ -192,6 +192,23 @@ class FailureMode(str, Enum):
     #: winner is EXACTLY the case this mode exists to stop from shipping
     #: silently as an undemoted SUCCESS.
     HEADER_BINDING_UNVERIFIED = "header_binding_unverified"
+    #: #1145 slice 3: a model's reading of an equation crop was spliced into this page
+    #: and its mathematics was never verified against the crop. The lane validates LaTeX
+    #: SYNTAX only -- ``semantic_fidelity_verified`` is a hardcoded ``False`` and nothing
+    #: computes it -- so a candidate that parses, and even one that aligns to the source
+    #: span, is not a proof that it says what the crop says.
+    #:
+    #: Same purpose as ``HEADER_BINDING_UNVERIFIED`` above, one check over: these pages
+    #: shipped SUCCESS / ``failure_mode=none`` / ``audit_passed=True`` with no mark, and
+    #: this mode exists to stop them shipping silently as undemoted SUCCESS.
+    #:
+    #: The mode is what makes the demotion SELF-EXPLAINING, and that is not cosmetic. A
+    #: status-only demotion left the page indistinguishable from one demoted by a guard
+    #: that names nothing (``_apply_ditto_guard``), so re-running the seam over it could
+    #: neither tell which clause justified the status nor keep its verdict stable. The
+    #: mode closes both: ``core/verdict._MODE_CLAUSES`` maps it back to the same
+    #: ``equation_fidelity=UNKNOWN`` clause the event produces on the first pass.
+    EQUATION_FIDELITY_UNVERIFIED = "equation_fidelity_unverified"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

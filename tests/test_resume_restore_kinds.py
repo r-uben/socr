@@ -4,6 +4,9 @@
 and ``_RESUME_REPLAYED``. The expected set below is hard-coded from ``main`` at 3cf5f87
 (before the notes moved into ``_RESUME_REPLAYED``), so dropping or adding a kind in a
 refactor fails here instead of silently changing what a resumed run reports.
+
+Every later addition carries its reason at the line, so the list stays a ledger of decisions
+rather than a snapshot that is updated whenever it goes red.
 """
 
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -71,6 +74,26 @@ EXPECTED_RESUME_KINDS = frozenset(
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
         "page_retry",
+        # #1145 slice 3: the LEGACY equation seam's two records
+        # (``_attach_equation_latex_sidecars``, under --detect-equations
+        # --recover-clean-equations). An ADDITION, deliberately, and this pin is doing its
+        # job by making it explicit rather than letting the set drift.
+        #
+        # They were absent, and by ``EQUATION_LANE_EVENT_KINDS``'s own docstring a missing
+        # kind "disappears from audit_log.json the moment the page resumes" -- already the
+        # #252 shape for that seam and independent of #1145. The accept record is now
+        # load-bearing for #1145 too, because the unverified-equation clause keys on it and
+        # a clause whose evidence is dropped on resume silently un-demotes the page. The
+        # refusal record follows the GH-522 argument already made for the region lane's:
+        # refusing a reading is only acceptable because the crop survives for a human to
+        # check, and a record dropped on resume holds that guarantee only until the next run.
+        #
+        # Neither was visible to ``tests/test_gh522_lane_events_survive_resume.py``, whose
+        # scanner read only ``kind="equation_..."`` keyword arguments while that seam assigns
+        # its kind to a local first. The scanner now sees both shapes, which is what
+        # surfaced these.
+        "equation_latex_accepted",
+        "equation_latex_rejected_kept_crop",
     }
 )
 
@@ -82,5 +105,8 @@ def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
 def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 48 after #1100 (blank_page); 49 with #1063's equation_sidecar_skipped_model_refused;
     # 51 with PR #1160's provider_empty_response and page_retry;
-    # 52 with #1144's table_escalation_refused.
-    assert len(EXPECTED_RESUME_KINDS) == 52
+    # 52 with #1144's table_escalation_refused;
+    # 54 with #1145 slice 3's two legacy-equation-seam kinds (equation_latex_accepted and
+    # equation_latex_rejected_kept_crop), which were never replayed and are explained at
+    # their lines above.
+    assert len(EXPECTED_RESUME_KINDS) == 54

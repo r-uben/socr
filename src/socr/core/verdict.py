@@ -146,6 +146,17 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         CheckResult.FAIL,
         "every rung of the table ladder was exhausted without accepting this page's grid",
     ),
+    #: #1145 slice 3. The row that makes the demotion idempotent: on the first pass the
+    #: clause comes from the lane's attach EVENT, and from here on every later pass, which
+    #: is what ``_rewrite_all_fragments`` does to every page at assemble. Same check, same
+    #: result, same reason -- so the verdict a re-finalized page publishes is the verdict
+    #: it already had.
+    FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
+        Check.EQUATION_FIDELITY,
+        CheckResult.UNKNOWN,
+        "an equation reading was attached from a crop and its mathematics was never "
+        "verified against the page -- only its LaTeX syntax was checked",
+    ),
     FailureMode.HEADER_BINDING_UNVERIFIED: (
         Check.TABLE_LABEL,
         CheckResult.UNKNOWN,
@@ -446,10 +457,30 @@ def _fallback_clause(output: PageOutput) -> VerdictClause:
     )
 
 
-#: The equation lane's own record that it attached a reading to a detected region
-#: (``pipeline/orchestrator.py``). In ``EQUATION_LANE_EVENT_KINDS``, so it is replayed on
-#: resume rather than disappearing with the audit log -- which is why the clause may key on
-#: it at all.
+#: Every event kind that records "a model's reading of an equation crop was spliced into
+#: this page's text", across BOTH seams that do it.
+#:
+#: ``equation_region_reading_attached`` is the P4-R region lane's. ``equation_latex_accepted``
+#: is the legacy ``--detect-equations --recover-clean-equations`` seam's
+#: (``_attach_equation_latex_sidecars``), which splices readings the same way and emits no
+#: attach event -- so keying on the first alone let every page of that seam escape the
+#: clause. 0 corpus pages, because those flags are off by default, and covered anyway: the
+#: cost is one more member of a frozenset, and the alternative is a known silent gap waiting
+#: for someone to turn the flags on.
+#:
+#: Both are in ``EQUATION_LANE_EVENT_KINDS``, the replay allowlist, so both survive a resume
+#: rather than disappearing with the audit log -- which is why the clause may key on them at
+#: all. The region kind already was; ``equation_latex_accepted`` was NOT, and the first draft
+#: of this comment asserted it before anyone checked. Adding it is a fix in its own right --
+#: by that set's own docstring a missing kind "disappears from ``audit_log.json`` the moment
+#: the page resumes", which was already true for that seam and independent of #1145 -- and
+#: #1145 makes it load-bearing, because a clause whose evidence is dropped on resume would
+#: silently un-demote the page on the next run.
+EQUATION_READING_ATTACHED_KINDS: frozenset[str] = frozenset(
+    {"equation_region_reading_attached", "equation_latex_accepted"}
+)
+#: Kept as a name for the region lane's kind specifically, since tests and the log refer to
+#: it, and it is the one the 399 measured pages carry.
 EQUATION_READING_ATTACHED_KIND = "equation_region_reading_attached"
 
 
@@ -495,7 +526,7 @@ def _equation_fidelity_clause(event_kinds: frozenset[str]) -> VerdictClause | No
     for unrelated reasons. Measured: 403 pages carry the event -- 399 shipping SUCCESS, which
     this clause demotes, and 4 already WARNING, which slice 1 marks.
     """
-    if EQUATION_READING_ATTACHED_KIND not in event_kinds:
+    if not (event_kinds & EQUATION_READING_ATTACHED_KINDS):
         return None
     return VerdictClause(
         Check.EQUATION_FIDELITY,
@@ -620,6 +651,38 @@ def _covered_checks(
     return covered, pairs
 
 
+def _status_is_explained(
+    output: PageOutput,
+    p: Any,
+    provenance: Any,
+    event_kinds: frozenset[str],
+    clauses: tuple[VerdictClause, ...],
+) -> bool:
+    """Does anything in this page's record name WHY its status is not SUCCESS?
+
+    Not "are there clauses". A silent-success clause says something true about the page but
+    nothing about its status -- it would be there on a SUCCESS page too -- so it cannot
+    discharge the fail-closed duty on its own. That was the hole: a page demoted by a
+    status-only guard that names nothing (``_apply_ditto_guard``) plus an attach event came
+    out with exactly ``{equation_fidelity=UNKNOWN}``, the fallback stayed silent, and the
+    page then looked entirely unresolvable to the resume exception.
+
+    Two things can explain the status, and the first is why the demotion records a mode:
+
+    * the failure MODE maps to a check. This covers the ticket's own demotion on every pass
+      after the first -- the mode clause may be DEDUPED away as a duplicate of the
+      silent-success clause, which is correct for emission and would be wrong to read as
+      "nothing explains the status", so the mode is asked directly rather than inferred
+      from the surviving clause list;
+    * a clause came from somewhere other than the silent-success set -- a flag, the judge,
+      the ladder.
+    """
+    if _MODE_CLAUSES.get(output.failure_mode) is not None:
+        return True
+    status_free = set(silent_success_clauses(output, p, event_kinds))
+    return bool([c for c in clauses if c not in status_free])
+
+
 def build_page_verdict(
     page_num: int,
     output: PageOutput,
@@ -663,10 +726,28 @@ def build_page_verdict(
         )
         return PageVerdict(page_num=page_num, clauses=(_fallback_clause(output),))
     clauses = derive_clauses(output, p, provenance, event_kinds)
-    if not clauses and output.status is not PageStatus.SUCCESS:
-        # Fail-closed: not CHECKED, and nothing named why. 34 pages of run 23117187 reach
-        # this. Deleting it is a mutant the suite must kill.
-        clauses = (_fallback_clause(output),)
+    # Fail-closed: the page is not CHECKED and nothing in the clause set names WHY ITS
+    # STATUS IS WHAT IT IS. 34 pages of run 23117187 reach this. Deleting it is a mutant the
+    # suite must kill.
+    #
+    # The condition is "no clause explains the status", not "no clauses at all", and the
+    # difference is a hole this ticket opened and Fable found. Slice 3 derives the
+    # silent-success clauses for EVERY status (it had to -- see the idempotence finding in
+    # the slice-3 log), so a page demoted by a STATUS-ONLY guard that sets no failure mode
+    # -- ``_apply_ditto_guard`` is one, and it names no check anywhere -- and which also
+    # carries an attach event came out with exactly ``{equation_fidelity=UNKNOWN}``. Not
+    # empty, so the fallback stayed silent, and the page then looked to
+    # ``_resume_verdict_is_permanently_unverifiable`` like a page whose every clause is
+    # unresolvable: restored for ever under a reason that is not the one that demoted it,
+    # where before this ticket it was re-OCR'd. 0 corpus pages and plainly reachable.
+    #
+    # A silent-success clause says something true about the page but nothing about its
+    # STATUS -- it would be there on a SUCCESS page too. So it cannot discharge the
+    # fail-closed duty, and the status still needs a reason.
+    if output.status is not PageStatus.SUCCESS and not _status_is_explained(
+        output, p, provenance, event_kinds, clauses
+    ):
+        clauses = (*clauses, _fallback_clause(output))
     return PageVerdict(page_num=page_num, clauses=clauses)
 
 

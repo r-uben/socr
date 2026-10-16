@@ -126,9 +126,36 @@ def test_audit_passed_is_not_touched_by_the_demotion() -> None:
     assert out.audit_passed is True, (
         "the demotion flipped audit_passed; assemble may now drop this page"
     )
-    assert out.failure_mode is FailureMode.NONE, (
-        "a FailureMode was invented; the clause already says what is unresolved"
+
+    # This assertion was the OPPOSITE an hour ago -- "a FailureMode was invented; the clause
+    # already says what is unresolved" -- and Fable's review round 1 on PR #1171 showed that
+    # was wrong. A status-only demotion leaves the page indistinguishable from one demoted
+    # by a guard that names nothing (``_apply_ditto_guard``), and then re-running the seam
+    # over it cannot tell whether the clause justified the status or whether the status was
+    # unexplained: either the fail-closed fallback fires on a page whose reason IS named
+    # (breaking idempotence) or it stays silent on a page whose reason is not (the hole
+    # Fable found, which let such a page be restored for ever under the wrong reason).
+    #
+    # So the demotion records its reason. ``audit_passed`` stays untouched either way --
+    # that is a different field with a different job, and the distinction is the point.
+    assert out.failure_mode is FailureMode.EQUATION_FIDELITY_UNVERIFIED, (
+        "the demotion does not explain itself, so a later pass cannot tell it from a page "
+        "demoted by a guard that names nothing"
     )
+
+
+def test_an_existing_more_specific_failure_mode_is_never_overwritten() -> None:
+    """The demotion fills a mode in; it never replaces one that says more.
+
+    A page already carrying ``NATIVE_GARBLED_MATH`` knows something this clause does not --
+    that the native layer garbled the maths AND no reading replaced it. Overwriting it with
+    the generic unverified-equation mode would lose that, and the mode is what the CLI
+    buckets and the disposition classifier read.
+    """
+    already = _success(status=PageStatus.SUCCESS, failure_mode=FailureMode.NATIVE_GARBLED_MATH)
+    out, _ = _apply_verdict_marks(already, _Flags(), 1, event_kinds=ATTACHED)
+    assert out.status is PageStatus.WARNING
+    assert out.failure_mode is FailureMode.NATIVE_GARBLED_MATH, out.failure_mode
 
 
 def test_a_page_already_warning_gets_BOTH_reasons_and_is_not_demoted_twice() -> None:
@@ -293,3 +320,80 @@ def test_only_a_permanently_unverifiable_clause_earns_the_resume_exception() -> 
     # And doubt reprocesses: anything unparseable is refused rather than guessed at.
     for junk in (None, {}, "failed", {"clauses": [{"check": "not_a_check"}]}, {"clauses": 7}):
         assert _resume_verdict_is_permanently_unverifiable(junk) is False, junk
+
+
+def test_a_page_demoted_by_a_guard_that_names_nothing_is_not_resume_skippable() -> None:
+    """Fable's P1 on PR #1171, and it is a hole this slice opened.
+
+    Slice 3 derives the silent-success clauses for EVERY status (it had to, or the seam was
+    not idempotent). So a page demoted by a STATUS-ONLY guard that sets no failure mode --
+    ``_apply_ditto_guard`` is one, and it names no check anywhere -- which ALSO carries an
+    attach event came out with exactly ``{equation_fidelity=UNKNOWN}``. Not empty, so the
+    fail-closed fallback stayed silent; and the page then looked to the resume exception
+    like one whose every clause is unresolvable, so it would be restored for ever under a
+    reason that is not the one that demoted it. Before this ticket it was re-OCR'd.
+
+    Both halves asserted: BOTH reasons are recorded, and the page is NOT admitted to the
+    resume exception.
+    """
+    from socr.pipeline.orchestrator import _resume_verdict_is_permanently_unverifiable
+
+    # The ditto guard's own shape: WARNING, no mode, nothing naming a check.
+    ditto = _success(status=PageStatus.WARNING, failure_mode=FailureMode.NONE)
+    out, verdict = _apply_verdict_marks(ditto, _Flags(), 1, event_kinds=ATTACHED)
+
+    checks = {c.check for c in verdict.clauses}
+    assert Check.EQUATION_FIDELITY in checks, verdict
+    assert Check.UNKNOWN_CHECK in checks, (
+        "the page is WARNING for a reason nothing names, and the fail-closed fallback did "
+        "not fire -- so the only clause on it is about something else entirely"
+    )
+    assert _resume_verdict_is_permanently_unverifiable(verdict.to_dict()) is False, (
+        "this page earns the resume exception, so it would be restored for ever under a "
+        "reason that is not the one that demoted it"
+    )
+    assert len(canonical_marks(out.text, 1)) == 2, canonical_marks(out.text, 1)
+
+    # The control, and the distinction the fix rests on: the SAME clause set on a page this
+    # ticket demoted itself IS admissible, because there the mode explains the status.
+    mine = _success()
+    out2, verdict2 = _apply_verdict_marks(mine, _Flags(), 1, event_kinds=ATTACHED)
+    assert out2.failure_mode is FailureMode.EQUATION_FIDELITY_UNVERIFIED
+    assert {c.check for c in verdict2.clauses} == {Check.EQUATION_FIDELITY}, verdict2
+    assert _resume_verdict_is_permanently_unverifiable(verdict2.to_dict()) is True
+
+
+def test_the_legacy_equation_seam_is_covered_too() -> None:
+    """The ``--detect-equations --recover-clean-equations`` seam splices readings as well.
+
+    ``_attach_equation_latex_sidecars`` emits ``equation_latex_accepted`` and no attach
+    event, so keying the clause on the region lane's kind alone let every page of that seam
+    escape. 0 corpus pages because those flags are off by default -- and covered anyway,
+    because the cost is one more member of a frozenset and the alternative is a known silent
+    gap waiting for someone to turn the flags on.
+    """
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    from socr.core.verdict import EQUATION_READING_ATTACHED_KINDS
+
+    # NAMED, not read from the set under test. Iterating
+    # ``EQUATION_READING_ATTACHED_KINDS`` was the first version and it is a tautology --
+    # shrinking the set just makes the loop shorter, and the
+    # ``clause-misses-the-legacy-equation-seam`` mutant SURVIVED it. These two strings are
+    # the emitters' own (``orchestrator.py:4362`` and ``:20820``), so the test fails if
+    # either stops being covered.
+    for kind in ("equation_region_reading_attached", "equation_latex_accepted"):
+        out, verdict = _apply_verdict_marks(_success(), _Flags(), 1, event_kinds=frozenset({kind}))
+        assert out.status is PageStatus.WARNING, kind
+        assert [c.check for c in verdict.clauses] == [Check.EQUATION_FIDELITY], (kind, verdict)
+        assert kind in EQUATION_READING_ATTACHED_KINDS, (
+            f"{kind} is emitted by a seam that splices readings but the clause does not "
+            "key on it, so every page of that seam escapes"
+        )
+
+    # And every kind the clause keys on must survive a resume, or the next run silently
+    # un-demotes the page. Asserted rather than assumed: ``equation_latex_accepted`` was
+    # NOT in this allowlist, and a comment claimed it was before anyone looked.
+    assert EQUATION_READING_ATTACHED_KINDS <= UnifiedPipeline.EQUATION_LANE_EVENT_KINDS, (
+        EQUATION_READING_ATTACHED_KINDS - UnifiedPipeline.EQUATION_LANE_EVENT_KINDS
+    )
