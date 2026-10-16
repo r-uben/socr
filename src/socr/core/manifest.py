@@ -5151,6 +5151,13 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
     by_check = {
         Check.EQUATION_FIDELITY: FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         Check.FIGURE_TEXT: FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        # #1181: the EXACT_PASS accept, where no judge was called at all. ``PAGE_JUDGE``
+        # is shared with the judge-refusal and judge-timeout clauses, and that is safe
+        # here only because those are status-DEPENDENT: ``derive_clauses`` returns before
+        # them on a SUCCESS page, so the only ``PAGE_JUDGE`` clause that can reach this
+        # map is the silent-success one. A future silent-success clause on the same check
+        # would need its own key, not this row.
+        Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
     }
     for clause in clauses:
         mode = by_check.get(clause.check)

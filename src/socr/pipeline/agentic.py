@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Protocol
 from socr.core.config import EngineType
 from socr.core.daemon_call import submit_daemon
 from socr.core.providers import ProviderProfile
+from socr.core.verdict import NATIVE_TABLE_EXACT_PASS_KIND
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
@@ -1377,7 +1378,7 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # EXACT_PASS: ship immediately — no model needed
             self._emit_event(
                 page_num=page_num,
-                kind="native_table_verifier_exact_pass",
+                kind=NATIVE_TABLE_EXACT_PASS_KIND,
                 engine=output.engine or "",
                 detail="deterministic EXACT_PASS: row counts match + multiset clean",
                 data={

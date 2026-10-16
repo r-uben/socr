@@ -134,6 +134,7 @@ from socr.pipeline.agentic import (
     route_page,
 )
 from socr.core.ollama_utils import probe_model_generation
+from socr.core.verdict import NATIVE_TABLE_EXACT_PASS_KIND
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
@@ -325,6 +326,17 @@ _RESUME_REPLAYED: dict[str, str] = {
         )
         for kind in REJUDGE_EVENT_KINDS
     },
+    NATIVE_TABLE_EXACT_PASS_KIND: (
+        "#1181: the deterministic EXACT_PASS accept, emitted by the audit gate inside the "
+        "page loop, which a terminal resumed page skips, while the run summary and "
+        "audit_log.json count the kind. It is NOT what keeps the page marked, and the "
+        "first version of this note said it was: a page the #1181 clause marks is WARNING, "
+        "so _load_terminal_page refuses it and the page is re-OCR'd, which re-emits the "
+        "event. The pages that DO resume carrying this kind are those where the gate emitted "
+        "EXACT_PASS but then delegated to the page judge: the accepting reason is replaced, "
+        "so the clause does not fire and the judged page can end SUCCESS (Fable, reviews of "
+        "the #1181 diff)"
+    ),
     "table_escalation_timeout": (
         "GH-851: emitted by _escalate_table_page, which a terminal resumed page skips; "
         "the shipped table is the unescalated incumbent"
@@ -1287,7 +1299,11 @@ def _resume_verdict_is_permanently_unverifiable(
     know, so doubt still reprocesses.
     """
     from socr.core.result import FailureMode as _FailureMode
-    from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES, PageVerdict
+    from socr.core.verdict import (
+        PERMANENTLY_UNRESOLVABLE_MODES,
+        REPROCESSABLE_CLAUSE_CHECKS,
+        PageVerdict,
+    )
 
     if not isinstance(raw_verdict, dict):
         return False
@@ -1319,6 +1335,15 @@ def _resume_verdict_is_permanently_unverifiable(
     # ``test_an_admissible_mode_is_only_ever_set_by_the_verdict_demotion`` so the argument
     # fails loudly if a second writer of these modes ever appears -- which is the event that
     # would make the deleted check necessary again.
+    # #1181: and the clause-level refusal, which is NOT redundant with the mode any more.
+    # The argument above assumed one silent-success class per page. A page can now carry the
+    # equation (or chart) clause AND the EXACT_PASS one; ``_merge_clause``'s mode
+    # arbitration records the equation mode, which is permanent, while the other clause is
+    # resolvable -- so the page skipped for ever with its table still unjudged. Measured
+    # through the seam before this line existed. Doubt reprocesses, so the refusal is the
+    # safe direction.
+    if any(clause.check in REPROCESSABLE_CLAUSE_CHECKS for clause in verdict.clauses):
+        return False
     return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
 
