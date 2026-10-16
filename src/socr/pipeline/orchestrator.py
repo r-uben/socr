@@ -1265,7 +1265,9 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
-def _resume_verdict_is_permanently_unverifiable(raw_verdict: object) -> bool:
+def _resume_verdict_is_permanently_unverifiable(
+    raw_verdict: object, raw_mode: object = None
+) -> bool:
     """Is every non-PASS clause in this published verdict one that can never be resolved?
 
     #1145 slice 3. The check these clauses name does not exist to be run: the equation lane
@@ -1278,7 +1280,8 @@ def _resume_verdict_is_permanently_unverifiable(raw_verdict: object) -> bool:
     route -- it has no need of it, and the ordinary SUCCESS gate is the one that should
     decide it. Returns False on anything unparseable, so doubt still reprocesses.
     """
-    from socr.core.verdict import PERMANENTLY_UNVERIFIABLE_CLAUSES, PageVerdict
+    from socr.core.result import FailureMode as _FailureMode
+    from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES, PageVerdict
 
     if not isinstance(raw_verdict, dict):
         return False
@@ -1288,7 +1291,29 @@ def _resume_verdict_is_permanently_unverifiable(raw_verdict: object) -> bool:
         return False
     if not verdict.clauses:
         return False
-    return all((c.check, c.result) in PERMANENTLY_UNVERIFIABLE_CLAUSES for c in verdict.clauses)
+    try:
+        mode = _FailureMode(str(raw_mode or ""))
+    except ValueError:
+        return False
+    # The mode alone decides, and that is a reachability argument rather than a shortcut.
+    #
+    # An earlier version also required the clauses to say nothing more than the mode does,
+    # on the reasoning that an extra clause might be a resolvable doubt. That check is
+    # UNREACHABLE, and a mutant deleting it survived every test, which is how it was found.
+    # The two unresolvable modes are set in exactly one place --
+    # ``manifest._verdict_demotion_mode``, reached only by the demotion, which only fires on
+    # a page that is still SUCCESS at the verdict step. On a SUCCESS page
+    # ``derive_clauses`` returns the silent-success clauses and nothing else, so a page
+    # carrying one of these modes cannot also be carrying a clause from a flag, the judge or
+    # the ladder: those all arrive with demotions of their own, which leave the mode as they
+    # found it.
+    #
+    # A page WARNING for another reason therefore reaches here with that reason's mode, or
+    # with NONE, and is refused by the line above. Pinned by
+    # ``test_an_admissible_mode_is_only_ever_set_by_the_verdict_demotion`` so the argument
+    # fails loudly if a second writer of these modes ever appears -- which is the event that
+    # would make the deleted check necessary again.
+    return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
 
 def _is_document_failed_stub(md_path: Path) -> bool:
@@ -15599,7 +15624,7 @@ class UnifiedPipeline:
             # for this class, which nothing records today; #713 had to mint a credential to
             # get one. Noted rather than half-built.
             is_permanently_unverifiable = _resume_verdict_is_permanently_unverifiable(
-                meta.get("verdict")
+                meta.get("verdict"), winning.get("failure_mode")
             )
 
             if not (

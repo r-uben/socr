@@ -151,6 +151,14 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
     #: is what ``_rewrite_all_fragments`` does to every page at assemble. Same check, same
     #: result, same reason -- so the verdict a re-finalized page publishes is the verdict
     #: it already had.
+    #: #1145 slice 3 (chart). Same purpose as the equation row below: the clause comes from
+    #: the lane's event on the first pass and from here on every later one.
+    FailureMode.VISUAL_VALUES_UNTRANSCRIBED: (
+        Check.FIGURE_TEXT,
+        CheckResult.UNKNOWN,
+        "this page's chart ships as an image and the labels and values drawn in it were "
+        "never transcribed -- read them off the image before citing",
+    ),
     FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
         Check.EQUATION_FIDELITY,
         CheckResult.UNKNOWN,
@@ -504,9 +512,57 @@ EQUATION_READING_ATTACHED_KIND = "equation_region_reading_attached"
 #: and enumerated, and NOT "every UNKNOWN clause": a judge that timed out may well answer
 #: next time, and admitting those would turn a narrow content exception into a general
 #: "WARNING pages resume" rule.
-PERMANENTLY_UNVERIFIABLE_CLAUSES: frozenset[tuple[Check, CheckResult]] = frozenset(
-    {(Check.EQUATION_FIDELITY, CheckResult.UNKNOWN)}
+#: Failure modes a page can never shed by being reprocessed, because the check they name
+#: has nothing to run. Keyed on the MODE rather than on the clause, and the chart slice is
+#: why: ``figure_text=UNKNOWN`` is produced by THREE sources -- this lane, the
+#: ``FIGURE_WORDS_UNREAD`` mode, and the scanned-figure flag -- and only this one is
+#: unresolvable. A reader that could not transcribe a figure crop today may succeed next
+#: run, so admitting ``(figure_text, UNKNOWN)`` as a pair would have let those pages skip
+#: for ever. The mode is already the field that explains the status (that is why the
+#: demotion records one), so it is the right key for "can this status ever be resolved".
+#:
+#: Deliberately small and enumerated. ``AUDIT_FAILED`` and the judge-timeout modes are
+#: absent on purpose: a judge may answer next time, and admitting those would turn a narrow
+#: content exception into a general "WARNING pages resume" rule.
+PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+    }
 )
+
+
+#: The chart lane's record that the values drawn in a chart were never transcribed.
+#:
+#: Keyed on this event ALONE, not on ``chart_asset_page`` beside it, and that is a checked
+#: decision rather than a simplification: ``chart_asset_page`` is NOT in the resume replay
+#: allowlist, so a predicate requiring it would lose the clause on every resumed page. On
+#: run 23192118 the two agree exactly (1,353 pages, every one with a ``chart_asset``
+#: winner), and this event is the one that states what the clause states -- a page whose
+#: visual values went untranscribed owes the reader that sentence whichever lane shipped it.
+VISUAL_VALUES_UNTRANSCRIBED_KIND = "visual_values_not_transcribed"
+
+
+def _chart_values_clause(event_kinds: frozenset[str]) -> VerdictClause | None:
+    """``figure_text=UNKNOWN`` on a page whose chart ships as an image, untranscribed.
+
+    The chart lane routes such a page to an image asset on purpose -- that is the lane
+    working, not failing -- but the numbers a reader would cite are then present only as
+    pixels. Measured on run 23192118: 1,353 pages carry the event, 210 shipping SUCCESS
+    with no mark anywhere (demoted here) and 1,143 already WARNING (which slice 1 marks and
+    which now gain this second, true clause).
+
+    UNKNOWN, not FAIL: nothing read the chart and found it wrong; nothing read it at all.
+    """
+    if VISUAL_VALUES_UNTRANSCRIBED_KIND not in event_kinds:
+        return None
+    return VerdictClause(
+        Check.FIGURE_TEXT,
+        CheckResult.UNKNOWN,
+        SCOPE_PAGE,
+        "this page's chart ships as an image and the labels and values drawn in it were "
+        "never transcribed -- read them off the image before citing",
+    )
 
 
 def _equation_fidelity_clause(event_kinds: frozenset[str]) -> VerdictClause | None:
@@ -550,7 +606,10 @@ def silent_success_clauses(
     the hole confirmed at the seam -- see the slice-2 log).
     """
     clauses: list[VerdictClause] = []
-    for clause in (_equation_fidelity_clause(event_kinds),):
+    for clause in (
+        _equation_fidelity_clause(event_kinds),
+        _chart_values_clause(event_kinds),
+    ):
         if clause is not None:
             clauses.append(clause)
     return tuple(clauses)

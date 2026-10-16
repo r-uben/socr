@@ -48,6 +48,8 @@ fitz = pytest.importorskip("fitz")
 from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
+from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -341,27 +343,64 @@ class TestShippedOutput:
         pdf_path = tmp_path / "rot_clean.pdf"
         _rotated_caption_pdf(pdf_path, shredded=False)
 
-        _result, sidecar = _run(pdf_path, tmp_path)
-        shipped_text = sidecar["winning_output"].get("text", "")
+        # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values.
+        # These pages take the chart lane, so the SUCCESS this reverse guard is about is
+        # asserted with that clause OFF -- unchanged, and it is #263's property, not
+        # #1145's. Slice 3's delta is pinned after it, so #263 still fails if its own
+        # guarantee breaks.
+        with chart_clause_off():
+            _result, sidecar = _run(pdf_path, tmp_path)
+            shipped_text = sidecar["winning_output"].get("text", "")
 
-        assert sidecar["status"] == PageStatus.SUCCESS.value, (
-            f"clean rotated prose must keep shipping native as success; shipped {shipped_text!r}"
+            assert sidecar["status"] == PageStatus.SUCCESS.value, (
+                f"clean rotated prose must keep shipping native as success; "
+                f"shipped {shipped_text!r}"
+            )
+            assert _confetti_lines(shipped_text) == []
+            assert "".join(_CAPTION.split()) in "".join(shipped_text.split())
+            assert "rotated_text_shredded" not in [ev["kind"] for ev in sidecar["audit_events"]]
+
+        _result_live, live = _run(pdf_path, tmp_path / "live")
+        assert_only_the_chart_clause_differs(
+            live["winning_output"].get("text", ""),
+            shipped_text,
+            1,
+            on_status=live["status"],
+            off_status=sidecar["status"],
+            on_mode=live["failure_mode"],
         )
-        assert _confetti_lines(shipped_text) == []
-        assert "".join(_CAPTION.split()) in "".join(shipped_text.split())
-        assert "rotated_text_shredded" not in [ev["kind"] for ev in sidecar["audit_events"]]
+        assert _confetti_lines(live["winning_output"].get("text", "")) == [], (
+            "the shredded-text confetti came back on the clause-on arm"
+        )
 
     def test_upright_page_still_ships_native_success(self, tmp_path: Path) -> None:
         """Reverse guard: the unrotated page is byte-for-byte unaffected."""
         pdf_path = tmp_path / "upright.pdf"
         _upright_caption_pdf(pdf_path)
 
-        _result, sidecar = _run(pdf_path, tmp_path)
-        shipped_text = sidecar["winning_output"].get("text", "")
+        # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values.
+        # These pages take the chart lane, so the SUCCESS this reverse guard is about is
+        # asserted with that clause OFF -- unchanged, and it is #263's property, not
+        # #1145's. Slice 3's delta is pinned after it, so #263 still fails if its own
+        # guarantee breaks.
+        with chart_clause_off():
+            _result, sidecar = _run(pdf_path, tmp_path)
+            shipped_text = sidecar["winning_output"].get("text", "")
 
-        assert sidecar["status"] == PageStatus.SUCCESS.value
-        assert _confetti_lines(shipped_text) == []
-        assert "Figure 4" in shipped_text
+            assert sidecar["status"] == PageStatus.SUCCESS.value
+            assert _confetti_lines(shipped_text) == []
+            assert "Figure 4" in shipped_text
+
+        _result_live, live = _run(pdf_path, tmp_path / "live")
+        assert_only_the_chart_clause_differs(
+            live["winning_output"].get("text", ""),
+            shipped_text,
+            1,
+            on_status=live["status"],
+            off_status=sidecar["status"],
+            on_mode=live["failure_mode"],
+        )
+        assert "Figure 4" in live["winning_output"].get("text", "")
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +498,34 @@ class TestChartAssetLaneCannotShipShreddedText:
         pdf_path = tmp_path / "rot_clean.pdf"
         _rotated_caption_pdf(pdf_path, shredded=False)
 
-        _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
-        shipped_text = sidecar["winning_output"].get("text", "")
+        # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values.
+        # These pages take the chart lane, so the SUCCESS this reverse guard is about is
+        # asserted with that clause OFF -- unchanged, and it is #263's property, not
+        # #1145's. Slice 3's delta is pinned after it, so #263 still fails if its own
+        # guarantee breaks.
+        with chart_clause_off():
+            _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
+            shipped_text = sidecar["winning_output"].get("text", "")
 
-        assert sidecar["engine"] == "chart_asset", (
-            f"the clean rotated chart page must keep its lane; got {sidecar['engine']!r}"
+            assert sidecar["engine"] == "chart_asset", (
+                f"the clean rotated chart page must keep its lane; got {sidecar['engine']!r}"
+            )
+            assert sidecar["status"] == PageStatus.SUCCESS.value, shipped_text
+            assert _confetti_lines(shipped_text) == []
+
+        _result_live, live = _run(pdf_path, tmp_path / "live", native_only=True)
+        assert live["engine"] == "chart_asset", (
+            "slice 3 moved the page off the chart lane; the demotion must mark the page, "
+            "not re-route it"
         )
-        assert sidecar["status"] == PageStatus.SUCCESS.value, shipped_text
-        assert _confetti_lines(shipped_text) == []
+        assert_only_the_chart_clause_differs(
+            live["winning_output"].get("text", ""),
+            shipped_text,
+            1,
+            on_status=live["status"],
+            off_status=sidecar["status"],
+            on_mode=live["failure_mode"],
+        )
         assert "".join(_CAPTION.split()) in "".join(shipped_text.split())
         assert "![Chart page 1](" in shipped_text, shipped_text
 
@@ -475,12 +534,29 @@ class TestChartAssetLaneCannotShipShreddedText:
         pdf_path = tmp_path / "upright.pdf"
         _upright_caption_pdf(pdf_path)
 
-        _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
-        shipped_text = sidecar["winning_output"].get("text", "")
+        # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values.
+        # These pages take the chart lane, so the SUCCESS this reverse guard is about is
+        # asserted with that clause OFF -- unchanged, and it is #263's property, not
+        # #1145's. Slice 3's delta is pinned after it, so #263 still fails if its own
+        # guarantee breaks.
+        with chart_clause_off():
+            _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
+            shipped_text = sidecar["winning_output"].get("text", "")
 
-        assert sidecar["engine"] == "chart_asset"
-        assert sidecar["status"] == PageStatus.SUCCESS.value
-        assert _confetti_lines(shipped_text) == []
+            assert sidecar["engine"] == "chart_asset"
+            assert sidecar["status"] == PageStatus.SUCCESS.value
+            assert _confetti_lines(shipped_text) == []
+
+        _result_live, live = _run(pdf_path, tmp_path / "live", native_only=True)
+        assert live["engine"] == "chart_asset"
+        assert_only_the_chart_clause_differs(
+            live["winning_output"].get("text", ""),
+            shipped_text,
+            1,
+            on_status=live["status"],
+            off_status=sidecar["status"],
+            on_mode=live["failure_mode"],
+        )
         assert "Figure 4" in shipped_text
         assert "![Chart page 1](" in shipped_text
 

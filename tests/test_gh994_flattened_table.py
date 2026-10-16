@@ -23,6 +23,7 @@ from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.reconstruct import MIN_TABLE_ROWS
+from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
 from verdict_marks_helper import assert_differs_only_by_marks
 
 _PROSE = (
@@ -335,21 +336,45 @@ def test_chart_asset_lane_demotes_but_keeps_body_and_audit_passed(tmp_path, monk
     The synthetic chart page has no caption, so the detector is forced for the live arm; the
     test is about the lane, not the detector.
     """
+    # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values, so
+    # the neutralised arm is no longer SUCCESS. THIS ticket's property is asserted with that
+    # clause OFF, unchanged -- including the earlier #1145 mark comparison, which is slice
+    # 1's and is about the flattened-table demotion, not the chart one. Slice 3's delta is
+    # pinned after it.
     kw = dict(provider=True, shape="chart", native_only=True)
-    off, _ = _process(tmp_path, "coff", monkeypatch, neutralised=True, **kw)
-    on, _ = _process(tmp_path, "con", monkeypatch, neutralised=False, forced=True, **kw)
-    a, b = _sidecar(tmp_path, "coff"), _sidecar(tmp_path, "con")
-    assert a["engine"] == "chart_asset", "setup: the page must take the chart lane"
-    assert a["status"] == "success" and off.status is DocumentStatus.SUCCESS
-    assert b["engine"] == "chart_asset"
-    assert b["status"] == "warning"
-    assert b["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
-    assert b["winning_output"]["audit_passed"] is a["winning_output"]["audit_passed"] is True
-    # #1145: the demoted arm gains the mark block, the SUCCESS arm carries nothing, and
-    # the bodies underneath are still byte-identical -- the original assertion.
-    assert_differs_only_by_marks(_page_text(tmp_path, "con"), _page_text(tmp_path, "coff"), 1)
-    assert "estimated effect" in _page_text(tmp_path, "con")
-    assert on.status is not DocumentStatus.SUCCESS
+    with chart_clause_off():
+        off, _ = _process(tmp_path, "coff", monkeypatch, neutralised=True, **kw)
+        on, _ = _process(tmp_path, "con", monkeypatch, neutralised=False, forced=True, **kw)
+        a, b = _sidecar(tmp_path, "coff"), _sidecar(tmp_path, "con")
+        assert a["engine"] == "chart_asset", "setup: the page must take the chart lane"
+        assert a["status"] == "success" and off.status is DocumentStatus.SUCCESS
+        assert b["engine"] == "chart_asset"
+        assert b["status"] == "warning"
+        assert b["failure_mode"] == FailureMode.TABLE_NOT_RECONSTRUCTED.value
+        assert b["winning_output"]["audit_passed"] is a["winning_output"]["audit_passed"] is True
+        # #1145 slice 1: the demoted arm gains the mark block, the SUCCESS arm carries
+        # nothing, and the bodies underneath are still byte-identical.
+        assert_differs_only_by_marks(_page_text(tmp_path, "con"), _page_text(tmp_path, "coff"), 1)
+        assert "estimated effect" in _page_text(tmp_path, "con")
+        assert on.status is not DocumentStatus.SUCCESS
+
+    # Slice 3's delta on the arm this ticket calls clean, and the more specific mode still
+    # wins on the arm it calls flagged: a flattened-table page keeps
+    # ``table_not_reconstructed``, which is what the CLI buckets read.
+    _process(tmp_path, "c1145", monkeypatch, neutralised=True, **kw)
+    side_1145 = _sidecar(tmp_path, "c1145")
+    assert_only_the_chart_clause_differs(
+        _page_text(tmp_path, "c1145"),
+        _page_text(tmp_path, "coff"),
+        1,
+        on_status=side_1145["status"],
+        off_status=a["status"],
+        on_mode=side_1145["failure_mode"],
+    )
+    _process(tmp_path, "con1145", monkeypatch, neutralised=False, forced=True, **kw)
+    assert _sidecar(tmp_path, "con1145")["failure_mode"] == (
+        FailureMode.TABLE_NOT_RECONSTRUCTED.value
+    ), "slice 3's generic mode displaced #994's more specific one"
 
 
 def _select(tmp_path, *, engine: str, flagged: bool):

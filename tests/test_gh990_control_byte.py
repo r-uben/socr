@@ -21,6 +21,8 @@ from socr.core import born_digital
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.glyph_recovery import count_control_byte_before_digit_hits
+from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+
 from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -368,21 +370,26 @@ def test_event_says_routed_or_retained_and_flags_errors(tmp_path, monkeypatch) -
 
 def test_chart_asset_lane_demotes_on_a_control_byte(tmp_path, monkeypatch) -> None:
     """The chart lane ships retained native prose; it must not bypass the demotion."""
-    off, _ = _e2e(
-        tmp_path,
-        "f_off",
-        monkeypatch,
-        provider=True,
-        native_only=True,
-        chart=True,
-        detector="neutralised",
-    )
-    assert _sidecar(tmp_path, "f_off")["engine"] == "chart_asset", "setup: chart lane"
-    assert _sidecar(tmp_path, "f_off")["status"] == "success"
-    on, _ = _e2e(tmp_path, "f_on", monkeypatch, provider=True, native_only=True, chart=True)
-    side = _sidecar(tmp_path, "f_on")
-    assert side["engine"] == "chart_asset"
-    assert side["status"] == "warning"
+    # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values, so
+    # the neutralised arm is no longer SUCCESS. THIS ticket's property is asserted below
+    # with that clause OFF, unchanged, and #1145's delta is pinned after it.
+    with chart_clause_off():
+        off, _ = _e2e(
+            tmp_path,
+            "f_off",
+            monkeypatch,
+            provider=True,
+            native_only=True,
+            chart=True,
+            detector="neutralised",
+        )
+        side_off = _sidecar(tmp_path, "f_off")
+        assert side_off["engine"] == "chart_asset", "setup: chart lane"
+        assert side_off["status"] == "success"
+        on, _ = _e2e(tmp_path, "f_on", monkeypatch, provider=True, native_only=True, chart=True)
+        side = _sidecar(tmp_path, "f_on")
+        assert side["engine"] == "chart_asset"
+        assert side["status"] == "warning"
     assert side["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert on.status is not DocumentStatus.SUCCESS
 
@@ -414,19 +421,40 @@ def _spy_restores(monkeypatch) -> list:
 def test_resume_does_not_restore_a_cached_clean_page_when_the_scan_now_fires(
     tmp_path, monkeypatch, chart, second
 ) -> None:
+    # #1145 slice 3: on the chart lane the cached first run is no longer SUCCESS, because a
+    # chart shipped as an image with untranscribed values is a page socr did not CHECK. The
+    # property THIS ticket owns is about the fresh SCAN, so it is asserted with that clause
+    # OFF -- unchanged -- and then asserted AGAIN with the clause live, because it must
+    # SURVIVE #1145 rather than merely coexist with it.
     kw = dict(provider=True, native_only=True, chart=chart)
-    _e2e(tmp_path, "r", monkeypatch, detector="neutralised", **kw)
-    first = _sidecar(tmp_path, "r")
-    assert first["status"] == "success", "setup: the clean first run caches SUCCESS"
-    assert first["engine"] == ("chart_asset" if chart else "native"), first["engine"]
+    with chart_clause_off():
+        _e2e(tmp_path, "r", monkeypatch, detector="neutralised", **kw)
+        first = _sidecar(tmp_path, "r")
+        assert first["status"] == "success", "setup: the clean first run caches SUCCESS"
+        assert first["engine"] == ("chart_asset" if chart else "native"), first["engine"]
 
-    restored = _spy_restores(monkeypatch)
-    res, _ = _e2e(tmp_path, "r", monkeypatch, detector=second, reprocess=True, **kw)
-    again = _sidecar(tmp_path, "r")
-    assert restored == [], "the cached native page must not be restored"
-    assert again["status"] == "warning", "must be demoted, never restored as SUCCESS"
-    assert again["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
-    assert res.status is not DocumentStatus.SUCCESS
+        restored = _spy_restores(monkeypatch)
+        res, _ = _e2e(tmp_path, "r", monkeypatch, detector=second, reprocess=True, **kw)
+        again = _sidecar(tmp_path, "r")
+        assert restored == [], "the cached native page must not be restored"
+        assert again["status"] == "warning", "must be demoted, never restored as SUCCESS"
+        assert again["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+        assert res.status is not DocumentStatus.SUCCESS
+
+    # #1145 live. On the chart lane the cached page now carries
+    # ``visual_values_untranscribed``, a mode #1145's OWN resume exception admits -- so the
+    # only thing still refusing it is this ticket's scan guard, which runs BEFORE that
+    # exception (``orchestrator.py`` ~15476 versus ~15560). If that ordering ever changed, a
+    # page the fresh scan flags would come back from cache, and this is what catches it.
+    restored_live = _spy_restores(monkeypatch)
+    _e2e(tmp_path, "r1145", monkeypatch, detector="neutralised", **kw)
+    res_live, _ = _e2e(tmp_path, "r1145", monkeypatch, detector=second, reprocess=True, **kw)
+    assert restored_live == [], (
+        "with #1145 live the cached page was restored although the fresh scan fires; the "
+        "scan guard no longer runs before the unverifiable-mode resume exception"
+    )
+    assert _sidecar(tmp_path, "r1145")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert res_live.status is not DocumentStatus.SUCCESS
 
 
 @pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
@@ -434,28 +462,71 @@ def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, 
     """Control for the pin above: the same two runs with the detector neutralised both times
     DO restore the cached page, so the refusal is caused by the fresh flag and nothing else."""
     kw = dict(provider=True, native_only=True, chart=chart, detector="neutralised")
-    _e2e(tmp_path, "c", monkeypatch, **kw)
-    restored = _spy_restores(monkeypatch)
-    res, _ = _e2e(tmp_path, "c", monkeypatch, reprocess=True, **kw)
-    assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
-    assert _sidecar(tmp_path, "c")["status"] == "success"
-    assert res.status is DocumentStatus.SUCCESS
+    with chart_clause_off():
+        _e2e(tmp_path, "c", monkeypatch, **kw)
+        restored = _spy_restores(monkeypatch)
+        res, _ = _e2e(tmp_path, "c", monkeypatch, reprocess=True, **kw)
+        assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
+        assert _sidecar(tmp_path, "c")["status"] == "success"
+        assert res.status is DocumentStatus.SUCCESS
+
+    # #1145 live: the cached chart page is WARNING now, and the ledger gate requires
+    # SUCCESS -- so without #1145's own resume exception this control would break and every
+    # chart page would re-OCR on every run, for ever, since the next run demotes it again.
+    # No document-status assertion: with the clause live the chart arm's document is
+    # non-SUCCESS and the native arm's is SUCCESS, and this control's property is the
+    # RESTORE, not the status.
+    restored_live = _spy_restores(monkeypatch)
+    _e2e(tmp_path, "c1145", monkeypatch, **kw)
+    _e2e(tmp_path, "c1145", monkeypatch, reprocess=True, **kw)
+    assert len(restored_live) == 1, (
+        "a cached chart page is no longer restored, so #1145 re-OCRs every chart page on "
+        "every run and never converges"
+    )
 
 
 @pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
 def test_resume_hole_is_shared_by_913s_scan(tmp_path, monkeypatch, chart) -> None:
     """#913 uses the same predicate, so its failing scan had the same resume hole."""
+    # #1145 slice 3: the chart arm's cached first run is no longer SUCCESS. The hole this
+    # test pins belongs to #913's scan, so it is asserted with the clause OFF and then
+    # again with it live -- the guard must survive #1145, not merely coexist with it.
     kw = dict(provider=True, native_only=True, chart=chart, line="the coefficient is 0.47 and 2.5")
-    _e2e(tmp_path, "m", monkeypatch, detector="neutralised", **kw)
-    assert _sidecar(tmp_path, "m")["status"] == "success", "setup: clean first run"
-    restored = _spy_restores(monkeypatch)
-    res, _ = _e2e(
-        tmp_path, "m", monkeypatch, detector="neutralised", reprocess=True, minus_raising=True, **kw
+    with chart_clause_off():
+        _e2e(tmp_path, "m", monkeypatch, detector="neutralised", **kw)
+        assert _sidecar(tmp_path, "m")["status"] == "success", "setup: clean first run"
+        restored = _spy_restores(monkeypatch)
+        res, _ = _e2e(
+            tmp_path,
+            "m",
+            monkeypatch,
+            detector="neutralised",
+            reprocess=True,
+            minus_raising=True,
+            **kw,
+        )
+        assert restored == []
+        assert _sidecar(tmp_path, "m")["status"] == "warning"
+        assert _sidecar(tmp_path, "m")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+        assert res.status is not DocumentStatus.SUCCESS
+
+    restored_live = _spy_restores(monkeypatch)
+    _e2e(tmp_path, "m1145", monkeypatch, detector="neutralised", **kw)
+    res_live, _ = _e2e(
+        tmp_path,
+        "m1145",
+        monkeypatch,
+        detector="neutralised",
+        reprocess=True,
+        minus_raising=True,
+        **kw,
     )
-    assert restored == []
-    assert _sidecar(tmp_path, "m")["status"] == "warning"
-    assert _sidecar(tmp_path, "m")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
-    assert res.status is not DocumentStatus.SUCCESS
+    assert restored_live == [], (
+        "with #1145 live the cached page was restored although #913's scan fires; that scan "
+        "guard no longer runs before the unverifiable-mode resume exception"
+    )
+    assert _sidecar(tmp_path, "m1145")["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
+    assert res_live.status is not DocumentStatus.SUCCESS
 
 
 @pytest.fixture(autouse=True)

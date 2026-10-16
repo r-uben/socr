@@ -209,6 +209,18 @@ class FailureMode(str, Enum):
     #: mode closes both: ``core/verdict._MODE_CLAUSES`` maps it back to the same
     #: ``equation_fidelity=UNKNOWN`` clause the event produces on the first pass.
     EQUATION_FIDELITY_UNVERIFIED = "equation_fidelity_unverified"
+    #: #1145 slice 3 (chart): the page shipped a chart as an IMAGE and nothing
+    #: transcribed the labels and values drawn in it. The chart lane routes such a
+    #: page to an image asset on purpose -- that is the lane working -- but the
+    #: numbers a reader would cite are then present only as pixels, and the page
+    #: said nothing about it: 210 pages of run 23192118 shipped SUCCESS /
+    #: ``failure_mode=none`` / ``audit_passed=True`` with no mark.
+    #:
+    #: Like ``EQUATION_FIDELITY_UNVERIFIED``, this mode exists so the demotion
+    #: explains itself, and like it, nothing can resolve it by reprocessing: the
+    #: lane has no transcriber to run. ``core/verdict._MODE_CLAUSES`` maps it back
+    #: to the same ``figure_text=UNKNOWN`` clause the event produces.
+    VISUAL_VALUES_UNTRANSCRIBED = "visual_values_untranscribed"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

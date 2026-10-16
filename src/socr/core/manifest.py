@@ -5150,6 +5150,7 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
     """
     by_check = {
         Check.EQUATION_FIDELITY: FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        Check.FIGURE_TEXT: FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
     }
     for clause in clauses:
         mode = by_check.get(clause.check)
@@ -5199,12 +5200,14 @@ def _apply_verdict_marks(
     # review HTML, the CLI counters). Marking without demoting would leave all of them
     # calling the page clean.
     #
-    # Status-only, with no new ``FailureMode``: the same shape as
-    # ``_apply_chart_region_guard`` and the other status-only guards, and the mode has
-    # nothing true to say here that the clause does not say better. The page becomes
-    # WARNING with mode NONE, which is one of the shapes this ticket opened by complaining
-    # about -- the difference, and the whole point, is that it now carries a verdict naming
-    # the check.
+    # The demotion RECORDS its reason as a failure mode (see
+    # ``_warn_success_status_for_verdict``). An earlier draft of this made it status-only,
+    # leaving the page WARNING with mode NONE, and this comment said so; that was wrong and
+    # Fable's round 1 on PR #1171 showed why. A status-only demotion is indistinguishable
+    # from one by a guard that names nothing, so a later pass over the page can neither
+    # tell which clause justified the status nor keep the verdict stable -- and such a page
+    # was admitted to the resume exception under a reason that was not the one that demoted
+    # it. An existing, more specific mode is never overwritten.
     if verdict.clauses and output.status is PageStatus.SUCCESS:
         output = _warn_success_status_for_verdict(output, verdict.clauses)
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"

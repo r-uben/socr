@@ -18,6 +18,8 @@ import pytest
 from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -337,33 +339,58 @@ def test_e2e_native_only_with_a_raising_detector_is_demoted_too(tmp_path, monkey
 
 def test_e2e_chart_asset_page_with_a_hit_is_demoted_too(tmp_path, monkeypatch) -> None:
     """The chart lane ships retained native prose; it must not bypass the demotion."""
-    off, _ = _e2e(
+    # #1145 slice 3 demotes a chart page shipped as an image with untranscribed values, so
+    # the neutralised arm is no longer SUCCESS. THIS ticket's property -- the chart lane must
+    # not bypass its demotion -- is asserted below with that clause OFF, unchanged and at
+    # full strength, and #1145's delta is pinned after it.
+    with chart_clause_off():
+        off, _ = _e2e(
+            tmp_path,
+            "f_off",
+            monkeypatch,
+            provider=True,
+            native_only=True,
+            chart=True,
+            detector="neutralised",
+        )
+        side_off = _sidecar(tmp_path, "f_off")
+        assert side_off["engine"] == "chart_asset", "setup: the page must take the chart lane"
+        assert side_off["status"] == "success" and off.status is DocumentStatus.SUCCESS
+
+        on, _ = _e2e(
+            tmp_path,
+            "f_on",
+            monkeypatch,
+            provider=True,
+            native_only=True,
+            chart=True,
+            detector="forced",
+        )
+        side_on = _sidecar(tmp_path, "f_on")
+        assert side_on["engine"] == "chart_asset"
+        assert side_on["status"] == "warning"
+        assert side_on["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
+        assert on.status is not DocumentStatus.SUCCESS
+
+    # #1145's delta on the arm this ticket calls clean.
+    _e2e(
         tmp_path,
-        "f_off",
+        "f_1145",
         monkeypatch,
         provider=True,
         native_only=True,
         chart=True,
         detector="neutralised",
     )
-    side_off = _sidecar(tmp_path, "f_off")
-    assert side_off["engine"] == "chart_asset", "setup: the page must take the chart lane"
-    assert side_off["status"] == "success" and off.status is DocumentStatus.SUCCESS
-
-    on, _ = _e2e(
-        tmp_path,
-        "f_on",
-        monkeypatch,
-        provider=True,
-        native_only=True,
-        chart=True,
-        detector="forced",
+    side_1145 = _sidecar(tmp_path, "f_1145")
+    assert_only_the_chart_clause_differs(
+        side_1145["winning_output"]["text"],
+        side_off["winning_output"]["text"],
+        1,
+        on_status=side_1145["status"],
+        off_status=side_off["status"],
+        on_mode=side_1145["failure_mode"],
     )
-    side_on = _sidecar(tmp_path, "f_on")
-    assert side_on["engine"] == "chart_asset"
-    assert side_on["status"] == "warning"
-    assert side_on["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
-    assert on.status is not DocumentStatus.SUCCESS
 
 
 def _run_twice(tmp_path, monkeypatch, *, detector="live"):
