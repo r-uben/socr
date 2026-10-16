@@ -258,60 +258,132 @@ def test_the_clause_keys_on_an_event_that_survives_a_resume() -> None:
 
 
 def test_an_admissible_mode_is_only_ever_set_by_the_verdict_demotion() -> None:
-    """The reachability argument the resume gate rests on, pinned by reading the source.
+    """The reachability argument the resume gate rests on, read from the parse tree.
 
-    The gate decides on the MODE alone. An earlier version also required the clauses to say
-    nothing more than the mode does, and that check was UNREACHABLE -- a mutant deleting it
-    survived every test, which is how it was found. The argument for deleting it rather than
-    inventing a fixture for it: these two modes are written in exactly ONE place, reached
-    only by the demotion, which only fires on a page still SUCCESS at the verdict step -- and
-    a SUCCESS page's clause set is the silent-success clauses and nothing else. Every other
-    clause source (a flag, the judge, the ladder) arrives with its own demotion and leaves
-    the mode as it found it, so a page WARNING for another reason reaches the gate with that
-    reason's mode or with NONE, and is refused.
+    The gate decides on the MODE alone, and the extra-clause half of that check was deleted
+    as unreachable: these modes are written in exactly ONE place, reached only by the
+    demotion, which only fires on a page still SUCCESS at the verdict step -- and a SUCCESS
+    page's clause set is the silent-success clauses alone. That argument is only true while
+    nothing else writes them, and this test is what notices if something starts.
 
-    That argument is only true while nothing else writes these modes. This test is what
-    notices if something starts -- the event that would make the deleted check necessary
-    again. Read from the source text rather than by behaviour, because the point is the
-    number of WRITERS, which no single page can show.
+    **By AST, not by scanning text.** The first version matched source LINES, and Fable's M7
+    walked straight past it: a writer spread over several lines, or passed as a positional
+    argument, has no line that looks like an assignment. So every reference to these two
+    enum members is located as a node, its enclosing function recorded, and the set of
+    enclosing functions compared -- which is the unit that matters, since one table with a
+    row per class is one writer and a second FUNCTION is what breaks the argument.
     """
-    import re
+    import ast
     from pathlib import Path as _Path
 
     import socr
 
+    NAMES = {"EQUATION_FIDELITY_UNVERIFIED", "VISUAL_VALUES_UNTRANSCRIBED"}
     root = _Path(socr.__file__).parent
-    writers: list[str] = []
+    functions: dict[str, set[str]] = {}
     for path in sorted(root.rglob("*.py")):
-        for num, line in enumerate(path.read_text().splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
+        tree = ast.parse(path.read_text())
+        # Map every node to its enclosing function by walking the function bodies.
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not re.search(
-                r"(EQUATION_FIDELITY_UNVERIFIED|VISUAL_VALUES_UNTRANSCRIBED)\b", stripped
-            ):
-                continue
-            # The enum's own definition, the clause table and the admissible set are
-            # READERS of the name, not writers of the field.
-            if re.match(r"(EQUATION_FIDELITY_UNVERIFIED|VISUAL_VALUES_UNTRANSCRIBED) =", stripped):
-                continue
-            if stripped.startswith("FailureMode.") and stripped.endswith(","):
-                continue
-            if stripped.startswith("FailureMode.") and stripped.endswith("("):
-                continue
-            # Which function is this line in? That is the unit that matters: one table
-            # with a row per class is one writer, and a second FUNCTION setting the field
-            # is what breaks the argument.
-            enclosing = ""
-            for prev in reversed(path.read_text().splitlines()[:num]):
-                if prev.startswith("def ") or prev.startswith("    def "):
-                    enclosing = prev.strip().split("(")[0].removeprefix("def ").strip()
-                    break
-            writers.append(f"{path.relative_to(root)}:{num} in {enclosing}(): {stripped}")
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Attribute) or inner.attr not in NAMES:
+                    continue
+                value = inner.value
+                if not (isinstance(value, ast.Name) and value.id == "FailureMode"):
+                    continue
+                functions.setdefault(node.name, set()).add(f"{path.relative_to(root)}")
 
-    functions = {w.split(" in ")[1].split("()")[0] for w in writers}
-    assert functions == {"_verdict_demotion_mode"}, (
+    # ``_MODE_CLAUSES`` and ``PERMANENTLY_UNRESOLVABLE_MODES`` are module-level tables, so
+    # they are not inside any function and never appear here: they are READERS of the name.
+    assert set(functions) == {"_verdict_demotion_mode"}, (
         "the resume gate decides on the mode alone, which is sound only while exactly one "
-        "FUNCTION sets these modes. Writers found:\n  " + "\n  ".join(writers)
+        f"FUNCTION sets these modes. Functions referencing them: {functions}"
     )
-    assert all("manifest.py" in w for w in writers), writers
+    assert functions["_verdict_demotion_mode"] == {"core/manifest.py"}, functions
+
+
+def test_the_mark_never_contradicts_the_recorded_mode(tmp_path) -> None:
+    """Fable's P1, reproduced on monacelli p21: 388 pages said one thing and recorded another.
+
+    #1053's ``figure_words_unread`` and this clause both produce ``figure_text=UNKNOWN``, so
+    they collapse to one line. The old rule was "the first wins, and the order is from most
+    specific to least" -- true while the status-dependent clauses came first, and silently
+    INVERTED when slice 3 moved the silent-success clauses to the front. The chart clause
+    then REPLACED #1053's reason: the page's line said "this page's chart ships as an image"
+    while its recorded mode still said ``figure_words_unread``.
+
+    A mark that contradicts the record is worse than either alone -- the reader and the
+    corpus disagree about the same page, and nothing says which is right. So the MODE
+    arbitrates: it is the field that explains the status, and the clause whose wording it
+    vouches for is the one that shows.
+    """
+    rec = _record(
+        tmp_path,
+        kinds=CHART,
+        status=PageStatus.WARNING,
+        failure_mode=FailureMode.FIGURE_WORDS_UNREAD,
+    )
+
+    assert [c.check for c in rec.verdict.clauses] == [Check.FIGURE_TEXT], rec.verdict
+    assert rec.output.failure_mode is FailureMode.FIGURE_WORDS_UNREAD, "the mode moved"
+    reason = rec.verdict.clauses[0].reason
+    assert "no reader transcribed" in reason, (
+        f"the line states the chart wording while the record says figure_words_unread: {reason!r}"
+    )
+    assert "ships as an image" not in reason, reason
+    # And the line on the page says the same thing as the clause.
+    (mark,) = canonical_marks(rec.output.text, 1)
+    assert "no reader transcribed" in mark, mark
+
+    # The control, so the arbitration is not simply "always prefer the mode table": with no
+    # mode to arbitrate, the chart clause is what the page has to say.
+    plain = _record(tmp_path, kinds=CHART)
+    assert "ships as an image" in plain.verdict.clauses[0].reason
+
+
+def test_a_success_page_with_an_unmapped_mode_still_gets_the_chart_clause(tmp_path) -> None:
+    """The #1173 shape: SUCCESS, a non-NONE mode nothing maps, plus the chart event.
+
+    Such a page is still not CHECKED, and the clause is still the only thing that says so.
+    The demotion must not silently skip it because the mode slot is already occupied by
+    something the clause table does not recognise -- and the existing mode must survive,
+    because it says something this clause does not.
+    """
+    rec = _record(tmp_path, kinds=CHART, failure_mode=FailureMode.TABLE_UNVERIFIED)
+
+    assert rec.output.status is PageStatus.WARNING, "the page was left SUCCESS and unmarked"
+    assert Check.FIGURE_TEXT in {c.check for c in rec.verdict.clauses}, rec.verdict
+    assert rec.output.failure_mode is FailureMode.TABLE_UNVERIFIED, (
+        "the demotion overwrote a mode that says more than it does"
+    )
+    assert canonical_marks(rec.output.text, 1)
+
+
+def test_a_dual_silent_success_page_records_one_mode_and_says_both(tmp_path) -> None:
+    """Repo soft 2: a page with BOTH an attached equation reading and an untranscribed chart.
+
+    The mode is a single field, so it can only name one of them -- the first row of
+    ``_verdict_demotion_mode``'s table, which is the equation one. That is documented rather
+    than fixed: inventing a combined mode would multiply with every future class, and the
+    VERDICT is the record that carries both, which is what a reader and the corpus read.
+
+    What must hold, and is asserted here: both clauses survive, both lines are written, and
+    the mode is one of the two rather than NONE -- a page demoted for two reasons must not
+    come out unexplained.
+    """
+    rec = _record(
+        tmp_path,
+        kinds=(VISUAL_VALUES_UNTRANSCRIBED_KIND, "equation_region_reading_attached"),
+    )
+
+    checks = {c.check for c in rec.verdict.clauses}
+    assert checks == {Check.FIGURE_TEXT, Check.EQUATION_FIDELITY}, rec.verdict
+    assert len(canonical_marks(rec.output.text, 1)) == 2, canonical_marks(rec.output.text, 1)
+    assert rec.output.failure_mode in {
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+    }, rec.output.failure_mode
+    # Documented, not accidental: the equation row comes first in the table.
+    assert rec.output.failure_mode is FailureMode.EQUATION_FIDELITY_UNVERIFIED

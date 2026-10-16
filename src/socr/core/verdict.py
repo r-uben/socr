@@ -657,16 +657,46 @@ def derive_clauses(
     ):
         if clause is None:
             continue
-        # One line per (check, region), so two sources that name the SAME failed check on
-        # the same region collapse to one. The first wins, and the order above is from
-        # most specific to least: ``NATIVE_GARBLED_MATH`` says the native layer garbled the
-        # mathematics AND that no reading replaced it, which the bare PUA flag does not, so
-        # a page carrying both must show the mode's wording. Without this the reader gets
-        # two lines about one check.
-        if any(c.check is clause.check and c.scope == clause.scope for c in clauses):
-            continue
-        clauses.append(clause)
+        clauses = _merge_clause(clauses, clause, output)
     return tuple(clauses)
+
+
+def _merge_clause(
+    clauses: list[VerdictClause], clause: VerdictClause, output: PageOutput
+) -> list[VerdictClause]:
+    """Add *clause*, collapsing it with any existing clause about the same (check, region).
+
+    One line per (check, region): two sources naming the same failed check on the same
+    region must not give the reader two lines about one thing.
+
+    **Which one survives is decided by the page's recorded MODE, not by arrival order**, and
+    that is a correction. The rule used to be "the first wins, and the order is from most
+    specific to least" -- which held while the status-dependent clauses came first, and
+    then slice 3 put the silent-success clauses at the front of the list and silently
+    inverted it. Fable found the consequence on the 388 ``figure_words_unread`` chart pages:
+    the chart clause REPLACED #1053's reason, so the page's line said "this page's chart
+    ships as an image" while its recorded mode still said ``figure_words_unread`` -- the mark
+    and the record contradicting each other about the same page, on 388 pages, while the log
+    claimed they each gained a second reason.
+
+    So the mode arbitrates. It is the field that explains the status (that is why the
+    demotion records one), so the clause whose wording the mode vouches for is the one the
+    reader should see; an incoming clause replaces an existing one only when the mode names
+    the incoming one's text and not the existing one's. Where the mode names neither, the
+    first still wins, which preserves the old most-specific-first behaviour for the
+    mode-table clauses that are all that can reach that case.
+    """
+    for index, existing in enumerate(clauses):
+        if existing.check is not clause.check or existing.scope != clause.scope:
+            continue
+        entry = _MODE_CLAUSES.get(output.failure_mode)
+        mode_reason = entry[2] if entry is not None else None
+        if mode_reason is not None and clause.reason == mode_reason != existing.reason:
+            # The page's own mode names the INCOMING clause's wording and not the one
+            # already here. Replace, so the line agrees with the record.
+            return [*clauses[:index], clause, *clauses[index + 1 :]]
+        return clauses
+    return [*clauses, clause]
 
 
 def _covered_checks(

@@ -22,6 +22,7 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.glyph_recovery import count_control_byte_before_digit_hits
 from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+from verdict_marks_helper import canonical_marks
 
 from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
@@ -393,6 +394,28 @@ def test_chart_asset_lane_demotes_on_a_control_byte(tmp_path, monkeypatch) -> No
     assert side["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value
     assert on.status is not DocumentStatus.SUCCESS
 
+    # #1145's delta on the arm this ticket calls clean. This test had NO clause-ON arm at
+    # all (Fable's P1, :371): both runs were inside ``chart_clause_off()``, so it pinned
+    # nothing about #1145 while being counted as a difference pin.
+    _e2e(
+        tmp_path,
+        "f_1145",
+        monkeypatch,
+        provider=True,
+        native_only=True,
+        chart=True,
+        detector="neutralised",
+    )
+    side_1145 = _sidecar(tmp_path, "f_1145")
+    assert_only_the_chart_clause_differs(
+        side_1145["winning_output"]["text"],
+        side_off["winning_output"]["text"],
+        1,
+        on_status=side_1145["status"],
+        off_status=side_off["status"],
+        on_mode=side_1145["failure_mode"],
+    )
+
 
 # ----------------------------------------------------------------------------
 # Resume: the CURRENT analysis wins over a cached native-text terminal page.
@@ -443,11 +466,28 @@ def test_resume_does_not_restore_a_cached_clean_page_when_the_scan_now_fires(
 
     # #1145 live. On the chart lane the cached page now carries
     # ``visual_values_untranscribed``, a mode #1145's OWN resume exception admits -- so the
-    # only thing still refusing it is this ticket's scan guard, which runs BEFORE that
-    # exception (``orchestrator.py`` ~15476 versus ~15560). If that ordering ever changed, a
-    # page the fresh scan flags would come back from cache, and this is what catches it.
+    # only thing still refusing it is this ticket's scan guard. The guard RETURNS None, so
+    # it refuses wherever it sits -- the earlier claim here that its position relative to
+    # #1145's exception was load-bearing was wrong (Fable, PR #1174): that exception only
+    # bypasses the SUCCESS/``audit_passed`` gate, never a guard that has already returned.
+    # What this arm pins is that the guard still fires at all on a page #1145 has demoted
+    # and marked, which is the thing that could plausibly break.
     restored_live = _spy_restores(monkeypatch)
     _e2e(tmp_path, "r1145", monkeypatch, detector="neutralised", **kw)
+    first_live = _sidecar(tmp_path, "r1145")
+    if chart:
+        assert_only_the_chart_clause_differs(
+            first_live["winning_output"]["text"],
+            first["winning_output"]["text"],
+            1,
+            on_status=first_live["status"],
+            off_status=first["status"],
+            on_mode=first_live["failure_mode"],
+        )
+    else:
+        assert first_live["winning_output"]["text"] == first["winning_output"]["text"], (
+            "the native lane must be untouched by the chart clause"
+        )
     res_live, _ = _e2e(tmp_path, "r1145", monkeypatch, detector=second, reprocess=True, **kw)
     assert restored_live == [], (
         "with #1145 live the cached page was restored although the fresh scan fires; the "
@@ -478,6 +518,11 @@ def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, 
     # RESTORE, not the status.
     restored_live = _spy_restores(monkeypatch)
     _e2e(tmp_path, "c1145", monkeypatch, **kw)
+    if chart:
+        assert canonical_marks(_sidecar(tmp_path, "c1145")["winning_output"]["text"], 1), (
+            "the cached chart page carries no figure_text mark, so this conversion pins "
+            "only the ledger gate and not #1145's change"
+        )
     _e2e(tmp_path, "c1145", monkeypatch, reprocess=True, **kw)
     assert len(restored_live) == 1, (
         "a cached chart page is no longer restored, so #1145 re-OCRs every chart page on "
@@ -512,6 +557,10 @@ def test_resume_hole_is_shared_by_913s_scan(tmp_path, monkeypatch, chart) -> Non
 
     restored_live = _spy_restores(monkeypatch)
     _e2e(tmp_path, "m1145", monkeypatch, detector="neutralised", **kw)
+    if chart:
+        assert canonical_marks(_sidecar(tmp_path, "m1145")["winning_output"]["text"], 1), (
+            "the cached chart page carries no figure_text mark"
+        )
     res_live, _ = _e2e(
         tmp_path,
         "m1145",

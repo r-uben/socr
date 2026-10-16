@@ -1268,7 +1268,12 @@ def _under_page_ladder_budget(gate):
 def _resume_verdict_is_permanently_unverifiable(
     raw_verdict: object, raw_mode: object = None
 ) -> bool:
-    """Is every non-PASS clause in this published verdict one that can never be resolved?
+    """Can this page's status never be resolved by reprocessing it?
+
+    Decided on the recorded MODE. The name and this docstring used to describe a check over
+    the CLAUSES, which is what the first version did and what the chart slice had to change:
+    ``figure_text=UNKNOWN`` is produced by three sources and only one of them is
+    unresolvable, so a clause-keyed test let unread figure crops skip for ever.
 
     #1145 slice 3. The check these clauses name does not exist to be run: the equation lane
     validates LaTeX syntax only and ``semantic_fidelity_verified`` is a hardcoded ``False``,
@@ -1278,7 +1283,8 @@ def _resume_verdict_is_permanently_unverifiable(
 
     Returns False for an empty clause list, so a CHECKED page is never admitted by this
     route -- it has no need of it, and the ordinary SUCCESS gate is the one that should
-    decide it. Returns False on anything unparseable, so doubt still reprocesses.
+    decide it. Returns False on anything unparseable, and on a mode this build does not
+    know, so doubt still reprocesses.
     """
     from socr.core.result import FailureMode as _FailureMode
     from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES, PageVerdict

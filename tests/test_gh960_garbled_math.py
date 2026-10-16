@@ -27,6 +27,7 @@ from socr.core.born_digital import (
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+from verdict_marks_helper import canonical_marks
 
 from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
@@ -634,12 +635,30 @@ def test_resume_does_not_restore_a_cached_clean_page_when_the_scan_now_fires(
 
     # #1145 live. On the chart lane the cached page now carries
     # ``visual_values_untranscribed``, a mode #1145's OWN resume exception admits -- so the
-    # only thing still refusing it is this ticket's scan guard, which runs BEFORE that
-    # exception (``orchestrator.py`` ~15476/15488 versus ~15560). If that ordering ever
-    # changed, a page the fresh scan flags would come back from cache and this is what
-    # catches it.
+    # only thing still refusing it is this ticket's scan guard. The guard RETURNS None, so
+    # it refuses wherever it sits -- the earlier claim here that its position relative to
+    # #1145's exception was load-bearing was wrong (Fable, PR #1174): that exception only
+    # bypasses the SUCCESS/``audit_passed`` gate, never a guard that has already returned.
+    # What this arm pins is that the guard still fires at all on a page #1145 has demoted
+    # and marked, which is the thing that could plausibly break.
     restored_live = _spy_restores(monkeypatch)
     _e2e(tmp_path, "r1145", monkeypatch, detector="neutralised", **kw)
+    first_live = _sidecar(tmp_path, "r1145")
+    if chart:
+        # #1145's own delta on the cached page, so this conversion pins the change and not
+        # only this ticket's guard. Fable's M6 survived every resume conversion before this.
+        assert_only_the_chart_clause_differs(
+            first_live["winning_output"]["text"],
+            first["winning_output"]["text"],
+            1,
+            on_status=first_live["status"],
+            off_status=first["status"],
+            on_mode=first_live["failure_mode"],
+        )
+    else:
+        assert first_live["winning_output"]["text"] == first["winning_output"]["text"], (
+            "the native lane must be untouched by the chart clause"
+        )
     res_live, _ = _e2e(tmp_path, "r1145", monkeypatch, detector=second, reprocess=True, **kw)
     assert restored_live == [], (
         "with #1145 live the cached page was restored although the fresh scan fires; the "
@@ -669,6 +688,12 @@ def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, 
     # end to end on a real cached page.
     restored_live = _spy_restores(monkeypatch)
     _e2e(tmp_path, "c1145", monkeypatch, **kw)
+    if chart:
+        # #1145's delta on the cached page, so this control pins the change too and not
+        # only the ledger gate. Without it Fable's M6 survived here.
+        assert canonical_marks(_sidecar(tmp_path, "c1145")["winning_output"]["text"], 1), (
+            "the cached chart page carries no figure_text mark"
+        )
     res_live, _ = _e2e(tmp_path, "c1145", monkeypatch, reprocess=True, **kw)
     assert len(restored_live) == 1, (
         "a cached chart page is no longer restored, so #1145 re-OCRs every chart page on "
