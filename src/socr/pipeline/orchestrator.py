@@ -19088,6 +19088,24 @@ class UnifiedPipeline:
                         provisional=figure_phase_failed,
                     )
                     metadata_rewritten = True
+                elif [(page.text or "").strip() for page in final_page_outputs] != final_bodies:
+                    # #1177: the saved document is the assembly of THESE records, the
+                    # bodies ``_rewrite_all_fragments`` writes below. The seam re-run above
+                    # can differ from the body saved earlier when page state changed after
+                    # ``pre_records`` -- ``_preserve_chart_regions`` sets the chart-region
+                    # flags only then -- so the verdict gains a clause and its mark lands
+                    # on the fragment. Without this re-save the document missed that mark
+                    # (``document_not_assembly`` = 7,537 pages in 152 documents on run
+                    # 23319732). Compared stripped, as ``assemble_pages`` strips, so a
+                    # document whose bodies did not move is not rewritten and stays
+                    # byte-identical. The metadata is not rewritten: no field of it derives
+                    # from the body, and ``output_path`` names this same file.
+                    final_text = assemble_pages(
+                        [page.text for page in final_page_outputs],
+                        page_numbers=list(range(1, state.handle.page_count + 1)),
+                    )
+                    final_result.pages[0].text = final_text
+                    self._save_markdown(state, final_text, output_dir)
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
