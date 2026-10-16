@@ -672,11 +672,66 @@ def has_installable_text(cfg: LibraryConfig, doc_dir: Path, stem: str) -> bool:
     installs (the library's own rule: best available text, listed unverified), and a legacy
     run with no status at all is unaffected.
     """
-    if not cfg.markdown_path(doc_dir, stem).is_file():
+    md = cfg.markdown_path(doc_dir, stem)
+    if not md.is_file():
         return False
     meta = _read_json(doc_dir / cfg.metadata)
     recorded = meta.get("status") if isinstance(meta, dict) else None
-    return not (isinstance(recorded, str) and recorded == _FAILED_DOC_STATUS)
+    if isinstance(recorded, str) and recorded == _FAILED_DOC_STATUS:
+        return False
+    # Defence in depth, and not redundant: the status above is the PRIMARY evidence, but it
+    # lives in a different file from the markdown and the two writes cannot be atomic. A
+    # process killed between them, or a metadata write that failed (the pipeline swallows
+    # that exception by design, because a metadata write must never lose OCR output), leaves
+    # the stub on disk with no ``failed`` status beside it -- and then the status check alone
+    # installs it. So the CONTENT is also read: a file that is nothing but a
+    # ``[document failed: …]`` line is a record of a failure whatever the metadata says.
+    #
+    # Whole-content ``fullmatch``, so a real document that merely quotes such a line is
+    # untouched, and an unreadable file answers True here (it is not recognisably a stub) so
+    # that doubt never silently withholds a document that may have real text.
+    return not _is_document_failure_stub(md)
+
+
+def blocked_reason(cfg: LibraryConfig, stem: str) -> str:
+    """Why ``pending_pdfs`` blocked *stem*, in words that match what is on disk.
+
+    #1145: the CLI said "text directory exists without <stem>.md" for every blocked stem,
+    which was true while the only way to be blocked was a missing file. Since the gate also
+    refuses a document whose markdown is a ``[document failed: …]`` mark, that message
+    asserted the file was absent when it was sitting right there -- and sent the reader
+    looking for the wrong problem.
+    """
+    doc_dir = cfg.text_doc_dir(stem)
+    md = cfg.markdown_path(doc_dir, stem)
+    if not md.is_file():
+        return f"text directory exists without {cfg.markdown.format(stem=stem)}"
+    if _is_document_failure_stub(md):
+        return (
+            f"{cfg.markdown.format(stem=stem)} is a document-failure mark, not text "
+            f"(socr could not read the PDF)"
+        )
+    meta = _read_json(doc_dir / cfg.metadata)
+    recorded = meta.get("status") if isinstance(meta, dict) else None
+    if isinstance(recorded, str) and recorded == _FAILED_DOC_STATUS:
+        return f"its run recorded status={recorded}, so its markdown is not trusted text"
+    return "its text directory is incomplete"
+
+
+def _is_document_failure_stub(md: Path) -> bool:
+    """Is *md* nothing but a ``[document failed: …]`` mark?
+
+    The recogniser is the pipeline's grammar, imported rather than restated: two copies of a
+    mark shape in two packages is how an emitter and a reader come to disagree, which is the
+    whole reason #1145 moved the page grammar into ``core/marks``.
+    """
+    from socr.core.marks import DOCUMENT_FAILED_MARK_RE
+
+    try:
+        body = md.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
 
 
 def install_staged(cfg: LibraryConfig, stem: str) -> Path:

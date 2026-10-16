@@ -247,6 +247,9 @@ def _run(
     return state, result, spy, out_dir
 
 
+from verdict_marks_helper import canonical_marks  # noqa: E402
+
+
 def _page_view(state, page_num: int) -> dict:
     """The observable bundle compared between runs -- never asserted absolutely."""
     bo = state.pages[page_num].best_output
@@ -629,8 +632,17 @@ def test_manifest_selection_ships_the_attached_output_unchanged(tmp_path: Path) 
     assert kind is SelectionProvenance.PASSING_BEST_OUTPUT
     assert selected is on.pages[2].best_output
     shipped = _winning_page_output(on, 2)
-    assert shipped.text == on.pages[2].best_output.text
-    assert "```latex" in shipped.text
+    # #1145 slice 3: the shipped page now carries one canonical line saying its attached
+    # equation reading was never verified against the crop. The guarantee this test exists
+    # for is the one below and underneath -- the guard chain must not re-stamp the page to
+    # plain native or DISCARD the attachments -- so the comparison runs on the body with
+    # that line removed, through the shared helper, which asserts the line was there and
+    # well-formed. A body change anywhere still fails it, and the mark going missing fails
+    # it too.
+    from verdict_marks_helper import strip_verdict_marks
+
+    assert strip_verdict_marks(shipped.text, 2) == on.pages[2].best_output.text
+    assert "```latex" in shipped.text, "the guard chain discarded the attachment"
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +782,7 @@ def test_resume_restores_the_attached_page_without_a_second_model_call(
 
     spy = _ModelSpy(_LATEX_CONTAINED)
     texts = []
+    fragments: list[str] = []
     for _ in range(2):
         pipeline = _make_pipeline(equation_region_lane=True)
         state = _make_state(pdf)
@@ -786,8 +799,27 @@ def test_resume_restores_the_attached_page_without_a_second_model_call(
             pipeline._phase_agentic(state, out_dir)
             pipeline._phase_assemble(state, out_dir)
         texts.append(_page_view(state, 2)["text"])
+        frag = next((out_dir / "out").rglob("pages/00002.md"), None) or next(
+            out_dir.rglob("pages/00002.md")
+        )
+        fragments.append(frag.read_text())
 
-    assert texts[0] == texts[1], "resumed page drifted from the first run"
+    # #1145 slice 3: the no-drift guarantee is about what SHIPS, so it is asserted on the
+    # page FRAGMENT, which is the authoritative artefact and is what every reader and the
+    # assembled document see.
+    #
+    # ``_page_view`` reads ``best_output``, and that deliberately differs between a fresh
+    # and a resumed page: the resume reader sets ``page_out.text = body`` from the fragment
+    # on disk ("prefer it over the serialised text so a post-OCR fragment rewrite is
+    # honoured"), while a fresh run's ``best_output`` is the pre-seam candidate. That
+    # asymmetry PREDATES this ticket; it was invisible only because the seam used to leave
+    # the bytes alone, and #1145 both marks the page and demotes it. Comparing the in-memory
+    # view would now be comparing two different things on purpose.
+    assert fragments[0] == fragments[1], "the shipped fragment drifted across the resume"
+    assert canonical_marks(fragments[0], 2), (
+        "the page ships no unverified-equation mark, so this test is not exercising the "
+        "demoted shape at all"
+    )
     assert spy.calls == 1, f"the model was called again on resume ({spy.calls} calls)"
     # The lane's disposition must survive the resume, or a refusal becomes
     # invisible the moment a run is restarted.

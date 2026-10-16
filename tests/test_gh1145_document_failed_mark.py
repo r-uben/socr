@@ -495,3 +495,199 @@ def test_real_text_that_merely_quotes_the_grammar_is_still_protected(tmp_path: P
 
     assert pipeline._write_document_failed_mark(pdf, out_dir, "transient") is False
     assert md.read_text() == quoting, "real text quoting the grammar was destroyed"
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 on PR #1168 (Fable)
+# ---------------------------------------------------------------------------
+
+
+def test_a_lost_metadata_write_still_cannot_install_the_stub(tmp_path: Path) -> None:
+    """The ordering gap: the stub's refusal evidence lived in a different file.
+
+    ``_write_metadata`` swallows every exception on purpose -- a metadata write must never
+    lose OCR output -- so a lost write, or a process killed between the two writes, left the
+    stub on disk with no ``failed`` status beside it. ``has_installable_text`` then read a
+    markdown file with no refusal evidence and installed it.
+
+    Two independent closures, and this test drives the second with the first disabled:
+    metadata is now written FIRST, and the gate ALSO refuses content that is nothing but the
+    mark. Either alone would do; both means neither a write order nor a file is load-bearing
+    on its own.
+    """
+    import json as _json
+
+    from socr import library as lib
+
+    lib_mod, cfg, _ = _library(tmp_path)
+    staged = cfg.staging_dir / "a"
+    staged.mkdir(parents=True)
+    (staged / "a.md").write_text("[document failed: unreadable_input: 0 of 64]\n")
+    # The lost write: no metadata at all, which is exactly what the swallowed exception
+    # leaves behind.
+    assert not (staged / "metadata.json").exists()
+
+    assert lib.has_installable_text(cfg, staged, "a") is False, (
+        "the stub is installable when its metadata is missing; the content gate is not firing"
+    )
+    with pytest.raises(lib.LibraryError):
+        lib.install_staged(cfg, "a")
+    assert lib.staged_stems(cfg) == []
+
+    # Control: the same directory with real text and no metadata IS installable, so the
+    # content gate is not simply refusing everything that lacks metadata.
+    (staged / "a.md").write_text("## Page 1\n\nReal text.\n")
+    assert lib.has_installable_text(cfg, staged, "a") is True
+    (staged / "metadata.json").write_text(_json.dumps({"status": "completed"}))
+    assert lib.staged_stems(cfg) == ["a"]
+
+
+def test_the_failure_record_is_written_before_the_stub(tmp_path: Path) -> None:
+    """Order, asserted directly, because it is the first of the two closures.
+
+    If the stub is written first, there is a window in which it exists with no ``failed``
+    status beside it. Observed through the write order rather than argued from the source.
+    """
+    pdf = _unreadable_pdf(tmp_path / "broken.pdf")
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+    pipeline._scan_root = pdf.parent
+
+    order: list[str] = []
+    real_meta = type(pipeline)._write_metadata
+    real_mark = type(pipeline)._write_document_failed_mark
+
+    def spy_meta(self, *a, **k):
+        order.append("metadata")
+        return real_meta(self, *a, **k)
+
+    def spy_mark(self, *a, **k):
+        order.append("mark")
+        return real_mark(self, *a, **k)
+
+    import socr.pipeline.orchestrator as orch
+
+    try:
+        orch.UnifiedPipeline._write_metadata = spy_meta
+        orch.UnifiedPipeline._write_document_failed_mark = spy_mark
+        pipeline.process(pdf, output_dir=out_dir)
+    finally:
+        orch.UnifiedPipeline._write_metadata = real_meta
+        orch.UnifiedPipeline._write_document_failed_mark = real_mark
+
+    assert order[:2] == ["metadata", "mark"], (
+        f"the stub is written before its failure record: {order}"
+    )
+    # And the record still ends up naming the stub, so ordering did not cost the pointer.
+    assert _doc_metadata(out_dir).get("output_path") or "", order
+
+
+def test_a_long_error_detail_does_not_break_the_rewrite(tmp_path: Path) -> None:
+    """The dropped ``4096`` cap, which was a magic number that did real harm.
+
+    A detail longer than it made the next run fail to recognise its own stub, refuse to
+    rewrite it, and log that existing text had been kept when there was none. Measured on
+    the corpus: every ``unreadable_input`` detail is 103 characters, and the longest
+    document error socr has ever recorded is 2,906 -- so the cap sat below real data.
+    """
+    pdf = _unreadable_pdf(tmp_path / "broken.pdf")
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+    pipeline._scan_root = pdf.parent
+
+    long_detail = "unreadable_input: " + ("malformed page tree " * 400)
+    assert len(long_detail) > 4096
+
+    assert pipeline._write_document_failed_mark(pdf, out_dir, long_detail) is True
+    # The second run must recognise its own stub and rewrite it, cap or no cap.
+    assert pipeline._write_document_failed_mark(pdf, out_dir, long_detail) is True
+
+    mds = list(out_dir.rglob("*.md"))
+    assert len(mds) == 1, mds
+    body = mds[0].read_text()
+    assert body.count("\n") == 1, "the stub was appended to rather than rewritten"
+    assert DOCUMENT_FAILED_MARK_RE.fullmatch(body.strip()), body[:120]
+
+
+def test_the_blocked_reason_says_what_is_actually_wrong(tmp_path: Path) -> None:
+    """The CLI said "text directory exists without <stem>.md" when it was sitting there.
+
+    True while the only way to be blocked was a missing file; false once the gate also
+    refuses a document whose markdown is a failure mark -- and it sent the reader looking
+    for the wrong problem. One row per way a stem can be blocked.
+    """
+    from test_gh964_library import _fake_doc, _pdf
+
+    lib, cfg, _ = _library(tmp_path)
+
+    # (a) no markdown at all: the original message, still correct.
+    _pdf(cfg.pdf_dir / "a.pdf")
+    (cfg.text_dir / "a").mkdir(parents=True)
+    (cfg.text_dir / "a" / "notes.txt").write_text("hand edited")
+    assert "without" in lib.blocked_reason(cfg, "a")
+
+    # (b) markdown that IS a failure mark: must not claim the file is absent.
+    _pdf(cfg.pdf_dir / "b.pdf")
+    _fake_doc(
+        cfg.text_dir, "b", status="failed", body="[document failed: unreadable_input: 0 of 2]\n"
+    )
+    reason_b = lib.blocked_reason(cfg, "b")
+    assert "document-failure mark" in reason_b, reason_b
+    assert "without" not in reason_b, f"the message claims the file is absent: {reason_b}"
+
+    # (c) real text with a failed record: names the record, not the file.
+    _pdf(cfg.pdf_dir / "c.pdf")
+    _fake_doc(cfg.text_dir, "c", status="failed", body="## Page 1\n\nSome text.\n")
+    reason_c = lib.blocked_reason(cfg, "c")
+    assert "status=failed" in reason_c, reason_c
+
+
+def test_both_layers_of_the_gate_refuse_on_their_own(tmp_path: Path) -> None:
+    """Defence in depth is only depth if each layer is load-bearing by itself.
+
+    Adding the content check made the STATUS check individually untestable by every existing
+    test: a stub is caught by either, so deleting the status check left them all green (the
+    ``shared-gate-ignores-the-status`` mutant SURVIVED, which is how this gap was found). An
+    untested layer is not a second line of defence, it is unexamined code.
+
+    So one case per layer, each of which only that layer can refuse:
+
+    * real TEXT with a ``failed`` record -- the content check sees ordinary markdown and
+      passes it; only the status refuses. This is a real shape, not a contrivance: a run
+      that produced text and then failed records exactly it.
+    * a stub with NO record at all -- the status check has nothing to read; only the content
+      refuses. This is the lost-metadata window.
+    """
+    import json as _json
+
+    from socr import library as lib
+
+    _, cfg, _ = _library(tmp_path)
+
+    # Layer 1 alone: text, but the run recorded failure.
+    a = cfg.staging_dir / "a"
+    a.mkdir(parents=True)
+    (a / "a.md").write_text("## Page 1\n\nOrdinary text with no mark in it.\n")
+    (a / "metadata.json").write_text(_json.dumps({"status": "failed", "error": "boom"}))
+    from socr.core.marks import DOCUMENT_FAILED_MARK_RE as _re
+
+    assert _re.search((a / "a.md").read_text()) is None, "the fixture is stub-shaped; retry"
+    assert lib.has_installable_text(cfg, a, "a") is False, (
+        "only the STATUS check can refuse this one, and it did not"
+    )
+
+    # Layer 2 alone: a stub, with no record to read.
+    b = cfg.staging_dir / "b"
+    b.mkdir(parents=True)
+    (b / "b.md").write_text("[document failed: unreadable_input: 0 of 2]\n")
+    assert not (b / "metadata.json").exists()
+    assert lib.has_installable_text(cfg, b, "b") is False, (
+        "only the CONTENT check can refuse this one, and it did not"
+    )
+
+    # And the control, so neither layer is simply refusing everything.
+    c = cfg.staging_dir / "c"
+    c.mkdir(parents=True)
+    (c / "c.md").write_text("## Page 1\n\nOrdinary text.\n")
+    (c / "metadata.json").write_text(_json.dumps({"status": "partial"}))
+    assert lib.has_installable_text(cfg, c, "c") is True
