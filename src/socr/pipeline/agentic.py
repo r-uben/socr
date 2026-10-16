@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Protocol
 from socr.core.config import EngineType
 from socr.core.daemon_call import submit_daemon
 from socr.core.providers import ProviderProfile
-from socr.core.verdict import NATIVE_TABLE_EXACT_PASS_KIND
+from socr.core.verdict import EXACT_PASS_ACCEPT_REASON, NATIVE_TABLE_EXACT_PASS_KIND
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_EXCEPTION,
@@ -1389,7 +1389,13 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             )
             decision = AcceptDecision(
                 accept=True,
-                reason="native_table_verifier: EXACT_PASS",
+                # #1181 round 2: the SHARED constant, not a third spelling of this
+                # string. ``core/verdict._exact_pass_unjudged_clause`` requires exact
+                # equality with it -- it is how the clause knows no judge was consulted --
+                # and while this was a literal here the reviewer changed it, ran the FULL
+                # suite, and got 7,894 passed: the clause switched off in production with
+                # CI green, and only the meter on the next corpus run would have noticed.
+                reason=EXACT_PASS_ACCEPT_REASON,
                 confidence=1.0,
             )
             # #245: this is the one accepting exit where no model has seen the

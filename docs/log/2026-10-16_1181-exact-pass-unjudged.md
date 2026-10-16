@@ -48,6 +48,25 @@ the seam twice on the same bytes, with and without the EXACT_PASS accept. 6 exte
 (canary, uncapped anchor counts), all killed; an independent review re-ran 2 of them plus one of
 its own. Full suite 7,941 passed. Lead artefacts: `scratch/routing-baseline/leads/1181/`.
 
+## Round 2 (review blocker: the accepting reason was not pinned)
+
+The clause requires exact equality with `EXACT_PASS_ACCEPT_REASON`, but the exit wrote its own
+literal. The reviewer changed that literal and the FULL suite passed (7,894): the clause could be
+switched off in production with CI green, and only the meter on the next corpus run would have
+noticed. The exit now uses the shared constant; the drift test asserts it appears once and that
+neither literal spelling survives in `agentic.py`; and a new end-to-end test drives
+`NativeTableVerifierJudge.assess` on an in-memory PyMuPDF page to its own accepting decision and
+feeds THAT `reason` through the seam, so the boundary where the string is written is crossed by a
+test for the first time. A mutant restoring the literal is killed by both.
+
+`benchmark/acceptance.TABLE_ONLY_JUDGE_REASON_PREFIX` is deliberately NOT derived from the
+product constant: the meter is the independent instrument, and an instrument sharing the
+product's constant cannot catch the drift it is there to catch. A test pins the relationship the
+other way round -- the product reason must start with the meter's prefix -- without coupling
+them. The mutant that renames the shared constant on both sides therefore survives, and that is
+the correct outcome: the string's TEXT is not load-bearing, its being shared is, and the meter's
+prefix match still flags a renamed reason.
+
 ## Not measured
 
 The meter on a fresh corpus run; the corpus rate of either binding shape.

@@ -19,6 +19,8 @@ and the evidence is an audit event on ``state.events``, where the lane puts it.
 
 from __future__ import annotations
 
+import pathlib
+
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _select_and_finalize_page
 from socr.core.marks import Check, CheckResult, leading_marks
@@ -231,8 +233,15 @@ def test_the_clause_survives_a_resume_because_the_event_is_replayed(tmp_path) ->
     assert NATIVE_TABLE_EXACT_PASS_KIND in UnifiedPipeline.resume_restore_kinds()
 
 
-def test_the_emitter_and_the_clause_name_the_same_event(tmp_path) -> None:
-    """One name for the kind, so the emitter and the reader cannot drift apart."""
+def test_the_emitter_and_the_clause_name_the_same_event_and_reason(tmp_path) -> None:
+    """One name for the kind AND for the accepting reason, so neither can drift.
+
+    Round 2, and the reason half is the reviewer's blocker. The clause requires exact
+    equality with ``EXACT_PASS_ACCEPT_REASON``; while the exit wrote its own literal, the
+    reviewer changed that literal and the FULL suite passed (7,894), so the clause could be
+    switched off in production with CI green and only the meter on the next corpus run
+    would have noticed.
+    """
     import inspect
 
     from socr.pipeline import agentic
@@ -241,9 +250,17 @@ def test_the_emitter_and_the_clause_name_the_same_event(tmp_path) -> None:
     assert src.count("kind=NATIVE_TABLE_EXACT_PASS_KIND") == 1, (
         "the EXACT_PASS emitter no longer uses the shared constant"
     )
-    for literal in ('"native_table_verifier_exact_pass"', "'native_table_verifier_exact_pass'"):
+    assert src.count("reason=EXACT_PASS_ACCEPT_REASON") == 1, (
+        "the EXACT_PASS accepting decision no longer uses the shared constant"
+    )
+    for literal in (
+        '"native_table_verifier_exact_pass"',
+        "'native_table_verifier_exact_pass'",
+        '"native_table_verifier: EXACT_PASS"',
+        "'native_table_verifier: EXACT_PASS'",
+    ):
         assert literal not in src, (
-            "the kind is spelled as a literal again, which can drift from the clause"
+            f"{literal} is spelled as a literal again, which can drift from the clause"
         )
 
 
@@ -337,3 +354,94 @@ def test_an_unjudged_page_is_never_admitted_to_the_resume_skip_exception(tmp_pat
     assert not _resume_verdict_is_permanently_unverifiable(
         both.verdict.to_dict(), both.output.failure_mode.value
     ), "an unjudged table page is skip-and-kept for ever once an equation shares the page"
+
+
+# ---------------------------------------------------------------------------
+# End to end: the REAL exit's own decision, through the seam
+# ---------------------------------------------------------------------------
+
+
+def test_the_real_exact_pass_exit_produces_a_reason_the_clause_marks(tmp_path) -> None:
+    """``NativeTableVerifierJudge.assess`` → its OWN decision → the seam → a marked page.
+
+    Round 2, the reviewer's blocker. Every other test in this file hands the seam a
+    ``judge_reason`` built from the constant, so none of them crosses the boundary where
+    the string is actually written. This one takes ``decision.reason`` from the real exit
+    and feeds exactly that to ``_select_and_finalize_page``: if the exit's spelling and the
+    clause's constant ever part company, the page comes back unmarked here.
+
+    Hermetic: a PyMuPDF page built in memory, no provider, no model. The wrapped judge
+    raises if it is ever consulted, which is also what proves the page took the exit where
+    no judge is called.
+    """
+    import fitz
+
+    from socr.pipeline.agentic import NativeTableVerifierJudge
+
+    class _NeverCalled:
+        def assess(self, output, provider):  # pragma: no cover - must not run
+            raise AssertionError("the inner judge was consulted on the EXACT_PASS exit")
+
+    doc = fitz.open()
+    page = doc.new_page()
+    rows = (("Alpha", "1.11", "2.22"), ("Beta", "3.33", "4.44"), ("Gamma", "5.55", "6.66"))
+    page.insert_text((72, 80), "Label", fontsize=10)
+    page.insert_text((200, 80), "X", fontsize=10)
+    page.insert_text((300, 80), "Y", fontsize=10)
+    for index, (label, first, second) in enumerate(rows):
+        y = 100 + 20 * index
+        page.insert_text((72, y), label, fontsize=10)
+        page.insert_text((200, y), first, fontsize=10)
+        page.insert_text((300, y), second, fontsize=10)
+
+    markdown = "| Label | X | Y |\n| --- | --- | --- |\n" + "".join(
+        f"| {label} | {first} | {second} |\n" for label, first, second in rows
+    )
+    candidate = PageOutput(
+        page_num=1,
+        text=markdown,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+        failure_mode=FailureMode.NONE,
+    )
+    events: list = []
+    judge = NativeTableVerifierJudge(
+        inner=_NeverCalled(),
+        get_fitz_page=lambda _n: page,
+        is_table_page=lambda _n: True,
+        record_event=events.append,
+    )
+
+    decision = judge.assess(candidate, None)
+
+    assert decision.accept and decision.confidence == 1.0, decision
+    assert NATIVE_TABLE_EXACT_PASS_KIND in {getattr(e, "kind", "") for e in events}, events
+
+    rec = _select_and_finalize_page(
+        _state(tmp_path, kinds=EXACT_PASS, text=markdown, judge_reason=decision.reason), 1
+    )
+
+    assert [c.check for c in rec.verdict.clauses] == [Check.PAGE_JUDGE], (
+        f"the exit's own reason {decision.reason!r} is not the one the clause requires"
+    )
+    assert rec.output.status is PageStatus.WARNING
+    assert canonical_marks(rec.output.text, 1), rec.output.text
+
+
+def test_the_meter_recognises_the_reason_without_sharing_the_constant(tmp_path) -> None:
+    """The meter stays the INDEPENDENT instrument, and this pins the relationship.
+
+    Round 2. The reviewer suggested deriving ``TABLE_ONLY_JUDGE_REASON_PREFIX`` from
+    ``EXACT_PASS_ACCEPT_REASON``; the ruling is not to. An instrument that shares the
+    product's constant cannot catch the product's drift, which is the whole reason the
+    meter exists beside the tests. So the two stay separately spelled, and what is pinned
+    is the only thing that must hold between them: whatever the product calls this accept,
+    the meter must still recognise it.
+    """
+    from socr.benchmark import acceptance
+
+    assert EXACT_PASS_ACCEPT_REASON.startswith(acceptance.TABLE_ONLY_JUDGE_REASON_PREFIX)
+    assert "EXACT_PASS_ACCEPT_REASON" not in pathlib.Path(acceptance.__file__).read_text(), (
+        "the meter now imports the product constant, so it can no longer catch its drift"
+    )
