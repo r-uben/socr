@@ -151,6 +151,14 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
     #: is what ``_rewrite_all_fragments`` does to every page at assemble. Same check, same
     #: result, same reason -- so the verdict a re-finalized page publishes is the verdict
     #: it already had.
+    #: #1145 slice 3 (chart). Same purpose as the equation row below: the clause comes from
+    #: the lane's event on the first pass and from here on every later one.
+    FailureMode.VISUAL_VALUES_UNTRANSCRIBED: (
+        Check.FIGURE_TEXT,
+        CheckResult.UNKNOWN,
+        "this page's chart ships as an image and the labels and values drawn in it were "
+        "never transcribed -- read them off the image before citing",
+    ),
     FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
         Check.EQUATION_FIDELITY,
         CheckResult.UNKNOWN,
@@ -504,9 +512,57 @@ EQUATION_READING_ATTACHED_KIND = "equation_region_reading_attached"
 #: and enumerated, and NOT "every UNKNOWN clause": a judge that timed out may well answer
 #: next time, and admitting those would turn a narrow content exception into a general
 #: "WARNING pages resume" rule.
-PERMANENTLY_UNVERIFIABLE_CLAUSES: frozenset[tuple[Check, CheckResult]] = frozenset(
-    {(Check.EQUATION_FIDELITY, CheckResult.UNKNOWN)}
+#: Failure modes a page can never shed by being reprocessed, because the check they name
+#: has nothing to run. Keyed on the MODE rather than on the clause, and the chart slice is
+#: why: ``figure_text=UNKNOWN`` is produced by THREE sources -- this lane, the
+#: ``FIGURE_WORDS_UNREAD`` mode, and the scanned-figure flag -- and only this one is
+#: unresolvable. A reader that could not transcribe a figure crop today may succeed next
+#: run, so admitting ``(figure_text, UNKNOWN)`` as a pair would have let those pages skip
+#: for ever. The mode is already the field that explains the status (that is why the
+#: demotion records one), so it is the right key for "can this status ever be resolved".
+#:
+#: Deliberately small and enumerated. ``AUDIT_FAILED`` and the judge-timeout modes are
+#: absent on purpose: a judge may answer next time, and admitting those would turn a narrow
+#: content exception into a general "WARNING pages resume" rule.
+PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+    }
 )
+
+
+#: The chart lane's record that the values drawn in a chart were never transcribed.
+#:
+#: Keyed on this event ALONE, not on ``chart_asset_page`` beside it, and that is a checked
+#: decision rather than a simplification: ``chart_asset_page`` is NOT in the resume replay
+#: allowlist, so a predicate requiring it would lose the clause on every resumed page. On
+#: run 23192118 the two agree exactly (1,353 pages, every one with a ``chart_asset``
+#: winner), and this event is the one that states what the clause states -- a page whose
+#: visual values went untranscribed owes the reader that sentence whichever lane shipped it.
+VISUAL_VALUES_UNTRANSCRIBED_KIND = "visual_values_not_transcribed"
+
+
+def _chart_values_clause(event_kinds: frozenset[str]) -> VerdictClause | None:
+    """``figure_text=UNKNOWN`` on a page whose chart ships as an image, untranscribed.
+
+    The chart lane routes such a page to an image asset on purpose -- that is the lane
+    working, not failing -- but the numbers a reader would cite are then present only as
+    pixels. Measured on run 23192118: 1,353 pages carry the event, 210 shipping SUCCESS
+    with no mark anywhere (demoted here) and 1,143 already WARNING (which slice 1 marks and
+    which now gain this second, true clause).
+
+    UNKNOWN, not FAIL: nothing read the chart and found it wrong; nothing read it at all.
+    """
+    if VISUAL_VALUES_UNTRANSCRIBED_KIND not in event_kinds:
+        return None
+    return VerdictClause(
+        Check.FIGURE_TEXT,
+        CheckResult.UNKNOWN,
+        SCOPE_PAGE,
+        "this page's chart ships as an image and the labels and values drawn in it were "
+        "never transcribed -- read them off the image before citing",
+    )
 
 
 def _equation_fidelity_clause(event_kinds: frozenset[str]) -> VerdictClause | None:
@@ -550,7 +606,10 @@ def silent_success_clauses(
     the hole confirmed at the seam -- see the slice-2 log).
     """
     clauses: list[VerdictClause] = []
-    for clause in (_equation_fidelity_clause(event_kinds),):
+    for clause in (
+        _equation_fidelity_clause(event_kinds),
+        _chart_values_clause(event_kinds),
+    ):
         if clause is not None:
             clauses.append(clause)
     return tuple(clauses)
@@ -598,16 +657,46 @@ def derive_clauses(
     ):
         if clause is None:
             continue
-        # One line per (check, region), so two sources that name the SAME failed check on
-        # the same region collapse to one. The first wins, and the order above is from
-        # most specific to least: ``NATIVE_GARBLED_MATH`` says the native layer garbled the
-        # mathematics AND that no reading replaced it, which the bare PUA flag does not, so
-        # a page carrying both must show the mode's wording. Without this the reader gets
-        # two lines about one check.
-        if any(c.check is clause.check and c.scope == clause.scope for c in clauses):
-            continue
-        clauses.append(clause)
+        clauses = _merge_clause(clauses, clause, output)
     return tuple(clauses)
+
+
+def _merge_clause(
+    clauses: list[VerdictClause], clause: VerdictClause, output: PageOutput
+) -> list[VerdictClause]:
+    """Add *clause*, collapsing it with any existing clause about the same (check, region).
+
+    One line per (check, region): two sources naming the same failed check on the same
+    region must not give the reader two lines about one thing.
+
+    **Which one survives is decided by the page's recorded MODE, not by arrival order**, and
+    that is a correction. The rule used to be "the first wins, and the order is from most
+    specific to least" -- which held while the status-dependent clauses came first, and
+    then slice 3 put the silent-success clauses at the front of the list and silently
+    inverted it. Fable found the consequence on the 388 ``figure_words_unread`` chart pages:
+    the chart clause REPLACED #1053's reason, so the page's line said "this page's chart
+    ships as an image" while its recorded mode still said ``figure_words_unread`` -- the mark
+    and the record contradicting each other about the same page, on 388 pages, while the log
+    claimed they each gained a second reason.
+
+    So the mode arbitrates. It is the field that explains the status (that is why the
+    demotion records one), so the clause whose wording the mode vouches for is the one the
+    reader should see; an incoming clause replaces an existing one only when the mode names
+    the incoming one's text and not the existing one's. Where the mode names neither, the
+    first still wins, which preserves the old most-specific-first behaviour for the
+    mode-table clauses that are all that can reach that case.
+    """
+    for index, existing in enumerate(clauses):
+        if existing.check is not clause.check or existing.scope != clause.scope:
+            continue
+        entry = _MODE_CLAUSES.get(output.failure_mode)
+        mode_reason = entry[2] if entry is not None else None
+        if mode_reason is not None and clause.reason == mode_reason != existing.reason:
+            # The page's own mode names the INCOMING clause's wording and not the one
+            # already here. Replace, so the line agrees with the record.
+            return [*clauses[:index], clause, *clauses[index + 1 :]]
+        return clauses
+    return [*clauses, clause]
 
 
 def _covered_checks(

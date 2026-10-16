@@ -257,24 +257,25 @@ def test_the_mark_is_the_first_rendered_block() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_only_a_permanently_unverifiable_clause_earns_the_resume_exception() -> None:
-    """The set must stay small, and nothing else pinned that.
+def test_only_a_permanently_unresolvable_MODE_earns_the_resume_exception() -> None:
+    """The set must stay small, and the key is the MODE.
 
-    Found by a SURVIVING mutant: widening ``PERMANENTLY_UNVERIFIABLE_CHECKS`` to every
-    ``Check`` left every test green, which would have turned a narrow content exception into
-    a general "WARNING pages resume" rule. The distinction it rests on:
+    Two corrections to this test, both forced by review findings and both worth stating
+    because the test originally asserted the opposite shape:
 
-    * ``equation_fidelity`` here can NEVER be resolved by reprocessing -- the lane validates
-      LaTeX syntax only and ``semantic_fidelity_verified`` is a hardcoded ``False`` -- so a
-      re-OCR produces the same unverified reading and the same clause, and refusing the skip
-      re-OCRs the page on every resume for ever without converging;
-    * a ``page_judge`` timeout is the opposite: the judge may well answer next time, and
-      skipping such a page keeps text no judge has accepted. That is an infra doubt, and
-      doubt must re-OCR.
+    * it keyed on the clause pair, and the chart slice showed that is wrong --
+      ``figure_text=UNKNOWN`` has three sources and only one is unresolvable, so the pair
+      admitted pages a reader might yet read. The mode is the field that explains the
+      status, so it is the key;
+    * its "admissible mode + inadmissible clause" rows tested a check that has since been
+      DELETED as unreachable (only ``_verdict_demotion_mode`` writes these modes, and it
+      only fires on a page whose clause set is the silent-success clauses alone). Testing a
+      deleted check is testing nothing; the reachability argument is pinned instead by
+      ``test_an_admissible_mode_is_only_ever_set_by_the_verdict_demotion``.
 
-    One row per side, plus the mixed case, which is the one a reviewer should care about
-    most: a page carrying BOTH must reprocess, because the admissible clause must not carry
-    the inadmissible one past the gate.
+    So the rows vary the MODE. The distinction they encode: an unresolvable mode names a
+    check with nothing to run, while a judge timeout or an audit failure may well answer
+    next run -- and skipping those would keep text no judge accepted, for ever.
     """
     from socr.pipeline.orchestrator import _resume_verdict_is_permanently_unverifiable
 
@@ -286,40 +287,46 @@ def test_only_a_permanently_unverifiable_clause_earns_the_resume_exception() -> 
             ),
         ).to_dict()
 
-    unverifiable = (Check.EQUATION_FIDELITY, CheckResult.UNKNOWN)
-    judge_timeout = (Check.PAGE_JUDGE, CheckResult.UNKNOWN)
-    table = (Check.TABLE_STRUCTURE, CheckResult.FAIL)
-    # The SAME check with the other result, and it must NOT be admitted. This is slice 1's
-    # corrupt-math hybrid clause: the mathematics is DAMAGED and unrecovered, which a run
-    # with a provider available can genuinely fix, and
-    # ``test_agentic_corrupt_math_flag_uses_region_recovery_not_whole_page`` pins that such
-    # a page must re-OCR. Keying the set on the CHECK alone admitted it; that test is what
-    # caught the bug, and this row is what stops it coming back.
-    corrupt_math = (Check.EQUATION_FIDELITY, CheckResult.FAIL)
+    unresolvable = verdict((Check.EQUATION_FIDELITY, CheckResult.UNKNOWN))
 
-    assert _resume_verdict_is_permanently_unverifiable(verdict(unverifiable)) is True
+    for mode in (
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+    ):
+        assert _resume_verdict_is_permanently_unverifiable(unresolvable, mode.value) is True, mode
 
-    for inadmissible in (judge_timeout, table, corrupt_math):
-        assert _resume_verdict_is_permanently_unverifiable(verdict(inadmissible)) is False, (
-            f"{inadmissible[0].value}={inadmissible[1].value} earned the resume exception; it "
-            "can be resolved by reprocessing, so skipping keeps unconfirmed text for ever"
-        )
-        assert (
-            _resume_verdict_is_permanently_unverifiable(verdict(unverifiable, inadmissible))
-            is False
-        ), (
-            f"an admissible clause carried {inadmissible[0].value}="
-            f"{inadmissible[1].value} past the gate; the exception must require EVERY "
-            "clause to be unresolvable"
+    for mode in (
+        FailureMode.AUDIT_FAILED,
+        FailureMode.PAGE_JUDGE_TIMEOUT,
+        FailureMode.FIGURE_WORDS_UNREAD,
+        FailureMode.TABLE_NOT_RECONSTRUCTED,
+        FailureMode.NONE,
+    ):
+        assert _resume_verdict_is_permanently_unverifiable(unresolvable, mode.value) is False, (
+            f"{mode.value} earned the resume exception; it can be resolved by reprocessing, "
+            "so skipping keeps unconfirmed text for ever"
         )
 
-    # A CHECKED page is never admitted by this route: it has no need of it, and the ordinary
-    # SUCCESS gate is the one that should decide it.
-    assert _resume_verdict_is_permanently_unverifiable(verdict()) is False
+    # No mode at all is never admitted -- a page whose status nothing explains must re-OCR.
+    assert _resume_verdict_is_permanently_unverifiable(unresolvable, None) is False
+    assert _resume_verdict_is_permanently_unverifiable(unresolvable, "not_a_mode") is False
+
+    # A CHECKED page is never admitted by this route: the ordinary SUCCESS gate decides it.
+    assert (
+        _resume_verdict_is_permanently_unverifiable(
+            verdict(), FailureMode.EQUATION_FIDELITY_UNVERIFIED.value
+        )
+        is False
+    )
 
     # And doubt reprocesses: anything unparseable is refused rather than guessed at.
     for junk in (None, {}, "failed", {"clauses": [{"check": "not_a_check"}]}, {"clauses": 7}):
-        assert _resume_verdict_is_permanently_unverifiable(junk) is False, junk
+        assert (
+            _resume_verdict_is_permanently_unverifiable(
+                junk, FailureMode.EQUATION_FIDELITY_UNVERIFIED.value
+            )
+            is False
+        ), junk
 
 
 def test_a_page_demoted_by_a_guard_that_names_nothing_is_not_resume_skippable() -> None:
@@ -348,7 +355,10 @@ def test_a_page_demoted_by_a_guard_that_names_nothing_is_not_resume_skippable() 
         "the page is WARNING for a reason nothing names, and the fail-closed fallback did "
         "not fire -- so the only clause on it is about something else entirely"
     )
-    assert _resume_verdict_is_permanently_unverifiable(verdict.to_dict()) is False, (
+    assert (
+        _resume_verdict_is_permanently_unverifiable(verdict.to_dict(), out.failure_mode.value)
+        is False
+    ), (
         "this page earns the resume exception, so it would be restored for ever under a "
         "reason that is not the one that demoted it"
     )
@@ -360,7 +370,10 @@ def test_a_page_demoted_by_a_guard_that_names_nothing_is_not_resume_skippable() 
     out2, verdict2 = _apply_verdict_marks(mine, _Flags(), 1, event_kinds=ATTACHED)
     assert out2.failure_mode is FailureMode.EQUATION_FIDELITY_UNVERIFIED
     assert {c.check for c in verdict2.clauses} == {Check.EQUATION_FIDELITY}, verdict2
-    assert _resume_verdict_is_permanently_unverifiable(verdict2.to_dict()) is True
+    assert (
+        _resume_verdict_is_permanently_unverifiable(verdict2.to_dict(), out2.failure_mode.value)
+        is True
+    )
 
 
 def test_the_legacy_equation_seam_is_covered_too() -> None:

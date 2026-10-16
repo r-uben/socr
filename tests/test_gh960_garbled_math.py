@@ -26,6 +26,9 @@ from socr.core.born_digital import (
 )
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from chart_clause_arms import assert_only_the_chart_clause_differs, chart_clause_off
+from verdict_marks_helper import canonical_marks
+
 from socr.core.result import DocumentStatus, FailureMode
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -495,25 +498,61 @@ def test_e2e_detector_exception_fails_closed(tmp_path, monkeypatch) -> None:
 
 
 def test_chart_asset_lane_demotes_on_garbled_math(tmp_path, monkeypatch) -> None:
-    """The chart lane ships retained native prose; it must not bypass the demotion."""
+    """The chart lane ships retained native prose; it must not bypass the demotion.
+
+    #1145 slice 3 makes a chart shipped as an image with untranscribed values a page socr
+    did not CHECK, so the neutralised arm is no longer SUCCESS. THIS ticket's property is
+    unchanged and is asserted below with that clause OFF, at full strength; #1145's delta is
+    pinned separately, so a regression in #960 still fails #960's test.
+    """
+    with chart_clause_off():
+        _e2e(
+            tmp_path,
+            "f_off",
+            monkeypatch,
+            provider=True,
+            native_only=True,
+            chart=True,
+            detector="neutralised",
+        )
+        side_off = _sidecar(tmp_path, "f_off")
+        assert side_off["engine"] == "chart_asset", "setup: chart lane"
+        assert side_off["status"] == "success"
+        on, _ = _e2e(tmp_path, "f_on", monkeypatch, provider=True, native_only=True, chart=True)
+        side = _sidecar(tmp_path, "f_on")
+        assert side["engine"] == "chart_asset"
+        assert side["status"] == "warning"
+        assert side["failure_mode"] == FailureMode.NATIVE_GARBLED_MATH.value
+        assert on.status is not DocumentStatus.SUCCESS
+
+    # #1145's delta on the arm #960 calls clean, and the more specific mode still wins on
+    # the arm it calls flagged -- a garbled-math page keeps ``native_garbled_math``, which
+    # is what the CLI buckets and the disposition classifier read.
     _e2e(
         tmp_path,
-        "f_off",
+        "f_1145",
         monkeypatch,
         provider=True,
         native_only=True,
         chart=True,
         detector="neutralised",
     )
-    side_off = _sidecar(tmp_path, "f_off")
-    assert side_off["engine"] == "chart_asset", "setup: chart lane"
-    assert side_off["status"] == "success"
-    on, _ = _e2e(tmp_path, "f_on", monkeypatch, provider=True, native_only=True, chart=True)
-    side = _sidecar(tmp_path, "f_on")
-    assert side["engine"] == "chart_asset"
-    assert side["status"] == "warning"
-    assert side["failure_mode"] == FailureMode.NATIVE_GARBLED_MATH.value
-    assert on.status is not DocumentStatus.SUCCESS
+    side_1145 = _sidecar(tmp_path, "f_1145")
+    assert_only_the_chart_clause_differs(
+        side_1145["winning_output"]["text"],
+        side_off["winning_output"]["text"],
+        1,
+        on_status=side_1145["status"],
+        off_status=side_off["status"],
+        on_mode=side_1145["failure_mode"],
+    )
+    on_live, _ = _e2e(
+        tmp_path, "f_on1145", monkeypatch, provider=True, native_only=True, chart=True
+    )
+    assert _sidecar(tmp_path, "f_on1145")["failure_mode"] == (
+        FailureMode.NATIVE_GARBLED_MATH.value
+    ), "#1145's generic mode displaced #960's more specific one"
+    assert on_live.status is not DocumentStatus.SUCCESS
 
 
 def _e2e_corrupt_math(tmp_path, tag, monkeypatch, *, detector):
@@ -574,19 +613,59 @@ def _spy_restores(monkeypatch) -> list:
 def test_resume_does_not_restore_a_cached_clean_page_when_the_scan_now_fires(
     tmp_path, monkeypatch, chart, second
 ) -> None:
+    # #1145 slice 3: on the chart lane the cached first run is no longer SUCCESS, because a
+    # chart shipped as an image with untranscribed values is a page socr did not CHECK. The
+    # property THIS ticket owns is about the fresh SCAN, so it is asserted with that clause
+    # OFF -- unchanged -- and then asserted AGAIN with the clause live, because it must
+    # SURVIVE #1145 rather than merely coexist with it.
     kw = dict(provider=True, native_only=True, chart=chart)
-    _e2e(tmp_path, "r", monkeypatch, detector="neutralised", **kw)
-    first = _sidecar(tmp_path, "r")
-    assert first["status"] == "success", "setup: the clean first run caches SUCCESS"
-    assert first["engine"] == ("chart_asset" if chart else "native"), first["engine"]
+    with chart_clause_off():
+        _e2e(tmp_path, "r", monkeypatch, detector="neutralised", **kw)
+        first = _sidecar(tmp_path, "r")
+        assert first["status"] == "success", "setup: the clean first run caches SUCCESS"
+        assert first["engine"] == ("chart_asset" if chart else "native"), first["engine"]
 
-    restored = _spy_restores(monkeypatch)
-    res, _ = _e2e(tmp_path, "r", monkeypatch, detector=second, reprocess=True, **kw)
-    again = _sidecar(tmp_path, "r")
-    assert restored == [], "the cached native page must not be restored"
-    assert again["status"] == "warning"
-    assert again["failure_mode"] == FailureMode.NATIVE_GARBLED_MATH.value
-    assert res.status is not DocumentStatus.SUCCESS
+        restored = _spy_restores(monkeypatch)
+        res, _ = _e2e(tmp_path, "r", monkeypatch, detector=second, reprocess=True, **kw)
+        again = _sidecar(tmp_path, "r")
+        assert restored == [], "the cached native page must not be restored"
+        assert again["status"] == "warning"
+        assert again["failure_mode"] == FailureMode.NATIVE_GARBLED_MATH.value
+        assert res.status is not DocumentStatus.SUCCESS
+
+    # #1145 live. On the chart lane the cached page now carries
+    # ``visual_values_untranscribed``, a mode #1145's OWN resume exception admits -- so the
+    # only thing still refusing it is this ticket's scan guard. The guard RETURNS None, so
+    # it refuses wherever it sits -- the earlier claim here that its position relative to
+    # #1145's exception was load-bearing was wrong (Fable, PR #1174): that exception only
+    # bypasses the SUCCESS/``audit_passed`` gate, never a guard that has already returned.
+    # What this arm pins is that the guard still fires at all on a page #1145 has demoted
+    # and marked, which is the thing that could plausibly break.
+    restored_live = _spy_restores(monkeypatch)
+    _e2e(tmp_path, "r1145", monkeypatch, detector="neutralised", **kw)
+    first_live = _sidecar(tmp_path, "r1145")
+    if chart:
+        # #1145's own delta on the cached page, so this conversion pins the change and not
+        # only this ticket's guard. Fable's M6 survived every resume conversion before this.
+        assert_only_the_chart_clause_differs(
+            first_live["winning_output"]["text"],
+            first["winning_output"]["text"],
+            1,
+            on_status=first_live["status"],
+            off_status=first["status"],
+            on_mode=first_live["failure_mode"],
+        )
+    else:
+        assert first_live["winning_output"]["text"] == first["winning_output"]["text"], (
+            "the native lane must be untouched by the chart clause"
+        )
+    res_live, _ = _e2e(tmp_path, "r1145", monkeypatch, detector=second, reprocess=True, **kw)
+    assert restored_live == [], (
+        "with #1145 live the cached page was restored although the fresh scan fires; the "
+        "scan guard no longer runs before the unverifiable-mode resume exception"
+    )
+    assert _sidecar(tmp_path, "r1145")["failure_mode"] == (FailureMode.NATIVE_GARBLED_MATH.value)
+    assert res_live.status is not DocumentStatus.SUCCESS
 
 
 @pytest.mark.parametrize("chart", [False, True], ids=["native_lane", "chart_lane"])
@@ -594,12 +673,35 @@ def test_resume_still_restores_when_the_scan_stays_clean(tmp_path, monkeypatch, 
     """Control: neutralised both times, the cached page IS restored, so the refusal above is
     caused by the fresh flag and nothing else."""
     kw = dict(provider=True, native_only=True, chart=chart, detector="neutralised")
-    _e2e(tmp_path, "c", monkeypatch, **kw)
-    restored = _spy_restores(monkeypatch)
-    res, _ = _e2e(tmp_path, "c", monkeypatch, reprocess=True, **kw)
-    assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
-    assert _sidecar(tmp_path, "c")["status"] == "success"
-    assert res.status is DocumentStatus.SUCCESS
+    with chart_clause_off():
+        _e2e(tmp_path, "c", monkeypatch, **kw)
+        restored = _spy_restores(monkeypatch)
+        res, _ = _e2e(tmp_path, "c", monkeypatch, reprocess=True, **kw)
+        assert len(restored) == 1, "setup: the ledger gate restores a clean cached page"
+        assert _sidecar(tmp_path, "c")["status"] == "success"
+        assert res.status is DocumentStatus.SUCCESS
+
+    # #1145 live: the cached chart page is WARNING now, and the ledger gate requires
+    # SUCCESS -- so without #1145's own resume exception this control would break and every
+    # chart page would re-OCR on every run, for ever, since the next run demotes it again.
+    # The exception is what keeps it restorable, and this is the only place that is checked
+    # end to end on a real cached page.
+    restored_live = _spy_restores(monkeypatch)
+    _e2e(tmp_path, "c1145", monkeypatch, **kw)
+    if chart:
+        # #1145's delta on the cached page, so this control pins the change too and not
+        # only the ledger gate. Without it Fable's M6 survived here.
+        assert canonical_marks(_sidecar(tmp_path, "c1145")["winning_output"]["text"], 1), (
+            "the cached chart page carries no figure_text mark"
+        )
+    res_live, _ = _e2e(tmp_path, "c1145", monkeypatch, reprocess=True, **kw)
+    assert len(restored_live) == 1, (
+        "a cached chart page is no longer restored, so #1145 re-OCRs every chart page on "
+        "every run and never converges"
+    )
+    # Deliberately no document-status assertion here: with #1145 live the chart arm's
+    # document is non-SUCCESS and the native arm's is SUCCESS, and this control's property
+    # is the RESTORE, not the status. Asserting both would be asserting the parametrisation.
 
 
 # ---------------------------------------------------------------------------
