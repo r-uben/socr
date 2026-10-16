@@ -440,8 +440,30 @@ def test_fully_covered_page_raises_no_event(tmp_path: Path) -> None:
     assert "math-font typesetting" not in (result.error or "")
     assert not any("math-font typesetting" in n for n in result.audit_notes)
     from socr.core.manifest import finalized_page_record
+    from socr.core.marks import Check
 
-    assert finalized_page_record(state, 1).output.status is PageStatus.SUCCESS
+    record = finalized_page_record(state, 1)
+
+    # #1145 slice 3: ``status is SUCCESS`` was this test's proxy for "not demoted FOR THIS
+    # REASON", and it is no longer a valid one -- the page IS demoted, by a different and
+    # correct clause. A fully covered page's regions were all located and their readings
+    # accepted and ALIGNED, but the lane validates LaTeX syntax only: a candidate that
+    # parses and aligns is still not a proof that it says what the crop says.
+    # ``tests/test_gh165_unresolved_math_outcome.py::test_complete_aligned_recovery_clears
+    # _this_warning_only`` says so in as many words and deliberately does NOT assert SUCCESS
+    # here, for exactly this reason.
+    #
+    # So the test's actual intent is asserted instead: nothing about the MATH-FONT signal is
+    # held against this page. The absence is checked against the rendered clause set, so a
+    # future ``native_glyphs`` clause creeping onto a covered page fails here.
+    checks = {c.check for c in (record.verdict.clauses if record.verdict else ())}
+    assert Check.NATIVE_GLYPHS not in checks, (
+        f"a covered page is being held to the math-font signal after all: {record.verdict}"
+    )
+    assert checks == {Check.EQUATION_FIDELITY}, (
+        f"the only thing unresolved on a covered page should be the unverified semantics "
+        f"of its attached reading: {record.verdict}"
+    )
 
 
 def test_no_provider_leaves_the_math_uncovered_and_reported(tmp_path: Path) -> None:

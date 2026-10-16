@@ -1221,7 +1221,9 @@ def library(
             else:
                 todo, blocked = lib.pending_pdfs(cfg)
                 for pdf in blocked:
-                    console.print(f"[yellow]blocked {pdf.stem}:[/yellow] text dir has no markdown")
+                    console.print(
+                        f"[yellow]blocked {pdf.stem}:[/yellow] {lib.blocked_reason(cfg, pdf.stem)}"
+                    )
                 for pdf in todo:
                     console.print(f"would process {pdf}")
                 console.print(f"[dim]{len(todo)} to process, {len(blocked)} blocked[/dim]")
@@ -1241,15 +1243,28 @@ def library(
                     result = lib.rerun(cfg, make_process(True), rerun_stem)
                     if failed(result):
                         failures.append(rerun_stem)
-                    console.print(
-                        f"{rerun_stem} awaiting approval: socr library --promote {rerun_stem}"
-                    )
+                    # #1145: ask the library whether anything is actually promotable instead
+                    # of announcing that there is. A re-run whose document came back
+                    # unreadable stages a ``[document failed: …]`` mark, which the gate
+                    # refuses -- so "awaiting approval: --promote <stem>" invited a command
+                    # that now fails, and before this ticket it invited one that ARCHIVED
+                    # the real text and installed the mark over it.
+                    if rerun_stem in lib.staged_stems(cfg):
+                        console.print(
+                            f"{rerun_stem} awaiting approval: socr library --promote {rerun_stem}"
+                        )
+                    else:
+                        console.print(
+                            f"[yellow]{rerun_stem}: nothing promotable was staged[/yellow] "
+                            f"(the re-run produced no text; the existing copy is untouched). "
+                            f"Inspect {cfg.staging_dir / rerun_stem}"
+                        )
                 else:
                     todo, blocked = lib.pending_pdfs(cfg)
                     for pdf in blocked:
                         console.print(
-                            f"[yellow]Skipped {pdf.stem}:[/yellow] text directory exists without "
-                            f"{cfg.markdown.format(stem=pdf.stem)}; use --rerun {pdf.stem}"
+                            f"[yellow]Skipped {pdf.stem}:[/yellow] "
+                            f"{lib.blocked_reason(cfg, pdf.stem)}; use --rerun {pdf.stem}"
                         )
                     if todo:
                         for stem, state, detail in lib.process_new(cfg, make_process(False), todo):

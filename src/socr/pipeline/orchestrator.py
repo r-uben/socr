@@ -1265,6 +1265,32 @@ def _under_page_ladder_budget(gate):
     return _budgeted
 
 
+def _resume_verdict_is_permanently_unverifiable(raw_verdict: object) -> bool:
+    """Is every non-PASS clause in this published verdict one that can never be resolved?
+
+    #1145 slice 3. The check these clauses name does not exist to be run: the equation lane
+    validates LaTeX syntax only and ``semantic_fidelity_verified`` is a hardcoded ``False``,
+    so re-OCR'ing the page produces the same unverified reading and the same clause. Such a
+    page is therefore final for the same input and config, exactly as a ladder REJECTED
+    verdict is, and must skip-and-keep rather than be re-OCR'd on every resume for ever.
+
+    Returns False for an empty clause list, so a CHECKED page is never admitted by this
+    route -- it has no need of it, and the ordinary SUCCESS gate is the one that should
+    decide it. Returns False on anything unparseable, so doubt still reprocesses.
+    """
+    from socr.core.verdict import PERMANENTLY_UNVERIFIABLE_CLAUSES, PageVerdict
+
+    if not isinstance(raw_verdict, dict):
+        return False
+    try:
+        verdict = PageVerdict.from_dict(raw_verdict)
+    except Exception:
+        return False
+    if not verdict.clauses:
+        return False
+    return all((c.check, c.result) in PERMANENTLY_UNVERIFIABLE_CLAUSES for c in verdict.clauses)
+
+
 def _is_document_failed_stub(md_path: Path) -> bool:
     """Is this file one THIS code wrote -- a document-failed mark and nothing else?
 
@@ -1277,14 +1303,23 @@ def _is_document_failed_stub(md_path: Path) -> bool:
 
     ``fullmatch`` on the whole stripped file, not a search: a document whose real text merely
     CONTAINS such a line (a paper quoting one, a hand-written note) must still be protected.
-    Unreadable or oversized files answer False, so the caller keeps them -- doubt protects
-    content, which is the direction this whole guard runs in.
+    An unreadable file answers False, so the caller keeps it -- doubt protects content, which
+    is the direction this whole guard runs in.
+
+    No size bound, deliberately, and the first version of this function had one: a bare
+    ``4096``, which is a magic number the repo forbids and which did real harm -- a detail
+    longer than it made the next run refuse to rewrite its own stub and log that existing
+    text had been kept, when there was none. Measured on the corpus: every
+    ``unreadable_input`` detail is **103** characters (5 of 5), and the longest document
+    ``error`` string socr has ever recorded is 2,906 (n=2,014; p99 1,522; median 451). So
+    any cap in the region of the old one is below real data. And a bespoke bound here would
+    be defending against something no neighbouring reader defends against -- ``_load_json``
+    and the meter's ``_read_text`` read whole files -- so it would be a threshold with no
+    basis rather than a safeguard.
     """
     from socr.core.marks import DOCUMENT_FAILED_MARK_RE
 
     try:
-        if md_path.stat().st_size > 4096:
-            return False
         body = md_path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         return False
@@ -3587,6 +3622,27 @@ class UnifiedPipeline:
         {
             "equation_region_reading_attached",
             "equation_region_reading_rejected",
+            # #1145 slice 3: the LEGACY seam's accept record
+            # (``_attach_equation_latex_sidecars``, under --detect-equations
+            # --recover-clean-equations). It splices a model's reading into the
+            # page exactly as the region lane does, and it was absent from this
+            # allowlist -- so by this set's own docstring it "disappears from
+            # audit_log.json the moment the page resumes", which was already the
+            # #252 shape for that seam and is independent of #1145. #1145 makes
+            # it load-bearing too: the unverified-equation clause keys on it, and
+            # a clause whose evidence is dropped on resume would silently
+            # un-demote the page on the next run.
+            "equation_latex_accepted",
+            # Its sibling, by the GH-522 argument already made for the region
+            # lane's own refusal record two entries down: "refusing a reading is
+            # only acceptable BECAUSE the crop survives for a human to check;
+            # without this the record was dropped on resume and the guarantee
+            # held only until the next run". Exactly as true for the legacy
+            # seam's refusal, which also retains a crop. Surfaced by widening
+            # ``_emitted_equation_kinds``'s scanner to see a kind assigned to a
+            # local -- the shape that had hidden this whole family from the
+            # guard in both directions.
+            "equation_latex_rejected_kept_crop",
             # GH-522 (cubic P1 on #537): the refusal record and, with it, the
             # `crop_path` pointing at the evidence. Refusing a reading is only
             # acceptable BECAUSE the crop survives for a human to check; without
@@ -15508,7 +15564,47 @@ class UnifiedPipeline:
             # run fingerprint drops through to a full revalidation.
             is_credentialed_judge_timeout = self._resume_credential_holds(state, winning)
 
-            if not (is_ladder_rejected or is_credentialed_judge_timeout):
+            # #1145 slice 3, the THIRD deliberate exception, and the same argument as the
+            # two above: a page demoted ONLY because a check can never run is a CONTENT
+            # verdict, not an infra doubt.
+            #
+            # Found by the equation lane's own resume tests failing, not by review, and it
+            # is not a test-expectation problem: the demotion makes these pages WARNING, the
+            # gate below requires SUCCESS, so every resume re-OCR'd all 399 of them and
+            # re-called the equation model. Forever -- the next run demotes them again, so
+            # the work never converges. That is the precise failure #713's exception exists
+            # to prevent ("re-OCR'd on every resume forever ... so the work never
+            # converges"), reached through a new door.
+            #
+            # Narrow on purpose. It admits a page only when EVERY non-PASS clause in the
+            # verdict its own run published is one of the permanently-unverifiable classes
+            # -- the lane cannot ever verify the semantics of an attached reading, because
+            # ``semantic_fidelity_verified`` is a hardcoded ``False`` and nothing computes
+            # it -- so reprocessing cannot change the answer and buys nothing but cost. A
+            # page carrying any OTHER clause alongside is NOT admitted: that clause may well
+            # be an infra doubt, and this exception must not become a general "WARNING pages
+            # resume" rule.
+            #
+            # What this branch is protected by, stated exactly, because the first draft of
+            # this comment claimed "the fragment digest" and that was wrong: the fragment
+            # digest check below runs only under ``is_credentialed_judge_timeout``. This
+            # branch has the run fingerprint (which hashes every shipped ``socr`` source
+            # file, so any change to this logic re-OCRs the page), the input checksum, the
+            # verdict's presence AND successful parse, the non-empty-body and
+            # failed-marker-body refusals, and the label-canonicalisation check -- the same
+            # protections the ordinary SUCCESS path has, and no more. A hand-edited or
+            # truncated fragment therefore restores verbatim here exactly as it does on the
+            # SUCCESS path: a property of the ledger that predates this branch rather than
+            # one it introduces. Closing it properly needs a finalized-body digest recorded
+            # for this class, which nothing records today; #713 had to mint a credential to
+            # get one. Noted rather than half-built.
+            is_permanently_unverifiable = _resume_verdict_is_permanently_unverifiable(
+                meta.get("verdict")
+            )
+
+            if not (
+                is_ladder_rejected or is_credentialed_judge_timeout or is_permanently_unverifiable
+            ):
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
                 # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
                 # whose best_output is the ERROR attempt, or a flagged native fallback)
@@ -19105,8 +19201,17 @@ class UnifiedPipeline:
         # Deliberately NOT a status change: the record stays FAILED, so the resume gate
         # still refuses it and the next run retries the file. Only ``output_path`` and the
         # file itself are new.
+        # ORDER IS LOAD-BEARING (#1145 slice 2, review round 3). ``_write_metadata`` swallows
+        # every exception -- a metadata write must never lose OCR output -- so if it is lost,
+        # or the process is killed between the two writes, the stub is on disk with no
+        # ``failed`` status beside it, and ``library.has_installable_text`` reads a markdown
+        # file with no refusal evidence and INSTALLS it. The failure record is therefore
+        # written FIRST, so the window where the stub exists without its status does not
+        # exist. ``output_path`` is then filled in by the second call, which is additive.
+        self._write_metadata(state, result, out_dir, has_text=False, markdown_written=False)
         written = self._write_document_failed_mark(pdf_path, out_dir, detail)
-        self._write_metadata(state, result, out_dir, has_text=False, markdown_written=written)
+        if written:
+            self._write_metadata(state, result, out_dir, has_text=False, markdown_written=True)
         if not self.config.quiet:
             console.print(f"[red]Unreadable PDF:[/red] {pdf_path.name} -- {detail}")
         return result

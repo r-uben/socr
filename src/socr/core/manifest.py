@@ -5114,12 +5114,57 @@ def _apply_unaccepted_output_mark(
     return replace(output, text=text)
 
 
+def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutput:
+    """SUCCESS becomes WARNING for a page with an unresolved check. Nothing else moves.
+
+    ``audit_passed`` is deliberately left alone. It is not a spare "is this page fine"
+    boolean: ``audit_passed=False`` is winner-SELECTION input (#1129 reads it as part of
+    refusal evidence, and `_warn_audit_failed_success_status` keys on it), and flipping it
+    to flag a page makes assemble discard that page's text. The status is the demotion
+    surface; the clause is the reason.
+
+    The failure MODE is set when the page has none, so the demotion explains itself. Not
+    cosmetic: a status-only demotion left the page indistinguishable from one demoted by a
+    guard that names nothing, and then re-running this seam over it (which
+    ``_rewrite_all_fragments`` does to every page at assemble) could not tell whether the
+    silent-success clause justified the status or whether the status was unexplained -- so
+    either the fail-closed fallback fired on a page whose reason WAS named, breaking
+    idempotence, or it stayed silent on a page whose reason was not, which is the hole
+    Fable found. An existing, more specific mode is never overwritten: it says more.
+    """
+    mode = (
+        _verdict_demotion_mode(clauses)
+        if output.failure_mode is FailureMode.NONE
+        else output.failure_mode
+    )
+    return replace(output, status=PageStatus.WARNING, failure_mode=mode)
+
+
+def _verdict_demotion_mode(clauses) -> FailureMode:
+    """The mode that records WHY a silent-success clause demoted this page.
+
+    One row per silent-success class, keyed on the clause so the mode and the clause cannot
+    drift apart. ``NONE`` for anything unmapped, which leaves the page demoted with its
+    reason carried by the clause alone -- the state this helper exists to avoid, so a class
+    added without a row here is caught by the idempotence test rather than shipped.
+    """
+    by_check = {
+        Check.EQUATION_FIDELITY: FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+    }
+    for clause in clauses:
+        mode = by_check.get(clause.check)
+        if mode is not None:
+            return mode
+    return FailureMode.NONE
+
+
 def _apply_verdict_marks(
     output: PageOutput,
     p,
     page_num: int,
     published: PageVerdict | None = None,
     provenance: SelectionProvenance | None = None,
+    event_kinds: frozenset[str] = frozenset(),
 ) -> tuple[PageOutput, PageVerdict]:
     """#1145: build this page's verdict and put its marks first on the page.
 
@@ -5137,8 +5182,31 @@ def _apply_verdict_marks(
     text = output.text or ""
     leading, _ = _split_page_top_banners(text)
     verdict = build_page_verdict(
-        page_num=page_num, output=output, p=p, published=published, provenance=provenance
+        page_num=page_num,
+        output=output,
+        p=p,
+        published=published,
+        provenance=provenance,
+        event_kinds=event_kinds,
     )
+    # #1145 slice 3: a clause on a SUCCESS page DEMOTES it.
+    #
+    # Only ``silent_success_clauses`` can produce one -- ``derive_clauses`` returns before
+    # everything else for a SUCCESS page -- so "clauses and still SUCCESS" is exactly the
+    # silent-SUCCESS case and nothing else reaches here. The demotion is the point, not a
+    # side effect: the mark tells a reader, and the STATUS is what every other consumer
+    # reads (the library's `unverified` curation, `table_counts`' `verified_text`, the
+    # review HTML, the CLI counters). Marking without demoting would leave all of them
+    # calling the page clean.
+    #
+    # Status-only, with no new ``FailureMode``: the same shape as
+    # ``_apply_chart_region_guard`` and the other status-only guards, and the mode has
+    # nothing true to say here that the clause does not say better. The page becomes
+    # WARNING with mode NONE, which is one of the shapes this ticket opened by complaining
+    # about -- the difference, and the whole point, is that it now carries a verdict naming
+    # the check.
+    if verdict.clauses and output.status is PageStatus.SUCCESS:
+        output = _warn_success_status_for_verdict(output, verdict.clauses)
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
     # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
     # whole page or only for the table it stands in place of.
@@ -5509,6 +5577,17 @@ def _select_and_finalize_page(
         p,
         page_num,
         published=getattr(p, "published_verdict", None),
+        # #1145 slice 3: the KINDS of this page's audit events, which is where the lanes
+        # record what they did. ``state.events`` is document-level, so the page's own are
+        # filtered here with the same predicate the sidecar writer uses (``ev.page_num``).
+        # Kinds only, not the events: a clause needs to know THAT the lane attached a
+        # reading, not what it said, and passing the objects would put mutable run state
+        # inside the verdict layer.
+        event_kinds=frozenset(
+            getattr(ev, "kind", "")
+            for ev in state.events
+            if getattr(ev, "page_num", None) == page_num
+        ),
         # #1145 round 2: the ENDING, not only the output. Two clauses are about who authored
         # the shipped bytes -- a judge refusal recorded on a body the judge never saw, and
         # native glyph damage on a page a model reading replaced -- and neither can be
