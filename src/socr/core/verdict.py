@@ -329,6 +329,70 @@ def _chart_region_clause(p: Any) -> VerdictClause | None:
     return VerdictClause(Check.CHART_REGION, CheckResult.FAIL, SCOPE_PAGE, reason)
 
 
+#: The only checks the chart floor may state about a page. ``chart_region`` per region,
+#: and ``native_coverage`` for text of the page that did not ship. Anything else from that
+#: attribute is a bug at the writer, so it is dropped and logged rather than published.
+_CHART_FLOOR_CHECKS: frozenset = frozenset({Check.CHART_REGION, Check.NATIVE_COVERAGE})
+
+
+def _chart_floor_clauses(p: Any) -> list[VerdictClause]:
+    """#1155: every outcome the chart floor RECORDED on this page.
+
+    Separate from ``_chart_region_clause`` above, and deliberately: that one reads
+    ``_apply_chart_region_guard``'s page-level flags and says one page-scoped thing. These
+    are per REGION, and they come from the region results themselves
+    (``figures.chart_witness.region_clause_records``) -- the same records the page's own
+    lines are rendered from, so the line and the clause cannot disagree.
+
+    Why it is needed: the first version of that lane wrote a mark per region into the page
+    and recorded nothing, so all 12 finalized verdicts carried ZERO ``chart_region``
+    clauses while the Markdown showed one per region. Both reviewers found it, and both
+    said the same thing -- a rendered mark string is not the machine-readable evidence.
+
+    Round 4 (Astra P2) widened it from the per-region records to EVERY record the lane
+    writes, because the page-scoped ``native_coverage=FAIL`` line -- the withheld prose
+    runs, and the reading-order refusal -- had exactly the same gap: the page said it in
+    Markdown and its terminal JSON carried no such clause. The withheld-runs line fires on
+    all 12 real Fed pages where the refusal fires on none, so recording only the one a
+    reviewer named would have left the commoner case unrecorded.
+
+    Reachability is POSITIVE, not a flag over a class: the attribute exists only on a page
+    whose bare whole-page marker was actually replaced by a chart body. A page that never
+    reached that branch has nothing here and derives exactly what it derived before, which
+    is why this cannot move the meter for the lanes that share this module. A record whose
+    check is not one this lane may state is ignored rather than trusted: the attribute is
+    written by one caller, and a clause saying otherwise would be a bug there, not a fact
+    about this page.
+    """
+    records = getattr(p, "chart_floor_clauses", None)
+    # A LIST or TUPLE, positively: ``p`` is a stand-in object in much of the suite, and a
+    # bare ``Mock`` hands back another ``Mock`` for any attribute. Iterating that would
+    # raise inside the verdict seam for every page in those tests, and a ``MagicMock``
+    # would iterate as EMPTY and read as "no clauses" -- which is the vacuous shape this
+    # repo keeps finding. Neither is a record.
+    if not isinstance(records, (list, tuple)):
+        return []
+    clauses: list[VerdictClause] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            clause = VerdictClause.from_dict(record)
+        except Exception:
+            logger.warning("#1155: unreadable chart-floor region record %r", record)
+            continue
+        if clause.check not in _CHART_FLOOR_CHECKS:
+            logger.warning("#1155: chart-floor record states a check it may not: %r", record)
+            continue
+        if clause.check is Check.CHART_REGION and clause.scope == SCOPE_PAGE:
+            # A chart_region clause must name WHICH region: a page-scoped one would
+            # impugn every region, including the ones this lane did represent.
+            logger.warning("#1155: chart-floor region record with no region: %r", record)
+            continue
+        clauses.append(clause)
+    return clauses
+
+
 def _table_label_clause(output: PageOutput) -> VerdictClause | None:
     """``_apply_label_unverified_guard``'s field (manifest.py:4212), #659.
 
@@ -746,6 +810,7 @@ def derive_clauses(
         _chart_region_clause(p),
         _table_label_clause(output),
         _scanned_figure_clause(p),
+        *_chart_floor_clauses(p),
     ):
         if clause is None:
             continue

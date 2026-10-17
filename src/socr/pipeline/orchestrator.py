@@ -5479,6 +5479,13 @@ class UnifiedPipeline:
             # would duplicate it and corrupt the marker.
             if not body or is_page_failed_marker(body):
                 continue
+            # #1155: the chart floor already accounts for every region of this
+            # page, and it withheld the in-chart words this pass anchors on, so
+            # it would report an unresolved placement for regions that are in
+            # fact represented. Skipping is not silence: each region carries its
+            # own canonical mark from the floor.
+            if getattr(ps, "chart_floor_body", False):
+                continue
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
                     _page = _doc[pn - 1]
@@ -5660,85 +5667,15 @@ class UnifiedPipeline:
         *,
         indices: list[int] | None = None,
     ) -> list:
-        """GH-189: render one PNG crop per chart-region bbox, reporting EVERY outcome.
+        """Delegates to ``figures.chart_regions.render_chart_region_crops`` (#1155).
 
-        The rendering internals of ``_render_chart_region_pngs`` (below), lifted so
-        a caller that must account for regions the WINNING candidate never mentioned
-        can drive them from an explicit bbox inventory instead of from placeholder
-        text.  That wrapper returns the unchanged string on failure -- an outcome its
-        caller cannot tell apart from "this page has no chart" -- which is exactly how
-        a dropped chart stayed silent.  This returns one ``ChartRegionAsset`` per
-        requested region carrying ``rendered`` and the exception text, so a failed
-        crop is a fact the audit can name.
-
-        Renders regardless of ``--save-figures`` / ``--describe-figures``: once a
-        model's text has won the page, the crop is the chart's only representation.
-
-        ``indices`` are 1-based detector ordinals; ``None`` means every region.
-        Never raises.
+        The body moved to the figures layer unchanged so the structure-class floor in
+        ``core.manifest`` can render the same crops; core may not import the pipeline
+        layer. Kept as a method because several call sites and tests reach it here.
         """
-        from socr.figures.chart_regions import ChartRegionAsset, chart_region_filename
+        from socr.figures.chart_regions import render_chart_region_crops
 
-        wanted = list(indices) if indices is not None else list(range(1, len(bboxes) + 1))
-        assets: list = []
-        for region_idx in wanted:
-            if region_idx < 1 or region_idx > len(bboxes):
-                continue
-            bbox = bboxes[region_idx - 1]
-            rect = (float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1))
-            fname = chart_region_filename(page_num, region_idx)
-            out_path = figures_dir / fname
-            try:
-                import fitz
-
-                from socr.core.born_digital import upright_rotation_for
-                from socr.core.pdf import open_pdf
-                from socr.figures.extractor import RENDER_DPI
-
-                figures_dir.mkdir(parents=True, exist_ok=True)
-                with open_pdf(str(pdf_path)) as _doc:
-                    _page = _doc[page_num - 1]
-                    # GH-307: clip-scoped, matching the crop path -- a region
-                    # can run against the page's dominant direction.
-                    mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                    _rotation = upright_rotation_for(_page, clip=bbox)
-                    if _rotation:
-                        mat = mat.prerotate(_rotation)
-                    pix = _page.get_pixmap(matrix=mat, clip=bbox)
-                    pix.save(str(out_path))
-                # A path is not a render. Check the asset the markdown will point
-                # at actually exists and has bytes -- a stale or truncated file
-                # would otherwise be reported as a successful preservation.
-                if not out_path.exists() or out_path.stat().st_size == 0:
-                    raise RuntimeError("crop PNG missing or empty after save")
-                assets.append(
-                    ChartRegionAsset(
-                        page_num=page_num,
-                        region_index=region_idx,
-                        bbox=rect,
-                        rel_path=f"{figures_dir.name}/{fname}",
-                        rendered=True,
-                    )
-                )
-                logger.debug("GH-189: saved chart region PNG %s", out_path)
-            except Exception as render_exc:
-                logger.warning(
-                    "chart region PNG render failed for p%d region %d: %s",
-                    page_num,
-                    region_idx,
-                    render_exc,
-                )
-                assets.append(
-                    ChartRegionAsset(
-                        page_num=page_num,
-                        region_index=region_idx,
-                        bbox=rect,
-                        rel_path="",
-                        rendered=False,
-                        error=f"{type(render_exc).__name__}: {render_exc}",
-                    )
-                )
-        return assets
+        return render_chart_region_crops(pdf_path, page_num, bboxes, figures_dir, indices=indices)
 
     def _render_chart_region_pngs(
         self,
@@ -10322,6 +10259,10 @@ class UnifiedPipeline:
         _agentic_doc_dir, _chart_figures_dir = self._doc_and_figures_dir(
             state.handle.path, output_dir
         )
+        # #1155: the floor renders chart crops when it replaces a whole-page marker,
+        # and it runs in ``core.manifest`` with only the DocumentState in hand. Record
+        # the directory the loop just computed, once, rather than deriving it twice.
+        state.figures_dir = _chart_figures_dir
 
         # -- --retry-failed-pages ---------------------------------------------------
         # The loop walks every page once; then, lazily (after that pass, so the
@@ -14946,6 +14887,16 @@ class UnifiedPipeline:
             "chart_region_inventory_failed": (
                 bool(getattr(ps, "chart_region_inventory_failed", False)) if ps else False
             ),
+            # #1155 (repo review of PR #1190): persisted for the same reason as the three
+            # above, in the opposite direction. This flag makes
+            # ``_preserve_chart_regions`` SKIP the page, because the chart floor has
+            # already accounted for every region on it and withheld the in-chart words
+            # that pass anchors on. In memory only, a resumed run restored the body
+            # without the flag, so the pass would re-enter a page it must not touch and
+            # stamp an unresolved-placement banner plus a ``chart_region=FAIL`` mark over
+            # per-region marks that are already correct. The flag travels with the bytes
+            # it describes.
+            "chart_floor_body": (bool(getattr(ps, "chart_floor_body", False)) if ps else False),
             # GH-674: an in-scope equation-region miss (crop with no attached
             # sidecar) demotes the document; persisted so a resumed page that
             # skips re-running the equation lane does not lose the demotion.
@@ -16260,6 +16211,15 @@ class UnifiedPipeline:
             ps.chart_region_inventory_failed = bool(
                 getattr(ps, "chart_region_inventory_failed", False)
             ) or bool(meta.get("chart_region_inventory_failed", False))
+            # #1155: OR-restored like its siblings. ``chart_floor_pictures`` and
+            # ``chart_floor_clauses`` are deliberately NOT restored: the first is a
+            # render cache whose only job is to stop a second render in one process, and
+            # the second reaches a resumed page through #1145's ``published_verdict``,
+            # which is restored verbatim. This flag is the one of the three that changes
+            # what a later PASS does to the bytes.
+            ps.chart_floor_body = bool(getattr(ps, "chart_floor_body", False)) or bool(
+                meta.get("chart_floor_body", False)
+            )
             # GH-674: OR-restore, same reasoning as the three chart-region
             # flags above -- a flag this run already set (e.g. a per-page call
             # that ran before the sidecar existed) must not be cleared by an

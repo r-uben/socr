@@ -137,7 +137,8 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
       ``pipeline/orchestrator.py`` (``_render_adjudication_crop``)
     - assignment: ``engines/base.py``, ``core/document.py`` (x2),
       ``review/html.py``, ``pipeline/orchestrator.py``
-      (``_render_chart_page_png``, ``_render_chart_region_crops``)
+      (``_render_chart_page_png``), ``figures/chart_regions.py``
+      (``render_chart_region_crops`` -- moved there from the orchestrator by #1155)
 
     GH-440: the mutate-only entry first named the D3 floor render, which does
     not call ``prerotate`` at all -- ``_render_d3_floor_png`` delegates to
@@ -179,10 +180,16 @@ _ASSIGNMENT_SITES = {
     ("core/document.py", "render_page"),
     ("engines/base.py", "process_pages"),
     ("pipeline/orchestrator.py", "_render_chart_page_png"),
-    ("pipeline/orchestrator.py", "_render_chart_region_crops"),
+    # #1155: moved from ``pipeline/orchestrator.py::_render_chart_region_crops`` to
+    # the figures layer as a PURE move (the body never referenced ``self``), so the
+    # structure-class floor in ``core.manifest`` can render the same crops -- core may
+    # not import the pipeline. Same matrix, same rotation, same clip, same bytes; the
+    # orchestrator method remains as a thin delegate and is no longer a prerotate site
+    # of its own. This record is exactly what should move when the call site moves.
+    ("figures/chart_regions.py", "render_chart_region_crops"),
     ("review/html.py", "_render_page_image"),
     # #635 Stage 1: `crop_digest` hashes the crop the pipeline is going to
-    # write, so it MUST mirror `_render_chart_region_crops` exactly -- same
+    # write, so it MUST mirror `render_chart_region_crops` exactly -- same
     # matrix, same rotation, same clip -- or the provenance would name a file
     # nobody ships. It is a deliberate second copy of that site's form, and
     # tests/test_gh635_chart_reader.py asserts the two produce the same bytes.

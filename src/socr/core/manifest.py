@@ -30,7 +30,7 @@ import logging
 import math
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -2347,7 +2347,184 @@ def structure_class_floor_applies(p) -> bool:
     return structure_class_grid_winner(p) is None
 
 
-def structure_class_floor_text(p, page_num: int) -> str:
+def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_ref: str):
+    """#1155: a LAZY builder for the chart body a floored page ships.
+
+    Returns a zero-argument callable, or ``None`` when this page is not one the
+    chart reader can speak for. The floor invokes the callable only once it has
+    decided the page would otherwise ship the bare whole-page marker, and only
+    after its /Rotate guard -- so a page taking any other branch renders no crop
+    and writes no file. The first version rendered eagerly at the call site, before
+    those checks (#1155 PR 1 review, Astra 1 / Argon 1).
+
+    The prose comes from ``native_prose_floor_text`` with the page's CHART regions
+    added to the withheld boxes, so nothing drawn inside a chart can ship as loose
+    text. The crops are rendered once here and passed in, so the picture a mark
+    claims is one that exists on disk.
+    """
+    try:
+        from socr.core.pdf import open_pdf
+        from socr.figures.chart_reader import read_chart_page
+        from socr.tables.reconstruct import chart_region_bboxes
+    except Exception:  # pragma: no cover - import guard
+        return None
+
+    # Round 2 (Argon 3) / round 4 (Argon 2): a page whose winner is ALREADY a finalized
+    # prose recovery is not a page shipping a bare marker -- re-finalizing it through
+    # this lane recomputed a body from ``native_words``, which a restored page does not
+    # carry, and so dropped its prose, its banner and its d3 ref.
+    #
+    # Round 2 returned ``None`` here, which was WORSE than the bug it fixed: the caller
+    # reads ``chart_floor is None`` as "this page has no chart body" and returns the bare
+    # whole-page marker, so the frozen recovery was erased rather than merely recomputed
+    # (measured by Argon on 2015-09-17 p22: the note, the banner and all four crops gone,
+    # ``scanned_prose_recovered`` True -> False). The #649 round-2 ruling is that the
+    # FROZEN RESULT STANDS, and ``_select_page_output_tagged``'s D3 branch implements it
+    # by keeping ``p.best_output.text`` (see the ``d3_text = best_output_text`` arm).
+    # This lane now does the same thing, with the same credential:
+    # ``_is_restored_prose_recovery`` requires both the typed field this module sets and
+    # this module's own banner in the bytes, neither of which a model attempt can forge.
+    if _is_restored_prose_recovery(p, page_num):
+        frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
+        if not frozen:
+            # No bytes to keep: fall through to the caller's bare marker rather than
+            # return a builder that would hand it an empty body.
+            return None
+        return lambda: frozen
+
+    pdf_path = getattr(getattr(state, "handle", None), "path", None)
+    if pdf_path is None:
+        return None
+    try:
+        with open_pdf(pdf_path) as doc:
+            if page_num - 1 >= doc.page_count:
+                return None
+            bboxes = list(chart_region_bboxes(doc[page_num - 1]))
+            if not bboxes:
+                return None
+            reading = read_chart_page(doc[page_num - 1], bboxes, page_num=page_num)
+    except Exception:
+        logger.warning("#1155: chart floor probe failed for p%d", page_num, exc_info=True)
+        return None
+    if not reading.panels:
+        return None
+
+    def _build() -> str | None:
+        from socr.figures.chart_regions import render_chart_region_crops
+        from socr.figures.chart_witness import floor_replacement_body
+
+        recovered = native_prose_floor_text(
+            p,
+            page_num,
+            marker_line=marker_line,
+            png_ref=png_ref,
+            extra_withheld_boxes=bboxes,
+        )
+        # #1144 round 5's gate, on the prose itself and before any mark is added:
+        # recovered text that does not follow the page's own reading order is not
+        # this page's prose, and must not ship however well the chart read.
+        order_refused = False
+        if recovered and not _prose_follows_native_order(
+            recovered, getattr(p, "native_text", "") or ""
+        ):
+            recovered = ""
+            order_refused = True
+        figures_dir = getattr(state, "figures_dir", None)
+        # Rendered ONCE per page. Selection runs again on a re-finalize and on a
+        # resume -- and even when a ``saved_text`` override is about to discard
+        # its result -- so without this the crops are re-rendered each time
+        # (Astra 3). The renderer is deterministic, so a repeat produced the same
+        # bytes under the same names; what it wasted was the work and the writes.
+        pictures = getattr(p, "chart_floor_pictures", None)
+        if pictures is None:
+            pictures = {}
+            if figures_dir is not None:
+                try:
+                    for asset in render_chart_region_crops(pdf_path, page_num, bboxes, figures_dir):
+                        index = int(getattr(asset, "region_index", 0))
+                        if getattr(asset, "rendered", False):
+                            pictures[index] = f"![chart region {index}]({asset.rel_path})"
+                        else:
+                            pictures[f"error:{index}"] = (
+                                getattr(asset, "error", "") or "render failed"
+                            )
+                except Exception as exc:
+                    logger.warning("#1155: crop render failed for p%d: %s", page_num, exc)
+            try:
+                p.chart_floor_pictures = pictures
+            except Exception:  # pragma: no cover - a read-only stand-in in tests
+                pass
+        # Round 2 (Argon 4): the prose lane marks EVERY withheld run, which on these
+        # pages is 3-6 identical failure blocks plus the page image each time. Say it
+        # once, page-scoped, and carry the image once.
+        from socr.figures.chart_witness import (
+            clause_mark,
+            collapse_withheld_runs,
+            order_refused_record,
+            region_clause_records,
+        )
+
+        prose, withheld_record, page_image = collapse_withheld_runs(
+            recovered or "", marker_line, png_ref, page_num
+        )
+        if order_refused:
+            # Round 2 (Astra P1): the refusal above set ``recovered = ""``, and the
+            # full-page image was embedded in that string -- so a page whose prose was
+            # refused shipped chart crops and NOTHING to read its text from, beside no
+            # statement that any text had been withheld. The image is the page's backup
+            # and does not depend on the prose being accepted; the refusal gets its own
+            # page-scoped line, because this lane may not withhold a page's whole text
+            # silently. ``collapse_withheld_runs`` cannot speak for this case: it was
+            # handed the emptied string, so it counted no runs and returned no image.
+            page_image = png_ref or None
+            withheld_record = order_refused_record()
+        # Round 4 (Astra P2): ONE list of records for everything this lane states about
+        # the page -- the per-region outcomes and the page-scoped coverage failure -- so
+        # that the page's lines and the page's verdict are rendered and recorded from the
+        # same objects. Round 3 recorded the regions only, and the page-scoped line
+        # existed as a string nothing could read back.
+        region_records = region_clause_records(
+            page_num,
+            region_pictures=pictures,
+            reading=reading,
+            region_count=len(bboxes),
+        )
+        lane_records = [*region_records, *([withheld_record] if withheld_record else [])]
+        try:
+            body = floor_replacement_body(
+                None,
+                page_num,
+                prose,
+                region_pictures=pictures,
+                reading=reading,
+                region_count=len(bboxes),
+                extra_marks=([clause_mark(page_num, withheld_record)] if withheld_record else []),
+                page_image=page_image,
+                region_records=region_records,
+            )
+        except Exception:
+            logger.warning("#1155: chart body build failed for p%d", page_num, exc_info=True)
+            return None
+        if not body:
+            return None
+        # Round 2 (both seats): the per-region outcomes RECORDED, not only rendered. The
+        # verdict seam reads them back (``core.verdict._chart_floor_clauses``) and
+        # publishes them on the sidecar, so a consumer learns per region what this page
+        # did and did not check without parsing the page's mark strings. Written only
+        # once a body exists, so the record cannot claim regions for a page that kept
+        # its bare marker.
+        try:
+            p.chart_floor_clauses = tuple(lane_records)
+        except Exception:  # pragma: no cover - a read-only stand-in in tests
+            pass
+        return body
+
+    return _build
+
+
+def structure_class_floor_text(
+    p, page_num: int, *, chart_floor: Callable[[], str | None] | None = None
+) -> str:
     """P2 / GH-317 / GH-520: fail-closed text for an exhausted structure-class page.
 
     Every table on the page becomes the standard unverifiable-table marker plus
@@ -2417,7 +2594,11 @@ def structure_class_floor_text(p, page_num: int) -> str:
     not a property anything downstream reads.
     """
     return table_floor_text_for_source(
-        p, page_num, getattr(p, "native_text", "") or "", prose_recovery=True
+        p,
+        page_num,
+        getattr(p, "native_text", "") or "",
+        prose_recovery=True,
+        chart_floor=chart_floor,
     )
 
 
@@ -2506,6 +2687,7 @@ def table_floor_text_for_source(
     *,
     fallback_marker: str | None = None,
     prose_recovery: bool = False,
+    chart_floor: Callable[[], str | None] | None = None,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
 
@@ -2608,7 +2790,56 @@ def table_floor_text_for_source(
         _boxes = getattr(p, "detected_table_bboxes", None) or []
         _count = getattr(p, "detected_table_count", 0)
         if not (type(_count) is int and _count > 0 and len(_boxes) == _count):
-            return whole_page
+            # #1155: a page with no usable table box withheld EVERYTHING --
+            # prose, pictures and the chart reading alike -- and 9 Fed SEP pages
+            # shipped 103 characters of marker and nothing else. When the chart
+            # READER can speak for the page, it recovers prose through this same
+            # #1144 lane with the chart regions added to the withheld boxes, and
+            # ships the chart's pictures and one mark per region.
+            #
+            # Round 2 (Astra 2, Argon 2, P0): the first version returned a body
+            # built from ``native_text`` VERBATIM here, which on a chart page is
+            # the chart's own y-axis ticks and shredded bin labels -- measured as
+            # 149 loose numeric lines on 2010-04-28 p15, and on 2015-09-17 p22 a
+            # dump of every bin endpoint from -0.37 to 4.37 -- shipped beside a
+            # mark saying values were not shipped. It also fired BEFORE the
+            # /Rotate guard below and on partial inventories. Both are fixed by
+            # going through ``_chart_prose_floor`` AFTER that guard, with the
+            # chart regions as withheld boxes: nothing inside a chart region can
+            # ship as loose text, by geometry rather than by pattern.
+            # Round 2 (Astra P1, Argon 2): a PARTIAL inventory is not an absence of
+            # tables. ``_count=2`` with one box means a table box is MISSING, and the
+            # chart boxes cannot protect a table nobody drew a box around -- an
+            # unboxed row of word cells then ships as loose prose. The chart floor is
+            # offered only where there is no table evidence at all. Measured: all 12
+            # real Fed SEP pages this lane reaches have ``_count == 0`` and no boxes,
+            # so this costs none of them; both reviewers' partial-inventory cases were
+            # CONSTRUCTED states, not pages in either corpus.
+            if _count != 0 or _boxes:
+                return whole_page
+            if chart_floor is None:
+                return whole_page
+            if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
+                # Same refusal the normal lane makes below, applied before the
+                # chart lane too: on a /Rotate page the box coordinates and the
+                # word coordinates are in different spaces.
+                return whole_page
+            # The order gate is applied INSIDE the builder, to the recovered prose
+            # alone. It cannot be applied here: this body leads with socr's own
+            # canonical mark lines, which are not page content and which the gate
+            # does not recognise, so gating the assembled body refuses every page
+            # and the lane never fires.
+            chart_body = chart_floor()
+            if not chart_body:
+                return whole_page
+            # Record that this body came from the chart floor, so the generic
+            # chart-preservation pass skips it: that pass anchors crops on the
+            # in-chart words this lane deliberately withheld (Argon 3).
+            try:
+                p.chart_floor_body = True
+            except Exception:  # pragma: no cover - a read-only stand-in in tests
+                pass
+            return chart_body
         # #1144 round 4, P0 (Fable, PR #1158). ``native_words`` are
         # ``get_text("words")`` -- UNROTATED coordinates -- while
         # ``detected_table_bboxes`` come from ``find_tables()`` in ROTATED ones.
@@ -2767,7 +2998,7 @@ def _prose_follows_native_order(body: str, native_text: str) -> bool:
     return all(tok in truth for tok in wanted)
 
 
-def _page_prose_partition(p) -> list:
+def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
     """The prose/table partition of a page's native words, whole page.
 
     #652 round 9 introduced this because TWO decisions read a page's layout --
@@ -2790,7 +3021,15 @@ def _page_prose_partition(p) -> list:
     # #1144: the page's DETECTED table boxes withhold the bands inside them
     # outright, so a numeral-free table (p77's Yes/No grid) cannot ship as
     # loose text. A page with no boxes partitions exactly as it did before.
-    return partition_prose_bands(words, table_boxes=getattr(p, "detected_table_bboxes", None))
+    # #1155: a caller may add boxes of its own. The chart floor adds the page's
+    # CHART regions, so that a band inside a chart -- its y-axis ticks, its
+    # shredded bin labels -- is withheld by the same geometry rule that
+    # withholds a table, rather than by any pattern over the text. Without it
+    # the chart's own numbers shipped as loose prose: 149 numeric lines on
+    # 2010-04-28 p15, measured in #1155 PR 1 review.
+    boxes = list(getattr(p, "detected_table_bboxes", None) or [])
+    boxes.extend(extra_boxes or [])
+    return partition_prose_bands(words, table_boxes=boxes or None)
 
 
 #: Banner stamped above prose recovered by ``native_prose_floor_text``. The
@@ -2948,7 +3187,15 @@ def _is_prose_recovery_body(text: str, page_num: int) -> bool:
     line is what is tested.
     """
     body = text or ""
-    while True:
+    # ``while body``, not ``while True`` (#1155 round 4). On an EMPTY or whitespace-only
+    # body, ``"".partition("\n")`` returns ``("", "", "")``: the head is blank, ``sep`` is
+    # empty, so the loop reassigned ``body = ""`` and span forever at 100% CPU. It was
+    # latent while every caller passed a body that always carried at least a marker line;
+    # round 4 added a caller that passes a SAVED fragment, which can be empty, and
+    # ``tests/test_1100_blank_pages.py`` then hung the whole suite for 55 minutes. An
+    # empty body carries no banner, so falling out here and returning False is also the
+    # right answer.
+    while body:
         head, sep, rest = body.partition("\n")
         if not head.strip():
             body = rest if sep else ""
@@ -3079,7 +3326,14 @@ def _all_native_text(
     return "\n\n".join(blocks)
 
 
-def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+def native_prose_floor_text(
+    p,
+    page_num: int,
+    *,
+    marker_line: str,
+    png_ref: str,
+    extra_withheld_boxes: list | None = None,
+) -> str | None:
     """The page's own prose, flagged, around a withheld table -- or ``None``.
 
     #649 (owner ruling, 2026-09-10). Fed 1989-11-14 p3 reaches
@@ -3134,7 +3388,7 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     if not words:
         return None
 
-    bands = _page_prose_partition(p)
+    bands = _page_prose_partition(p, extra_boxes=extra_withheld_boxes)
     prose_bands = [band for is_prose, band in bands if is_prose]
     if not prose_bands:
         return None
@@ -3587,6 +3841,8 @@ def _select_page_output_tagged(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
+    *,
+    text_will_be_overridden: bool = False,
 ) -> tuple[PageOutput, SelectionProvenance]:
     """The PageOutput that should be frozen for this page.
 
@@ -4249,7 +4505,21 @@ def _select_page_output_tagged(
             # subsumes the other's.
             timed_out = page_judge_timeout_attempt(p) is not None
             text_table_declined = not timed_out and structure_class_text_table_declined(p)
-            floor_text = structure_class_floor_text(p, page_num)
+            floor_text = structure_class_floor_text(
+                p,
+                page_num,
+                chart_floor=(
+                    None
+                    if text_will_be_overridden
+                    else chart_floor_replacement(
+                        state,
+                        page_num,
+                        p,
+                        marker_line=page_failed_marker(page_num),
+                        png_ref=getattr(p, "d3_floor_png_ref", "") or "",
+                    )
+                ),
+            )
             # #1144 round 4, P1 (Fable). The D3 lane records its recovery on the
             # output (``audit_notes`` plus ``scanned_prose_recovered``) and this
             # branch did not, so for every page #1144 adds the sidecar said
@@ -4511,6 +4781,11 @@ def _select_page_output_tagged(
     # case that prose ships and only the table region(s) marker.
     whole_page_marker = page_failed_marker(page_num)
     native_text = getattr(p, "native_text", "") or ""
+    # #1155 deliberately does NOT offer a chart replacement here: this call leaves
+    # ``prose_recovery`` at False, and the refusal lane returns the whole-page marker
+    # before it reaches the no-box branch. Passing one would be an argument that
+    # silently does nothing. All 9 Fed SEP pages reach the floor through
+    # ``structure_class_floor_text`` instead, which is where the replacement is offered.
     floor_text = table_floor_text_for_source(
         p, page_num, native_text, fallback_marker=whole_page_marker
     )
@@ -5531,6 +5806,45 @@ def _apply_native_paragraphs(
     return output if text == output.text else replace(output, text=text)
 
 
+def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num: int):
+    """#1155 round 4 (Argon 2): the recovery facts belong to the BYTES that ship.
+
+    ``_phase_assemble`` re-finalizes every page with ``saved_text`` (the fragment it
+    already wrote), and selection is told its text will be overridden -- so the chart
+    floor declines, the structure-class ending computes its ``prose_recovered`` from the
+    bare whole-page marker it then builds, and the swap below replaces only the TEXT. The
+    page's own sidecar was therefore rewritten at assemble with
+    ``scanned_prose_recovered=False`` and ``audit_notes=[]`` over a body that visibly
+    carries the recovery banner: the record contradicting the bytes it describes, on the
+    last write of the run, which is the one a resume and the corpus read.
+
+    So the facts are re-derived from the saved body, by the same evidence the ending and
+    the restore path use -- ``_is_prose_recovery_body``, this module's own banner, which
+    no model attempt can forge.
+
+    ADDITIVE only: it records a recovery the bytes show and never clears one. The
+    symmetric direction was written first, with a test arm for it, and a mutant that
+    removed the clearing killed nothing -- because a stale TRUE cannot reach this seam by
+    the path this ticket touches: a saved body forces ``text_will_be_overridden``, which
+    makes the structure-class ending derive its flag from the bare marker, so the output
+    arriving here already says False. Clearing is therefore an unexercised branch that
+    REMOVES a disclosure, and this repo does not ship those. If a future ending sets the
+    flag on a path the override does not suppress, that is the moment to add the other
+    direction, with the arm that reaches it.
+    """
+    # ``not saved_text`` first: belt and braces only, and recorded as such -- a mutant
+    # removing it kills no test, because the walk in ``_is_prose_recovery_body`` now
+    # terminates on an empty body by itself. It stays because asking whether nothing is a
+    # prose recovery is a question with no answer, not because it guards the hang.
+    if not saved_text or not _is_prose_recovery_body(saved_text, page_num):
+        return output
+    if bool(getattr(output, "scanned_prose_recovered", False)):
+        return output
+    notes = [n for n in (output.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE]
+    notes.append(SCANNED_PROSE_RECOVERED_NOTE)
+    return replace(output, scanned_prose_recovered=True, audit_notes=notes)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -5557,9 +5871,17 @@ def _select_and_finalize_page(
           every mark an earlier step already put at the top.
       10. Disposition construction from the guarded output and provenance.
     """
-    output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
+    # Round 2 (Argon 3): when a saved body is going to replace the selected text, the
+    # selection's SIDE EFFECTS still ran -- the chart floor rendered crops that were
+    # then discarded. Telling selection that its text will be overridden lets the
+    # chart floor decline before it renders. The override itself is unchanged and
+    # still has the last word.
+    output, provenance = _select_page_output_with_provenance(
+        state, page_num, whole_doc, text_will_be_overridden=saved_text is not None
+    )
     if saved_text is not None:
         output = replace(output, text=saved_text)
+        output = _recovery_facts_of_saved_body(output, saved_text, page_num)
     output = _apply_table_emission_guard(output, page_num)
     p = state.pages.get(page_num)
     if p is not None:
