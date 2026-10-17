@@ -433,10 +433,85 @@ def text_layer_span_is_visible(span: dict) -> bool:
     """True when a text-layer span is visibly rendered (#961 / #1099).
 
     Uses ``get_text("dict")`` span ``alpha`` (0 = invisible / render mode 3 on
-    typical PDFs). ``get_texttrace()`` is avoided: repeated calls across many
-    pages can trip a PyMuPDF refcount defect in ``find_tables`` later in-process.
+    typical PDFs). ``get_texttrace()`` is avoided because it has a refcount
+    defect that ABORTS the interpreter; see
+    :func:`text_layer_invisible_char_counts` for what that defect actually is.
     """
     return span.get("alpha", 255) != 0
+
+
+def text_layer_invisible_char_counts(page) -> tuple[int, int]:
+    """``(invisible chars, total chars)`` in *page*'s text layer (#1189).
+
+    The one place that weighs a page's text layer by visibility. #961 asks whether
+    most of it is invisible; ``native_contradiction`` asks the complement, whether
+    enough of it is visible to be read as evidence. Both are ratios over the SAME
+    two counts, so they live here together: a wrapper in front of one of them would
+    blind the other.
+
+    ``get_texttrace()`` is deliberately not used. In PyMuPDF 1.27.2.2, 1.27.2.3 and
+    1.28.0 it decrements ``None``'s reference count once per span returned
+    (measured: 309 spans -> -320, 515 -> -520). The count falls monotonically to
+    zero and the interpreter dies with ``Fatal Python error: none_dealloc``. That is
+    an ABORT, not an exception: no ``except``, no ``finally``, no fail-closed
+    handling runs. Because the fatal decref can be any decref, the crash surfaces at
+    whatever code happens to touch ``None`` next -- which is why #1189 was first
+    reported as a ``find_tables`` defect, and why the comment here used to say so.
+    Upstream fixed it in 1.28.2 (PyMuPDF #5042), but the Alliance cluster builds its
+    own wheels and ran the affected ``1.27.2.2+computecanada``, so socr does not rely
+    on having a fixed PyMuPDF.
+
+    The ``alpha`` route agreed with the old one on every page of 506 pages of six
+    documents -- five Fed scans that abort, plus a dense econ paper -- 315
+    invisible-dominant and 191 not (``scratch/1189/alpha_equiv.jsonl``). It is NOT
+    equivalent by construction, and two synthetic constructions diverge; both times
+    ``alpha`` is the more faithful answer and both times it errs toward distrusting
+    the text layer, which is the safe direction for a citation corpus:
+
+    * **Render mode 7** (clip-only) text is invisible, and ``get_texttrace`` returns
+      no spans at all for it, so the old route scored it ``0/0`` and called the page
+      clean. ``alpha`` reports it as invisible, which it is.
+    * **Render mode 0 with a fully transparent fill** is invisible ink in a visible
+      mode. The old route saw type 0 and called it visible; ``alpha`` reports 0.
+
+    One third shape diverges the OTHER way, and is accepted rather than fixed:
+    **render mode 2 with a transparent fill and an opaque stroke** puts visible glyph
+    outlines on the page, but the span's ``alpha`` comes from the fill pass, so this
+    route calls it invisible. That is wrong about the ink and right about the risk:
+    the page is sent for re-reading instead of being trusted, which costs OCR time
+    and loses nothing. Outline-only text over a page-sized raster is not a shape any
+    OCR tool produces.
+
+    No page of the 506 was any of the three shapes, so the change is inert on
+    everything measured. ``tests/test_gh1189_texttrace_abort.py`` pins all three as
+    intended rather than leaving them to be rediscovered as regressions.
+
+    Raises on a PyMuPDF failure, so a caller that must fail closed still can; an
+    unreadable page is "unknown", never "clean". That includes a non-dict return:
+    ``(page.get_text("dict") or {})`` would have turned a ``None`` into zero spans,
+    i.e. a confident "no invisible text" on a page nothing could be read from. A
+    dict carrying no ``blocks`` is different and is NOT an error -- that is a page
+    with no text layer, which legitimately counts ``(0, 0)``.
+    """
+    page_dict = page.get_text("dict")
+    if not isinstance(page_dict, dict):
+        raise TypeError(
+            f'page.get_text("dict") returned {type(page_dict).__name__}, not a dict; '
+            "the page's text layer could not be read"
+        )
+    invisible = total = 0
+    for block in page_dict.get("blocks", ()):
+        if block.get("type") != 0:  # 0 = text; images carry no spans
+            continue
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if not isinstance(span, dict):
+                    continue
+                count = len(span.get("text") or "")
+                total += count
+                if not text_layer_span_is_visible(span):
+                    invisible += count
+    return invisible, total
 
 
 def _invisible_text_layer_bboxes(page) -> list[tuple[float, float, float, float]]:
