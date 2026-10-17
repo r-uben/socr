@@ -145,3 +145,17 @@ printed figure from a real cell and requires that row to be refused.
 and the mutation was at fault, not the test: it added a self-assignment instead
 of deleting the reset, and the anchor was not unique between the two reset
 sites. Suite and ruff results are in the PR.
+## PR 2 census: 1 panel, then 43
+
+The first PR 2 census reported 1 resolved panel in 15 regions and was wrong. It
+took its page set from the `chart_region` marks in the `fed-repilot-1016`
+output, but that run is dated 2026-10-16 11:08 and #1190 — the routing that
+sends these pages to the chart floor — merged 2026-10-17 11:25, so in that run
+the very pages the floor rescues still carry the 105-byte whole-page marker and
+no mark at all. Scoping to the marks excluded exactly the pages PR 2 is for.
+Taking the page set from what the floor will fire on after #1190 gives **43
+panels over 13 pages in 3 documents, 56 series carrying counts**, and the
+reader reproduces #1155's figures exactly on #1155's pages (2015-09-17 p17 5/5,
+p18 5/5, p20 4/4; 2010-04-28 p15 3/4, p18 2/3; every 2015 series sums to 17).
+Probe: `scratch/routing-baseline/leads/1184/probes/pr2_reconcile.py`,
+`pr2_census2.py`.
