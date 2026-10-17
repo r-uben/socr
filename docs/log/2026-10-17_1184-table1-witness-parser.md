@@ -96,3 +96,52 @@ because only a band with bound cells sets one.
   post-change total above.
 
 DONE
+
+## Round 2: the PR #1195 review
+
+Two holes on the wrong-number path, both real.
+
+**A lost cell was indistinguishable from a column the release never prints.**
+The self-check only compared neighbouring groups, so a missing central cell
+left the range with nothing above it: on head `c9e38d8`, GDP 2010 shipped
+`(4.1, 4.6)` on a row whose own median is 3.5, with `rejected` empty, and a row
+carrying only the range group shipped every year unchecked. Two rules now: the
+range is checked against the median DIRECTLY, and a year that prints a range
+while a group the table declares is absent is refused by name
+(`REJECTED_MISSING_GROUP`). The distinction holds because a column these
+releases do not print is blank in EVERY group — longer-run core PCE prints no
+median, no central tendency and no range — so a gap in one group alone is a
+cell this parser lost. The blank-column case still costs only its own key: the
+three releases still yield 30, 28 and 43 published ranges, and 2015-09-17
+still scores 43/43 against the Fed's published table.
+
+**A rejected row lent its name to the sub-row below it.** The reset existed and
+was commented, but no test failed when it was deleted: the reviewer's four-row
+fixture then returned GDP's `(2.3, 4.0)` for
+`range_for("Unemployment rate", "prior", "2010")` — one variable's figures
+under another's key. A sub-row names a meeting, not a variable, so an orphan
+one is now refused by name (`REJECTED_ORPHAN_PRIOR_ROW`) rather than falling
+back on the last variable that survived or on its own printed label, which
+would invent a variable called "january projection".
+
+Also closed from that review: the median-outside-central check, the
+repeated-sequence column check, the one-group-word-per-block rule, the trailing
+column bound (the "Federal Open Market Committee" printed down the edge of
+2015-09-17 p13), the pitch coming from the LAST repetition (2015's 26.4pt
+median columns against its 41.4pt range columns), and the first-data-band
+on-grid rule were each in the code and in no test; each now has one. Holes are
+bound like figures instead of being filtered out before binding, so a
+misplaced `n/a` is refused rather than dropped — the branch that read them was
+dead code. A figure can no longer name a column. The module docstring
+described the parser it replaced.
+
+**The real geometry is now in the repository.** `tests/fixtures/gh1184/` holds
+the frozen word boxes of the three pages, so the suite drives the real layouts
+with no PDF: 30, 28 and 43 rows, the 2015 figures checked against the Fed's own
+published table carried as literal data, and a difference test that deletes one
+printed figure from a real cell and requires that row to be refused.
+
+19 mutants, all killed by their named test. One of them survived its first run
+and the mutation was at fault, not the test: it added a self-assignment instead
+of deleting the reset, and the anchor was not unique between the two reset
+sites. Suite and ruff results are in the PR.

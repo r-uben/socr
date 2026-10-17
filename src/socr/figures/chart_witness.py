@@ -29,18 +29,32 @@ Two rules this module exists to enforce, both of them the owner's:
   No witness, an unrecognised layout, a row that fails its own self-check, or a
   reading that contradicts the range: all withhold.
 * **the witness must itself be proven.** A parsed row is only a witness when
-  its own arithmetic holds -- median inside central tendency inside range, and
-  a value count equal to the header's own column count. A table whose parse is
-  unchecked would launder a parsing bug into a published number.
+  its own arithmetic holds -- the median and the central tendency each inside
+  the range, the median inside the central tendency, every value bound to one
+  column of the table's own header, and no year printing a range while a group
+  the table declares is absent. A table whose parse is unchecked would launder
+  a parsing bug into a published number.
 
-Scope, deliberately narrow (see #1184). Only the **upright single-block**
-layout is parsed: one row per series carrying the row label and then one cell
-per column, group by group. The 2008-10-29 release splits the same table into
-two stacked blocks, and the 2015-09-17 release draws it rotated 90 degrees;
-both are REFUSED here with a named reason rather than guessed at, so the gate
-withholds on them until #1184 lands. The Fed minutes corpus runs to 1,021
-documents across more decades than these three, so the layout set is not
-closed, and an unrecognised layout must always refuse rather than improvise.
+How it reads a table (#1184). Geometrically. The columns are the labels the
+table's own HEADER prints, never a grid clustered out of the data: every data
+row seeds such a grid, so each cell then falls inside its own cluster's spread
+by identity and a stray figure is admitted by the tolerance it widened. Each
+value binds to one header column -- within a quarter of a cell's own lo-to-hi
+span, which is the distance a dropped figure would move it -- or the row is
+refused by name. Groups are placed by where their headings sit: beside the
+columns when the header's year sequence repeats (2010-04-28, 2015-09-17), and
+as stacked blocks over one shared grid when it does not (2008-10-29). The
+reading frame comes from the direction the page records, so a table drawn
+rotated (2015-09-17) is read like any other.
+
+What it does NOT do. The count rule this replaced -- a row's value total
+against the header's column total -- rejected a column the release never
+prints (longer-run core PCE, uncollected) and every row of a stacked table.
+Binding tells those apart; it does not make the layout set closed. The Fed
+minutes corpus runs to 1,021 documents over more decades than the three
+measured here, and pre-2007 fractional projections, horizon headers that are
+not years, and content drawn at other angles are all REFUSED with a named
+reason rather than guessed at.
 """
 
 from __future__ import annotations
@@ -135,6 +149,14 @@ REJECTED_UNBOUND_CELL = "a value is printed in no column of this table"
 REJECTED_TWO_CELLS_IN_A_COLUMN = "two values are printed in one column"
 REJECTED_NO_LABEL = "the row carries no label beside its values"
 REJECTED_CENTRAL_OUTSIDE_RANGE = "central tendency is not inside the range"
+REJECTED_MEDIAN_OUTSIDE_RANGE = "the median is not inside the range"
+REJECTED_MISSING_GROUP = (
+    "a year prints a range but not every group this table declares, so a cell of that "
+    "row was lost rather than never printed"
+)
+REJECTED_ORPHAN_PRIOR_ROW = (
+    "a previous-meeting sub-row whose own variable row did not survive its checks"
+)
 REJECTED_MEDIAN_OUTSIDE_CENTRAL = "median is not inside the central tendency"
 
 #: ``gate_series`` refusal reasons.
@@ -429,14 +451,18 @@ def _resolve_columns(
     # row-label heading ("Variable"), not a column -- and on the right by one
     # pitch for the column itself plus half a pitch for a token's own width,
     # which is what keeps the "Federal Open Market Committee" printed down the
-    # edge of 2015-09-17 p13 out of the trailing "Longer run" column.
+    # edge of 2015-09-17 p13 out of the trailing "Longer run" column. A figure
+    # is never a column's name either, so a stray value printed above the first
+    # data row cannot invent a column.
     right_bound = years[-1] + 1.5 * pitch
     extra = [
         (u0, u1, text)
         for v, tokens in bands.items()
         if v not in group_band_vs and header_v <= v < first_data_v
         for u0, u1, text in tokens
-        if not _YEAR_RE.match(text) and years[0] < (u0 + u1) / 2 <= right_bound
+        if not _YEAR_RE.match(text)
+        and not _VALUE_RE.match(text)
+        and years[0] < (u0 + u1) / 2 <= right_bound
     ]
 
     columns = [_Column(centre=centre, label=name) for centre, name in named]
@@ -606,10 +632,10 @@ def parse_table1_witness(page) -> WitnessTable:
         return WitnessTable(refusal=refusal)
 
     layout = LAYOUT_SIDE_BY_SIDE_GROUPS if repetitions > 1 else LAYOUT_STACKED_BLOCKS
-    available = (
+    declared_groups = (
         {column.group for column in columns} if repetitions > 1 else set(block_names.values())
     )
-    if GROUP_RANGE not in available:
+    if GROUP_RANGE not in declared_groups:
         return WitnessTable(refusal=REFUSED_NO_RANGE_GROUP)
 
     centres = [column.centre for column in columns]
@@ -625,9 +651,19 @@ def parse_table1_witness(page) -> WitnessTable:
         if len(values) < 2:
             continue
         tokens = bands[v]
-        printed = _row_label(tokens, min(c.first_token for c in values), tolerance)
+        printed = _row_label(tokens, min(c.first_token for c in cells_by_band[v]), tolerance)
         prior = _PRIOR_ROW_RE.match(printed.strip())
-        if prior is not None and current_variable is not None:
+        if prior is not None:
+            # A sub-row names a MEETING, not a variable, so it only means
+            # anything under the variable row above it. With that row rejected
+            # there is nothing to attach it to: publishing it under the last
+            # variable that did survive puts one variable's figures under
+            # another's key (the reviewer measured unemployment's prior row
+            # returning GDP's range), and publishing it under its own printed
+            # label invents a variable called "january projection".
+            if current_variable is None:
+                rejected.append((_normalise_label(printed), "prior", REJECTED_ORPHAN_PRIOR_ROW))
+                continue
             variable, series_row = current_variable, "prior"
         else:
             variable, series_row = _normalise_label(printed), "current"
@@ -639,7 +675,12 @@ def parse_table1_witness(page) -> WitnessTable:
 
         bound: dict[int, _Cell] = {}
         failure = ""
-        for cell in values:
+        # Holes are bound along with the figures. They carry no value, but they
+        # occupy a column, so an "n/a" printed where no column is -- or in a
+        # column that already holds a figure -- is refused rather than dropped.
+        # Before, both callers filtered holes out before binding and the branch
+        # that reads them was dead code (PR #1195 review).
+        for cell in cells_by_band[v]:
             index = min(range(len(columns)), key=lambda i: abs(cell.centre - centres[i]))
             if abs(cell.centre - centres[index]) > tolerance or not (
                 cell.u0 <= centres[index] <= cell.u1
@@ -669,7 +710,7 @@ def parse_table1_witness(page) -> WitnessTable:
         by_year = collected.setdefault((variable, series_row), {})
         for index, cell in bound.items():
             group = columns[index].group or band_group
-            if not group:
+            if not group or cell.is_hole:
                 continue
             by_year.setdefault(columns[index].label, {})[group] = (cell.lo, cell.hi)
 
@@ -680,12 +721,33 @@ def parse_table1_witness(page) -> WitnessTable:
             full = groups.get(GROUP_RANGE)
             central = groups.get(GROUP_CENTRAL)
             median = groups.get(GROUP_MEDIAN)
+            # A year that prints a range but not every group the table declares
+            # has LOST a cell. A column the release never prints is blank in
+            # every group -- longer-run core PCE, which these releases do not
+            # collect, prints no median, no central tendency and no range -- so
+            # a gap in one group only cannot be that. Without this the central
+            # cell could go missing and the range ship with nothing above it to
+            # check against (PR #1195 review, blocker 1).
+            if full and declared_groups - set(groups):
+                broken = REJECTED_MISSING_GROUP
+                break
             if (
                 full
                 and central
                 and not (full[0] - _EPSILON <= central[0] and central[1] <= full[1] + _EPSILON)
             ):
                 broken = REJECTED_CENTRAL_OUTSIDE_RANGE
+                break
+            # Checked against the median DIRECTLY, not only through the central
+            # tendency: chaining the two leaves the range unchecked whenever the
+            # middle link is absent, which is how "4.1 to 4.6" shipped on a row
+            # whose own median was 3.5.
+            if (
+                full
+                and median
+                and not (full[0] - _EPSILON <= median[0] and median[1] <= full[1] + _EPSILON)
+            ):
+                broken = REJECTED_MEDIAN_OUTSIDE_RANGE
                 break
             if (
                 central

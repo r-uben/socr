@@ -24,7 +24,13 @@ import fitz
 import pytest
 
 from socr.figures.chart_witness import (
+    REFUSED_COLUMNS_UNRESOLVED,
+    REFUSED_GROUPS_UNRESOLVED,
     REFUSED_NO_RANGE_GROUP,
+    REJECTED_MEDIAN_OUTSIDE_CENTRAL,
+    REJECTED_MEDIAN_OUTSIDE_RANGE,
+    REJECTED_MISSING_GROUP,
+    REJECTED_ORPHAN_PRIOR_ROW,
     REFUSED_UNSUPPORTED_ROTATION,
     REJECTED_CENTRAL_OUTSIDE_RANGE,
     REJECTED_TWO_CELLS_IN_A_COLUMN,
@@ -53,8 +59,19 @@ def _width(text: str) -> float:
     return fitz.get_text_length(text, fontname=_FONT, fontsize=_SIZE)
 
 
-def _column_u(group_index: int, year_index: int, years: int) -> float:
-    return _FIRST_COLUMN_U + group_index * (years * _PITCH + _GROUP_GAP) + year_index * _PITCH
+def _column_u(group_index: int, year_index: int, years: int, pitches=None) -> float:
+    """Where one column's centre lands.
+
+    ``pitches`` gives each group its OWN column pitch. The releases do not print
+    the groups at one width -- on 2015-09-17 the median group holds a single
+    figure per column and sits 26.4pt apart while the range group holds a pair
+    and sits 41.4pt apart -- and a fixture with one pitch everywhere cannot
+    exercise the code that derives the trailing bound from the LAST group.
+    """
+    origin = _FIRST_COLUMN_U
+    for earlier in range(group_index):
+        origin += years * (pitches[earlier] if pitches else _PITCH) + _GROUP_GAP
+    return origin + year_index * (pitches[group_index] if pitches else _PITCH)
 
 
 def _draw(path, placements, *, rotate=0):
@@ -89,25 +106,33 @@ def _draw(path, placements, *, rotate=0):
     return fitz.open(path)
 
 
-def _side_by_side(path, *, years, groups, rows, rotate=0, extra=()):
+def _side_by_side(
+    path, *, years, groups, rows, rotate=0, extra=(), pitches=None, trailing_label=None
+):
     """The 2010-04-28 / 2015-09-17 shape: every group printed beside the others.
 
     ``rows`` is ``(label, {(group_index, year_index): cell_text})``; a pair left
-    out is a column the table does not print there.
+    out is a column the table does not print there. ``trailing_label`` adds one
+    further column to EVERY group, named by something other than a year, the
+    way the releases print "Longer run"; its cells use year index
+    ``len(years)``.
     """
+    span_count = len(years) + (1 if trailing_label else 0)
     placements = [(0, _FIRST_COLUMN_U, "Table 1. Economic projections")]
     for g, group in enumerate(groups):
-        span = [_column_u(g, y, len(years)) for y in range(len(years))]
-        placements.append((1, (span[0] + span[-1]) / 2, group))
+        edges = [_column_u(g, y, span_count, pitches) for y in (0, span_count - 1)]
+        placements.append((1, sum(edges) / 2, group))
     for g in range(len(groups)):
         for y, year in enumerate(years):
-            placements.append((2, _column_u(g, y, len(years)), year))
+            placements.append((2, _column_u(g, y, span_count, pitches), year))
+        if trailing_label:
+            placements.append((2.6, _column_u(g, len(years), span_count, pitches), trailing_label))
     placements.append((2, _LABEL_U, "Variable"))
     for index, (label, cells) in enumerate(rows):
         line = 3 + index
         placements.append((line, _LABEL_U, label))
         for (g, y), text in cells.items():
-            placements.append((line, _column_u(g, y, len(years)), text))
+            placements.append((line, _column_u(g, y, span_count, pitches), text))
     placements.extend(extra)
     return _draw(path, placements, rotate=rotate)
 
@@ -513,3 +538,298 @@ def test_the_fixture_really_lands_where_the_test_says_it_does(tmp_path, rotation
     assert min(abs(c - wanted) for c in centres) < 1.0, (
         f"the fixture placed 2010 at {centres}, not at {wanted}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# PR #1195 review, blocker 1: a lost cell is not a blank column
+# --------------------------------------------------------------------------------------
+
+
+def test_a_range_contradicting_its_own_median_does_not_ship(tmp_path):
+    """The reviewer's case: with the central cell lost, nothing checked the range.
+
+    The self-check compared neighbouring groups only -- range against central,
+    central against median -- so a missing central cell left the range with
+    nothing above it. Measured on head c9e38d8: GDP 2010 shipped (4.1, 4.6) on
+    a row whose own median is 3.5, with ``rejected`` empty.
+    """
+    cells = {k: v for k, v in _ROWS[0][1].items() if k != (1, 0)}
+    rows = ((_ROWS[0][0], {**cells, (2, 0): "4.1 to 4.6"}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "contradicts.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert ("change in real gdp", "current", "2010") not in witness.rows
+    assert witness.rows == {}, "and the row ships nothing at all, not just that year"
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MISSING_GROUP]
+
+
+def test_a_year_missing_a_declared_group_is_a_lost_cell_not_a_hole(tmp_path):
+    """A column the release never prints is blank in EVERY group.
+
+    Longer-run core PCE is uncollected, so that column prints no median, no
+    central tendency and no range. A gap in one group only cannot be that, so
+    it is a cell this parser lost and the row is refused by name -- while the
+    blank-column case keeps working (see the hole test above).
+    """
+    rows = ((_ROWS[0][0], {k: v for k, v in _ROWS[0][1].items() if k != (0, 1)}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "lostgroup.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert witness.rows == {}
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MISSING_GROUP]
+
+
+def test_a_row_carrying_only_the_range_group_ships_nothing(tmp_path):
+    """Both checking groups lost at once must not read as a clean row."""
+    rows = ((_ROWS[0][0], {k: v for k, v in _ROWS[0][1].items() if k[0] == 2}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "rangeonly.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert witness.rows == {}
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MISSING_GROUP]
+
+
+def test_a_table_with_no_central_group_still_checks_median_against_range(tmp_path):
+    """Where no central tendency is declared, the median is the only check left.
+
+    The missing-group rule cannot help here -- nothing is missing, the table
+    simply prints two groups -- so this is what the DIRECT median-in-range test
+    is for.
+    """
+    groups = (_GROUPS[0], _GROUPS[2])
+    rows = (
+        (
+            "Change in real GDP",
+            {(0, 0): "3.5", (0, 1): "3.9", (1, 0): "1.0 to 1.5", (1, 1): "3.0 to 4.6"},
+        ),
+    )
+    witness = _parse(
+        _side_by_side(tmp_path / "medrange.pdf", years=_YEARS, groups=groups, rows=rows)
+    )
+    assert witness.rows == {}
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MEDIAN_OUTSIDE_RANGE]
+
+
+def test_a_median_outside_its_central_tendency_is_not_a_witness(tmp_path):
+    """The third nesting rule, which no test reached before (PR #1195 review)."""
+    rows = ((_ROWS[0][0], {**_ROWS[0][1], (0, 0): "2.9"}),)
+    witness = _parse(_side_by_side(tmp_path / "medct.pdf", years=_YEARS, groups=_GROUPS, rows=rows))
+    assert witness.rows == {}
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MEDIAN_OUTSIDE_CENTRAL]
+
+
+# --------------------------------------------------------------------------------------
+# PR #1195 review, blocker 2: a rejected row lends its name to nothing
+# --------------------------------------------------------------------------------------
+
+
+def test_a_rejected_row_does_not_hand_its_sub_row_to_the_variable_above(tmp_path):
+    """The reviewer's four-row fixture, and the wrong number it exposed.
+
+    A sub-row names a MEETING, so it only means anything under the variable row
+    above it. With that row rejected, the reviewer measured
+    ``range_for("Unemployment rate", "prior", "2010")`` returning GDP's
+    (2.3, 4.0): one variable's figures under another variable's key, which is a
+    wrong number, not a missing one. The sub-row must not fall back on its own
+    printed label either -- that publishes a variable called "january
+    projection".
+    """
+    unemployment = {
+        (0, 0): "9.3",
+        (0, 1): "8.3",
+        (1, 0): "9.1 to 9.5",
+        (1, 1): "8.1 to 8.5",
+        (2, 0): "8.6 to 10.0",
+        (2, 1): "7.2 to 8.8",
+    }
+    unemployment_prior = {
+        (0, 0): "9.6",
+        (0, 1): "8.4",
+        (1, 0): "9.5 to 9.7",
+        (1, 1): "8.2 to 8.5",
+        (2, 0): "8.6 to 10.0",
+        (2, 1): "7.2 to 8.8",
+    }
+    rows = (
+        ("Unemployment rate", unemployment),
+        ("January projection", unemployment_prior),
+        ("Change in real GDP", {k: v for k, v in _ROWS[0][1].items() if k != (2, 0)}),
+        ("January projection", _ROWS[1][1]),
+    )
+    stray = _column_u(2, 0, len(_YEARS)) + _GROUP_GAP / 2
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "fourrow.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=rows,
+            extra=((5, stray, "2.7 to 4.0"),),
+        )
+    )
+    assert witness.range_for("Unemployment rate", "prior", "2010") == (8.6, 10.0), (
+        "the unemployment sub-row keeps its OWN figures"
+    )
+    assert witness.range_for("Change in real GDP", "current", "2010") is None
+    assert ("january projection", "current", "2010") not in witness.rows, (
+        "and no variable is invented out of a sub-row's printed label"
+    )
+    reasons = [reason for _, _, reason in witness.rejected]
+    assert REJECTED_ORPHAN_PRIOR_ROW in reasons
+    assert REJECTED_UNBOUND_CELL in reasons
+
+
+# --------------------------------------------------------------------------------------
+# PR #1195 review: gates that were in the code but in no test
+# --------------------------------------------------------------------------------------
+
+
+def test_header_labels_that_do_not_repeat_evenly_refuse(tmp_path):
+    """Each group must print the same columns, or the table is not understood."""
+    gap = (_column_u(0, 1, len(_YEARS)) + _column_u(1, 0, len(_YEARS))) / 2
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "uneven.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=_ROWS,
+            extra=((2, gap, "Longer run"),),
+        )
+    )
+    assert witness.rows == {}
+    assert witness.refusal == REFUSED_COLUMNS_UNRESOLVED
+
+
+def test_two_group_names_over_one_block_refuse(tmp_path):
+    """Which group governs those columns is not established, so nothing ships."""
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "twonames.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=_ROWS,
+            extra=((1, _column_u(0, 1, len(_YEARS)), "Range"),),
+        )
+    )
+    assert witness.rows == {}
+    assert witness.refusal == REFUSED_GROUPS_UNRESOLVED
+
+
+def test_text_printed_past_the_last_column_does_not_become_a_column(tmp_path):
+    """2015-09-17 p13 runs "Federal Open Market Committee" down the page edge.
+
+    In the table's own rotated frame that text sits past the last column, where
+    the trailing "Longer run" column would be looked for.
+    """
+    beyond = _column_u(len(_GROUPS) - 1, len(_YEARS) - 1, len(_YEARS)) + 2 * _PITCH
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "edge.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=_ROWS,
+            extra=((2, beyond, "Committee"),),
+        )
+    )
+    assert witness.rows == _EXPECTED, "the edge text changed nothing"
+
+
+def test_groups_printed_at_different_widths_still_resolve(tmp_path):
+    """2015-09-17's median columns sit 26.4pt apart and its range columns 41.4pt.
+
+    The trailing column's bound has to come from the LAST group's pitch. Taken
+    from the first, the bound falls short of the last group's "Longer run" and
+    the table refuses.
+    """
+    pitches = [30.0, 60.0, 60.0]
+    rows = (
+        (
+            "Change in real GDP",
+            {
+                (0, 0): "3.5",
+                (0, 1): "3.9",
+                (0, 2): "3.6",
+                (1, 0): "3.2 to 3.7",
+                (1, 1): "3.4 to 4.5",
+                (1, 2): "3.3 to 3.9",
+                (2, 0): "2.7 to 4.0",
+                (2, 1): "3.0 to 4.6",
+                (2, 2): "2.5 to 4.1",
+            },
+        ),
+    )
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "pitches.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=rows,
+            pitches=pitches,
+            trailing_label="Longer run",
+        )
+    )
+    assert witness.refusal == ""
+    assert witness.rows == {
+        ("change in real gdp", "current", "2010"): (2.7, 4.0),
+        ("change in real gdp", "current", "2011"): (3.0, 4.6),
+        ("change in real gdp", "current", "Longer run"): (2.5, 4.1),
+    }
+
+
+def test_a_stray_pair_above_the_table_is_not_taken_for_its_first_row(tmp_path):
+    """The first data band must be ON the grid, or the header is read short.
+
+    The column names printed below the year header -- "Longer run" on its own
+    band, as 2015-09-17 prints it -- are gathered between the header and the
+    first data row. Treat a stray line as that first row and they fall outside
+    the window and are lost.
+    """
+    noise = _column_u(0, 0, len(_YEARS) + 1) + _PITCH / 2
+    rows = (
+        (
+            "Change in real GDP",
+            {
+                (0, 0): "3.5",
+                (0, 1): "3.9",
+                (0, 2): "3.6",
+                (1, 0): "3.2 to 3.7",
+                (1, 1): "3.4 to 4.5",
+                (1, 2): "3.3 to 3.9",
+                (2, 0): "2.7 to 4.0",
+                (2, 1): "3.0 to 4.6",
+                (2, 2): "2.5 to 4.1",
+            },
+        ),
+    )
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "noise.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=rows,
+            trailing_label="Longer run",
+            extra=((2.3, noise, "7.7"), (2.3, noise + _PITCH, "8.8")),
+        )
+    )
+    assert witness.refusal == ""
+    assert witness.rows[("change in real gdp", "current", "Longer run")] == (2.5, 4.1)
+
+
+def test_a_declared_hole_printed_off_the_grid_is_REFUSED(tmp_path):
+    """An "n.a." is bound like a figure, so a misplaced one is caught.
+
+    Both callers used to filter holes out before binding, which made the branch
+    that reads them dead code: an "n.a." could sit anywhere, or on top of a
+    figure's column, and nothing noticed (PR #1195 review).
+    """
+    stray = _column_u(2, 0, len(_YEARS)) + _GROUP_GAP / 2
+    witness = _parse(
+        _side_by_side(
+            tmp_path / "hole.pdf",
+            years=_YEARS,
+            groups=_GROUPS,
+            rows=_ROWS,
+            extra=((3, stray, "n.a."),),
+        )
+    )
+    assert ("change in real gdp", "current", "2010") not in witness.rows
+    assert REJECTED_UNBOUND_CELL in [reason for _, _, reason in witness.rejected]
