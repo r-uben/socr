@@ -833,3 +833,41 @@ def test_a_declared_hole_printed_off_the_grid_is_REFUSED(tmp_path):
     )
     assert ("change in real gdp", "current", "2010") not in witness.rows
     assert REJECTED_UNBOUND_CELL in [reason for _, _, reason in witness.rejected]
+
+
+def test_a_whole_column_of_holes_keeps_the_row_and_its_label(tmp_path):
+    """How these releases actually print a column they do not collect.
+
+    Every group of that year prints "n.a.", so there is no range to check and
+    nothing is rejected -- while the years the table DOES publish survive. This
+    fixture carries two rules at once. The hole is the row's FIRST cell, so the
+    label must end at it: anchoring on the first FIGURE instead leaves the
+    "n.a." inside the label run and files the row under "change in real gdp
+    n.a" (#1198). And a hole counts for nothing in the missing-group rule, so
+    an earlier version that recorded it as a group PRESENT -- which let a year
+    with "n.a." medians ship its range unchecked, reopening #1195's blocker 1
+    -- cannot come back without this failing (PR #1199 review, blocker 1).
+    """
+    rows = ((_ROWS[0][0], {**_ROWS[0][1], (0, 0): "n.a.", (1, 0): "n.a.", (2, 0): "n.a."}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "holecol.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert witness.rejected == (), "a column of declared holes is not a lost cell"
+    assert {key[0] for key in witness.rows} == {"change in real gdp"}
+    assert witness.range_for("Change in real GDP", "current", "2011") == (3.0, 4.6)
+    assert witness.range_for("Change in real GDP", "current", "2010") is None
+
+
+def test_a_year_whose_checking_groups_are_holes_does_not_ship_its_range(tmp_path):
+    """The reviewer's case: "n.a." median and central, a range, and nothing above it.
+
+    A hole in SOME groups of a year is not the same as a column the release
+    does not collect, which is blank in all of them. Here the range would ship
+    with neither the median nor the central tendency to contradict it.
+    """
+    rows = ((_ROWS[0][0], {**_ROWS[0][1], (0, 0): "n.a.", (1, 0): "n.a.", (2, 0): "4.1 to 4.6"}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "halfhole.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert witness.rows == {}
+    assert [reason for _, _, reason in witness.rejected] == [REJECTED_MISSING_GROUP]
