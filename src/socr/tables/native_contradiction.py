@@ -136,13 +136,14 @@ def text_layer_is_visible(page) -> bool:
     That is an OCR layer sitting under a raster: its digits are an OCR engine's
     reading, so agreement or disagreement with it proves nothing about the print.
     A page with no text at all has no layer to read either.
+
+    Visibility comes from the text layer's own ``alpha`` (#1189), not from
+    ``get_texttrace``, which aborts the interpreter on some PyMuPDF versions --
+    see :func:`socr.tables.source_evidence.text_layer_invisible_char_counts`.
     """
-    invisible = total = 0
-    for trace in page.get_texttrace():
-        count = len(trace["chars"])
-        total += count
-        if trace["type"] == 3:
-            invisible += count
+    from socr.tables.source_evidence import text_layer_invisible_char_counts
+
+    invisible, total = text_layer_invisible_char_counts(page)
     return total > 0 and invisible * 2 <= total
 
 

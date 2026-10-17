@@ -4754,29 +4754,30 @@ class BornDigitalDetector:
         return len(images) > 0
 
     def _has_invisible_text_over_raster(self, page: fitz.Page) -> bool:
-        """#961: the page's text is mostly invisible (``get_texttrace`` type 3 / render
-        mode 3, by characters) AND the UNION of its raster images, clipped to the page,
-        covers >= ``RASTER_DOMINANCE_RATIO`` of it.
+        """#961: the page's text is mostly invisible (render mode 3, by characters) AND
+        the UNION of its raster images, clipped to the page, covers >=
+        ``RASTER_DOMINANCE_RATIO`` of it.
 
         A sum of image boxes would let overlapping images inflate coverage, and "any
         invisible span" would re-route a born-digital page with a background image plus a
         little invisible accessibility text; a scan's old OCR layer is the page's text.
         Coverage is computed first and the (costlier) text trace is skipped when there is
         not enough raster, so a born-digital page pays only ``get_image_info``.
+        Visibility comes from the text layer's own ``alpha`` (#1189), not from
+        ``get_texttrace``, which aborts the interpreter on some PyMuPDF versions --
+        see :func:`socr.tables.source_evidence.text_layer_invisible_char_counts`.
+
         Raises on a PyMuPDF failure; the caller fails closed.
         """
+        from socr.tables.source_evidence import text_layer_invisible_char_counts
+
         page_area = page.rect.get_area()
         if page_area <= 0:
             return False
         boxes = [fitz.Rect(info["bbox"]) for info in page.get_image_info() if info.get("bbox")]
         if _union_area(boxes, page.rect) / page_area < self.RASTER_DOMINANCE_RATIO:
             return False
-        invisible = total = 0
-        for span in page.get_texttrace():
-            n = len(span.get("chars") or ())
-            total += n
-            if span.get("type") == 3:
-                invisible += n
+        invisible, total = text_layer_invisible_char_counts(page)
         return invisible * 2 > total
 
     @staticmethod
