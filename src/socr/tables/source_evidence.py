@@ -440,6 +440,27 @@ def text_layer_span_is_visible(span: dict) -> bool:
     return span.get("alpha", 255) != 0
 
 
+def _text_layer_dict_flags() -> int:
+    """``get_text("dict")`` flags with image payloads switched off.
+
+    Not a tuning knob: this helper reads text spans and never looks at an image block,
+    while ``TEXTFLAGS_DICT`` makes MuPDF carry every raster into the result -- copying a
+    JPEG through, or re-encoding a flate raster to PNG. The pages #961 targets are
+    precisely the ones with a full-page raster, so the default pays that on every page it
+    is asked about. Measured on three Fed scans, 12 pages each, median per page:
+    61.8 / 50.7 / 57.6 ms with the default against 3.9 / 3.6 / 3.7 ms with images off.
+    At roughly 350,000 pages in the Fed re-OCR that is hours of CPU for bytes nothing
+    reads. (#1189 review; the reviewer measured 105 ms -> 0.7 ms on a flate scan of
+    theirs, same direction, larger gap.)
+    """
+    import fitz
+
+    return fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
+
+
+_TEXT_LAYER_DICT_FLAGS = _text_layer_dict_flags()
+
+
 def text_layer_invisible_char_counts(page) -> tuple[int, int]:
     """``(invisible chars, total chars)`` in *page*'s text layer (#1189).
 
@@ -493,7 +514,7 @@ def text_layer_invisible_char_counts(page) -> tuple[int, int]:
     dict carrying no ``blocks`` is different and is NOT an error -- that is a page
     with no text layer, which legitimately counts ``(0, 0)``.
     """
-    page_dict = page.get_text("dict")
+    page_dict = page.get_text("dict", flags=_TEXT_LAYER_DICT_FLAGS)
     if not isinstance(page_dict, dict):
         raise TypeError(
             f'page.get_text("dict") returned {type(page_dict).__name__}, not a dict; '
@@ -507,6 +528,19 @@ def text_layer_invisible_char_counts(page) -> tuple[int, int]:
             for span in line.get("spans", ()):
                 if not isinstance(span, dict):
                     continue
+                if "alpha" not in span:
+                    # A missing key is not evidence of visible ink. PyMuPDF below
+                    # 1.25.3 emits no "alpha" at all, and the 255 default in
+                    # text_layer_span_is_visible would then read a scan's invisible OCR
+                    # layer as fully visible and ship it as trusted native -- silently,
+                    # the one outcome #961 exists to prevent. pyproject's floor rules
+                    # those versions out; this raise is what makes that floor
+                    # load-bearing rather than advisory, for a wheel built outside it
+                    # (the Alliance cluster builds its own). The callers fail closed.
+                    raise ValueError(
+                        'get_text("dict") span carries no "alpha" key; PyMuPDF >= 1.25.3 '
+                        "is required to judge text-layer visibility (#1189)"
+                    )
                 count = len(span.get("text") or "")
                 total += count
                 if not text_layer_span_is_visible(span):

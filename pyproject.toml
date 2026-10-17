@@ -23,7 +23,12 @@ dependencies = [
     "rich>=13.0.0",
     "click>=8.1.0",
     "pillow>=10.0.0",
-    "pymupdf>=1.24.0",
+    # Floor is 1.25.3, not 1.24.0: span "alpha" in get_text("dict") first appears there
+    # (verified 1.24.14 / 1.25.0 / 1.25.2 absent, 1.25.3 present). Below it every span
+    # reads as visible, so an OCR-layer scan ships as trusted native (#1189 review).
+    # No upper bound: 1.27.2.2/.3 and 1.28.0 abort in get_texttrace, which socr no longer
+    # calls, and the Alliance wheel 1.27.2.2+computecanada satisfies this floor.
+    "pymupdf>=1.25.3",
     "httpx>=0.27.0",
     "pyyaml>=6.0.0",
     # Canonical OCR output contract: shared by every engine CLI. socr reuses its

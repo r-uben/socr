@@ -29,7 +29,10 @@ import pytest
 
 from socr.core.born_digital import BornDigitalDetector
 from socr.tables import native_contradiction as nc
-from socr.tables.source_evidence import text_layer_invisible_char_counts
+from socr.tables.source_evidence import (
+    text_layer_invisible_char_counts,
+    text_layer_span_is_visible,
+)
 
 _PROSE = "The policy rate was raised to 5.25 percent in a unanimous vote. "
 
@@ -312,6 +315,95 @@ def test_a_none_return_is_a_failure_not_an_empty_page():
             text_layer_invisible_char_counts(page)
         with pytest.raises(TypeError, match="not a dict"):
             BornDigitalDetector()._has_invisible_text_over_raster(page)
+
+
+class _AlphaLessDictPage:
+    """A page whose spans carry no ``alpha`` key, as PyMuPDF < 1.25.3 emits them."""
+
+    def __init__(self, page):
+        self._page = page
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    def get_text(self, *args, **kwargs):
+        result = self._page.get_text(*args, **kwargs)
+        if not (args and args[0] == "dict"):
+            return result
+        for block in result.get("blocks", ()):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", ()):
+                for span in line.get("spans", ()):
+                    span.pop("alpha", None)
+        return result
+
+
+def test_a_span_without_an_alpha_key_is_unknown_not_visible():
+    """PyMuPDF < 1.25.3 emits no ``alpha``, and 255 would read a scan as fully visible.
+
+    Verified against real wheels: 1.24.14, 1.25.0 and 1.25.2 carry no ``alpha`` key;
+    1.25.3 is the first that does. On those versions the default would have made an
+    invisible OCR layer over a full-page raster ship as trusted native ``success`` --
+    silent, unlogged, and exactly what #961 exists to prevent. ``pyproject`` rules them
+    out; this raise is what makes that floor load-bearing for a wheel built outside it.
+    """
+    with fitz.open() as doc:
+        page = _AlphaLessDictPage(_page(doc, 8, 0, raster=True))
+
+        # Premise: without the guard this page reads as entirely visible, not as an error.
+        stripped = page.get_text("dict")
+        spans = [
+            span
+            for block in stripped.get("blocks", ())
+            if block.get("type") == 0
+            for line in block.get("lines", ())
+            for span in line.get("spans", ())
+        ]
+        assert spans, "premise: the page has text spans to judge"
+        assert all("alpha" not in span for span in spans)
+        assert all(text_layer_span_is_visible(span) for span in spans), (
+            "premise: the shared predicate's default calls every alpha-less span visible"
+        )
+
+        with pytest.raises(ValueError, match="1.25.3"):
+            text_layer_invisible_char_counts(page)
+        with pytest.raises(ValueError, match="1.25.3"):
+            BornDigitalDetector()._has_invisible_text_over_raster(page)
+
+
+def test_the_declared_floor_is_the_version_alpha_appears_in():
+    """The raise and the dependency floor must not drift apart.
+
+    Either alone decays: a floor nobody enforces is advice, and a raise with no floor
+    turns a resolvable install into a runtime failure.
+    """
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert '"pymupdf>=1.25.3"' in pyproject, "the pymupdf floor moved away from 1.25.3"
+
+
+def test_image_payloads_are_not_carried_into_the_text_dict():
+    """The helper reads spans; ``TEXTFLAGS_DICT`` would copy every raster in with them.
+
+    Pinned as a FLAG difference, not a timing assertion: a wall-clock threshold in CI
+    would be a magic number measuring the runner's load. The timing that motivated it is
+    in ``docs/log/2026-10-17_1189-pymupdf-texttrace-abort.md``.
+    """
+    import fitz
+
+    from socr.tables.source_evidence import _TEXT_LAYER_DICT_FLAGS
+
+    assert not _TEXT_LAYER_DICT_FLAGS & fitz.TEXT_PRESERVE_IMAGES
+    assert _TEXT_LAYER_DICT_FLAGS == fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
+
+    with fitz.open() as doc:
+        page = _page(doc, 8, 0, raster=True)
+        default_blocks = page.get_text("dict")["blocks"]
+        lean_blocks = page.get_text("dict", flags=_TEXT_LAYER_DICT_FLAGS)["blocks"]
+
+    # Not vacuous: the default really does carry an image on exactly these pages.
+    assert any(b.get("type") == 1 and b.get("image") for b in default_blocks)
+    assert not any(b.get("type") == 1 and b.get("image") for b in lean_blocks)
 
 
 def test_a_dict_with_no_blocks_is_an_empty_page_not_a_failure():
