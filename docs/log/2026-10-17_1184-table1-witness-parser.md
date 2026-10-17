@@ -205,3 +205,66 @@ is the chart reader's, filed separately.
 
 29 mutants, all killed by their named test. Suite 8,078 passed, 0 failed;
 `ruff format --check` clean.
+
+## PR 2 round 2: the #1199 review
+
+**A hole stopped counting as a group.** PR 2 recorded a bound `n.a.` as a group
+that was PRESENT, which reopened #1195's blocker 1: a year whose median and
+central tendency print `n.a.` shipped its range with nothing to check it
+against, and the test added with it asserted exactly that weaker behaviour.
+Only a group carrying a VALUE counts as present now. The whole-column fixture
+replaces it — every group of that year printing `n.a.`, which is how these
+releases actually print a column they do not collect — and it carries both
+rules at once, since the hole is the row's first cell and so also pins the
+label cut (#1198).
+
+**Counts could ship under a line saying they had not.** The count tables were
+collected from the decisions by index while only one branch of
+`region_clause_records` consulted a decision, so a region whose picture failed
+to render got "values not shipped" and a count table underneath it — with no
+"read from the drawing, not verified" sentence anywhere, because that sentence
+lives in the line that was replaced. Grok reproduced it on 2008-10-29 p16 by
+pointing `figures_dir` at a file. A block now ships only for a region whose own
+RECORD carries the shipped reason, so the page's line and its numbers come from
+one place and cannot drift; a test asserts the count of tables equals the count
+of records saying they shipped, over every arrangement of pictures.
+
+**The wiring had no test at the real caller.** Emptying `decisions`, dropping
+it from either call, and reading the caption off the wrong page all survived
+the full suite. A two-page document — a `build_chart` histogram captioned for
+the change in real GDP, then a `_side_by_side` Table 1 — now drives
+`chart_floor_replacement` and asserts the counts AND the mark together.
+
+**Grok's P1, the axis ticks.** A re-select carrying only the native winner
+replaced 2008-10-29 p16 with its raw axis ticks. Every branch of
+`structure_class_floor_text` that cannot use the chart floor returns the
+whole-page MARKER, not native text, so the construction does not correspond to
+a path this code takes; that is argued, not proved, so the invariant is pinned
+instead for all three ways the floor can be unavailable (no builder, a builder
+that declines, a builder that raises): the page ships the marker and no numeral
+drawn inside the chart. Also recorded from Grok: the floor's output is status
+error with `audit_passed` false, so **the ledger never keeps these pages** and
+every run re-does them.
+
+**Smaller, all from the review.** "No projection table in this document" and
+"this caption names no variable" are now different statements, and both are
+UNKNOWN rather than FAIL — FAIL is reserved for a panel whose counts were
+checked and refused, which is only the gate. So are unread bars and a year the
+table does not publish. The counts header names the region and the variable, so
+two panels sharing a year label can be told apart. The witness is cached per
+document (keyed on path, size and mtime) and skipped entirely when the caption
+names no variable, which was 0.51s per 100 dense pages paid on every
+chart-floor page and every re-finalize. The exception fallback says the witness
+lookup failed instead of claiming the counts are not wired yet.
+
+**The census, reconciled.** The PR body and the previous entry disagreed because
+they counted different things. One ordering now, the obstacle each page's line
+actually STATES, which is the order `decide_panel` tests in: no table, no
+variable, bars unread, no published range, counts outside the range. On the
+three SEP releases: 55 chart regions, 43 resolving to a panel, 19 panels
+shipping, **30 of 59 series shipping counts** (2015: 26, 2008: 4, 2010: 0).
+Withheld: 23 for unread bars, 3 for counts outside the published range, 3 for a
+year the table does not publish. Of the 23, **18 would also fail the gate** —
+their line says the bars because that is tested first, and the earlier "17" was
+that overlap counted as gate failures. The 12 regions that never resolve are
+the chart reader's, not this gate's, and are filed separately.

@@ -28,8 +28,10 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
@@ -2347,6 +2349,47 @@ def structure_class_floor_applies(p) -> bool:
     return structure_class_grid_winner(p) is None
 
 
+#: How many documents' projection tables to keep parsed at once. A witness is
+#: a few dozen numbers, and a document is finished long before the next few are
+#: started, so a small cache serves every chart page of one document from one
+#: scan. Sized, not tuned: the reviewer measured the uncached scan at 0.51s per
+#: 100 dense pages, paid again on every chart-floor page and every re-finalize.
+_WITNESS_CACHE_DOCUMENTS = 8
+_WITNESS_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+
+
+def _witness_lookup_failed():
+    """What a panel says when the witness could not be looked up at all."""
+    from socr.figures.chart_witness import WITHHELD_NO_TABLE, PanelDecision
+
+    return PanelDecision(False, WITHHELD_NO_TABLE)
+
+
+def _document_witness(pdf_path, page_num: int):
+    """This document's projection table, parsed once and reused.
+
+    Keyed on the path together with the file's size and modification time, so
+    a document rewritten under the same name is not served a stale witness.
+    """
+    from socr.core.pdf import open_pdf
+    from socr.figures.chart_witness import witness_for_document
+
+    try:
+        stat = os.stat(pdf_path)
+        key = (str(pdf_path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        key = (str(pdf_path), None, None)
+    if key in _WITNESS_CACHE:
+        _WITNESS_CACHE.move_to_end(key)
+        return _WITNESS_CACHE[key]
+    with open_pdf(pdf_path) as doc:
+        witness = witness_for_document(doc, skip_page=page_num)
+    _WITNESS_CACHE[key] = witness
+    while len(_WITNESS_CACHE) > _WITNESS_CACHE_DOCUMENTS:
+        _WITNESS_CACHE.popitem(last=False)
+    return witness
+
+
 def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_ref: str):
     """#1155: a LAZY builder for the chart body a floored page ships.
 
@@ -2492,22 +2535,42 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
         try:
             from socr.core.pdf import open_pdf as open_witness_pdf
             from socr.figures.chart_witness import (
+                WITHHELD_NO_VARIABLE,
+                PanelDecision,
                 decide_panel,
                 figure_variable,
-                witness_for_document,
             )
 
+            panels = (reading.panels or {}).items()
             with open_witness_pdf(pdf_path) as witness_doc:
                 variable = figure_variable(witness_doc[page_num - 1])
-                witness = witness_for_document(witness_doc, skip_page=page_num)
+            if not variable:
+                # No variable, no binding, so no counts whatever the document
+                # holds: scanning it for a table is pure cost here (PR #1199
+                # review). The reason still has to name the CAPTION as what is
+                # missing -- saying the document carries no table would be
+                # false of a document that does.
                 decisions = {
-                    index: decide_panel(panel, witness, variable)
-                    for index, panel in (reading.panels or {}).items()
+                    index: PanelDecision(False, WITHHELD_NO_VARIABLE) for index, _ in panels
+                }
+            else:
+                witness = _document_witness(pdf_path, page_num)
+                decisions = {
+                    index: decide_panel(
+                        panel,
+                        witness,
+                        variable,
+                        region_index=index,
+                        region_count=len(bboxes),
+                    )
+                    for index, panel in panels
                 }
         except Exception:
-            # No witness means no counts, never counts without one.
+            # No witness means no counts, never counts without one. The reason
+            # has to say THAT, not the old "not yet wired to an output path",
+            # which stopped being true when the counts went on (PR #1199).
             logger.warning("#1184: witness lookup failed for p%d", page_num, exc_info=True)
-            decisions = {}
+            decisions = {index: _witness_lookup_failed() for index in (reading.panels or {})}
         region_records = region_clause_records(
             page_num,
             region_pictures=pictures,

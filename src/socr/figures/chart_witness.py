@@ -712,10 +712,13 @@ def parse_table1_witness(page) -> WitnessTable:
             group = columns[index].group or band_group
             if not group:
                 continue
-            # A bound hole is recorded as a group that is PRESENT and empty.
-            # "n.a." is the table declaring a figure unavailable, which is not
-            # the same as a cell this parser lost, and the missing-group rule
-            # below must not confuse the two.
+            # A bound hole is recorded with no value. It is kept rather than
+            # dropped because the hole had to BIND -- that is what catches an
+            # "n.a." printed in no column, or on top of a figure -- but it
+            # counts as nothing for the missing-group rule below. Recording it
+            # as a group that was PRESENT reopened #1195's blocker 1: a year
+            # whose median and central tendency print "n.a." then shipped its
+            # range with nothing to check it against (PR #1199 review).
             by_year.setdefault(columns[index].label, {})[group] = (
                 None if cell.is_hole else (cell.lo, cell.hi)
             )
@@ -734,7 +737,12 @@ def parse_table1_witness(page) -> WitnessTable:
             # a gap in one group only cannot be that. Without this the central
             # cell could go missing and the range ship with nothing above it to
             # check against (PR #1195 review, blocker 1).
-            if full and declared_groups - set(groups):
+            # Only a group carrying a VALUE counts as present. When the whole
+            # year is holes there is no range either, so ``full`` is None and
+            # this does not fire -- which is how these releases actually print
+            # a column they do not collect.
+            printed = {name for name, value in groups.items() if value is not None}
+            if full and declared_groups - printed:
                 broken = REJECTED_MISSING_GROUP
                 break
             if (
@@ -915,6 +923,10 @@ def witness_for_document(doc, skip_page: int | None = None) -> WitnessTable | No
 
 #: Why one panel's counts were withheld. Each names the panel's own obstacle, so
 #: a reader is told what is missing rather than that something is.
+WITHHELD_NO_TABLE = (
+    "this document carries no projection table this parser can read, so there is nothing "
+    "to check these counts against; values not shipped"
+)
 WITHHELD_NO_VARIABLE = (
     "this figure's caption names no variable this document's projection table prints, so "
     "the counts could not be checked against anything; values not shipped"
@@ -935,20 +947,36 @@ WITHHELD_GATE = (
 
 @dataclass(frozen=True)
 class PanelDecision:
-    """What one chart region's counts may do, and why."""
+    """What one chart region's counts may do, and why.
+
+    ``decided`` is True only when this panel's counts were actually CHECKED and
+    refused -- the gate ran and the reading contradicted the published range.
+    No table in the document, no variable in the caption, no published range
+    for that year, and a reading with unread bars are all cases where the check
+    could not run, which #1145 records as UNKNOWN rather than FAIL. Before this,
+    every resolved chart panel in a document with no projection table was
+    recorded FAIL, with a reason blaming the caption (PR #1199 review).
+    """
 
     shipped: bool
     reason: str
     blocks: tuple[str, ...] = ()
+    decided: bool = False
 
 
-def _counts_block(panel, series) -> str:
-    """One series' counts, bin by bin, as the drawing gives them."""
+def _counts_block(panel, series, *, region_index: int, region_count: int, variable: str) -> str:
+    """One series' counts, bin by bin, as the drawing gives them.
+
+    The header names the region and the variable as well as the year: two
+    regions of one page can carry the same year label, and a bare
+    "September projections (2015)" cannot be told from another panel's
+    (PR #1199 review).
+    """
     labels = [cell.bin_label for cell in series.cells]
     counts = [str(cell.count) for cell in series.cells]
     return "\n".join(
         [
-            f"{series.name} ({panel.label}):",
+            f"region {region_index} of {region_count}, {variable}, {panel.label} -- {series.name}:",
             "| " + " | ".join(labels) + " |",
             "|" + "|".join(["---"] * len(labels)) + "|",
             "| " + " | ".join(counts) + " |",
@@ -956,7 +984,14 @@ def _counts_block(panel, series) -> str:
     )
 
 
-def decide_panel(panel, witness: WitnessTable | None, variable: str) -> PanelDecision:
+def decide_panel(
+    panel,
+    witness: WitnessTable | None,
+    variable: str,
+    *,
+    region_index: int = 1,
+    region_count: int = 1,
+) -> PanelDecision:
     """Which of this panel's series may ship their counts, and why the rest may not.
 
     Judged per SERIES, not per panel. A panel draws the current meeting's bars
@@ -972,11 +1007,14 @@ def decide_panel(panel, witness: WitnessTable | None, variable: str) -> PanelDec
     """
     from socr.figures.chart_reader import INTEGER
 
-    if not witness or not variable or witness.variable_for(variable) is None:
+    if not witness:
+        return PanelDecision(False, WITHHELD_NO_TABLE)
+    if not variable or witness.variable_for(variable) is None:
         return PanelDecision(False, WITHHELD_NO_VARIABLE)
 
     blocks: list[str] = []
     notes: list[str] = []
+    refused = False
     for series in panel.series:
         unread = [cell.bin_label for cell in series.cells if cell.status != INTEGER]
         if REQUIRE_COMPLETE_READING and unread:
@@ -998,6 +1036,9 @@ def decide_panel(panel, witness: WitnessTable | None, variable: str) -> PanelDec
         ]
         passed, _reason = gate_series(filled, published)
         if not passed:
+            # The only outcome here that was JUDGED: the gate ran and the
+            # reading contradicted the table.
+            refused = True
             notes.append(
                 f"{series.name}: "
                 + WITHHELD_GATE.format(
@@ -1008,10 +1049,18 @@ def decide_panel(panel, witness: WitnessTable | None, variable: str) -> PanelDec
                 )
             )
             continue
-        blocks.append(_counts_block(panel, series))
+        blocks.append(
+            _counts_block(
+                panel,
+                series,
+                region_index=region_index,
+                region_count=region_count,
+                variable=variable,
+            )
+        )
 
     if not blocks:
-        return PanelDecision(False, "; ".join(notes) or WITHHELD_NO_VARIABLE)
+        return PanelDecision(False, "; ".join(notes) or WITHHELD_NO_VARIABLE, decided=refused)
     if not notes:
         return PanelDecision(True, SHIPPED_REASON, tuple(blocks))
     # Some of this panel's series ship and some do not, so the line has to say
@@ -1130,10 +1179,12 @@ def region_clause_records(
                 decided = False
             else:
                 reason = f"panel {panel.label}: {decision.reason}"
-                # A withheld panel was JUDGED and found wanting, which is a
-                # decided outcome; a shipped one is UNKNOWN because the gate
-                # narrows what may ship and does not prove a reading right.
-                decided = not decision.shipped
+                # FAIL only where this panel's counts were CHECKED and refused.
+                # A shipped panel is UNKNOWN because the gate narrows what may
+                # ship without proving a reading right, and so is a panel whose
+                # check could not run at all -- no table, no variable, no
+                # published range, bars unread (#1145, PR #1199 review).
+                decided = decision.decided and not decision.shipped
         records.append(
             {
                 "check": Check.CHART_REGION.value,
@@ -1270,11 +1321,18 @@ def floor_replacement_body(
     # already said they were read from a drawing and only checked at their two
     # extremes. Panels that did not pass contribute nothing here; their line
     # above says why.
-    counts = [
-        block
-        for index in range(1, region_count + 1)
-        for block in ((decisions or {}).get(index).blocks if (decisions or {}).get(index) else ())
-    ]
+    # One source for both. The counts follow the RECORD, not the decision: a
+    # region whose line says its values were not shipped -- because its picture
+    # failed to render, say -- must not carry a count table under that line.
+    # Reading the decisions directly let exactly that happen, on every region
+    # that took the no-picture branch (PR #1199 review, blocker 2; Grok P1).
+    counts: list[str] = []
+    for position, record in enumerate(records, start=1):
+        if SHIPPED_REASON not in record.get("reason", ""):
+            continue
+        decision = (decisions or {}).get(position)
+        if decision is not None:
+            counts.extend(decision.blocks)
     parts = ["\n".join([*lines, *(extra_marks or [])])]
     prose = (recovered_prose or "").strip()
     if prose:
