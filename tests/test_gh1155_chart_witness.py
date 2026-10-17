@@ -18,9 +18,6 @@ from socr.figures.chart_witness import (
     clause_mark,
     GATE_OUT_OF_RANGE,
     GATE_UNPARSEABLE_BIN,
-    LAYOUT_UPRIGHT_SINGLE_BLOCK,
-    REFUSED_ROTATED,
-    REFUSED_SPLIT_BLOCKS,
     SHIPPED_REASON,
     bin_interval,
     gate_series,
@@ -63,33 +60,30 @@ def _upright_table(path, rows, *, years=_YEARS, median=False):
     return fitz.open(path)
 
 
-def _rotated_table(path):
-    """The same table drawn turned through 90 degrees inside an upright page."""
-    doc = fitz.open()
-    page = doc.new_page(width=612, height=792)
-    page.insert_text(
-        (60, 700), "Table 1. Economic projections of Federal Reserve Board", fontsize=9, rotate=90
-    )
-    page.insert_text((80, 700), "Variable 2010 2011 2012 2010 2011 2012", fontsize=9, rotate=90)
-    page.insert_text(
-        (100, 700),
-        "Change in real GDP 2.7 to 4.0 3.0 to 4.6 2.8 to 5.0 2.4 to 3.0 2.5 to 4.1 2.6 to 5.1",
-        fontsize=9,
-        rotate=90,
-    )
-    doc.save(path)
-    doc.close()
-    return fitz.open(path)
-
-
 # --------------------------------------------------------------------------------------
 # The witness must parse what it claims to parse
 # --------------------------------------------------------------------------------------
 
 
-def test_upright_single_block_parses_every_year_of_every_row(tmp_path):
-    """One row per series, label then one cell per column, group by group."""
-    pdf = tmp_path / "upright.pdf"
+def test_a_table_not_printed_on_a_grid_is_not_read_as_a_table(tmp_path):
+    """What these line-drawn fixtures are, after #1184: not tables.
+
+    This file's ``_upright_table`` writes each row as ONE run of text, so the
+    header's "2010" and the row's first value land wherever the font puts them
+    and no two rows agree on a column. The parser this file was written against
+    read lines and counted their values, so that was a fair input for it. The
+    parser now binds each value to a column the table's own header declares
+    (#1184, orchestrator ruling), and a sequence of figures that is not printed
+    on a grid is indistinguishable from a sentence containing figures -- which
+    is exactly the thing that must not become a published number. It refuses.
+
+    The positive coverage these fixtures used to carry -- the upright layout,
+    the collapsed range, the broken nesting, the prior-meeting month, and the
+    two layouts that used to refuse by name and now parse -- is in
+    ``tests/test_gh1184_table1_layouts.py``, on fixtures drawn to a grid.
+    Nothing was dropped; it moved to the issue that changed it.
+    """
+    pdf = tmp_path / "ungridded.pdf"
     doc = _upright_table(
         pdf,
         [
@@ -99,89 +93,8 @@ def test_upright_single_block_parses_every_year_of_every_row(tmp_path):
     )
     witness = parse_table1_witness(doc[0])
     doc.close()
-
-    assert witness.refusal == ""
-    assert witness.layout == LAYOUT_UPRIGHT_SINGLE_BLOCK
-    # The RANGE group is the witness, not the central tendency.
-    assert witness.range_for("Change in real GDP", "current", "2010") == (2.7, 4.0)
-    assert witness.range_for("Change in real GDP", "current", "2012") == (2.8, 5.0)
-    assert witness.range_for("Change in real GDP", "prior", "2011") == (2.7, 4.7)
-    assert witness.prior_months == frozenset({"January"})
-
-
-def test_a_collapsed_range_is_read_as_a_degenerate_interval(tmp_path):
-    """A release prints a collapsed range as one figure. Dropping it loses a variable."""
-    pdf = tmp_path / "collapsed.pdf"
-    doc = _upright_table(pdf, ["PCE inflation 1.2 to 1.6 1.0 to 2.0 2.0 1.1 to 2.0 0.9 to 2.4 2.0"])
-    witness = parse_table1_witness(doc[0])
-    doc.close()
-    assert witness.range_for("PCE in", "current", "2012") == (2.0, 2.0)
-
-
-def test_a_row_whose_nesting_breaks_is_not_a_witness(tmp_path):
-    """The witness must prove itself: central tendency outside its own range."""
-    pdf = tmp_path / "broken.pdf"
-    doc = _upright_table(
-        pdf,
-        [  # 2010's central tendency 3.2-3.7 is NOT inside the range 1.0-1.5
-            "Change in real GDP 3.2 to 3.7 3.4 to 4.5 3.5 to 4.5 1.0 to 1.5 3.0 to 4.6 2.8 to 5.0"
-        ],
-    )
-    witness = parse_table1_witness(doc[0])
-    doc.close()
     assert witness.rows == {}
-    assert any("not inside the range" in reason for _, _, reason in witness.rejected)
-
-
-def test_a_row_with_the_wrong_cell_count_is_not_a_witness(tmp_path):
-    """The header declares the column count; a row that disagrees is not trusted."""
-    pdf = tmp_path / "short.pdf"
-    doc = _upright_table(pdf, ["Unemployment rate 9.1 to 9.5 8.1 to 8.5 6.6 to 7.5"])
-    witness = parse_table1_witness(doc[0])
-    doc.close()
-    assert witness.rows == {}
-
-
-def test_the_rotated_layout_refuses_by_name(tmp_path):
-    """A layout this parser does not read must refuse, never guess."""
-    pdf = tmp_path / "rotated.pdf"
-    doc = _rotated_table(pdf)
-    witness = parse_table1_witness(doc[0])
-    doc.close()
-    assert witness.rows == {}
-    assert witness.refusal == REFUSED_ROTATED
-
-
-def test_the_split_block_layout_refuses_by_name(tmp_path):
-    """Every data row short of the header's count is a stacked-block table."""
-    pdf = tmp_path / "split.pdf"
-    doc = _upright_table(
-        pdf,
-        [  # each row carries ONE group: the central-tendency block only
-            "Change in real GDP 0.0 to 0.3 -0.2 to 1.1 2.3 to 3.2",
-            "Unemployment rate 6.3 to 6.5 7.1 to 7.6 6.5 to 7.3",
-        ],
-    )
-    witness = parse_table1_witness(doc[0])
-    doc.close()
-    assert witness.rows == {}
-    assert witness.refusal == REFUSED_SPLIT_BLOCKS
-
-
-def test_a_series_is_the_prior_meeting_only_when_its_own_month_matches(tmp_path):
-    """Every series here is month-prefixed, so "has a month" classes them all prior."""
-    pdf = tmp_path / "months.pdf"
-    doc = _upright_table(
-        pdf,
-        [
-            "Change in real GDP 3.2 to 3.7 3.4 to 4.5 3.5 to 4.5 2.7 to 4.0 3.0 to 4.6 2.8 to 5.0",
-            "January projection 2.8 to 3.5 3.4 to 4.5 3.5 to 4.5 2.3 to 4.0 2.7 to 4.7 3.0 to 5.0",
-        ],
-    )
-    witness = parse_table1_witness(doc[0])
-    doc.close()
-    assert witness.series_row_for("January projections") == "prior"
-    assert witness.series_row_for("April projections") == "current"
+    assert witness.refusal, "and it says why, rather than returning quietly empty"
 
 
 # --------------------------------------------------------------------------------------
