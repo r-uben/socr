@@ -345,6 +345,30 @@ class PageState:
     #: ``needs_repair`` (below): a detector crash must not force the chart lane
     #: or a repair pass — it is honoured downstream at the document buckets.
     chart_asset_detection_failed: bool = False
+    #: #1155: this page's body came from the chart floor, which has already
+    #: accounted for EVERY chart region on it -- a crop (or a named reason why
+    #: there is none) and one canonical mark each. ``_preserve_chart_regions``
+    #: must therefore skip it: that pass places crops by matching anchor text,
+    #: and the chart floor withholds the in-chart words those anchors are built
+    #: from, so it cannot place them and injects an "Unresolved chart placement"
+    #: banner plus a ``chart_region=FAIL`` mark that contradicts the per-region
+    #: marks already on the page (#1155 PR 1 review, Argon 3).
+    chart_floor_body: bool = False
+    #: #1155: the chart floor's rendered crop references for this page, cached so
+    #: the renderer runs ONCE. Selection runs again on a re-finalize and on a
+    #: resume, and even when a ``saved_text`` override is about to discard its
+    #: result, so without this the same crops were re-rendered each time.
+    chart_floor_pictures: dict | None = None
+    #: #1155: every clause record the chart floor wrote for this page -- one per chart
+    #: region, plus a page-scoped ``native_coverage`` record when text of the page did
+    #: not ship -- in the clause dict shape ``core.verdict.VerdictClause`` reads. Set
+    #: only when a chart body actually replaced the page's bare marker. The verdict seam
+    #: derives the page's clauses from THESE, and the page's own mark lines are rendered
+    #: from the same records: a rendered line is not a record, and the first version of
+    #: this lane marked every region on the page while its sidecar verdict carried none
+    #: of them (#1155 PR 1 re-review, Astra and Argon both; the page-scoped lines had the
+    #: same gap, found in round 3 review).
+    chart_floor_clauses: tuple | None = None
     #: GH-189: at least one detected chart region on this mixed chart+table page
     #: could not be rendered to a crop, so the chart ships as a visible marker and
     #: nothing else. Deliberately distinct from ``chart_asset_render_failed``
@@ -620,6 +644,14 @@ class DocumentState:
     """
 
     handle: DocumentHandle
+    #: #1155: where chart crops are written for this document, as the processing
+    #: loop computed it (``_doc_and_figures_dir``). Carried rather than re-derived:
+    #: the structure-class FLOOR renders a crop when it replaces a whole-page
+    #: marker, and a second derivation of the same path is how two code paths come
+    #: to disagree about where a file went. ``None`` on paths that never set it, in
+    #: which case the floor keeps the page's prose and says the picture is missing
+    #: rather than rendering somewhere unexpected.
+    figures_dir: object | None = None
     status: DocumentStatus = DocumentStatus.PENDING
     pages: dict[int, PageState] = field(default_factory=dict)
     #: #1074: the document's own witnesses for line-end hyphen splits, built once from the

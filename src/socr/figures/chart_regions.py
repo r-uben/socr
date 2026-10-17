@@ -1008,3 +1008,99 @@ def reconcile_chart_region_refs(
         for asset in ordered
     ]
     return "\n".join(body), outcomes
+
+
+def render_chart_region_crops(
+    pdf_path: Path,
+    page_num: int,
+    bboxes: list,
+    figures_dir: Path,
+    *,
+    indices: list[int] | None = None,
+) -> list:
+    """GH-189: render one PNG crop per chart-region bbox, reporting EVERY outcome.
+
+    Moved here from ``pipeline.orchestrator._render_chart_region_crops`` by #1155 as a
+    PURE move -- the body never referenced ``self``, and the orchestrator method below
+    now delegates, so every existing caller renders the same bytes to the same names.
+    The move is what lets the structure-class FLOOR (``core.manifest``) render a crop:
+    core may not import the pipeline layer, and re-deriving the render settings a second
+    time is how two code paths drift apart.
+
+    The rendering internals of ``_render_chart_region_pngs`` (below), lifted so
+    a caller that must account for regions the WINNING candidate never mentioned
+    can drive them from an explicit bbox inventory instead of from placeholder
+    text.  That wrapper returns the unchanged string on failure -- an outcome its
+    caller cannot tell apart from "this page has no chart" -- which is exactly how
+    a dropped chart stayed silent.  This returns one ``ChartRegionAsset`` per
+    requested region carrying ``rendered`` and the exception text, so a failed
+    crop is a fact the audit can name.
+
+    Renders regardless of ``--save-figures`` / ``--describe-figures``: once a
+    model's text has won the page, the crop is the chart's only representation.
+
+    ``indices`` are 1-based detector ordinals; ``None`` means every region.
+    Never raises.
+    """
+    from socr.figures.chart_regions import ChartRegionAsset, chart_region_filename  # noqa: PLC0415
+
+    wanted = list(indices) if indices is not None else list(range(1, len(bboxes) + 1))
+    assets: list = []
+    for region_idx in wanted:
+        if region_idx < 1 or region_idx > len(bboxes):
+            continue
+        bbox = bboxes[region_idx - 1]
+        rect = (float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1))
+        fname = chart_region_filename(page_num, region_idx)
+        out_path = figures_dir / fname
+        try:
+            import fitz
+
+            from socr.core.born_digital import upright_rotation_for
+            from socr.core.pdf import open_pdf
+            from socr.figures.extractor import RENDER_DPI
+
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            with open_pdf(str(pdf_path)) as _doc:
+                _page = _doc[page_num - 1]
+                # GH-307: clip-scoped, matching the crop path -- a region
+                # can run against the page's dominant direction.
+                mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                _rotation = upright_rotation_for(_page, clip=bbox)
+                if _rotation:
+                    mat = mat.prerotate(_rotation)
+                pix = _page.get_pixmap(matrix=mat, clip=bbox)
+                pix.save(str(out_path))
+            # A path is not a render. Check the asset the markdown will point
+            # at actually exists and has bytes -- a stale or truncated file
+            # would otherwise be reported as a successful preservation.
+            if not out_path.exists() or out_path.stat().st_size == 0:
+                raise RuntimeError("crop PNG missing or empty after save")
+            assets.append(
+                ChartRegionAsset(
+                    page_num=page_num,
+                    region_index=region_idx,
+                    bbox=rect,
+                    rel_path=f"{figures_dir.name}/{fname}",
+                    rendered=True,
+                )
+            )
+            logger.debug("GH-189: saved chart region PNG %s", out_path)
+        except Exception as render_exc:
+            logger.warning(
+                "chart region PNG render failed for p%d region %d: %s",
+                page_num,
+                region_idx,
+                render_exc,
+            )
+            assets.append(
+                ChartRegionAsset(
+                    page_num=page_num,
+                    region_index=region_idx,
+                    bbox=rect,
+                    rel_path="",
+                    rendered=False,
+                    error=f"{type(render_exc).__name__}: {render_exc}",
+                )
+            )
+    return assets

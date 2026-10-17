@@ -122,9 +122,18 @@ def test_public_wrapper_returns_the_output_not_the_tuple() -> None:
         audit_passed=True,
     )
     calls: list[tuple] = []
+    # #1155: the selector gained a keyword, ``text_will_be_overridden``, which
+    # ``_select_and_finalize_page`` passes at manifest.py:5809 so that a page whose text
+    # a saved body is about to replace does not render chart crops that are then thrown
+    # away. This stand-in has to accept what production passes, or it fails on the
+    # signature and says nothing about the contract it exists to pin. It RECORDS the
+    # value rather than swallowing it, so the forced change buys coverage of the wiring
+    # instead of only permitting it.
+    overrides: list[bool] = []
 
-    def _fake(state, page_num, whole_doc=None):
+    def _fake(state, page_num, whole_doc=None, *, text_will_be_overridden=False):
         calls.append((state, page_num, whole_doc))
+        overrides.append(text_will_be_overridden)
         return sentinel_output, SelectionProvenance.PASSING_BEST_OUTPUT
 
     original_tagged = manifest._select_page_output_tagged
@@ -143,6 +152,11 @@ def test_public_wrapper_returns_the_output_not_the_tuple() -> None:
         disp = manifest.page_disposition(mock_state, 1)
         assert disp.ending is PageEnding.FAIL_CLOSED_MARKER
         assert disp.primary_reason is PagePrimaryReason.INVALID_TABLE_EMISSION
+        # Both calls above: neither saves a body, so neither may tell the selector its
+        # text is about to be overridden. One per call, in call order.
+        assert overrides == [False, False], (
+            "#1155: a path that saves no body must leave text_will_be_overridden False"
+        )
     finally:
         manifest._select_page_output_tagged = original_tagged
         manifest._select_page_output_with_provenance = original_with_prov
