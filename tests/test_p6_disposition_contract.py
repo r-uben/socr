@@ -148,7 +148,7 @@ def test_selection_provenance_keeps_all_sixteen_members() -> None:
     live, AST-derived count that tracks the cascade itself.
     """
     SelectionProvenance = manifest.SelectionProvenance
-    assert len(list(SelectionProvenance)) == 23, (
+    assert len(list(SelectionProvenance)) == 24, (
         "the selector's endings must not be silently merged in this task -- Stage "
         "A/B is behaviour-preserving; merging is S3/S4 of the design doc, out of "
         "scope. A count change is only legitimate when a real ending was added "

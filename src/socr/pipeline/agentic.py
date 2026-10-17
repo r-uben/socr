@@ -1208,6 +1208,15 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                        born-digital detector found table structure on the page.
         record_event:  Callable[[AuditEvent]] — appends to state.events.
                        None silently skips audit recording (non-breaking).
+        native_evidence_suspect:
+                       Callable[[page_num: int]] -> bool — True when the page's
+                       native text is a PRIOR OCR reading (#1156). Its numbers
+                       are not evidence, so native geometry is skipped exactly
+                       as on a non-table page; the string-only structural gate
+                       still runs. Without this the witness could pass a
+                       reading and the suspect layer then veto it on a numeric
+                       multiset mismatch -- the layer under suspicion grading
+                       the reading that replaced it.
     """
 
     def __init__(
@@ -1216,11 +1225,13 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         get_fitz_page: Callable[[int], object] | None,
         is_table_page: Callable[[int], bool],
         record_event: Callable[[object], None] | None = None,
+        native_evidence_suspect: Callable[[int], bool] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
+        self._native_evidence_suspect = native_evidence_suspect
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1237,7 +1248,40 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         # Bypassing native geometry does NOT bypass the string-only structural
         # gate: an accepting inner decision still passes through
         # _apply_structural_gate with words=None and rules=None before returning.
-        if not self._is_table_page(page_num) or self._get_fitz_page is None:
+        # #1156: a prior-OCR layer is not numeric evidence. Same branch as a
+        # non-table page, so the structural gate below still runs on the text.
+        #
+        # Round 2 (Astra P1): dropping row-level verification is only safe when
+        # something INDEPENDENT checked the table. On a page whose text is hidden
+        # UNDER an opaque page-covering raster the outer SourceEvidenceTableJudge
+        # reads the pixels and excludes the text layer, so it is. On any other page
+        # -- which is what a DETECTION ERROR on a genuine born-digital page looks
+        # like -- that judge rebuilds its evidence from the same native text, and its
+        # aggregate multiset accepts two swapped values (Alpha=2.1/Beta=3.1) that
+        # row-level verification rejects. Suspicion must never make the check weaker,
+        # so without an independent witness the native verifier still runs.
+        suspect = False
+        if self._native_evidence_suspect is not None:
+            try:
+                suspect = bool(self._native_evidence_suspect(page_num))
+            except Exception:  # a trust source that raises is not a licence to trust
+                suspect = True
+        if suspect and self._get_fitz_page is not None:
+            # Round 2/3 (Astra P1, then Argon -- the same weakening twice more):
+            # coverage is not a witness. ``page_has_page_covering_raster`` is satisfied
+            # by an image drawn with alpha 0, which leaves the pixels unchanged; and
+            # coverage by an OPAQUE image is still satisfied by a born-digital table
+            # drawn ON TOP of a background photo. The pixels are an independent reading
+            # only of text that lies UNDER them, which is the positive question
+            # ``_has_prior_ocr_layer`` asks.
+            from socr.core.born_digital import page_has_opaque_page_covering_raster
+
+            try:
+                suspect = bool(page_has_opaque_page_covering_raster(self._get_fitz_page(page_num)))
+            except Exception:
+                # Fail closed the way that keeps MORE checking: verify natively.
+                suspect = False
+        if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)
 

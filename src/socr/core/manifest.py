@@ -3636,6 +3636,10 @@ class PagePrimaryReason(str, Enum):
     #: #1027: a scan whose only native text is an invisible OCR layer, and no model
     #: reading was accepted: fail-closed marker plus page image.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1156: a scan whose text layer is an EARLIER OCR run, with no independent reading
+    #: of the page to check it against: fail-closed marker plus page image. The layer
+    #: itself is retained in the sidecar, unshipped.
+    PRIOR_OCR_LAYER_UNREAD = "prior_ocr_layer_unread"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
     DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
@@ -3726,6 +3730,13 @@ class SelectionProvenance(str, Enum):
     #: #1027: invisible OCR layer over a raster scan, model ladder accepted nothing:
     #: fail-closed marker (neither the layer nor the rejected reading ships)
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1156: the page's text layer is an EARLIER OCR run and no reading of the page was
+    #: accepted (rejected, or none ever ran): fail-closed marker plus the page image.
+    #: Neither the layer, nor its numbers, nor the rejected reading ships; the layer is
+    #: retained in the sidecar for a later comparison. Declared AFTER the #1027 member
+    #: because the enum mirrors the cascade's return order and this branch is tried
+    #: second -- #1027 keeps the render-mode family it already owns.
+    PRIOR_OCR_LAYER_UNREAD = "prior_ocr_layer_unread"
     #: #259: ladder accepted nothing but the model produced a table -- kept flagged
     FLAGGED_MODEL_KEPT = "flagged_model_kept"
     #: TICKET-A1c (#641): the winner came from A1b's row-corroboration fallback
@@ -3824,6 +3835,12 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     ),
     SelectionProvenance.INVISIBLE_SCAN_UNREAD: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.INVISIBLE_SCAN_UNREAD
+    ),
+    #: #1156: the same ending as #1027 -- the marker and the page image, nothing of the
+    #: layer -- under its own reason, because the operator action differs: these pages
+    #: have readable prose waiting in the sidecar for Part B to recover.
+    SelectionProvenance.PRIOR_OCR_LAYER_UNREAD: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD
     ),
     SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
@@ -4010,6 +4027,10 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
+            # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a
+            # mark -- but never as a clean pass, which is what this short-circuit would
+            # make it.
+            or getattr(p, "prior_ocr_layer_suspect", False)
             or garbled_math_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
@@ -4360,6 +4381,64 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 failure_mode=FailureMode.INVISIBLE_SCAN_UNREAD,
             ), SelectionProvenance.INVISIBLE_SCAN_UNREAD
+
+        # #1156, the owner's interim ruling (2026-10-17): a page whose text layer is an
+        # EARLIER OCR run, and for which no reading of the page was accepted, ships the
+        # page image plus its mark -- no prior-layer text and no numbers. #1027's floor,
+        # widened to the family the drawing-order detector found. The layer itself is
+        # retained in the page sidecar (``prior_ocr_layer_text``), unshipped, so Part B
+        # can recover its prose by re-finalizing from it with no re-OCR; the interim
+        # exists because a layer whose numbers are wrong ("3 Y," where the page reads
+        # 3 1/2) cannot ship numbers until something has read the page to compare.
+        #
+        # Scoped to POSITIVE detection by the #1156 route, on purpose, three times over:
+        #
+        # (a) ``prior_ocr_layer`` only, never ``prior_ocr_layer_scan_failed``. A failed
+        #     scan is "unknown", and suspicion must never grant deletion rights: the
+        #     flag still marks the page and keeps the document out of SUCCESS, which are
+        #     additions, while this branch is a subtraction.
+        # (b) not ``invisible_text_over_raster``, which is #1027's and #961's settled
+        #     territory -- #1027 ships its own marker for it above when a model attempt
+        #     ran, and #961 documents the no-attempt case as a retained WARNING. Placed
+        #     AFTER that branch so those pages keep their exact current ending.
+        # (c) a structure-class page is S1's to decide, exactly as above.
+        #
+        # Unlike #1027 this is NOT gated on ``_model_attempt_ran``: the ruling names
+        # "rejected, or never ran (no provider, --native-only)" together, because a layer
+        # nothing has checked is equally unchecked when nothing tried.
+        if (
+            getattr(p, "prior_ocr_layer", False)
+            and not getattr(p, "invisible_text_over_raster", False)
+            and not _reaches_structure_class_branch(p)
+        ):
+            prior_png = getattr(p, "prior_ocr_page_png_ref", "")
+            # The image is conditional (needs figure saving and a successful render), so
+            # the marker only points at it when one was written.
+            # ``failed: `` is NOT decoration: ``is_page_failed_marker`` is the ONE shared
+            # recogniser every consumer reads the ending from, and it anchors on that
+            # prefix. Without it (Argon, Part A review) this body was invisible to
+            # ``failed_pages`` in ``_phase_assemble``, so a floored page with a rejected
+            # model attempt landed in ``native_fallback_pages`` -- a list whose whole
+            # meaning is "the page shipped its native text because OCR never passed" --
+            # on a page where the native text is precisely what was withheld. The
+            # prefix also makes the body a member of ``_MARKER_FAMILY_REASONS``, so the
+            # reason is read from the SHIPPED BYTES rather than from provenance alone.
+            prior_marker = (
+                f"[page {page_num} failed: earlier OCR, not re-read — see image]"
+                if prior_png
+                else (
+                    f"[page {page_num} failed: earlier OCR, not re-read — not "
+                    f"transcribed, see PDF page {page_num}]"
+                )
+            )
+            return PageOutput(
+                page_num=page_num,
+                text=f"{prior_marker}\n\n{prior_png}" if prior_png else prior_marker,
+                status=PageStatus.WARNING,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+            ), SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed
         # AFTER the D3 floor above so a hard-fail still fails closed, and before
@@ -5249,6 +5328,10 @@ _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES: frozenset[SelectionProvenance] = f
         SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED,
         SelectionProvenance.ROTATED_TEXT_SHREDDED,
         SelectionProvenance.INVISIBLE_SCAN_UNREAD,
+        # #1156: same reason as the #1027 member above -- the floor DELETED the rejected
+        # reading, so "socr kept this model reading" would describe a body that is not
+        # there.
+        SelectionProvenance.PRIOR_OCR_LAYER_UNREAD,
         SelectionProvenance.STRUCTURE_CLASS_FLOOR,
         SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
         SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR,
@@ -5523,6 +5606,7 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
         # map is the silent-success one. A future silent-success clause on the same check
         # would need its own key, not this row.
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
+        Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
     }
     for clause in clauses:
         mode = by_check.get(clause.check)
@@ -5652,6 +5736,7 @@ _MARKER_FAMILY_REASONS: tuple[tuple[str, "PagePrimaryReason"], ...] = (
     ("invalid table emission", PagePrimaryReason.INVALID_TABLE_EMISSION),
     ("rotated text extraction shredded", PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED),
     ("invisible OCR layer unread", PagePrimaryReason.INVISIBLE_SCAN_UNREAD),
+    ("earlier OCR, not re-read", PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD),
     ("no usable OCR output", PagePrimaryReason.NO_USABLE_OUTPUT),
     # The unverifiable-table family is DELIBERATELY absent. Its marker prose does
     # not say which lane distrusted the table, and every path that authors it --
@@ -5726,7 +5811,12 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     is_marker = is_page_failed_marker(text)
     if ref in text or any(
         getattr(p, name, "")
-        for name in ("d3_floor_png_ref", "rotated_shred_png_ref", "invisible_scan_png_ref")
+        for name in (
+            "d3_floor_png_ref",
+            "rotated_shred_png_ref",
+            "invisible_scan_png_ref",
+            "prior_ocr_page_png_ref",
+        )
     ):
         return output
     if is_marker and any(ln.lstrip().startswith("![") for ln in text.splitlines()):

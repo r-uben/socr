@@ -497,6 +497,16 @@ def test_e2e_resume_skips_the_page_and_replays_the_event_with_identical_bytes(
     pdf = _scan_pdf(tmp_path / "r.pdf", caption=True)
     out = tmp_path / "out-r"
     _CountingEngine.calls = 0
+    # #1156: this fixture page -- render-mode-3 text over a full-page raster -- is a
+    # prior-OCR layer, so #1156 marks and DEMOTES it, and a demoted page is re-read on
+    # resume rather than skipped. That is #1156's behaviour, pinned in its own tests;
+    # here it would turn a #1030 test about the page-level ledger gate into a test of
+    # someone else's demotion. Only THIS test needs the clause off -- every other #1030
+    # test runs with it live -- and ``test_the_1156_clause_fires_on_this_fixture`` below
+    # fails if the clause ever stops applying, so nothing is being hidden.
+    from socr.core import verdict as _verdict
+
+    monkeypatch.setattr(_verdict, "_prior_ocr_layer_clause", lambda output, p: None)
     with monkeypatch.context() as m:
         _pipe(m).process(pdf, output_dir=out)
     first_calls = _CountingEngine.calls
@@ -591,3 +601,28 @@ def test_guard_closes_an_unclosed_code_fence_before_the_image(delim: str) -> Non
     # A closed block, or no block, is untouched apart from the ref.
     closed = _out(f"{delim}\ncode\n{delim}\nafter")
     assert manifest._apply_scanned_figure_guard(closed, _p(REF)).text == closed.text + "\n\n" + REF
+
+
+def test_the_1156_clause_fires_on_this_fixture(tmp_path) -> None:
+    """Grounds the switch-off above: this page IS a prior-OCR layer, and #1156 marks it.
+
+    Silencing a clause inside a test is only honest while the clause applies.
+    """
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.state import PageState
+    from socr.core.verdict import _prior_ocr_layer_clause
+
+    pdf = _scan_pdf(tmp_path / "grounding.pdf", caption=True)
+    page = BornDigitalDetector().detect(Path(pdf)).pages[0]
+    assert page.prior_ocr_layer is True
+
+    ps = PageState(page_num=1)
+    ps.prior_ocr_layer_suspect = True
+    out = PageOutput(
+        page_num=1,
+        text="a reading",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    assert _prior_ocr_layer_clause(out, ps) is not None

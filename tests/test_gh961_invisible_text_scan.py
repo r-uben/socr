@@ -124,7 +124,10 @@ def test_routing_difference_pin(tmp_path: Path, name: str, monkeypatch) -> None:
     image, mode, expected = SHAPES[name]
     pdf = _make(tmp_path / "p.pdf", image=image, render_mode=mode)
     with monkeypatch.context() as m:
+        # Both routes, for the reason given on ``_e2e``: the arm's contract is "no
+        # detector fires", and #1156 added a second detector that also sees this page.
         m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", lambda self, p: False)
+        m.setattr(BornDigitalDetector, "_has_prior_ocr_layer", lambda self, p, r, f=None: False)
         pipe_off, state_off = _analyze(pdf)
         trusted_off = pipe_off._is_agentic_trusted_native(1, state_off.pages[1])
         kinds_off = [e.kind for e in state_off.events]
@@ -222,7 +225,16 @@ def _e2e(
     chart=False,
     recover_corrupt_math=True,
 ):
-    """detector: live | neutralised | raising | forced (always fires)."""
+    """detector: live | neutralised | raising | forced (always fires).
+
+    #1156: this fixture page -- a full-page raster over render-mode-3 text -- is a prior
+    OCR layer, so socr now detects it by TWO routes: #961's render-mode test and #1156's
+    drawing-order one. "neutralised" and "raising" are about #961's route, so they silence
+    the other one too; otherwise they would not express "no detector fires", and these
+    arms would be measuring #1156's demotion instead of #961's behaviour. That the second
+    route really does fire on this page is pinned by
+    ``test_the_1156_route_also_sees_this_page``, so the silencing is not hiding it.
+    """
     if detector not in {"live", "neutralised", "raising", "forced"}:
         raise ValueError(detector)
     from socr.core.providers import PROFILE_QWEN_LOCAL
@@ -233,6 +245,7 @@ def _e2e(
         m.setattr(orch, "get_engine", lambda engine_type: engine)
         if detector == "neutralised":
             m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", lambda s, p: False)
+            m.setattr(BornDigitalDetector, "_has_prior_ocr_layer", lambda s, p, r, f=None: False)
         elif detector == "forced":
             m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", lambda s, p: True)
         elif detector == "raising":
@@ -241,6 +254,7 @@ def _e2e(
                 raise RuntimeError("detector exploded")
 
             m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", _boom)
+            m.setattr(BornDigitalDetector, "_has_prior_ocr_layer", lambda s, p, r, f=None: False)
         if chart:
             pdf = _chart_pdf(tmp_path / f"{tag}.pdf")
         else:
@@ -632,3 +646,20 @@ def _whole_page_chart_route(monkeypatch: pytest.MonkeyPatch) -> None:
     from socr.figures import figure_crops
 
     monkeypatch.setattr(figure_crops, "plan_figure_page", lambda page: None)
+
+
+def test_the_1156_route_also_sees_this_page(tmp_path: Path) -> None:
+    """Grounds the silencing above: the fixture page IS a prior OCR layer in production.
+
+    The arms that neutralise #961's route silence #1156's too, which is only honest if
+    the second route genuinely fires here. It does -- through the real assessment, not a
+    stub.
+    """
+    pdf = _make(tmp_path / "two-routes.pdf", image="full", render_mode=3)
+    assessment = BornDigitalDetector().detect(Path(pdf))
+    page = assessment.pages[0]
+    assert page.invisible_text_over_raster is True
+    assert page.prior_ocr_layer is True, (
+        "the #1156 route does not fire on this page, so silencing it in the control arms "
+        "above would be hiding nothing and the arms would be mislabelled"
+    )

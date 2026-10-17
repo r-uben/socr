@@ -121,6 +121,15 @@ class PageState:
     #: that scan failed (unknown, treated as a hit). See ``BornDigitalDetector``.
     invisible_text_over_raster: bool = False
     invisible_text_scan_failed: bool = False
+    #: #1156: the page's text layer is a PRIOR OCR reading, not the document's own text, so
+    #: nothing native on it is trustworthy evidence. Kept separate from
+    #: ``invisible_text_over_raster`` on purpose: that flag alone grants #1027 the right to
+    #: DELETE the native text, and suspicion must never grant deletion rights.
+    prior_ocr_layer_suspect: bool = False
+    #: #1156: the drawing-order route's own verdict and whether it failed (unknown, which
+    #: feeds suspicion). Kept beside #961's pair so each route stays separately visible.
+    prior_ocr_layer: bool = False
+    prior_ocr_layer_scan_failed: bool = False
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -326,6 +335,11 @@ class PageState:
     #: #1027: image ref for the invisible-OCR-layer floor. Not persisted to the sidecar:
     #: that floor ships ``audit_passed=False``, so a resume never restores the page.
     invisible_scan_png_ref: str = ""
+    #: #1156: the rendered page image the "earlier OCR, not re-read" marker links to.
+    #: A key of its own rather than #1027's: that one also gates the scanned-figure
+    #: caption lane, which keys on ``invisible_text_over_raster`` and must not start
+    #: firing on this family.
+    prior_ocr_page_png_ref: str = ""
     #: #1030: image ref for a scanned page whose text layer carries a figure caption. The page
     #: ships its own text PLUS this image (the figure box cannot be isolated on a scan, so the
     #: asset is the whole page). Persisted to the sidecar; ``scanned_figure_render_failed`` is not
@@ -804,6 +818,18 @@ class DocumentState:
                 ps.control_byte_scan_failed = getattr(pa, "control_byte_scan_failed", False)
                 ps.invisible_text_over_raster = getattr(pa, "invisible_text_over_raster", False)
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
+                ps.prior_ocr_layer = getattr(pa, "prior_ocr_layer", False)
+                ps.prior_ocr_layer_scan_failed = getattr(pa, "prior_ocr_layer_scan_failed", False)
+                # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
+                # narrower key (``invisible_text_over_raster``) and is not widened here.
+                # BOTH detection routes feed suspicion: #961's render-mode route catches
+                # layers this one cannot (and vice versa), and each is pinned by its own test.
+                ps.prior_ocr_layer_suspect = (
+                    ps.invisible_text_over_raster
+                    or ps.invisible_text_scan_failed
+                    or ps.prior_ocr_layer
+                    or ps.prior_ocr_layer_scan_failed
+                )
                 ps.garbled_math_signals = dict(getattr(pa, "garbled_math_signals", None) or {})
                 ps.garbled_math_scan_failed = getattr(pa, "garbled_math_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(
