@@ -159,3 +159,49 @@ reader reproduces #1155's figures exactly on #1155's pages (2015-09-17 p17 5/5,
 p18 5/5, p20 4/4; 2010-04-28 p15 3/4, p18 2/3; every 2015 series sums to 17).
 Probe: `scratch/routing-baseline/leads/1184/probes/pr2_reconcile.py`,
 `pr2_census2.py`.
+
+## PR 2: the counts turned on
+
+A chart panel's counts ship only when BOTH hold, and the two are separate
+conditions: the reading is complete — every bin of that series resolved — and
+its filled bins span the range this document's own projection table publishes
+for that variable, that meeting and that year.
+
+Completeness is not implied by the gate and had to be named
+(`REQUIRE_COMPLETE_READING`, orchestrator ruling 2026-10-17). The gate compares
+only the lowest and highest bars it can see, so a bar the reader could not
+measure in between passes it unnoticed: measured on the Fed pilot, **5 of the
+35 series that pass the gate have unread bars**. A histogram shipped with bars
+missing reads as complete to whoever cites it, and silent loss ranks below a
+missing number. Requiring completeness ships 30 series rather than 35.
+
+Judged per SERIES, not per panel. A panel draws the current meeting's bars and
+the previous meeting's in the same axes but each is checked against its own row
+of the table, so a bar unread in one says nothing about the other. Built
+per-panel first, it shipped 26; per-series ships 30. A panel whose series
+disagree ships the good one and SAYS which other series it withheld and why —
+shipping the good one silently would let a reader take the panel for whole.
+
+Binding a panel to a table row needs the variable, which only the figure's
+caption names. The grammar is identical across the three releases
+("Figure 2.A. Distribution of participants' projections for the change in real
+GDP, 2008-11"), but the policy-path caption names a variable twice and wraps
+mid-phrase, which read line by line yields "federal" and binds to nothing. The
+caption is joined until a comma closes the phrase and the LAST "for the ..."
+before that comma is taken. Validated on all 13 figure pages of the three
+releases: 13 bind, 0 miss.
+
+The witness is found by offering every page of the document to the parser and
+taking the first that yields rows; measured over the pilot, exactly one page per
+document is accepted. It is looked up inside the lazy builder, not beside the
+chart reading, so a page that never reaches the chart floor pays nothing for it.
+
+**Census on the Fed pilot**: 19 panels ship counts and 24 withhold, 30 series
+in all. The withheld name their own obstacle — bars unread (the commonest), a
+reading that contradicts the published range (2), or no published range for
+that year. A further 8 regions never resolve to a panel at all, for want of a
+legend binding series names to drawing styles on 2015-09-17 p19 and p22; that
+is the chart reader's, filed separately.
+
+29 mutants, all killed by their named test. Suite 8,078 passed, 0 failed;
+`ruff format --check` clean.

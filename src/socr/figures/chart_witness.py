@@ -710,9 +710,15 @@ def parse_table1_witness(page) -> WitnessTable:
         by_year = collected.setdefault((variable, series_row), {})
         for index, cell in bound.items():
             group = columns[index].group or band_group
-            if not group or cell.is_hole:
+            if not group:
                 continue
-            by_year.setdefault(columns[index].label, {})[group] = (cell.lo, cell.hi)
+            # A bound hole is recorded as a group that is PRESENT and empty.
+            # "n.a." is the table declaring a figure unavailable, which is not
+            # the same as a cell this parser lost, and the missing-group rule
+            # below must not confuse the two.
+            by_year.setdefault(columns[index].label, {})[group] = (
+                None if cell.is_hole else (cell.lo, cell.hi)
+            )
 
     found: dict[tuple[str, str, str], tuple[float, float]] = {}
     for (variable, series_row), by_year in collected.items():
@@ -760,8 +766,9 @@ def parse_table1_witness(page) -> WitnessTable:
             rejected.append((variable, series_row, broken))
             continue
         for year, groups in by_year.items():
-            if GROUP_RANGE in groups:
-                found[(variable, series_row, year)] = groups[GROUP_RANGE]
+            published = groups.get(GROUP_RANGE)
+            if published is not None:
+                found[(variable, series_row, year)] = published
 
     return WitnessTable(
         rows=found,
@@ -829,6 +836,191 @@ def gate_series(filled_bin_labels, published_range) -> tuple[bool, str]:
     return True, GATE_PASSED
 
 
+#: The one condition #1184 PR 2 turns on, named so it can be found and changed
+#: in one place (orchestrator ruling, 2026-10-17). A panel ships its counts only
+#: when its reading is COMPLETE -- every bin of every series resolved to an
+#: integer -- *as well as* passing the witness gate.
+#:
+#: The gate alone is not enough. It compares only the lowest and highest bars it
+#: can see against the published range, so a bar the reader could not measure in
+#: between passes unnoticed: measured on the Fed pilot, 5 of the 35 series that
+#: pass the gate have unread bars. A histogram shipped with bars missing reads as
+#: complete to whoever cites it, and silent loss ranks below a missing number.
+#: Requiring completeness ships 30 series instead of 35.
+REQUIRE_COMPLETE_READING = True
+
+#: How these releases name the variable a figure is about. Measured identical in
+#: grammar across 2008-10-29, 2010-04-28 and 2015-09-17: "Figure 2.A.
+#: Distribution of participants' projections for the change in real GDP,
+#: 2008-11". The policy-path figure says "... judgments of the midpoint of the
+#: appropriate target range for the federal funds rate or the appropriate target
+#: level for the federal funds rate, 2015-18 ...", which names a variable twice
+#: and wraps across two printed lines -- so the caption is joined until a comma
+#: closes the phrase, and the LAST "for the ..." before that comma is the
+#: subject. Validated on all 13 figure pages of the three releases: 13 bind.
+_CAPTION_ANCHOR_RE = re.compile(r"\b(?:projections|judgments)\s+(?:for|of)\b")
+_CAPTION_FOR_RE = re.compile(r"\bfor\s+(?:the\s+)?")
+#: How many printed lines a caption may run to before this stops joining.
+_CAPTION_MAX_LINES = 4
+
+
+def figure_variable(page) -> str:
+    """The variable this page's figure is about, as its own caption names it.
+
+    Returns "" when no caption on the page names one, which withholds rather
+    than guessing: a panel bound to the wrong variable would be checked against
+    another variable's published range and could ship a wrong number.
+    """
+    _, bands = _bands(page)
+    lines = [" ".join(text for _, _, text in tokens) for _, tokens in sorted(bands.items())]
+    for index, line in enumerate(lines):
+        if "Figure" not in line:
+            continue
+        joined = line
+        for following in lines[index + 1 : index + _CAPTION_MAX_LINES]:
+            found = _CAPTION_ANCHOR_RE.search(joined)
+            if found and "," in joined[found.start() :]:
+                break
+            joined = f"{joined} {following}"
+        found = _CAPTION_ANCHOR_RE.search(joined)
+        if not found or "," not in joined[found.start() :]:
+            continue
+        segment = joined[found.start() :].split(",", 1)[0]
+        hits = list(_CAPTION_FOR_RE.finditer(segment))
+        if hits:
+            return segment[hits[-1].end() :].strip()
+    return ""
+
+
+def witness_for_document(doc, skip_page: int | None = None) -> WitnessTable | None:
+    """The first page of *doc* that parses into a projection table, if any.
+
+    The witness lives on another page of the SAME document, so a chart page's
+    gate has to go and find it. Every page is offered to the parser and the
+    first that yields rows wins; measured over the Fed pilot, exactly one page
+    per document is accepted and the other pages -- prose, figures, notes --
+    all refuse, so this does not need to know where the table is printed.
+    """
+    for index in range(getattr(doc, "page_count", 0)):
+        if skip_page is not None and index + 1 == skip_page:
+            continue
+        try:
+            candidate = parse_table1_witness(doc[index])
+        except Exception:
+            continue
+        if candidate.rows:
+            return candidate
+    return None
+
+
+#: Why one panel's counts were withheld. Each names the panel's own obstacle, so
+#: a reader is told what is missing rather than that something is.
+WITHHELD_NO_VARIABLE = (
+    "this figure's caption names no variable this document's projection table prints, so "
+    "the counts could not be checked against anything; values not shipped"
+)
+WITHHELD_NO_WITNESS = (
+    "this document's projection table publishes no range for {variable} in {year}, so the "
+    "counts could not be checked; values not shipped"
+)
+WITHHELD_INCOMPLETE = (
+    "{count} of this panel's bars could not be read ({bins}), so its counts would be "
+    "missing bars while reading as complete; values not shipped"
+)
+WITHHELD_GATE = (
+    "the counts read here do not span the range this document's own projection table "
+    "publishes for {variable} in {year} ({low} to {high}); values not shipped"
+)
+
+
+@dataclass(frozen=True)
+class PanelDecision:
+    """What one chart region's counts may do, and why."""
+
+    shipped: bool
+    reason: str
+    blocks: tuple[str, ...] = ()
+
+
+def _counts_block(panel, series) -> str:
+    """One series' counts, bin by bin, as the drawing gives them."""
+    labels = [cell.bin_label for cell in series.cells]
+    counts = [str(cell.count) for cell in series.cells]
+    return "\n".join(
+        [
+            f"{series.name} ({panel.label}):",
+            "| " + " | ".join(labels) + " |",
+            "|" + "|".join(["---"] * len(labels)) + "|",
+            "| " + " | ".join(counts) + " |",
+        ]
+    )
+
+
+def decide_panel(panel, witness: WitnessTable | None, variable: str) -> PanelDecision:
+    """Which of this panel's series may ship their counts, and why the rest may not.
+
+    Judged per SERIES, not per panel. A panel draws the current meeting's bars
+    and the previous meeting's in the same axes, and each is checked against
+    its own row of the table, so a bar the reader could not measure in one of
+    them says nothing about the other. Withholding both would drop 4 series on
+    the Fed pilot that are complete and agree with the published table.
+
+    Both conditions must hold for a series to ship, and they are separate:
+    :data:`REQUIRE_COMPLETE_READING` (every bin resolved) and the witness gate
+    (the filled bins span the published range). The gate alone passes a reading
+    with a hole in the middle of it.
+    """
+    from socr.figures.chart_reader import INTEGER
+
+    if not witness or not variable or witness.variable_for(variable) is None:
+        return PanelDecision(False, WITHHELD_NO_VARIABLE)
+
+    blocks: list[str] = []
+    notes: list[str] = []
+    for series in panel.series:
+        unread = [cell.bin_label for cell in series.cells if cell.status != INTEGER]
+        if REQUIRE_COMPLETE_READING and unread:
+            notes.append(
+                f"{series.name}: "
+                + WITHHELD_INCOMPLETE.format(count=len(unread), bins=", ".join(unread))
+            )
+            continue
+        published = witness.range_for(variable, witness.series_row_for(series.name), panel.label)
+        if published is None:
+            notes.append(
+                f"{series.name}: " + WITHHELD_NO_WITNESS.format(variable=variable, year=panel.label)
+            )
+            continue
+        filled = [
+            cell.bin_label
+            for cell in series.cells
+            if cell.status == INTEGER and (cell.count or 0) > 0
+        ]
+        passed, _reason = gate_series(filled, published)
+        if not passed:
+            notes.append(
+                f"{series.name}: "
+                + WITHHELD_GATE.format(
+                    variable=variable,
+                    year=panel.label,
+                    low=published[0],
+                    high=published[1],
+                )
+            )
+            continue
+        blocks.append(_counts_block(panel, series))
+
+    if not blocks:
+        return PanelDecision(False, "; ".join(notes) or WITHHELD_NO_VARIABLE)
+    if not notes:
+        return PanelDecision(True, SHIPPED_REASON, tuple(blocks))
+    # Some of this panel's series ship and some do not, so the line has to say
+    # both: what the shipped numbers are and are not, and which series is
+    # absent and why. Saying only the first would let a reader take the panel
+    # for complete.
+    return PanelDecision(True, "; ".join([SHIPPED_REASON, *notes]), tuple(blocks))
+
+
 #: What a panel line says when the numbers DO ship. The owner's standing rule is that a
 #: model reading ships "(OCR, not verified)" and a mark never claims a value was verified
 #: (#1181). A gated chart reading is in the same position: the gate NARROWS what can ship,
@@ -886,7 +1078,12 @@ COUNTS_NOT_WIRED = (
 
 
 def region_clause_records(
-    page_num: int, *, region_pictures: dict, reading, region_count: int
+    page_num: int,
+    *,
+    region_pictures: dict,
+    reading,
+    region_count: int,
+    decisions: dict | None = None,
 ) -> tuple[dict, ...]:
     """#1155 round 3: one MACHINE-READABLE clause per chart region, from the results.
 
@@ -927,8 +1124,16 @@ def region_clause_records(
             )
             decided = True
         else:
-            reason = f"panel {panel.label}: {COUNTS_NOT_WIRED}"
-            decided = False
+            decision = (decisions or {}).get(index)
+            if decision is None:
+                reason = f"panel {panel.label}: {COUNTS_NOT_WIRED}"
+                decided = False
+            else:
+                reason = f"panel {panel.label}: {decision.reason}"
+                # A withheld panel was JUDGED and found wanting, which is a
+                # decided outcome; a shipped one is UNKNOWN because the gate
+                # narrows what may ship and does not prove a reading right.
+                decided = not decision.shipped
         records.append(
             {
                 "check": Check.CHART_REGION.value,
@@ -1008,6 +1213,7 @@ def floor_replacement_body(
     extra_marks: list | None = None,
     page_image: str | None = None,
     region_records: tuple[dict, ...] | list[dict] | None = None,
+    decisions: dict | None = None,
 ) -> str | None:
     """#1155: what a chart page ships INSTEAD of a bare whole-page failure marker.
 
@@ -1050,6 +1256,7 @@ def floor_replacement_body(
             region_pictures=region_pictures,
             reading=reading,
             region_count=region_count,
+            decisions=decisions,
         )
     )
     lines = [clause_mark(page_num, record) for record in records]
@@ -1059,10 +1266,20 @@ def floor_replacement_body(
         if picture and picture not in (recovered_prose or ""):
             pictures.append(picture)
 
+    # The counts of every panel the gate let through, each under the line that
+    # already said they were read from a drawing and only checked at their two
+    # extremes. Panels that did not pass contribute nothing here; their line
+    # above says why.
+    counts = [
+        block
+        for index in range(1, region_count + 1)
+        for block in ((decisions or {}).get(index).blocks if (decisions or {}).get(index) else ())
+    ]
     parts = ["\n".join([*lines, *(extra_marks or [])])]
     prose = (recovered_prose or "").strip()
     if prose:
         parts.append(prose)
+    parts.extend(counts)
     parts.extend(pictures)
     # The page image ONCE, after the crops, when the lane withheld page text.
     if page_image and page_image not in (recovered_prose or ""):

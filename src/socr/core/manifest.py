@@ -2483,11 +2483,37 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
         # that the page's lines and the page's verdict are rendered and recorded from the
         # same objects. Round 3 recorded the regions only, and the page-scoped line
         # existed as a string nothing could read back.
+        # #1184 PR 2: the gate needs this document's OWN projection table, which
+        # is printed on another page, and the variable this figure is about,
+        # which its caption names. Both are read HERE rather than beside the
+        # chart reading above, so the builder stays lazy: a page that never
+        # reaches this branch pays nothing for them (#1155 round 4).
+        decisions: dict = {}
+        try:
+            from socr.core.pdf import open_pdf as open_witness_pdf
+            from socr.figures.chart_witness import (
+                decide_panel,
+                figure_variable,
+                witness_for_document,
+            )
+
+            with open_witness_pdf(pdf_path) as witness_doc:
+                variable = figure_variable(witness_doc[page_num - 1])
+                witness = witness_for_document(witness_doc, skip_page=page_num)
+                decisions = {
+                    index: decide_panel(panel, witness, variable)
+                    for index, panel in (reading.panels or {}).items()
+                }
+        except Exception:
+            # No witness means no counts, never counts without one.
+            logger.warning("#1184: witness lookup failed for p%d", page_num, exc_info=True)
+            decisions = {}
         region_records = region_clause_records(
             page_num,
             region_pictures=pictures,
             reading=reading,
             region_count=len(bboxes),
+            decisions=decisions,
         )
         lane_records = [*region_records, *([withheld_record] if withheld_record else [])]
         try:
@@ -2501,6 +2527,7 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
                 extra_marks=([clause_mark(page_num, withheld_record)] if withheld_record else []),
                 page_image=page_image,
                 region_records=region_records,
+                decisions=decisions,
             )
         except Exception:
             logger.warning("#1155: chart body build failed for p%d", page_num, exc_info=True)

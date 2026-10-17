@@ -833,3 +833,21 @@ def test_a_declared_hole_printed_off_the_grid_is_REFUSED(tmp_path):
     )
     assert ("change in real gdp", "current", "2010") not in witness.rows
     assert REJECTED_UNBOUND_CELL in [reason for _, _, reason in witness.rejected]
+
+
+def test_a_row_whose_first_column_prints_a_hole_keeps_its_own_label(tmp_path):
+    """The label ends at the row's first CELL, holes included (PR #1195 review).
+
+    Anchoring on the first FIGURE instead leaves any "n.a." printed before it
+    inside the label run, so the row is filed under "change in real gdp n.a."
+    and a caller asking for "Change in real GDP" gets nothing. The reviewer
+    found the anchor could be switched back to figures with all tests still
+    green; this is the row that notices.
+    """
+    rows = ((_ROWS[0][0], {**_ROWS[0][1], (0, 0): "n.a."}),)
+    witness = _parse(
+        _side_by_side(tmp_path / "firsthole.pdf", years=_YEARS, groups=_GROUPS, rows=rows)
+    )
+    assert witness.rejected == (), "a declared hole is not a lost cell"
+    assert witness.range_for("Change in real GDP", "current", "2010") == (2.7, 4.0)
+    assert {key[0] for key in witness.rows} == {"change in real gdp"}
