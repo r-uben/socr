@@ -586,3 +586,52 @@ waiting on `faulthandler_timeout`; and every full run from here carries
 `-o faulthandler_timeout=300 -p faulthandler`, so a repeat names itself.
 
 Suite after the fix, frozen tree: **7997 passed, 2 skipped, 4 xfailed, 0 failed** (6:05).
+
+## Round 5 — the repo reviewer's blocker on PR #1190
+
+One blocker, two parts, both about the preservation-pass skip
+(`orchestrator.py:5487`). CI was green and the lane itself held up; 13 of the reviewer's
+16 mutants were already killed.
+
+**1. The skip was UNPINNED.** Deleting
+`if getattr(ps, "chart_floor_body", False): continue` kept every test green, because no
+test outside this ticket's file ever set the flag and
+`test_selecting_the_replacement_marks_the_page_for_the_preservation_pass` only checked
+that the FLOOR sets it, never that the PASS honours it. Now driven for real:
+`_preserve_chart_regions` over the body `chart_floor_replacement` built, asserting
+identical bytes, no `chart_region_*` flag and no event — with the flag-off control, which
+does rewrite the body. A mutant deleting the skip kills that test and leaves the GH-189
+suite that owns the pass green.
+
+**2. The flag lived only in memory.** `chart_floor_body` was never written to the sidecar
+and never restored, so a resumed run brought the body back without the fact that describes
+it, and the pass would re-enter a page whose in-chart words this lane withheld. Persisted
+beside the GH-682 `chart_region_*` siblings and OR-restored the same way.
+`chart_floor_pictures` and `chart_floor_clauses` are deliberately NOT persisted: the first
+is a within-process render cache, and the second reaches a resumed page through #1145's
+`published_verdict`, restored verbatim. Two mutants — dropping the writer line, and
+ignoring the restored value — each kill the resume test.
+
+**The sidecar surface is policed, and it caught this.** The new key failed seven P6 tests.
+That is the guard working: a sidecar key may not appear unless it is enumerated per page
+with its expected value. Registered from the oracle's OWN measured report — twelve leaf
+paths, each `None -> False`, and nothing else — in `ADDITIVE_SIDECAR_KEYS` plus
+`CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES`, and in the canonical key set of
+`test_p6_disposition_persistence.py`. No guard was relaxed: the writer mutant now fails
+the P6 surface test as well as the resume test. False on every page of that corpus,
+page 10 included — it is a structure-class floor page whose chart reader resolves no panel,
+which is why its markdown is unchanged too.
+
+**Honest limit of the resume test**, stated in its docstring: it drives
+`_flush_page_sidecar` and `_restore_terminal_page_state`, the writer and the restorer the
+review named. It does NOT assert that `_load_terminal_page`'s ledger gate admits such a
+page — a floored page is ERROR, and that gate decides whether a page is skipped at all,
+which is a different question.
+
+One more hermeticity trap, caught by the repo's own guard rather than by CI:
+`_flush_page_sidecar` reaches `_run_fingerprint` -> `_resolve_judge_model`, which POSTs to
+a live Ollama daemon whatever the judge backend. Patched to `""` in the test, per CLAUDE.md.
+
+Suite, frozen tree, with `-o faulthandler_timeout=300 -p faulthandler`: **7999 passed,
+2 skipped, 4 xfailed, 0 failed** (6:00). Format gate: 968 files already formatted. The
+softs in that review are untouched — the orchestrator is filing them as a follow-up.

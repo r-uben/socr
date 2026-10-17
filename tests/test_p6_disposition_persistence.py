@@ -304,6 +304,11 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "chart_region_render_failed",
         "chart_region_placement_unresolved",
         "chart_region_inventory_failed",
+        # #1155: persisted alongside the chart_region_* siblings above, and for the
+        # mirror-image reason -- this flag makes the preservation pass SKIP a page the
+        # chart floor already accounted for, and in memory only a resumed run lost it.
+        # See tests/test_gh1155_chart_witness.py.
+        "chart_floor_body",
         # GH-674: persisted so the demotion survives resume -- see
         # test_gh674_equation_skip_demotion.py.
         "equation_sidecar_skipped",

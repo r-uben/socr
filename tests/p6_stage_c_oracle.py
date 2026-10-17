@@ -93,6 +93,7 @@ __all__ = [
     "METADATA_DIFFERENCES",
     "PAGE_TOP_MARK_1145_DIFFERENCES",
     "VERDICT_SIDECAR_1145_DIFFERENCES",
+    "CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES",
 ]
 
 #: Volatile keys excluded from canonical byte comparison.
@@ -135,6 +136,13 @@ ADDITIVE_SIDECAR_KEYS: frozenset[str] = frozenset(
         # #1145: the per-page verdict. Pinned per page by
         # VERDICT_SIDECAR_1145_DIFFERENCES and by tests/test_gh1145_*.py.
         "verdict",
+        # #1155: whether this page's body came from the chart floor, persisted so the
+        # preservation pass still skips it after a resume (repo review of PR #1190).
+        # Pinned per page by CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES -- False on every
+        # page of this corpus, including the floor page, whose chart reader resolves
+        # nothing -- and by tests/test_gh1155_chart_witness.py for the page where it is
+        # True.
+        "chart_floor_body",
     }
 )
 
@@ -1303,6 +1311,137 @@ VERDICT_SIDECAR_1145_DIFFERENCES: list[ExpectedDiff] = [
 # Complete Unified EXPECTED_STAGE_C_DIFFERENCES Mapping
 # ---------------------------------------------------------------------------
 
+#: #1155 (repo review of PR #1190): the additive ``chart_floor_body`` sidecar key.
+#:
+#: MEASURED, not assumed: the oracle's own unexpected-diff report named these twelve leaf
+#: paths and no others, each ``None -> False``. The flag is only ever True on a page whose
+#: bare whole-page marker the chart floor replaced, and this corpus has none -- page 10 is
+#: a structure-class floor page whose chart reader resolves no panel, which is why its
+#: markdown is unchanged here too.
+CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00001.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 1 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 2 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00003.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 3 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 4 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 5 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00006.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 6 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 7 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00008.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 8 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00009.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 9 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 10 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00011.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 11 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00012.json", "chart_floor_body"),
+        old_value=None,
+        new_value=False,
+        description=(
+            "#1155: page 12 gains the additive ``chart_floor_body`` sidecar key. False: no "
+            "page of this corpus reaches the chart floor, so no body and no mark moves, and "
+            "the key records that fact instead of leaving it to memory."
+        ),
+    ),
+]
+
+
 EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *BUCKET_DIFFERENCES,
     *STATE_EVENT_DIFFERENCES,
@@ -1315,6 +1454,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *UNACCEPTED_OUTPUT_1129_DIFFERENCES,
     *PAGE_TOP_MARK_1145_DIFFERENCES,
     *VERDICT_SIDECAR_1145_DIFFERENCES,
+    *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
 ]
 
 #: Exactly one entry per leaf path. The dict below would silently keep only the last entry

@@ -14887,6 +14887,16 @@ class UnifiedPipeline:
             "chart_region_inventory_failed": (
                 bool(getattr(ps, "chart_region_inventory_failed", False)) if ps else False
             ),
+            # #1155 (repo review of PR #1190): persisted for the same reason as the three
+            # above, in the opposite direction. This flag makes
+            # ``_preserve_chart_regions`` SKIP the page, because the chart floor has
+            # already accounted for every region on it and withheld the in-chart words
+            # that pass anchors on. In memory only, a resumed run restored the body
+            # without the flag, so the pass would re-enter a page it must not touch and
+            # stamp an unresolved-placement banner plus a ``chart_region=FAIL`` mark over
+            # per-region marks that are already correct. The flag travels with the bytes
+            # it describes.
+            "chart_floor_body": (bool(getattr(ps, "chart_floor_body", False)) if ps else False),
             # GH-674: an in-scope equation-region miss (crop with no attached
             # sidecar) demotes the document; persisted so a resumed page that
             # skips re-running the equation lane does not lose the demotion.
@@ -16201,6 +16211,15 @@ class UnifiedPipeline:
             ps.chart_region_inventory_failed = bool(
                 getattr(ps, "chart_region_inventory_failed", False)
             ) or bool(meta.get("chart_region_inventory_failed", False))
+            # #1155: OR-restored like its siblings. ``chart_floor_pictures`` and
+            # ``chart_floor_clauses`` are deliberately NOT restored: the first is a
+            # render cache whose only job is to stop a second render in one process, and
+            # the second reaches a resumed page through #1145's ``published_verdict``,
+            # which is restored verbatim. This flag is the one of the three that changes
+            # what a later PASS does to the bytes.
+            ps.chart_floor_body = bool(getattr(ps, "chart_floor_body", False)) or bool(
+                meta.get("chart_floor_body", False)
+            )
             # GH-674: OR-restore, same reasoning as the three chart-region
             # flags above -- a flag this run already set (e.g. a per-page call
             # that ran before the sidecar existed) must not be cleared by an

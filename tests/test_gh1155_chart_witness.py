@@ -1476,3 +1476,170 @@ def test_an_empty_saved_body_does_not_spin_the_recovery_check_forever(tmp_path):
     assert record.output.scanned_prose_recovered is not True, (
         "and an empty body is not recorded as a prose recovery"
     )
+
+
+def _preservation_pipeline():
+    """A pipeline for ``_preserve_chart_regions``, with every engine knob PINNED.
+
+    ``primary_engine`` is named rather than left at ``AUTO``, which would make
+    ``resolve_auto_engine`` instantiate and probe engines from the registry -- the #841
+    leak that makes a test's outcome depend on which models this machine has pulled.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    return UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.DEEPSEEK,
+            local_engine=EngineType.DEEPSEEK,
+            enabled_engines=[EngineType.DEEPSEEK],
+            agentic=True,
+            quiet=True,
+            native_first=True,
+            save_figures=False,
+            describe_figures=False,
+            table_judge_ladder=False,
+        )
+    )
+
+
+def test_the_preservation_pass_leaves_a_chart_floor_body_byte_identical(tmp_path):
+    """Repo review of #1190: the skip at ``orchestrator.py:5487`` was UNPINNED.
+
+    Deleting ``if getattr(ps, "chart_floor_body", False): continue`` kept every test
+    green, because no test outside this file ever sets the flag and
+    ``test_selecting_the_replacement_marks_the_page_for_the_preservation_pass`` only
+    checks that the FLOOR sets it, never that the PASS honours it.
+
+    This drives the real ``_preserve_chart_regions`` over the body the floor itself
+    built, and pins the difference between the two values of the flag: with it, the bytes
+    are identical, no ``chart_region_*`` flag is raised and no event fires; without it,
+    the pass rewrites the body -- it anchors crops on the in-chart words this lane
+    deliberately withheld, which on the real multi-region SEP pages is the "Unresolved
+    chart placement" banner and a ``chart_region=FAIL`` mark contradicting the
+    per-region marks already on the page (Argon 3).
+    """
+    import socr.core.manifest as m
+
+    pdf, _ = _chart_page_with_prose(tmp_path)
+    state = _chart_floor_document_state(pdf)
+    body = m._select_and_finalize_page(state, 1).output.text
+    ps = state.pages[1]
+
+    pipeline = _preservation_pipeline()
+    assert ps.chart_floor_body is True, "premise: the floor marked this body as its own"
+    assert pipeline._page_has_tables(1, ps), "premise: the page is a candidate for the pass"
+    assert not m.is_page_failed_marker(body), (
+        "premise: the body is not a bare marker, which the pass skips for another reason"
+    )
+    assert "chart_region=" in body, "premise: the floor's own per-region marks are on the page"
+
+    kept = pipeline._preserve_chart_regions(state, [body], tmp_path)
+
+    assert kept[0] == body, "the pass must not touch a body the chart floor accounted for"
+    for flag in (
+        "chart_region_render_failed",
+        "chart_region_placement_unresolved",
+        "chart_region_inventory_failed",
+    ):
+        assert getattr(ps, flag) is False, f"{flag} was raised on a page with per-region marks"
+    assert [e for e in state.events if "chart_region" in getattr(e, "kind", "")] == [], (
+        "and it emits no chart-region event about a page it did not examine"
+    )
+
+    # The control: the SAME body and the same pass, with the flag off, does rewrite it.
+    # Without this arm the assertions above would pass on a pass that never runs at all.
+    control_state = _chart_floor_document_state(pdf)
+    control_body = m._select_and_finalize_page(control_state, 1).output.text
+    assert control_body == body, "premise: the two arms start from the same bytes"
+    control_state.pages[1].chart_floor_body = False
+    rewritten = _preservation_pipeline()._preserve_chart_regions(
+        control_state, [control_body], tmp_path
+    )
+    assert rewritten[0] != control_body, (
+        "control: with the flag off the pass DOES rewrite the floor's body"
+    )
+
+
+def test_a_resumed_chart_floor_page_still_skips_the_preservation_pass(tmp_path, monkeypatch):
+    """Repo review of #1190, part 2: the skip flag lived only in memory.
+
+    ``chart_floor_body`` was never written to the sidecar and never restored, so a
+    resumed run brought the BODY back without the fact that describes it: the
+    preservation pass would then re-enter a page whose in-chart words this lane withheld
+    and stamp an unresolved-placement banner plus a ``chart_region=FAIL`` mark over
+    per-region marks that are already correct. The flag now travels with its bytes,
+    OR-restored exactly like its GH-682 siblings.
+
+    HONEST SCOPE: this drives ``_flush_page_sidecar`` and then
+    ``_restore_terminal_page_state`` -- the writer and the restorer the review named. It
+    does NOT assert that ``_load_terminal_page``'s ledger gate admits such a page; that
+    gate is about whether a page is SKIPPED at all, and a floored page is ERROR. The two
+    arms differ only in what the sidecar carries.
+    """
+    import json
+
+    import socr.core.manifest as m
+    from socr.core.state import DocumentHandle, DocumentState
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    # ``_flush_page_sidecar`` -> ``_run_fingerprint`` -> ``_resolve_judge_model`` POSTs to
+    # a live Ollama daemon regardless of the judge backend (CLAUDE.md). The repo's own
+    # hermeticity guard caught this at teardown; patched to "" so the test cannot reach a
+    # provider here or in CI, where there is none.
+    monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self, *a, **k: "")
+
+    pdf, _ = _chart_page_with_prose(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _preservation_pipeline()
+
+    state = _chart_floor_document_state(pdf)
+    body = m._select_and_finalize_page(state, 1).output.text
+    state.pages[1].best_output = m.replace(state.pages[1].best_output, text=body)
+    assert state.pages[1].chart_floor_body is True, "premise: the live run set the flag"
+
+    pipeline._flush_page_fragment(state, 1, body, out_dir)
+    sidecar = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    assert json.loads(sidecar.read_text())["chart_floor_body"] is True, (
+        "the sidecar carries the flag at all"
+    )
+
+    resumed = DocumentState(handle=DocumentHandle.from_path(pdf))
+    resumed.pages[1].has_tables = True
+    pipeline._restore_terminal_page_state(resumed, 1, state.pages[1].best_output, out_dir)
+    assert resumed.pages[1].chart_floor_body is True, "and the resumed page gets it back"
+
+    kept = _preservation_pipeline()._preserve_chart_regions(resumed, [body], tmp_path)
+    assert kept[0] == body, "a resumed chart-floor page goes through the pass unchanged"
+    assert [e for e in resumed.events if "chart_region" in getattr(e, "kind", "")] == []
+
+    # The control: a sidecar that does NOT carry the flag -- which is what every sidecar
+    # written before this fix looks like. The key is removed from the real sidecar on
+    # disk rather than by clearing the PageState, because ``_flush_page_sidecar``
+    # re-finalizes the page and so writes the flag back: an older on-disk artefact is a
+    # JSON without the key, and that is what is built here.
+    stale_dir = tmp_path / "stale"
+    stale_state = _chart_floor_document_state(pdf)
+    stale_body = m._select_and_finalize_page(stale_state, 1).output.text
+    stale_state.pages[1].best_output = m.replace(stale_state.pages[1].best_output, text=stale_body)
+    assert stale_body == body, "premise: both arms start from the same bytes"
+    pipeline._flush_page_fragment(stale_state, 1, stale_body, stale_dir)
+    stale_sidecar = pipeline._flush_page_sidecar(stale_state, 1, stale_dir, terminal=True)
+    stale_meta = json.loads(stale_sidecar.read_text())
+    stale_meta.pop("chart_floor_body", None)
+    stale_sidecar.write_text(json.dumps(stale_meta))
+
+    stale_resumed = DocumentState(handle=DocumentHandle.from_path(pdf))
+    stale_resumed.pages[1].has_tables = True
+    pipeline._restore_terminal_page_state(
+        stale_resumed, 1, stale_state.pages[1].best_output, stale_dir
+    )
+    assert stale_resumed.pages[1].chart_floor_body is False, (
+        "a sidecar predating the fix restores no flag, which is the case this guards"
+    )
+    rewritten = _preservation_pipeline()._preserve_chart_regions(
+        stale_resumed, [stale_body], tmp_path
+    )
+    assert rewritten[0] != stale_body, (
+        "control: without the restored flag the pass rewrites the resumed body"
+    )
