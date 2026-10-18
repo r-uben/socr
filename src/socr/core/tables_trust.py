@@ -166,6 +166,10 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # keeps the two copies from diverging silently.
         "table_ladder_rejected",
         "table_ladder_unverified",
+        # Default-on per-cell native binding check: active disagreement or
+        # incomplete geometry on a born-digital table page.
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
         # P1 (owner ruling Q2): the table's bytes did NOT ship -- the region
         # is a fail-closed marker plus the page image. Registered here for the
         # same reason the other two terminals are: a consumer reading the

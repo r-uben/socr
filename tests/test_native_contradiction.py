@@ -420,11 +420,14 @@ class TestWithholdThroughTheWholePipeline:
         assert {c["kind"] for c in events[0].data["contradictions"]} == {nc.NUMBER_ABSENT}
 
     def test_ladder_off_leaves_the_table_alone(self, tmp_path: Path) -> None:
-        """The check lives inside the ladder gate: with the ladder off, the contradicted
-        table ships exactly as it did before."""
+        """With the ladder off, ``native_cell_check`` still runs and marks the page
+        TABLE_UNVERIFIED; ``native_contradiction`` withhold does not."""
         _p, _r, state, *_ = _process(tmp_path, "off", MINUS_DROPPED_MD, ladder=False)
-        assert state.pages[1].table_ladder_disposition is None
+        assert state.pages[1].table_ladder_disposition is FailureMode.TABLE_UNVERIFIED
         assert not [e for e in state.events if e.kind == TABLE_LADDER_WITHHELD_KIND]
+        assert [
+            e for e in state.events if e.kind == "native_cell_check_contradicted"
+        ]
 
 
 class TestScope:

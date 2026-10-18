@@ -2097,6 +2097,8 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         "table_ladder_rejected",
         "table_ladder_unverified",
         "table_ladder_withheld",
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
         "table_escalation_refused",
         "table_escalation_timeout",
         # GH-851: a page that lost its escalation to a wedged provider.

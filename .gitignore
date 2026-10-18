@@ -52,6 +52,7 @@ output/
 !.gemini/styleguide.md
 !TICKETS.md
 !TODO.md
+!tests/fixtures/resf_native_cell/*.md
 
 # Test artifacts
 test_*.md

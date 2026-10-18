@@ -91,6 +91,7 @@ from socr.tables.native_verifier import (
     _cluster_x_positions,
     _lane_count_from_words,
     _normalize_cell,
+    _normalize_binding_numeric_token,
     _normalize_numeric_token,
     _well_separated_lanes_in_row,
     is_numeric_token,
@@ -1301,7 +1302,7 @@ def _native_rows(
             else:
                 lane_tokens[li] = (text, token_ambiguous)
                 lane_bboxes[li] = (word[0], word[1], word[2], word[3])
-            multiset[_normalize_numeric_token(text)] += 1
+            multiset[_normalize_binding_numeric_token(text)] += 1
 
         rows.append(
             _NativeRow(
@@ -1478,7 +1479,7 @@ def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
     for cell in row[1:]:
         for tok in re.split(r"\s+", _normalize_cell(cell).strip()):
             if tok and is_numeric_token(tok):
-                c[_normalize_numeric_token(tok)] += 1
+                c[_normalize_binding_numeric_token(tok)] += 1
     return c
 
 
@@ -1856,7 +1857,7 @@ def _best_lane_column_map(
                 cand_normalized = _normalize_cell(cand_text) if cand_text else ""
                 if not cand_normalized or not is_numeric_token(cand_normalized):
                     continue
-                if _normalize_numeric_token(native_text) == _normalize_numeric_token(
+                if _normalize_binding_numeric_token(native_text) == _normalize_binding_numeric_token(
                     cand_normalized
                 ):
                     score[lane][col_idx] += 1
@@ -2541,7 +2542,7 @@ def bind(
                         )
                     )
                     continue
-                if _normalize_numeric_token(native_value) == _normalize_numeric_token(
+                if _normalize_binding_numeric_token(native_value) == _normalize_binding_numeric_token(
                     model_value_normalized
                 ):
                     result.matched_cells.append(

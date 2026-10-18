@@ -1031,6 +1031,54 @@ def is_numeric_token(tok: str) -> bool:
     return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
 
 
+_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f ](?=\d)")
+# Decimal comma: exactly one comma, 1–3 fractional digits, end of numeric body.
+_DECIMAL_COMMA_RE = re.compile(r"^(?P<body>-?\d[\d.,]*),(?P<frac>\d{1,2})$")
+
+
+def _strip_trailing_table_punctuation(body: str) -> str:
+    """Drop a terminal comma that punctuates an already-dotted decimal (``0.253,``).
+
+    Table typography often appends a list comma after English-style decimals.
+    That comma must not be treated as a French decimal separator (which would
+    turn ``0.253,`` into ``0253.`` via the mixed-separator branch).
+    """
+    if body.endswith(",") and "." in body and not re.search(r",\d{1,2}$", body):
+        return body[:-1]
+    return body
+
+
+def _apply_locale_numeric_normalization(body: str) -> str:
+    """Map locale-specific separators to one canonical decimal-point form.
+
+    Handles French-style ``1,5`` / ``1 234,5`` (decimal comma, space thousands),
+    English ``1,234.56`` (comma thousands, dot decimal), and plain ``15`` /
+    ``2.10`` without float parsing (stated precision is preserved).
+    """
+    body = _THOUSANDS_SPACE_RE.sub("", body)
+    body = body.replace("\u2212", "-").replace("\u2013", "-")
+    body = _strip_trailing_table_punctuation(body)
+    if not body or body == "-":
+        return body
+    dec_comma = _DECIMAL_COMMA_RE.match(body)
+    if dec_comma and "." not in dec_comma.group("body"):
+        return f"{dec_comma.group('body')}.{dec_comma.group('frac')}"
+    if "," in body and "." in body:
+        if body.rfind(",") > body.rfind("."):
+            body = body.replace(".", "")
+            body = body.replace(",", ".")
+        else:
+            body = body.replace(",", "")
+        return body
+    if "," in body:
+        if re.search(r"\d,\d{1,2}$", body) and body.count(",") == 1:
+            return body.replace(",", ".")
+        for _ in range(3):
+            body = re.sub(r"(\d),(\d)", r"\1\2", body)
+        return body
+    return body
+
+
 def _normalize_numeric_token(tok: str) -> str:
     """N2 canonical form for numeric-string comparison (no float parsing).
 
@@ -1039,10 +1087,13 @@ def _normalize_numeric_token(tok: str) -> str:
     2. Strip parenthesis wrappers (econ negative-sign convention):
        ``(0.014)`` → ``0.014``.
     3. Strip trailing ``%`` sign: ``45%`` → ``45``.
-    4. Remove thousands-separator commas between digit groups:
-       ``1,204`` → ``1204``, ``1,234,567`` → ``1234567``.
-    5. Return the resulting decimal string verbatim — stated precision is
-       preserved (``2.10`` ≠ ``2.1``); no float/Decimal cast is performed.
+    4. Strip trailing list punctuation after an English-style decimal (``0.253,``).
+    5. Remove thousands-separator commas between digit groups only — never
+       merge a French decimal comma (``1,5`` stays ``1,5``, not ``15``).
+
+    Scanned source-evidence (#1082) deliberately does NOT treat ``1,5`` as
+    ``1.5`` here; born-digital cell binding uses
+    :func:`_normalize_binding_numeric_token` instead.
 
     Both native tokens and output tokens are normalized with this function
     before multiset comparison, so the comparison is always N2↔N2. Entities
@@ -1057,11 +1108,22 @@ def _normalize_numeric_token(tok: str) -> str:
     # Strip trailing percent
     if tok.endswith("%"):
         tok = tok[:-1]
-    # Remove thousands-separator commas (between digit groups only)
-    # Repeat three times to handle up to 1,234,567,890
+    tok = _strip_trailing_table_punctuation(tok)
+    if re.match(r"^-?\d+,\d{1,2}$", tok) and "." not in tok:
+        return tok
     for _ in range(3):
         tok = re.sub(r"(\d),(\d)", r"\1\2", tok)
     return tok
+
+
+def _normalize_binding_numeric_token(tok: str) -> str:
+    """Locale-aware numeric form for born-digital per-cell binding only."""
+    tok = _decoded_numeric_candidate(tok)
+    if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
+        tok = tok[1:-1]
+    if tok.endswith("%"):
+        tok = tok[:-1]
+    return _apply_locale_numeric_normalization(tok)
 
 
 def _numeric_multiset_from_tokens(
