@@ -111,18 +111,6 @@ def _run_page(
             stack.enter_context(patch.object(pipeline, "_page_has_tables", return_value=False))
         if locate_tables_empty:
             stack.enter_context(patch("socr.tables.locate.locate_tables", return_value=[]))
-        elif pdf_name == "resf_p59.pdf":
-            import socr.tables.locate as locate_mod
-
-            _orig_locate = locate_mod.locate_tables
-
-            def _p59_locate(page):
-                boxes = _orig_locate(page)
-                if len(boxes) >= 2:
-                    return [boxes[1], boxes[0]]
-                return boxes
-
-            stack.enter_context(patch.object(locate_mod, "locate_tables", side_effect=_p59_locate))
         stack.enter_context(
             patch.object(pipeline, "_phase_assemble", side_effect=_assemble_wrapper)
         )

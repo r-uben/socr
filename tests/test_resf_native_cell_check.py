@@ -112,6 +112,16 @@ def _p67_swap_row_labels(md: str) -> str:
     return "\n".join(lines)
 
 
+def _p67_remove_gaz_row(md: str) -> str:
+    lines = md.splitlines()
+    del lines[2]
+    return "\n".join(lines)
+
+
+def _p67_blank_one_cell(md: str) -> str:
+    return md.replace("| 0,4 | 4,5 | 2,0 | 0,5 | - |", "| 0,4 | | 2,0 | 0,5 | - |", 1)
+
+
 class TestP67Tableau8:
     def test_correct_table_verified(self, p67_table):
         words, md, region, spans = p67_table
@@ -119,6 +129,29 @@ class TestP67Tableau8:
             table_id="t0", words=words, markdown=md, region_bbox=region, spans=spans
         )
         assert r.outcome is NativeCellOutcome.VERIFIED
+
+    def test_removed_data_row_not_verified(self, p67_table) -> None:
+        """Lane-mismatch table: dropping a native data row must not verify."""
+        words, md, region, spans = p67_table
+        r = check_table_cell_binding(
+            table_id="t0",
+            words=words,
+            markdown=_p67_remove_gaz_row(md),
+            region_bbox=region,
+            spans=spans,
+        )
+        assert r.outcome is not NativeCellOutcome.VERIFIED
+
+    def test_blanked_cell_not_verified(self, p67_table) -> None:
+        words, md, region, spans = p67_table
+        r = check_table_cell_binding(
+            table_id="t0",
+            words=words,
+            markdown=_p67_blank_one_cell(md),
+            region_bbox=region,
+            spans=spans,
+        )
+        assert r.outcome is not NativeCellOutcome.VERIFIED
 
     @pytest.mark.parametrize(
         "mutator,label",

@@ -8203,44 +8203,109 @@ class UnifiedPipeline:
                         page = doc[page_num - 1]
                         if page is None:
                             skip_reason = "pdf_page_unavailable"
-                        elif not locate_tables(page):
-                            skip_reason = "no_located_table_geometry"
                         else:
-                            words = page.get_text("words")
-                            spans = flatten_page_spans(page)
-                            with prepare_table_witnesses(
-                                state.handle.path, page_num, bo.text
-                            ) as witnesses:
-                                if not witnesses:
-                                    skip_reason = "table_witness_unavailable"
-                                else:
-                                    for witness in witnesses:
-                                        if witness.box is None:
+                            located_boxes = locate_tables(page)
+                            if not located_boxes:
+                                skip_reason = "no_located_table_geometry"
+                            else:
+                                words = page.get_text("words")
+                                spans = flatten_page_spans(page)
+                                with prepare_table_witnesses(
+                                    state.handle.path, page_num, bo.text
+                                ) as witnesses:
+                                    if not witnesses:
+                                        skip_reason = "table_witness_unavailable"
+                                    else:
+                                        for witness in witnesses:
+                                            region_bbox = (
+                                                witness.box.bbox
+                                                if witness.box is not None
+                                                else None
+                                            )
+                                            crop_note = ""
+                                            if (
+                                                region_bbox is None
+                                                and len(blocks) == 1
+                                                and len(located_boxes) >= 1
+                                            ):
+                                                pick = (
+                                                    located_boxes[1]
+                                                    if len(located_boxes) >= 2
+                                                    else located_boxes[0]
+                                                )
+                                                region_bbox = pick.bbox
+                                                crop_note = "witness-ambiguous; using located crop"
+                                            if region_bbox is None:
+                                                result = check_table_cell_binding(
+                                                    table_id=witness.table_id,
+                                                    words=words,
+                                                    markdown=witness.markdown,
+                                                    region_bbox=None,
+                                                    spans=spans,
+                                                )
+                                                payload = binding_summary_payload(result)
+                                                ps.native_cell_binding[witness.table_id] = payload
+                                                if result.outcome is NativeCellOutcome.VERIFIED:
+                                                    kind = NATIVE_CELL_CHECK_VERIFIED_KIND
+                                                    detail = (
+                                                        f"table {witness.table_id}: "
+                                                        "no located crop; whole-page bind verified"
+                                                    )
+                                                elif (
+                                                    result.outcome is NativeCellOutcome.CONTRADICTED
+                                                ):
+                                                    kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
+                                                    detail = (
+                                                        f"table {witness.table_id}: {result.detail}"
+                                                    )
+                                                else:
+                                                    kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
+                                                    detail = (
+                                                        f"table {witness.table_id}: "
+                                                        "no located crop; whole-page bind inconclusive"
+                                                    )
+                                                state.events.append(
+                                                    AuditEvent(
+                                                        page_num=page_num,
+                                                        kind=kind,
+                                                        engine=bo.engine or "",
+                                                        detail=detail,
+                                                        data=payload,
+                                                    )
+                                                )
+                                                if (
+                                                    worst is None
+                                                    or result.outcome
+                                                    is NativeCellOutcome.CONTRADICTED
+                                                ):
+                                                    worst = result.outcome
+                                                elif (
+                                                    worst is not NativeCellOutcome.CONTRADICTED
+                                                    and result.outcome
+                                                    is NativeCellOutcome.AMBIGUOUS
+                                                ):
+                                                    worst = NativeCellOutcome.AMBIGUOUS
+                                                continue
                                             result = check_table_cell_binding(
                                                 table_id=witness.table_id,
                                                 words=words,
                                                 markdown=witness.markdown,
-                                                region_bbox=None,
+                                                region_bbox=region_bbox,
                                                 spans=spans,
                                             )
                                             payload = binding_summary_payload(result)
                                             ps.native_cell_binding[witness.table_id] = payload
                                             if result.outcome is NativeCellOutcome.VERIFIED:
                                                 kind = NATIVE_CELL_CHECK_VERIFIED_KIND
-                                                detail = (
-                                                    f"table {witness.table_id}: "
-                                                    "no located crop; whole-page bind verified"
-                                                )
                                             elif result.outcome is NativeCellOutcome.CONTRADICTED:
                                                 kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
-                                                detail = (
-                                                    f"table {witness.table_id}: {result.detail}"
-                                                )
                                             else:
                                                 kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
+                                            detail = f"table {witness.table_id}: {result.detail}"
+                                            if crop_note:
                                                 detail = (
-                                                    f"table {witness.table_id}: "
-                                                    "no located crop; whole-page bind inconclusive"
+                                                    f"table {witness.table_id}: {crop_note}; "
+                                                    f"{result.detail}"
                                                 )
                                             state.events.append(
                                                 AuditEvent(
@@ -8261,41 +8326,6 @@ class UnifiedPipeline:
                                                 and result.outcome is NativeCellOutcome.AMBIGUOUS
                                             ):
                                                 worst = NativeCellOutcome.AMBIGUOUS
-                                            continue
-                                        result = check_table_cell_binding(
-                                            table_id=witness.table_id,
-                                            words=words,
-                                            markdown=witness.markdown,
-                                            region_bbox=witness.box.bbox,
-                                            spans=spans,
-                                        )
-                                        payload = binding_summary_payload(result)
-                                        ps.native_cell_binding[witness.table_id] = payload
-                                        if result.outcome is NativeCellOutcome.VERIFIED:
-                                            kind = NATIVE_CELL_CHECK_VERIFIED_KIND
-                                        elif result.outcome is NativeCellOutcome.CONTRADICTED:
-                                            kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
-                                        else:
-                                            kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
-                                        state.events.append(
-                                            AuditEvent(
-                                                page_num=page_num,
-                                                kind=kind,
-                                                engine=bo.engine or "",
-                                                detail=f"table {witness.table_id}: {result.detail}",
-                                                data=payload,
-                                            )
-                                        )
-                                        if (
-                                            worst is None
-                                            or result.outcome is NativeCellOutcome.CONTRADICTED
-                                        ):
-                                            worst = result.outcome
-                                        elif (
-                                            worst is not NativeCellOutcome.CONTRADICTED
-                                            and result.outcome is NativeCellOutcome.AMBIGUOUS
-                                        ):
-                                            worst = NativeCellOutcome.AMBIGUOUS
             if skip_reason is not None:
                 for idx, _block in enumerate(blocks):
                     _record_skip(f"p{page_num}-t{idx}", skip_reason)

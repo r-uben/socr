@@ -117,6 +117,54 @@ def test_swapped_row_labels_same_values_not_verified_when_columns_unverifiable()
     assert classify_binding_for_cell_check(binding, swapped) is not NativeCellOutcome.VERIFIED
 
 
+def test_native_unbound_year_header_column_is_excludable() -> None:
+    from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+
+    assert _native_unbound_cell_is_excludable(
+        UnboundCell(row_path=("Header",), col_path=(), token="2024")
+    )
+    assert _native_unbound_cell_is_excludable(
+        UnboundCell(row_path=("Header",), col_path=(), token="2024,")
+    )
+
+
+def test_native_unbound_footnote_band_is_excludable() -> None:
+    from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+
+    assert _native_unbound_cell_is_excludable(
+        UnboundCell(
+            row_path=("** footnote prose", "detail line"),
+            col_path=(),
+            token="8,8",
+        )
+    )
+
+
+def test_native_unbound_page_number_is_excludable() -> None:
+    from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+
+    assert _native_unbound_cell_is_excludable(UnboundCell(row_path=(), col_path=(), token="67"))
+
+
+def test_native_unbound_data_cell_blocks_when_columns_unverifiable() -> None:
+    md = "| A | B |\n| --- | --- |\n| r | 1 |\n"
+    result = _minimal_binding(
+        column_binding_unverifiable=True,
+        row_binding={0: 0},
+        native_rows=[
+            SimpleNamespace(
+                is_parent=False,
+                row_path=("r",),
+                lane_tokens={0: ("1", False)},
+            )
+        ],
+        native_unbound=[
+            UnboundCell(row_path=("Dropped row",), col_path=("B",), token="9"),
+        ],
+    )
+    assert classify_binding_for_cell_check(result, md) is not NativeCellOutcome.VERIFIED
+
+
 def test_model_unbound_numeric_blocks_when_columns_unverifiable() -> None:
     md = "| A | B |\n| --- | --- |\n| r | 1 |\n"
     result = _minimal_binding(

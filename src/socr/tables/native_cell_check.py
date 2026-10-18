@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from socr.tables.binding import BindingResult, bind, parse_grid
+from socr.tables.binding import BindingResult, UnboundCell, bind, parse_grid
 from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
     _THOUSANDS_SPACE_RE,
@@ -32,6 +32,7 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
+_PAGE_NUMBER_RE = re.compile(r"^\d{1,3}$")
 
 
 class NativeCellOutcome(str, Enum):
@@ -244,20 +245,34 @@ def _row_anchor_scan(
     return mismatches, comparisons
 
 
+def _native_unbound_cell_is_excludable(cell: UnboundCell) -> bool:
+    """Only year column headers, page numbers, and footnote bands are ignorable."""
+    for seg in cell.row_path:
+        if seg.strip().startswith("**"):
+            return True
+    tok = _prepare_numeric_cell(cell.token.strip())
+    if not tok or not is_numeric_token(tok):
+        return False
+    if not cell.col_path:
+        year_core = tok.rstrip(",.;:")
+        if _YEAR_HEADER_RE.match(year_core):
+            return True
+        if _PAGE_NUMBER_RE.match(year_core) and len(cell.row_path) <= 1:
+            return True
+    return False
+
+
 def _numeric_unbound_blocks_verify(result: BindingResult) -> bool:
     """Any unmatched side carrying a numeric token blocks VERIFIED."""
     for cell in result.model_unbound:
         if is_numeric_token(_prepare_numeric_cell(cell.token)):
             return True
-    if result.column_binding_unverifiable:
-        return False
     for cell in result.native_unbound:
+        if _native_unbound_cell_is_excludable(cell):
+            continue
         tok = _prepare_numeric_cell(cell.token)
-        if not is_numeric_token(tok):
-            continue
-        if not cell.col_path and _YEAR_HEADER_RE.match(tok):
-            continue
-        return True
+        if is_numeric_token(tok):
+            return True
     return False
 
 
@@ -295,10 +310,6 @@ def classify_binding_for_cell_check(result: BindingResult, markdown: str) -> Nat
     if result.structural_agreement:
         return NativeCellOutcome.VERIFIED
     if _row_binding_covers_model_data_rows(result, markdown) and comparisons > 0:
-        if result.column_binding_unverifiable:
-            for cell in result.model_unbound:
-                if is_numeric_token(_prepare_numeric_cell(cell.token)):
-                    return NativeCellOutcome.AMBIGUOUS
         return NativeCellOutcome.VERIFIED
     if mismatches:
         return NativeCellOutcome.AMBIGUOUS
