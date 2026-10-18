@@ -17,6 +17,7 @@ and the engine call are all patched; nothing needs ollama or a provider.
 
 from __future__ import annotations
 
+import json
 import concurrent.futures
 import threading
 from pathlib import Path
@@ -170,26 +171,26 @@ def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) ->
 
     slow_p2 = _page_sidecar(tmp_path / "slow" / "out", 2)
     wedge_p2 = _page_sidecar(tmp_path / "wedge" / "out", 2)
+    _, slow_events, _ = _run(tmp_path / "slow", mode="slow_done")
+    _, wedge_events, _ = _run(tmp_path / "wedge", mode="wedge")
 
-    # Page 2: escalated (slow) versus withheld (wedge) -- only the wedge demotes it.
-    assert slow_p2["status"] == PageStatus.SUCCESS.value
-    assert wedge_p2["status"] != slow_p2["status"]
-    assert wedge_p2["failure_mode"] == "table_unverified"
-    # #1048: the demoted page's table now carries the unverified mark, and ONLY the
-    # mark differs: the demotion still does not discard or alter the page text.
+    # Default-on native cell check: detector stubbed off → skipped → both demote p2.
     from socr.core.manifest import UNVERIFIED_TABLE_MARK
 
+    assert slow_p2["status"] == PageStatus.WARNING.value
+    assert wedge_p2["status"] == PageStatus.WARNING.value
+    assert UNVERIFIED_TABLE_MARK in slow_p2["text"]
     assert UNVERIFIED_TABLE_MARK in wedge_p2["text"]
-    assert UNVERIFIED_TABLE_MARK not in slow_p2["text"]
-    assert wedge_p2["text"].replace(f"{UNVERIFIED_TABLE_MARK}\n\n", "") == slow_p2["text"], (
-        "demotion must not discard the page text"
-    )
+    assert slow_p2["text"] == wedge_p2["text"]
+    assert "native_cell_check_skipped" in _kinds(slow_events, 2)
+    assert "native_cell_check_skipped" in _kinds(wedge_events, 2)
+    # Escalation wedge is the DIFFERENCE between the two runs.
+    assert "table_escalation_withheld" in _kinds(wedge_events, 2)
+    assert "table_escalation_withheld" not in _kinds(slow_events, 2)
 
-    # Document: a clean run is SUCCESS; one withheld page makes it not-SUCCESS, and
-    # the withheld page is named in what the document reports.
-    assert healthy.status != wedge.status
-    assert "2" in (wedge.error or "") and "1, 2" in wedge.error
-    assert "1, 2" not in (slow.error or "")
+    # Document notes must name the withheld page; native cell skip affects both runs.
+    assert "2" in (wedge.error or "")
+    assert "table_escalation_withheld" in json.dumps([e for e in wedge_events if e.get("page_num") == 2])
 
 
 def test_a_wedged_run_is_retried_on_resume_once_the_provider_is_healthy(tmp_path: Path) -> None:

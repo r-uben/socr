@@ -92,6 +92,12 @@ class TestP59Tableau1:
         assert r.outcome is NativeCellOutcome.CONTRADICTED, label
 
 
+def _p67_swap_row_labels(md: str) -> str:
+    lines = md.splitlines()
+    lines[2], lines[4] = lines[4], lines[2]
+    return "\n".join(lines)
+
+
 class TestP67Tableau8:
     def test_correct_table_verified(self, p67_table):
         words, md, region, spans = p67_table
@@ -100,10 +106,37 @@ class TestP67Tableau8:
         )
         assert r.outcome is NativeCellOutcome.VERIFIED
 
-    def test_moved_column_contradicted(self, p67_table):
+    @pytest.mark.parametrize(
+        "mutator,label",
+        [
+            (
+                lambda m: m.replace("| 2022 | 2023 |", "| 2023 | 2022 |").replace(
+                    "| 0,4 | 4,5 | 2,0 |", "| 0,4 | 2,0 | 4,5 |", 1
+                ),
+                "swapped_year_columns",
+            ),
+            (
+                lambda m: m.replace("| 0,4 | 4,5 | 2,0 |", "| 15 | 4,5 | 2,0 |", 1),
+                "wrong_value_15_vs_0,4",
+            ),
+            (
+                lambda m: m.replace("| 0,4 | 4,5 | 2,0 |", "| -0,4 | 4,5 | 2,0 |", 1),
+                "flipped_sign",
+            ),
+            (_p67_swap_row_labels, "swapped_row_labels"),
+            (
+                lambda m: m.replace("| 0,4 | 4,5 | 2,0 |", "| 4,5 | 0,4 | 2,0 |", 1),
+                "swapped_numeric_columns",
+            ),
+        ],
+    )
+    def test_mutations_contradicted(self, p67_table, mutator, label):
         words, md, region, spans = p67_table
-        bad = md.replace("| 0,4 | 4,5 | 2,0 |", "| 4,5 | 0,4 | 2,0 |", 1)
         r = check_table_cell_binding(
-            table_id="t0", words=words, markdown=bad, region_bbox=region, spans=spans
+            table_id="t0",
+            words=words,
+            markdown=mutator(md),
+            region_bbox=region,
+            spans=spans,
         )
-        assert r.outcome is NativeCellOutcome.CONTRADICTED
+        assert r.outcome is NativeCellOutcome.CONTRADICTED, label

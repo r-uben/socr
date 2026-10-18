@@ -8058,6 +8058,27 @@ class UnifiedPipeline:
                 )
             )
 
+    def _apply_native_cell_check_demotion(
+        self,
+        ps: PageState,
+        bo: PageOutput,
+        worst: "NativeCellOutcome",
+    ) -> None:
+        from socr.tables.native_cell_check import NativeCellOutcome as _NativeCellOutcome
+
+        if worst not in (_NativeCellOutcome.CONTRADICTED, _NativeCellOutcome.AMBIGUOUS):
+            return
+        if ps.table_ladder_disposition not in (
+            FailureMode.TABLE_REJECTED,
+            FailureMode.TABLE_WITHHELD,
+        ):
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        if bo.status == PageStatus.SUCCESS:
+            bo.status = PageStatus.WARNING
+        if not bo.failure_mode:
+            bo.failure_mode = FailureMode.TABLE_UNVERIFIED
+        ps.unchecked_table_kind = "unverified"
+
     def _run_native_cell_binding_check(
         self,
         state: DocumentState,
@@ -8067,8 +8088,13 @@ class UnifiedPipeline:
     ) -> None:
         """Default-on per-cell native binding check (``tables.native_cell_check``).
 
-        Runs on born-digital table pages regardless of ``table_judge_ladder``.
-        Never raises; a failure to open the page is treated as no evidence.
+        Runs on born-digital pages whose model output contains markdown tables,
+        regardless of ``table_judge_ladder``. Skips that cannot run ``bind()``
+        still fail closed (AMBIGUOUS + visible mark), never plain success.
+
+        Legitimate no-ops (other checks own these pages): no model output,
+        ``native_only``, native-engine winner, chart/failed candidates, scanned /
+        non-born-digital pages, or pages with no markdown table blocks.
         """
         if bo is None or not bo.text or bo.engine == "chart_asset" or is_failed_candidate(bo):
             return
@@ -8078,102 +8104,152 @@ class UnifiedPipeline:
             return
         if not getattr(ps, "is_born_digital", False):
             return
-        if not self._page_has_tables(page_num, ps):
-            return
         if not layer_is_admissible_evidence(ps):
             return
         from socr.core.audit_log import AuditEvent
         from socr.judge.table_verdict import (
             NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
             NATIVE_CELL_CHECK_CONTRADICTED_KIND,
+            NATIVE_CELL_CHECK_SKIPPED_KIND,
             NATIVE_CELL_CHECK_VERIFIED_KIND,
         )
         from socr.tables.native_cell_check import (
             NativeCellOutcome,
             binding_summary_payload,
             check_table_cell_binding,
+            skipped_check_result,
         )
         from socr.tables.reconcile import find_table_blocks
         from socr.tables.witness import prepare_table_witnesses
 
-        if not find_table_blocks(bo.text):
+        blocks = find_table_blocks(bo.text)
+        if not blocks:
             return
 
         worst: NativeCellOutcome | None = None
+
+        def _record_skip(table_id: str, reason: str) -> None:
+            nonlocal worst
+            result = skipped_check_result(table_id, reason)
+            payload = binding_summary_payload(result)
+            payload["skip_reason"] = reason
+            ps.native_cell_binding[table_id] = payload
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=NATIVE_CELL_CHECK_SKIPPED_KIND,
+                    engine=bo.engine or "",
+                    detail=f"table {table_id}: native cell check skipped ({reason})",
+                    data=payload,
+                )
+            )
+            if worst is None or worst is not NativeCellOutcome.CONTRADICTED:
+                worst = NativeCellOutcome.AMBIGUOUS
+
+        skip_reason: str | None = None
+        if not self._page_has_tables(page_num, ps):
+            skip_reason = "native_table_detector_negative"
         try:
-            with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
-                if not witnesses:
-                    return
-                from socr.core.born_digital import flatten_page_spans
-                from socr.core.pdf import open_pdf
+            from socr.core.born_digital import flatten_page_spans
+            from socr.core.pdf import open_pdf
+            from socr.tables.locate import locate_tables
 
-                from socr.tables.locate import locate_tables
-
+            if skip_reason is None:
                 with open_pdf(state.handle.path) as doc:
                     if page_num < 1 or page_num > doc.page_count:
-                        return
-                    page = doc[page_num - 1]
-                    if page is None:
-                        return
-                    words = page.get_text("words")
-                    spans = flatten_page_spans(page)
-                    if not locate_tables(page):
-                        return
-                    for witness in witnesses:
-                        if witness.box is None:
-                            result = check_table_cell_binding(
-                                table_id=witness.table_id,
-                                words=words,
-                                markdown=witness.markdown,
-                                region_bbox=None,
-                                spans=spans,
-                            )
-                            payload = binding_summary_payload(result)
-                            ps.native_cell_binding[witness.table_id] = payload
-                            state.events.append(
-                                AuditEvent(
-                                    page_num=page_num,
-                                    kind=NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
-                                    engine=bo.engine or "",
-                                    detail=(
-                                        f"table {witness.table_id}: "
-                                        "no located crop; whole-page bind inconclusive"
-                                    ),
-                                    data=payload,
-                                )
-                            )
-                            continue
-                        result = check_table_cell_binding(
-                            table_id=witness.table_id,
-                            words=words,
-                            markdown=witness.markdown,
-                            region_bbox=witness.box.bbox,
-                            spans=spans,
-                        )
-                        payload = binding_summary_payload(result)
-                        ps.native_cell_binding[witness.table_id] = payload
-                        if result.outcome is NativeCellOutcome.VERIFIED:
-                            kind = NATIVE_CELL_CHECK_VERIFIED_KIND
-                        elif result.outcome is NativeCellOutcome.CONTRADICTED:
-                            kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
+                        skip_reason = "pdf_page_unavailable"
+                    else:
+                        page = doc[page_num - 1]
+                        if page is None:
+                            skip_reason = "pdf_page_unavailable"
+                        elif not locate_tables(page):
+                            skip_reason = "no_located_table_geometry"
                         else:
-                            kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
-                        state.events.append(
-                            AuditEvent(
-                                page_num=page_num,
-                                kind=kind,
-                                engine=bo.engine or "",
-                                detail=f"table {witness.table_id}: {result.detail}",
-                                data=payload,
-                            )
-                        )
-                        if worst is None or result.outcome is NativeCellOutcome.CONTRADICTED:
-                            worst = result.outcome
-                        elif (
-                            worst is not NativeCellOutcome.CONTRADICTED
-                            and result.outcome is NativeCellOutcome.AMBIGUOUS
-                        ):
-                            worst = NativeCellOutcome.AMBIGUOUS
+                            words = page.get_text("words")
+                            spans = flatten_page_spans(page)
+                            with prepare_table_witnesses(
+                                state.handle.path, page_num, bo.text
+                            ) as witnesses:
+                                if not witnesses:
+                                    skip_reason = "table_witness_unavailable"
+                                else:
+                                    for witness in witnesses:
+                                        if witness.box is None:
+                                            result = check_table_cell_binding(
+                                                table_id=witness.table_id,
+                                                words=words,
+                                                markdown=witness.markdown,
+                                                region_bbox=None,
+                                                spans=spans,
+                                            )
+                                            payload = binding_summary_payload(result)
+                                            ps.native_cell_binding[witness.table_id] = payload
+                                            if result.outcome is NativeCellOutcome.VERIFIED:
+                                                kind = NATIVE_CELL_CHECK_VERIFIED_KIND
+                                                detail = (
+                                                    f"table {witness.table_id}: "
+                                                    "no located crop; whole-page bind verified"
+                                                )
+                                            elif result.outcome is NativeCellOutcome.CONTRADICTED:
+                                                kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
+                                                detail = f"table {witness.table_id}: {result.detail}"
+                                            else:
+                                                kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
+                                                detail = (
+                                                    f"table {witness.table_id}: "
+                                                    "no located crop; whole-page bind inconclusive"
+                                                )
+                                            state.events.append(
+                                                AuditEvent(
+                                                    page_num=page_num,
+                                                    kind=kind,
+                                                    engine=bo.engine or "",
+                                                    detail=detail,
+                                                    data=payload,
+                                                )
+                                            )
+                                            if worst is None or result.outcome is NativeCellOutcome.CONTRADICTED:
+                                                worst = result.outcome
+                                            elif (
+                                                worst is not NativeCellOutcome.CONTRADICTED
+                                                and result.outcome is NativeCellOutcome.AMBIGUOUS
+                                            ):
+                                                worst = NativeCellOutcome.AMBIGUOUS
+                                            continue
+                                        result = check_table_cell_binding(
+                                            table_id=witness.table_id,
+                                            words=words,
+                                            markdown=witness.markdown,
+                                            region_bbox=witness.box.bbox,
+                                            spans=spans,
+                                        )
+                                        payload = binding_summary_payload(result)
+                                        ps.native_cell_binding[witness.table_id] = payload
+                                        if result.outcome is NativeCellOutcome.VERIFIED:
+                                            kind = NATIVE_CELL_CHECK_VERIFIED_KIND
+                                        elif result.outcome is NativeCellOutcome.CONTRADICTED:
+                                            kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
+                                        else:
+                                            kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
+                                        state.events.append(
+                                            AuditEvent(
+                                                page_num=page_num,
+                                                kind=kind,
+                                                engine=bo.engine or "",
+                                                detail=f"table {witness.table_id}: {result.detail}",
+                                                data=payload,
+                                            )
+                                        )
+                                        if worst is None or result.outcome is NativeCellOutcome.CONTRADICTED:
+                                            worst = result.outcome
+                                        elif (
+                                            worst is not NativeCellOutcome.CONTRADICTED
+                                            and result.outcome is NativeCellOutcome.AMBIGUOUS
+                                        ):
+                                            worst = NativeCellOutcome.AMBIGUOUS
+            if skip_reason is not None:
+                for idx, _block in enumerate(blocks):
+                    _record_skip(f"p{page_num}-t{idx}", skip_reason)
         except Exception as exc:
             logger.warning(
                 "native cell binding check failed on p%d (%s: %s)",
@@ -8181,19 +8257,11 @@ class UnifiedPipeline:
                 type(exc).__name__,
                 exc,
             )
-            return
+            for idx, _block in enumerate(blocks):
+                _record_skip(f"p{page_num}-t{idx}", f"check_error:{type(exc).__name__}")
 
-        if worst in (NativeCellOutcome.CONTRADICTED, NativeCellOutcome.AMBIGUOUS):
-            if ps.table_ladder_disposition not in (
-                FailureMode.TABLE_REJECTED,
-                FailureMode.TABLE_WITHHELD,
-            ):
-                ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
-            if bo.status == PageStatus.SUCCESS:
-                bo.status = PageStatus.WARNING
-            if not bo.failure_mode:
-                bo.failure_mode = FailureMode.TABLE_UNVERIFIED
-            ps.unchecked_table_kind = "unverified"
+        if worst is not None:
+            self._apply_native_cell_check_demotion(ps, bo, worst)
 
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?

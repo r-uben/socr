@@ -276,6 +276,7 @@ def test_watched_kinds_are_real_emitted_kinds():
         "table_ditto_unresolved",
         "native_cell_check_contradicted",
         "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
     }
     unknown = TABLE_DISTRUST_KINDS - literals - dynamic - pending
 

@@ -729,6 +729,7 @@ TABLE_WRAPPED_LABEL_MERGED_KIND = "table_wrapped_label_merged"
 NATIVE_CELL_CHECK_VERIFIED_KIND = "native_cell_check_verified"
 NATIVE_CELL_CHECK_CONTRADICTED_KIND = "native_cell_check_contradicted"
 NATIVE_CELL_CHECK_AMBIGUOUS_KIND = "native_cell_check_ambiguous"
+NATIVE_CELL_CHECK_SKIPPED_KIND = "native_cell_check_skipped"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.

@@ -250,9 +250,12 @@ def test_the_latch_does_not_move_text_audit_passed_or_status(tmp_path: Path) -> 
     clear_page_two = _page_sidecar(clear_dir, 2)
     set_page_two = _page_sidecar(set_dir, 2)
 
-    assert clear_page_two["text"] == set_page_two["text"] == _MISSING_COLUMNS_CANDIDATE, (
+    assert clear_page_two["text"] == set_page_two["text"], (
         "page 2's selected text moved with the latch state"
     )
+    assert "native_cell_check_skipped" in [
+        e["kind"] for e in _audit_events(clear_dir) if e.get("page_num") == 2
+    ]
     assert clear_page_two["audit_passed"] == set_page_two["audit_passed"], (
         f"page 2's audit_passed moved with the latch state: "
         f"clear={clear_page_two['audit_passed']!r} set={set_page_two['audit_passed']!r}"
