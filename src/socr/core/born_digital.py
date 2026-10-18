@@ -2918,11 +2918,13 @@ def _any_alpha_below_one(text: str | None) -> bool:
     -- so that a PyMuPDF failure during the document reads, which raises the same
     ``ValueError``, can propagate instead of being swallowed with it.
     """
-    try:
-        return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
-    except (TypeError, ValueError):
-        logger.debug("#1156: unreadable graphics-state value", exc_info=True)
-        return False
+    # No try here (round 3, r-uben soft 2): ``_ALPHA_RE`` captures
+    # ``[0-9]*\.?[0-9]+``, which ``float()`` always accepts, so the catch this function
+    # was built around could not be reached by any input -- a guard that cannot fail.
+    # What the function IS for survives unchanged: it is the one place that parses an
+    # already-fetched string, so the document reads above it can propagate a PyMuPDF
+    # failure that raises the very same ``ValueError``.
+    return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
 
 
 def page_has_opaque_page_covering_raster(page) -> bool:
@@ -5080,8 +5082,15 @@ class BornDigitalDetector:
         #1156 round 2 (Astra P1): an image drawn under such a state can be invisible
         however opaque its own pixels are, and ``get_image_info`` says nothing about it.
         The whole page is then treated as UNKNOWN opacity rather than opaque: a page
-        that declares no partial alpha anywhere is the positive case. Raises nothing --
-        an unreadable resource dict reads as "declares transparency", the cautious side.
+        that declares no partial alpha anywhere is the positive case.
+
+        A PyMuPDF failure PROPAGATES (round 2, r-uben blocker 5): the document reads below
+        sit outside any try, and only the parsing of an already-fetched string is guarded,
+        in ``_any_alpha_below_one``. The two cannot be told apart by exception type --
+        ``xref_get_key`` raises ``ValueError("bad xref")`` and so does ``float()`` on a
+        non-numeric alpha -- so they are separated by WHERE instead. This reader also does
+        NOT follow indirect references; ``_declares_transparency_following_references``
+        is the one that does, and the split is by consumer, not by accident.
         """
         doc = page.parent
         resources = doc.xref_get_key(page.xref, "Resources")

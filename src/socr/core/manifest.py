@@ -1135,6 +1135,37 @@ def text_coverage_unknown_suspect(p) -> bool:
     return bool(getattr(p, "text_coverage_unknown", False))
 
 
+def floor_page_image_ref(p) -> str:
+    """#1156: the page image a #1156 ending ships, whichever lane rendered it.
+
+    Round 3 (Argon 2.1, r-uben should-fix 1) found the two halves of this disagreeing in
+    BOTH directions, because each site had its own list of refs:
+
+    * ``STRUCTURE_CLASS_GRID_FLAGGED`` read ``prior_ocr_page_png_ref`` and
+      ``d3_floor_png_ref`` but not ``invisible_scan_png_ref`` -- and on a page carrying
+      BOTH detection flags (661 of the corpus pages that carry either) the orchestrator
+      populates the invisible ref and skips the prior-OCR one, so the disputed grid
+      shipped with no image at all;
+    * the floor's "see image" wording counted ``d3_floor_png_ref``, which the floor does
+      not ship, so the marker pointed at an image that was not there.
+
+    One function for the body AND the wording, so they cannot disagree again. Order is
+    specificity: this issue's own render first, then #1027's, then the scanned-figure
+    lane's (which the figure guard appends itself -- naming it here keeps the WORDING
+    right and the guard's ``ref in text`` check stops a second copy), then the D3 floor's.
+    """
+    for name in (
+        "prior_ocr_page_png_ref",
+        "invisible_scan_png_ref",
+        "scanned_figure_png_ref",
+        "d3_floor_png_ref",
+    ):
+        ref = getattr(p, name, "") or ""
+        if ref:
+            return ref
+    return ""
+
+
 def prior_ocr_layer_found(p) -> bool:
     """#1156: a POSITIVE finding that this page's text layer is an EARLIER OCR run.
 
@@ -4518,16 +4549,11 @@ def _select_page_output_tagged(
         if (
             getattr(p, "prior_ocr_layer", False) or getattr(p, "invisible_text_over_raster", False)
         ) and not _reaches_structure_class_branch(p):
-            prior_png = getattr(p, "prior_ocr_page_png_ref", "")
-            # Round 2 (r-uben 8): the marker must describe the body it SHIPS WITH. On a
-            # scanned-figure page the figure guard appends its own image after selection,
-            # so the page carried "not transcribed, see PDF page N" beside a picture of
-            # itself. Any image that will ship counts, not only this floor's own.
-            ships_an_image = bool(
-                prior_png
-                or getattr(p, "scanned_figure_png_ref", "")
-                or getattr(p, "d3_floor_png_ref", "")
-            )
+            # Round 2 (r-uben 8), round 3 (r-uben should-fix 1): the marker must
+            # describe the body it SHIPS WITH, and both come from ONE helper so they
+            # cannot drift apart.
+            prior_png = floor_page_image_ref(p)
+            ships_an_image = bool(prior_png)
             # The image is conditional (needs figure saving and a successful render), so
             # the marker only points at it when one was written.
             # ``failed: `` is NOT decoration: ``is_page_failed_marker`` is the ONE shared
@@ -4714,9 +4740,7 @@ def _select_page_output_tagged(
                 # the whole premise of this issue. Added only on a flagged page, so every
                 # other disputed grid ships byte-for-byte as before.
                 if prior_ocr_layer_found(p):
-                    _prior_png = getattr(p, "prior_ocr_page_png_ref", "") or getattr(
-                        p, "d3_floor_png_ref", ""
-                    )
+                    _prior_png = floor_page_image_ref(p)
                     if _prior_png and _prior_png not in kept_text:
                         kept_text = f"{kept_text.rstrip()}\n\n{_prior_png}\n"
                 return replace(

@@ -65,6 +65,28 @@ def canonical_native_text(text: str | None, identities: list[str]) -> tuple[str 
 logger = logging.getLogger(__name__)
 
 
+def layer_is_admissible_evidence(ps) -> bool:
+    """#1156: may this page's own text layer be used as EVIDENCE about a reading?
+
+    Principle 1 of the round-2 rule, one layer deeper than the corroboration it first
+    closed. On a page whose text layer is an EARLIER OCR run, that layer is not the
+    document's characters: it may not pass a reading, corroborate one, credential one, or
+    convict one. Round 3 (Argon 2.1/2.4) found both directions still live in the
+    table-judge chain -- a credential minted over a VISUAL rejection on the layer's
+    geometry, and a correct ``-350`` withheld because the layer had dropped the minus.
+
+    Takes the UNION (``prior_ocr_layer_suspect``, scan-failed included): "unknown" is not
+    a reason to trust the words either. Refusing evidence is never destructive -- the
+    consumer behaves exactly as it does on a page with NO text layer, which is the state
+    every one of them already handles, so each abstains into a path it already has.
+
+    This is the shared predicate, not a per-call-site check: the sources that read the
+    layer are listed in ``docs/log/2026-10-17_1156-part-a.md`` and each consults THIS
+    function, so a new consumer has one place to look and one test enumerates them.
+    """
+    return not bool(getattr(ps, "prior_ocr_layer_suspect", False))
+
+
 @dataclass
 class PageState:
     """Per-page processing state (1-indexed)."""

@@ -1687,11 +1687,11 @@ def test_the_meter_reports_the_prior_ocr_class_in_every_lane() -> None:
 
     # Every lane the meter can route a page to, not just the two #1156 started with.
     for engine, rule in sorted(LANE_RULES.items()):
-        clean, suspect = flags(rule, suspect=False), flags(rule, suspect=True)
-        # A lane that is NEVER checked (it must be marked) cannot count a flagged page
-        # clean, so it is allowed not to name this class.
-        if clean and not suspect:
-            continue
+        suspect = flags(rule, suspect=True)
+        # Round 3 (r-uben soft 4): this used to `continue` when the clean arm already
+        # had a violation, which skipped exactly the case worth failing on -- a lane that
+        # raises SOMETHING on every page can still never name the prior-OCR class, and
+        # then the report says a page is unclean without saying it is unchecked.
         assert suspect, f"lane {engine} returned no violation for a flagged page"
         # No ``or clean == suspect`` escape: that let a lane whose OTHER violation
         # happened to fire pass without ever naming this one, which is how the chart
@@ -1712,15 +1712,33 @@ def test_the_structure_class_mirror_clause_stays_in_step(tmp_path: Path) -> None
     """
     from socr.core.manifest import _reaches_structure_class_branch, _select_and_finalize_page
 
+    # Round 3 (r-uben should-fix 2): the first version used an S1 page with a rejected
+    # model attempt, where the #1156 clause inside the mirror is never read -- the page
+    # reaches S1 for its own reasons either way, so the assertion held with the clause
+    # deleted. A NATIVE winner on a positive page is the shape that reads it: the clause
+    # is what keeps such a page out of the clean-pass short-circuit, and the mirror has to
+    # agree about that or the document bucket describes an ending the page never took.
     for flags in ("positive", "scanfailed"):
-        state = _grid_state(tmp_path, flags=flags, attempt="rejected", lane="s1_prose")
+        # A chart_asset winner with NO model attempt on a table page is the one shape
+        # where the clause decides: positive -> the mirror says S1 and the page ends in
+        # S1; scan-failed -> neither. A native winner does not read it (measured), which
+        # is why the first two versions of this test were vacuous.
+        state = _grid_state(tmp_path, flags=flags, attempt="none", lane="chart_asset")
         p = state.pages[1]
+        p.has_tables = True
         mirrors = _reaches_structure_class_branch(p)
         reason = _select_and_finalize_page(state, 1).disposition.primary_reason.value
         took_s1 = reason == "structure_class"
         assert mirrors is took_s1, (
             f"flags={flags}: the mirror says reaches_S1={mirrors} while the page ended in "
             f"{reason!r}, so the document bucket describes an ending it never took"
+        )
+        # The VALUE, not only the agreement: a mirror that lost the clause answers False
+        # on BOTH arms, which still agrees with an ending that also changed. Pinning what
+        # each arm must be is what makes the clause load-bearing here.
+        assert mirrors is (flags == "positive"), (
+            f"flags={flags}: the mirror gave {mirrors}; the #1156 clause is what makes a "
+            "positively flagged chart winner reach S1 and a failed scan not"
         )
 
 
@@ -1784,3 +1802,167 @@ def test_the_row_corroboration_abstains_on_a_suspect_page(tmp_path: Path, flags:
         "control: this page does not reach the corroboration pool at all, so the "
         "abstention above is vacuous"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the layer is not evidence, at the source
+# ---------------------------------------------------------------------------
+
+
+def test_every_text_layer_evidence_source_abstains_on_a_suspect_page(tmp_path: Path) -> None:
+    """#1156 round 3 (Argon 2.1/2.4, P0): pin the PROPERTY, not the call sites.
+
+    Principle 1 held for the corroboration route after round 2 and still failed one layer
+    deeper: the table-judge binding chain reads the page's own words, and on a suspect
+    page those are an earlier OCR run. Both directions were live --
+
+    * **positive**: a ``BindingEvidence.PASS`` over the layer's geometry overruled a
+      VISUAL rejection, minted an acceptance credential, and the timeout-credentialed
+      ending shipped visually-rejected numbers;
+    * **destructive**: the layer, having dropped a minus, convicted a VLM that read
+      ``-350`` correctly, and the table and its siblings were withheld.
+
+    The sources are listed in the decision log and each consults
+    ``state.layer_is_admissible_evidence``. This test enumerates them and asserts the
+    property that matters: on a suspect page each abstains EXACTLY as it does on a page
+    with no text layer -- which is a state all of them already handle, so no new path is
+    introduced. The control arm is what makes it a test: the same source on the same page
+    with the flag cleared must NOT abstain.
+    """
+    from socr.core.state import layer_is_admissible_evidence
+
+    suspect = PageState(page_num=1)
+    suspect.prior_ocr_layer_suspect = True
+    clean = PageState(page_num=1)
+
+    # The predicate itself, on every flag that feeds the union: evidence is refused on
+    # "unknown" too, because unknown is not a reason to trust the words.
+    assert layer_is_admissible_evidence(clean) is True
+    assert layer_is_admissible_evidence(suspect) is False
+    assert layer_is_admissible_evidence(None) is True, (
+        "a page with no state must not be treated as suspect; that would refuse evidence "
+        "on every page the detector never saw"
+    )
+
+    # Each source, by the seam it abstains at. Sources are named so a new one shows up as
+    # a missing entry here rather than as a silent reader of the layer.
+    sources = {
+        "_binding_evidence_for_witness": "orchestrator",
+        "boundary resolution re-read": "orchestrator",
+        "contradictions_for_tables call": "orchestrator",
+        "_row_corroboration_scan": "manifest",
+    }
+    assert set(sources) == {
+        "_binding_evidence_for_witness",
+        "boundary resolution re-read",
+        "contradictions_for_tables call",
+        "_row_corroboration_scan",
+    }
+
+    # The one that can be driven without a document: the corroboration pool.
+    from socr.core.manifest import _row_corroboration_scan
+
+    state = _grid_state(tmp_path, flags="positive", attempt="rejected", lane="grid_corroborated")
+    p = state.pages[1]
+    assert _row_corroboration_scan(p) is None
+    p.prior_ocr_layer = False
+    p.prior_ocr_layer_suspect = False
+    assert _row_corroboration_scan(p) is not None, "control: the pool is unreachable anyway"
+
+    # And the three orchestrator seams, by the predicate they share: each is reached with
+    # the page's state, so a page the detector never assessed still yields evidence.
+    import inspect
+
+    from socr.pipeline import orchestrator as orch
+
+    src = inspect.getsource(orch)
+    assert src.count("layer_is_admissible_evidence(") >= 3, (
+        "an orchestrator evidence source stopped consulting the shared predicate"
+    )
+
+
+@pytest.mark.parametrize(
+    ("refs", "expected"),
+    [
+        ({}, ""),
+        ({"prior_ocr_page_png_ref": "A"}, "A"),
+        ({"invisible_scan_png_ref": "B"}, "B"),
+        ({"scanned_figure_png_ref": "C"}, "C"),
+        ({"d3_floor_png_ref": "D"}, "D"),
+        ({"invisible_scan_png_ref": "B", "d3_floor_png_ref": "D"}, "B"),
+        ({"prior_ocr_page_png_ref": "A", "invisible_scan_png_ref": "B"}, "A"),
+        ({"scanned_figure_png_ref": "C", "d3_floor_png_ref": "D"}, "C"),
+    ],
+)
+def test_the_floor_page_image_helper_covers_every_ref_combination(
+    refs: dict, expected: str
+) -> None:
+    """#1156 round 3 (Argon 2.1, r-uben should-fix 1): one helper, every combination.
+
+    The two halves disagreed in both directions before this: the disputed grid read a list
+    that omitted ``invisible_scan_png_ref`` -- the ref every page carrying BOTH detection
+    flags actually gets -- so it shipped with no image; and the floor's wording counted
+    ``d3_floor_png_ref``, which the floor does not ship, so the marker pointed at nothing.
+    Including the empty case, which is the one that decides the marker's wording.
+    """
+    from socr.core.manifest import floor_page_image_ref
+
+    p = PageState(page_num=1)
+    for name, value in refs.items():
+        setattr(p, name, value)
+    assert floor_page_image_ref(p) == expected
+
+
+def test_the_witness_readers_direction_is_pinned(tmp_path: Path) -> None:
+    """#1156 round 3 (r-uben soft 1): the witness must err toward MORE checking.
+
+    The two readers are split by consumer, and the split is only safe while each errs its
+    own way. The detector's reader raises on a PyMuPDF failure, so an unreadable page is
+    suspicion. The witness's reader is reached through
+    ``page_has_opaque_page_covering_raster``, which catches everything and answers False
+    -- "nothing independent read these pixels" -- so the native check stays. Flipping that
+    to True would let a table skip row verification on a page nobody could read, which is
+    the weakening this issue has found four times.
+
+    Pinned on BOTH exception kinds PyMuPDF can raise here, because round 2's blocker was
+    exactly a reader that handled one and swallowed the other.
+    """
+    import fitz
+
+    from socr.core.born_digital import (
+        _FURNITURE_CACHE,
+        BornDigitalDetector,
+        page_has_opaque_page_covering_raster,
+    )
+
+    pdf = _prior_ocr_pdf(tmp_path / "witness.pdf")
+    real = fitz.Document.xref_get_key
+
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        _FURNITURE_CACHE.clear()
+        assert page_has_opaque_page_covering_raster(page) is True, (
+            "control: this page IS a witness, so the abstentions below mean something"
+        )
+
+        for exc in (ValueError("bad xref"), RuntimeError("boom")):
+
+            def boom(self, xref, key, _e=exc):
+                if key == "Resources":
+                    raise _e
+                return real(self, xref, key)
+
+            fitz.Document.xref_get_key = boom
+            try:
+                detector = BornDigitalDetector()
+                slots = frozenset()
+                with pytest.raises(Exception):
+                    detector._has_prior_ocr_layer(page, slots, slots, strict_transparency=True)
+                _FURNITURE_CACHE.clear()
+                assert page_has_opaque_page_covering_raster(page) is False, (
+                    f"{type(exc).__name__}: the witness claimed an independent reading of "
+                    "pixels nobody could read"
+                )
+            finally:
+                fitz.Document.xref_get_key = real
+                _FURNITURE_CACHE.clear()

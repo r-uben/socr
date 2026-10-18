@@ -511,7 +511,11 @@ def test_e2e_no_provider_a_flagged_scan_withholds_the_layer_not_shreds_it(
     assert "estimated effect" not in text, "the earlier OCR layer's prose shipped"
 
     # Still surfaced, still not clean: the page image is there and the page is marked.
-    assert "![Scanned figure page 1]" in text or "![" in text, "the page image is gone too"
+    # Round 3 (r-uben soft 5): the `or "![" in text` escape accepted ANY image, so the
+    # assertion could be satisfied by a figure crop while the page image itself was gone.
+    assert "![Scanned figure page 1]" in text, "the page image is gone too"
+    # ... and the marker must point at it, which is the round-2 rule this page exercises.
+    assert "see image" in text, "the marker does not point at the image it ships with"
 
 
 class _CountingEngine(_Engine):

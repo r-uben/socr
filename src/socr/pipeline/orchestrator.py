@@ -81,7 +81,13 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState, PageState, canonical_native_text, add_page_cost
+from socr.core.state import (
+    DocumentState,
+    PageState,
+    layer_is_admissible_evidence,
+    canonical_native_text,
+    add_page_cost,
+)
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
@@ -644,6 +650,14 @@ def _attempts_summary(ps) -> list[dict]:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _PriorOcrLayerNotEvidenceError(Exception):
+    """#1156: this page's text layer may not be read as evidence (see
+    ``state.layer_is_admissible_evidence``). Raised so a caller's existing
+    read-failure path handles the abstention, rather than growing a second one."""
+
+
 console = Console()
 
 # Provenance value recorded when no vision judge could be built and the page gate
@@ -7733,6 +7747,14 @@ class UnifiedPipeline:
 
         from socr.core.born_digital import flatten_page_spans
 
+        # #1156 round 3 (Argon 2.1): this binds a model table against the PAGE's own
+        # words. On a suspect page those words are an earlier OCR run, so a PASS here is
+        # the layer vouching for a reading -- and ``_resolve_table_guard_chain`` lets that
+        # PASS overrule a VISUAL rejection and mint an acceptance credential. Abstaining
+        # gives ``bind()`` the no-words behaviour it already has for a page with no text
+        # layer; the visual readers' verdict then stands on its own.
+        if not layer_is_admissible_evidence(state.pages.get(page_num)):
+            return None
         try:
             with open_pdf(state.handle.path) as doc:
                 page = doc[page_num - 1]
@@ -7891,6 +7913,11 @@ class UnifiedPipeline:
         try:
             from socr.core.pdf import open_pdf
 
+            # #1156 round 3: same rule. A resolution "proven" from this page's own words
+            # is proven from the earlier OCR layer; abstaining leaves the unresolved
+            # emission below exactly as a read failure does.
+            if not layer_is_admissible_evidence(state.pages.get(page_num)):
+                raise _PriorOcrLayerNotEvidenceError
             with open_pdf(state.handle.path) as doc:
                 native_words = doc[page_num - 1].get_text("words")
         except Exception as exc:
@@ -8389,6 +8416,17 @@ class UnifiedPipeline:
         ]
         if not targets:
             return
+        # #1156 round 3 (Argon 2.4), the DESTRUCTIVE direction of the same rule. This
+        # check convicts a model table by comparing it against the page's own signed
+        # numbers. On a suspect page those come from an earlier OCR run, so the layer
+        # convicts a CORRECT reading: measured, a VLM read ``-350`` where the layer had
+        # dropped the minus, the visual PASS was clamped to UNVERIFIED by
+        # ``forced_by_binding``, and ``_withhold_contradicted_unverified_tables``
+        # destroyed that table AND its siblings. ``contradictions_for_tables`` already
+        # abstains whole when the text layer is not visible, which is the same no-evidence
+        # state; this reaches it one step earlier, before the page is even opened.
+        if not layer_is_admissible_evidence(state.pages.get(page_num)):
+            return
 
         try:
             doc = open_pdf(state.handle.path)
@@ -8400,6 +8438,9 @@ class UnifiedPipeline:
                     ["\n".join(lines[b.start : b.end + 1]) for b in blocks],
                     [box.bbox for box in boxes],
                 )
+                # #1156 round 3 (Argon 2.4): the destructive direction. The layer
+                # convicts a CORRECT reading -- the VLM read ``-350`` where the layer had
+                # dropped the minus -- and the table and its siblings are withheld.
                 findings = contradictions_for_tables(
                     page,
                     bo.text,
