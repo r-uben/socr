@@ -3499,6 +3499,16 @@ class UnifiedPipeline:
             # the event claims OCR replaced it).
             and not ps.invisible_text_over_raster
             and not ps.invisible_text_scan_failed
+            # #1156: the same reasoning as the two lines above, for the family the
+            # drawing-order route finds. Argon, round 1: without this a flagged page with
+            # corrupt maths is a math-recovery page, so it leaves whole-page OCR
+            # altogether -- the model never reads it, the hybrid ships the earlier OCR
+            # layer's prose, and on the Fed run that is GPU work skipped and never redone.
+            # Excluding it here is strictly better than withholding inside the lane: the
+            # page goes to OCR, so it reaches either an accepted reading or the floor.
+            # The failed-scan key is included because an unreadable page is not prose to
+            # repair around equations either -- the same reason #961 lists its own.
+            and not getattr(ps, "prior_ocr_layer_suspect", False)
             # #960: the hybrid keeps this native prose and patches regions; on a page whose
             # math the layer garbled, the A/B found the hybrid unreadable and a whole-page
             # read correct (Pastel p4/p5/p10), so the whole page goes to OCR.
@@ -16133,6 +16143,18 @@ class UnifiedPipeline:
             # no suspicion, so the assemble re-flush drops the flag and its mark, and the
             # page reads as checked on evidence nothing can see.
             ps.prior_ocr_layer_suspect = bool(meta.get("prior_ocr_layer_suspect", False))
+            # #1156 round 1 (Argon C): the flag came back but the LAYER did not, so a
+            # re-flush from restored state wrote the sidecar with ``native_text`` empty and
+            # dropped ``prior_ocr_layer_text`` -- the one thing Part A retains for Part B to
+            # re-finalize from. Latent today rather than live: the page ledger admits only a
+            # terminal SUCCESS page and a flagged page is always WARNING, so this restore is
+            # not reached on a flagged page in a normal resume (both halves are pinned by
+            # ``test_a_restored_page_keeps_the_retained_layer``). Restored anyway, because
+            # retention is Part A's own contract and Part B re-finalizes from exactly this
+            # key.
+            _retained_layer = meta.get("prior_ocr_layer_text")
+            if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
+                ps.native_text = _retained_layer
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.

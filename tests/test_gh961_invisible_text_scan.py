@@ -311,11 +311,20 @@ def test_e2e_provider_absent_is_never_trusted_success(tmp_path, monkeypatch) -> 
     on, _ = _e2e(tmp_path, "b_on", monkeypatch, provider=False)
     assert _sidecar(tmp_path, "b_off")["status"] == "success"
     assert off.status is DocumentStatus.SUCCESS
+    # #1156 Part A, round 1: the owner's interim rule is that a flagged page whose
+    # reading was rejected OR NEVER RAN ships no prior-layer text and no numbers. This
+    # fixture page is flagged by BOTH routes, so the no-attempt arm is now floored by
+    # #1156 instead of retaining its layer. Every other assertion in this test is
+    # unchanged -- the page is still not success, the document is still not SUCCESS, and
+    # the engine that produced it is still named. Only the two claims the ruling
+    # overrides move: the failure mode, and "no content dropped".
     side = _sidecar(tmp_path, "b_on")
     assert side["status"] != "success"
-    assert side["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
+    assert side["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
     assert on.status is not DocumentStatus.SUCCESS
-    assert "estimated effect" in _page_text(tmp_path, "b_on"), "no content dropped"
+    body = _page_text(tmp_path, "b_on")
+    assert "estimated effect" not in body, "the earlier OCR layer shipped"
+    assert "earlier OCR, not re-read" in body, "the page does not say why its text is gone"
 
 
 def test_e2e_native_only_retains_the_page_but_demotes_it(tmp_path, monkeypatch) -> None:
@@ -328,9 +337,14 @@ def test_e2e_native_only_retains_the_page_but_demotes_it(tmp_path, monkeypatch) 
     side = _sidecar(tmp_path, "c_on")
     assert eng_on.calls == 0
     assert side["status"] == "warning"
-    assert side["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
+    # #1156 Part A, round 1: see the note on the provider-absent test above. The page is
+    # still WARNING and the engine is still never called; only the mode and the retention
+    # move, because the ruling replaces the retention.
+    assert side["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
     assert on.status is not DocumentStatus.SUCCESS
-    assert "estimated effect" in _page_text(tmp_path, "c_on")
+    body = _page_text(tmp_path, "c_on")
+    assert "estimated effect" not in body, "the earlier OCR layer shipped"
+    assert "earlier OCR, not re-read" in body
 
 
 def test_e2e_detector_exception_fails_closed(tmp_path, monkeypatch) -> None:
@@ -347,6 +361,12 @@ def test_e2e_native_only_with_a_raising_detector_is_demoted_too(tmp_path, monkey
     on, _ = _e2e(tmp_path, "e_on", monkeypatch, provider=True, native_only=True, detector="raising")
     side = _sidecar(tmp_path, "e_on")
     assert side["status"] == "warning"
+    # #1156 Part A, round 1: UNCHANGED, and the reason is worth recording. A FAILED scan
+    # is "unknown", never a positive finding, so #1156's withholding floor deliberately
+    # does not take this page and its layer is still retained (the documented exception,
+    # measured at 0 of 318 probe pages). #1156's clause does fire and mark the page, but
+    # ``_warn_success_status_for_verdict`` never overwrites a mode that is already set,
+    # and #961's own mode says more. So the mode here stays #961's.
     assert side["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
     assert on.status is not DocumentStatus.SUCCESS
 
@@ -381,9 +401,15 @@ def test_e2e_chart_asset_page_with_a_hit_is_demoted_too(tmp_path, monkeypatch) -
             detector="forced",
         )
         side_on = _sidecar(tmp_path, "f_on")
-        assert side_on["engine"] == "chart_asset"
+        # #1156 Part A, round 1 (Grok 2): the chart lane ships ``native_text``, so on a
+        # flagged page it shipped the earlier OCR layer and this test's own subject -- "it
+        # must not bypass the demotion" -- was satisfied by a demoted page that still
+        # carried the layer. The page now reaches the #1156 floor, so the winning engine is
+        # the floor's ``native`` rather than ``chart_asset``. The demotion this test exists
+        # for is still asserted, more strongly.
+        assert side_on["engine"] == "native"
         assert side_on["status"] == "warning"
-        assert side_on["failure_mode"] == FailureMode.NATIVE_INVISIBLE_TEXT_SCAN.value
+        assert side_on["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
         assert on.status is not DocumentStatus.SUCCESS
 
     # #1145's delta on the arm this ticket calls clean.
@@ -545,7 +571,13 @@ def _scan_state(tmp_path, monkeypatch, *, detector_live=True):
     pdf = _make(tmp_path / "s.pdf", image="full", render_mode=3)
     with monkeypatch.context() as m:
         if not detector_live:
+            # Both routes, for the reason given on ``_e2e``: the arm's contract is "no
+            # detector fires", and #1156 added a second route that also sees this page
+            # (grounded by ``test_the_1156_route_also_sees_this_page``).
             m.setattr(BornDigitalDetector, "_has_invisible_text_over_raster", lambda s, p: False)
+            m.setattr(
+                BornDigitalDetector, "_has_prior_ocr_layer", lambda s, p, r, f=None, **k: False
+            )
         pipe, state = _analyze(pdf)
     return pipe, state.pages[1]
 

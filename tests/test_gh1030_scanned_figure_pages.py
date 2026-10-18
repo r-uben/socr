@@ -445,18 +445,59 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
     assert fig_side["status"] == pro_side["status"]
 
 
-def test_e2e_no_provider_layer_ships_with_its_spelled_axis_title_fenced(
+def test_e2e_no_provider_a_flagged_page_withholds_the_layer(tmp_path, monkeypatch) -> None:
+    """#1156 Part A, round 1: the ruling, on THIS fixture, with both routes live.
+
+    Added rather than folded into the fencing test below, because the two subjects are
+    different and both are worth keeping: what the layer LOOKS LIKE when it ships (below),
+    and whether it ships at all on a flagged page (here). Without this arm, silencing
+    #1156 below would remove the ruling from this file entirely.
+    """
+    _doc, _state, text = _run(
+        tmp_path, monkeypatch, "ruling", caption=True, spelled=True, providers=False
+    )[:3]
+    assert SPELLED_FENCE_OPEN not in text, "the earlier OCR layer shipped on a flagged page"
+    assert "earlier OCR, not re-read" in text
+
+
+def test_e2e_no_provider_a_flagged_scan_withholds_the_layer_not_shreds_it(
     tmp_path, monkeypatch
 ) -> None:
-    on = _run(tmp_path, monkeypatch, "on", caption=True, spelled=True, providers=False)
-    off = _run(tmp_path, monkeypatch, "off", caption=False, spelled=True, providers=False)
-    on_text, off_text = on[2], off[2]
-    # Same layer, one thing changed (the caption): only the caption page fences the spelled run.
-    assert SPELLED_FENCE_OPEN in on_text and SPELLED_FENCE_OPEN not in off_text
-    fenced = on_text.split(SPELLED_FENCE_OPEN, 1)[1].split(SPELLED_FENCE_CLOSE, 1)[0]
-    kept = [ln for ln in fenced.split("\n")[1:] if ln.strip()]
-    assert "".join(ch.strip() for ch in kept) == _AXIS_TITLE, "every character is kept, in order"
-    assert _AXIS_TITLE not in on_text.replace(fenced, "")
+    """#1156 Part A, round 1: what this page's INTENT reduces to under the owner's ruling.
+
+    This test used to prove that when a scan's layer ships with no model reading, a
+    spelled-out axis title (``P\\ni\\nc\\ne``) is fenced rather than shipped as one letter
+    per line. The ruling replaced the premise: on a flagged page with no reading, the
+    layer does not ship at all. The scanned-figure lane fires only on
+    ``invisible_text_over_raster``, and the floor now withholds exactly those pages, so
+    the fence's end-to-end path is unreachable until Part B ships masked prose. It is NOT
+    deleted: ``fence_spelled_runs`` keeps its own unit test
+    (``test_fence_is_in_place_and_removing_it_gives_back_the_input_byte_for_byte``), and
+    what this page still owes the reader is pinned here.
+
+    The intent that survives is the same one the fence served -- a reader must never be
+    handed a shredded axis title as if it were the page's prose -- now satisfied by
+    withholding instead of fencing. The marker and the page image stay, so nothing is
+    silently missing.
+    """
+    _doc, _state, text = _run(
+        tmp_path, monkeypatch, "withheld", caption=True, spelled=True, providers=False
+    )[:3]
+
+    from socr.core.manifest import is_page_failed_marker
+
+    body_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith(">")]
+    assert is_page_failed_marker(body_lines[0]), f"no floor marker: {body_lines[:2]}"
+    assert "earlier OCR, not re-read" in text
+
+    # The shredding this page's fence existed to prevent: never shipped, fenced or not.
+    assert SPELLED_FENCE_OPEN not in text, "a fence implies the layer shipped"
+    assert _AXIS_TITLE not in text, "the spelled axis title shipped"
+    assert "\n".join(_AXIS_TITLE) not in text, "the axis title shipped one letter per line"
+    assert "estimated effect" not in text, "the earlier OCR layer's prose shipped"
+
+    # Still surfaced, still not clean: the page image is there and the page is marked.
+    assert "![Scanned figure page 1]" in text or "![" in text, "the page image is gone too"
 
 
 class _CountingEngine(_Engine):

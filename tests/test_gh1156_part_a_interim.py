@@ -977,3 +977,501 @@ def test_neither_lane_counts_a_flagged_page_as_checked(lane: str) -> None:
     assert PRIOR_OCR_UNCHECKED in flags(suspect=True), (
         f"the {lane} lane counted a prior-OCR page CHECKED"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 1: the whole cross-product, tested whole
+# ---------------------------------------------------------------------------
+
+_LANES = ("native", "chart_asset", "math_hybrid", "s1_prose", "tr3_splice")
+_ATTEMPTS = ("none", "rejected", "accepted")
+_LAYER_TOKENS = ("3 Y,", "$400 million")
+
+
+def _grid_state(tmp_path: Path, *, detected: bool, invisible: bool, attempt: str, lane: str):
+    """One cell of the cross-product, built to reach the named lane.
+
+    Round 1's lesson: my first grid was three separate tests, each covering one slice, and
+    the cell that leaked (`detected and invisible and no attempt`) was in none of them. The
+    cross-product is enumerated here so a cell cannot be missing by accident.
+    """
+    from socr.core.manifest import ENGINE_NATIVE_MATH
+
+    real_pdf = _prior_ocr_pdf(tmp_path / "grid.pdf")
+    state = DocumentState(handle=DocumentHandle(path=real_pdf, page_count=2))
+    p = PageState(page_num=1)
+    p.is_born_digital = True
+    p.native_text = (
+        "Opening paragraph of the section.\n"
+        "Discount rates were raised from 3 to 3 Y, per cent.\n"
+        "A total of $400 million was involved.\nClosing paragraph."
+    )
+    p.needs_ocr_enhancement = True
+    p.prior_ocr_layer = detected
+    p.invisible_text_over_raster = invisible
+    p.prior_ocr_layer_suspect = detected or invisible
+    p.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
+
+    if lane in ("s1_prose", "tr3_splice"):
+        p.has_tables = True
+        p.detected_table_count = 1
+        p.detected_table_bboxes = [(72.0, 100.0, 520.0, 250.0)]
+        p.table_bbox_sane = True
+        p.native_table_region_count = 1
+        if lane == "tr3_splice":
+            p.native_table_structure_failed = True
+            p.native_table_unverifiable = True
+
+    if attempt != "none":
+        accepted = attempt == "accepted"
+        model = PageOutput(
+            page_num=1,
+            text="A MODEL READING OF THE PAGE",
+            status=PageStatus.SUCCESS if accepted else PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=accepted,
+            failure_mode=FailureMode.NONE if accepted else FailureMode.AUDIT_FAILED,
+        )
+        p.attempts = [model]
+        p.best_output = model
+
+    if lane == "chart_asset":
+        win = PageOutput(
+            page_num=1,
+            text=p.native_text + "\n\n![chart](figures/chart_p1.png)",
+            status=PageStatus.SUCCESS,
+            engine="chart_asset",
+            audit_passed=True,
+            failure_mode=FailureMode.NONE,
+        )
+        p.attempts = [*p.attempts, win]
+        p.best_output = win
+    elif lane == "math_hybrid":
+        p.has_corrupt_math = True
+        hybrid = PageOutput(
+            page_num=1,
+            text=p.native_text + "\n\n![crop](figures/math_crop_p1.png)",
+            status=PageStatus.WARNING,
+            engine=ENGINE_NATIVE_MATH,
+            audit_passed=False,
+            failure_mode=FailureMode.AUDIT_FAILED,
+        )
+        p.attempts = [*p.attempts, hybrid]
+        p.best_output = hybrid
+        p.corrupt_math_hybrid = hybrid
+
+    state.pages[1] = p
+    return state
+
+
+@pytest.mark.parametrize("lane", _LANES)
+@pytest.mark.parametrize("attempt", _ATTEMPTS)
+@pytest.mark.parametrize("invisible", [True, False])
+@pytest.mark.parametrize("detected", [True, False])
+def test_the_whole_flag_lane_attempt_grid(
+    tmp_path: Path, detected: bool, invisible: bool, attempt: str, lane: str
+) -> None:
+    """For every cell: the layer's numbers never ship unless a reading was ACCEPTED (and
+    then the body is the reading's, not the layer's); the page is never CHECKED; and the
+    document cannot be clean over it."""
+    from socr.core.manifest import _select_and_finalize_page
+    from socr.core.marks import Check
+    from socr.core.verdict import build_page_verdict
+
+    if not (detected or invisible):
+        pytest.skip("not a flagged page: nothing for this rule to say")
+
+    state = _grid_state(
+        tmp_path, detected=detected, invisible=invisible, attempt=attempt, lane=lane
+    )
+    record = _select_and_finalize_page(state, 1)
+    body = record.output.text
+    cell = f"detected={detected} invisible={invisible} attempt={attempt} lane={lane}"
+
+    leaked = [tok for tok in _LAYER_TOKENS if tok in body]
+    assert leaked == [], f"{cell}: the earlier OCR layer shipped {leaked}"
+
+    clauses = [c.check for c in build_page_verdict(1, record.output, state.pages[1]).clauses]
+    assert Check.PRIOR_OCR_LAYER in clauses, f"{cell}: the page is not marked"
+    assert record.output.audit_passed is False or record.output.status is not PageStatus.SUCCESS, (
+        f"{cell}: the page reads as a clean pass"
+    )
+
+    # Re-finalize with the saved body: one set of bytes, on every cell.
+    again = _select_and_finalize_page(state, 1, saved_text=body)
+    assert again.output.text == body, f"{cell}: re-finalizing changed the body"
+
+
+# ---------------------------------------------------------------------------
+# Round 1: the PROVIDER path, which is the path the Fed run takes
+# ---------------------------------------------------------------------------
+
+
+class _StubReadingEngine:
+    """A provider that returns one reading per page, so a judge can reject it."""
+
+    name = "qwen"
+
+    def is_available(self) -> bool:
+        return True
+
+    def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+        return [
+            PageOutput(
+                page_num=n,
+                text="A MODEL READING OF THE PAGE",
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+            )
+            for n in page_nums
+        ]
+
+
+class _FixedJudge:
+    def __init__(self, accept: bool) -> None:
+        self._accept = accept
+
+    def assess(self, output, provider):
+        from socr.pipeline.agentic import AcceptDecision
+
+        return AcceptDecision(accept=self._accept, reason="fixed judge")
+
+
+def _provider_run(tmp_path: Path, monkeypatch, tag: str, *, accept: bool):
+    """gh1027's ``_run`` shape, on the painted-under fixture, with figures saved."""
+    import json
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = _prior_ocr_pdf(tmp_path / f"{tag}.pdf")
+    with monkeypatch.context() as m:
+        m.setattr(orch, "get_engine", lambda engine_type: _StubReadingEngine())
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=True,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._build_page_judge = lambda state: _FixedJudge(accept)
+        pipe._resolve_crop_vlm_model = lambda: None
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        result = pipe.process(pdf, output_dir=tmp_path / f"out-{tag}")
+    out = tmp_path / f"out-{tag}"
+    side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    text = next(iter(out.rglob("pages/00001.md"))).read_text()
+    audit = json.loads(next(iter(out.rglob("audit_log.json"))).read_text())
+    return result, side, text, audit["events"]
+
+
+def test_e2e_the_provider_path_floor_ships_the_marker_and_the_page_image(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 1 (r-uben blocker 2): no test drove this path, and it is the Fed run's path.
+
+    Every other floor test here is PNG-less or goes through ``--native-only``, so two
+    mutants survived the full suite: dropping ``failed:`` from the SEE-IMAGE marker
+    variant, and switching off the page-image render. Both are killed from here.
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.core.result import DocumentStatus
+
+    result, side, text, events = _provider_run(tmp_path, monkeypatch, "rej", accept=False)
+
+    body = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith(">")]
+    assert is_page_failed_marker(body[0]), f"the floor marker is not recognisable: {body[:2]}"
+    assert "earlier OCR, not re-read" in text
+    # The page IMAGE, which only this path renders.
+    assert "prior_ocr_layer_page_p1" in text, f"the page image is missing: {text[:300]}"
+    assert "see image" in text, "the marker does not point at the image it shipped with"
+
+    # Neither the layer nor the rejected reading.
+    assert "3 Y," not in text and "$400 million" not in text
+    assert "A MODEL READING OF THE PAGE" not in text
+
+    # A floored page is NOT a native fallback: that event claims native text shipped.
+    kinds = [e.get("kind") for e in events if e.get("page_num") == 1]
+    assert "native_fallback" not in kinds, f"the floored page was called a native fallback: {kinds}"
+
+    assert side["prior_ocr_layer_suspect"] is True
+    assert side["winning_output"]["status"] != "success"
+    assert result.status is not DocumentStatus.SUCCESS
+
+
+def test_e2e_the_provider_path_accepted_reading_ships_marked(tmp_path: Path, monkeypatch) -> None:
+    """The other arm of the same path: an accepted reading ships, under its mark."""
+    from socr.core.result import DocumentStatus
+
+    result, side, text, _events = _provider_run(tmp_path, monkeypatch, "acc", accept=True)
+
+    assert "A MODEL READING OF THE PAGE" in text, "the accepted reading did not ship"
+    assert "3 Y," not in text and "$400 million" not in text, "the layer shipped beside it"
+    assert "prior_ocr_layer=UNKNOWN" in text, "an accepted reading of a scan shipped unmarked"
+    assert side["winning_output"]["status"] != "success", "the page reads as a clean pass"
+    assert result.status is not DocumentStatus.SUCCESS
+
+
+def test_a_restored_page_keeps_the_retained_layer(tmp_path: Path) -> None:
+    """#1156 round 1 (Argon C): a re-flush from restored state used to WIPE the retention.
+
+    Two halves, both pinned, because the second is why this was latent rather than live:
+
+    1. ``_restore_terminal_page_state`` brought back the suspicion flag but not the layer,
+       so the next sidecar write saw ``native_text == ""`` and omitted
+       ``prior_ocr_layer_text`` -- the only thing Part A stores for Part B to re-finalize
+       from, gone without a word.
+    2. The page ledger admits only a TERMINAL SUCCESS page, and a flagged page is always
+       WARNING, so a normal resume never reaches that restore on a flagged page. That is
+       what made it latent; it is pinned here so a later change to either the ledger gate
+       or the page's status cannot make it live unnoticed.
+    """
+    import json
+
+    sidecar = _flushed(tmp_path, suspect=True)
+    assert "3 Y," in sidecar["prior_ocr_layer_text"], "fixture premise: the layer is retained"
+
+    resumed = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=1))
+    resumed.pages[1] = PageState(page_num=1)
+    restored = PageOutput.from_dict(sidecar["winning_output"])
+    out_dir = tmp_path / "sus"
+    _pipeline()._restore_terminal_page_state(resumed, 1, restored, out_dir)
+
+    assert resumed.pages[1].prior_ocr_layer_suspect is True
+    assert "3 Y," in (resumed.pages[1].native_text or ""), (
+        "the restored page lost the retained layer, so the next flush drops it"
+    )
+
+    # ... and the re-flush keeps it, which is the consequence that matters.
+    again_path = Path(_pipeline()._flush_page_sidecar(resumed, 1, out_dir, terminal=True))
+    again = json.loads(again_path.read_text())
+    assert "3 Y," in again.get("prior_ocr_layer_text", ""), "the re-flush wiped the retention"
+
+    # Half 2: the status that keeps this off the normal resume path.
+    assert sidecar["winning_output"]["status"] != "success", (
+        "a flagged page became terminal SUCCESS, which puts it on the ledger's skip path"
+    )
+
+
+def test_a_detector_failure_is_suspicion_not_trust(tmp_path: Path, monkeypatch) -> None:
+    """#1156 round 1 (r-uben blocker 3): a PyMuPDF failure must mean "unknown", not "clean".
+
+    The two opacity reads used to swallow exceptions, so every image read not-opaque and
+    ``_has_prior_ocr_layer`` RETURNED False instead of raising: the caller's ``except``
+    never ran, ``prior_ocr_layer_scan_failed`` was unreachable from a PyMuPDF failure, and
+    a detected scan became a clean pass. Measured at ``process()`` on this fixture: the
+    document went ERROR -> SUCCESS, the page WARNING -> SUCCESS, the mark vanished, and the
+    layer's numbers shipped unflagged.
+
+    The witness keeps the opposite direction, which is the whole reason the swallow looked
+    right: ``page_has_opaque_page_covering_raster`` catches and answers False, so a failure
+    there means "nothing read these pixels" and the native check stays. Both directions are
+    asserted, because fixing one by breaking the other is the trap.
+    """
+    import json
+
+    from socr.core.born_digital import _FURNITURE_CACHE, page_has_opaque_page_covering_raster
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.result import DocumentStatus
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = _prior_ocr_pdf(tmp_path / "failing.pdf")
+    real = fitz.Document.xref_get_key
+    # The two reads a PyMuPDF failure can hit are tested SEPARATELY, because the first
+    # guards the second: ``_page_declares_transparency`` reads ``Resources`` and runs
+    # before ``_image_is_opaque`` reads ``SMask``, so breaking both at once leaves the
+    # second helper's own swallow unreachable and therefore unpinned.
+    break_keys = {"Resources"}
+
+    def boom(self, xref, key):
+        # BOTH reads a PyMuPDF failure can hit: the page's resource dictionary
+        # (``_page_declares_transparency``) and the image's soft mask
+        # (``_image_is_opaque``). Each used to swallow on its own, so breaking only one
+        # leaves the other's swallow unpinned.
+        if key in break_keys:
+            raise RuntimeError("simulated PyMuPDF failure")
+        return real(self, xref, key)
+
+    # Direction 1: the DETECTOR must raise, so its caller can record suspicion.
+    detector = BornDigitalDetector()
+    with fitz.open(pdf) as doc:
+        slots = detector._repeated_text_slots(doc)
+        folios = detector._folio_slots(doc, slots)
+        monkeypatch.setattr(fitz.Document, "xref_get_key", boom)
+        for keys in ({"Resources"}, {"SMask"}, {"ImageMask"}):
+            break_keys.clear()
+            break_keys.update(keys)
+            with pytest.raises(Exception):
+                detector._has_prior_ocr_layer(doc[0], slots, folios)
+        break_keys.clear()
+        break_keys.add("Resources")
+        # Direction 2: the WITNESS must still answer, and answer "no witness".
+        _FURNITURE_CACHE.clear()
+        assert page_has_opaque_page_covering_raster(doc[0]) is False, (
+            "the witness raised or claimed a reading; a failure there must keep the "
+            "native check, not skip it"
+        )
+        monkeypatch.undo()
+
+    # And the consequence at process(): suspicion, a mark, and an unclean document.
+    def run(tag: str, *, breaking: bool):
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                native_only=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=False,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: []
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        pipe._resolve_crop_vlm_model = lambda: None
+        out = tmp_path / f"out-{tag}"
+        if breaking:
+            monkeypatch.setattr(fitz.Document, "xref_get_key", boom)
+        try:
+            result = pipe.process(pdf, output_dir=out)
+        finally:
+            if breaking:
+                monkeypatch.undo()
+        side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+        return result, side
+
+    intact, intact_side = run("intact", breaking=False)
+    broken, broken_side = run("broken", breaking=True)
+
+    assert intact_side["prior_ocr_layer_suspect"] is True
+    assert broken_side["prior_ocr_layer_suspect"] is True, (
+        "a PyMuPDF failure left the page unflagged, so it ships as a clean pass"
+    )
+    assert intact.status is not DocumentStatus.SUCCESS
+    assert broken.status is not DocumentStatus.SUCCESS, (
+        "the document reported a clean run over a page nothing could read"
+    )
+
+
+def test_a_flagged_page_never_enters_the_math_recovery_lane() -> None:
+    """#1156 round 1 (Argon): the math lane took the page OUT of whole-page OCR.
+
+    ``_is_corrupt_math_recovery_page`` owns a page instead of the model, so a flagged page
+    with corrupt maths was never read at all -- on the Fed run, GPU work skipped and never
+    redone, with the hybrid shipping the earlier layer's prose. The same function already
+    excludes #961's two keys for exactly this reason, so the flag joins them there rather
+    than being withheld inside the lane: the page goes to OCR and reaches either an
+    accepted reading or the floor.
+
+    Difference pin on the flag alone; the failed-scan key is included because an unreadable
+    page is not prose to repair around equations either.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pipe = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            recover_corrupt_math=True,
+        )
+    )
+
+    def owns(**flags) -> bool:
+        ps = PageState(page_num=1)
+        ps.is_born_digital = True
+        ps.native_text = "rates of 6-1/2 to 9-1/2 per cent"
+        ps.has_corrupt_math = True
+        for k, v in flags.items():
+            setattr(ps, k, v)
+        ps.prior_ocr_layer_suspect = bool(
+            flags.get("prior_ocr_layer") or flags.get("prior_ocr_layer_scan_failed")
+        )
+        return pipe._is_corrupt_math_recovery_page(1, ps)
+
+    assert owns() is True, "control: an unflagged corrupt-math page is the lane's own"
+    assert owns(prior_ocr_layer=True) is False, (
+        "a flagged page is still the math lane's, so the model never reads it"
+    )
+    assert owns(prior_ocr_layer_scan_failed=True) is False, (
+        "an unreadable page is not prose to repair around equations"
+    )
+
+
+def test_the_s1_floor_and_the_tr3_splice_withhold_the_layers_prose(tmp_path: Path) -> None:
+    """#1156 round 1 (r-uben 1b; Grok measured the other cell of the same branch).
+
+    Both endings splice the page's own ``native_text`` around their table markers, and on
+    a flagged page that text is an EARLIER OCR run. Reproduced on gh520's own
+    ``_floored_page`` + ``TWO_PARSEABLE_TABLES`` fixture, which is the one shape where the
+    GH-520 guard PASSES and prose recovery actually runs: flagged and unflagged were
+    byte-identical apart from the banner, both carrying "3 to 3 Y, per cent".
+
+    Why the two reviewers disagreed, pinned here so it is not rediscovered: recovery runs
+    only when the guard passes (count > 0, boxes == count, a sane bbox, a parsed block per
+    table). Guard fails -> whole-page marker, which is what Grok saw; guard passes ->
+    prose, which is what r-uben saw, and what a real minutes page with parseable tables
+    does. The unflagged arm is asserted too, so the fix cannot be "withhold from everyone".
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_gh520_regional_floor_splice import (
+        PROSE_BEFORE,
+        TWO_PARSEABLE_TABLES,
+        _floored_page,
+    )
+
+    from socr.core.manifest import _winning_page_output
+
+    rate = "Discount rates were raised from 3 to 3 Y, per cent."
+    money = "A total of $400 million was involved."
+    text = f"{rate}\n{money}\n{TWO_PARSEABLE_TABLES}"
+
+    for tr3 in (False, True):
+        bodies = {}
+        for flagged in (False, True):
+            sub = tmp_path / f"s1-{tr3}-{flagged}"
+            sub.mkdir(parents=True, exist_ok=True)
+            state, ps = _floored_page(sub, text, detected=2)
+            ps.prior_ocr_layer = flagged
+            ps.prior_ocr_layer_suspect = flagged
+            if tr3:
+                # The TR-3 ending, which splices the same text by a different route.
+                # ``native_table_header_unattributed`` is the branch that splices
+                # UNCONDITIONALLY (GH-375: no per-table header identity exists, so every
+                # table is replaced and the surrounding prose kept). The ordinal branch
+                # beside it refuses unless region identities match 1:1, which this
+                # synthetic fixture cannot satisfy -- so pointing the test at that one
+                # made the guard inert and its mutant survived.
+                ps.native_table_structure_failed = True
+                ps.native_table_unverifiable = True
+                ps.native_table_header_unattributed = True
+            bodies[flagged] = _winning_page_output(state, 1).text
+
+        lane = "TR-3 splice" if tr3 else "S1 prose recovery"
+        # The control must actually recover prose, or the pin below shows nothing.
+        if not tr3:
+            assert PROSE_BEFORE in bodies[False], (
+                f"{lane}: the control did not recover prose, so this test proves nothing"
+            )
+        assert rate not in bodies[True], f"{lane}: the earlier layer's rate shipped"
+        assert money not in bodies[True], f"{lane}: the earlier layer's figure shipped"
+        assert "failed:" in bodies[True], f"{lane}: no marker shipped in its place"

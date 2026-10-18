@@ -5056,8 +5056,8 @@ class BornDigitalDetector:
                 if "/SMask" in blob and "/SMask /None" not in blob:
                     return True
             return False
-        except Exception:
-            logger.debug("#1156: could not follow the page's graphics states", exc_info=True)
+        except (IndexError, TypeError, ValueError):
+            logger.debug("#1156: unreadable graphics-state value", exc_info=True)
             return True
 
     @staticmethod
@@ -5086,9 +5086,12 @@ class BornDigitalDetector:
             if ext[0] == "xref":
                 text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
             return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
-        except Exception:
-            logger.debug("#1156: could not read the page's graphics states", exc_info=True)
-            return True
+        except (IndexError, TypeError, ValueError):
+            # A malformed resource VALUE is "no declared alpha" by the same positive-
+            # evidence rule the rest of this helper uses. A PyMuPDF FAILURE is different
+            # and propagates: see ``_image_is_opaque``.
+            logger.debug("#1156: unreadable graphics-state value", exc_info=True)
+            return False
 
     @staticmethod
     def _image_is_opaque(doc, info: dict, page_declares_transparency: bool) -> bool:
@@ -5098,6 +5101,19 @@ class BornDigitalDetector:
         image with alpha 0 -- which leaves the rendered pixels byte-identical -- still
         counted as covering the text under it. Every clause here must be answered
         affirmatively; anything unknown means NOT opaque.
+
+        A PyMuPDF failure RAISES rather than answering (round 1, r-uben blocker 3). It used
+        to answer the "cautious" value, and that word hid an asymmetry: the two consumers of
+        opacity need opposite failure directions, exactly as the two transparency readers do.
+        Swallowing made every image read not-opaque, so ``_has_prior_ocr_layer`` RETURNED
+        False instead of raising, its caller's ``except`` never ran, and
+        ``prior_ocr_layer_scan_failed`` was unreachable from a PyMuPDF failure. Measured at
+        ``process()`` on the painted-under fixture: the document went from ERROR to clean
+        SUCCESS, the page from WARNING to SUCCESS, the mark vanished, and the layer's
+        numbers shipped unflagged. Raising makes the detector answer "unknown", which is
+        suspicion; the witness keeps its own direction because
+        ``page_has_opaque_page_covering_raster`` catches and returns False. Measured cost:
+        these reads raised on 0 of 318 probe-set pages.
         """
         if page_declares_transparency:
             return False
@@ -5106,12 +5122,10 @@ class BornDigitalDetector:
         xref = info.get("xref")
         if not xref:
             return False
-        try:
-            if doc.xref_get_key(xref, "SMask")[0] != "null":
-                return False
-            if doc.xref_get_key(xref, "ImageMask")[0] != "null":
-                return False
-        except Exception:
+        # Raises on a PyMuPDF failure; see the note in the docstring.
+        if doc.xref_get_key(xref, "SMask")[0] != "null":
+            return False
+        if doc.xref_get_key(xref, "ImageMask")[0] != "null":
             return False
         return True
 

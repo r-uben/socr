@@ -1172,6 +1172,18 @@ def _reaches_structure_class_branch(p) -> bool:
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
+        # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a mark
+        # -- but never as a clean pass, which is what this short-circuit would make it.
+        #
+        # Scoped to ``_NATIVE_TEXT_LANES`` for the reason stated directly above, which
+        # round 1 proved applies here too (Grok 2): this clause lived in
+        # ``native_distrusted``, gated on the ``native`` prefix alone, and the chart lane's
+        # engine is ``chart_asset`` -- so a passing chart winner on a flagged page returned
+        # here with the whole layer as its body. The chart lane ships ``native_text``, so a
+        # flag about ``native_text`` has to cover it.
+        prior_ocr_layer_in_a_native_lane = winning_engine.startswith(
+            _NATIVE_TEXT_LANES
+        ) and getattr(p, "prior_ocr_layer_suspect", False)
         # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission,
         # per ``_truncated_grid_reading_ids``) is a non-native distrust case
         # this predicate's original three conditions never covered -- it is
@@ -1191,6 +1203,7 @@ def _reaches_structure_class_branch(p) -> bool:
         if not (
             native_distrusted
             or native_text_shredded
+            or prior_ocr_layer_in_a_native_lane
             or best_output_truncated
             or getattr(p, "structure_class_model_kept_on_resume", False)
         ):
@@ -2683,6 +2696,30 @@ def structure_class_floor_text(
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """
+    # #1156 round 1 (r-uben 1b, the cell the Fed run hits): prose recovery ships the
+    # page's own ``native_text`` around the table markers, and on a flagged page that text
+    # is an EARLIER OCR run -- measured on gh520's own two-table fixture, the recovered
+    # prose carried "3 to 3 Y, per cent" and "$400 million", byte-identical to the
+    # unflagged page apart from the banner. The owner's interim rule is that such a page
+    # ships no prior-layer text and no numbers, so the recovery is refused here and the
+    # page keeps the whole-page marker plus its image. The table marker and the image are
+    # unaffected, which is what keeps this narrow: only the prose is withheld.
+    #
+    # Grok measured the SAME path and saw a whole-page marker; both are right. Recovery
+    # only runs when the GH-520 guard passes (count > 0, boxes == count, a sane bbox, a
+    # parsed block per table). Guard fails -> marker, which is what Grok hit; guard passes
+    # -> prose, which is what r-uben hit, and what a real minutes page with parseable
+    # tables does.
+    if getattr(p, "prior_ocr_layer_suspect", False):
+        # ``prose_recovery=False`` is NOT the lever here: that flag only governs what the
+        # REFUSAL path returns, so a page whose GH-520 guard PASSES splices its prose
+        # whatever it is set to (measured: the flagged and unflagged arms were identical
+        # with it off). The whole-page marker plus the page image is what this helper
+        # already ships whenever isolation is unprovable, so returning it here introduces
+        # no new ending -- it withholds the prose and keeps the marker and the image.
+        d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+        png_ref = getattr(p, "d3_floor_png_ref", "")
+        return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
     return table_floor_text_for_source(
         p,
         page_num,
@@ -3982,6 +4019,15 @@ def _select_page_output_tagged(
         math_hybrid is not None
         and not getattr(p, "native_rotated_text_shredded", False)
         and not math_hybrid_blocked_by_table
+        # #1156 round 1: the routing gate in ``_is_corrupt_math_recovery_page`` already
+        # keeps a flagged page out of this lane, so in a fresh run ``math_hybrid`` is never
+        # set on one. This is the second site, for state that did not come from this run's
+        # routing: a resume restores ``corrupt_math_hybrid`` from a sidecar written before
+        # that gate existed, and the grid test found the layer shipping from here. The page
+        # then falls through to the floor, which costs the retained crop on such a page and
+        # is the safe direction -- the crop is recoverable by re-reading, a wrong number is
+        # not.
+        and not getattr(p, "prior_ocr_layer_suspect", False)
         and math_hybrid in p.attempts
         and (math_hybrid.engine or "") == ENGINE_NATIVE_MATH
     ):
@@ -4027,10 +4073,6 @@ def _select_page_output_tagged(
             # same text, WARNING, never clean SUCCESS.
             or minus_as_digit_suspect(p)
             or _invisible_text_suspect(p)
-            # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a
-            # mark -- but never as a clean pass, which is what this short-circuit would
-            # make it.
-            or getattr(p, "prior_ocr_layer_suspect", False)
             or garbled_math_suspect(p)
         )
         # #263: same contradiction, for a rotated page whose native layer is
@@ -4044,6 +4086,18 @@ def _select_page_output_tagged(
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
+        # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a mark
+        # -- but never as a clean pass, which is what this short-circuit would make it.
+        #
+        # Scoped to ``_NATIVE_TEXT_LANES`` for the reason stated directly above, which
+        # round 1 proved applies here too (Grok 2): this clause lived in
+        # ``native_distrusted``, gated on the ``native`` prefix alone, and the chart lane's
+        # engine is ``chart_asset`` -- so a passing chart winner on a flagged page returned
+        # here with the whole layer as its body. The chart lane ships ``native_text``, so a
+        # flag about ``native_text`` has to cover it.
+        prior_ocr_layer_in_a_native_lane = winning_engine.startswith(
+            _NATIVE_TEXT_LANES
+        ) and getattr(p, "prior_ocr_layer_suspect", False)
         # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission)
         # must not win by this short-circuit either -- it is a non-native
         # distrust case neither flag above catches, and the S1 branch below
@@ -4053,7 +4107,12 @@ def _select_page_output_tagged(
         # ``_reaches_structure_class_branch``'s own gate so the two agree on
         # reachability (see that function's docstring).
         best_output_truncated = id(p.best_output) in _truncated_grid_reading_ids(p)
-        if not (native_distrusted or native_text_shredded or best_output_truncated):
+        if not (
+            native_distrusted
+            or native_text_shredded
+            or prior_ocr_layer_in_a_native_lane
+            or best_output_truncated
+        ):
             # GH-994: a flattened-table flag demotes the selected native/chart winner IN
             # PLACE. Its exact bytes ship (a re-derived fallback would keep only a
             # prefix-extending append, and could drop e.g. a ``native+equations`` body);
@@ -4276,8 +4335,18 @@ def _select_page_output_tagged(
             png_ref = getattr(p, "d3_floor_png_ref", "")
 
             d3_text = None
+            # #1156 round 1: every branch below splices ``native_text`` around the
+            # markers, so on a flagged page the earlier OCR layer's prose ships from here
+            # too -- the same shape as the S1 floor above, reached by a different route
+            # (r-uben, by reading; fixture built in
+            # ``test_gh1156_part_a_interim.py``). Leaving ``d3_text`` None takes the
+            # whole-page marker plus the page image, which this branch already uses
+            # whenever isolation is unprovable, so no new ending is introduced.
+            prior_ocr_suspect = bool(getattr(p, "prior_ocr_layer_suspect", False))
             header_unattributed = bool(getattr(p, "native_table_header_unattributed", False))
-            if header_unattributed:
+            if prior_ocr_suspect:
+                pass  # no splice: the whole-page marker and the page image
+            elif header_unattributed:
                 d3_text = splice_all_table_regions(
                     native_text, marker_line=d3_marker, png_ref=png_ref
                 )
@@ -4397,20 +4466,23 @@ def _select_page_output_tagged(
         #     scan is "unknown", and suspicion must never grant deletion rights: the
         #     flag still marks the page and keeps the document out of SUCCESS, which are
         #     additions, while this branch is a subtraction.
-        # (b) not ``invisible_text_over_raster``, which is #1027's and #961's settled
-        #     territory -- #1027 ships its own marker for it above when a model attempt
-        #     ran, and #961 documents the no-attempt case as a retained WARNING. Placed
-        #     AFTER that branch so those pages keep their exact current ending.
+        # (b) EITHER positive route, #1156's or #961's. Round 1 (Grok 1, r-uben 1a): this
+        #     used to exclude ``invisible_text_over_raster`` to keep #1027's territory
+        #     intact, and the two exclusions left a hole between them -- #1027's floor
+        #     needs ``_model_attempt_ran``, so a page flagged by BOTH routes with no model
+        #     attempt fell through both and the native fallback shipped the whole layer.
+        #     Measured at ``process()`` on a real JSTOR scan under ``--native-only``:
+        #     4,252 bytes of the earlier layer, every numeral, no marker at all. #1027's
+        #     pages are still byte-for-byte because its branch is tried FIRST and keeps
+        #     its own attempt gate; this one now takes only what that branch declines.
         # (c) a structure-class page is S1's to decide, exactly as above.
         #
         # Unlike #1027 this is NOT gated on ``_model_attempt_ran``: the ruling names
         # "rejected, or never ran (no provider, --native-only)" together, because a layer
         # nothing has checked is equally unchecked when nothing tried.
         if (
-            getattr(p, "prior_ocr_layer", False)
-            and not getattr(p, "invisible_text_over_raster", False)
-            and not _reaches_structure_class_branch(p)
-        ):
+            getattr(p, "prior_ocr_layer", False) or getattr(p, "invisible_text_over_raster", False)
+        ) and not _reaches_structure_class_branch(p):
             prior_png = getattr(p, "prior_ocr_page_png_ref", "")
             # The image is conditional (needs figure saving and a successful render), so
             # the marker only points at it when one was written.
