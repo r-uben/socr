@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import fitz
 import pytest
 
 from socr.judge.table_verdict import (
@@ -16,6 +17,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import BindingResult, UnboundCell, parse_grid
 from socr.tables.native_cell_check import (
     NativeCellOutcome,
+    check_table_cell_binding,
     classify_binding_for_cell_check,
 )
 from socr.tables.native_verifier import (
@@ -88,6 +90,121 @@ def test_interior_thousand_space_is_stripped_for_binding() -> None:
 
 def test_unit_suffix_md_euro_is_parsed() -> None:
     assert _canonical_binding_numeric("1,5 M€")[0] == "1.5"
+
+
+def test_swapped_row_labels_same_values_not_verified_when_columns_unverifiable() -> None:
+    """Astra 3: permuted row labels with agreeing numerics must not verify."""
+    md = "| L | a | b |\n| --- | --- | --- |\n| Alpha | 1 | 2 |\n| Beta | 3 | 4 |\n"
+    swapped = "| L | a | b |\n| --- | --- | --- |\n| Beta | 1 | 2 |\n| Alpha | 3 | 4 |\n"
+    native_rows = [
+        SimpleNamespace(
+            is_parent=False,
+            row_path=("Alpha",),
+            lane_tokens={0: ("1", False), 1: ("2", False)},
+        ),
+        SimpleNamespace(
+            is_parent=False,
+            row_path=("Beta",),
+            lane_tokens={0: ("3", False), 1: ("4", False)},
+        ),
+    ]
+    binding = _minimal_binding(
+        column_binding_unverifiable=True,
+        row_binding={0: 0, 1: 1},
+        native_rows=native_rows,
+    )
+    assert classify_binding_for_cell_check(binding, md) is NativeCellOutcome.VERIFIED
+    assert classify_binding_for_cell_check(binding, swapped) is not NativeCellOutcome.VERIFIED
+
+
+def test_model_unbound_numeric_blocks_when_columns_unverifiable() -> None:
+    md = "| A | B |\n| --- | --- |\n| r | 1 |\n"
+    result = _minimal_binding(
+        column_binding_unverifiable=True,
+        row_binding={0: 0},
+        native_rows=[
+            SimpleNamespace(
+                is_parent=False,
+                row_path=("r",),
+                lane_tokens={0: ("1", False)},
+            )
+        ],
+        model_unbound=[UnboundCell(row_path=("r",), col_path=("B",), token="9")],
+    )
+    assert classify_binding_for_cell_check(result, md) is not NativeCellOutcome.VERIFIED
+
+
+def test_ambiguous_comma_thousands_in_row_is_ambiguous_not_verified() -> None:
+    md = "| A | B |\n| --- | --- |\n| r | 1,250 |\n"
+    binding = _minimal_binding(
+        column_binding_unverifiable=True,
+        row_binding={0: 0},
+        native_rows=[
+            SimpleNamespace(
+                is_parent=False,
+                row_path=("r",),
+                lane_tokens={0: ("1250", False)},
+            )
+        ],
+    )
+    assert classify_binding_for_cell_check(binding, md) is NativeCellOutcome.AMBIGUOUS
+
+
+def test_lane_width_mismatch_without_slot_credit_never_verifies() -> None:
+    """Lane mismatch on an unverifiable table must not reach VERIFIED on numeric zip alone."""
+    md = "| A | B | C |\n| --- | --- | --- |\n| r | 1 | 2 | 3 |\n"
+    binding = _minimal_binding(
+        column_binding_unverifiable=True,
+        row_binding={0: 0},
+        native_rows=[
+            SimpleNamespace(
+                is_parent=False,
+                row_path=("r",),
+                lane_tokens={0: ("1", False)},
+            )
+        ],
+    )
+    assert classify_binding_for_cell_check(binding, md) is not NativeCellOutcome.VERIFIED
+
+
+def test_dash_position_swap_check_table_cell_binding_e2e(tmp_path: Path) -> None:
+    """'7 | -' vs '- | 7' through bind(), not only slot helper."""
+    pdf = tmp_path / "dash_swap.pdf"  # type: ignore[operator]
+    doc = fitz.open()
+    page = doc.new_page()
+    rect = fitz.Rect(50, 50, 280, 160)
+    page.draw_rect(rect, width=0.8)
+    for y, vals in [(85, ("R1", "7", "-")), (105, ("R2", "8", "3"))]:
+        x = 60
+        for v in vals:
+            page.insert_text((x, y), v, fontsize=10)
+            x += 55
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    words = doc[0].get_text("words")
+    good = "| L | v1 | v2 |\n| --- | --- | --- |\n| R1 | 7 | - |\n| R2 | 8 | 3 |\n"
+    bad = "| L | v1 | v2 |\n| --- | --- | --- |\n| R1 | - | 7 |\n| R2 | 8 | 3 |\n"
+    ok = check_table_cell_binding(
+        table_id="t0", words=words, markdown=good, region_bbox=rect, spans=[]
+    )
+    no = check_table_cell_binding(
+        table_id="t0", words=words, markdown=bad, region_bbox=rect, spans=[]
+    )
+    doc.close()
+    assert ok.outcome is NativeCellOutcome.VERIFIED
+    assert no.outcome is not NativeCellOutcome.VERIFIED
+
+
+def test_empty_native_words_is_ambiguous_not_contradicted() -> None:
+    r = check_table_cell_binding(
+        table_id="t0",
+        words=[],
+        markdown="| A | B |\n| --- | --- |\n| x | 1 |\n",
+        region_bbox=(0, 0, 100, 100),
+        spans=[],
+    )
+    assert r.outcome is NativeCellOutcome.AMBIGUOUS
 
 
 def test_dash_position_swap_is_contradicted() -> None:

@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any
 
 from socr.tables.binding import BindingResult, bind, parse_grid
+from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
     _THOUSANDS_SPACE_RE,
     _normalize_cell,
@@ -135,6 +136,8 @@ def _slots_equivalent(
 def _compare_bound_row(
     native_row,
     cand_row: list[str],
+    *,
+    column_binding_unverifiable: bool = False,
 ) -> bool | None:
     """``True``/``False`` on agreement; ``None`` = no comparison or ambiguous locale."""
     model_slots = _model_row_slots(cand_row)
@@ -178,9 +181,38 @@ def _row_anchor_scan(
         if native_row.is_parent:
             continue
         stub = cand_row[0].strip() if cand_row else ""
-        cmp = _compare_bound_row(native_row, cand_row)
+        if result.column_binding_unverifiable:
+            native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+            cand_label = stub
+            if label_key(cand_label) != label_key(native_label):
+                model_nums = _model_row_numeric_tokens(cand_row)
+                native_nums = _native_row_numeric_tokens(native_row)
+                if model_nums and native_nums and len(model_nums) == len(native_nums):
+                    equiv = all(
+                        binding_numeric_tokens_equivalent(n, m) is True
+                        for n, m in zip(native_nums, model_nums, strict=True)
+                    )
+                    if equiv:
+                        mismatches.append((stub, native_label, cand_label))
+                        continue
+        cmp = _compare_bound_row(
+            native_row,
+            cand_row,
+            column_binding_unverifiable=result.column_binding_unverifiable,
+        )
         if cmp is True and _native_row_numeric_tokens(native_row):
-            comparisons += 1
+            model_slots = _model_row_slots(cand_row)
+            native_slots = _native_row_slots(native_row)
+            slot_aligned = model_slots and native_slots and len(model_slots) == len(native_slots)
+            if (
+                result.column_binding_unverifiable
+                and model_slots
+                and native_slots
+                and not slot_aligned
+            ):
+                pass
+            else:
+                comparisons += 1
         elif cmp is False:
             mismatches.append(
                 (
@@ -263,6 +295,10 @@ def classify_binding_for_cell_check(result: BindingResult, markdown: str) -> Nat
     if result.structural_agreement:
         return NativeCellOutcome.VERIFIED
     if _row_binding_covers_model_data_rows(result, markdown) and comparisons > 0:
+        if result.column_binding_unverifiable:
+            for cell in result.model_unbound:
+                if is_numeric_token(_prepare_numeric_cell(cell.token)):
+                    return NativeCellOutcome.AMBIGUOUS
         return NativeCellOutcome.VERIFIED
     if mismatches:
         return NativeCellOutcome.AMBIGUOUS
