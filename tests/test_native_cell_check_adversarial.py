@@ -540,8 +540,8 @@ def test_two_tables_pairs_first_box_when_markdown_matches_first(tmp_path: Path) 
     low_md = "| L | a | b |\n| --- | --- | --- |\n| Gamma | 99 | 88 |\n| Delta | 77 | 66 |\n"
     boxes = [top, low]
     paired = pair_regions(page, [top_md, low_md], boxes)
-    assert paired[0] is top
-    assert paired[1] is low
+    assert paired[0] == tuple(top)
+    assert paired[1] == tuple(low)
     r = check_table_cell_binding(
         table_id="t0", words=words, markdown=top_md, region_bbox=top, spans=[]
     )

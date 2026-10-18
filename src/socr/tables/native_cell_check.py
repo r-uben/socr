@@ -32,6 +32,20 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
+_FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d+\)")
+_DATA_ROW_LABEL_RE = re.compile(
+    r"(?i)\b(Total|Sous-total|Solde|Ensemble|Recettes|Dépenses|Budget|Effectifs|Impôts|Taxes|Autres)\b"
+)
+_FOOTNOTE_LABEL_PREFIXES = (
+    "Source :",
+    "Source:",
+    "Note :",
+    "Note:",
+    "Lecture :",
+    "Lecture:",
+    "Champ :",
+    "Champ:",
+)
 
 
 class NativeCellOutcome(str, Enum):
@@ -201,6 +215,74 @@ def _native_row_label_text(native_row) -> str:
     return " ".join(p.strip() for p in native_row.row_path if p and p.strip())
 
 
+def _row_path_is_footnote_prose(row_path: tuple[str, ...]) -> bool:
+    if not row_path:
+        return False
+    head = row_path[0].strip()
+    if head.startswith("**") and not head.startswith("** dont"):
+        return True
+    for seg in row_path:
+        if _native_leaf_is_excludable_footnote_label(seg.strip()):
+            return True
+    return False
+
+
+def _native_leaf_is_excludable_footnote_label(leaf: str) -> bool:
+    """True only for prose footnote markers, never data subtotals/totals."""
+    if not leaf.strip():
+        return False
+    if _DATA_ROW_LABEL_RE.search(leaf):
+        return False
+    if leaf.startswith("** dont"):
+        return False
+    if leaf.startswith("**") or (leaf.startswith("*") and not leaf.startswith("**")):
+        return True
+    if _FOOTNOTE_PAREN_NUM_RE.match(leaf.strip()):
+        return True
+    for pref in _FOOTNOTE_LABEL_PREFIXES:
+        if leaf.strip().startswith(pref):
+            return True
+    return False
+
+
+def _label_key_literal(key) -> str:
+    if not key:
+        return ""
+    return key[0][1] if key[0] else ""
+
+
+def _is_truncated_label_variant(full_label: str, partial_label: str) -> bool:
+    full_k = _label_key_literal(label_key(full_label))
+    part_k = _label_key_literal(label_key(partial_label))
+    if not full_k or not part_k:
+        return False
+    return full_k.startswith(part_k) or part_k.startswith(full_k)
+
+
+def _labels_disagree_under_unverifiable_columns(native_row, cand_label: str) -> bool:
+    if not cand_label.strip():
+        return False
+    cand_k = label_key(cand_label)
+    if not cand_k:
+        return False
+    if native_row.row_path:
+        last = native_row.row_path[-1].strip()
+        if last and _is_truncated_label_variant(cand_label, last):
+            return False
+        joined = _native_row_label_text(native_row)
+        if joined and _is_truncated_label_variant(cand_label, joined):
+            return False
+    native_keys: list = []
+    if native_row.row_path:
+        last = native_row.row_path[-1].strip()
+        if last:
+            native_keys.append(label_key(last))
+        joined = _native_row_label_text(native_row)
+        if joined and joined != last:
+            native_keys.append(label_key(joined))
+    return all(cand_k != k for k in native_keys if k)
+
+
 def _native_row_index_for_unbound(cell: UnboundCell, result: BindingResult) -> int | None:
     for idx, native_row in enumerate(result.native_rows):
         if native_row.row_path == cell.row_path:
@@ -313,19 +395,10 @@ def _native_unbound_cell_is_excludable(
                     return True
                 if data_y is not None and bbox[3] < data_y - 1.5:
                     return True
-        leaf = cell.row_path[-1].strip() if cell.row_path else ""
-        last_y = _table_bound_data_y_max(result)
-        gap = _footnote_separation_threshold(result)
-        if leaf:
-            if last_y is not None and bbox[1] > last_y + gap:
-                return True
-            return False
-        header_y = result.native_header_band_y_max
-        if header_y is not None and bbox[3] <= header_y:
+        if _row_path_is_footnote_prose(cell.row_path):
             return True
-        last_y = _table_bound_data_y_max(result)
-        gap = _footnote_separation_threshold(result)
-        if last_y is not None and bbox[1] > last_y + gap:
+        leaf = cell.row_path[-1].strip() if cell.row_path else ""
+        if _native_leaf_is_excludable_footnote_label(leaf):
             return True
         return False
     header_y = result.native_header_band_y_max
@@ -333,10 +406,6 @@ def _native_unbound_cell_is_excludable(
     if not cell.col_path and header_y is not None and bbox[3] <= header_y:
         return True
     if not cell.col_path and data_y is not None and bbox[3] < data_y - 1.5:
-        return True
-    last_y = _table_bound_data_y_max(result)
-    gap = _footnote_separation_threshold(result)
-    if last_y is not None and bbox[1] > last_y + gap:
         return True
     return False
 
@@ -370,37 +439,8 @@ def _row_anchor_scan(
         ):
             comparisons += 1
             per_row[cand_idx] = per_row.get(cand_idx, 0) + 1
-            if result.column_binding_unverifiable and len(native_row.row_path) == 1:
-                native_label = _native_row_label_text(native_row)
-                cand_label = stub
-                if (
-                    cand_label
-                    and native_label
-                    and label_key(cand_label)
-                    and label_key(native_label)
-                    and label_key(cand_label) != label_key(native_label)
-                ):
-                    model_nums = _model_row_numeric_tokens(cand_row)
-                    native_nums = _native_row_numeric_tokens(
-                        native_row, include_ambiguous_lanes=True
-                    )
-                    if model_nums and native_nums and len(model_nums) == len(native_nums):
-                        equiv = all(
-                            binding_numeric_tokens_equivalent(n, m) is True
-                            for n, m in zip(native_nums, model_nums, strict=True)
-                        )
-                        if equiv:
-                            mismatches.append((stub, native_label, cand_label))
-            continue
-        if result.column_binding_unverifiable and len(native_row.row_path) == 1:
-            native_label = _native_row_label_text(native_row)
-            cand_label = stub
-            if (
-                cand_label
-                and native_label
-                and label_key(cand_label)
-                and label_key(native_label)
-                and label_key(cand_label) != label_key(native_label)
+            if result.column_binding_unverifiable and _labels_disagree_under_unverifiable_columns(
+                native_row, stub
             ):
                 model_nums = _model_row_numeric_tokens(cand_row)
                 native_nums = _native_row_numeric_tokens(native_row, include_ambiguous_lanes=True)
@@ -410,8 +450,23 @@ def _row_anchor_scan(
                         for n, m in zip(native_nums, model_nums, strict=True)
                     )
                     if equiv:
-                        mismatches.append((stub, native_label, cand_label))
-                        continue
+                        native_label = _native_row_label_text(native_row)
+                        mismatches.append((stub, native_label, stub))
+            continue
+        if result.column_binding_unverifiable and _labels_disagree_under_unverifiable_columns(
+            native_row, stub
+        ):
+            model_nums = _model_row_numeric_tokens(cand_row)
+            native_nums = _native_row_numeric_tokens(native_row, include_ambiguous_lanes=True)
+            if model_nums and native_nums and len(model_nums) == len(native_nums):
+                equiv = all(
+                    binding_numeric_tokens_equivalent(n, m) is True
+                    for n, m in zip(native_nums, model_nums, strict=True)
+                )
+                if equiv:
+                    native_label = _native_row_label_text(native_row)
+                    mismatches.append((stub, native_label, stub))
+                    continue
         if cmp is False:
             mismatches.append(
                 (

@@ -45,6 +45,7 @@ class _AdvFixtures:
         header=None,
         border: bool = True,
         grid: bool = False,
+        ys: list[float] | None = None,
     ) -> fitz.Rect:
         y = top + 30
         if header:
@@ -52,12 +53,15 @@ class _AdvFixtures:
                 if v:
                     page.insert_text((x, y), v, fontsize=10)
             y += step
-        for vals in rows:
+        body_bottom = y
+        for i, vals in enumerate(rows):
+            yy = ys[i] if ys is not None and i < len(ys) else y
             for x, v in zip(colx, vals, strict=True):
                 if v:
-                    page.insert_text((x, y), v, fontsize=10)
-            y += step
-        rect = fitz.Rect(50, top, 330, y)
+                    page.insert_text((x, yy), v, fontsize=10)
+            body_bottom = max(body_bottom, yy + step)
+            y = yy + step
+        rect = fitz.Rect(50, top, 330, body_bottom + 10)
         if border:
             page.draw_rect(rect, width=0.8)
         if grid:
@@ -453,7 +457,7 @@ def test_shepherd_b2_unique(adv: _AdvFixtures, tmp_path: Path) -> None:
     try:
         boxes_t = _b2_boxes(pg)
         paired = pair_regions(pg, [adv.md(TOP), adv.md(LOW)], boxes_t)
-        got = [None if p_ is None else ("top" if p_ is boxes_t[0] else "low") for p_ in paired]
+        got = [None if p_ is None else ("top" if p_ == boxes_t[0] else "low") for p_ in paired]
         assert got == ["top", "low"]
     finally:
         d.close()
@@ -465,7 +469,7 @@ def test_shepherd_b2_tie(adv: _AdvFixtures, tmp_path: Path) -> None:
         boxes_t = _b2_boxes(pg)
         mds = [adv.md([TOP[0], ("Beta", "30", "99")]), adv.md(LOW)]
         paired = pair_regions(pg, mds, boxes_t)
-        got = [None if p_ is None else ("top" if p_ is boxes_t[0] else "low") for p_ in paired]
+        got = [None if p_ is None else ("top" if p_ == boxes_t[0] else "low") for p_ in paired]
         assert got == [None, "low"]
     finally:
         d.close()
@@ -480,7 +484,7 @@ def test_shepherd_b2_both_tie(adv: _AdvFixtures, tmp_path: Path) -> None:
             adv.md([TOP[0], ("Beta", "30", "98")]),
         ]
         paired = pair_regions(pg, mds, boxes_t)
-        got = [None if p_ is None else ("top" if p_ is boxes_t[0] else "low") for p_ in paired]
+        got = [None if p_ is None else ("top" if p_ == boxes_t[0] else "low") for p_ in paired]
         assert got == [None, None]
     finally:
         d.close()
@@ -491,7 +495,7 @@ def test_shepherd_b2_claim(adv: _AdvFixtures, tmp_path: Path) -> None:
     try:
         boxes_t = _b2_boxes(pg)
         paired = pair_regions(pg, [adv.md(TOP), adv.md(TOP)], boxes_t)
-        got = [None if p_ is None else ("top" if p_ is boxes_t[0] else "low") for p_ in paired]
+        got = [None if p_ is None else ("top" if p_ == boxes_t[0] else "low") for p_ in paired]
         assert got == [None, None]
     finally:
         d.close()
