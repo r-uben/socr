@@ -8216,88 +8216,40 @@ class UnifiedPipeline:
                                     if not witnesses:
                                         skip_reason = "table_witness_unavailable"
                                     else:
-                                        for witness in witnesses:
+                                        from socr.tables.native_contradiction import (
+                                            pair_regions,
+                                        )
+
+                                        block_markdowns = [w.markdown for w in witnesses]
+                                        located_bboxes = [tuple(b.bbox) for b in located_boxes]
+                                        paired_regions = pair_regions(
+                                            page, block_markdowns, located_bboxes
+                                        )
+                                        for wi, witness in enumerate(witnesses):
                                             region_bbox = (
                                                 witness.box.bbox
                                                 if witness.box is not None
                                                 else None
                                             )
                                             crop_note = ""
-                                            if region_bbox is None and located_boxes:
-                                                from socr.tables.native_contradiction import (
-                                                    pair_regions,
+                                            if region_bbox is None:
+                                                pick = (
+                                                    paired_regions[wi]
+                                                    if wi < len(paired_regions)
+                                                    else None
                                                 )
-
-                                                block_markdowns = [w.markdown for w in witnesses]
-                                                paired = pair_regions(
-                                                    page, block_markdowns, located_boxes
-                                                )
-                                                wi = witnesses.index(witness)
-                                                paired_box = (
-                                                    paired[wi] if wi < len(paired) else None
-                                                )
-                                                if paired_box is not None:
-                                                    region_bbox = paired_box.bbox
+                                                if pick is not None:
+                                                    region_bbox = pick
                                                     crop_note = (
                                                         "witness-ambiguous; "
                                                         "content-paired located crop"
                                                     )
-                                                elif len(blocks) == 1:
-                                                    crop_note = (
-                                                        "witness-ambiguous; "
-                                                        "table-region pairing inconclusive"
-                                                    )
-                                            if region_bbox is None:
-                                                result = check_table_cell_binding(
-                                                    table_id=witness.table_id,
-                                                    words=words,
-                                                    markdown=witness.markdown,
-                                                    region_bbox=None,
-                                                    spans=spans,
-                                                )
-                                                payload = binding_summary_payload(result)
-                                                ps.native_cell_binding[witness.table_id] = payload
-                                                if result.outcome is NativeCellOutcome.VERIFIED:
-                                                    kind = NATIVE_CELL_CHECK_VERIFIED_KIND
-                                                    detail = (
-                                                        f"table {witness.table_id}: "
-                                                        "no located crop; whole-page bind verified"
-                                                    )
-                                                elif (
-                                                    result.outcome is NativeCellOutcome.CONTRADICTED
-                                                ):
-                                                    kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
-                                                    detail = (
-                                                        f"table {witness.table_id}: {result.detail}"
-                                                    )
                                                 else:
-                                                    kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
-                                                    detail = (
-                                                        f"table {witness.table_id}: "
-                                                        "no located crop; whole-page bind inconclusive"
+                                                    _record_skip(
+                                                        witness.table_id,
+                                                        "table-region pairing inconclusive",
                                                     )
-                                                state.events.append(
-                                                    AuditEvent(
-                                                        page_num=page_num,
-                                                        kind=kind,
-                                                        engine=bo.engine or "",
-                                                        detail=detail,
-                                                        data=payload,
-                                                    )
-                                                )
-                                                if (
-                                                    worst is None
-                                                    or result.outcome
-                                                    is NativeCellOutcome.CONTRADICTED
-                                                ):
-                                                    worst = result.outcome
-                                                elif (
-                                                    worst is not NativeCellOutcome.CONTRADICTED
-                                                    and result.outcome
-                                                    is NativeCellOutcome.AMBIGUOUS
-                                                ):
-                                                    worst = NativeCellOutcome.AMBIGUOUS
-                                                continue
+                                                    continue
                                             result = check_table_cell_binding(
                                                 table_id=witness.table_id,
                                                 words=words,

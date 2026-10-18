@@ -712,7 +712,8 @@ class TestRegionsArePairedByContent:
             stray = self.TOP_MD.replace("11.11", "99.99").replace("22.22", "98.98")
             stray = stray.replace("33.33", "97.97").replace("44.44", "96.96")
             assert nc.pair_regions(doc[0], [stray, self.LOW_MD], boxes) == [None, self.LOW_BOX]
-            assert nc.pair_regions(doc[0], [self.TOP_MD], boxes) == [None]  # counts differ
+            one = nc.pair_regions(doc[0], [self.TOP_MD], boxes)
+            assert len(one) == 1 and one[0] is not None  # one block, two boxes: content pick
         finally:
             doc.close()
 

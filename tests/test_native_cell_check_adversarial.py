@@ -168,7 +168,8 @@ def test_native_unbound_year_header_in_header_band_is_excludable() -> None:
             SimpleNamespace(row_path=("Hdr",), is_parent=False, label_bbox=(0, 0, 0, 10)),
             SimpleNamespace(row_path=("Data",), is_parent=False, label_bbox=(0, 20, 0, 30)),
         ],
-        native_header_row_indices=frozenset({0}),
+        native_header_band_y_max=12.0,
+        native_data_y_min=20.0,
     )
     cell = UnboundCell(
         row_path=("Hdr",),
@@ -401,6 +402,113 @@ def test_spacer_row_table_still_verified_via_real_bind(tmp_path: Path) -> None:
         table_id="t0", words=words, markdown=md, region_bbox=region, spans=[]
     )
     assert r.outcome is NativeCellOutcome.VERIFIED
+
+
+def test_text_header_first_data_row_dropped_not_verified(tmp_path: Path) -> None:
+    """Fable H1: text header band must not hide dropped first data row."""
+    hdr = ("Libellé", "Montant1", "Montant2")
+    rows = [("Effectifs", "12", "15"), ("Budget", "340", "360"), ("Taux", "7", "9")]
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 70
+    for x, v in zip((60, 200, 260), hdr, strict=True):
+        if v:
+            page.insert_text((x, y), v, fontsize=10)
+    y += 20
+    for row in rows:
+        page.insert_text((60, y), row[0], fontsize=10)
+        page.insert_text((200, y), row[1], fontsize=10)
+        page.insert_text((260, y), row[2], fontsize=10)
+        y += 20
+    region = fitz.Rect(50, 40, 330, y)
+    page.draw_rect(region, width=0.8)
+    pdf = tmp_path / "hdr.pdf"  # type: ignore[operator]
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    words = doc[0].get_text("words")
+    doc.close()
+    md = "| " + " | ".join(hdr) + " |\n| --- | --- | --- |\n"
+    for row in rows[1:]:
+        md += "| " + " | ".join(row) + " |\n"
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=md, region_bbox=region, spans=[]
+    )
+    assert r.outcome is not NativeCellOutcome.VERIFIED
+
+
+def test_gapped_total_row_dropped_not_verified(tmp_path: Path) -> None:
+    natt = [
+        ("Recettes", "120", "150"),
+        ("Dépenses", "340", "360"),
+        ("", "", ""),
+        ("Total", "460", "510"),
+    ]
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 70
+    for row in natt:
+        if row[0]:
+            page.insert_text((60, y), row[0], fontsize=10)
+        if row[1]:
+            page.insert_text((200, y), row[1], fontsize=10)
+        if row[2]:
+            page.insert_text((260, y), row[2], fontsize=10)
+        y += 20
+    region = fitz.Rect(50, 40, 330, y)
+    page.draw_rect(region, width=0.8)
+    pdf = tmp_path / "total_gap.pdf"  # type: ignore[operator]
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    words = doc[0].get_text("words")
+    doc.close()
+    md = "| Libellé | c1 | c2 |\n| --- | --- | --- |\n"
+    md += "| Recettes | 120 | 150 |\n| Dépenses | 340 | 360 |\n"
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=md, region_bbox=region, spans=[]
+    )
+    assert r.outcome is not NativeCellOutcome.VERIFIED
+
+
+def test_orchestrator_pair_regions_uses_bbox_tuples(tmp_path: Path) -> None:
+    """Orchestrator passes ``[tuple(b.bbox) for b in located_boxes]`` into pair_regions."""
+    from socr.tables.locate import locate_tables
+    from socr.tables.native_contradiction import pair_regions
+
+    doc = fitz.open()
+    page = doc.new_page()
+    top_rows = [("Alpha", "10", "20"), ("Beta", "30", "40")]
+    low_rows = [("Alpha", "10", "20"), ("Beta", "30", "41")]
+    for top, rows in ((40, top_rows), (200, low_rows)):
+        y = top + 30
+        for row in rows:
+            page.insert_text((60, y), row[0], fontsize=10)
+            page.insert_text((200, y), row[1], fontsize=10)
+            page.insert_text((260, y), row[2], fontsize=10)
+            y += 20
+        page.draw_rect(fitz.Rect(50, top, 330, y), width=0.8)
+    pdf = tmp_path / "two.pdf"  # type: ignore[operator]
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    page = doc[0]
+    top = fitz.Rect(50, 40, 330, 110)
+    low = fitz.Rect(50, 200, 330, 270)
+    top_md = "| L | a | b |\n| --- | --- | --- |\n| Alpha | 10 | 20 |\n| Beta | 30 | 40 |\n"
+    low_md = "| L | a | b |\n| --- | --- | --- |\n| Alpha | 10 | 20 |\n| Beta | 30 | 41 |\n"
+    paired = pair_regions(page, [top_md, low_md], [tuple(top), tuple(low)])
+    assert paired[0] == tuple(top) and paired[1] == tuple(low)
+    doc.close()
+
+
+def test_parse_failure_is_ambiguous_not_verified(tmp_path: Path) -> None:
+    _, region, words = _draw_table_pdf(tmp_path, rows=[("Data", "1", "2")])
+    for bad_md in ("not a table", "| L | v |\n| --- | --- |\n"):
+        r = check_table_cell_binding(
+            table_id="t0", words=words, markdown=bad_md, region_bbox=region, spans=[]
+        )
+        assert r.outcome is NativeCellOutcome.AMBIGUOUS
 
 
 def test_two_tables_pairs_first_box_when_markdown_matches_first(tmp_path: Path) -> None:

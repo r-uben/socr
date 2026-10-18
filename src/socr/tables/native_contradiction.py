@@ -488,7 +488,7 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     other block claims it. Anything ambiguous abstains for that block.
     """
     count = len(block_markdowns)
-    if not boxes or len(boxes) != count:
+    if not boxes:
         return [None] * count
     in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
     chosen: list[int | None] = []
@@ -497,7 +497,22 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
         overlap = [sum((wanted & printed).values()) for printed in in_box]
         best = max(overlap)
         winners = [k for k, value in enumerate(overlap) if value == best]
-        chosen.append(winners[0] if best > 0 and len(winners) == 1 else None)
+        if best <= 0 or not winners:
+            chosen.append(None)
+        elif len(winners) == 1:
+            chosen.append(winners[0])
+        elif len(boxes) != count:
+
+            def _box_area(idx: int) -> float:
+                box = boxes[idx]
+                return (box[2] - box[0]) * (box[3] - box[1])
+
+            winners.sort(key=_box_area)
+            chosen.append(winners[0])
+        else:
+            chosen.append(None)
+    if len(boxes) != count:
+        return [boxes[k] if k is not None else None for k in chosen]
     claims = Counter(k for k in chosen if k is not None)
     return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
 
