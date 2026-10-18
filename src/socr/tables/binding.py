@@ -1707,6 +1707,10 @@ class BindingResult:
     #: Body rows ``bind()`` actually row-bound against (post-spacer, post-merge).
     candidate_rows: tuple[tuple[str, ...], ...] = ()
     native_header_row_indices: frozenset[int] = frozenset()
+    #: Bottom y of native header bands (band-centre + half pitch); tokens above
+    #: ``native_data_y_min`` are column-header orphans, not data rows.
+    native_header_band_y_max: float | None = None
+    native_data_y_min: float | None = None
     row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
     #: Words the region membership predicate rejected but that still touch
     #: *region* (positive overlap, at or under the majority-overlap
@@ -2202,6 +2206,21 @@ def bind(
 
     native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols, spans)
     result.native_header_row_indices = frozenset(header_band_idxs or ())
+    if header_band_idxs and band_centers:
+        pitches = [
+            abs(band_centers[header_band_idxs[i + 1]] - band_centers[header_band_idxs[i]])
+            for i in range(len(header_band_idxs) - 1)
+            if i + 1 < len(header_band_idxs)
+        ]
+        half_pitch = (max(pitches) / 2.0) if pitches else 8.0
+        result.native_header_band_y_max = (
+            max(band_centers[i] for i in header_band_idxs) + half_pitch
+        )
+    data_ys = [
+        nr.label_bbox[1] for nr in native_rows if nr.label_bbox is not None and not nr.is_parent
+    ]
+    if data_ys:
+        result.native_data_y_min = min(data_ys)
     lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (

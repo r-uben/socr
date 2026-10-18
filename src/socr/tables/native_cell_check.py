@@ -56,11 +56,28 @@ def _prepare_numeric_cell(raw: str) -> str:
 
 
 def _is_year_header_row(cand_row: list[str]) -> bool:
+    """Column-header row only: empty stub and every data cell is a year token."""
     stub = (cand_row[0] if cand_row else "").strip()
-    if stub and not _YEAR_HEADER_RE.match(stub):
+    if stub:
         return False
     data = [_prepare_numeric_cell(c) for c in cand_row[1:] if c.strip() and c.strip() != "-"]
     return bool(data) and all(_YEAR_HEADER_RE.match(c) for c in data)
+
+
+def _row_has_numeric_data(cand_row: list[str]) -> bool:
+    return bool(_model_row_numeric_tokens(cand_row))
+
+
+def _bound_rows_requiring_coverage(result: BindingResult, cand_rows: list[list[str]]) -> list[int]:
+    """Every bound candidate row that carries numeric model content."""
+    out: list[int] = []
+    for cand_idx in result.row_binding:
+        if cand_idx >= len(cand_rows):
+            continue
+        cand_row = cand_rows[cand_idx]
+        if _row_has_numeric_data(cand_row):
+            out.append(cand_idx)
+    return out
 
 
 def _model_row_numeric_tokens(cand_row: list[str]) -> list[str]:
@@ -142,11 +159,12 @@ def _compare_bound_row(
 ) -> bool | None:
     """``True``/``False`` on agreement; ``None`` = no comparison or ambiguous locale."""
     incl = column_binding_unverifiable
-    if not incl:
-        model_slots = _model_row_slots(cand_row)
-        native_slots = _native_row_slots(native_row)
-        if model_slots and native_slots and len(model_slots) == len(native_slots):
-            return _slots_equivalent(native_slots, model_slots)
+    model_slots = _model_row_slots(cand_row)
+    native_slots = _native_row_slots(native_row, include_ambiguous_lanes=incl)
+    if model_slots and native_slots and len(model_slots) == len(native_slots):
+        slot_cmp = _slots_equivalent(native_slots, model_slots)
+        if slot_cmp is not None or not incl:
+            return slot_cmp
     model_nums = _model_row_numeric_tokens(cand_row)
     native_nums = _native_row_numeric_tokens(native_row, include_ambiguous_lanes=incl)
     if not native_nums:
@@ -176,18 +194,11 @@ def _candidate_rows_for_scan(result: BindingResult, markdown: str) -> list[list[
     return rows
 
 
-def _bound_data_row_indices(result: BindingResult, cand_rows: list[list[str]]) -> list[int]:
-    out: list[int] = []
-    for cand_idx in result.row_binding:
-        if cand_idx >= len(cand_rows):
-            continue
-        cand_row = cand_rows[cand_idx]
-        if _is_year_header_row(cand_row):
-            continue
-        if not _model_row_numeric_tokens(cand_row):
-            continue
-        out.append(cand_idx)
-    return out
+_bound_data_row_indices = _bound_rows_requiring_coverage
+
+
+def _native_row_label_text(native_row) -> str:
+    return " ".join(p.strip() for p in native_row.row_path if p and p.strip())
 
 
 def _native_row_index_for_unbound(cell: UnboundCell, result: BindingResult) -> int | None:
@@ -227,7 +238,34 @@ def _table_bound_data_y_min(result: BindingResult) -> float | None:
     return min(y_mins)
 
 
-_FOOTNOTE_BAND_GAP_PT = 25.0
+def _median_bound_row_pitch(result: BindingResult) -> float | None:
+    bound_native = set(result.row_binding.values())
+    ys: list[float] = []
+    for idx, native_row in enumerate(result.native_rows):
+        if idx not in bound_native or native_row.is_parent:
+            continue
+        if native_row.label_bbox is not None:
+            ys.append((native_row.label_bbox[1] + native_row.label_bbox[3]) / 2.0)
+    ys.sort()
+    if len(ys) < 2:
+        return None
+    diffs = [ys[i + 1] - ys[i] for i in range(len(ys) - 1) if ys[i + 1] - ys[i] > 1.0]
+    if not diffs:
+        return None
+    diffs.sort()
+    mn = diffs[0]
+    core = [d for d in diffs if d <= max(mn * 2.5, mn + 12.0)]
+    if not core:
+        core = diffs
+    q1_idx = min(len(core) - 1, max(0, len(core) // 4))
+    return core[q1_idx]
+
+
+def _footnote_separation_threshold(result: BindingResult) -> float:
+    pitch = _median_bound_row_pitch(result)
+    if pitch is None:
+        return 40.0
+    return max(pitch * 2.5, pitch + 8.0)
 
 
 def _is_whole_unbound_native_row(cell: UnboundCell, result: BindingResult) -> bool:
@@ -265,26 +303,40 @@ def _native_unbound_cell_is_excludable(
             box = None
         if box is not None and len(box) == 4 and _bbox_outside_region(bbox, box):
             return True
-    native_idx = _native_row_index_for_unbound(cell, result)
-    if native_idx is not None and native_idx in result.native_header_row_indices:
-        return True
     if _is_whole_unbound_native_row(cell, result):
+        if not cell.col_path:
+            tok = _prepare_numeric_cell(cell.token)
+            if _YEAR_HEADER_RE.match(tok):
+                data_y = result.native_data_y_min
+                header_y = result.native_header_band_y_max
+                if header_y is not None and bbox[3] <= header_y:
+                    return True
+                if data_y is not None and bbox[3] < data_y - 1.5:
+                    return True
         leaf = cell.row_path[-1].strip() if cell.row_path else ""
         last_y = _table_bound_data_y_max(result)
-        if last_y is not None and bbox is not None and bbox[1] > last_y + _FOOTNOTE_BAND_GAP_PT:
-            return True
+        gap = _footnote_separation_threshold(result)
         if leaf:
+            if last_y is not None and bbox[1] > last_y + gap:
+                return True
             return False
-        first_y = _table_bound_data_y_min(result)
-        if first_y is not None and bbox[3] < first_y - 1.5:
+        header_y = result.native_header_band_y_max
+        if header_y is not None and bbox[3] <= header_y:
+            return True
+        last_y = _table_bound_data_y_max(result)
+        gap = _footnote_separation_threshold(result)
+        if last_y is not None and bbox[1] > last_y + gap:
             return True
         return False
-    if not cell.col_path:
-        first_y = _table_bound_data_y_min(result)
-        if first_y is not None and bbox[3] < first_y - 1.5:
-            return True
+    header_y = result.native_header_band_y_max
+    data_y = result.native_data_y_min
+    if not cell.col_path and header_y is not None and bbox[3] <= header_y:
+        return True
+    if not cell.col_path and data_y is not None and bbox[3] < data_y - 1.5:
+        return True
     last_y = _table_bound_data_y_max(result)
-    if last_y is not None and bbox[1] > last_y + _FOOTNOTE_BAND_GAP_PT:
+    gap = _footnote_separation_threshold(result)
+    if last_y is not None and bbox[1] > last_y + gap:
         return True
     return False
 
@@ -304,8 +356,6 @@ def _row_anchor_scan(
         if cand_idx >= len(cand_rows) or native_idx >= len(result.native_rows):
             continue
         cand_row = cand_rows[cand_idx]
-        if _is_year_header_row(cand_row):
-            continue
         native_row = result.native_rows[native_idx]
         if native_row.is_parent:
             continue
@@ -320,8 +370,8 @@ def _row_anchor_scan(
         ):
             comparisons += 1
             per_row[cand_idx] = per_row.get(cand_idx, 0) + 1
-            if result.column_binding_unverifiable:
-                native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+            if result.column_binding_unverifiable and len(native_row.row_path) == 1:
+                native_label = _native_row_label_text(native_row)
                 cand_label = stub
                 if (
                     cand_label
@@ -339,15 +389,11 @@ def _row_anchor_scan(
                             binding_numeric_tokens_equivalent(n, m) is True
                             for n, m in zip(native_nums, model_nums, strict=True)
                         )
-                        if (
-                            equiv
-                            and native_label not in cand_label
-                            and cand_label not in native_label
-                        ):
+                        if equiv:
                             mismatches.append((stub, native_label, cand_label))
             continue
-        if result.column_binding_unverifiable:
-            native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+        if result.column_binding_unverifiable and len(native_row.row_path) == 1:
+            native_label = _native_row_label_text(native_row)
             cand_label = stub
             if (
                 cand_label
@@ -425,12 +471,10 @@ def _fallback_verified_allowed(
 ) -> bool:
     if _numeric_unbound_blocks_verify(result, region):
         return False
-    if result.fully_checked:
-        return True
     cand_rows = _candidate_rows_for_scan(result, markdown)
     if cand_rows is None:
         return False
-    data_rows = _bound_data_row_indices(result, cand_rows)
+    data_rows = _bound_rows_requiring_coverage(result, cand_rows)
     if not data_rows:
         return False
     return all(comparisons_per_row.get(idx, 0) >= 1 for idx in data_rows)
