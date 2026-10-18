@@ -15056,7 +15056,11 @@ class UnifiedPipeline:
             # something: the withholding counter is Part B's, and a page whose text the
             # floor replaced is exactly the page whose original must survive. Stored
             # untransformed, which is what makes Part B's single transform possible.
-            layer = getattr(ps, "native_text", "") or ""
+            # #1203: ``native_text`` first, so every sidecar Part A already writes keeps
+            # its bytes; the second carrier is the layer of a page an early born-digital
+            # rejection left with no native text at all, which the census puts at ~3,960
+            # Fed pages (#1203).
+            layer = getattr(ps, "native_text", "") or getattr(ps, "prior_ocr_layer_text", "") or ""
             if layer:
                 payload["prior_ocr_layer_text"] = layer
 
@@ -16200,8 +16204,25 @@ class UnifiedPipeline:
             # retention is Part A's own contract and Part B re-finalizes from exactly this
             # key.
             _retained_layer = meta.get("prior_ocr_layer_text")
-            if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
-                ps.native_text = _retained_layer
+            if isinstance(_retained_layer, str) and _retained_layer:
+                # #1203 (Argon, diff review, P0): restored into the retention CARRIER, and
+                # no longer into ``native_text``.
+                #
+                # Part A put it in ``native_text`` because that was the only carrier
+                # between this restore and the re-flush. It now has its own, and the
+                # re-flush reads ``native_text or prior_ocr_layer_text``, so retention
+                # survives for both page classes without this line.
+                #
+                # Writing ``native_text`` had become unsafe: since #1203 the sidecar key
+                # is also written for a page an EARLY RETURN rejected, where
+                # ``native_text`` is empty precisely because the layer is not trusted.
+                # ``not ps.native_text`` is always true there, so every restored
+                # early-return page came back with an earlier OCR run's numbers sitting in
+                # the field that makes a page native-eligible under ``--native-only``.
+                # ``is_born_digital`` cannot gate it either: this restore never brings
+                # that field back, so the gate would be answered from an unrestored field
+                # and would always be False.
+                ps.prior_ocr_layer_text = _retained_layer
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.

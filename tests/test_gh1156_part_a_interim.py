@@ -1340,8 +1340,19 @@ def test_a_restored_page_keeps_the_retained_layer(tmp_path: Path) -> None:
     _pipeline()._restore_terminal_page_state(resumed, 1, restored, out_dir)
 
     assert resumed.pages[1].prior_ocr_layer_suspect is True
-    assert "3 Y," in (resumed.pages[1].native_text or ""), (
+    # #1203 changed WHICH field the restore puts it back in, not whether it survives.
+    # Part A used ``native_text`` because it was the only carrier between the restore and
+    # the re-flush; the retention now has its own, and ``native_text`` must stay empty
+    # here -- since #1203 this sidecar key is also written for a page an early
+    # born-digital rejection left with no native reading, and filling ``native_text``
+    # there is what would make an earlier OCR run's numbers native-eligible under
+    # ``--native-only``. The consequence this test exists for (the re-flush keeps the
+    # retention) is asserted below and is unchanged.
+    assert "3 Y," in (resumed.pages[1].prior_ocr_layer_text or ""), (
         "the restored page lost the retained layer, so the next flush drops it"
+    )
+    assert not resumed.pages[1].native_text, (
+        "the restore put the earlier OCR layer into the field that decides native eligibility"
     )
 
     # ... and the re-flush keeps it, which is the consequence that matters.

@@ -156,6 +156,9 @@ class PageState:
     #: feeds suspicion). Kept beside #961's pair so each route stays separately visible.
     prior_ocr_layer: bool = False
     prior_ocr_layer_scan_failed: bool = False
+    #: #1203: the page's own text layer when ``native_text`` is empty because an early
+    #: born-digital rejection fired. Retained unshipped, for the sidecar only.
+    prior_ocr_layer_text: str = ""
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -846,6 +849,8 @@ class DocumentState:
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
                 ps.prior_ocr_layer = getattr(pa, "prior_ocr_layer", False)
                 ps.prior_ocr_layer_scan_failed = getattr(pa, "prior_ocr_layer_scan_failed", False)
+                # #1203: the layer of a page an early return left with no native text.
+                ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches
