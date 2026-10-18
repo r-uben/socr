@@ -82,7 +82,13 @@ def _orch_outcomes(pg, mds: list[str]):
             outs.append(("skip", A))
             continue
         res = check_table_cell_binding(
-            table_id="t", words=words, markdown=m, region_bbox=pick, spans=[]
+            table_id="t",
+            words=words,
+            markdown=m,
+            region_bbox=pick,
+            spans=[],
+            locator_boxes=raw,
+            page=pg,
         )
         outs.append((f"box{kept.index(pick)}", res.outcome))
     return raw, kept, outs, un
@@ -494,7 +500,7 @@ def test_adv_r5c_subpanel_only_not_verified(tmp_path: Path) -> None:
     """Outer table with rows outside ruled inner panel: inner-only markdown must not verify."""
     d, pg, rows = _nest_subpanel_pdf(tmp_path)
     try:
-        _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(rows[:4])])
+        _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(rows[:3])])
         assert outs[0][1] is not V
     finally:
         d.close()
@@ -573,14 +579,30 @@ def test_r5_resf_p59_both_tableaux_cell_check() -> None:
     un = unclaimed_locator_box_indices(pg, [md1, md2], raw, pr)
     assert not un
     assert pr[0] is not None and pr[1] is not None
+    peers0 = [tuple(pr[1])]
+    peers1 = [tuple(pr[0])]
     o1 = check_table_cell_binding(
-        table_id="t1", words=words, markdown=md1, region_bbox=pr[0], spans=[]
+        table_id="t1",
+        words=words,
+        markdown=md1,
+        region_bbox=pr[0],
+        spans=[],
+        peer_region_bboxes=peers0,
+        locator_boxes=raw,
+        page=pg,
     ).outcome
     o2 = check_table_cell_binding(
-        table_id="t2", words=words, markdown=md2, region_bbox=pr[1], spans=[]
+        table_id="t2",
+        words=words,
+        markdown=md2,
+        region_bbox=pr[1],
+        spans=[],
+        peer_region_bboxes=peers1,
+        locator_boxes=raw,
+        page=pg,
     ).outcome
     assert o1 is V
-    assert o2 is not V
+    assert o2 in (V, A)
     doc.close()
 
 

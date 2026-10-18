@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any
 
 from socr.tables.binding import BindingResult, UnboundCell, bind, parse_grid
+from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
     _THOUSANDS_SPACE_RE,
@@ -32,7 +33,9 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
-_FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d+\)")
+_FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d{1,2}\)$")
+_LABEL_FOOTNOTE_MARK_RE = re.compile(r"\(\d{1,2}\)\s*$")
+_STUB_HEADER_LABELS = frozenset({"libellé", "libelle", "label", "poste"})
 _FOOTNOTE_LABEL_PREFIXES = (
     "Source :",
     "Source:",
@@ -63,6 +66,8 @@ class TableCellCheckResult:
 def _prepare_numeric_cell(raw: str) -> str:
     """Presentation + interior thousand-space strip before numeric classification."""
     cell = _normalize_cell(strip_presentation(raw.strip()))
+    if cell.startswith("+") and len(cell) > 1 and cell[1].isdigit():
+        cell = cell[1:]
     return _THOUSANDS_SPACE_RE.sub("", cell)
 
 
@@ -73,6 +78,97 @@ def _is_year_header_row(cand_row: list[str]) -> bool:
         return False
     data = [_prepare_numeric_cell(c) for c in cand_row[1:] if c.strip() and c.strip() != "-"]
     return bool(data) and all(_YEAR_HEADER_RE.match(c) for c in data)
+
+
+def _is_column_header_row(cand_row: list[str]) -> bool:
+    """Header band row: optional Libellé stub and year tokens in data lanes."""
+    if not cand_row:
+        return False
+    stub = cand_row[0].strip()
+    if stub and normalize_label(stub) not in _STUB_HEADER_LABELS:
+        return False
+    data = [_prepare_numeric_cell(c) for c in cand_row[1:] if c.strip() and c.strip() != "-"]
+    return bool(data) and all(_YEAR_HEADER_RE.match(c) for c in data)
+
+
+def _model_header_year_tokens(cand_rows: list[list[str]]) -> list[str] | None:
+    for row in cand_rows[:4]:
+        if _is_column_header_row(row):
+            return [
+                _prepare_numeric_cell(c)
+                for c in row[1:]
+                if c.strip() and _YEAR_HEADER_RE.match(_prepare_numeric_cell(c))
+            ]
+    return None
+
+
+def _native_header_year_tokens(result: BindingResult) -> list[str] | None:
+    years: list[str] = []
+    for chp in result.column_header_paths:
+        for seg in chp.path:
+            tok = _prepare_numeric_cell(seg.strip())
+            if _YEAR_HEADER_RE.match(tok):
+                years.append(tok)
+    if years:
+        return years
+    for nr in result.native_rows:
+        if not nr.multiset:
+            continue
+        vals = [str(v) for v in nr.multiset.elements()]
+        if vals and all(_YEAR_HEADER_RE.match(v.replace(".0", "")) for v in vals):
+            years.extend(v.replace(".0", "") for v in vals)
+            break
+    return years or None
+
+
+def _model_header_years_from_markdown(markdown: str) -> list[str] | None:
+    for line in markdown.splitlines()[:10]:
+        if not line.startswith("|") or "---" in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if _is_column_header_row(cells):
+            return _model_header_year_tokens([cells])
+    return None
+
+
+def _header_year_mismatch(result: BindingResult, markdown: str) -> bool:
+    model_years = _model_header_years_from_markdown(markdown)
+    if not model_years:
+        return False
+    if not model_years:
+        return False
+    native_years = _native_header_year_tokens(result)
+    if not native_years or len(native_years) != len(model_years):
+        return False
+    return list(model_years) != list(native_years)
+
+
+def _soft_row_label_mismatch(candidate_label: str, native_path: tuple[str, ...]) -> bool:
+    """Wrapped/truncated native labels or unverifiable columns → doubt, not contradiction."""
+    native_text = " ".join(p.strip() for p in native_path if p.strip())
+    cand_k = normalize_label(candidate_label)
+    native_k = normalize_label(native_text)
+    last_k = normalize_label(native_path[-1].strip()) if native_path else ""
+    if not cand_k or not (native_k or last_k):
+        return True
+    keys = [k for k in (native_k, last_k) if k]
+    if any(cand_k == k for k in keys):
+        return False
+    for nk in keys:
+        if nk.startswith(cand_k) or cand_k.startswith(nk):
+            return True
+    return False
+
+
+def _row_label_contradictions_are_soft(result: BindingResult) -> bool:
+    if not result.row_label_contradictions:
+        return True
+    if result.column_binding_unverifiable:
+        return True
+    return all(
+        _soft_row_label_mismatch(rl.candidate_label, rl.row_path)
+        for rl in result.row_label_contradictions
+    )
 
 
 def _row_has_numeric_data(cand_row: list[str]) -> bool:
@@ -438,7 +534,10 @@ def _row_anchor_scan(
         ):
             continue
         stub = cand_row[0].strip() if cand_row else ""
-        mismatches.append((stub, "native_unbound", "model_data_row"))
+        kind = "model_data_row"
+        if result.column_binding_unverifiable:
+            kind = "ambiguous_label"
+        mismatches.append((stub, "native_unbound", kind))
 
     return mismatches, comparisons, per_row
 
@@ -478,6 +577,26 @@ def _fallback_verified_allowed(
     return all(comparisons_per_row.get(idx, 0) >= 1 for idx in data_rows)
 
 
+def _native_row_counts_as_data(nr) -> bool:
+    multiset = getattr(nr, "multiset", None)
+    if not multiset or getattr(nr, "is_parent", False) or not getattr(nr, "row_path", ()):
+        return False
+    vals = [v for v in multiset.elements()]
+    if vals and all(_YEAR_HEADER_RE.match(str(v).replace(".0", "")) for v in vals):
+        return False
+    return True
+
+
+def _model_covers_native_data_rows(result: BindingResult, markdown: str) -> bool:
+    """False when the native grid has substantially more numeric rows than the model bound."""
+    cand_rows = _candidate_rows_for_scan(result, markdown)
+    if cand_rows is None:
+        return True
+    bound = len(_bound_rows_requiring_coverage(result, cand_rows))
+    native_data = sum(1 for nr in result.native_rows if _native_row_counts_as_data(nr))
+    return bound >= native_data
+
+
 def classify_binding_for_cell_check(
     result: BindingResult,
     markdown: str,
@@ -485,11 +604,21 @@ def classify_binding_for_cell_check(
     region: tuple[float, float, float, float] | None = None,
 ) -> NativeCellOutcome:
     if result.contradicted_cells:
-        return NativeCellOutcome.CONTRADICTED
+        footnote_only = all(
+            _FOOTNOTE_PAREN_NUM_RE.match(_prepare_numeric_cell(c.native_token or ""))
+            or _FOOTNOTE_PAREN_NUM_RE.match(_prepare_numeric_cell(c.model_token or ""))
+            for c in result.contradicted_cells
+        )
+        if not footnote_only:
+            return NativeCellOutcome.CONTRADICTED
     if result.row_label_contradictions and not result.column_binding_unverifiable:
+        return NativeCellOutcome.CONTRADICTED
+    if _header_year_mismatch(result, markdown):
         return NativeCellOutcome.CONTRADICTED
 
     if result.structural_agreement:
+        if not _model_covers_native_data_rows(result, markdown):
+            return NativeCellOutcome.AMBIGUOUS
         return NativeCellOutcome.VERIFIED
 
     mismatches, comparisons, per_row = _row_anchor_scan(result, markdown)
@@ -510,7 +639,11 @@ def classify_binding_for_cell_check(
     if _numeric_unbound_blocks_verify(result, region):
         return NativeCellOutcome.AMBIGUOUS
     if _fallback_verified_allowed(result, markdown, region, comparisons_per_row=per_row):
+        if not _model_covers_native_data_rows(result, markdown):
+            return NativeCellOutcome.AMBIGUOUS
         return NativeCellOutcome.VERIFIED
+    if result.row_label_contradictions and result.column_binding_unverifiable:
+        return NativeCellOutcome.AMBIGUOUS
     if mismatches:
         return NativeCellOutcome.AMBIGUOUS
     return NativeCellOutcome.AMBIGUOUS
@@ -523,6 +656,9 @@ def check_table_cell_binding(
     markdown: str,
     region_bbox,
     spans: list | None = None,
+    peer_region_bboxes: list | None = None,
+    locator_boxes: list | None = None,
+    page=None,
 ) -> TableCellCheckResult:
     if not words:
         return TableCellCheckResult(
@@ -536,6 +672,16 @@ def check_table_cell_binding(
             region_tuple = tuple(float(v) for v in region_bbox)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             region_tuple = None
+    if region_tuple is not None and peer_region_bboxes:
+        from socr.tables.native_contradiction import refine_check_region
+
+        peers = []
+        for peer in peer_region_bboxes:
+            try:
+                peers.append(tuple(float(v) for v in peer))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+        region_tuple = refine_check_region(region_tuple, peers)
     try:
         binding = bind(words, markdown, region=region_tuple, spans=spans or [])
     except Exception as exc:
@@ -545,6 +691,37 @@ def check_table_cell_binding(
             detail=f"bind failed: {type(exc).__name__}: {exc}",
         )
     outcome = classify_binding_for_cell_check(binding, markdown, region=region_tuple)
+    if (
+        outcome is NativeCellOutcome.VERIFIED
+        and region_tuple is not None
+        and locator_boxes
+        and page is not None
+    ):
+        from socr.tables.native_contradiction import (
+            _bbox_tuple,
+            _box_area_tuple,
+            _box_contains,
+            _box_has_numbers_beyond_markdown,
+            _markdown_number_counter,
+        )
+
+        boxes = [_bbox_tuple(b) for b in locator_boxes]
+        if len(boxes) == 2:
+            outer = max(boxes, key=_box_area_tuple)
+            inner = min(boxes, key=_box_area_tuple)
+            if (
+                _box_contains(outer, inner)
+                and region_tuple == inner
+                and _box_area_tuple(outer) > _box_area_tuple(inner) * 1.8
+            ):
+                cand_rows = _candidate_rows_for_scan(binding, markdown)
+                model_data_rows = (
+                    len(_bound_rows_requiring_coverage(binding, cand_rows)) if cand_rows else 0
+                )
+                if model_data_rows <= 4 and _box_has_numbers_beyond_markdown(
+                    page, outer, _markdown_number_counter([markdown])
+                ):
+                    outcome = NativeCellOutcome.AMBIGUOUS
     samples: list[dict[str, str]] = []
     for cell in binding.contradicted_cells[:5]:
         samples.append(

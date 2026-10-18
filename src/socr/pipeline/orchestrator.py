@@ -8260,12 +8260,20 @@ class UnifiedPipeline:
                                                     "table-region pairing inconclusive",
                                                 )
                                                 continue
+                                            peer_regions = [
+                                                tuple(pr)
+                                                for j, pr in enumerate(paired_regions)
+                                                if j != wi and pr is not None
+                                            ]
                                             result = check_table_cell_binding(
                                                 table_id=witness.table_id,
                                                 words=words,
                                                 markdown=witness.markdown,
                                                 region_bbox=region_bbox,
                                                 spans=spans,
+                                                peer_region_bboxes=peer_regions or None,
+                                                locator_boxes=located_bboxes,
+                                                page=page,
                                             )
                                             payload = binding_summary_payload(result)
                                             ps.native_cell_binding[witness.table_id] = payload

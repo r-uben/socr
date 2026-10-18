@@ -11,3 +11,4 @@
 | dont composante non discrétionnaire | -1,7 | -0,5 | -0,3 |
 | dont recettes hors PO | -0,1 | 0,0 | -0,1 |
 | dont effets d'élasticités fiscales | -1,7 | -0,5 | -0,2 |
+| Écart de production | -0,6 | -0,6 | -0,7 |

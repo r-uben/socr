@@ -579,6 +579,63 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
 
 
+def _locator_boxes_for_lost_table_scan(
+    page,
+    boxes: list,
+) -> list[tuple[float, float, float, float]]:
+    """Every located box that carries table numbers (no area cap for lost-table scan)."""
+    tuples = [_bbox_tuple(b) for b in boxes]
+    with_nums = [b for b in tuples if _table_number_counter(page, b)]
+    return with_nums if with_nums else tuples
+
+
+def _markdown_number_counter(block_markdowns: list[str]) -> Counter:
+    covered = Counter()
+    for markdown in block_markdowns:
+        covered.update(_candidate_values(markdown))
+    return covered
+
+
+def _box_has_numbers_beyond_markdown(
+    page,
+    box: tuple[float, float, float, float],
+    covered: Counter,
+) -> bool:
+    """True when the box prints numeric values no emitted model table claims."""
+    in_box = _table_number_counter(page, box)
+    if not in_box:
+        return False
+    extra = in_box - covered
+    return sum(extra.values()) >= 1
+
+
+def _is_ruled_subpanel_geometry(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+) -> bool:
+    return (
+        _box_contains(outer, inner)
+        and (_box_area_tuple(inner) / max(_box_area_tuple(outer), 1.0)) < 0.55
+    )
+
+
+def refine_check_region(
+    region: tuple[float, float, float, float],
+    peer_regions: list[tuple[float, float, float, float]] | None = None,
+) -> tuple[float, float, float, float]:
+    """Crop an enclosing union box so peer tables do not leak into the bind region."""
+    if not peer_regions:
+        return region
+    x0, y0, x1, y1 = region
+    for peer in peer_regions:
+        if not _box_contains(region, peer):
+            continue
+        _px0, py0, px1, py1 = peer
+        if py1 <= y0 + (y1 - y0) * 0.7:
+            y0 = max(y0, py1 - 1.0)
+    return (x0, y0, x1, y1)
+
+
 def unclaimed_locator_box_indices(
     page,
     block_markdowns: list[str],
@@ -586,9 +643,10 @@ def unclaimed_locator_box_indices(
     paired: list,
 ) -> list[int]:
     """Indices of native table regions (after pairing filter) with no model block."""
-    tuples = locator_boxes_for_pairing(page, boxes, min_boxes=len(block_markdowns))
+    tuples = _locator_boxes_for_lost_table_scan(page, boxes)
     if not tuples:
         return []
+    covered = _markdown_number_counter(block_markdowns)
     claimed = set()
     claimed_boxes: list[tuple[float, float, float, float]] = []
     for pick in paired:
@@ -604,9 +662,14 @@ def unclaimed_locator_box_indices(
     for i, box in enumerate(tuples):
         if i in claimed:
             continue
-        if any(_box_contains(box, cb) for cb in claimed_boxes):
-            continue
         if not _table_number_counter(page, box):
+            continue
+        if len(block_markdowns) == 1 and any(_box_contains(box, cb) for cb in claimed_boxes):
+            continue
+        if _box_has_numbers_beyond_markdown(page, box, covered):
+            unclaimed.append(i)
+            continue
+        if any(_box_contains(box, cb) for cb in claimed_boxes):
             continue
         unclaimed.append(i)
     return unclaimed
