@@ -7754,7 +7754,13 @@ class UnifiedPipeline:
         # gives ``bind()`` the no-words behaviour it already has for a page with no text
         # layer; the visual readers' verdict then stands on its own.
         if not layer_is_admissible_evidence(state.pages.get(page_num)):
-            return None
+            # ``(None, ABSTAIN)``, the shape every other exit here returns. Round 3
+            # returned a bare ``None`` and BOTH callers unpack a pair, so the TypeError
+            # landed in the gate's catch-all and every judged table on a flagged page
+            # became ``TABLE_UNVERIFIED / witness_preparation_error`` with no rung run at
+            # all -- an abstention that silently failed the whole ladder instead of
+            # falling through to the blind-cell adjudicator (round 4, all three seats).
+            return None, BindingEvidence.ABSTAIN
         try:
             with open_pdf(state.handle.path) as doc:
                 page = doc[page_num - 1]
@@ -14483,7 +14489,7 @@ class UnifiedPipeline:
             # #1156: same source as ``native_trusted`` below. A page whose text
             # layer is a prior OCR reading contributes no numbers to any check.
             ps = state.pages.get(page_num)
-            return bool(ps is not None and getattr(ps, "prior_ocr_layer_suspect", False))
+            return ps is not None and not layer_is_admissible_evidence(ps)
 
         native_judge = NativeTableVerifierJudge(
             inner=timed_leaf,
@@ -14505,7 +14511,7 @@ class UnifiedPipeline:
             ps = state.pages.get(page_num)
             if ps is None:
                 return None
-            if getattr(ps, "prior_ocr_layer_suspect", False):
+            if not layer_is_admissible_evidence(ps):
                 return False
             return bool(ps.is_born_digital)
 

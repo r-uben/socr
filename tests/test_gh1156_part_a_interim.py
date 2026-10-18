@@ -1808,77 +1808,11 @@ def test_the_row_corroboration_abstains_on_a_suspect_page(tmp_path: Path, flags:
 # Round 3: the layer is not evidence, at the source
 # ---------------------------------------------------------------------------
 
-
-def test_every_text_layer_evidence_source_abstains_on_a_suspect_page(tmp_path: Path) -> None:
-    """#1156 round 3 (Argon 2.1/2.4, P0): pin the PROPERTY, not the call sites.
-
-    Principle 1 held for the corroboration route after round 2 and still failed one layer
-    deeper: the table-judge binding chain reads the page's own words, and on a suspect
-    page those are an earlier OCR run. Both directions were live --
-
-    * **positive**: a ``BindingEvidence.PASS`` over the layer's geometry overruled a
-      VISUAL rejection, minted an acceptance credential, and the timeout-credentialed
-      ending shipped visually-rejected numbers;
-    * **destructive**: the layer, having dropped a minus, convicted a VLM that read
-      ``-350`` correctly, and the table and its siblings were withheld.
-
-    The sources are listed in the decision log and each consults
-    ``state.layer_is_admissible_evidence``. This test enumerates them and asserts the
-    property that matters: on a suspect page each abstains EXACTLY as it does on a page
-    with no text layer -- which is a state all of them already handle, so no new path is
-    introduced. The control arm is what makes it a test: the same source on the same page
-    with the flag cleared must NOT abstain.
-    """
-    from socr.core.state import layer_is_admissible_evidence
-
-    suspect = PageState(page_num=1)
-    suspect.prior_ocr_layer_suspect = True
-    clean = PageState(page_num=1)
-
-    # The predicate itself, on every flag that feeds the union: evidence is refused on
-    # "unknown" too, because unknown is not a reason to trust the words.
-    assert layer_is_admissible_evidence(clean) is True
-    assert layer_is_admissible_evidence(suspect) is False
-    assert layer_is_admissible_evidence(None) is True, (
-        "a page with no state must not be treated as suspect; that would refuse evidence "
-        "on every page the detector never saw"
-    )
-
-    # Each source, by the seam it abstains at. Sources are named so a new one shows up as
-    # a missing entry here rather than as a silent reader of the layer.
-    sources = {
-        "_binding_evidence_for_witness": "orchestrator",
-        "boundary resolution re-read": "orchestrator",
-        "contradictions_for_tables call": "orchestrator",
-        "_row_corroboration_scan": "manifest",
-    }
-    assert set(sources) == {
-        "_binding_evidence_for_witness",
-        "boundary resolution re-read",
-        "contradictions_for_tables call",
-        "_row_corroboration_scan",
-    }
-
-    # The one that can be driven without a document: the corroboration pool.
-    from socr.core.manifest import _row_corroboration_scan
-
-    state = _grid_state(tmp_path, flags="positive", attempt="rejected", lane="grid_corroborated")
-    p = state.pages[1]
-    assert _row_corroboration_scan(p) is None
-    p.prior_ocr_layer = False
-    p.prior_ocr_layer_suspect = False
-    assert _row_corroboration_scan(p) is not None, "control: the pool is unreachable anyway"
-
-    # And the three orchestrator seams, by the predicate they share: each is reached with
-    # the page's state, so a page the detector never assessed still yields evidence.
-    import inspect
-
-    from socr.pipeline import orchestrator as orch
-
-    src = inspect.getsource(orch)
-    assert src.count("layer_is_admissible_evidence(") >= 3, (
-        "an orchestrator evidence source stopped consulting the shared predicate"
-    )
+# #1156 round 4: ``test_every_text_layer_evidence_source_abstains_on_a_suspect_page`` lived
+# here and was vacuous twice over -- it counted the predicate's NAME in the module source
+# and compared a literal to itself (r-uben). It is replaced by
+# ``tests/test_gh1156_evidence_guards.py``, which drives ``_run_table_judge_gate`` for both
+# directions with a clean-page control, and whose mutants make each guard dead in turn.
 
 
 @pytest.mark.parametrize(
@@ -1888,10 +1822,11 @@ def test_every_text_layer_evidence_source_abstains_on_a_suspect_page(tmp_path: P
         ({"prior_ocr_page_png_ref": "A"}, "A"),
         ({"invisible_scan_png_ref": "B"}, "B"),
         ({"scanned_figure_png_ref": "C"}, "C"),
-        ({"d3_floor_png_ref": "D"}, "D"),
+        # the D3 floor's own image is NOT this floor's to ship (round 4, r-uben)
+        ({"d3_floor_png_ref": "D"}, ""),
         ({"invisible_scan_png_ref": "B", "d3_floor_png_ref": "D"}, "B"),
+        ({"d3_floor_png_ref": "D", "scanned_figure_png_ref": "C"}, "C"),
         ({"prior_ocr_page_png_ref": "A", "invisible_scan_png_ref": "B"}, "A"),
-        ({"scanned_figure_png_ref": "C", "d3_floor_png_ref": "D"}, "C"),
     ],
 )
 def test_the_floor_page_image_helper_covers_every_ref_combination(

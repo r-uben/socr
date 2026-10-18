@@ -80,7 +80,7 @@ from socr.core.verdict import (
     build_page_verdict,
     marks_to_write,
 )
-from socr.core.state import DocumentState, PageState
+from socr.core.state import DocumentState, PageState, layer_is_admissible_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -1152,13 +1152,18 @@ def floor_page_image_ref(p) -> str:
     One function for the body AND the wording, so they cannot disagree again. Order is
     specificity: this issue's own render first, then #1027's, then the scanned-figure
     lane's (which the figure guard appends itself -- naming it here keeps the WORDING
-    right and the guard's ``ref in text`` check stops a second copy), then the D3 floor's.
+    right and the guard's ``ref in text`` check stops a second copy).
+
+    ``d3_floor_png_ref`` is deliberately NOT in the list (round 4, r-uben): it is the D3
+    floor's own image, rendered for a different ending, and this floor does not ship it.
+    Counting it was exactly the mismatch being fixed -- the marker said "see image" for a
+    picture the body never carried -- and the cure is to stop counting it, not to start
+    shipping another ending's image.
     """
     for name in (
         "prior_ocr_page_png_ref",
         "invisible_scan_png_ref",
         "scanned_figure_png_ref",
-        "d3_floor_png_ref",
     ):
         ref = getattr(p, name, "") or ""
         if ref:
@@ -1640,7 +1645,7 @@ def _row_corroboration_scan(p):
     content -- the page falls through to its own floor, which keeps that floor's marker
     and image.
     """
-    if getattr(p, "prior_ocr_layer_suspect", False):
+    if not layer_is_admissible_evidence(p):
         return None
     words = getattr(p, "native_words", None) or []
     if not words:
