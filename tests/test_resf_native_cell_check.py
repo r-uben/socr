@@ -58,7 +58,7 @@ def test_locale_decimal_comma_not_thousands():
     assert binding_numeric_tokens_equivalent("1,204", "1204") is None
     assert binding_numeric_tokens_equivalent("45%", "45") is False
     assert _normalize_binding_numeric_token("(0,4)") == "-0.4"
-    assert _normalize_binding_numeric_token("1,5 M€") == "1.5"
+    assert _normalize_binding_numeric_token("1,5 M€") == "1.5@M€"
 
 
 class TestP59Tableau1:

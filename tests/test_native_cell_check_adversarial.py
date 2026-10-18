@@ -17,6 +17,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import BindingResult, UnboundCell, parse_grid
 from socr.tables.native_cell_check import (
     NativeCellOutcome,
+    _prepare_numeric_cell,
     check_table_cell_binding,
     classify_binding_for_cell_check,
 )
@@ -43,14 +44,49 @@ def _minimal_binding(**kwargs) -> BindingResult:
     return BindingResult(**defaults)
 
 
-def test_unbound_empty_col_path_is_not_verified() -> None:
-    """Native unbound with numeric token and empty col_path must not verify."""
-    md = "| A | B |\n| --- | --- |\n| x | 1 |\n"
-    result = _minimal_binding(
-        matched_cells=[object()],  # type: ignore[list-item]
-        native_unbound=[UnboundCell(row_path=("x",), col_path=(), token="99")],
+def _draw_table_pdf(
+    tmp_path: Path,
+    *,
+    rows: list[tuple[str, ...]],
+    rect: fitz.Rect | None = None,
+    margin_number: tuple[float, float, str] | None = None,
+) -> tuple[Path, fitz.Rect, list]:
+    pdf = tmp_path / "table.pdf"  # type: ignore[operator]
+    doc = fitz.open()
+    page = doc.new_page()
+    region = rect or fitz.Rect(50, 80, 320, 80 + 22 * (len(rows) + 2))
+    page.draw_rect(region, width=0.5)
+    y = region.y0 + 18
+    x_label = region.x0 + 8
+    x_cols = [region.x0 + 110, region.x0 + 170, region.x0 + 230]
+    for row in rows:
+        page.insert_text((x_label, y), row[0], fontsize=10)
+        for col_i, val in enumerate(row[1:]):
+            page.insert_text((x_cols[col_i], y), val, fontsize=10)
+        y += 20
+    if margin_number is not None:
+        mx, my, num = margin_number
+        page.insert_text((mx, my), num, fontsize=10)
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    words = doc[0].get_text("words")
+    doc.close()
+    return pdf, region, words
+
+
+def test_unbound_empty_col_path_is_not_verified(tmp_path: Path) -> None:
+    """Dropped data-row numerics through real bind() must not reach VERIFIED."""
+    full_md = "| L | a | b |\n| --- | --- | --- |\n| Taux | 7 | 9 |\n| Data | 1 | 2 |\n"
+    dropped_md = "| L | a | b |\n| --- | --- | --- |\n| Data | 1 | 2 |\n"
+    _, region, words = _draw_table_pdf(
+        tmp_path,
+        rows=[("Taux", "7", "9"), ("Data", "1", "2")],
     )
-    assert classify_binding_for_cell_check(result, md) is not NativeCellOutcome.VERIFIED
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=dropped_md, region_bbox=region, spans=[]
+    )
+    assert r.outcome is not NativeCellOutcome.VERIFIED
 
 
 def test_single_matched_cell_without_full_coverage_is_ambiguous() -> None:
@@ -82,6 +118,10 @@ def test_parenthesised_negative_binding_normalization() -> None:
     assert _canonical_binding_numeric("(0,4)")[0] == "-0.4"
 
 
+def test_parenthesised_thousands_ambiguous_not_equal_to_bare() -> None:
+    assert binding_numeric_tokens_equivalent("(1,250)", "1,250") is False
+
+
 def test_interior_thousand_space_is_stripped_for_binding() -> None:
     left, amb = _canonical_binding_numeric("1\u202f234,5")
     assert amb is False
@@ -89,7 +129,8 @@ def test_interior_thousand_space_is_stripped_for_binding() -> None:
 
 
 def test_unit_suffix_md_euro_is_parsed() -> None:
-    assert _canonical_binding_numeric("1,5 M€")[0] == "1.5"
+    assert _canonical_binding_numeric("1,5 M€")[0] == "1.5@M€"
+    assert binding_numeric_tokens_equivalent("1,5 M€", "1,5 Md€") is False
 
 
 def test_swapped_row_labels_same_values_not_verified_when_columns_unverifiable() -> None:
@@ -117,33 +158,63 @@ def test_swapped_row_labels_same_values_not_verified_when_columns_unverifiable()
     assert classify_binding_for_cell_check(binding, swapped) is not NativeCellOutcome.VERIFIED
 
 
-def test_native_unbound_year_header_column_is_excludable() -> None:
+def test_native_unbound_year_header_in_header_band_is_excludable() -> None:
     from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+    from socr.tables.binding import BindingResult
 
-    assert _native_unbound_cell_is_excludable(
-        UnboundCell(row_path=("Header",), col_path=(), token="2024")
+    binding = BindingResult(
+        row_binding={1: 1},
+        native_rows=[
+            SimpleNamespace(row_path=("Hdr",), is_parent=False, label_bbox=(0, 0, 0, 10)),
+            SimpleNamespace(row_path=("Data",), is_parent=False, label_bbox=(0, 20, 0, 30)),
+        ],
+        native_header_row_indices=frozenset({0}),
     )
-    assert _native_unbound_cell_is_excludable(
-        UnboundCell(row_path=("Header",), col_path=(), token="2024,")
+    cell = UnboundCell(
+        row_path=("Hdr",),
+        col_path=(),
+        token="2024",
+        token_bbox=(100, 5, 120, 12),
     )
+    assert _native_unbound_cell_is_excludable(cell, binding, (50, 0, 200, 40))
 
 
-def test_native_unbound_footnote_band_is_excludable() -> None:
+def test_native_unbound_page_number_outside_region_is_excludable() -> None:
     from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+    from socr.tables.binding import BindingResult
 
-    assert _native_unbound_cell_is_excludable(
-        UnboundCell(
-            row_path=("** footnote prose", "detail line"),
-            col_path=(),
-            token="8,8",
-        )
+    binding = BindingResult(row_binding={0: 0})
+    cell = UnboundCell(
+        row_path=(),
+        col_path=(),
+        token="999",
+        token_bbox=(400, 750, 420, 762),
     )
+    table_region = (50, 80, 320, 140)
+    assert _native_unbound_cell_is_excludable(cell, binding, table_region)
 
 
-def test_native_unbound_page_number_is_excludable() -> None:
+def test_native_unbound_footnote_below_table_is_excludable() -> None:
     from socr.tables.native_cell_check import _native_unbound_cell_is_excludable
+    from socr.tables.binding import BindingResult
 
-    assert _native_unbound_cell_is_excludable(UnboundCell(row_path=(), col_path=(), token="67"))
+    binding = BindingResult(
+        row_binding={0: 0},
+        native_rows=[
+            SimpleNamespace(
+                row_path=("Data",),
+                is_parent=False,
+                label_bbox=(0, 20, 0, 35),
+            ),
+        ],
+    )
+    cell = UnboundCell(
+        row_path=("Data",),
+        col_path=("note",),
+        token="8,8",
+        token_bbox=(100, 70, 120, 82),
+    )
+    assert _native_unbound_cell_is_excludable(cell, binding, (0, 0, 200, 50))
 
 
 def test_native_unbound_data_cell_blocks_when_columns_unverifiable() -> None:
@@ -288,6 +359,86 @@ def test_resume_restore_includes_native_cell_event_kinds() -> None:
         "native_cell_check_contradicted",
     ):
         assert kind in kinds
+
+
+@pytest.mark.parametrize(
+    "full_rows,dropped_md,label",
+    [
+        (
+            [("Taux", "7", "9"), ("Data", "1", "2")],
+            "| L | a | b |\n| --- | --- | --- |\n| Data | 1 | 2 |\n",
+            "dropped_taux_row",
+        ),
+        (
+            [("Année de base", "2019", "2020"), ("Data", "1", "2")],
+            "| L | a | b |\n| --- | --- | --- |\n| Data | 1 | 2 |\n",
+            "dropped_annee_de_base",
+        ),
+        (
+            [("Data", "1", "2"), ("** dont Etat", "3", "4")],
+            "| L | a | b |\n| --- | --- | --- |\n| Data | 1 | 2 |\n",
+            "dropped_footnote_row",
+        ),
+    ],
+)
+def test_dropped_native_rows_not_verified_via_real_bind(
+    tmp_path: Path, full_rows, dropped_md, label
+) -> None:
+    _, region, words = _draw_table_pdf(tmp_path, rows=full_rows)
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=dropped_md, region_bbox=region, spans=[]
+    )
+    assert r.outcome is not NativeCellOutcome.VERIFIED, label
+
+
+def test_spacer_row_table_still_verified_via_real_bind(tmp_path: Path) -> None:
+    md = "| L | v |\n| --- | --- |\n| | |\n| Data | 1 |\n"
+    _, region, words = _draw_table_pdf(
+        tmp_path,
+        rows=[("Data", "1")],
+    )
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=md, region_bbox=region, spans=[]
+    )
+    assert r.outcome is NativeCellOutcome.VERIFIED
+
+
+def test_two_tables_pairs_first_box_when_markdown_matches_first(tmp_path: Path) -> None:
+    from socr.tables.native_contradiction import pair_regions
+
+    doc = fitz.open()
+    page = doc.new_page()
+    top = fitz.Rect(40, 40, 280, 120)
+    low = fitz.Rect(40, 200, 280, 280)
+    page.draw_rect(top, width=0.5)
+    page.draw_rect(low, width=0.5)
+    for y, vals in [(70, ("Alpha", "10", "20")), (95, ("Beta", "30", "40"))]:
+        x = 50
+        for v in vals:
+            page.insert_text((x, y), v, fontsize=10)
+            x += 60
+    for y, vals in [(230, ("Gamma", "99", "88")), (255, ("Delta", "77", "66"))]:
+        x = 50
+        for v in vals:
+            page.insert_text((x, y), v, fontsize=10)
+            x += 60
+    pdf = tmp_path / "two_tables.pdf"  # type: ignore[operator]
+    doc.save(str(pdf))
+    doc.close()
+    doc = fitz.open(str(pdf))
+    page = doc[0]
+    words = page.get_text("words")
+    top_md = "| L | a | b |\n| --- | --- | --- |\n| Alpha | 10 | 20 |\n| Beta | 30 | 40 |\n"
+    low_md = "| L | a | b |\n| --- | --- | --- |\n| Gamma | 99 | 88 |\n| Delta | 77 | 66 |\n"
+    boxes = [top, low]
+    paired = pair_regions(page, [top_md, low_md], boxes)
+    assert paired[0] is top
+    assert paired[1] is low
+    r = check_table_cell_binding(
+        table_id="t0", words=words, markdown=top_md, region_bbox=top, spans=[]
+    )
+    doc.close()
+    assert r.outcome is NativeCellOutcome.VERIFIED
 
 
 def test_native_cell_check_error_path_is_atomic(tmp_path: Path) -> None:

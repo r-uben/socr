@@ -1662,6 +1662,7 @@ class UnboundCell:
     row_path: tuple[str, ...]
     col_path: tuple[str, ...]
     token: str
+    token_bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -1703,6 +1704,9 @@ class BindingResult:
     native_rows: list = field(default_factory=list)
     row_binding: dict = field(default_factory=dict)
     candidate_row_labels: tuple[str, ...] = ()
+    #: Body rows ``bind()`` actually row-bound against (post-spacer, post-merge).
+    candidate_rows: tuple[tuple[str, ...], ...] = ()
+    native_header_row_indices: frozenset[int] = frozenset()
     row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
     #: Words the region membership predicate rejected but that still touch
     #: *region* (positive overlap, at or under the majority-overlap
@@ -1936,7 +1940,12 @@ def _record_inventions_on_parent_row(
         chp = header_paths_by_lane.get(lane) if lane is not None else None
         col_path = chp.path if chp is not None else ()
         result.model_unbound.append(
-            UnboundCell(row_path=native_row.row_path, col_path=col_path, token=cand_text)
+            UnboundCell(
+                row_path=native_row.row_path,
+                col_path=col_path,
+                token=cand_text,
+                token_bbox=native_row.lane_bboxes.get(lane) if lane is not None else None,
+            )
         )
 
 
@@ -2192,6 +2201,7 @@ def bind(
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
 
     native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols, spans)
+    result.native_header_row_indices = frozenset(header_band_idxs or ())
     lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (
@@ -2236,6 +2246,7 @@ def bind(
     result.candidate_row_labels = tuple(
         (row[0].strip() if row else "") for row in candidate_grid.rows
     )
+    result.candidate_rows = tuple(candidate_grid.rows)
     bound_candidate_idxs = set(row_binding)
     bound_native_idxs = set(row_binding.values())
     result.candidate_valueless_unbound = sum(
@@ -2332,7 +2343,12 @@ def bind(
             chp = header_paths_by_lane.get(lane)
             col_path = chp.path if chp else (str(lane),)
             result.native_unbound.append(
-                UnboundCell(row_path=nr.row_path, col_path=col_path, token=text)
+                UnboundCell(
+                    row_path=nr.row_path,
+                    col_path=col_path,
+                    token=text,
+                    token_bbox=nr.lane_bboxes.get(lane),
+                )
             )
 
     # HIGH 2: the candidate-side mirror of BLOCKING 1. An invented candidate
@@ -2446,7 +2462,12 @@ def bind(
                 chp = header_paths_by_lane.get(lane)
                 col_path = chp.path if chp else (str(lane),)
                 result.native_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=text)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=text,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
 
             for col_idx in range(physical_n_cand_cols):
@@ -2512,11 +2533,21 @@ def bind(
                 )
             elif native_value is None and model_value is not None:
                 result.model_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=model_value)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=model_value,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
             elif native_value is not None and model_value is None:
                 result.native_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=native_value)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=native_value,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
             else:
                 # #766: decode entities/strip presentation BEFORE the numeric

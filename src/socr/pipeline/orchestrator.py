@@ -8223,18 +8223,30 @@ class UnifiedPipeline:
                                                 else None
                                             )
                                             crop_note = ""
-                                            if (
-                                                region_bbox is None
-                                                and len(blocks) == 1
-                                                and len(located_boxes) >= 1
-                                            ):
-                                                pick = (
-                                                    located_boxes[1]
-                                                    if len(located_boxes) >= 2
-                                                    else located_boxes[0]
+                                            if region_bbox is None and located_boxes:
+                                                from socr.tables.native_contradiction import (
+                                                    pair_regions,
                                                 )
-                                                region_bbox = pick.bbox
-                                                crop_note = "witness-ambiguous; using located crop"
+
+                                                block_markdowns = [w.markdown for w in witnesses]
+                                                paired = pair_regions(
+                                                    page, block_markdowns, located_boxes
+                                                )
+                                                wi = witnesses.index(witness)
+                                                paired_box = (
+                                                    paired[wi] if wi < len(paired) else None
+                                                )
+                                                if paired_box is not None:
+                                                    region_bbox = paired_box.bbox
+                                                    crop_note = (
+                                                        "witness-ambiguous; "
+                                                        "content-paired located crop"
+                                                    )
+                                                elif len(blocks) == 1:
+                                                    crop_note = (
+                                                        "witness-ambiguous; "
+                                                        "table-region pairing inconclusive"
+                                                    )
                                             if region_bbox is None:
                                                 result = check_table_cell_binding(
                                                     table_id=witness.table_id,

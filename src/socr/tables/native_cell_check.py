@@ -32,7 +32,6 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
-_PAGE_NUMBER_RE = re.compile(r"^\d{1,3}$")
 
 
 class NativeCellOutcome(str, Enum):
@@ -75,11 +74,12 @@ def _model_row_numeric_tokens(cand_row: list[str]) -> list[str]:
     return out
 
 
-def _native_row_numeric_tokens(native_row) -> list[str]:
+def _native_row_numeric_tokens(native_row, *, include_ambiguous_lanes: bool = False) -> list[str]:
     return [
         text
         for _lane, (text, ambiguous) in sorted(native_row.lane_tokens.items())
-        if not ambiguous and is_numeric_token(_prepare_numeric_cell(text))
+        if (include_ambiguous_lanes or not ambiguous)
+        and is_numeric_token(_prepare_numeric_cell(text))
     ]
 
 
@@ -96,10 +96,10 @@ def _model_row_slots(cand_row: list[str]) -> list[str | None]:
     return slots
 
 
-def _native_row_slots(native_row) -> list[str | None]:
+def _native_row_slots(native_row, *, include_ambiguous_lanes: bool = False) -> list[str | None]:
     slots: list[str | None] = []
     for _lane, (text, ambiguous) in sorted(native_row.lane_tokens.items()):
-        if ambiguous:
+        if ambiguous and not include_ambiguous_lanes:
             return []
         text = _prepare_numeric_cell(text)
         if not text or text == "-":
@@ -141,12 +141,14 @@ def _compare_bound_row(
     column_binding_unverifiable: bool = False,
 ) -> bool | None:
     """``True``/``False`` on agreement; ``None`` = no comparison or ambiguous locale."""
-    model_slots = _model_row_slots(cand_row)
-    native_slots = _native_row_slots(native_row)
-    if model_slots and native_slots and len(model_slots) == len(native_slots):
-        return _slots_equivalent(native_slots, model_slots)
+    incl = column_binding_unverifiable
+    if not incl:
+        model_slots = _model_row_slots(cand_row)
+        native_slots = _native_row_slots(native_row)
+        if model_slots and native_slots and len(model_slots) == len(native_slots):
+            return _slots_equivalent(native_slots, model_slots)
     model_nums = _model_row_numeric_tokens(cand_row)
-    native_nums = _native_row_numeric_tokens(native_row)
+    native_nums = _native_row_numeric_tokens(native_row, include_ambiguous_lanes=incl)
     if not native_nums:
         return None
     if not model_nums:
@@ -162,32 +164,200 @@ def _compare_bound_row(
     return True
 
 
-def _row_anchor_scan(
-    result: BindingResult, markdown: str
-) -> tuple[list[tuple[str, str, str]], int]:
-    """Return (mismatches, successful_numeric_comparisons)."""
+def _candidate_rows_for_scan(result: BindingResult, markdown: str) -> list[list[str]] | None:
+    if result.candidate_rows:
+        return [list(row) for row in result.candidate_rows]
     grid = parse_grid(markdown)
     if grid is None:
-        return [("", "", "parse_failed")], 0
+        return None
+    rows = list(grid.rows)
+    if grid.spacer_row_indices:
+        rows = [row for i, row in enumerate(rows) if i not in grid.spacer_row_indices]
+    return rows
+
+
+def _bound_data_row_indices(result: BindingResult, cand_rows: list[list[str]]) -> list[int]:
+    out: list[int] = []
+    for cand_idx in result.row_binding:
+        if cand_idx >= len(cand_rows):
+            continue
+        cand_row = cand_rows[cand_idx]
+        if _is_year_header_row(cand_row):
+            continue
+        if not _model_row_numeric_tokens(cand_row):
+            continue
+        out.append(cand_idx)
+    return out
+
+
+def _native_row_index_for_unbound(cell: UnboundCell, result: BindingResult) -> int | None:
+    for idx, native_row in enumerate(result.native_rows):
+        if native_row.row_path == cell.row_path:
+            return idx
+    return None
+
+
+def _table_bound_data_y_max(result: BindingResult) -> float | None:
+    bound_native = set(result.row_binding.values())
+    y_maxs: list[float] = []
+    for idx, native_row in enumerate(result.native_rows):
+        if idx not in bound_native or native_row.is_parent:
+            continue
+        if native_row.label_bbox is not None:
+            y_maxs.append(native_row.label_bbox[3])
+        for bbox in native_row.lane_bboxes.values():
+            y_maxs.append(bbox[3])
+    if not y_maxs:
+        return None
+    return max(y_maxs)
+
+
+def _table_bound_data_y_min(result: BindingResult) -> float | None:
+    bound_native = set(result.row_binding.values())
+    y_mins: list[float] = []
+    for idx, native_row in enumerate(result.native_rows):
+        if idx not in bound_native or native_row.is_parent:
+            continue
+        if native_row.label_bbox is not None:
+            y_mins.append(native_row.label_bbox[1])
+        for bbox in native_row.lane_bboxes.values():
+            y_mins.append(bbox[1])
+    if not y_mins:
+        return None
+    return min(y_mins)
+
+
+_FOOTNOTE_BAND_GAP_PT = 25.0
+
+
+def _is_whole_unbound_native_row(cell: UnboundCell, result: BindingResult) -> bool:
+    idx = _native_row_index_for_unbound(cell, result)
+    if idx is None:
+        return False
+    return idx not in set(result.row_binding.values())
+
+
+def _bbox_outside_region(
+    bbox: tuple[float, float, float, float],
+    region: tuple[float, float, float, float],
+    *,
+    margin: float = 1.0,
+) -> bool:
+    x0, y0, x1, y1 = region
+    cx = (bbox[0] + bbox[2]) / 2.0
+    cy = (bbox[1] + bbox[3]) / 2.0
+    return cx < x0 - margin or cx > x1 + margin or cy < y0 - margin or cy > y1 + margin
+
+
+def _native_unbound_cell_is_excludable(
+    cell: UnboundCell,
+    result: BindingResult,
+    region: tuple[float, float, float, float] | None,
+) -> bool:
+    """Position-only: margin/outside region, header band, or footnote band below data."""
+    bbox = cell.token_bbox
+    if bbox is None:
+        return False
+    if region is not None:
+        try:
+            box = tuple(float(v) for v in region)
+        except (TypeError, ValueError):
+            box = None
+        if box is not None and len(box) == 4 and _bbox_outside_region(bbox, box):
+            return True
+    native_idx = _native_row_index_for_unbound(cell, result)
+    if native_idx is not None and native_idx in result.native_header_row_indices:
+        return True
+    if _is_whole_unbound_native_row(cell, result):
+        leaf = cell.row_path[-1].strip() if cell.row_path else ""
+        last_y = _table_bound_data_y_max(result)
+        if last_y is not None and bbox is not None and bbox[1] > last_y + _FOOTNOTE_BAND_GAP_PT:
+            return True
+        if leaf:
+            return False
+        first_y = _table_bound_data_y_min(result)
+        if first_y is not None and bbox[3] < first_y - 1.5:
+            return True
+        return False
+    if not cell.col_path:
+        first_y = _table_bound_data_y_min(result)
+        if first_y is not None and bbox[3] < first_y - 1.5:
+            return True
+    last_y = _table_bound_data_y_max(result)
+    if last_y is not None and bbox[1] > last_y + _FOOTNOTE_BAND_GAP_PT:
+        return True
+    return False
+
+
+def _row_anchor_scan(
+    result: BindingResult, markdown: str
+) -> tuple[list[tuple[str, str, str]], int, dict[int, int]]:
+    """Return (mismatches, successful_numeric_comparisons, comparisons_per_cand_row)."""
+    cand_rows = _candidate_rows_for_scan(result, markdown)
+    if cand_rows is None:
+        return [("", "", "parse_failed")], 0, {}
     mismatches: list[tuple[str, str, str]] = []
     comparisons = 0
+    per_row: dict[int, int] = {}
 
     for cand_idx, native_idx in result.row_binding.items():
-        if cand_idx >= len(grid.rows) or native_idx >= len(result.native_rows):
+        if cand_idx >= len(cand_rows) or native_idx >= len(result.native_rows):
             continue
-        cand_row = grid.rows[cand_idx]
+        cand_row = cand_rows[cand_idx]
         if _is_year_header_row(cand_row):
             continue
         native_row = result.native_rows[native_idx]
         if native_row.is_parent:
             continue
         stub = cand_row[0].strip() if cand_row else ""
+        cmp = _compare_bound_row(
+            native_row,
+            cand_row,
+            column_binding_unverifiable=result.column_binding_unverifiable,
+        )
+        if cmp is True and _native_row_numeric_tokens(
+            native_row, include_ambiguous_lanes=result.column_binding_unverifiable
+        ):
+            comparisons += 1
+            per_row[cand_idx] = per_row.get(cand_idx, 0) + 1
+            if result.column_binding_unverifiable:
+                native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+                cand_label = stub
+                if (
+                    cand_label
+                    and native_label
+                    and label_key(cand_label)
+                    and label_key(native_label)
+                    and label_key(cand_label) != label_key(native_label)
+                ):
+                    model_nums = _model_row_numeric_tokens(cand_row)
+                    native_nums = _native_row_numeric_tokens(
+                        native_row, include_ambiguous_lanes=True
+                    )
+                    if model_nums and native_nums and len(model_nums) == len(native_nums):
+                        equiv = all(
+                            binding_numeric_tokens_equivalent(n, m) is True
+                            for n, m in zip(native_nums, model_nums, strict=True)
+                        )
+                        if (
+                            equiv
+                            and native_label not in cand_label
+                            and cand_label not in native_label
+                        ):
+                            mismatches.append((stub, native_label, cand_label))
+            continue
         if result.column_binding_unverifiable:
             native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
             cand_label = stub
-            if label_key(cand_label) != label_key(native_label):
+            if (
+                cand_label
+                and native_label
+                and label_key(cand_label)
+                and label_key(native_label)
+                and label_key(cand_label) != label_key(native_label)
+            ):
                 model_nums = _model_row_numeric_tokens(cand_row)
-                native_nums = _native_row_numeric_tokens(native_row)
+                native_nums = _native_row_numeric_tokens(native_row, include_ambiguous_lanes=True)
                 if model_nums and native_nums and len(model_nums) == len(native_nums):
                     equiv = all(
                         binding_numeric_tokens_equivalent(n, m) is True
@@ -196,25 +366,7 @@ def _row_anchor_scan(
                     if equiv:
                         mismatches.append((stub, native_label, cand_label))
                         continue
-        cmp = _compare_bound_row(
-            native_row,
-            cand_row,
-            column_binding_unverifiable=result.column_binding_unverifiable,
-        )
-        if cmp is True and _native_row_numeric_tokens(native_row):
-            model_slots = _model_row_slots(cand_row)
-            native_slots = _native_row_slots(native_row)
-            slot_aligned = model_slots and native_slots and len(model_slots) == len(native_slots)
-            if (
-                result.column_binding_unverifiable
-                and model_slots
-                and native_slots
-                and not slot_aligned
-            ):
-                pass
-            else:
-                comparisons += 1
-        elif cmp is False:
+        if cmp is False:
             mismatches.append(
                 (
                     stub,
@@ -224,13 +376,15 @@ def _row_anchor_scan(
             )
         elif (
             cmp is None
-            and _native_row_numeric_tokens(native_row)
+            and _native_row_numeric_tokens(
+                native_row, include_ambiguous_lanes=result.column_binding_unverifiable
+            )
             and _model_row_numeric_tokens(cand_row)
         ):
             mismatches.append((stub, "ambiguous_locale", "ambiguous_locale"))
 
     bound_cand = set(result.row_binding.keys())
-    for cand_idx, cand_row in enumerate(grid.rows):
+    for cand_idx, cand_row in enumerate(cand_rows):
         if cand_idx in bound_cand or _is_year_header_row(cand_row):
             continue
         if not any(
@@ -242,33 +396,19 @@ def _row_anchor_scan(
         stub = cand_row[0].strip() if cand_row else ""
         mismatches.append((stub, "native_unbound", "model_data_row"))
 
-    return mismatches, comparisons
+    return mismatches, comparisons, per_row
 
 
-def _native_unbound_cell_is_excludable(cell: UnboundCell) -> bool:
-    """Only year column headers, page numbers, and footnote bands are ignorable."""
-    for seg in cell.row_path:
-        if seg.strip().startswith("**"):
-            return True
-    tok = _prepare_numeric_cell(cell.token.strip())
-    if not tok or not is_numeric_token(tok):
-        return False
-    if not cell.col_path:
-        year_core = tok.rstrip(",.;:")
-        if _YEAR_HEADER_RE.match(year_core):
-            return True
-        if _PAGE_NUMBER_RE.match(year_core) and len(cell.row_path) <= 1:
-            return True
-    return False
-
-
-def _numeric_unbound_blocks_verify(result: BindingResult) -> bool:
+def _numeric_unbound_blocks_verify(
+    result: BindingResult,
+    region: tuple[float, float, float, float] | None,
+) -> bool:
     """Any unmatched side carrying a numeric token blocks VERIFIED."""
     for cell in result.model_unbound:
         if is_numeric_token(_prepare_numeric_cell(cell.token)):
             return True
     for cell in result.native_unbound:
-        if _native_unbound_cell_is_excludable(cell):
+        if _native_unbound_cell_is_excludable(cell, result, region):
             continue
         tok = _prepare_numeric_cell(cell.token)
         if is_numeric_token(tok):
@@ -276,40 +416,54 @@ def _numeric_unbound_blocks_verify(result: BindingResult) -> bool:
     return False
 
 
-def _row_binding_covers_model_data_rows(result: BindingResult, markdown: str) -> bool:
-    grid = parse_grid(markdown)
-    if grid is None:
+def _fallback_verified_allowed(
+    result: BindingResult,
+    markdown: str,
+    region: tuple[float, float, float, float] | None,
+    *,
+    comparisons_per_row: dict[int, int],
+) -> bool:
+    if _numeric_unbound_blocks_verify(result, region):
         return False
-    for cand_idx, cand_row in enumerate(grid.rows):
-        if _is_year_header_row(cand_row):
-            continue
-        if not any(
-            is_numeric_token(_prepare_numeric_cell(c))
-            for c in cand_row[1:]
-            if c.strip() and c.strip() != "-"
-        ):
-            continue
-        if cand_idx not in result.row_binding:
-            return False
-    return True
+    if result.fully_checked:
+        return True
+    cand_rows = _candidate_rows_for_scan(result, markdown)
+    if cand_rows is None:
+        return False
+    data_rows = _bound_data_row_indices(result, cand_rows)
+    if not data_rows:
+        return False
+    return all(comparisons_per_row.get(idx, 0) >= 1 for idx in data_rows)
 
 
-def classify_binding_for_cell_check(result: BindingResult, markdown: str) -> NativeCellOutcome:
-    mismatches, comparisons = _row_anchor_scan(result, markdown)
+def classify_binding_for_cell_check(
+    result: BindingResult,
+    markdown: str,
+    *,
+    region: tuple[float, float, float, float] | None = None,
+) -> NativeCellOutcome:
     if result.contradicted_cells:
         return NativeCellOutcome.CONTRADICTED
     if result.row_label_contradictions and not result.column_binding_unverifiable:
         return NativeCellOutcome.CONTRADICTED
-    hard_mismatches = [m for m in mismatches if m[1] != "ambiguous_locale"]
+
+    if result.structural_agreement:
+        return NativeCellOutcome.VERIFIED
+
+    mismatches, comparisons, per_row = _row_anchor_scan(result, markdown)
+    if any(m[2] == "parse_failed" for m in mismatches):
+        return NativeCellOutcome.AMBIGUOUS
+
+    hard_mismatches = [
+        m for m in mismatches if m[1] != "ambiguous_locale" and m[2] != "parse_failed"
+    ]
     if hard_mismatches:
         return NativeCellOutcome.CONTRADICTED
     if result.ambiguous_count and not result.column_binding_unverifiable:
         return NativeCellOutcome.AMBIGUOUS
-    if _numeric_unbound_blocks_verify(result):
+    if _numeric_unbound_blocks_verify(result, region):
         return NativeCellOutcome.AMBIGUOUS
-    if result.structural_agreement:
-        return NativeCellOutcome.VERIFIED
-    if _row_binding_covers_model_data_rows(result, markdown) and comparisons > 0:
+    if _fallback_verified_allowed(result, markdown, region, comparisons_per_row=per_row):
         return NativeCellOutcome.VERIFIED
     if mismatches:
         return NativeCellOutcome.AMBIGUOUS
@@ -330,15 +484,21 @@ def check_table_cell_binding(
             outcome=NativeCellOutcome.AMBIGUOUS,
             detail="no native words in region",
         )
+    region_tuple: tuple[float, float, float, float] | None = None
+    if region_bbox is not None:
+        try:
+            region_tuple = tuple(float(v) for v in region_bbox)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            region_tuple = None
     try:
-        binding = bind(words, markdown, region=region_bbox, spans=spans or [])
+        binding = bind(words, markdown, region=region_tuple, spans=spans or [])
     except Exception as exc:
         return TableCellCheckResult(
             table_id=table_id,
             outcome=NativeCellOutcome.AMBIGUOUS,
             detail=f"bind failed: {type(exc).__name__}: {exc}",
         )
-    outcome = classify_binding_for_cell_check(binding, markdown)
+    outcome = classify_binding_for_cell_check(binding, markdown, region=region_tuple)
     samples: list[dict[str, str]] = []
     for cell in binding.contradicted_cells[:5]:
         samples.append(
@@ -349,7 +509,7 @@ def check_table_cell_binding(
             }
         )
     if outcome is NativeCellOutcome.CONTRADICTED and not samples:
-        mismatches, _ = _row_anchor_scan(binding, markdown)
+        mismatches, _, _ = _row_anchor_scan(binding, markdown)
         for stub, n_tok, m_tok in mismatches[:5]:
             samples.append({"row": stub, "native": n_tok, "model": m_tok})
     detail = (

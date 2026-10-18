@@ -1038,7 +1038,7 @@ _DECIMAL_COMMA_RE = re.compile(r"^(?P<body>-?\d[\d.,]*),(?P<frac>\d{1,2})$")
 # Single comma + exactly three fractional digits: English thousands vs mis-read decimal.
 _BINDING_COMMA_THOUSANDS_AMBIGUOUS_RE = re.compile(r"^-?\d{1,3},\d{3}$")
 _BINDING_UNIT_SUFFIX_RE = re.compile(
-    r"^(?P<num>.+?)\s*(?:M€|Md€|k€|€|EUR|USD)\s*$",
+    r"^(?P<num>.+?)\s*(?P<unit>M€|Md€|k€|€|EUR|USD)\s*$",
     re.IGNORECASE,
 )
 
@@ -1125,14 +1125,33 @@ def _normalize_numeric_token(tok: str) -> str:
     return tok
 
 
-def _strip_binding_unit_suffix(tok: str) -> str:
+def _split_binding_unit_suffix(tok: str) -> tuple[str, str | None]:
     m = _BINDING_UNIT_SUFFIX_RE.match(tok.strip())
-    return m.group("num").strip() if m else tok.strip()
+    if not m:
+        return tok.strip(), None
+    unit = m.group("unit")
+    if unit.upper() in ("EUR", "USD"):
+        unit_key = unit.upper()
+    elif unit == "M€":
+        unit_key = "M€"
+    elif unit == "Md€":
+        unit_key = "Md€"
+    elif unit == "k€":
+        unit_key = "k€"
+    else:
+        unit_key = "€"
+    return m.group("num").strip(), unit_key
+
+
+def _strip_binding_unit_suffix(tok: str) -> str:
+    num, _unit = _split_binding_unit_suffix(tok)
+    return num
 
 
 def _canonical_binding_numeric(tok: str) -> tuple[str, bool]:
     """Born-digital binding canonical form and whether locale is ambiguous."""
-    tok = _strip_binding_unit_suffix(_decoded_numeric_candidate(tok))
+    tok = _decoded_numeric_candidate(tok)
+    tok, unit_key = _split_binding_unit_suffix(tok)
     paren_neg = False
     if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
         inner = tok[1:-1].strip()
@@ -1143,12 +1162,19 @@ def _canonical_binding_numeric(tok: str) -> tuple[str, bool]:
     if has_pct:
         tok = tok[:-1]
     if _BINDING_COMMA_THOUSANDS_AMBIGUOUS_RE.match(tok):
-        return (tok, True)
+        signed = tok
+        if paren_neg and signed and not signed.startswith("-"):
+            signed = f"-{signed}"
+        if unit_key:
+            signed = f"{signed}@{unit_key}"
+        return (signed, True)
     body = _apply_locale_numeric_normalization(tok)
     if paren_neg and body and body not in ("-", "") and not body.startswith("-"):
         body = f"-{body}"
     if has_pct:
         body = f"{body}%"
+    if unit_key:
+        body = f"{body}@{unit_key}"
     return (body, False)
 
 
@@ -1157,7 +1183,11 @@ def binding_numeric_tokens_equivalent(left: str, right: str) -> bool | None:
     left_c, left_amb = _canonical_binding_numeric(left)
     right_c, right_amb = _canonical_binding_numeric(right)
     if left_amb or right_amb:
-        return None
+        if left_c == right_c:
+            return None
+        if left_amb != right_amb:
+            return None
+        return False
     return left_c == right_c
 
 
