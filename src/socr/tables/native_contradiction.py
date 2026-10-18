@@ -478,6 +478,44 @@ def number_absent_contradictions(
     ]
 
 
+def _bbox_tuple(box) -> tuple[float, float, float, float]:
+    if hasattr(box, "bbox"):
+        box = box.bbox
+    return tuple(float(v) for v in box)  # type: ignore[arg-type]
+
+
+def _box_area_tuple(box: tuple[float, float, float, float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _box_contains(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    *,
+    margin: float = 2.0,
+) -> bool:
+    return (
+        inner[0] >= outer[0] - margin
+        and inner[1] >= outer[1] - margin
+        and inner[2] <= outer[2] + margin
+        and inner[3] <= outer[3] + margin
+        and _box_area_tuple(inner) < _box_area_tuple(outer) * 0.98
+    )
+
+
+def locator_boxes_for_pairing(boxes: list) -> list[tuple[float, float, float, float]]:
+    """Drop union/outer locator boxes that strictly enclose another candidate."""
+    tuples = [_bbox_tuple(b) for b in boxes]
+    if len(tuples) <= 1:
+        return tuples
+    kept: list[tuple[float, float, float, float]] = []
+    for i, bi in enumerate(tuples):
+        if any(i != j and _box_contains(bi, bj) for j, bj in enumerate(tuples)):
+            continue
+        kept.append(bi)
+    return kept if kept else tuples
+
+
 def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     """One region per block, paired to the locator's boxes by CONTENT, else None.
 
@@ -488,6 +526,7 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     other block claims it. Anything ambiguous abstains for that block.
     """
     count = len(block_markdowns)
+    boxes = locator_boxes_for_pairing(boxes)
     if not boxes:
         return [None] * count
     in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
@@ -501,20 +540,32 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
             chosen.append(None)
         elif len(winners) == 1:
             chosen.append(winners[0])
-        elif len(boxes) != count:
-
-            def _box_area(idx: int) -> float:
-                box = boxes[idx]
-                return (box[2] - box[0]) * (box[3] - box[1])
-
-            winners.sort(key=_box_area)
-            chosen.append(winners[0])
         else:
             chosen.append(None)
-    if len(boxes) != count:
-        return [boxes[k] if k is not None else None for k in chosen]
     claims = Counter(k for k in chosen if k is not None)
     return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
+
+
+def unclaimed_locator_box_indices(
+    page,
+    block_markdowns: list[str],
+    boxes: list,
+    paired: list,
+) -> list[int]:
+    """Indices of native table regions (after pairing filter) with no model block."""
+    tuples = locator_boxes_for_pairing(boxes)
+    if not tuples:
+        return []
+    claimed = set()
+    for pick in paired:
+        if pick is None:
+            continue
+        pt = _bbox_tuple(pick)
+        for i, box in enumerate(tuples):
+            if box == pt:
+                claimed.add(i)
+                break
+    return [i for i in range(len(tuples)) if i not in claimed]
 
 
 # -- entry point --------------------------------------------------------------------

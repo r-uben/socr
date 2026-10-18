@@ -8218,6 +8218,7 @@ class UnifiedPipeline:
                                     else:
                                         from socr.tables.native_contradiction import (
                                             pair_regions,
+                                            unclaimed_locator_box_indices,
                                         )
 
                                         block_markdowns = [w.markdown for w in witnesses]
@@ -8225,6 +8226,16 @@ class UnifiedPipeline:
                                         paired_regions = pair_regions(
                                             page, block_markdowns, located_bboxes
                                         )
+                                        for ui in unclaimed_locator_box_indices(
+                                            page,
+                                            block_markdowns,
+                                            located_bboxes,
+                                            paired_regions,
+                                        ):
+                                            _record_skip(
+                                                f"p{page_num}-native-region-{ui}",
+                                                "unpaired native table region (possible lost table)",
+                                            )
                                         for wi, witness in enumerate(witnesses):
                                             region_bbox = (
                                                 witness.box.bbox
