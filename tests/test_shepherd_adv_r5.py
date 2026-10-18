@@ -22,11 +22,14 @@ from socr.tables.native_contradiction import (
     unclaimed_locator_box_indices,
 )
 
-from test_shepherd_adv_r3 import A, C, NOT_V, V, _AdvFixtures, TOP, LOW
+from test_shepherd_adv_r3 import A, C, NOT_V, V, _AdvFixtures, TOP
 
 pytest.importorskip("fitz")
 
 H3 = ("Libellé", "c1", "c2")
+# adv_r5.py naming: LOW = distinct second table; LOWs = near-duplicate of TOP (Beta 41).
+LOWS = [("Alpha", "10", "20"), ("Beta", "30", "41")]
+LOW = [("Gamma", "50", "60"), ("Delta", "70", "80")]
 
 
 def _mdx(rows, extra: bool) -> str:
@@ -99,12 +102,14 @@ def _drawfull(page, rows, top, x0=50, x1=330):
     return fitz.Rect(x0, top, x1, y)
 
 
-def _page_of(tmp_path: Path, name: str, tables: list):
+def _page_of(tmp_path: Path, name: str, tables: list, extra=None):
     pdf = tmp_path / name
     doc = fitz.open()
     pg = doc.new_page()
     for i, t in enumerate(tables):
         _drawfull(pg, t, 40 + 160 * i)
+    if extra is not None:
+        extra(pg)
     doc.save(str(pdf))
     doc.close()
     d = fitz.open(str(pdf))
@@ -338,25 +343,23 @@ def test_adv_r5_cell_case(
 D_PAIR_CASES = [
     ("D-ctl1", [TOP], [TOP], [(V,)], False),
     ("D-ctl2", [TOP, LOW], [TOP, LOW], [(V,), (V,)], False),
-    (
-        "D-ctl2s",
-        [TOP, [("Alpha", "10", "20"), ("Beta", "30", "41")]],
-        [TOP, [("Alpha", "10", "20"), ("Beta", "30", "41")]],
-        [(V, A), (V, A)],
-        False,
-    ),
+    ("D-ctl2s", [TOP, LOWS], [TOP, LOWS], [(V, A), (V, A)], False),
+    ("D-ctl3", [TOP, LOW, LOWS], [TOP, LOW, LOWS], [(V, A), (V, A), (V, A)], False),
     ("D-dup1", [TOP], [TOP, TOP], [NOT_V, NOT_V], True),
     ("D-dup2", [TOP, LOW], [TOP, TOP], [NOT_V, NOT_V], True),
     ("D-only", [TOP, LOW], [TOP], [(V, A)], True),
+    ("D-only3", [TOP, LOW, LOWS], [TOP, LOW], [(V, A), (V, A)], True),
     (
-        "D-only3",
-        [TOP, LOW, [("Gamma", "50", "60"), ("Delta", "70", "81")]],
+        "D-dup2L",
         [TOP, LOW],
-        [(V, A), (V, A)],
+        [TOP, TOP, LOW],
+        [NOT_V, NOT_V, (V, A)],
         True,
     ),
     ("D-tie", [TOP, TOP], [TOP], [NOT_V], False),
 ]
+
+D_SPECIAL_CASE_IDS = ("D-inner", "D-inner-drop")
 
 
 @pytest.mark.parametrize(
@@ -376,6 +379,8 @@ def test_adv_r5_pairing_case(
     try:
         mds = [adv_md(b) for b in blocks]
         _raw, _kept, outs, un = _orch_outcomes(pg, mds)
+        if tag == "D-tie":
+            assert outs[0][0] == "skip"
         assert all(o in w_ for (_, o), w_ in zip(outs, wants, strict=True))
         verified_boxes = [box_id for box_id, o in outs if o is V]
         assert len(verified_boxes) == len(set(verified_boxes))
@@ -386,6 +391,67 @@ def test_adv_r5_pairing_case(
         d.close()
 
 
+def _inner_cell_frame(pg) -> None:
+    pg.draw_rect(fitz.Rect(195, 75, 245, 95), width=0.8)
+
+
+def _textbox_frame(pg) -> None:
+    pg.draw_rect(fitz.Rect(50, 400, 330, 470), width=0.8)
+    for i, t in enumerate(
+        [
+            "Encadré : la loi de finances 2025",
+            "prévoit 3 mesures et 12 dispositifs",
+            "applicables au 1er janvier.",
+        ]
+    ):
+        pg.insert_text((60, 420 + i * 15), t, fontsize=10)
+
+
+@pytest.mark.parametrize("case_id", D_SPECIAL_CASE_IDS)
+def test_adv_r5_d_special_case(tmp_path: Path, case_id: str) -> None:
+    """adv_r5 duplicate/sub-panel geometry cases (D-inner*, D-textbox)."""
+    full = TOP + [("Gamma", "50", "60")]
+    if case_id == "D-inner":
+        d, pg = _page_of(tmp_path, "D-inner.pdf", [full], extra=_inner_cell_frame)
+        try:
+            mds = [adv_md(full)]
+            raw, kept, outs, un = _orch_outcomes(pg, mds)
+            o = outs[0][1]
+            tall = len(kept) == 1 and kept[0][3] - kept[0][1] > 60
+            assert o is not V or kept == raw or tall, (o, kept, raw, un)
+        finally:
+            d.close()
+        return
+    if case_id == "D-inner-drop":
+        d, pg = _page_of(tmp_path, "D-inner2.pdf", [full], extra=_inner_cell_frame)
+        try:
+            _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(TOP)])
+            assert outs[0][1] is not V
+        finally:
+            d.close()
+        return
+    raise AssertionError(case_id)
+
+
+def test_adv_r5_d_textbox_no_false_lost_table(tmp_path: Path) -> None:
+    """adv_r5 D-textbox: framed prose beside one table must not create unclaimed regions."""
+    d, pg = _page_of(tmp_path, "D-textbox.pdf", [TOP], extra=_textbox_frame)
+    try:
+        _raw, kept, outs, un = _orch_outcomes(pg, [adv_md(TOP)])
+        assert outs[0][1] in (V, A)
+        assert len(kept) >= 1
+        assert not un
+    finally:
+        d.close()
+
+
+def test_adv_r5_script_ports_one_hundred_twenty_three_ids() -> None:
+    """adv_r5.py: 111 cell cases + 12 duplicate/geometry D cases."""
+    assert len(ADV_R5_CELL_CASES) == 111
+    assert len(D_PAIR_CASES) == 10
+    assert len(D_SPECIAL_CASE_IDS) == 2
+
+
 def adv_md(rows, header=("Libellé", "c1", "c2")) -> str:
     n = len(header)
     s = "| " + " | ".join(header) + " |\n|" + " --- |" * n + "\n"
@@ -394,8 +460,8 @@ def adv_md(rows, header=("Libellé", "c1", "c2")) -> str:
     return s
 
 
-def test_adv_r5c_subpanel_only_not_verified(tmp_path: Path) -> None:
-    """Ruled sub-panel inside outer table: emitting only top rows must not verify."""
+def _nest_subpanel_pdf(tmp_path: Path) -> tuple[fitz.Document, fitz.Page, list]:
+    """adv_r5c NEST: outer table + ruled inner panel over ~4 rows."""
     rows = [
         (n, str(10 + i), str(20 + i))
         for i, n in enumerate(
@@ -411,18 +477,36 @@ def test_adv_r5c_subpanel_only_not_verified(tmp_path: Path) -> None:
         y += 20
     bottom = y - 10
     pg.draw_rect(fitz.Rect(50, 40, 330, bottom), width=0.8)
-    ib = 125
+    ib = 40 + 85
     pg.draw_rect(fitz.Rect(50, 40, 330, ib), width=0.8)
+    for yy in range(55, int(ib), 20):
+        pg.draw_line((50, yy), (330, yy), width=0.5)
+    for gx in (190, 250):
+        pg.draw_line((gx, 40), (gx, ib), width=0.5)
     pdf = tmp_path / "nest.pdf"
     doc.save(str(pdf))
     doc.close()
     d = fitz.open(str(pdf))
-    pg = d[0]
+    return d, d[0], rows
+
+
+def test_adv_r5c_subpanel_only_not_verified(tmp_path: Path) -> None:
+    """Outer table with rows outside ruled inner panel: inner-only markdown must not verify."""
+    d, pg, rows = _nest_subpanel_pdf(tmp_path)
     try:
-        _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(rows[:3])])
+        _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(rows[:4])])
         assert outs[0][1] is not V
-        _raw2, _kept2, outs2, _un2 = _orch_outcomes(pg, [adv_md(rows)])
-        assert outs2[0][1] in (V, A)
+    finally:
+        d.close()
+
+
+def test_adv_r5c_full_table_not_contradicted_by_inner_box(tmp_path: Path) -> None:
+    """Full-table markdown must not be contradicted because a nested ruled box exists."""
+    d, pg, rows = _nest_subpanel_pdf(tmp_path)
+    try:
+        _raw, _kept, outs, _un = _orch_outcomes(pg, [adv_md(rows)])
+        assert outs[0][1] is not C
+        assert outs[0][1] in (V, A)
     finally:
         d.close()
 
@@ -475,6 +559,45 @@ def test_r5_native_cell_binding_unclaimed_region_recorded(tmp_path: Path) -> Non
     pipeline._run_native_cell_binding_check(state, 1, ps, bo)
     assert any(k.startswith("p1-native-region-") for k in ps.native_cell_binding)
     assert any(v.get("skip_reason") for v in ps.native_cell_binding.values())
+
+
+def test_r5_resf_p59_both_tableaux_cell_check() -> None:
+    """RESF p.59 Tableau 1 + Tableau 2: pair, check cells, no unclaimed locator boxes."""
+    doc = fitz.open(FIXTURES / "resf_p59.pdf")
+    pg = doc[0]
+    raw = [tuple(b.bbox) for b in locate_tables(pg)]
+    words = pg.get_text("words")
+    md1 = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
+    md2 = (FIXTURES / "p59_tableau2.md").read_text(encoding="utf-8")
+    pr = pair_regions(pg, [md1, md2], raw)
+    un = unclaimed_locator_box_indices(pg, [md1, md2], raw, pr)
+    assert not un
+    assert pr[0] is not None and pr[1] is not None
+    o1 = check_table_cell_binding(
+        table_id="t1", words=words, markdown=md1, region_bbox=pr[0], spans=[]
+    ).outcome
+    o2 = check_table_cell_binding(
+        table_id="t2", words=words, markdown=md2, region_bbox=pr[1], spans=[]
+    ).outcome
+    assert o1 is V
+    assert o2 is not V
+    doc.close()
+
+
+def test_r5_resf_p59_both_tableaux_pipeline_no_lost_table(tmp_path: Path) -> None:
+    import test_resf_native_cell_pipeline as pipe
+
+    md1 = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
+    md2 = (FIXTURES / "p59_tableau2.md").read_text(encoding="utf-8")
+    md = md1.strip() + "\n\n" + md2.strip()
+    _pipe, _result, state, out_dir = pipe._run_page(tmp_path, "resf_p59.pdf", md)
+    ps = state.pages[1]
+    assert not any(k.startswith("p1-native-region-") for k in ps.native_cell_binding)
+    outcomes = {k: v.get("outcome") for k, v in ps.native_cell_binding.items()}
+    assert any(o == "verified" for o in outcomes.values())
+    assert not any(v.get("skip_reason") for v in ps.native_cell_binding.values())
+    kinds = [e["kind"] for e in pipe._audit_events(out_dir) if e.get("page_num") == 1]
+    assert "native_cell_check_skipped" not in kinds
 
 
 def test_r5_resf_p59_emitted_table_verified_not_over_flagged(tmp_path: Path) -> None:

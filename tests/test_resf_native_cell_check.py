@@ -36,6 +36,22 @@ def p59_table():
 
 
 @pytest.fixture(scope="module")
+def p59_tableau2_paired():
+    from socr.tables.native_contradiction import pair_regions
+
+    doc = fitz.open(FIXTURES / "resf_p59.pdf")
+    page = doc[0]
+    raw = [tuple(b.bbox) for b in locate_tables(page)]
+    md2 = (FIXTURES / "p59_tableau2.md").read_text(encoding="utf-8")
+    pr = pair_regions(page, [md2], raw)
+    words = page.get_text("words")
+    spans = flatten_page_spans(page)
+    doc.close()
+    assert pr[0] is not None
+    return words, md2, pr[0], spans
+
+
+@pytest.fixture(scope="module")
 def p67_table():
     doc = fitz.open(FIXTURES / "resf_p67.pdf")
     page = doc[0]
@@ -104,6 +120,15 @@ class TestP59Tableau1:
             spans=spans,
         )
         assert r.outcome is NativeCellOutcome.CONTRADICTED, label
+
+
+class TestP59Tableau2:
+    def test_tableau2_strict_labels_not_verified(self, p59_tableau2_paired):
+        words, md, region, spans = p59_tableau2_paired
+        r = check_table_cell_binding(
+            table_id="t1", words=words, markdown=md, region_bbox=region, spans=spans
+        )
+        assert r.outcome is not NativeCellOutcome.VERIFIED
 
 
 def _p67_swap_row_labels(md: str) -> str:
