@@ -75,6 +75,12 @@ EXPECTED_RESUME_KINDS = frozenset(
         # terminal resumed page skips, and the page_judge=UNKNOWN clause keys on it -- so a
         # resumed run that dropped it would un-mark a page the first run marked.
         "native_table_verifier_exact_pass",
+        # default-on native per-cell binding: emitted by _run_native_cell_binding_check,
+        # which a terminal resumed page skips (same #252 / GH-353 replay contract).
+        "native_cell_check_ambiguous",
+        "native_cell_check_contradicted",
+        "native_cell_check_skipped",
+        "native_cell_check_verified",
         "blank_page",
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
@@ -114,5 +120,6 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 54 with #1145 slice 3's two legacy-equation-seam kinds (equation_latex_accepted and
     # equation_latex_rejected_kept_crop), which were never replayed and are explained at
     # their lines above;
-    # 55 with #1181's native_table_verifier_exact_pass.
-    assert len(EXPECTED_RESUME_KINDS) == 55
+    # 55 with #1181's native_table_verifier_exact_pass;
+    # 59 with default-on native per-cell binding's four terminal kinds.
+    assert len(EXPECTED_RESUME_KINDS) == 59
