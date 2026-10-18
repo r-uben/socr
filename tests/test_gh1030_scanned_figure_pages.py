@@ -24,8 +24,8 @@ from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.figures.scanned_figures import (
-    MIN_SPELLED_RUN,
     MAX_CAPTION_LINE,
+    MIN_SPELLED_RUN,
     SPELLED_FENCE_CLOSE,
     SPELLED_FENCE_NOTE,
     SPELLED_FENCE_OPEN,
@@ -429,7 +429,21 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
     off_text = re.sub(
         r"\n*\*\*Figure \d+\*\* \(page \d+\)\n\n!\[Figure \d+\]\([^)]*\)", "", off[2]
     ).rstrip()
-    assert stripped == off_text
+    # #1156 round 2 (r-uben 8): the two bodies now differ in the MARKER as well as the
+    # image, and that is the point of the change -- a marker must describe the body it
+    # ships with, so the page that carries an image says "see image" and the page that
+    # carries none says "see PDF page N". Stripping the image is therefore no longer
+    # enough to make them identical. The pointer difference is asserted explicitly, which
+    # is a stronger statement than the old equality: it says WHICH way each page points.
+    pointer = "see image"
+    _NOpointer = "not transcribed, see PDF page 1"
+    if pointer in stripped or _NOpointer in off_text:
+        assert pointer in stripped, "the page that ships an image does not point at it"
+        assert _NOpointer in off_text, "the page with no image still claims one"
+        stripped_body = stripped.replace(pointer, _NOpointer)
+    else:
+        stripped_body = stripped
+    assert stripped_body == off_text
     assert not [i for i in _images(off[2]) if "scanned_figure_page" in i]
     assert not [i for i in _images(fig_text) if "/figure_" in i], "the raster is not shipped twice"
 

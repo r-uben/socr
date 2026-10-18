@@ -153,6 +153,7 @@ VIOLATION_CLASSES = (
     DOCUMENT_FAILED_UNMARKED,
     NATIVE_UNCHECKED,
     CHART_UNCHECKED,
+    PRIOR_OCR_UNCHECKED,
     SUCCESS_AUDIT_FALSE,
     EQUATION_UNVERIFIED_SUCCESS,
     WARNING_UNMARKED,
@@ -403,19 +404,37 @@ def rule_native_equations(page: Page) -> list[str]:
 
 
 def rule_native_math(page: Page) -> list[str]:
-    return [SUCCESS_UNCHECKED]  # never CHECKED: it must be MARKED
+    # #1156 round 2: this lane is never CHECKED under any circumstances, so it could not
+    # count a flagged page clean -- but a violation list that does not NAME the prior-OCR
+    # class leaves the report saying only THAT the page is unclean, not WHY, and that is
+    # what the class exists for. Every lane now names it, so the rule is uniform and the
+    # meter has no lane-shaped hole to argue about.
+    return [*_prior_ocr_unchecked(page), SUCCESS_UNCHECKED]  # never CHECKED: it must be MARKED
 
 
 def rule_chart(page: Page) -> list[str]:
+    # #1156 round 2 (Argon): the chart lane ships the page's own ``native_text``, so on a
+    # page whose layer is an earlier OCR run its evidence is that layer. Without this a
+    # ``chart_asset`` SUCCESS with ``prior_ocr_layer_suspect`` counted CHECKED.
+    out = _prior_ocr_unchecked(page)
     ok = _evidence_passed(page, EVIDENCE_FIGURE_TEXT)
     if ok and not page.events_of(EVENT_VALUES_NOT_TRANSCRIBED):
         ok = _evidence_passed(page, EVIDENCE_CHART_VALUES)
-    return [] if ok else [CHART_UNCHECKED]
+    if not ok:
+        out.append(CHART_UNCHECKED)
+    return out
 
 
 def rule_blank(page: Page) -> list[str]:
+    # #1156 round 2: a BLANK page has no text layer to be an earlier OCR run of, and the
+    # detector cannot flag one (``_has_prior_ocr_layer`` requires hidden text). The flag
+    # is still read, so the rule cannot be the place a flagged page slips through if that
+    # ever stops being true.
+    out = _prior_ocr_unchecked(page)
     ok = bool(page.events_of(EVENT_BLANK_PAGE)) and page.md.strip() == blank_page_marker()
-    return [] if ok else [SUCCESS_UNCHECKED]
+    if not ok:
+        out.append(SUCCESS_UNCHECKED)
+    return out
 
 
 LANE_RULES: dict[str, Callable[[Page], list[str]]] = {

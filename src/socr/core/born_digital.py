@@ -2909,6 +2909,22 @@ def _image_info_for_box(infos: list, drawn: fitz.Rect, page_rect: fitz.Rect) -> 
     return best
 
 
+def _any_alpha_below_one(text: str | None) -> bool:
+    """Does this graphics-state blob declare an alpha below 1?
+
+    #1156 round 2 (r-uben blocker 5): the ONLY place a malformed VALUE is tolerated. A
+    non-numeric alpha is "no declared alpha" by the same positive-evidence rule the
+    callers use, and it is caught HERE -- around the parsing of a string already in hand
+    -- so that a PyMuPDF failure during the document reads, which raises the same
+    ``ValueError``, can propagate instead of being swallowed with it.
+    """
+    try:
+        return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
+    except (TypeError, ValueError):
+        logger.debug("#1156: unreadable graphics-state value", exc_info=True)
+        return False
+
+
 def page_has_opaque_page_covering_raster(page) -> bool:
     """#1156 round 2: is there an independent PIXEL reading of this page?
 
@@ -5029,36 +5045,33 @@ class BornDigitalDetector:
         reimplementing one in Python miscomputes geometry. Splitting by consumer is the
         honest bound instead: each side errs the way that adds checks.
 
-        Reads as "declares transparency" on any failure -- the cautious side for its one
-        caller.
+        A PyMuPDF failure propagates here too, for the reason given on
+        ``_page_declares_transparency``; the witness keeps its direction through
+        ``page_has_opaque_page_covering_raster``'s own catch.
         """
-        try:
-            doc = page.parent
-            resources = doc.xref_get_key(page.xref, "Resources")
-            if resources[0] == "xref":
-                ext = doc.xref_get_key(int(resources[1].split()[0]), "ExtGState")
-            elif resources[0] == "dict":
-                ext = ("dict", resources[1])
-            else:
-                return False
-            if ext[0] == "null":
-                return False
-            text = ext[1]
-            if ext[0] == "xref":
-                text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
-            blobs = [text or ""]
-            for xref in {int(m) for m in _INDIRECT_REF_RE.findall(blobs[0])}:
-                blobs.append(doc.xref_object(xref, compressed=True) or "")
-            for blob in blobs:
-                if any(float(v) < 1.0 for v in _ALPHA_RE.findall(blob)):
-                    return True
-                # A soft mask makes the state transparent without naming an alpha.
-                if "/SMask" in blob and "/SMask /None" not in blob:
-                    return True
+        doc = page.parent
+        resources = doc.xref_get_key(page.xref, "Resources")
+        if resources[0] == "xref":
+            ext = doc.xref_get_key(int(resources[1].split()[0]), "ExtGState")
+        elif resources[0] == "dict":
+            ext = ("dict", resources[1])
+        else:
             return False
-        except (IndexError, TypeError, ValueError):
-            logger.debug("#1156: unreadable graphics-state value", exc_info=True)
-            return True
+        if ext[0] == "null":
+            return False
+        text = ext[1]
+        if ext[0] == "xref":
+            text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
+        blobs = [text or ""]
+        for xref in {int(m) for m in _INDIRECT_REF_RE.findall(blobs[0])}:
+            blobs.append(doc.xref_object(xref, compressed=True) or "")
+        for blob in blobs:
+            if _any_alpha_below_one(blob):
+                return True
+            # A soft mask makes the state transparent without naming an alpha.
+            if "/SMask" in blob and "/SMask /None" not in blob:
+                return True
+        return False
 
     @staticmethod
     def _page_declares_transparency(page) -> bool:
@@ -5070,28 +5083,21 @@ class BornDigitalDetector:
         that declares no partial alpha anywhere is the positive case. Raises nothing --
         an unreadable resource dict reads as "declares transparency", the cautious side.
         """
-        try:
-            doc = page.parent
-            resources = doc.xref_get_key(page.xref, "Resources")
-            if resources[0] == "xref":
-                res_xref = int(resources[1].split()[0])
-                ext = doc.xref_get_key(res_xref, "ExtGState")
-            elif resources[0] == "dict":
-                ext = ("dict", resources[1])
-            else:
-                return False
-            if ext[0] == "null":
-                return False
-            text = ext[1]
-            if ext[0] == "xref":
-                text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
-            return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
-        except (IndexError, TypeError, ValueError):
-            # A malformed resource VALUE is "no declared alpha" by the same positive-
-            # evidence rule the rest of this helper uses. A PyMuPDF FAILURE is different
-            # and propagates: see ``_image_is_opaque``.
-            logger.debug("#1156: unreadable graphics-state value", exc_info=True)
+        doc = page.parent
+        resources = doc.xref_get_key(page.xref, "Resources")
+        if resources[0] == "xref":
+            res_xref = int(resources[1].split()[0])
+            ext = doc.xref_get_key(res_xref, "ExtGState")
+        elif resources[0] == "dict":
+            ext = ("dict", resources[1])
+        else:
             return False
+        if ext[0] == "null":
+            return False
+        text = ext[1]
+        if ext[0] == "xref":
+            text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
+        return _any_alpha_below_one(text)
 
     @staticmethod
     def _image_is_opaque(doc, info: dict, page_declares_transparency: bool) -> bool:
