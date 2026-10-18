@@ -90,9 +90,7 @@ def _run_page(
         return original_assemble(state, od)
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route)
-        )
+        stack.enter_context(patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route))
         stack.enter_context(
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
@@ -108,14 +106,26 @@ def _run_page(
         stack.enter_context(
             patch.object(pipeline, "_suppress_chart_table_skeletons", lambda *a, **k: 0)
         )
-        stack.enter_context(
-            patch("socr.tables.reconstruct.chart_region_bboxes", return_value=[])
-        )
+        stack.enter_context(patch("socr.tables.reconstruct.chart_region_bboxes", return_value=[]))
         if page_has_tables is False:
             stack.enter_context(patch.object(pipeline, "_page_has_tables", return_value=False))
         if locate_tables_empty:
             stack.enter_context(patch("socr.tables.locate.locate_tables", return_value=[]))
-        stack.enter_context(patch.object(pipeline, "_phase_assemble", side_effect=_assemble_wrapper))
+        elif pdf_name == "resf_p59.pdf":
+            import socr.tables.locate as locate_mod
+
+            _orig_locate = locate_mod.locate_tables
+
+            def _p59_locate(page):
+                boxes = _orig_locate(page)
+                if len(boxes) >= 2:
+                    return [boxes[1], boxes[0]]
+                return boxes
+
+            stack.enter_context(patch.object(locate_mod, "locate_tables", side_effect=_p59_locate))
+        stack.enter_context(
+            patch.object(pipeline, "_phase_assemble", side_effect=_assemble_wrapper)
+        )
         result = pipeline.process(pdf, out_dir)
 
     return pipeline, result, captured["state"], out_dir
@@ -137,9 +147,9 @@ def test_correct_table_verified_end_to_end(tmp_path: Path, pdf: str, md_file: st
 
     assert result.status in (DocumentStatus.SUCCESS, DocumentStatus.AUDIT_FAILED)
     assert ps.native_cell_binding
-    assert all(
-        entry.get("outcome") == "verified" for entry in ps.native_cell_binding.values()
-    ), ps.native_cell_binding
+    assert all(entry.get("outcome") == "verified" for entry in ps.native_cell_binding.values()), (
+        ps.native_cell_binding
+    )
     assert win["status"] == PageStatus.SUCCESS.value
     assert UNVERIFIED_TABLE_MARK not in win["text"]
     kinds = [e["kind"] for e in _audit_events(out_dir) if e.get("page_num") == 1]

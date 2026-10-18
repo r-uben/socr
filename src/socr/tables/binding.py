@@ -1857,9 +1857,9 @@ def _best_lane_column_map(
                 cand_normalized = _normalize_cell(cand_text) if cand_text else ""
                 if not cand_normalized or not is_numeric_token(cand_normalized):
                     continue
-                if _normalize_binding_numeric_token(native_text) == _normalize_binding_numeric_token(
-                    cand_normalized
-                ):
+                if _normalize_binding_numeric_token(
+                    native_text
+                ) == _normalize_binding_numeric_token(cand_normalized):
                     score[lane][col_idx] += 1
 
     dp = [[0] * (n_cand_cols + 1) for _ in range(lane_count + 1)]
@@ -2542,9 +2542,9 @@ def bind(
                         )
                     )
                     continue
-                if _normalize_binding_numeric_token(native_value) == _normalize_binding_numeric_token(
-                    model_value_normalized
-                ):
+                if _normalize_binding_numeric_token(
+                    native_value
+                ) == _normalize_binding_numeric_token(model_value_normalized):
                     result.matched_cells.append(
                         MatchedCell(
                             row_path=native_row.row_path, col_path=col_path, value=native_value

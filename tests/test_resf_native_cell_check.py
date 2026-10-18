@@ -12,7 +12,11 @@ from socr.tables.native_cell_check import (
     NativeCellOutcome,
     check_table_cell_binding,
 )
-from socr.tables.native_verifier import _normalize_binding_numeric_token
+from socr.tables.native_verifier import (
+    _canonical_binding_numeric,
+    _normalize_binding_numeric_token,
+    binding_numeric_tokens_equivalent,
+)
 from socr.core.born_digital import flatten_page_spans
 
 FIXTURES = Path(__file__).parent / "fixtures" / "resf_native_cell"
@@ -50,7 +54,11 @@ def test_locale_decimal_comma_not_thousands():
     assert _normalize_binding_numeric_token("1,5") != _normalize_binding_numeric_token("15")
     assert _normalize_binding_numeric_token("-5,5") == "-5.5"
     assert _normalize_binding_numeric_token("1 234,5") == "1234.5"
-    assert _normalize_binding_numeric_token("1,204") == "1204"
+    assert _canonical_binding_numeric("1,204")[1] is True
+    assert binding_numeric_tokens_equivalent("1,204", "1204") is None
+    assert binding_numeric_tokens_equivalent("45%", "45") is False
+    assert _normalize_binding_numeric_token("(0,4)") == "-0.4"
+    assert _normalize_binding_numeric_token("1,5 M€") == "1.5"
 
 
 class TestP59Tableau1:
@@ -64,8 +72,14 @@ class TestP59Tableau1:
     @pytest.mark.parametrize(
         "mutator,label",
         [
-            (lambda m: m.replace("Solde public | -5,5 | -6,1", "Solde public | -6,1 | -5,5"), "swapped_year_columns"),
-            (lambda m: m.replace("Solde public | -5,5 |", "Solde public | 15 |"), "wrong_value_15_vs_-5,5"),
+            (
+                lambda m: m.replace("Solde public | -5,5 | -6,1", "Solde public | -6,1 | -5,5"),
+                "swapped_year_columns",
+            ),
+            (
+                lambda m: m.replace("Solde public | -5,5 |", "Solde public | 15 |"),
+                "wrong_value_15_vs_-5,5",
+            ),
             (lambda m: m.replace("Solde public | -5,5 |", "Solde public | 5,5 |"), "flipped_sign"),
             (
                 lambda m: m.replace(

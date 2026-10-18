@@ -117,6 +117,10 @@ from socr.judge.table_rung_ollama import (
     adjudicator_rung_reachable as table_judge_adjudicator_reachable,
 )
 from socr.judge.table_verdict import (
+    NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
+    NATIVE_CELL_CHECK_CONTRADICTED_KIND,
+    NATIVE_CELL_CHECK_SKIPPED_KIND,
+    NATIVE_CELL_CHECK_VERIFIED_KIND,
     RUNG_KIND_CELL_ADJUDICATOR,
     RUNG_KIND_GEMINI,
     RUNG_KIND_OLLAMA,
@@ -379,6 +383,18 @@ _RESUME_REPLAYED: dict[str, str] = {
     TABLE_BINDING_BOUNDARY_RESOLVED_KIND: (
         "GH-609 round 4: the companion resolution event; dropping it would un-resolve "
         "a table a prior run proved clean"
+    ),
+    NATIVE_CELL_CHECK_VERIFIED_KIND: (
+        "default-on native per-cell binding: terminal table outcome on a resumed page"
+    ),
+    NATIVE_CELL_CHECK_CONTRADICTED_KIND: (
+        "default-on native per-cell binding: contradiction recorded this run only"
+    ),
+    NATIVE_CELL_CHECK_AMBIGUOUS_KIND: (
+        "default-on native per-cell binding: inconclusive/skip outcome on a resumed page"
+    ),
+    NATIVE_CELL_CHECK_SKIPPED_KIND: (
+        "default-on native per-cell binding: geometry skip on a resumed page"
     ),
     VISUAL_VALUES_NOT_TRANSCRIBED_KIND: (
         "GH-519 / GH-563: the chart lane's debt is a standing property of the page; "
@@ -3755,6 +3771,32 @@ class UnifiedPipeline:
             "equation_sidecar_skipped_model_refused",
         }
     )
+
+    @staticmethod
+    def native_cell_check_event_kinds() -> frozenset[str]:
+        """Terminal audit kinds emitted by ``_run_native_cell_binding_check``."""
+        return frozenset(
+            {
+                NATIVE_CELL_CHECK_VERIFIED_KIND,
+                NATIVE_CELL_CHECK_CONTRADICTED_KIND,
+                NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
+                NATIVE_CELL_CHECK_SKIPPED_KIND,
+            }
+        )
+
+    @staticmethod
+    def rollback_native_cell_page_state(
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        *,
+        block_count: int,
+    ) -> None:
+        """Drop native-cell audit events and sidecar entries for one page (error rollback)."""
+        kinds = UnifiedPipeline.native_cell_check_event_kinds()
+        state.events = [e for e in state.events if not (e.page_num == page_num and e.kind in kinds)]
+        for idx in range(block_count):
+            ps.native_cell_binding.pop(f"p{page_num}-t{idx}", None)
 
     @classmethod
     def resume_restore_kinds(cls) -> frozenset[str]:
@@ -8107,12 +8149,6 @@ class UnifiedPipeline:
         if not layer_is_admissible_evidence(ps):
             return
         from socr.core.audit_log import AuditEvent
-        from socr.judge.table_verdict import (
-            NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
-            NATIVE_CELL_CHECK_CONTRADICTED_KIND,
-            NATIVE_CELL_CHECK_SKIPPED_KIND,
-            NATIVE_CELL_CHECK_VERIFIED_KIND,
-        )
         from socr.tables.native_cell_check import (
             NativeCellOutcome,
             binding_summary_payload,
@@ -8127,6 +8163,11 @@ class UnifiedPipeline:
             return
 
         worst: NativeCellOutcome | None = None
+
+        def _rollback_native_cell_page() -> None:
+            nonlocal worst
+            self.rollback_native_cell_page_state(state, page_num, ps, block_count=len(blocks))
+            worst = None
 
         def _record_skip(table_id: str, reason: str) -> None:
             nonlocal worst
@@ -8192,7 +8233,9 @@ class UnifiedPipeline:
                                                 )
                                             elif result.outcome is NativeCellOutcome.CONTRADICTED:
                                                 kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
-                                                detail = f"table {witness.table_id}: {result.detail}"
+                                                detail = (
+                                                    f"table {witness.table_id}: {result.detail}"
+                                                )
                                             else:
                                                 kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
                                                 detail = (
@@ -8208,7 +8251,10 @@ class UnifiedPipeline:
                                                     data=payload,
                                                 )
                                             )
-                                            if worst is None or result.outcome is NativeCellOutcome.CONTRADICTED:
+                                            if (
+                                                worst is None
+                                                or result.outcome is NativeCellOutcome.CONTRADICTED
+                                            ):
                                                 worst = result.outcome
                                             elif (
                                                 worst is not NativeCellOutcome.CONTRADICTED
@@ -8240,7 +8286,10 @@ class UnifiedPipeline:
                                                 data=payload,
                                             )
                                         )
-                                        if worst is None or result.outcome is NativeCellOutcome.CONTRADICTED:
+                                        if (
+                                            worst is None
+                                            or result.outcome is NativeCellOutcome.CONTRADICTED
+                                        ):
                                             worst = result.outcome
                                         elif (
                                             worst is not NativeCellOutcome.CONTRADICTED
@@ -8257,6 +8306,7 @@ class UnifiedPipeline:
                 type(exc).__name__,
                 exc,
             )
+            _rollback_native_cell_page()
             for idx, _block in enumerate(blocks):
                 _record_skip(f"p{page_num}-t{idx}", f"check_error:{type(exc).__name__}")
 
@@ -15239,7 +15289,9 @@ class UnifiedPipeline:
             # GH-367: per-table lift/hold record so a resumed run does not
             # silently re-clamp a table whose contradictions were disproved.
             "binding_adjudication": dict(ps.binding_adjudication) if ps else {},
-            "native_cell_binding": dict(getattr(ps, "native_cell_binding", None) or {}) if ps else {},
+            "native_cell_binding": dict(getattr(ps, "native_cell_binding", None) or {})
+            if ps
+            else {},
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -16627,6 +16679,9 @@ class UnifiedPipeline:
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             ps.page_retry = meta.get("page_retry") or None
             ps.timings_s = coerce_page_timings(meta.get("timings_s"))
+            restored_native_cell = meta.get("native_cell_binding")
+            if isinstance(restored_native_cell, dict):
+                ps.native_cell_binding = dict(restored_native_cell)
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
             from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND

@@ -507,10 +507,7 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
 
     assert sidecar_pop["winning_output"]["audit_passed"] is False
     assert sidecar_pop["winning_output"]["status"] == PageStatus.WARNING.value
-    assert (
-        sidecar_pop["winning_output"]["failure_mode"]
-        == FailureMode.TABLE_UNVERIFIED.value
-    )
+    assert sidecar_pop["winning_output"]["failure_mode"] == FailureMode.TABLE_UNVERIFIED.value
 
     # Audit log JSON: empty run records structure failure; populated run records
     # default-on native cell skip (no PDF table geometry on this prose-only fixture).

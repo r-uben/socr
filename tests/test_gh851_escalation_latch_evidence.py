@@ -190,7 +190,9 @@ def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) ->
 
     # Document notes must name the withheld page; native cell skip affects both runs.
     assert "2" in (wedge.error or "")
-    assert "table_escalation_withheld" in json.dumps([e for e in wedge_events if e.get("page_num") == 2])
+    assert "table_escalation_withheld" in json.dumps(
+        [e for e in wedge_events if e.get("page_num") == 2]
+    )
 
 
 def test_a_wedged_run_is_retried_on_resume_once_the_provider_is_healthy(tmp_path: Path) -> None:

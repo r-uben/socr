@@ -425,9 +425,7 @@ class TestWithholdThroughTheWholePipeline:
         _p, _r, state, *_ = _process(tmp_path, "off", MINUS_DROPPED_MD, ladder=False)
         assert state.pages[1].table_ladder_disposition is FailureMode.TABLE_UNVERIFIED
         assert not [e for e in state.events if e.kind == TABLE_LADDER_WITHHELD_KIND]
-        assert [
-            e for e in state.events if e.kind == "native_cell_check_contradicted"
-        ]
+        assert [e for e in state.events if e.kind == "native_cell_check_contradicted"]
 
 
 class TestScope:

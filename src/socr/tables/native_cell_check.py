@@ -2,16 +2,16 @@
 
 Uses ``tables.binding.bind()`` as the primary oracle. When column geometry is
 lane-mismatched (common on dense French budget tables), falls back to row-anchor
-comparison: for each row ``bind()`` already paired, compare x-sorted native
-numeric tokens to the candidate row's data cells (order + N2 normalization).
+comparison on ``bind()``'s ``row_binding`` map only (no substring label guessing).
 
 Outcomes (closed set):
 
-* ``verified`` — structural agreement from ``bind()``, or the row-anchor
-  fallback found no mismatches on every paired row.
-* ``contradicted`` — a contradicted cell, row-label contradiction, or a
-  significant (column-bound) native/model unbound cell, or a row-anchor mismatch.
-* ``ambiguous`` — insufficient geometry to compare (no paired rows, parse failure).
+* ``verified`` — ``structural_agreement``, or a documented French-table fallback
+  with real per-row numeric comparisons and no anchor mismatches.
+* ``contradicted`` — contradicted cells, row-label contradictions (when columns
+  are verifiable), or row-anchor mismatches.
+* ``ambiguous`` — any unbound cell (when columns are verifiable), incomplete
+  coverage, ambiguous locale, or insufficient comparisons.
 """
 
 from __future__ import annotations
@@ -23,10 +23,11 @@ from typing import Any
 
 from socr.tables.binding import BindingResult, bind, parse_grid
 from socr.tables.native_verifier import (
-    _normalize_binding_numeric_token,
+    _THOUSANDS_SPACE_RE,
     _normalize_cell,
+    binding_numeric_tokens_equivalent,
     is_numeric_token,
-    label_key,
+    strip_presentation,
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
@@ -47,97 +48,129 @@ class TableCellCheckResult:
     contradicted_samples: list[dict[str, str]] = field(default_factory=list)
 
 
-def _significant_unbound(result: BindingResult) -> bool:
-    return bool([c for c in result.native_unbound if c.col_path]) or bool(
-        [c for c in result.model_unbound if c.col_path]
-    )
+def _prepare_numeric_cell(raw: str) -> str:
+    """Presentation + interior thousand-space strip before numeric classification."""
+    cell = _normalize_cell(strip_presentation(raw.strip()))
+    return _THOUSANDS_SPACE_RE.sub("", cell)
 
 
-def _active_contradictions(result: BindingResult, markdown: str) -> bool:
-    if result.contradicted_cells:
-        return True
-    if _significant_unbound(result):
-        return True
-    if not result.row_label_contradictions:
+def _is_year_header_row(cand_row: list[str]) -> bool:
+    stub = (cand_row[0] if cand_row else "").strip()
+    if stub and not _YEAR_HEADER_RE.match(stub):
         return False
-    if result.column_binding_unverifiable:
-        return bool(_row_anchor_mismatch(result, markdown))
-    return True
+    data = [_prepare_numeric_cell(c) for c in cand_row[1:] if c.strip() and c.strip() != "-"]
+    return bool(data) and all(_YEAR_HEADER_RE.match(c) for c in data)
 
 
 def _model_row_numeric_tokens(cand_row: list[str]) -> list[str]:
     out: list[str] = []
     for cell in cand_row[1:]:
-        cell = _normalize_cell(cell.strip())
+        cell = _prepare_numeric_cell(cell)
         if not cell or cell == "-":
             continue
         if is_numeric_token(cell):
-            out.append(_normalize_binding_numeric_token(cell))
+            out.append(cell)
     return out
 
 
 def _native_row_numeric_tokens(native_row) -> list[str]:
     return [
-        _normalize_binding_numeric_token(text)
+        text
         for _lane, (text, ambiguous) in sorted(native_row.lane_tokens.items())
-        if not ambiguous and is_numeric_token(_normalize_cell(text))
+        if not ambiguous and is_numeric_token(_prepare_numeric_cell(text))
     ]
 
 
-def _is_year_header_row(cand_row: list[str]) -> bool:
-    data = [_normalize_cell(c.strip()) for c in cand_row[1:] if c.strip()]
-    return bool(data) and all(_YEAR_HEADER_RE.match(c) for c in data)
+def _model_row_slots(cand_row: list[str]) -> list[str | None]:
+    slots: list[str | None] = []
+    for cell in cand_row[1:]:
+        cell = _prepare_numeric_cell(cell)
+        if not cell or cell == "-":
+            slots.append(None)
+        elif is_numeric_token(cell):
+            slots.append(cell)
+        else:
+            slots.append("__non_numeric__")
+    return slots
 
 
-def _native_row_for_label(result: BindingResult, row_label: str):
-    key = label_key(row_label)
-    if not key:
+def _native_row_slots(native_row) -> list[str | None]:
+    slots: list[str | None] = []
+    for _lane, (text, ambiguous) in sorted(native_row.lane_tokens.items()):
+        if ambiguous:
+            return []
+        text = _prepare_numeric_cell(text)
+        if not text or text == "-":
+            slots.append(None)
+        elif is_numeric_token(text):
+            slots.append(text)
+        else:
+            slots.append("__non_numeric__")
+    return slots
+
+
+def _slots_equivalent(
+    native_slots: list[str | None],
+    model_slots: list[str | None],
+) -> bool | None:
+    if len(native_slots) != len(model_slots):
+        return False
+    for n_raw, m_raw in zip(native_slots, model_slots, strict=True):
+        if n_raw is None and m_raw is None:
+            continue
+        if n_raw is None or m_raw is None:
+            return False
+        if n_raw == "__non_numeric__" or m_raw == "__non_numeric__":
+            if n_raw != m_raw:
+                return False
+            continue
+        equiv = binding_numeric_tokens_equivalent(n_raw, m_raw)
+        if equiv is None:
+            return None
+        if not equiv:
+            return False
+    return True
+
+
+def _compare_bound_row(
+    native_row,
+    cand_row: list[str],
+) -> bool | None:
+    """``True``/``False`` on agreement; ``None`` = no comparison or ambiguous locale."""
+    model_slots = _model_row_slots(cand_row)
+    native_slots = _native_row_slots(native_row)
+    if model_slots and native_slots and len(model_slots) == len(native_slots):
+        return _slots_equivalent(native_slots, model_slots)
+    model_nums = _model_row_numeric_tokens(cand_row)
+    native_nums = _native_row_numeric_tokens(native_row)
+    if not native_nums:
         return None
-    best = None
-    for nr in result.native_rows:
-        if nr.is_parent:
-            continue
-        native_label = "/".join(nr.row_path) if nr.row_path else ""
-        nkey = label_key(native_label)
-        if not nkey:
-            continue
-        if nkey == key or key in nkey or nkey in key:
-            best = nr
-            break
-    return best
+    if not model_nums:
+        return False
+    if len(native_nums) != len(model_nums):
+        return False
+    for n_raw, m_raw in zip(native_nums, model_nums, strict=True):
+        equiv = binding_numeric_tokens_equivalent(n_raw, m_raw)
+        if equiv is None:
+            return None
+        if not equiv:
+            return False
+    return True
 
 
-def _row_anchor_mismatch(result: BindingResult, markdown: str) -> list[tuple[str, str, str]]:
-    """Return (row_label, native_token, model_token) tuples that disagree.
-
-    When ``bind()``'s ``row_binding`` map is incomplete (common after a single
-    cell edit), fall back to label-keyed native rows. Comparison is always
-    x-ordered within the row: a value moved to another year column changes the
-    ordered token list and is convicted even when ``column_binding_unverifiable``.
-    """
+def _row_anchor_scan(
+    result: BindingResult, markdown: str
+) -> tuple[list[tuple[str, str, str]], int]:
+    """Return (mismatches, successful_numeric_comparisons)."""
     grid = parse_grid(markdown)
     if grid is None:
-        return []
+        return [("", "", "parse_failed")], 0
     mismatches: list[tuple[str, str, str]] = []
-    seen_cand: set[int] = set()
-
-    def _compare(stub: str, native_nums: list[str], model_nums: list[str]) -> None:
-        if not native_nums:
-            return
-        if not model_nums:
-            mismatches.append((stub, ",".join(native_nums), ""))
-            return
-        if len(native_nums) != len(model_nums):
-            mismatches.append((stub, ",".join(native_nums), ",".join(model_nums)))
-            return
-        for n_tok, m_tok in zip(native_nums, model_nums, strict=True):
-            if n_tok != m_tok:
-                mismatches.append((stub, n_tok, m_tok))
+    comparisons = 0
 
     for cand_idx, native_idx in result.row_binding.items():
         if cand_idx >= len(grid.rows) or native_idx >= len(result.native_rows):
             continue
-        seen_cand.add(cand_idx)
         cand_row = grid.rows[cand_idx]
         if _is_year_header_row(cand_row):
             continue
@@ -145,43 +178,94 @@ def _row_anchor_mismatch(result: BindingResult, markdown: str) -> list[tuple[str
         if native_row.is_parent:
             continue
         stub = cand_row[0].strip() if cand_row else ""
-        _compare(stub, _native_row_numeric_tokens(native_row), _model_row_numeric_tokens(cand_row))
+        cmp = _compare_bound_row(native_row, cand_row)
+        if cmp is True and _native_row_numeric_tokens(native_row):
+            comparisons += 1
+        elif cmp is False:
+            mismatches.append(
+                (
+                    stub,
+                    ",".join(_native_row_numeric_tokens(native_row)),
+                    ",".join(_model_row_numeric_tokens(cand_row)),
+                )
+            )
+        elif (
+            cmp is None
+            and _native_row_numeric_tokens(native_row)
+            and _model_row_numeric_tokens(cand_row)
+        ):
+            mismatches.append((stub, "ambiguous_locale", "ambiguous_locale"))
 
+    bound_cand = set(result.row_binding.keys())
     for cand_idx, cand_row in enumerate(grid.rows):
-        if cand_idx in seen_cand or _is_year_header_row(cand_row):
+        if cand_idx in bound_cand or _is_year_header_row(cand_row):
+            continue
+        if not any(
+            is_numeric_token(_prepare_numeric_cell(c))
+            for c in cand_row[1:]
+            if c.strip() and c.strip() != "-"
+        ):
             continue
         stub = cand_row[0].strip() if cand_row else ""
-        model_nums = _model_row_numeric_tokens(cand_row)
-        if not model_nums:
-            continue
-        native_row = _native_row_for_label(result, stub)
-        if native_row is None:
-            mismatches.append((stub, "", ",".join(model_nums)))
-            continue
-        _compare(stub, _native_row_numeric_tokens(native_row), model_nums)
+        mismatches.append((stub, "native_unbound", "model_data_row"))
 
-    return mismatches
+    return mismatches, comparisons
+
+
+def _numeric_unbound_blocks_verify(result: BindingResult) -> bool:
+    """Any unmatched side carrying a numeric token blocks VERIFIED."""
+    for cell in result.model_unbound:
+        if is_numeric_token(_prepare_numeric_cell(cell.token)):
+            return True
+    if result.column_binding_unverifiable:
+        return False
+    for cell in result.native_unbound:
+        tok = _prepare_numeric_cell(cell.token)
+        if not is_numeric_token(tok):
+            continue
+        if not cell.col_path and _YEAR_HEADER_RE.match(tok):
+            continue
+        return True
+    return False
+
+
+def _row_binding_covers_model_data_rows(result: BindingResult, markdown: str) -> bool:
+    grid = parse_grid(markdown)
+    if grid is None:
+        return False
+    for cand_idx, cand_row in enumerate(grid.rows):
+        if _is_year_header_row(cand_row):
+            continue
+        if not any(
+            is_numeric_token(_prepare_numeric_cell(c))
+            for c in cand_row[1:]
+            if c.strip() and c.strip() != "-"
+        ):
+            continue
+        if cand_idx not in result.row_binding:
+            return False
+    return True
 
 
 def classify_binding_for_cell_check(result: BindingResult, markdown: str) -> NativeCellOutcome:
-    """Map one ``bind()`` result to the three consumer outcomes."""
-    if _active_contradictions(result, markdown):
+    mismatches, comparisons = _row_anchor_scan(result, markdown)
+    if result.contradicted_cells:
         return NativeCellOutcome.CONTRADICTED
+    if result.row_label_contradictions and not result.column_binding_unverifiable:
+        return NativeCellOutcome.CONTRADICTED
+    hard_mismatches = [m for m in mismatches if m[1] != "ambiguous_locale"]
+    if hard_mismatches:
+        return NativeCellOutcome.CONTRADICTED
+    if result.ambiguous_count and not result.column_binding_unverifiable:
+        return NativeCellOutcome.AMBIGUOUS
+    if _numeric_unbound_blocks_verify(result):
+        return NativeCellOutcome.AMBIGUOUS
     if result.structural_agreement:
         return NativeCellOutcome.VERIFIED
-    if result.matched_cells and result.ambiguous_count == 0 and not _significant_unbound(result):
+    if _row_binding_covers_model_data_rows(result, markdown) and comparisons > 0:
         return NativeCellOutcome.VERIFIED
-    mismatches = _row_anchor_mismatch(result, markdown)
     if mismatches:
-        return NativeCellOutcome.CONTRADICTED
-    if result.column_binding_unverifiable:
-        if mismatches:
-            return NativeCellOutcome.CONTRADICTED
-        if result.row_binding:
-            return NativeCellOutcome.VERIFIED
         return NativeCellOutcome.AMBIGUOUS
-    if result.row_binding:
-        return NativeCellOutcome.VERIFIED
     return NativeCellOutcome.AMBIGUOUS
 
 
@@ -193,7 +277,12 @@ def check_table_cell_binding(
     region_bbox,
     spans: list | None = None,
 ) -> TableCellCheckResult:
-    """Run ``bind()`` and classify for one table region."""
+    if not words:
+        return TableCellCheckResult(
+            table_id=table_id,
+            outcome=NativeCellOutcome.AMBIGUOUS,
+            detail="no native words in region",
+        )
     try:
         binding = bind(words, markdown, region=region_bbox, spans=spans or [])
     except Exception as exc:
@@ -213,7 +302,8 @@ def check_table_cell_binding(
             }
         )
     if outcome is NativeCellOutcome.CONTRADICTED and not samples:
-        for stub, n_tok, m_tok in _row_anchor_mismatch(binding, markdown)[:5]:
+        mismatches, _ = _row_anchor_scan(binding, markdown)
+        for stub, n_tok, m_tok in mismatches[:5]:
             samples.append({"row": stub, "native": n_tok, "model": m_tok})
     detail = (
         f"outcome={outcome.value}; fully_checked={binding.fully_checked}; "
@@ -230,7 +320,6 @@ def check_table_cell_binding(
 
 
 def skipped_check_result(table_id: str, reason: str) -> TableCellCheckResult:
-    """Born-digital model table present but geometry/detector prevented ``bind()``."""
     return TableCellCheckResult(
         table_id=table_id,
         outcome=NativeCellOutcome.AMBIGUOUS,
@@ -239,7 +328,6 @@ def skipped_check_result(table_id: str, reason: str) -> TableCellCheckResult:
 
 
 def binding_summary_payload(result: TableCellCheckResult) -> dict[str, Any]:
-    """JSON-serializable sidecar fragment for one table."""
     b = result.binding
     payload: dict[str, Any] = {
         "table_id": result.table_id,

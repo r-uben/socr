@@ -1031,9 +1031,16 @@ def is_numeric_token(tok: str) -> bool:
     return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
 
 
-_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f ](?=\d)")
-# Decimal comma: exactly one comma, 1–3 fractional digits, end of numeric body.
+# Thin space, NBSP, narrow NBSP, figure space, word joiner — digit-group separators.
+_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f\u2009\u2007\u2060 ](?=\d)")
+# Decimal comma: exactly one comma, 1–2 fractional digits, end of numeric body.
 _DECIMAL_COMMA_RE = re.compile(r"^(?P<body>-?\d[\d.,]*),(?P<frac>\d{1,2})$")
+# Single comma + exactly three fractional digits: English thousands vs mis-read decimal.
+_BINDING_COMMA_THOUSANDS_AMBIGUOUS_RE = re.compile(r"^-?\d{1,3},\d{3}$")
+_BINDING_UNIT_SUFFIX_RE = re.compile(
+    r"^(?P<num>.+?)\s*(?:M€|Md€|k€|€|EUR|USD)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _strip_trailing_table_punctuation(body: str) -> str:
@@ -1071,6 +1078,8 @@ def _apply_locale_numeric_normalization(body: str) -> str:
             body = body.replace(",", "")
         return body
     if "," in body:
+        if _BINDING_COMMA_THOUSANDS_AMBIGUOUS_RE.match(body):
+            return body
         if re.search(r"\d,\d{1,2}$", body) and body.count(",") == 1:
             return body.replace(",", ".")
         for _ in range(3):
@@ -1116,14 +1125,46 @@ def _normalize_numeric_token(tok: str) -> str:
     return tok
 
 
+def _strip_binding_unit_suffix(tok: str) -> str:
+    m = _BINDING_UNIT_SUFFIX_RE.match(tok.strip())
+    return m.group("num").strip() if m else tok.strip()
+
+
+def _canonical_binding_numeric(tok: str) -> tuple[str, bool]:
+    """Born-digital binding canonical form and whether locale is ambiguous."""
+    tok = _strip_binding_unit_suffix(_decoded_numeric_candidate(tok))
+    paren_neg = False
+    if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
+        inner = tok[1:-1].strip()
+        if _NUMERIC_RE.search(inner):
+            tok = inner
+            paren_neg = True
+    has_pct = tok.endswith("%")
+    if has_pct:
+        tok = tok[:-1]
+    if _BINDING_COMMA_THOUSANDS_AMBIGUOUS_RE.match(tok):
+        return (tok, True)
+    body = _apply_locale_numeric_normalization(tok)
+    if paren_neg and body and body not in ("-", "") and not body.startswith("-"):
+        body = f"-{body}"
+    if has_pct:
+        body = f"{body}%"
+    return (body, False)
+
+
+def binding_numeric_tokens_equivalent(left: str, right: str) -> bool | None:
+    """Compare two tokens for binding; ``None`` means ambiguous (never verify)."""
+    left_c, left_amb = _canonical_binding_numeric(left)
+    right_c, right_amb = _canonical_binding_numeric(right)
+    if left_amb or right_amb:
+        return None
+    return left_c == right_c
+
+
 def _normalize_binding_numeric_token(tok: str) -> str:
     """Locale-aware numeric form for born-digital per-cell binding only."""
-    tok = _decoded_numeric_candidate(tok)
-    if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
-        tok = tok[1:-1]
-    if tok.endswith("%"):
-        tok = tok[:-1]
-    return _apply_locale_numeric_normalization(tok)
+    canonical, _ambiguous = _canonical_binding_numeric(tok)
+    return canonical
 
 
 def _numeric_multiset_from_tokens(
