@@ -1087,7 +1087,11 @@ def _presentation_normalized_for_lanes(words: list) -> list:
         text = wd[4]
         if is_numeric_token(text):
             stripped = strip_presentation(text)
-            if stripped != text:
+            if _SPEC_NUMBER_RE.match(stripped):
+                # Footnote markers like (1) sit beside row labels; they must not
+                # become data lanes (RESF p.59 T2 and similar).
+                wd = (wd[0], wd[1], wd[2], wd[3], "", *wd[5:])
+            elif stripped != text:
                 wd = (wd[0], wd[1], wd[2], wd[3], stripped, *wd[5:])
         normalized.append(wd)
     return normalized
@@ -1160,7 +1164,9 @@ def _native_lane_geometry(
             band_lanes = {
                 raw_lane_of[word[0]]
                 for word in band_words
-                if is_numeric_token(word[4]) and word[0] in raw_lane_of
+                if is_numeric_token(word[4])
+                and not _SPEC_NUMBER_RE.match(strip_presentation(word[4]))
+                and word[0] in raw_lane_of
             }
             if len(band_lanes) > 1:
                 data_lanes.update(band_lanes)
@@ -1182,7 +1188,28 @@ def _native_lane_geometry(
     remap = {raw: new for new, raw in enumerate(surviving_raw)}
     centers = [all_centers[i] for i in surviving_raw]
     lane_of = {x: remap[li] for x, li in raw_lane_of.items() if li in remap}
-    return len(surviving_raw), lane_of, centers
+    lane_count = len(surviving_raw)
+
+    # Indented sub-rows often shift numeric x slightly into extra lane clusters
+    # (same 3 columns → 6 native lanes). Collapse to candidate width when known.
+    if n_cand_cols is not None and lane_count > n_cand_cols and lane_count == 2 * n_cand_cols:
+        order = sorted(range(lane_count), key=lambda i: centers[i])
+        merge_map: dict[int, int] = {}
+        new_centers = [0.0] * n_cand_cols
+        counts = [0] * n_cand_cols
+        for rank, old_li in enumerate(order):
+            new_li = min(n_cand_cols - 1, (rank * n_cand_cols) // lane_count)
+            merge_map[old_li] = new_li
+            new_centers[new_li] += centers[old_li]
+            counts[new_li] += 1
+        centers = [
+            (new_centers[i] / counts[i]) if counts[i] else centers[min(i, lane_count - 1)]
+            for i in range(n_cand_cols)
+        ]
+        lane_of = {x: merge_map[li] for x, li in lane_of.items() if li in merge_map}
+        lane_count = n_cand_cols
+
+    return lane_count, lane_of, centers
 
 
 def _native_rows(
@@ -1243,7 +1270,11 @@ def _native_rows(
 
     for bidx in data_positions:
         band_words = bands[bidx]
-        numeric_words = [w for w in band_words if is_numeric_token(w[4])]
+        numeric_words = [
+            w
+            for w in band_words
+            if is_numeric_token(w[4]) and not _SPEC_NUMBER_RE.match(strip_presentation(w[4]))
+        ]
         data_words = [w for w in band_words if lane_of.get(w[0]) is not None]
         label, label_bbox = _row_label_and_bbox(band_words, lane_of)
         band_ambiguous = bidx in ambiguous_bands

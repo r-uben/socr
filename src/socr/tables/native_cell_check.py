@@ -17,6 +17,7 @@ Outcomes (closed set):
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -26,6 +27,7 @@ from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
     _THOUSANDS_SPACE_RE,
+    _normalize_binding_numeric_token,
     _normalize_cell,
     binding_numeric_tokens_equivalent,
     is_numeric_token,
@@ -279,6 +281,12 @@ def _compare_bound_row(
     if not model_nums:
         return False
     if len(native_nums) != len(model_nums):
+        model_counter = Counter(
+            _normalize_binding_numeric_token(_prepare_numeric_cell(m)) for m in model_nums
+        )
+        native_counter = getattr(native_row, "multiset", None) or Counter()
+        if model_counter and model_counter == native_counter:
+            return None
         return False
     for n_raw, m_raw in zip(native_nums, model_nums, strict=True):
         equiv = binding_numeric_tokens_equivalent(n_raw, m_raw)
@@ -682,6 +690,10 @@ def check_table_cell_binding(
             except (TypeError, ValueError):
                 continue
         region_tuple = refine_check_region(region_tuple, peers)
+    if region_tuple is not None and page is not None:
+        from socr.tables.native_contradiction import extend_check_region_for_trailing_words
+
+        region_tuple = extend_check_region_for_trailing_words(page, region_tuple, markdown)
     try:
         binding = bind(words, markdown, region=region_tuple, spans=spans or [])
     except Exception as exc:

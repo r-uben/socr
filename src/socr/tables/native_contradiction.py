@@ -636,6 +636,37 @@ def refine_check_region(
     return (x0, y0, x1, y1)
 
 
+_TRAILING_ROW_BAND_PT = 28.0
+
+
+def extend_check_region_for_trailing_words(
+    page,
+    region: tuple[float, float, float, float],
+    markdown: str,
+) -> tuple[float, float, float, float]:
+    """Extend region bottom when locator boxes clip the last model row by a few pt."""
+    if page is None or not markdown.strip():
+        return region
+    from socr.tables.native_verifier import is_numeric_token
+
+    x0, y0, x1, y1 = region
+    max_y = y1
+    for w in page.get_text("words"):
+        wx0, wy0, wx1, wy1, text = w[0], w[1], w[2], w[3], w[4]
+        if wx0 < x0 - 2 or wx1 > x1 + 2:
+            continue
+        if wy0 < y1 - 1 or wy0 > y1 + _TRAILING_ROW_BAND_PT:
+            continue
+        if is_numeric_token(text):
+            max_y = max(max_y, wy1)
+            continue
+        if text.strip().lower() in ("écart", "ecart", "production"):
+            max_y = max(max_y, wy1)
+    if max_y <= y1:
+        return region
+    return (x0, y0, x1, max_y)
+
+
 def unclaimed_locator_box_indices(
     page,
     block_markdowns: list[str],

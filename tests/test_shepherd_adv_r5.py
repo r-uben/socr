@@ -166,7 +166,7 @@ def _build_adv_r5_cell_cases() -> list[tuple[str, tuple[NativeCellOutcome, ...]]
         ("F14", "** dont Etat"),
     ]
     for tag, _lab in frows:
-        ok_ctl: tuple[NativeCellOutcome, ...] = (C, A) if tag == "F10" else (V, A)
+        ok_ctl: tuple[NativeCellOutcome, ...] = (V, A)
         cases.append((f"{tag}-ctl", ok_ctl))
         cases.append((f"{tag}-drop", NOT_V))
         cases.append((f"{tag}-droplast", NOT_V))
@@ -273,8 +273,7 @@ def _run_adv_r5_cell(adv: _AdvFixtures, case_id: str) -> None:
         rows = [("Etat", "100", "200"), (lab, "60", "80"), ("Divers", "5", "6")]
         w, r = adv.mkpdf(f"{tag}.pdf", rows)
         if case_id == f"{tag}-ctl":
-            ok_ctl: tuple[NativeCellOutcome, ...] = (C, A) if tag == "F10" else (V, A)
-            adv.run(w, r, _mdx(rows, False), ok_ctl)
+            adv.run(w, r, _mdx(rows, False), (V, A))
             return
         if case_id == f"{tag}-drop":
             adv.run(w, r, _mdx([rows[0], rows[2]], False), NOT_V)

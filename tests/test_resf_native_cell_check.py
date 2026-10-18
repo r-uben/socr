@@ -42,13 +42,13 @@ def p59_tableau2_paired():
     doc = fitz.open(FIXTURES / "resf_p59.pdf")
     page = doc[0]
     raw = [tuple(b.bbox) for b in locate_tables(page)]
+    md1 = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
     md2 = (FIXTURES / "p59_tableau2.md").read_text(encoding="utf-8")
-    pr = pair_regions(page, [md2], raw)
+    pr = pair_regions(page, [md1, md2], raw)
     words = page.get_text("words")
     spans = flatten_page_spans(page)
-    doc.close()
-    assert pr[0] is not None
-    return words, md2, pr[0], spans
+    assert pr[1] is not None
+    return words, md2, pr[1], spans, pr[0], raw, page, doc
 
 
 @pytest.fixture(scope="module")
@@ -124,11 +124,22 @@ class TestP59Tableau1:
 
 class TestP59Tableau2:
     def test_tableau2_complete_not_contradicted(self, p59_tableau2_paired):
-        words, md, region, spans = p59_tableau2_paired
-        r = check_table_cell_binding(
-            table_id="t1", words=words, markdown=md, region_bbox=region, spans=spans
-        )
+        words, md, region, spans, peer, locator_boxes, page, doc = p59_tableau2_paired
+        try:
+            r = check_table_cell_binding(
+                table_id="t1",
+                words=words,
+                markdown=md,
+                region_bbox=region,
+                spans=spans,
+                peer_region_bboxes=[peer],
+                locator_boxes=locator_boxes,
+                page=page,
+            )
+        finally:
+            doc.close()
         assert r.outcome in (NativeCellOutcome.VERIFIED, NativeCellOutcome.AMBIGUOUS)
+        assert r.outcome is not NativeCellOutcome.CONTRADICTED
 
 
 def _p67_swap_row_labels(md: str) -> str:
