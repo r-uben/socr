@@ -80,9 +80,13 @@ def layer_is_admissible_evidence(ps) -> bool:
     consumer behaves exactly as it does on a page with NO text layer, which is the state
     every one of them already handles, so each abstains into a path it already has.
 
-    This is the shared predicate, not a per-call-site check: the sources that read the
-    layer are listed in ``docs/log/2026-10-17_1156-part-a.md`` and each consults THIS
-    function, so a new consumer has one place to look and one test enumerates them.
+    This is the shared predicate, not a per-call-site check: the sources that consult it
+    are listed in ``docs/log/2026-10-17_1156-part-a.md``, so a new consumer has one place
+    to look. They are pinned by BEHAVIOUR, in
+    ``tests/test_gh1156_evidence_guards.py`` -- an earlier enumerating test counted this
+    function's name in the module source, which is grep rather than behaviour and let a
+    guard that crashed the whole table ladder pass (round 4). The readers the log lists as
+    NOT gated are tracked in GitHub issue #1205.
     """
     return not bool(getattr(ps, "prior_ocr_layer_suspect", False))
 

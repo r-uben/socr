@@ -14,11 +14,13 @@ row-shift fixture, with a clean-page control in which binding DOES fire.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from test_ladder_binding_evidence import (  # noqa: E402
+    _CORRECT_MD,
     _SHIFTED_MD,
     _accept_rung,
     _bo,
@@ -38,13 +40,24 @@ def test_loaded_source_is_this_checkout() -> None:
     assert Path(socr.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
 
 
-def _run(tmp_path: Path, *, suspect: bool, rung):
+def _run(tmp_path: Path, *, suspect: bool, rung, markdown=None, judge_outcome: str = ""):
+    """Drive the gate on one page.
+
+    ``markdown`` selects the binding RELATION to the page's own words: ``_SHIFTED_MD``
+    contradicts them (same values, swapped row labels) and ``_CORRECT_MD`` matches, which
+    is the only one that can produce a binding PASS. ``judge_outcome`` is what makes a
+    credential mintable at all -- a credential stands in for a page judge that TIMED OUT,
+    so without the typed outcome the credential assertion cannot fail either way.
+    """
     pipeline = _make_pipeline()
-    state = _make_state(_row_shift_pdf(tmp_path, f"{'suspect' if suspect else 'clean'}.pdf"))
+    tag = f"{'suspect' if suspect else 'clean'}-{judge_outcome or 'none'}"
+    state = _make_state(_row_shift_pdf(tmp_path, f"{tag}.pdf"))
     ps = state.pages[1]
     ps.prior_ocr_layer_suspect = suspect
     ps.prior_ocr_layer = suspect
-    bo = _bo(_SHIFTED_MD)
+    bo = _bo(_SHIFTED_MD if markdown is None else markdown)
+    if judge_outcome:
+        bo = replace(bo, judge_outcome=judge_outcome)
     with patch.object(pipeline, "_transcribe_cell_token", return_value=None):
         pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
     return state, ps, bo
@@ -71,13 +84,52 @@ def test_the_ladder_still_runs_on_a_flagged_page(tmp_path: Path) -> None:
 def test_a_binding_pass_does_not_overrule_a_visual_rejection_on_a_flagged_page(
     tmp_path: Path,
 ) -> None:
-    """(a) The positive direction. The visual rung FAILs; the layer must not rescue it.
+    """(a) The positive direction, with the arm that makes it a test.
 
-    On a suspect page the binding evidence comes from an earlier OCR run, so a PASS there
-    is the layer vouching for a reading. It may not overrule the readers that looked at
-    the pixels, and it may not mint an acceptance credential on their behalf.
+    Round 5 (all three seats): the first version of this was vacuous three ways.
+    ``_SHIFTED_MD`` against this PDF yields CONTRADICT, never PASS, so a guard that
+    abstained only on CONTRADICT would have satisfied it; ``_bo()`` sets no judge outcome,
+    so a credential could not be minted on either arm and that assertion could not fail;
+    and there was no control showing binding DOES overrule when the page is clean.
+
+    ``_CORRECT_MD`` matches the page's own words, which is the only relation that produces
+    a binding PASS, and the timeout outcome is what makes a credential mintable. The clean
+    arm then shows the overrule happening -- accepted, ``verified_by_geometry``, credential
+    minted -- and the suspect arm shows it refused, because on that page the words are an
+    earlier OCR run.
     """
-    state, ps, bo = _run(tmp_path, suspect=True, rung=_reject_rung())
+    from socr.core.result import JUDGE_OUTCOME_TIMEOUT
+    from socr.judge.table_verdict import REASON_VERIFIED_BY_GEOMETRY
+
+    clean_state, clean_ps, clean_bo = _run(
+        tmp_path,
+        suspect=False,
+        rung=_reject_rung(),
+        markdown=_CORRECT_MD,
+        judge_outcome=JUDGE_OUTCOME_TIMEOUT,
+    )
+    accepted = _events_of_kind(clean_state, "table_ladder_accepted")
+    assert accepted, (
+        "control: binding does not overrule the visual rejection on a CLEAN page, so the "
+        "suspect arm below proves nothing"
+    )
+    assert any(
+        REASON_VERIFIED_BY_GEOMETRY in str((e.data or {}).get("reason", ""))
+        or REASON_VERIFIED_BY_GEOMETRY in (e.detail or "")
+        for e in accepted
+    ), f"control: the overrule did not come from geometry: {[e.detail for e in accepted]}"
+    assert getattr(clean_bo, "table_acceptance_credential", None), (
+        "control: no credential was minted, so the suspect arm's credential assertion cannot fail"
+    )
+    assert clean_ps is not None
+
+    state, ps, bo = _run(
+        tmp_path,
+        suspect=True,
+        rung=_reject_rung(),
+        markdown=_CORRECT_MD,
+        judge_outcome=JUDGE_OUTCOME_TIMEOUT,
+    )
 
     assert ps.table_ladder_disposition is not FailureMode.NONE, (
         "a visually REJECTED table was let through on a flagged page"
