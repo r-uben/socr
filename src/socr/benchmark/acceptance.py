@@ -27,6 +27,10 @@ Per lane (one function each, so a later per-page verdict record replaces them lo
 - ``qwen``: ``judge_outcome == page_judge_completed``; no disputed, unverifiable or
   label-unverified table; and not a table-only acceptance (``judge_reason`` starting
   ``native_table_verifier:`` means the page judge was bypassed).
+- Every lane, before its own rule: a page whose sidecar carries
+  ``prior_ocr_layer_suspect`` (#1156) is ``prior_ocr_unchecked``. The page's text layer is
+  an earlier OCR run, so neither coverage nor a page judge is an independent reading of
+  it, and Part A has no comparison that could clear it.
 - ``native``: the #1050 step-1 ink-vs-text-layer verdict ``text_coverage == passed`` on the
   page sidecar (``socr.core.text_coverage.VERDICT_PASSED``). ``flagged``, ``unknown`` or absent
   is not a check.
@@ -118,6 +122,10 @@ from socr.core.text_coverage import VERDICT_PASSED
 UNACCOUNTED = "unaccounted"
 DOCUMENT_FAILED_UNMARKED = "document_failed_unmarked"
 NATIVE_UNCHECKED = "native_unchecked"
+#: #1156: the page's text layer is an EARLIER OCR run and nothing independent has read
+#: the page to check it. Raised in BOTH lanes, because the fault is the page's evidence,
+#: not the engine that happened to win on it.
+PRIOR_OCR_UNCHECKED = "prior_ocr_unchecked"
 CHART_UNCHECKED = "chart_unchecked"
 SUCCESS_AUDIT_FALSE = "success_audit_false"
 EQUATION_UNVERIFIED_SUCCESS = "equation_unverified_success"
@@ -145,6 +153,7 @@ VIOLATION_CLASSES = (
     DOCUMENT_FAILED_UNMARKED,
     NATIVE_UNCHECKED,
     CHART_UNCHECKED,
+    PRIOR_OCR_UNCHECKED,
     SUCCESS_AUDIT_FALSE,
     EQUATION_UNVERIFIED_SUCCESS,
     WARNING_UNMARKED,
@@ -358,13 +367,32 @@ def rule_qwen(page: Page) -> list[str]:
     for name in ("table_disputed", "table_unverifiable", "table_label_unverified"):
         if page.wo.get(name):
             out.append(SUCCESS_UNCHECKED)
+    # #1156: the two lanes must agree. A model reading that won on a page whose text layer
+    # is a prior OCR run is still one reading of a scan with nothing to compare it with;
+    # the page judge's verdict is not that comparison.
+    out.extend(_prior_ocr_unchecked(page))
     return out
+
+
+def _prior_ocr_unchecked(page: Page) -> list[str]:
+    """#1156: coverage proves the layer is PRESENT, never that it is right.
+
+    On a scan the text layer is a previous OCR run's reading, so ``text_coverage ==
+    passed`` says the old reading covers the ink -- which it would also do if every
+    number in it were wrong (measured: ``3 Y,`` for 3 1/2, Fed 1957-05-28 p2). CHECKED
+    needs a comparison against an INDEPENDENT reading, and Part A ships no comparator, so
+    every flagged page is unchecked here. Part B's agreement record is what will clear it.
+    """
+    return [PRIOR_OCR_UNCHECKED] if page.sidecar.get("prior_ocr_layer_suspect") else []
 
 
 def rule_native(page: Page) -> list[str]:
     # The orchestrator writes the verdict sparsely (absent when the check did not run), so
     # an absent key is no evidence, exactly like ``flagged`` and ``unknown``.
-    return [] if page.sidecar.get("text_coverage") == VERDICT_PASSED else [NATIVE_UNCHECKED]
+    out = _prior_ocr_unchecked(page)
+    if page.sidecar.get("text_coverage") != VERDICT_PASSED:
+        out.append(NATIVE_UNCHECKED)
+    return out
 
 
 def rule_native_equations(page: Page) -> list[str]:
@@ -376,19 +404,37 @@ def rule_native_equations(page: Page) -> list[str]:
 
 
 def rule_native_math(page: Page) -> list[str]:
-    return [SUCCESS_UNCHECKED]  # never CHECKED: it must be MARKED
+    # #1156 round 2: this lane is never CHECKED under any circumstances, so it could not
+    # count a flagged page clean -- but a violation list that does not NAME the prior-OCR
+    # class leaves the report saying only THAT the page is unclean, not WHY, and that is
+    # what the class exists for. Every lane now names it, so the rule is uniform and the
+    # meter has no lane-shaped hole to argue about.
+    return [*_prior_ocr_unchecked(page), SUCCESS_UNCHECKED]  # never CHECKED: it must be MARKED
 
 
 def rule_chart(page: Page) -> list[str]:
+    # #1156 round 2 (Argon): the chart lane ships the page's own ``native_text``, so on a
+    # page whose layer is an earlier OCR run its evidence is that layer. Without this a
+    # ``chart_asset`` SUCCESS with ``prior_ocr_layer_suspect`` counted CHECKED.
+    out = _prior_ocr_unchecked(page)
     ok = _evidence_passed(page, EVIDENCE_FIGURE_TEXT)
     if ok and not page.events_of(EVENT_VALUES_NOT_TRANSCRIBED):
         ok = _evidence_passed(page, EVIDENCE_CHART_VALUES)
-    return [] if ok else [CHART_UNCHECKED]
+    if not ok:
+        out.append(CHART_UNCHECKED)
+    return out
 
 
 def rule_blank(page: Page) -> list[str]:
+    # #1156 round 2: a BLANK page has no text layer to be an earlier OCR run of, and the
+    # detector cannot flag one (``_has_prior_ocr_layer`` requires hidden text). The flag
+    # is still read, so the rule cannot be the place a flagged page slips through if that
+    # ever stops being true.
+    out = _prior_ocr_unchecked(page)
     ok = bool(page.events_of(EVENT_BLANK_PAGE)) and page.md.strip() == blank_page_marker()
-    return [] if ok else [SUCCESS_UNCHECKED]
+    if not ok:
+        out.append(SUCCESS_UNCHECKED)
+    return out
 
 
 LANE_RULES: dict[str, Callable[[Page], list[str]]] = {

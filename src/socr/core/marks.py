@@ -257,6 +257,9 @@ class Check(str, Enum):
     EQUATION_FIDELITY = "equation_fidelity"
     TABLE_LABEL = "table_label"
     PAGE_PROCESSED = "page_processed"
+    #: #1156: the page's text layer is an earlier OCR run, not the document's own
+    #: characters, and nothing independent has read the page to compare it with.
+    PRIOR_OCR_LAYER = "prior_ocr_layer"
     UNREADABLE_INPUT = "unreadable_input"
     #: The fail-closed fallback: the page is not CHECKED and nothing more specific named
     #: the reason. Never silence it -- a page with no clause at all ships unmarked, which

@@ -221,6 +221,10 @@ class FailureMode(str, Enum):
     #: lane has no transcriber to run. ``core/verdict._MODE_CLAUSES`` maps it back
     #: to the same ``figure_text=UNKNOWN`` clause the event produces.
     VISUAL_VALUES_UNTRANSCRIBED = "visual_values_untranscribed"
+    #: #1156: the page ships an EARLIER OCR run's text layer, which nothing independent
+    #: has read the page to check. Like the two modes above, it exists so the demotion
+    #: carries its reason in the status as well as in the page's mark.
+    PRIOR_OCR_LAYER_UNVERIFIED = "prior_ocr_layer_unverified"
     #: #1181: the native table verifier reached EXACT_PASS, so the page was ACCEPTED
     #: without any judge seeing it, at ``confidence=1.0``, while content outside the
     #: table (caption, panel heading, notes, prose, a chart shipped as an image) ships

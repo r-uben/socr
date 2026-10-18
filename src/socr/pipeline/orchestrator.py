@@ -81,7 +81,13 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState, PageState, canonical_native_text, add_page_cost
+from socr.core.state import (
+    DocumentState,
+    PageState,
+    layer_is_admissible_evidence,
+    canonical_native_text,
+    add_page_cost,
+)
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
@@ -644,6 +650,14 @@ def _attempts_summary(ps) -> list[dict]:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _PriorOcrLayerNotEvidenceError(Exception):
+    """#1156: this page's text layer may not be read as evidence (see
+    ``state.layer_is_admissible_evidence``). Raised so a caller's existing
+    read-failure path handles the abstention, rather than growing a second one."""
+
+
 console = Console()
 
 # Provenance value recorded when no vision judge could be built and the page gate
@@ -3499,6 +3513,16 @@ class UnifiedPipeline:
             # the event claims OCR replaced it).
             and not ps.invisible_text_over_raster
             and not ps.invisible_text_scan_failed
+            # #1156: the same reasoning as the two lines above, for the family the
+            # drawing-order route finds. Argon, round 1: without this a flagged page with
+            # corrupt maths is a math-recovery page, so it leaves whole-page OCR
+            # altogether -- the model never reads it, the hybrid ships the earlier OCR
+            # layer's prose, and on the Fed run that is GPU work skipped and never redone.
+            # Excluding it here is strictly better than withholding inside the lane: the
+            # page goes to OCR, so it reaches either an accepted reading or the floor.
+            # The failed-scan key is included because an unreadable page is not prose to
+            # repair around equations either -- the same reason #961 lists its own.
+            and not getattr(ps, "prior_ocr_layer_suspect", False)
             # #960: the hybrid keeps this native prose and patches regions; on a page whose
             # math the layer garbled, the A/B found the hybrid unreadable and a whole-page
             # read correct (Pastel p4/p5/p10), so the whole page goes to OCR.
@@ -7723,6 +7747,20 @@ class UnifiedPipeline:
 
         from socr.core.born_digital import flatten_page_spans
 
+        # #1156 round 3 (Argon 2.1): this binds a model table against the PAGE's own
+        # words. On a suspect page those words are an earlier OCR run, so a PASS here is
+        # the layer vouching for a reading -- and ``_resolve_table_guard_chain`` lets that
+        # PASS overrule a VISUAL rejection and mint an acceptance credential. Abstaining
+        # gives ``bind()`` the no-words behaviour it already has for a page with no text
+        # layer; the visual readers' verdict then stands on its own.
+        if not layer_is_admissible_evidence(state.pages.get(page_num)):
+            # ``(None, ABSTAIN)``, the shape every other exit here returns. Round 3
+            # returned a bare ``None`` and BOTH callers unpack a pair, so the TypeError
+            # landed in the gate's catch-all and every judged table on a flagged page
+            # became ``TABLE_UNVERIFIED / witness_preparation_error`` with no rung run at
+            # all -- an abstention that silently failed the whole ladder instead of
+            # falling through to the blind-cell adjudicator (round 4, all three seats).
+            return None, BindingEvidence.ABSTAIN
         try:
             with open_pdf(state.handle.path) as doc:
                 page = doc[page_num - 1]
@@ -7881,6 +7919,11 @@ class UnifiedPipeline:
         try:
             from socr.core.pdf import open_pdf
 
+            # #1156 round 3: same rule. A resolution "proven" from this page's own words
+            # is proven from the earlier OCR layer; abstaining leaves the unresolved
+            # emission below exactly as a read failure does.
+            if not layer_is_admissible_evidence(state.pages.get(page_num)):
+                raise _PriorOcrLayerNotEvidenceError
             with open_pdf(state.handle.path) as doc:
                 native_words = doc[page_num - 1].get_text("words")
         except Exception as exc:
@@ -8379,6 +8422,17 @@ class UnifiedPipeline:
         ]
         if not targets:
             return
+        # #1156 round 3 (Argon 2.4), the DESTRUCTIVE direction of the same rule. This
+        # check convicts a model table by comparing it against the page's own signed
+        # numbers. On a suspect page those come from an earlier OCR run, so the layer
+        # convicts a CORRECT reading: measured, a VLM read ``-350`` where the layer had
+        # dropped the minus, the visual PASS was clamped to UNVERIFIED by
+        # ``forced_by_binding``, and ``_withhold_contradicted_unverified_tables``
+        # destroyed that table AND its siblings. ``contradictions_for_tables`` already
+        # abstains whole when the text layer is not visible, which is the same no-evidence
+        # state; this reaches it one step earlier, before the page is even opened.
+        if not layer_is_admissible_evidence(state.pages.get(page_num)):
+            return
 
         try:
             doc = open_pdf(state.handle.path)
@@ -8390,6 +8444,9 @@ class UnifiedPipeline:
                     ["\n".join(lines[b.start : b.end + 1]) for b in blocks],
                     [box.bbox for box in boxes],
                 )
+                # #1156 round 3 (Argon 2.4): the destructive direction. The layer
+                # convicts a CORRECT reading -- the VLM read ``-350`` where the layer had
+                # dropped the minus -- and the table and its siblings are withheld.
                 findings = contradictions_for_tables(
                     page,
                     bo.text,
@@ -10705,6 +10762,24 @@ class UnifiedPipeline:
                                 _chart_figures_dir,
                                 stem="invisible_scan_page",
                                 label="Scanned page with unread invisible OCR layer",
+                            )
+
+                        # #1156: the same image for the family the drawing-order detector
+                        # found. The marker that ships in place of the earlier OCR layer
+                        # has to point at something a reader can check, and this is the
+                        # only thing on the page that was never re-read.
+                        if (
+                            getattr(ps, "prior_ocr_layer", False)
+                            and not getattr(ps, "invisible_text_over_raster", False)
+                            and not decision.accepted
+                            and _chart_figures_dir is not None
+                        ):
+                            ps.prior_ocr_page_png_ref = self._render_d3_floor_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                stem="prior_ocr_layer_page",
+                                label="Scanned page carrying an earlier, unchecked OCR layer",
                             )
 
                         # Provenance guard: when the judge rejected ALL ladder rungs for a
@@ -13897,6 +13972,7 @@ class UnifiedPipeline:
                 ps.d3_floor_png_ref = ""
             ps.rotated_shred_png_ref = ""
             ps.invisible_scan_png_ref = ""
+            ps.prior_ocr_page_png_ref = ""
             state.events.extend(judge_events)
             state.events.append(
                 AuditEvent(
@@ -14408,19 +14484,36 @@ class UnifiedPipeline:
             owner=self,
             on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
         )
+
+        def native_evidence_suspect(page_num: int) -> bool:
+            # #1156: same source as ``native_trusted`` below. A page whose text
+            # layer is a prior OCR reading contributes no numbers to any check.
+            ps = state.pages.get(page_num)
+            return ps is not None and not layer_is_admissible_evidence(ps)
+
         native_judge = NativeTableVerifierJudge(
             inner=timed_leaf,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
+            native_evidence_suspect=native_evidence_suspect,
         )
 
         def native_trusted(page_num: int) -> bool | None:
             # GH-163: the source-evidence verifier must select the native
             # verifier on TRUST, not on the presence of words. A scanned page
             # with a baked-in OCR layer has words and no trustworthy reading.
+            # #1156: a page whose text layer is a PRIOR OCR reading is not trusted,
+            # however born-digital its structure looks. Before this, a detected scan kept
+            # ``is_born_digital`` True, so the raster witness deferred to that old layer
+            # (``source_evidence.verify_scanned_table``) and model tables were verified
+            # against it.
             ps = state.pages.get(page_num)
-            return None if ps is None else bool(ps.is_born_digital)
+            if ps is None:
+                return None
+            if not layer_is_admissible_evidence(ps):
+                return False
+            return bool(ps.is_born_digital)
 
         return SourceEvidenceTableJudge(
             inner=native_judge,
@@ -14949,6 +15042,23 @@ class UnifiedPipeline:
         _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
         if _coverage:
             payload["text_coverage"] = _coverage
+
+        # #1156: sparse for the same reason as ``text_coverage`` -- written only when the
+        # page's text layer is a prior OCR reading, so every other sidecar keeps its bytes.
+        # The meter needs its own view of this: ``rule_native`` reads the sidecar, and a
+        # router-only flag would leave the meter counting such pages CHECKED.
+        if ps is not None and getattr(ps, "prior_ocr_layer_suspect", False):
+            payload["prior_ocr_layer_suspect"] = True
+            # The owner's ruling, "so we don't lose job done": the earlier OCR layer is
+            # retained HERE, numbers included, where it is never shipped, so Part B can
+            # recover that work by re-finalizing from it with no re-OCR. Stored on every
+            # suspect page with native text rather than only on a page that withheld
+            # something: the withholding counter is Part B's, and a page whose text the
+            # floor replaced is exactly the page whose original must survive. Stored
+            # untransformed, which is what makes Part B's single transform possible.
+            layer = getattr(ps, "native_text", "") or ""
+            if layer:
+                payload["prior_ocr_layer_text"] = layer
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor
@@ -16076,6 +16186,22 @@ class UnifiedPipeline:
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            # #1156 (Argon, stack review): without this a resumed page comes back with
+            # no suspicion, so the assemble re-flush drops the flag and its mark, and the
+            # page reads as checked on evidence nothing can see.
+            ps.prior_ocr_layer_suspect = bool(meta.get("prior_ocr_layer_suspect", False))
+            # #1156 round 1 (Argon C): the flag came back but the LAYER did not, so a
+            # re-flush from restored state wrote the sidecar with ``native_text`` empty and
+            # dropped ``prior_ocr_layer_text`` -- the one thing Part A retains for Part B to
+            # re-finalize from. Latent today rather than live: the page ledger admits only a
+            # terminal SUCCESS page and a flagged page is always WARNING, so this restore is
+            # not reached on a flagged page in a normal resume (both halves are pinned by
+            # ``test_a_restored_page_keeps_the_retained_layer``). Restored anyway, because
+            # retention is Part A's own contract and Part B re-finalizes from exactly this
+            # key.
+            _retained_layer = meta.get("prior_ocr_layer_text")
+            if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
+                ps.native_text = _retained_layer
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.
@@ -17244,6 +17370,22 @@ class UnifiedPipeline:
             and p.best_output.audit_passed
             and (p.best_output.engine or "").startswith(("native", "chart_asset"))
         ]
+        # #1156: a page whose text layer is an EARLIER OCR run. Part A has no comparator,
+        # so NOTHING can have agreed with that layer: every such page is MARKED and the
+        # document cannot report a clean SUCCESS over it. Deliberately not narrowed by
+        # winning engine -- the rule is "one reading of a scan is one reading, whoever
+        # produced it", so a qwen winner counts too (Argon, stack review: restricting it
+        # to native winners left a model reading of such a scan shipping SUCCESS with no
+        # mark, while the meter's own rule flagged the same page). That makes the page's
+        # mark and the document's status read the same condition rather than two that have
+        # to be kept in step.
+        prior_ocr_retained_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if getattr(p, "prior_ocr_layer_suspect", False)
+            and p.best_output
+            and n not in failed_pages
+        ]
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -17453,6 +17595,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not minus_retained_pages
         pages_ok = pages_ok and not invisible_retained_pages
+        pages_ok = pages_ok and not prior_ocr_retained_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -17777,6 +17920,7 @@ class UnifiedPipeline:
             or native_only_distrust_pages
             or minus_retained_pages
             or invisible_retained_pages
+            or prior_ocr_retained_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -17936,6 +18080,22 @@ class UnifiedPipeline:
                             else "OCR unavailable or every rung failed"
                         )
                         + "); the text ships WARNING, unverified",
+                    )
+                )
+            for n in prior_ocr_retained_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="prior_ocr_layer_retained",
+                        engine=(
+                            state.pages[n].best_output.engine
+                            if state.pages[n].best_output
+                            else "native"
+                        ),
+                        detail="this page's text layer is an EARLIER OCR run's reading, not "
+                        "the document's own characters (or the scan for that failed), and no "
+                        "independent reading has agreed with it; the page is marked "
+                        '"earlier OCR, not re-read" and is never counted CHECKED',
                     )
                 )
             for n in garbled_math_retained_pages:
@@ -18300,6 +18460,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(invisible_retained_pages)} page(s) shipped an "
                         "invisible baked-in OCR text layer from a scan (no OCR read "
                         f"replaced it): {invisible_retained_pages}[/yellow]"
+                    )
+                if prior_ocr_retained_pages:
+                    console.print(
+                        f"  [yellow]{len(prior_ocr_retained_pages)} page(s) carry an earlier "
+                        "OCR run's text layer that no independent reading has agreed with "
+                        f"(marked, not checked): {prior_ocr_retained_pages}[/yellow]"
                     )
                 if garbled_math_retained_pages:
                     console.print(

@@ -121,10 +121,24 @@ def test_scan_failed_is_unknown_not_known_garbage_and_keeps_native_fallback() ->
     assert "estimated effect" in out.text
 
 
-def test_no_model_attempt_keeps_the_documented_961_retention() -> None:
+def test_no_model_attempt_is_floored_by_1156_not_retained() -> None:
+    """#1156 Part A, round 1: this page's retention is what the owner's interim replaced.
+
+    #1027's own floor still requires ``_model_attempt_ran``, and that is unchanged -- the
+    assertion below still says this page is not #1027's ending. What changed is where it
+    goes instead: it used to fall to the native fallback and ship the earlier OCR layer,
+    and the gap between #1027's attempt gate and #1156's old route exclusion was measured
+    at ``process()`` as 4,252 bytes of that layer with no marker at all (Grok 1,
+    r-uben 1a). It now reaches #1156's floor, which withholds the layer and keeps the
+    marker plus the page image.
+    """
     out, prov = _select_page_output_tagged(_page(over_raster=True, attempts=False), 1)
-    assert prov is not SelectionProvenance.INVISIBLE_SCAN_UNREAD
-    assert "estimated effect" in out.text
+    assert prov is not SelectionProvenance.INVISIBLE_SCAN_UNREAD, (
+        "#1027's floor must still keep its own attempt gate"
+    )
+    assert prov is SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
+    assert "estimated effect" not in out.text, "the earlier OCR layer shipped"
+    assert "earlier OCR, not re-read" in out.text
 
 
 def test_failure_mode_ordering_invisible_outranks_minus_as_digit() -> None:

@@ -24,8 +24,8 @@ from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.figures.scanned_figures import (
-    MIN_SPELLED_RUN,
     MAX_CAPTION_LINE,
+    MIN_SPELLED_RUN,
     SPELLED_FENCE_CLOSE,
     SPELLED_FENCE_NOTE,
     SPELLED_FENCE_OPEN,
@@ -429,7 +429,21 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
     off_text = re.sub(
         r"\n*\*\*Figure \d+\*\* \(page \d+\)\n\n!\[Figure \d+\]\([^)]*\)", "", off[2]
     ).rstrip()
-    assert stripped == off_text
+    # #1156 round 2 (r-uben 8): the two bodies now differ in the MARKER as well as the
+    # image, and that is the point of the change -- a marker must describe the body it
+    # ships with, so the page that carries an image says "see image" and the page that
+    # carries none says "see PDF page N". Stripping the image is therefore no longer
+    # enough to make them identical. The pointer difference is asserted explicitly, which
+    # is a stronger statement than the old equality: it says WHICH way each page points.
+    pointer = "see image"
+    _NOpointer = "not transcribed, see PDF page 1"
+    if pointer in stripped or _NOpointer in off_text:
+        assert pointer in stripped, "the page that ships an image does not point at it"
+        assert _NOpointer in off_text, "the page with no image still claims one"
+        stripped_body = stripped.replace(pointer, _NOpointer)
+    else:
+        stripped_body = stripped
+    assert stripped_body == off_text
     assert not [i for i in _images(off[2]) if "scanned_figure_page" in i]
     assert not [i for i in _images(fig_text) if "/figure_" in i], "the raster is not shipped twice"
 
@@ -445,18 +459,63 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
     assert fig_side["status"] == pro_side["status"]
 
 
-def test_e2e_no_provider_layer_ships_with_its_spelled_axis_title_fenced(
+def test_e2e_no_provider_a_flagged_page_withholds_the_layer(tmp_path, monkeypatch) -> None:
+    """#1156 Part A, round 1: the ruling, on THIS fixture, with both routes live.
+
+    Added rather than folded into the fencing test below, because the two subjects are
+    different and both are worth keeping: what the layer LOOKS LIKE when it ships (below),
+    and whether it ships at all on a flagged page (here). Without this arm, silencing
+    #1156 below would remove the ruling from this file entirely.
+    """
+    _doc, _state, text = _run(
+        tmp_path, monkeypatch, "ruling", caption=True, spelled=True, providers=False
+    )[:3]
+    assert SPELLED_FENCE_OPEN not in text, "the earlier OCR layer shipped on a flagged page"
+    assert "earlier OCR, not re-read" in text
+
+
+def test_e2e_no_provider_a_flagged_scan_withholds_the_layer_not_shreds_it(
     tmp_path, monkeypatch
 ) -> None:
-    on = _run(tmp_path, monkeypatch, "on", caption=True, spelled=True, providers=False)
-    off = _run(tmp_path, monkeypatch, "off", caption=False, spelled=True, providers=False)
-    on_text, off_text = on[2], off[2]
-    # Same layer, one thing changed (the caption): only the caption page fences the spelled run.
-    assert SPELLED_FENCE_OPEN in on_text and SPELLED_FENCE_OPEN not in off_text
-    fenced = on_text.split(SPELLED_FENCE_OPEN, 1)[1].split(SPELLED_FENCE_CLOSE, 1)[0]
-    kept = [ln for ln in fenced.split("\n")[1:] if ln.strip()]
-    assert "".join(ch.strip() for ch in kept) == _AXIS_TITLE, "every character is kept, in order"
-    assert _AXIS_TITLE not in on_text.replace(fenced, "")
+    """#1156 Part A, round 1: what this page's INTENT reduces to under the owner's ruling.
+
+    This test used to prove that when a scan's layer ships with no model reading, a
+    spelled-out axis title (``P\\ni\\nc\\ne``) is fenced rather than shipped as one letter
+    per line. The ruling replaced the premise: on a flagged page with no reading, the
+    layer does not ship at all. The scanned-figure lane fires only on
+    ``invisible_text_over_raster``, and the floor now withholds exactly those pages, so
+    the fence's end-to-end path is unreachable until Part B ships masked prose. It is NOT
+    deleted: ``fence_spelled_runs`` keeps its own unit test
+    (``test_fence_is_in_place_and_removing_it_gives_back_the_input_byte_for_byte``), and
+    what this page still owes the reader is pinned here.
+
+    The intent that survives is the same one the fence served -- a reader must never be
+    handed a shredded axis title as if it were the page's prose -- now satisfied by
+    withholding instead of fencing. The marker and the page image stay, so nothing is
+    silently missing.
+    """
+    _doc, _state, text = _run(
+        tmp_path, monkeypatch, "withheld", caption=True, spelled=True, providers=False
+    )[:3]
+
+    from socr.core.manifest import is_page_failed_marker
+
+    body_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith(">")]
+    assert is_page_failed_marker(body_lines[0]), f"no floor marker: {body_lines[:2]}"
+    assert "earlier OCR, not re-read" in text
+
+    # The shredding this page's fence existed to prevent: never shipped, fenced or not.
+    assert SPELLED_FENCE_OPEN not in text, "a fence implies the layer shipped"
+    assert _AXIS_TITLE not in text, "the spelled axis title shipped"
+    assert "\n".join(_AXIS_TITLE) not in text, "the axis title shipped one letter per line"
+    assert "estimated effect" not in text, "the earlier OCR layer's prose shipped"
+
+    # Still surfaced, still not clean: the page image is there and the page is marked.
+    # Round 3 (r-uben soft 5): the `or "![" in text` escape accepted ANY image, so the
+    # assertion could be satisfied by a figure crop while the page image itself was gone.
+    assert "![Scanned figure page 1]" in text, "the page image is gone too"
+    # ... and the marker must point at it, which is the round-2 rule this page exercises.
+    assert "see image" in text, "the marker does not point at the image it ships with"
 
 
 class _CountingEngine(_Engine):
@@ -497,6 +556,16 @@ def test_e2e_resume_skips_the_page_and_replays_the_event_with_identical_bytes(
     pdf = _scan_pdf(tmp_path / "r.pdf", caption=True)
     out = tmp_path / "out-r"
     _CountingEngine.calls = 0
+    # #1156: this fixture page -- render-mode-3 text over a full-page raster -- is a
+    # prior-OCR layer, so #1156 marks and DEMOTES it, and a demoted page is re-read on
+    # resume rather than skipped. That is #1156's behaviour, pinned in its own tests;
+    # here it would turn a #1030 test about the page-level ledger gate into a test of
+    # someone else's demotion. Only THIS test needs the clause off -- every other #1030
+    # test runs with it live -- and ``test_the_1156_clause_fires_on_this_fixture`` below
+    # fails if the clause ever stops applying, so nothing is being hidden.
+    from socr.core import verdict as _verdict
+
+    monkeypatch.setattr(_verdict, "_prior_ocr_layer_clause", lambda output, p: None)
     with monkeypatch.context() as m:
         _pipe(m).process(pdf, output_dir=out)
     first_calls = _CountingEngine.calls
@@ -591,3 +660,28 @@ def test_guard_closes_an_unclosed_code_fence_before_the_image(delim: str) -> Non
     # A closed block, or no block, is untouched apart from the ref.
     closed = _out(f"{delim}\ncode\n{delim}\nafter")
     assert manifest._apply_scanned_figure_guard(closed, _p(REF)).text == closed.text + "\n\n" + REF
+
+
+def test_the_1156_clause_fires_on_this_fixture(tmp_path) -> None:
+    """Grounds the switch-off above: this page IS a prior-OCR layer, and #1156 marks it.
+
+    Silencing a clause inside a test is only honest while the clause applies.
+    """
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.state import PageState
+    from socr.core.verdict import _prior_ocr_layer_clause
+
+    pdf = _scan_pdf(tmp_path / "grounding.pdf", caption=True)
+    page = BornDigitalDetector().detect(Path(pdf)).pages[0]
+    assert page.prior_ocr_layer is True
+
+    ps = PageState(page_num=1)
+    ps.prior_ocr_layer_suspect = True
+    out = PageOutput(
+        page_num=1,
+        text="a reading",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    assert _prior_ocr_layer_clause(out, ps) is not None

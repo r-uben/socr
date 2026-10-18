@@ -234,6 +234,13 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         CheckResult.FAIL,
         "no page of this document could be loaded",
     ),
+    #: #1156: without this row the demoted page carried a second, bogus banner saying
+    #: ``unknown=UNKNOWN`` beside the clause that already named the reason.
+    FailureMode.PRIOR_OCR_LAYER_UNVERIFIED: (
+        Check.PRIOR_OCR_LAYER,
+        CheckResult.UNKNOWN,
+        "earlier OCR, not re-read",
+    ),
 }
 
 
@@ -748,6 +755,34 @@ def _exact_pass_unjudged_clause(
     )
 
 
+def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """#1156: this page's text layer is an earlier OCR run, and nothing checked it.
+
+    #1050's ink-vs-text coverage shows the layer covers the page's ink; it cannot show the
+    layer is RIGHT, and on a scan that layer is a previous OCR run's reading, not the
+    document's own characters. Measured on the Fed pilot: 63 of 79 scanned pages shipped
+    one unverified prior reading and the meter counted every one CHECKED.
+
+    So the page is demoted and marked. Part A has no comparator, so there is no record a
+    page could carry to earn its way out of this clause: one reading of a scan is one
+    reading, and the page is MARKED. (Part B adds the agreement record and the escape.)
+
+    Round 3 (Argon): this covers a MODEL winner too. Restricting it to native winners
+    left a qwen reading of such a scan shipping SUCCESS with no mark at all, while the
+    meter's own rule flagged the same page ``prior_ocr_unchecked`` -- the page and the
+    meter disagreeing about whether anything checked it. One reading of a scan, whoever
+    produced it, is one reading.
+    """
+    if not _flag(p, "prior_ocr_layer_suspect"):
+        return None
+    return VerdictClause(
+        check=Check.PRIOR_OCR_LAYER,
+        result=CheckResult.UNKNOWN,
+        scope=SCOPE_PAGE,
+        reason="earlier OCR, not re-read",
+    )
+
+
 def silent_success_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
 ) -> tuple[VerdictClause, ...]:
@@ -765,6 +800,7 @@ def silent_success_clauses(
         _equation_fidelity_clause(event_kinds),
         _chart_values_clause(event_kinds),
         _exact_pass_unjudged_clause(output, event_kinds),
+        _prior_ocr_layer_clause(output, p),
     ):
         if clause is not None:
             clauses.append(clause)

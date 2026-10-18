@@ -80,7 +80,7 @@ from socr.core.verdict import (
     build_page_verdict,
     marks_to_write,
 )
-from socr.core.state import DocumentState, PageState
+from socr.core.state import DocumentState, PageState, layer_is_admissible_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -1135,6 +1135,66 @@ def text_coverage_unknown_suspect(p) -> bool:
     return bool(getattr(p, "text_coverage_unknown", False))
 
 
+def floor_page_image_ref(p) -> str:
+    """#1156: the page image a #1156 ending ships, whichever lane rendered it.
+
+    Round 3 (Argon 2.1, r-uben should-fix 1) found the two halves of this disagreeing in
+    BOTH directions, because each site had its own list of refs:
+
+    * ``STRUCTURE_CLASS_GRID_FLAGGED`` read ``prior_ocr_page_png_ref`` and
+      ``d3_floor_png_ref`` but not ``invisible_scan_png_ref`` -- and on a page carrying
+      BOTH detection flags (661 of the corpus pages that carry either) the orchestrator
+      populates the invisible ref and skips the prior-OCR one, so the disputed grid
+      shipped with no image at all;
+    * the floor's "see image" wording counted ``d3_floor_png_ref``, which the floor does
+      not ship, so the marker pointed at an image that was not there.
+
+    One function for the body AND the wording, so they cannot disagree again. Order is
+    specificity: this issue's own render first, then #1027's, then the scanned-figure
+    lane's (which the figure guard appends itself -- naming it here keeps the WORDING
+    right and the guard's ``ref in text`` check stops a second copy).
+
+    ``d3_floor_png_ref`` is deliberately NOT in the list (round 4, r-uben): it is the D3
+    floor's own image, rendered for a different ending, and this floor does not ship it.
+    Counting it was exactly the mismatch being fixed -- the marker said "see image" for a
+    picture the body never carried -- and the cure is to stop counting it, not to start
+    shipping another ending's image.
+    """
+    for name in (
+        "prior_ocr_page_png_ref",
+        "invisible_scan_png_ref",
+        "scanned_figure_png_ref",
+    ):
+        ref = getattr(p, name, "") or ""
+        if ref:
+            return ref
+    return ""
+
+
+def prior_ocr_layer_found(p) -> bool:
+    """#1156: a POSITIVE finding that this page's text layer is an EARLIER OCR run.
+
+    Round 2 draws the line round 1 blurred. Suspicion has two different jobs and they take
+    two different flags, so the predicate each gate reads IS the rule:
+
+    * **The suspect layer is never EVIDENCE** -- ``prior_ocr_layer_suspect``, the union,
+      which includes a FAILED scan. Nothing may pass, corroborate or credential a reading
+      on the strength of this page's own text layer. Removing trust is always allowed,
+      even when the result is that a model reading falls to the floor.
+    * **The layer's OWN text is withheld only on a POSITIVE finding** -- this predicate.
+      "Unknown" is not a finding, so on a failed scan alone the page keeps its layer under
+      the mark (the recorded exception, measured at 0 of 318 probe pages) and every lane
+      keeps its own artefacts: the chart figure link, the prose around table markers, the
+      math splices. Round 1 wired four destructive gates to the union and a detector
+      hiccup therefore deleted born-digital content (Argon 2.2, Grok P1).
+    * **Routing to a model may use the union**, because it only ADDS a reading; the math
+      gate in ``orchestrator`` keeps it.
+    """
+    return bool(
+        getattr(p, "prior_ocr_layer", False) or getattr(p, "invisible_text_over_raster", False)
+    )
+
+
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
     structure-class branch for this page, mirroring EVERY precondition that
@@ -1172,6 +1232,18 @@ def _reaches_structure_class_branch(p) -> bool:
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
+        # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a mark
+        # -- but never as a clean pass, which is what this short-circuit would make it.
+        #
+        # Scoped to ``_NATIVE_TEXT_LANES`` for the reason stated directly above, which
+        # round 1 proved applies here too (Grok 2): this clause lived in
+        # ``native_distrusted``, gated on the ``native`` prefix alone, and the chart lane's
+        # engine is ``chart_asset`` -- so a passing chart winner on a flagged page returned
+        # here with the whole layer as its body. The chart lane ships ``native_text``, so a
+        # flag about ``native_text`` has to cover it.
+        prior_ocr_layer_in_a_native_lane = winning_engine.startswith(
+            _NATIVE_TEXT_LANES
+        ) and prior_ocr_layer_found(p)
         # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission,
         # per ``_truncated_grid_reading_ids``) is a non-native distrust case
         # this predicate's original three conditions never covered -- it is
@@ -1191,6 +1263,7 @@ def _reaches_structure_class_branch(p) -> bool:
         if not (
             native_distrusted
             or native_text_shredded
+            or prior_ocr_layer_in_a_native_lane
             or best_output_truncated
             or getattr(p, "structure_class_model_kept_on_resume", False)
         ):
@@ -1562,7 +1635,18 @@ def _row_corroboration_scan(p):
     ``None`` when the page has no native words or no detected table bbox, and
     when no grid-reading candidate survives the truncation drop -- the same
     abstentions the winner has always had.
+
+    #1156 round 2 (Argon 1, P0): and ``None`` on a page whose text layer is a PRIOR OCR
+    run. This route scores a candidate against ``p.native_words``, so on such a page it
+    corroborates a reading against the very layer under suspicion, and a HARD-rejected
+    grid shipped its numbers on that strength. The suspect layer is never EVIDENCE, so
+    the abstention takes the UNION flag (a failed scan included): "unknown" is not a
+    reason to trust the words either. Abstaining is removing trust, never deleting
+    content -- the page falls through to its own floor, which keeps that floor's marker
+    and image.
     """
+    if not layer_is_admissible_evidence(p):
+        return None
     words = getattr(p, "native_words", None) or []
     if not words:
         return None
@@ -2683,6 +2767,30 @@ def structure_class_floor_text(
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """
+    # #1156 round 1 (r-uben 1b, the cell the Fed run hits): prose recovery ships the
+    # page's own ``native_text`` around the table markers, and on a flagged page that text
+    # is an EARLIER OCR run -- measured on gh520's own two-table fixture, the recovered
+    # prose carried "3 to 3 Y, per cent" and "$400 million", byte-identical to the
+    # unflagged page apart from the banner. The owner's interim rule is that such a page
+    # ships no prior-layer text and no numbers, so the recovery is refused here and the
+    # page keeps the whole-page marker plus its image. The table marker and the image are
+    # unaffected, which is what keeps this narrow: only the prose is withheld.
+    #
+    # Grok measured the SAME path and saw a whole-page marker; both are right. Recovery
+    # only runs when the GH-520 guard passes (count > 0, boxes == count, a sane bbox, a
+    # parsed block per table). Guard fails -> marker, which is what Grok hit; guard passes
+    # -> prose, which is what r-uben hit, and what a real minutes page with parseable
+    # tables does.
+    if prior_ocr_layer_found(p):
+        # ``prose_recovery=False`` is NOT the lever here: that flag only governs what the
+        # REFUSAL path returns, so a page whose GH-520 guard PASSES splices its prose
+        # whatever it is set to (measured: the flagged and unflagged arms were identical
+        # with it off). The whole-page marker plus the page image is what this helper
+        # already ships whenever isolation is unprovable, so returning it here introduces
+        # no new ending -- it withholds the prose and keeps the marker and the image.
+        d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+        png_ref = getattr(p, "d3_floor_png_ref", "")
+        return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
     return table_floor_text_for_source(
         p,
         page_num,
@@ -3636,6 +3744,10 @@ class PagePrimaryReason(str, Enum):
     #: #1027: a scan whose only native text is an invisible OCR layer, and no model
     #: reading was accepted: fail-closed marker plus page image.
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1156: a scan whose text layer is an EARLIER OCR run, with no independent reading
+    #: of the page to check it against: fail-closed marker plus page image. The layer
+    #: itself is retained in the sidecar, unshipped.
+    PRIOR_OCR_LAYER_UNREAD = "prior_ocr_layer_unread"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
     DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
@@ -3726,6 +3838,13 @@ class SelectionProvenance(str, Enum):
     #: #1027: invisible OCR layer over a raster scan, model ladder accepted nothing:
     #: fail-closed marker (neither the layer nor the rejected reading ships)
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
+    #: #1156: the page's text layer is an EARLIER OCR run and no reading of the page was
+    #: accepted (rejected, or none ever ran): fail-closed marker plus the page image.
+    #: Neither the layer, nor its numbers, nor the rejected reading ships; the layer is
+    #: retained in the sidecar for a later comparison. Declared AFTER the #1027 member
+    #: because the enum mirrors the cascade's return order and this branch is tried
+    #: second -- #1027 keeps the render-mode family it already owns.
+    PRIOR_OCR_LAYER_UNREAD = "prior_ocr_layer_unread"
     #: #259: ladder accepted nothing but the model produced a table -- kept flagged
     FLAGGED_MODEL_KEPT = "flagged_model_kept"
     #: TICKET-A1c (#641): the winner came from A1b's row-corroboration fallback
@@ -3824,6 +3943,12 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     ),
     SelectionProvenance.INVISIBLE_SCAN_UNREAD: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.INVISIBLE_SCAN_UNREAD
+    ),
+    #: #1156: the same ending as #1027 -- the marker and the page image, nothing of the
+    #: layer -- under its own reason, because the operator action differs: these pages
+    #: have readable prose waiting in the sidecar for Part B to recover.
+    SelectionProvenance.PRIOR_OCR_LAYER_UNREAD: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD
     ),
     SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
@@ -3965,6 +4090,15 @@ def _select_page_output_tagged(
         math_hybrid is not None
         and not getattr(p, "native_rotated_text_shredded", False)
         and not math_hybrid_blocked_by_table
+        # #1156 round 1: the routing gate in ``_is_corrupt_math_recovery_page`` already
+        # keeps a flagged page out of this lane, so in a fresh run ``math_hybrid`` is never
+        # set on one. This is the second site, for state that did not come from this run's
+        # routing: a resume restores ``corrupt_math_hybrid`` from a sidecar written before
+        # that gate existed, and the grid test found the layer shipping from here. The page
+        # then falls through to the floor, which costs the retained crop on such a page and
+        # is the safe direction -- the crop is recoverable by re-reading, a wrong number is
+        # not.
+        and not prior_ocr_layer_found(p)
         and math_hybrid in p.attempts
         and (math_hybrid.engine or "") == ENGINE_NATIVE_MATH
     ):
@@ -4023,6 +4157,18 @@ def _select_page_output_tagged(
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
+        # #1156: the page's text layer is an EARLIER OCR run. It may ship -- under a mark
+        # -- but never as a clean pass, which is what this short-circuit would make it.
+        #
+        # Scoped to ``_NATIVE_TEXT_LANES`` for the reason stated directly above, which
+        # round 1 proved applies here too (Grok 2): this clause lived in
+        # ``native_distrusted``, gated on the ``native`` prefix alone, and the chart lane's
+        # engine is ``chart_asset`` -- so a passing chart winner on a flagged page returned
+        # here with the whole layer as its body. The chart lane ships ``native_text``, so a
+        # flag about ``native_text`` has to cover it.
+        prior_ocr_layer_in_a_native_lane = winning_engine.startswith(
+            _NATIVE_TEXT_LANES
+        ) and prior_ocr_layer_found(p)
         # GH-671: a judge-cleared but TRUNCATED best_output (ends mid-emission)
         # must not win by this short-circuit either -- it is a non-native
         # distrust case neither flag above catches, and the S1 branch below
@@ -4032,7 +4178,12 @@ def _select_page_output_tagged(
         # ``_reaches_structure_class_branch``'s own gate so the two agree on
         # reachability (see that function's docstring).
         best_output_truncated = id(p.best_output) in _truncated_grid_reading_ids(p)
-        if not (native_distrusted or native_text_shredded or best_output_truncated):
+        if not (
+            native_distrusted
+            or native_text_shredded
+            or prior_ocr_layer_in_a_native_lane
+            or best_output_truncated
+        ):
             # GH-994: a flattened-table flag demotes the selected native/chart winner IN
             # PLACE. Its exact bytes ship (a re-derived fallback would keep only a
             # prefix-extending append, and could drop e.g. a ``native+equations`` body);
@@ -4255,8 +4406,18 @@ def _select_page_output_tagged(
             png_ref = getattr(p, "d3_floor_png_ref", "")
 
             d3_text = None
+            # #1156 round 1: every branch below splices ``native_text`` around the
+            # markers, so on a flagged page the earlier OCR layer's prose ships from here
+            # too -- the same shape as the S1 floor above, reached by a different route
+            # (r-uben, by reading; fixture built in
+            # ``test_gh1156_part_a_interim.py``). Leaving ``d3_text`` None takes the
+            # whole-page marker plus the page image, which this branch already uses
+            # whenever isolation is unprovable, so no new ending is introduced.
+            prior_ocr_suspect = prior_ocr_layer_found(p)
             header_unattributed = bool(getattr(p, "native_table_header_unattributed", False))
-            if header_unattributed:
+            if prior_ocr_suspect:
+                pass  # no splice: the whole-page marker and the page image
+            elif header_unattributed:
                 d3_text = splice_all_table_regions(
                     native_text, marker_line=d3_marker, png_ref=png_ref
                 )
@@ -4360,6 +4521,71 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 failure_mode=FailureMode.INVISIBLE_SCAN_UNREAD,
             ), SelectionProvenance.INVISIBLE_SCAN_UNREAD
+
+        # #1156, the owner's interim ruling (2026-10-17): a page whose text layer is an
+        # EARLIER OCR run, and for which no reading of the page was accepted, ships the
+        # page image plus its mark -- no prior-layer text and no numbers. #1027's floor,
+        # widened to the family the drawing-order detector found. The layer itself is
+        # retained in the page sidecar (``prior_ocr_layer_text``), unshipped, so Part B
+        # can recover its prose by re-finalizing from it with no re-OCR; the interim
+        # exists because a layer whose numbers are wrong ("3 Y," where the page reads
+        # 3 1/2) cannot ship numbers until something has read the page to compare.
+        #
+        # Scoped to POSITIVE detection by the #1156 route, on purpose, three times over:
+        #
+        # (a) ``prior_ocr_layer`` only, never ``prior_ocr_layer_scan_failed``. A failed
+        #     scan is "unknown", and suspicion must never grant deletion rights: the
+        #     flag still marks the page and keeps the document out of SUCCESS, which are
+        #     additions, while this branch is a subtraction.
+        # (b) EITHER positive route, #1156's or #961's. Round 1 (Grok 1, r-uben 1a): this
+        #     used to exclude ``invisible_text_over_raster`` to keep #1027's territory
+        #     intact, and the two exclusions left a hole between them -- #1027's floor
+        #     needs ``_model_attempt_ran``, so a page flagged by BOTH routes with no model
+        #     attempt fell through both and the native fallback shipped the whole layer.
+        #     Measured at ``process()`` on a real JSTOR scan under ``--native-only``:
+        #     4,252 bytes of the earlier layer, every numeral, no marker at all. #1027's
+        #     pages are still byte-for-byte because its branch is tried FIRST and keeps
+        #     its own attempt gate; this one now takes only what that branch declines.
+        # (c) a structure-class page is S1's to decide, exactly as above.
+        #
+        # Unlike #1027 this is NOT gated on ``_model_attempt_ran``: the ruling names
+        # "rejected, or never ran (no provider, --native-only)" together, because a layer
+        # nothing has checked is equally unchecked when nothing tried.
+        if (
+            getattr(p, "prior_ocr_layer", False) or getattr(p, "invisible_text_over_raster", False)
+        ) and not _reaches_structure_class_branch(p):
+            # Round 2 (r-uben 8), round 3 (r-uben should-fix 1): the marker must
+            # describe the body it SHIPS WITH, and both come from ONE helper so they
+            # cannot drift apart.
+            prior_png = floor_page_image_ref(p)
+            ships_an_image = bool(prior_png)
+            # The image is conditional (needs figure saving and a successful render), so
+            # the marker only points at it when one was written.
+            # ``failed: `` is NOT decoration: ``is_page_failed_marker`` is the ONE shared
+            # recogniser every consumer reads the ending from, and it anchors on that
+            # prefix. Without it (Argon, Part A review) this body was invisible to
+            # ``failed_pages`` in ``_phase_assemble``, so a floored page with a rejected
+            # model attempt landed in ``native_fallback_pages`` -- a list whose whole
+            # meaning is "the page shipped its native text because OCR never passed" --
+            # on a page where the native text is precisely what was withheld. The
+            # prefix also makes the body a member of ``_MARKER_FAMILY_REASONS``, so the
+            # reason is read from the SHIPPED BYTES rather than from provenance alone.
+            prior_marker = (
+                f"[page {page_num} failed: earlier OCR, not re-read — see image]"
+                if ships_an_image
+                else (
+                    f"[page {page_num} failed: earlier OCR, not re-read — not "
+                    f"transcribed, see PDF page {page_num}]"
+                )
+            )
+            return PageOutput(
+                page_num=page_num,
+                text=f"{prior_marker}\n\n{prior_png}" if prior_png else prior_marker,
+                status=PageStatus.WARNING,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+            ), SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed
         # AFTER the D3 floor above so a hard-fail still fails closed, and before
@@ -4509,6 +4735,19 @@ def _select_page_output_tagged(
                 note = kept_table_flag_note(state, page_num, kept_text)
                 if note:
                     kept_text = f"{kept_text.rstrip()}\n\n{note}\n"
+                # #1156 round 2 (Argon 1, the third S1 branch): this ships the MODEL's
+                # disputed grid, not the layer, so principle 2 is already satisfied -- no
+                # prior-layer number reaches the page. What the owner's 2026-10-12 ruling
+                # also requires of a disputed scanned table is a PAGE-IMAGE LINK beside the
+                # mark, and this branch carried the marks without one. On a page whose text
+                # layer is an earlier OCR run that link is the only way a reader can check
+                # a disputed number at all: the layer cannot serve as the check, which is
+                # the whole premise of this issue. Added only on a flagged page, so every
+                # other disputed grid ships byte-for-byte as before.
+                if prior_ocr_layer_found(p):
+                    _prior_png = floor_page_image_ref(p)
+                    if _prior_png and _prior_png not in kept_text:
+                        kept_text = f"{kept_text.rstrip()}\n\n{_prior_png}\n"
                 return replace(
                     grid_winner,
                     text=kept_text,
@@ -5249,6 +5488,10 @@ _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES: frozenset[SelectionProvenance] = f
         SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED,
         SelectionProvenance.ROTATED_TEXT_SHREDDED,
         SelectionProvenance.INVISIBLE_SCAN_UNREAD,
+        # #1156: same reason as the #1027 member above -- the floor DELETED the rejected
+        # reading, so "socr kept this model reading" would describe a body that is not
+        # there.
+        SelectionProvenance.PRIOR_OCR_LAYER_UNREAD,
         SelectionProvenance.STRUCTURE_CLASS_FLOOR,
         SelectionProvenance.STRUCTURE_CLASS_PAGE_JUDGE_TIMEOUT_FLOOR,
         SelectionProvenance.STRUCTURE_CLASS_TEXT_TABLE_FLOOR,
@@ -5523,6 +5766,7 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
         # map is the silent-success one. A future silent-success clause on the same check
         # would need its own key, not this row.
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
+        Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
     }
     for clause in clauses:
         mode = by_check.get(clause.check)
@@ -5652,6 +5896,7 @@ _MARKER_FAMILY_REASONS: tuple[tuple[str, "PagePrimaryReason"], ...] = (
     ("invalid table emission", PagePrimaryReason.INVALID_TABLE_EMISSION),
     ("rotated text extraction shredded", PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED),
     ("invisible OCR layer unread", PagePrimaryReason.INVISIBLE_SCAN_UNREAD),
+    ("earlier OCR, not re-read", PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD),
     ("no usable OCR output", PagePrimaryReason.NO_USABLE_OUTPUT),
     # The unverifiable-table family is DELIBERATELY absent. Its marker prose does
     # not say which lane distrusted the table, and every path that authors it --
@@ -5726,7 +5971,12 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     is_marker = is_page_failed_marker(text)
     if ref in text or any(
         getattr(p, name, "")
-        for name in ("d3_floor_png_ref", "rotated_shred_png_ref", "invisible_scan_png_ref")
+        for name in (
+            "d3_floor_png_ref",
+            "rotated_shred_png_ref",
+            "invisible_scan_png_ref",
+            "prior_ocr_page_png_ref",
+        )
     ):
         return output
     if is_marker and any(ln.lstrip().startswith("![") for ln in text.splitlines()):

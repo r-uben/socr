@@ -65,6 +65,32 @@ def canonical_native_text(text: str | None, identities: list[str]) -> tuple[str 
 logger = logging.getLogger(__name__)
 
 
+def layer_is_admissible_evidence(ps) -> bool:
+    """#1156: may this page's own text layer be used as EVIDENCE about a reading?
+
+    Principle 1 of the round-2 rule, one layer deeper than the corroboration it first
+    closed. On a page whose text layer is an EARLIER OCR run, that layer is not the
+    document's characters: it may not pass a reading, corroborate one, credential one, or
+    convict one. Round 3 (Argon 2.1/2.4) found both directions still live in the
+    table-judge chain -- a credential minted over a VISUAL rejection on the layer's
+    geometry, and a correct ``-350`` withheld because the layer had dropped the minus.
+
+    Takes the UNION (``prior_ocr_layer_suspect``, scan-failed included): "unknown" is not
+    a reason to trust the words either. Refusing evidence is never destructive -- the
+    consumer behaves exactly as it does on a page with NO text layer, which is the state
+    every one of them already handles, so each abstains into a path it already has.
+
+    This is the shared predicate, not a per-call-site check: the sources that consult it
+    are listed in ``docs/log/2026-10-17_1156-part-a.md``, so a new consumer has one place
+    to look. They are pinned by BEHAVIOUR, in
+    ``tests/test_gh1156_evidence_guards.py`` -- an earlier enumerating test counted this
+    function's name in the module source, which is grep rather than behaviour and let a
+    guard that crashed the whole table ladder pass (round 4). The readers the log lists as
+    NOT gated are tracked in GitHub issue #1205.
+    """
+    return not bool(getattr(ps, "prior_ocr_layer_suspect", False))
+
+
 @dataclass
 class PageState:
     """Per-page processing state (1-indexed)."""
@@ -121,6 +147,15 @@ class PageState:
     #: that scan failed (unknown, treated as a hit). See ``BornDigitalDetector``.
     invisible_text_over_raster: bool = False
     invisible_text_scan_failed: bool = False
+    #: #1156: the page's text layer is a PRIOR OCR reading, not the document's own text, so
+    #: nothing native on it is trustworthy evidence. Kept separate from
+    #: ``invisible_text_over_raster`` on purpose: that flag alone grants #1027 the right to
+    #: DELETE the native text, and suspicion must never grant deletion rights.
+    prior_ocr_layer_suspect: bool = False
+    #: #1156: the drawing-order route's own verdict and whether it failed (unknown, which
+    #: feeds suspicion). Kept beside #961's pair so each route stays separately visible.
+    prior_ocr_layer: bool = False
+    prior_ocr_layer_scan_failed: bool = False
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -326,6 +361,11 @@ class PageState:
     #: #1027: image ref for the invisible-OCR-layer floor. Not persisted to the sidecar:
     #: that floor ships ``audit_passed=False``, so a resume never restores the page.
     invisible_scan_png_ref: str = ""
+    #: #1156: the rendered page image the "earlier OCR, not re-read" marker links to.
+    #: A key of its own rather than #1027's: that one also gates the scanned-figure
+    #: caption lane, which keys on ``invisible_text_over_raster`` and must not start
+    #: firing on this family.
+    prior_ocr_page_png_ref: str = ""
     #: #1030: image ref for a scanned page whose text layer carries a figure caption. The page
     #: ships its own text PLUS this image (the figure box cannot be isolated on a scan, so the
     #: asset is the whole page). Persisted to the sidecar; ``scanned_figure_render_failed`` is not
@@ -804,6 +844,18 @@ class DocumentState:
                 ps.control_byte_scan_failed = getattr(pa, "control_byte_scan_failed", False)
                 ps.invisible_text_over_raster = getattr(pa, "invisible_text_over_raster", False)
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
+                ps.prior_ocr_layer = getattr(pa, "prior_ocr_layer", False)
+                ps.prior_ocr_layer_scan_failed = getattr(pa, "prior_ocr_layer_scan_failed", False)
+                # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
+                # narrower key (``invisible_text_over_raster``) and is not widened here.
+                # BOTH detection routes feed suspicion: #961's render-mode route catches
+                # layers this one cannot (and vice versa), and each is pinned by its own test.
+                ps.prior_ocr_layer_suspect = (
+                    ps.invisible_text_over_raster
+                    or ps.invisible_text_scan_failed
+                    or ps.prior_ocr_layer
+                    or ps.prior_ocr_layer_scan_failed
+                )
                 ps.garbled_math_signals = dict(getattr(pa, "garbled_math_signals", None) or {})
                 ps.garbled_math_scan_failed = getattr(pa, "garbled_math_scan_failed", False)
                 ps.possible_table_structure_not_reconstructed = getattr(

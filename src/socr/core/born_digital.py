@@ -2587,6 +2587,16 @@ class PageAssessment:
     #: carries invisible text (render mode 3): a scan with an old baked-in OCR layer, not a
     #: born-digital page. Routes the page off the trusted-native lane to OCR.
     invisible_text_over_raster: bool = False
+    #: #1156: the page's text layer is a PRIOR OCR reading, found from the DRAWING ORDER
+    #: (``get_bboxlog``) rather than from render mode alone: an opaque raster covers the
+    #: page (by UNION, so strip-tiled scans count), text is hidden from the reader
+    #: (render mode 3, or painted over by a later covering raster), and the page keeps no
+    #: visible text of its own -- every visible word sits at a slot the document repeats
+    #: on another page, which is what a stamp, running header or page number is.
+    #: Independent of ``invisible_text_over_raster``, which keeps its own, narrower
+    #: meaning because #1027 may DELETE a page's native text on it.
+    prior_ocr_layer: bool = False
+    prior_ocr_layer_scan_failed: bool = False
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -2815,6 +2825,163 @@ def _is_lane_stacked(table: object) -> bool:
     return False
 
 
+#: ``/ca`` (fill) and ``/CA`` (stroke) alpha in a graphics state, as written in the PDF.
+_ALPHA_RE = re.compile(r"/(?:ca|CA)\s+([0-9]*\.?[0-9]+)")
+
+#: An indirect object reference, ``15 0 R``, as written in a PDF dictionary.
+_INDIRECT_REF_RE = re.compile(r"\b(\d+)\s+\d+\s+R\b")
+
+
+#: Repetition evidence per document, for callers that hold a page and not a run. Keyed on
+#: the document object's identity and bounded, so a long run cannot grow it without limit.
+_FURNITURE_CACHE: dict[int, tuple[frozenset, frozenset]] = {}
+_FURNITURE_CACHE_MAX = 8
+
+
+def _document_furniture_cached(detector, doc) -> tuple[frozenset, frozenset]:
+    """This document's repetition evidence, read once.
+
+    The cache holds the DOCUMENT alongside its evidence, not just its ``id``. ``id()``
+    is only unique among live objects: a ``fitz.Document`` freed between two calls lets
+    CPython hand its address to the next document of the same size, and the cache would
+    then answer with ANOTHER document's running headers -- which can only make the
+    witness test wrong, in whichever direction that document's furniture happens to lie.
+    Keeping the reference makes the key valid by construction, and the bound below keeps
+    at most ``_FURNITURE_CACHE_MAX`` documents open on its account.
+    """
+    key = id(doc)
+    hit = _FURNITURE_CACHE.get(key)
+    if hit is not None:
+        _held, slots, folios = hit
+        return slots, folios
+    try:
+        slots = detector._repeated_text_slots(doc)
+        folios = detector._folio_slots(doc, slots)
+    except Exception:
+        logger.debug("#1156: furniture scan failed for this document", exc_info=True)
+        slots, folios = frozenset(), frozenset()
+    if len(_FURNITURE_CACHE) >= _FURNITURE_CACHE_MAX:
+        _FURNITURE_CACHE.clear()
+    _FURNITURE_CACHE[key] = (doc, slots, folios)
+    return slots, folios
+
+
+#: #1156: how far apart two APIs' bounding boxes for the SAME drawn image may be, in
+#: points, before they are not the same placement. Measured, not chosen: over 598 pages
+#: of 150 corpus PDFs, every page whose drawing order and ``get_image_info`` agreed on
+#: the image COUNT also agreed on every bbox to better than 0.5 pt -- there were zero
+#: mismatches at that tolerance (``scratch/1156a/image_pairing_probe.py``). It is a float
+#: identity tolerance on a geometric equality, not a threshold on the evidence.
+_IMAGE_BOX_TOLERANCE_PT = 0.5
+
+
+def _image_info_for_box(infos: list, drawn: fitz.Rect, page_rect: fitz.Rect) -> dict:
+    """The ``get_image_info`` entry describing the image drawn at *drawn*.
+
+    #1156: the opacity test used to pair the Nth image in the DRAWING ORDER with
+    ``infos[N]``, an ordering agreement between two different PyMuPDF APIs that nothing
+    guaranteed. Measured on 598 pages of 150 corpus PDFs: 25 disagree on the count, every
+    one of them with FEWER images in the drawing order than ``get_image_info`` lists, so
+    from the first missing one onwards each drawn image was read against another image's
+    metadata. (The old code had a second desync of its own: it advanced its counter only
+    for images whose box survived clipping to the page, while ``infos`` lists them all.)
+
+    Pairing on geometry removes the assumption. An entry that matches nothing returns
+    ``{}``, which ``_image_is_opaque`` reads as NOT opaque -- the fail-closed direction
+    for both callers: the page keeps its native check, and the witness test says "no
+    independent reading".
+    """
+    best: dict = {}
+    for info in infos:
+        box = fitz.Rect(info.get("bbox") or (0, 0, 0, 0))
+        if max(abs(a - b) for a, b in zip(tuple(box), tuple(drawn))) <= _IMAGE_BOX_TOLERANCE_PT:
+            return info
+        # A placement clipped by the page: compare what is actually on the page.
+        clipped = box & page_rect
+        target = drawn & page_rect
+        if (
+            not clipped.is_empty
+            and not target.is_empty
+            and max(abs(a - b) for a, b in zip(tuple(clipped), tuple(target)))
+            <= _IMAGE_BOX_TOLERANCE_PT
+        ):
+            best = info
+    return best
+
+
+def _any_alpha_below_one(text: str | None) -> bool:
+    """Does this graphics-state blob declare an alpha below 1?
+
+    #1156 round 2 (r-uben blocker 5): the ONLY place a malformed VALUE is tolerated. A
+    non-numeric alpha is "no declared alpha" by the same positive-evidence rule the
+    callers use, and it is caught HERE -- around the parsing of a string already in hand
+    -- so that a PyMuPDF failure during the document reads, which raises the same
+    ``ValueError``, can propagate instead of being swallowed with it.
+    """
+    # No try here (round 3, r-uben soft 2): ``_ALPHA_RE`` captures
+    # ``[0-9]*\.?[0-9]+``, which ``float()`` always accepts, so the catch this function
+    # was built around could not be reached by any input -- a guard that cannot fail.
+    # What the function IS for survives unchanged: it is the one place that parses an
+    # already-fetched string, so the document reads above it can propagate a PyMuPDF
+    # failure that raises the very same ``ValueError``.
+    return any(float(v) < 1.0 for v in _ALPHA_RE.findall(text or ""))
+
+
+def page_has_opaque_page_covering_raster(page) -> bool:
+    """#1156 round 2: is there an independent PIXEL reading of this page?
+
+    ``source_evidence.page_has_page_covering_raster`` answers "is the page covered by
+    images", which an image with alpha 0 satisfies while changing nothing on screen.
+    Dropping a check on that basis is how suspicion made verification WEAKER (Astra P1,
+    twice). This answers the narrower question the judge actually needs: do opaque
+    rasters cover the page, so a reader of the pixels has something to read?
+
+    Round 3 (Argon, stack review -- the same weakening a FOURTH time): coverage plus
+    opacity is still not enough. A born-digital table drawn ON TOP of an opaque
+    background image satisfies both, so forcing the flag on such a page skipped
+    ``verify_native_table`` and a table with two values swapped was accepted. The pixels
+    are only an independent reading of text that lies UNDER them, so this asks the same
+    positive question ``_has_prior_ocr_layer`` does: is the page's text hidden beneath
+    the raster?
+
+    Round 3 (Argon): with EMPTY slots this returned False on any scan carrying a running
+    header or a folio -- the page prints a word of its own, and nothing says it is
+    furniture -- so those pages re-enabled ``verify_native_table`` against the very layer
+    under suspicion. The document's own repetition evidence is read here, once per
+    document and cached, exactly as ``detect`` reads it.
+
+    Fails closed to ``False`` -- "no independent witness", which keeps the native check.
+    """
+    try:
+        detector = BornDigitalDetector()
+        doc = page.parent
+        slots, folios = _document_furniture_cached(detector, doc)
+        return detector._has_prior_ocr_layer(page, slots, folios, strict_transparency=True)
+    except Exception:
+        logger.debug("#1156: opaque-raster test failed; treating as no witness", exc_info=True)
+        return False
+
+
+#: #1156: tiled scans leave sub-point seams between their strips, so a text line
+#: crossing one is not uncovered -- it is covered by two tiles that do not quite meet.
+#: Each tile is grown by this much before the coverage test.
+#:
+#: Derivation, bounded from both sides rather than fitted:
+#:   * measured gap between adjacent strips on a 29-strip page: ~6e-5 pt (the floats
+#:     differ at the 5th decimal: a strip ends at 27.310302734375 and the next begins
+#:     at 27.31036376953125). 0.01 pt is two orders of magnitude above that, so every
+#:     such seam closes.
+#:   * one device pixel at 1200 dpi -- finer than any scan in the corpus -- is 72/1200
+#:     = 0.06 pt. 0.01 pt is well under a single pixel at that resolution, so nothing a
+#:     reader could see is swallowed.
+#:   * bounded from above by a test: a genuine 3 pt gutter with the page's own line in
+#:     it must still read as VISIBLE text
+#:     (``test_a_visible_line_in_a_gutter_is_not_swallowed_by_the_seam_tolerance``),
+#:     and widening this constant to 2 pt fails it.
+#: It is a statement about the page's geometry, not a cut tuned on the corpus.
+_SEAM_PT = 0.01
+
+
 def _union_area(boxes: list, clip) -> float:
     """Area of the union of ``boxes`` clipped to ``clip`` (sweep over x, merged y intervals)."""
     rects = []
@@ -3005,6 +3172,7 @@ class BornDigitalDetector:
             # repair, so each declared page is looked up by it afterwards.
             xrefs_before = [self._safe_page_xref(doc, i) for i in range(declared)]
             self._recover_symbol_fonts(doc, pdf_path)
+            self._read_document_furniture(doc)
             xref_to_index: dict[int, int] | None = None
             if len(doc) != declared:
                 xref_to_index = {}
@@ -3082,6 +3250,7 @@ class BornDigitalDetector:
             if page_num < 1 or page_num > len(doc):
                 raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
             self._recover_symbol_fonts(doc, pdf_path)
+            self._read_document_furniture(doc)
             assessment = self._assess_page(doc[page_num - 1], page_num)
             self._mark_unrecovered_glyphs([assessment])
             return assessment
@@ -3610,6 +3779,34 @@ class BornDigitalDetector:
                 + " -> OCR"
             )
 
+        # #1156: the same family read from the drawing order, which also sees a layer
+        # painted OVER by the raster (render mode 0) and a scan stored as strips. The page
+        # is routed to a model: the owner's ruling is "re-read, and withhold the layer only
+        # if the reading is rejected", so the page must REACH a model. Without this the
+        # withholding branch is unreachable -- no model attempt runs, and the page ships
+        # its unverified prior-OCR text as a clean SUCCESS (63 of 63 Fed pilot pages,
+        # "3 Y, per cent" among them). #1027's delete key (``invisible_text_over_raster``)
+        # is deliberately left alone.
+        prior_ocr_layer = False
+        prior_ocr_layer_scan_failed = False
+        try:
+            prior_ocr_layer = self._has_prior_ocr_layer(
+                page,
+                getattr(self, "_repeated_slots", frozenset()),
+                getattr(self, "_doc_folio_slots", frozenset()),
+            )
+        except Exception:
+            # Fail towards suspicion: an unreadable page is never evidence of trust.
+            logger.warning("#1156: prior-OCR-layer scan failed", exc_info=True)
+            prior_ocr_layer_scan_failed = True
+        if prior_ocr_layer or prior_ocr_layer_scan_failed:
+            needs_ocr_enhancement = True
+            notes.append(
+                "text layer is an earlier OCR reading (hidden under the page raster)"
+                + (" (scan failed: unknown)" if prior_ocr_layer_scan_failed else "")
+                + " -> OCR"
+            )
+
         # #960: math the text layer garbled (private-use glyphs, math-alphanumeric codepoints,
         # letters of a script no corpus page is written in, or a math font ``_MATH_FONT_RE``
         # does not list). The P4-R region lane keeps this native text as its floor, so only a
@@ -3842,6 +4039,8 @@ class BornDigitalDetector:
             control_byte_digit_hits=control_byte_digit_hits,
             control_byte_scan_failed=control_byte_scan_failed,
             invisible_text_over_raster=invisible_text_over_raster,
+            prior_ocr_layer=prior_ocr_layer,
+            prior_ocr_layer_scan_failed=prior_ocr_layer_scan_failed,
             invisible_text_scan_failed=invisible_text_scan_failed,
             garbled_math_signals=garbled_math_signals,
             garbled_math_scan_failed=garbled_math_scan_failed,
@@ -4779,6 +4978,321 @@ class BornDigitalDetector:
             return False
         invisible, total = text_layer_invisible_char_counts(page)
         return invisible * 2 > total
+
+    def _read_document_furniture(self, doc) -> None:
+        """#1156: read this document's repetition evidence onto the detector, once.
+
+        Repetition is a property of the DOCUMENT, so it cannot be derived from the page
+        the predicate is asked about. A failure leaves both sets empty, which can only
+        make the prior-OCR predicate QUIETER (a page with any visible word then keeps its
+        own text) -- never louder.
+
+        The attribute is NOT named after the method it comes from (Argon, re-review):
+        assigning ``self._folio_slots`` overwrote the method with a frozenset, so the
+        SECOND document raised ``'frozenset' object is not callable``, the except below
+        swallowed it, both sets reset to empty -- and every prior-OCR scan with a header
+        or a folio after document one went undetected. ``UnifiedPipeline`` reuses one
+        detector for the whole run, so that was every document but the first.
+
+        Called from BOTH entry points for the same reason: the single-page route shares
+        the detector, so leaving the previous document's furniture in place would judge
+        this page against another document's running headers.
+        """
+        try:
+            self._repeated_slots = self._repeated_text_slots(doc)
+            self._doc_folio_slots = self._folio_slots(doc, self._repeated_slots)
+        except Exception:
+            logger.warning("#1156: repeated-slot scan failed", exc_info=True)
+            self._repeated_slots = frozenset()
+            self._doc_folio_slots = frozenset()
+
+    #: #1156: the same WORD printed at the same place on at least this many pages is page
+    #: furniture. Two is the smallest number that is a repeat at all; it is a definition,
+    #: not a tuned cut.
+    #:
+    #: Round 2 (Astra P1): this counted POSITIONS only, so two slide-like pages whose
+    #: body columns happen to align made the body itself "furniture" and the pages read
+    #: as bare scans. The text is part of the key again. The cost is a folio whose digits
+    #: change per page ("101 of 107"): its slot is no longer furniture, so a page carrying
+    #: one keeps a word of its own and is not called a scan. That is the conservative
+    #: direction -- a missed scan is a page that keeps today's behaviour, a false scan is
+    #: a born-digital page whose text stops being trusted.
+    MIN_SLOT_PAGES = 2
+
+    @staticmethod
+    def _declares_transparency_following_references(page) -> bool:
+        """The same question as ``_page_declares_transparency``, following references.
+
+        Measured (``scratch/1156a/extgstate_probe.py``, 598 pages of 150 corpus PDFs): the
+        page-level reader below finds partial alpha on **0** pages, because standard
+        generators write ``/ExtGState << /GS0 15 0 R >>`` and keep ``/ca 0.5`` inside
+        object 15. Following those references finds it on 76. So that guard, added for
+        Astra's round-2 finding, has never fired on any corpus page.
+
+        It is NOT simply switched on, because the two consumers of opacity need OPPOSITE
+        failure directions and this flag is page-level, not per-image:
+
+        * the WITNESS test asks "did anything independent read these pixels?", and a wrong
+          "yes" lets a table skip row verification -- the weakening found four times. Here
+          more suspicion is pure gain, so the witness uses THIS reader.
+        * the DETECTOR asks "is the page's text hidden under an opaque raster?", and a
+          wrong "no" ships a prior-OCR layer as trusted native, which is the harm #1156
+          exists to prevent. Measured: switching this reader on there loses 2 detections
+          of 594 pages, and both are genuine JSTOR scans (100% render-mode-3 text under
+          full-page rasters). So ``detect`` keeps the page-level reader and its measured
+          80 detections.
+
+        A per-IMAGE answer would need the graphics state at each placement, which means
+        tracking ``gs`` through the content stream; that is a PDF interpreter, and
+        reimplementing one in Python miscomputes geometry. Splitting by consumer is the
+        honest bound instead: each side errs the way that adds checks.
+
+        A PyMuPDF failure propagates here too, for the reason given on
+        ``_page_declares_transparency``; the witness keeps its direction through
+        ``page_has_opaque_page_covering_raster``'s own catch.
+        """
+        doc = page.parent
+        resources = doc.xref_get_key(page.xref, "Resources")
+        if resources[0] == "xref":
+            ext = doc.xref_get_key(int(resources[1].split()[0]), "ExtGState")
+        elif resources[0] == "dict":
+            ext = ("dict", resources[1])
+        else:
+            return False
+        if ext[0] == "null":
+            return False
+        text = ext[1]
+        if ext[0] == "xref":
+            text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
+        blobs = [text or ""]
+        for xref in {int(m) for m in _INDIRECT_REF_RE.findall(blobs[0])}:
+            blobs.append(doc.xref_object(xref, compressed=True) or "")
+        for blob in blobs:
+            if _any_alpha_below_one(blob):
+                return True
+            # A soft mask makes the state transparent without naming an alpha.
+            if "/SMask" in blob and "/SMask /None" not in blob:
+                return True
+        return False
+
+    @staticmethod
+    def _page_declares_transparency(page) -> bool:
+        """True when the page's resources declare any graphics state with alpha < 1.
+
+        #1156 round 2 (Astra P1): an image drawn under such a state can be invisible
+        however opaque its own pixels are, and ``get_image_info`` says nothing about it.
+        The whole page is then treated as UNKNOWN opacity rather than opaque: a page
+        that declares no partial alpha anywhere is the positive case.
+
+        A PyMuPDF failure PROPAGATES (round 2, r-uben blocker 5): the document reads below
+        sit outside any try, and only the parsing of an already-fetched string is guarded,
+        in ``_any_alpha_below_one``. The two cannot be told apart by exception type --
+        ``xref_get_key`` raises ``ValueError("bad xref")`` and so does ``float()`` on a
+        non-numeric alpha -- so they are separated by WHERE instead. This reader also does
+        NOT follow indirect references; ``_declares_transparency_following_references``
+        is the one that does, and the split is by consumer, not by accident.
+        """
+        doc = page.parent
+        resources = doc.xref_get_key(page.xref, "Resources")
+        if resources[0] == "xref":
+            res_xref = int(resources[1].split()[0])
+            ext = doc.xref_get_key(res_xref, "ExtGState")
+        elif resources[0] == "dict":
+            ext = ("dict", resources[1])
+        else:
+            return False
+        if ext[0] == "null":
+            return False
+        text = ext[1]
+        if ext[0] == "xref":
+            text = doc.xref_object(int(ext[1].split()[0]), compressed=True)
+        return _any_alpha_below_one(text)
+
+    @staticmethod
+    def _image_is_opaque(doc, info: dict, page_declares_transparency: bool) -> bool:
+        """Positive evidence that this image paints over what is beneath it.
+
+        Round 2 (Astra P1): the previous test read MISSING metadata as opaque, so an
+        image with alpha 0 -- which leaves the rendered pixels byte-identical -- still
+        counted as covering the text under it. Every clause here must be answered
+        affirmatively; anything unknown means NOT opaque.
+
+        A PyMuPDF failure RAISES rather than answering (round 1, r-uben blocker 3). It used
+        to answer the "cautious" value, and that word hid an asymmetry: the two consumers of
+        opacity need opposite failure directions, exactly as the two transparency readers do.
+        Swallowing made every image read not-opaque, so ``_has_prior_ocr_layer`` RETURNED
+        False instead of raising, its caller's ``except`` never ran, and
+        ``prior_ocr_layer_scan_failed`` was unreachable from a PyMuPDF failure. Measured at
+        ``process()`` on the painted-under fixture: the document went from ERROR to clean
+        SUCCESS, the page from WARNING to SUCCESS, the mark vanished, and the layer's
+        numbers shipped unflagged. Raising makes the detector answer "unknown", which is
+        suspicion; the witness keeps its own direction because
+        ``page_has_opaque_page_covering_raster`` catches and returns False. Measured cost:
+        these reads raised on 0 of 318 probe-set pages.
+        """
+        if page_declares_transparency:
+            return False
+        if "has-mask" not in info or info["has-mask"]:
+            return False
+        xref = info.get("xref")
+        if not xref:
+            return False
+        # Raises on a PyMuPDF failure; see the note in the docstring.
+        if doc.xref_get_key(xref, "SMask")[0] != "null":
+            return False
+        if doc.xref_get_key(xref, "ImageMask")[0] != "null":
+            return False
+        return True
+
+    @staticmethod
+    def _repeated_text_slots(doc) -> frozenset:
+        """Word origins this document prints on ``MIN_SLOT_PAGES`` or more pages."""
+        import collections
+
+        pages: collections.Counter = collections.Counter()
+        for page in doc:
+            try:
+                words = page.get_text("words")
+            except Exception:  # one unreadable page costs its own evidence, not the document
+                continue
+            pages.update({(str(w[4]).casefold(), round(w[0], 1), round(w[1], 1)) for w in words})
+        return frozenset(k for k, n in pages.items() if n >= BornDigitalDetector.MIN_SLOT_PAGES)
+
+    @staticmethod
+    def _folio_slots(doc, repeated_slots: frozenset) -> frozenset:
+        """Slots that hold a PAGE NUMBER, by construction rather than by looking small.
+
+        Round 2: furniture is "the same word at the same place", which a folio fails --
+        its digits change on every page. The positive evidence that a slot is a folio is
+        the counting itself: the same slot, beside surrounding text the document repeats,
+        holding an integer whose value minus its page index is CONSTANT. That allows
+        pages where the number is absent (the slot is simply unobserved there) while
+        forbidding reversals and jumps, so aligned body text cannot fake it -- body
+        columns would have to count upwards in step with the page number to qualify.
+        """
+        import collections
+
+        seen: dict[tuple[float, float], dict[int, int]] = collections.defaultdict(dict)
+        for index, page in enumerate(doc):
+            try:
+                words = list(page.get_text("words"))
+            except Exception:
+                continue
+            by_line: dict[float, list] = collections.defaultdict(list)
+            for word in words:
+                by_line[round(word[1], 1)].append(word)
+            for word in words:
+                text = str(word[4]).strip()
+                if not text.isdigit():
+                    continue
+                line = by_line[round(word[1], 1)]
+                has_repeated_neighbour = any(
+                    other is not word
+                    and (str(other[4]).casefold(), round(other[0], 1), round(other[1], 1))
+                    in repeated_slots
+                    for other in line
+                )
+                if not has_repeated_neighbour:
+                    continue
+                seen[(round(word[0], 1), round(word[1], 1))][index] = int(text)
+        folios = set()
+        for slot, observations in seen.items():
+            if len(observations) < BornDigitalDetector.MIN_SLOT_PAGES:
+                continue
+            if len({value - index for index, value in observations.items()}) == 1:
+                folios.add(slot)
+        return frozenset(folios)
+
+    def _has_prior_ocr_layer(
+        self,
+        page: fitz.Page,
+        repeated_slots: frozenset,
+        folio_slots: frozenset = frozenset(),
+        *,
+        strict_transparency: bool = False,
+    ) -> bool:
+        """#1156: the page's text is an earlier OCR run, by positive evidence only.
+
+        Read from ``get_bboxlog`` -- the page's drawing operations in order -- and NOT
+        from ``get_texttrace``, which aborts the process on some documents (610 pages of
+        one Fed pass, uncatchable by ``except``). All three must hold:
+
+        1. opaque rasters cover ``RASTER_DOMINANCE_RATIO`` of the page by UNION, so a scan
+           stored as strips counts (Kim-Verrecchia p1-36: 29 tiles, largest 3.5%);
+        2. the page carries text the reader cannot see: render mode 3 (``ignore-text``),
+           or text drawn BEFORE a later opaque image that contains it -- the shape #961
+           cannot see, and the one every CHECKED page in the Fed pilot had;
+        3. it keeps no visible text of its own: every visible word sits at a repeated
+           slot. A page that still prints its own words is a born-digital page with an
+           overlay, not a scan (Gentzkow p30: 0.87 raster, 265 words of its own).
+
+        A document of one page repeats nothing, so it yields no evidence and returns
+        False: absence of evidence is not suspicion. Raises on a PyMuPDF failure; the
+        caller fails closed.
+        """
+        rect = page.rect
+        page_area = abs(rect.get_area())
+        if page_area <= 0:
+            return False
+        infos = page.get_image_info(xrefs=True)
+        # ``strict_transparency`` follows indirect graphics states; see
+        # ``_declares_transparency_following_references`` for why only the witness does.
+        declares_alpha = (
+            self._declares_transparency_following_references(page)
+            if strict_transparency
+            else self._page_declares_transparency(page)
+        )
+        images: list[tuple[int, fitz.Rect, bool]] = []
+        texts: list[tuple[int, fitz.Rect, bool]] = []
+        for seq, (kind, bbox) in enumerate(page.get_bboxlog()):
+            box = fitz.Rect(bbox) & rect
+            if box.is_empty:
+                continue
+            if "image" in kind:
+                info = _image_info_for_box(infos, fitz.Rect(bbox), rect)
+                opaque = self._image_is_opaque(page.parent, info, declares_alpha)
+                images.append((seq, box, opaque))
+            elif kind in ("fill-text", "stroke-text", "ignore-text"):
+                texts.append((seq, box, kind == "ignore-text"))
+        opaque_boxes = [box for _seq, box, opaque in images if opaque]
+        if _union_area(opaque_boxes, rect) / page_area < self.RASTER_DOMINANCE_RATIO:
+            return False
+
+        hidden: list[fitz.Rect] = []
+        visible: list[fitz.Rect] = []
+        for seq, box, invisible in texts:
+            # Against the UNION of the later opaque images, not one of them: a scan
+            # stored as strips paints a line that straddles two tiles, and asking any
+            # SINGLE tile to contain it leaves such lines looking visible (4 of 12 on a
+            # 29-strip page). ``math.isclose`` is float tolerance on an area equality,
+            # not a threshold on the evidence.
+            later = [
+                (img + (-_SEAM_PT, -_SEAM_PT, _SEAM_PT, _SEAM_PT)) & box
+                for s, img, opaque in images
+                if s > seq and opaque
+            ]
+            box_area = abs(box.get_area())
+            painted_over = box_area > 0 and math.isclose(
+                _union_area([r for r in later if not r.is_empty], box),
+                box_area,
+                rel_tol=1e-6,
+            )
+            (hidden if invisible or painted_over else visible).append(box)
+        if not hidden:
+            return False
+        if not visible:
+            return True
+        for word in page.get_text("words"):
+            word_box = fitz.Rect(word[:4])
+            if not any(not (word_box & box).is_empty for box in visible):
+                continue
+            key = (str(word[4]).casefold(), round(word[0], 1), round(word[1], 1))
+            if (
+                key not in repeated_slots
+                and (round(word[0], 1), round(word[1], 1)) not in folio_slots
+            ):
+                return False  # the page prints a word of its own: not a bare scan
+        return True
 
     @staticmethod
     def _raster_coverage(page: fitz.Page) -> float:
