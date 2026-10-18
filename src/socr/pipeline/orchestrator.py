@@ -10686,13 +10686,74 @@ class UnifiedPipeline:
                         # prose (or unread-table) winner and may promote a
                         # marked candidate; ``decision.accepted`` is then true
                         # only for a verified later table or a promoted mark.
-                        if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
+                        #
+                        # #1203 round 1 (OWNER RULING 2026-10-18, r-uben blocker 1): and
+                        # when nothing could witness the table at all. Since #1202 a
+                        # suspect page under an opaque raster skips row-level verification
+                        # -- correctly, the layer is not evidence -- which leaves the
+                        # PIXELS as the only witness. With no classical-OCR witness
+                        # installed (CI's state and the cluster's) nothing reads them, the
+                        # heuristic leaf accepts, ``decision.accepted`` is True, and the
+                        # model's table shipped under #1048's unverified mark. Measured on
+                        # r-uben's fixture: the table shipped carrying 521/380/18 where the
+                        # layer read 512/-380/-18.
+                        #
+                        # The ruling is to WITHHOLD: the outcome is UNVERIFIED, so the
+                        # table goes to this floor -- page picture plus mark -- and the
+                        # model's table stays in ``ps.attempts``, hence in the sidecar,
+                        # where a later second reader can release it by re-finalizing with
+                        # no new OCR.
+                        #
+                        # The layer is consulted NEITHER to pass nor to fail, which is why
+                        # this is not "re-run the native verifier": that would hand the
+                        # layer back both its veto (the -350 case) and its licence to pass
+                        # a table that happens to agree with it.
+                        #
+                        # "No witness RAN" is read from the judge's own event, not from
+                        # ``_source_ev_no_witness`` above: that reduction looks at the
+                        # attempts' failure modes, and by the time the ladder has settled
+                        # an unverified table (#1048) the surviving attempt's mode is
+                        # NONE -- measured, the gate saw ``no_witness=False`` on exactly
+                        # the page whose table shipped unwitnessed. The event is emitted
+                        # for the whole no-witness family (package missing, binary
+                        # missing, exec error, unrasterisable page), which is the question
+                        # the ruling asks: did anything independent read these pixels.
+                        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+
+                        _no_witness_ran = any(
+                            getattr(ev, "page_num", None) == page_num
+                            and getattr(ev, "kind", "") == NO_WITNESS_BACKEND_KIND
+                            for ev in state.events
+                        )
+                        _layer_not_evidence_unwitnessed = bool(
+                            _no_witness_ran
+                            and getattr(ps, "native_table_check_skipped_no_evidence", False)
+                        )
+                        if _layer_not_evidence_unwitnessed and ps.best_output is not None:
+                            # Captured BEFORE the floor demotes the winner. The ruling
+                            # withholds this table, and withholding is not deletion: the
+                            # reading survives in the sidecar, unshipped, for a second
+                            # reader to release by re-finalizing. Only on pages the new
+                            # rule withholds, so no sidecar that exists today grows a key.
+                            ps.withheld_table_text = ps.best_output.text or ""
+                        if (
+                            _source_ev_rejected
+                            and not ps.is_born_digital
+                            and (not decision.accepted or _layer_not_evidence_unwitnessed)
+                        ):
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
                                 page_num,
                                 _chart_figures_dir,
-                                no_witness=_source_ev_no_witness,
+                                # #1203 round 1: ``or _no_witness_ran``. The floor stamps
+                                # HALLUCINATION unless it is told the gate found no
+                                # witness, and on a page withheld by the ruling above the
+                                # model did not invent the table -- nothing could check
+                                # it. Measured: without this the withheld page shipped
+                                # ``hallucination``, which also drops it out of the
+                                # unwitnessed-pages rollup and its CLI line.
+                                no_witness=_source_ev_no_witness or _no_witness_ran,
                             )
                         # #1048: the gate could not check a scanned page's table and
                         # the candidate was accepted, so it ships. Record the page's
@@ -10768,8 +10829,25 @@ class UnifiedPipeline:
                         # found. The marker that ships in place of the earlier OCR layer
                         # has to point at something a reader can check, and this is the
                         # only thing on the page that was never re-read.
+                        #
+                        # #1203 round 1 (Argon P2b): and ONLY on a page that can reach an
+                        # ending which references it. Both readers of
+                        # ``prior_ocr_page_png_ref`` -- the #1156 floor (``manifest.py``
+                        # ~4578) and the disputed-grid branch (~4766) -- live inside
+                        # ``if p.is_born_digital and p.native_text:`` (~4366), so on a page
+                        # an early born-digital rejection produced, this render had no
+                        # reader at all: one page rasterised and written per page, ~3,960
+                        # of them on the Fed run, referenced by nothing.
+                        #
+                        # Stopped rather than referenced, deliberately. The ending such a
+                        # page ships is either its own table floor, which already carries
+                        # the page image it rendered itself (``d3_floor_png_ref``), or a
+                        # model reading with no marker to hang a link on -- and appending a
+                        # link there would change the shipped bytes of every one of those
+                        # pages, which is a shipping decision and not this round's.
                         if (
                             getattr(ps, "prior_ocr_layer", False)
+                            and getattr(ps, "is_born_digital", False)
                             and not getattr(ps, "invisible_text_over_raster", False)
                             and not decision.accepted
                             and _chart_figures_dir is not None
@@ -14491,12 +14569,22 @@ class UnifiedPipeline:
             ps = state.pages.get(page_num)
             return ps is not None and not layer_is_admissible_evidence(ps)
 
+        def on_layer_not_evidence(page_num: int) -> None:
+            # #1203 round 1 (owner ruling 2026-10-18): remember that this page's table was
+            # NOT row-verified, and why -- the layer is an earlier OCR run, so it may
+            # neither pass nor fail the table. The scanned-table floor below reads this to
+            # withhold the table when no witness could read the pixels instead.
+            ps = state.pages.get(page_num)
+            if ps is not None:
+                ps.native_table_check_skipped_no_evidence = True
+
         native_judge = NativeTableVerifierJudge(
             inner=timed_leaf,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
             native_evidence_suspect=native_evidence_suspect,
+            on_layer_not_evidence=on_layer_not_evidence,
         )
 
         def native_trusted(page_num: int) -> bool | None:
@@ -15063,6 +15151,12 @@ class UnifiedPipeline:
             layer = getattr(ps, "native_text", "") or getattr(ps, "prior_ocr_layer_text", "") or ""
             if layer:
                 payload["prior_ocr_layer_text"] = layer
+
+        # #1203 round 1 (owner ruling 2026-10-18): the table this run withheld because
+        # nothing could witness it. Sparse for the same reason as the key above -- absent
+        # on every page that did not hit the rule, so their sidecar bytes are unchanged.
+        if ps is not None and getattr(ps, "withheld_table_text", ""):
+            payload["withheld_table_text"] = ps.withheld_table_text
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor
@@ -16223,6 +16317,17 @@ class UnifiedPipeline:
                 # that field back, so the gate would be answered from an unrestored field
                 # and would always be False.
                 ps.prior_ocr_layer_text = _retained_layer
+            # #1203 round 1 (owner ruling 2026-10-18): the table the ruling withheld, for
+            # the same reason the layer above is restored -- the re-flush rebuilds the
+            # sidecar from PageState, so a field that does not come back is a key that
+            # disappears, and this one is the whole release path for ~1,700 Fed pages.
+            # Defence rather than a live path, and for the same reason: a withheld page is
+            # ERROR, so the page ledger never admits it and this restore is not reached in
+            # a normal resume. Both halves are pinned
+            # (``test_the_withheld_table_survives_a_flush_a_restore_and_a_re_flush``).
+            _withheld_table = meta.get("withheld_table_text")
+            if isinstance(_withheld_table, str) and _withheld_table:
+                ps.withheld_table_text = _withheld_table
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.

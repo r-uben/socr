@@ -3351,10 +3351,18 @@ class BornDigitalDetector:
         Measured on THIS tree, before and after (``scratch/1203/``): 307 of the 355
         unflagged pages the 455-PDF Fed census recorded gain the flag (~3,960 of the
         5,870-PDF corpus at the census's x12.9), and 80 pages of the corpus probe set --
-        which is the count the issue reports. Zero in the other direction, zero routing
-        changes, and zero pages change what they SHIP: every native floor, Part A's
-        included, sits inside ``manifest.py``'s ``if p.is_born_digital and p.native_text``
-        branch, which these pages satisfy neither half of.
+        which is the count the issue reports. Zero in the other direction and zero routing
+        changes.
+
+        Round 1 correction (Argon P1, r-uben should-fix 2): "zero pages change what they
+        SHIP" was WRONG, and so was the reason given for it. Most native floors sit inside
+        ``manifest.py``'s ``if p.is_born_digital and p.native_text`` branch, which these
+        pages satisfy neither half of -- but ``UNVERIFIABLE_TABLE_SCANNED`` (~4246) is
+        reached by ``not p.is_born_digital and scanned_table_evidence_failed``, i.e. on
+        exactly these pages, and #649's ``native_prose_floor_text`` shipped the earlier OCR
+        run's own paragraphs from there. That is now gated on ``prior_ocr_layer_found``,
+        so such a page falls to its marker plus page image and the layer stays retained,
+        unshipped. See ``docs/log/2026-10-18_1203-early-returns.md``.
 
         Called ONCE per page, from ``_assess_page``, which is the stamping point every
         early return already passes through.
