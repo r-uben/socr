@@ -274,7 +274,16 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
 # this set is the word-keyed mechanism below (``_boundary_fully_resolved_tables``),
 # never a generic ACCEPTED and never merely the ABSENCE of a current
 # unresolved event.
-NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset({TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND})
+NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
+    {
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        # Per-cell native binding: geometry/content doubt is independent of a
+        # later page-wide table escalation replacing markdown.
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
+    }
+)
 
 #: GH-609 round 4: maps each ``NON_RESOLVABLE_DISTRUST_KINDS`` member to the
 #: kind whose matching, word-keyed event resolves it. A kind in

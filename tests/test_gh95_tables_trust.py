@@ -594,6 +594,17 @@ def test_a_page_wide_ladder_accept_with_no_table_id_is_a_no_op():
     assert trust.resolved_pages == []
 
 
+def test_native_cell_distrust_survives_table_escalation_accepted():
+    """Native per-cell flags must not be erased by a later page-wide escalation accept."""
+    events = [
+        AuditEvent(page_num=3, kind="native_cell_check_ambiguous", data={"table_id": "1"}),
+        AuditEvent(page_num=3, kind="table_escalation_accepted"),
+    ]
+    trust = build_tables_trust("doc.pdf", events)
+    assert trust.untrusted_pages == [3]
+    assert "native_cell_check_ambiguous" in trust.to_dict()["pages"]["3"]["reasons"]
+
+
 def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():
     """``table_escalation_accepted`` is the one kind allowed to clear a whole
     page with no ``table_id`` -- it is the only kind with a real emit site

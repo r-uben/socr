@@ -8237,30 +8237,29 @@ class UnifiedPipeline:
                                                 "unpaired native table region (possible lost table)",
                                             )
                                         for wi, witness in enumerate(witnesses):
-                                            region_bbox = (
-                                                witness.box.bbox
-                                                if witness.box is not None
+                                            pick = (
+                                                paired_regions[wi]
+                                                if wi < len(paired_regions)
                                                 else None
                                             )
                                             crop_note = ""
-                                            if region_bbox is None:
-                                                pick = (
-                                                    paired_regions[wi]
-                                                    if wi < len(paired_regions)
-                                                    else None
-                                                )
-                                                if pick is not None:
-                                                    region_bbox = pick
+                                            if pick is not None:
+                                                region_bbox = pick
+                                                if witness.box is not None and tuple(
+                                                    witness.box.bbox
+                                                ) != tuple(pick):
                                                     crop_note = (
-                                                        "witness-ambiguous; "
-                                                        "content-paired located crop"
+                                                        "content-paired located crop "
+                                                        "overrides witness box"
                                                     )
-                                                else:
-                                                    _record_skip(
-                                                        witness.table_id,
-                                                        "table-region pairing inconclusive",
-                                                    )
-                                                    continue
+                                            elif witness.box is not None:
+                                                region_bbox = witness.box.bbox
+                                            else:
+                                                _record_skip(
+                                                    witness.table_id,
+                                                    "table-region pairing inconclusive",
+                                                )
+                                                continue
                                             result = check_table_cell_binding(
                                                 table_id=witness.table_id,
                                                 words=words,

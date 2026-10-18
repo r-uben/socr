@@ -123,12 +123,13 @@ def _p67_blank_one_cell(md: str) -> str:
 
 
 class TestP67Tableau8:
-    def test_correct_table_verified(self, p67_table):
+    def test_correct_table_ambiguous_under_strict_labels(self, p67_table):
+        """Fail-closed: wrapped native row paths vs model footnote markers → ambiguous, not verified."""
         words, md, region, spans = p67_table
         r = check_table_cell_binding(
             table_id="t0", words=words, markdown=md, region_bbox=region, spans=spans
         )
-        assert r.outcome is NativeCellOutcome.VERIFIED
+        assert r.outcome is NativeCellOutcome.AMBIGUOUS
 
     def test_removed_data_row_not_verified(self, p67_table) -> None:
         """Lane-mismatch table: dropping a native data row must not verify."""

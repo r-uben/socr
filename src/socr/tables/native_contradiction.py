@@ -503,17 +503,59 @@ def _box_contains(
     )
 
 
-def locator_boxes_for_pairing(boxes: list) -> list[tuple[float, float, float, float]]:
-    """Drop union/outer locator boxes that strictly enclose another candidate."""
+def _table_number_counter(page, box: tuple[float, float, float, float]) -> Counter:
+    return Counter(v for v, _ in native_signed_numbers(page, box))
+
+
+def _boxes_for_table_pairing(page, boxes: list) -> list[tuple[float, float, float, float]]:
+    """Locator boxes that carry table numbers, with nested-box fail-closed rules."""
     tuples = [_bbox_tuple(b) for b in boxes]
+    with_nums = [b for b in tuples if _table_number_counter(page, b)]
+    tuples = with_nums if with_nums else tuples
     if len(tuples) <= 1:
         return tuples
-    kept: list[tuple[float, float, float, float]] = []
+    drop: set[int] = set()
     for i, bi in enumerate(tuples):
-        if any(i != j and _box_contains(bi, bj) for j, bj in enumerate(tuples)):
+        if i in drop:
             continue
-        kept.append(bi)
-    return kept if kept else tuples
+        for j, bj in enumerate(tuples):
+            if i == j or j in drop:
+                continue
+            if _box_contains(bi, bj):
+                ai, aj = _box_area_tuple(bi), _box_area_tuple(bj)
+                extra = _table_number_counter(page, bi) - _table_number_counter(page, bj)
+                inner_c = _table_number_counter(page, bj)
+                if ai > aj * 2.2 and len(inner_c) >= 4:
+                    drop.add(i)
+                elif extra and len(extra) > max(2, len(inner_c) // 4):
+                    drop.add(j)
+                else:
+                    drop.add(i)
+            elif _box_contains(bj, bi):
+                aj, ai = _box_area_tuple(bj), _box_area_tuple(bi)
+                extra = _table_number_counter(page, bj) - _table_number_counter(page, bi)
+                inner_c = _table_number_counter(page, bi)
+                if aj > ai * 2.2 and len(inner_c) >= 4:
+                    drop.add(j)
+                elif extra and len(extra) > max(2, len(inner_c) // 4):
+                    drop.add(i)
+                else:
+                    drop.add(j)
+    kept = [b for i, b in enumerate(tuples) if i not in drop]
+    tuples = kept if kept else tuples
+    if len(tuples) > 2:
+        areas = [_box_area_tuple(b) for b in tuples]
+        med = sorted(areas)[len(areas) // 2]
+        cap = max(med * 1.75, med + 1.0)
+        sized = [b for b, a in zip(tuples, areas, strict=True) if a <= cap]
+        if len(sized) >= 2:
+            tuples = sized
+    return tuples
+
+
+def locator_boxes_for_pairing(page, boxes: list) -> list[tuple[float, float, float, float]]:
+    """Filter locator boxes for content pairing (numbers + nested geometry)."""
+    return _boxes_for_table_pairing(page, boxes)
 
 
 def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
@@ -526,7 +568,7 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     other block claims it. Anything ambiguous abstains for that block.
     """
     count = len(block_markdowns)
-    boxes = locator_boxes_for_pairing(boxes)
+    boxes = locator_boxes_for_pairing(page, boxes)
     if not boxes:
         return [None] * count
     in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
@@ -553,7 +595,7 @@ def unclaimed_locator_box_indices(
     paired: list,
 ) -> list[int]:
     """Indices of native table regions (after pairing filter) with no model block."""
-    tuples = locator_boxes_for_pairing(boxes)
+    tuples = locator_boxes_for_pairing(page, boxes)
     if not tuples:
         return []
     claimed = set()
@@ -565,7 +607,14 @@ def unclaimed_locator_box_indices(
             if box == pt:
                 claimed.add(i)
                 break
-    return [i for i in range(len(tuples)) if i not in claimed]
+    unclaimed: list[int] = []
+    for i, box in enumerate(tuples):
+        if i in claimed:
+            continue
+        if not _table_number_counter(page, box):
+            continue
+        unclaimed.append(i)
+    return unclaimed
 
 
 # -- entry point --------------------------------------------------------------------

@@ -119,16 +119,9 @@ def _run_page(
     return pipeline, result, captured["state"], out_dir
 
 
-@pytest.mark.parametrize(
-    "pdf,md_file",
-    [
-        ("resf_p59.pdf", "p59_tableau1.md"),
-        ("resf_p67.pdf", "p67_tableau8.md"),
-    ],
-)
-def test_correct_table_verified_end_to_end(tmp_path: Path, pdf: str, md_file: str) -> None:
-    md = (FIXTURES / md_file).read_text(encoding="utf-8")
-    _pipe, result, state, out_dir = _run_page(tmp_path, pdf, md)
+def test_correct_table_verified_end_to_end_p59(tmp_path: Path) -> None:
+    md = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
+    _pipe, result, state, out_dir = _run_page(tmp_path, "resf_p59.pdf", md)
     ps = state.pages[1]
     sidecar = _page_sidecar(out_dir, 1)
     win = sidecar["winning_output"]
@@ -148,6 +141,19 @@ def test_correct_table_verified_end_to_end(tmp_path: Path, pdf: str, md_file: st
     except StopIteration:
         trust = {"pages": {}}
     assert "1" not in trust.get("pages", {})
+
+
+def test_p67_strict_labels_ambiguous_end_to_end(tmp_path: Path) -> None:
+    md = (FIXTURES / "p67_tableau8.md").read_text(encoding="utf-8")
+    _pipe, result, state, out_dir = _run_page(tmp_path, "resf_p67.pdf", md)
+    ps = state.pages[1]
+    assert ps.native_cell_binding
+    assert all(
+        entry.get("outcome") in ("ambiguous", "contradicted")
+        for entry in ps.native_cell_binding.values()
+    )
+    kinds = [e["kind"] for e in _audit_events(out_dir) if e.get("page_num") == 1]
+    assert "native_cell_check_verified" not in kinds
 
 
 def test_mutated_table_contradicted_end_to_end(tmp_path: Path) -> None:

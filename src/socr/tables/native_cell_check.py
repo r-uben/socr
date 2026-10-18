@@ -33,9 +33,6 @@ from socr.tables.native_verifier import (
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
 _FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d+\)")
-_DATA_ROW_LABEL_RE = re.compile(
-    r"(?i)\b(Total|Sous-total|Solde|Ensemble|Recettes|Dépenses|Budget|Effectifs|Impôts|Taxes|Autres)\b"
-)
 _FOOTNOTE_LABEL_PREFIXES = (
     "Source :",
     "Source:",
@@ -228,10 +225,8 @@ def _row_path_is_footnote_prose(row_path: tuple[str, ...]) -> bool:
 
 
 def _native_leaf_is_excludable_footnote_label(leaf: str) -> bool:
-    """True only for prose footnote markers, never data subtotals/totals."""
+    """True only for prose footnote markers on rows with no data-lane numbers."""
     if not leaf.strip():
-        return False
-    if _DATA_ROW_LABEL_RE.search(leaf):
         return False
     if leaf.startswith("** dont"):
         return False
@@ -245,41 +240,24 @@ def _native_leaf_is_excludable_footnote_label(leaf: str) -> bool:
     return False
 
 
-def _label_key_literal(key) -> str:
-    if not key:
-        return ""
-    return key[0][1] if key[0] else ""
-
-
-def _is_truncated_label_variant(full_label: str, partial_label: str) -> bool:
-    full_k = _label_key_literal(label_key(full_label))
-    part_k = _label_key_literal(label_key(partial_label))
-    if not full_k or not part_k:
-        return False
-    return full_k.startswith(part_k) or part_k.startswith(full_k)
-
-
 def _labels_disagree_under_unverifiable_columns(native_row, cand_label: str) -> bool:
     if not cand_label.strip():
-        return False
+        return bool(native_row.row_path and any(part.strip() for part in native_row.row_path))
     cand_k = label_key(cand_label)
     if not cand_k:
         return False
-    if native_row.row_path:
-        last = native_row.row_path[-1].strip()
-        if last and _is_truncated_label_variant(cand_label, last):
-            return False
-        joined = _native_row_label_text(native_row)
-        if joined and _is_truncated_label_variant(cand_label, joined):
-            return False
     native_keys: list = []
     if native_row.row_path:
+        joined = _native_row_label_text(native_row)
+        if joined:
+            native_keys.append(label_key(joined))
         last = native_row.row_path[-1].strip()
         if last:
-            native_keys.append(label_key(last))
-        joined = _native_row_label_text(native_row)
-        if joined and joined != last:
-            native_keys.append(label_key(joined))
+            k = label_key(last)
+            if k and k not in native_keys:
+                native_keys.append(k)
+    if not native_keys:
+        return True
     return all(cand_k != k for k in native_keys if k)
 
 
@@ -290,64 +268,25 @@ def _native_row_index_for_unbound(cell: UnboundCell, result: BindingResult) -> i
     return None
 
 
-def _table_bound_data_y_max(result: BindingResult) -> float | None:
-    bound_native = set(result.row_binding.values())
-    y_maxs: list[float] = []
-    for idx, native_row in enumerate(result.native_rows):
-        if idx not in bound_native or native_row.is_parent:
+def _native_row_has_data_lane_numbers(result: BindingResult, row_path: tuple[str, ...]) -> bool:
+    for native_row in result.native_rows:
+        if native_row.row_path != row_path:
             continue
-        if native_row.label_bbox is not None:
-            y_maxs.append(native_row.label_bbox[3])
-        for bbox in native_row.lane_bboxes.values():
-            y_maxs.append(bbox[3])
-    if not y_maxs:
-        return None
-    return max(y_maxs)
-
-
-def _table_bound_data_y_min(result: BindingResult) -> float | None:
-    bound_native = set(result.row_binding.values())
-    y_mins: list[float] = []
-    for idx, native_row in enumerate(result.native_rows):
-        if idx not in bound_native or native_row.is_parent:
+        for text, _ambig in native_row.lane_tokens.values():
+            if is_numeric_token(_prepare_numeric_cell(text)):
+                return True
+    for cell in result.native_unbound:
+        if cell.row_path != row_path or not cell.col_path:
             continue
-        if native_row.label_bbox is not None:
-            y_mins.append(native_row.label_bbox[1])
-        for bbox in native_row.lane_bboxes.values():
-            y_mins.append(bbox[1])
-    if not y_mins:
-        return None
-    return min(y_mins)
+        if is_numeric_token(_prepare_numeric_cell(cell.token)):
+            return True
+    return False
 
 
-def _median_bound_row_pitch(result: BindingResult) -> float | None:
-    bound_native = set(result.row_binding.values())
-    ys: list[float] = []
-    for idx, native_row in enumerate(result.native_rows):
-        if idx not in bound_native or native_row.is_parent:
-            continue
-        if native_row.label_bbox is not None:
-            ys.append((native_row.label_bbox[1] + native_row.label_bbox[3]) / 2.0)
-    ys.sort()
-    if len(ys) < 2:
-        return None
-    diffs = [ys[i + 1] - ys[i] for i in range(len(ys) - 1) if ys[i + 1] - ys[i] > 1.0]
-    if not diffs:
-        return None
-    diffs.sort()
-    mn = diffs[0]
-    core = [d for d in diffs if d <= max(mn * 2.5, mn + 12.0)]
-    if not core:
-        core = diffs
-    q1_idx = min(len(core) - 1, max(0, len(core) // 4))
-    return core[q1_idx]
-
-
-def _footnote_separation_threshold(result: BindingResult) -> float:
-    pitch = _median_bound_row_pitch(result)
-    if pitch is None:
-        return 40.0
-    return max(pitch * 2.5, pitch + 8.0)
+def _unbound_cell_has_data_lane_number(cell: UnboundCell) -> bool:
+    if not cell.col_path:
+        return False
+    return is_numeric_token(_prepare_numeric_cell(cell.token))
 
 
 def _is_whole_unbound_native_row(cell: UnboundCell, result: BindingResult) -> bool:
@@ -385,6 +324,8 @@ def _native_unbound_cell_is_excludable(
             box = None
         if box is not None and len(box) == 4 and _bbox_outside_region(bbox, box):
             return True
+    if _unbound_cell_has_data_lane_number(cell):
+        return False
     if _is_whole_unbound_native_row(cell, result):
         if not cell.col_path:
             tok = _prepare_numeric_cell(cell.token)
@@ -395,6 +336,8 @@ def _native_unbound_cell_is_excludable(
                     return True
                 if data_y is not None and bbox[3] < data_y - 1.5:
                     return True
+        if _native_row_has_data_lane_numbers(result, cell.row_path):
+            return False
         if _row_path_is_footnote_prose(cell.row_path):
             return True
         leaf = cell.row_path[-1].strip() if cell.row_path else ""
@@ -451,7 +394,7 @@ def _row_anchor_scan(
                     )
                     if equiv:
                         native_label = _native_row_label_text(native_row)
-                        mismatches.append((stub, native_label, stub))
+                        mismatches.append((stub, native_label, "ambiguous_label"))
             continue
         if result.column_binding_unverifiable and _labels_disagree_under_unverifiable_columns(
             native_row, stub
@@ -465,7 +408,7 @@ def _row_anchor_scan(
                 )
                 if equiv:
                     native_label = _native_row_label_text(native_row)
-                    mismatches.append((stub, native_label, stub))
+                    mismatches.append((stub, native_label, "ambiguous_label"))
                     continue
         if cmp is False:
             mismatches.append(
@@ -554,10 +497,14 @@ def classify_binding_for_cell_check(
         return NativeCellOutcome.AMBIGUOUS
 
     hard_mismatches = [
-        m for m in mismatches if m[1] != "ambiguous_locale" and m[2] != "parse_failed"
+        m
+        for m in mismatches
+        if m[1] != "ambiguous_locale" and m[2] not in ("parse_failed", "ambiguous_label")
     ]
     if hard_mismatches:
         return NativeCellOutcome.CONTRADICTED
+    if any(m[2] == "ambiguous_label" for m in mismatches):
+        return NativeCellOutcome.AMBIGUOUS
     if result.ambiguous_count and not result.column_binding_unverifiable:
         return NativeCellOutcome.AMBIGUOUS
     if _numeric_unbound_blocks_verify(result, region):
