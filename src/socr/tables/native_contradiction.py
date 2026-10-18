@@ -507,55 +507,36 @@ def _table_number_counter(page, box: tuple[float, float, float, float]) -> Count
     return Counter(v for v, _ in native_signed_numbers(page, box))
 
 
-def _boxes_for_table_pairing(page, boxes: list) -> list[tuple[float, float, float, float]]:
-    """Locator boxes that carry table numbers, with nested-box fail-closed rules."""
+def _boxes_for_table_pairing(
+    page,
+    boxes: list,
+    *,
+    min_boxes: int = 1,
+) -> list[tuple[float, float, float, float]]:
+    """Locator boxes that carry table numbers; drop spurious union boxes only."""
     tuples = [_bbox_tuple(b) for b in boxes]
     with_nums = [b for b in tuples if _table_number_counter(page, b)]
     tuples = with_nums if with_nums else tuples
     if len(tuples) <= 1:
         return tuples
-    drop: set[int] = set()
-    for i, bi in enumerate(tuples):
-        if i in drop:
-            continue
-        for j, bj in enumerate(tuples):
-            if i == j or j in drop:
-                continue
-            if _box_contains(bi, bj):
-                ai, aj = _box_area_tuple(bi), _box_area_tuple(bj)
-                extra = _table_number_counter(page, bi) - _table_number_counter(page, bj)
-                inner_c = _table_number_counter(page, bj)
-                if ai > aj * 2.2 and len(inner_c) >= 4:
-                    drop.add(i)
-                elif extra and len(extra) > max(2, len(inner_c) // 4):
-                    drop.add(j)
-                else:
-                    drop.add(i)
-            elif _box_contains(bj, bi):
-                aj, ai = _box_area_tuple(bj), _box_area_tuple(bi)
-                extra = _table_number_counter(page, bj) - _table_number_counter(page, bi)
-                inner_c = _table_number_counter(page, bi)
-                if aj > ai * 2.2 and len(inner_c) >= 4:
-                    drop.add(j)
-                elif extra and len(extra) > max(2, len(inner_c) // 4):
-                    drop.add(i)
-                else:
-                    drop.add(j)
-    kept = [b for i, b in enumerate(tuples) if i not in drop]
-    tuples = kept if kept else tuples
     if len(tuples) > 2:
         areas = [_box_area_tuple(b) for b in tuples]
         med = sorted(areas)[len(areas) // 2]
         cap = max(med * 1.75, med + 1.0)
         sized = [b for b, a in zip(tuples, areas, strict=True) if a <= cap]
-        if len(sized) >= 2:
+        if len(sized) >= max(2, min_boxes):
             tuples = sized
     return tuples
 
 
-def locator_boxes_for_pairing(page, boxes: list) -> list[tuple[float, float, float, float]]:
+def locator_boxes_for_pairing(
+    page,
+    boxes: list,
+    *,
+    min_boxes: int = 1,
+) -> list[tuple[float, float, float, float]]:
     """Filter locator boxes for content pairing (numbers + nested geometry)."""
-    return _boxes_for_table_pairing(page, boxes)
+    return _boxes_for_table_pairing(page, boxes, min_boxes=min_boxes)
 
 
 def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
@@ -568,7 +549,7 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     other block claims it. Anything ambiguous abstains for that block.
     """
     count = len(block_markdowns)
-    boxes = locator_boxes_for_pairing(page, boxes)
+    boxes = locator_boxes_for_pairing(page, boxes, min_boxes=count)
     if not boxes:
         return [None] * count
     in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
@@ -583,7 +564,17 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
         elif len(winners) == 1:
             chosen.append(winners[0])
         else:
-            chosen.append(None)
+            nested_tie = any(
+                _box_contains(boxes[a], boxes[b]) or _box_contains(boxes[b], boxes[a])
+                for a in winners
+                for b in winners
+                if a != b
+            )
+            if nested_tie:
+                winners.sort(key=lambda k: _box_area_tuple(boxes[k]))
+                chosen.append(winners[0])
+            else:
+                chosen.append(None)
     claims = Counter(k for k in chosen if k is not None)
     return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
 
@@ -595,14 +586,16 @@ def unclaimed_locator_box_indices(
     paired: list,
 ) -> list[int]:
     """Indices of native table regions (after pairing filter) with no model block."""
-    tuples = locator_boxes_for_pairing(page, boxes)
+    tuples = locator_boxes_for_pairing(page, boxes, min_boxes=len(block_markdowns))
     if not tuples:
         return []
     claimed = set()
+    claimed_boxes: list[tuple[float, float, float, float]] = []
     for pick in paired:
         if pick is None:
             continue
         pt = _bbox_tuple(pick)
+        claimed_boxes.append(pt)
         for i, box in enumerate(tuples):
             if box == pt:
                 claimed.add(i)
@@ -610,6 +603,8 @@ def unclaimed_locator_box_indices(
     unclaimed: list[int] = []
     for i, box in enumerate(tuples):
         if i in claimed:
+            continue
+        if any(_box_contains(box, cb) for cb in claimed_boxes):
             continue
         if not _table_number_counter(page, box):
             continue
