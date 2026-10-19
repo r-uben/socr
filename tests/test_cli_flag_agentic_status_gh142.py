@@ -178,6 +178,10 @@ _UNEXERCISED = {
     # tests/test_gh635_chart_reader.py (an accepting, a rejecting and a raising
     # hook, each through the real pipeline or the real `verify_panel`).
     "chart_constraint_hook",
+    # Read by `_apply_native_cell_check_demotion` only when the native cell
+    # check finishes with CONTRADICTED/AMBIGUOUS/skip. This fixture has no
+    # born-digital model table page; falsified in test_resf_native_cell_pipeline.
+    "native_cell_gating",
     # Per-engine model/task settings. Read by the engine when it actually runs;
     # `_run_engine_on_pages` is stubbed here, so no engine subprocess is ever
     # constructed. Their appearance under `_engine_determinants` is fingerprint

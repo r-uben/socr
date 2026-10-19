@@ -533,6 +533,9 @@ class PageState:
     #: Restored from the sidecar so a resumed run does not silently
     #: re-clamp a table whose contradictions were already disproved.
     binding_adjudication: dict = field(default_factory=dict)
+    #: Default-on per-cell native binding outcomes by ``table_id`` (see
+    #: ``tables.native_cell_check`` and ``native_cell_check_*`` audit events).
+    native_cell_binding: dict = field(default_factory=dict)
     #: P1 retry latch: transient external state absent from the run fingerprint.
     #: Set when at least one table on this page reached an UNVERIFIED terminal
     #: caused by an unavailable table judge rung (transport failure, missing

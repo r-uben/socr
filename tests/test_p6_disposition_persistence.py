@@ -324,6 +324,7 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         # Additive: see tests/test_retry_failed_pages.py.
         "page_retry",
         "binding_adjudication",
+        "native_cell_binding",
         "audit_events",
         "figure_refs",
         # #1027: compact per-rung attempt record (diagnostic; never read back for routing).

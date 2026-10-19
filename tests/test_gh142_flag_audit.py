@@ -177,6 +177,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         AGENTIC,
         "recover_uncovered_text; read in _prepare_text_coverage, gates _recover_one_region",
     ),
+    "native_cell_gating": (
+        AGENTIC,
+        "native_cell_gating; gates _apply_native_cell_check_demotion on the agentic loop",
+    ),
     # -- non-agentic by design
     "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),
     "hpc_sequential": (NON_AGENTIC, "HPC lane only; sets hpc.enabled, read at pipeline choice"),

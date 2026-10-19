@@ -2134,6 +2134,12 @@ CREDENTIAL_NON_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         "structure_class_ladder_exhausted_floor",
         "structure_class_row_corroborated",
         "structure_floor_overrode_ladder",
+        # Default-on native cell check is advisory: distrust is recorded in
+        # tables_trust.json but does not block #713 credentials unless
+        # ``native_cell_gating`` demoted the page (table_ladder_disposition).
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
     }
 )
 

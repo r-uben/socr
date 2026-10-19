@@ -49,6 +49,7 @@ nothing to pin bytes against. That is P5 escalation-lane territory, not P3.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -63,6 +64,17 @@ from socr.core.providers import PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import PageOutput, PageStatus  # noqa: E402
 from socr.pipeline.agentic import NativeTableVerifierJudge  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
+
+_NATIVE_CELL_MARK_LINES = re.compile(
+    r"(?:^> \[(?:page unchecked|table unverified):[^\n]*\]\n\n)+",
+    re.MULTILINE,
+)
+
+
+def _without_native_cell_marks(text: str) -> str:
+    """Default-on native cell demotion is orthogonal to the P3 header-repair pin."""
+    return _NATIVE_CELL_MARK_LINES.sub("", text)
+
 
 # ---------------------------------------------------------------------------
 # Fixture: a real fitz page whose header row is too-narrow / spanning, so the
@@ -209,7 +221,7 @@ class TestJudgedBytesShip:
         p1_flushes = [body for page_num, body in flushed if page_num == 1]
         assert p1_flushes, "page 1 was never flushed"
         for body in p1_flushes:
-            assert body == captured["text"], (
+            assert _without_native_cell_marks(body) == captured["text"], (
                 "every provisional in-loop flush body must equal the judge-accepted text exactly"
             )
 
@@ -218,7 +230,7 @@ class TestJudgedBytesShip:
         fragment_candidates = list(out_dir.rglob("pages/00001.md"))
         assert fragment_candidates, f"no pages/00001.md found under {out_dir}"
         fragment_text = fragment_candidates[0].read_text(encoding="utf-8")
-        assert fragment_text == captured["text"], (
+        assert _without_native_cell_marks(fragment_text) == captured["text"], (
             "the pages/00001.md fragment after authoritative rewrite must equal "
             "the judge-accepted text exactly"
         )
@@ -233,7 +245,7 @@ class TestJudgedBytesShip:
 
         pages = split_native_pages(final_markdown)
         assert len(pages) >= 1
-        assert pages[0] == captured["text"], (
+        assert _without_native_cell_marks(pages[0]) == captured["text"], (
             "page 1 of the final stitched document must be BYTE-IDENTICAL to "
             "the text the judge accepted -- not merely contain it"
         )

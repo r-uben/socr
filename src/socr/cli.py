@@ -158,6 +158,17 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--native-cell-gating",
+        is_flag=True,
+        help=(
+            "Fail-closed gating for the default-on native per-cell table binding check. "
+            "Without this flag the check still runs and records native_cell_binding, "
+            "audit events, and tables_trust entries, but never demotes a page (no "
+            "TABLE_UNVERIFIED status, mark, or failure_mode change). With this flag, "
+            "CONTRADICTED, AMBIGUOUS, and skip outcomes demote the page as before."
+        ),
+    )(f)
+    f = click.option(
         "--no-recover-uncovered-text",
         is_flag=True,
         help=(
@@ -429,6 +440,7 @@ def build_config(
     no_equation_region_lane: bool = False,
     equation_region_lane: bool | None = None,
     no_text_coverage: bool = False,
+    native_cell_gating: bool = False,
     no_recover_uncovered_text: bool = False,
     clean_equation_model: str | None = None,
     math_model: str | None = None,
@@ -614,6 +626,8 @@ def build_config(
         config.equation_region_lane = equation_region_lane
     if no_text_coverage:
         config.check_text_coverage = False
+    if native_cell_gating:
+        config.native_cell_gating = True
     if no_recover_uncovered_text:
         config.recover_uncovered_text = False
     if clean_equation_model is not None:

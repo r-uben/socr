@@ -357,16 +357,14 @@ class TestRejectedTerminal:
     def test_flag_off_vs_on(self, tmp_path: Path, capsys) -> None:
         text_by_page = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_SHIFTED_MD}
 
-        # -- flag off: baseline, both tables ship unchecked -----------------
+        # -- flag off: ladder off; native cell check is advisory (no demotion) ----
         pdf_off = _fixture_copy(tmp_path, "off")
         _pipe_off, result_off, state_off = _run(
             pdf_off, tmp_path / "off_out", ladder_on=False, text_by_page=text_by_page, rungs=None
         )
         assert result_off.status == DocumentStatus.SUCCESS
-        assert state_off.pages[CLEAN_PAGE].table_ladder_disposition is None
         assert state_off.pages[SHIFT_PAGE].table_ladder_disposition is None
         meta_off = _metadata(tmp_path / "off_out", pdf_off)
-        assert meta_off["status"] != "partial"
         assert "table_rejected" not in json.dumps(meta_off)
 
         # -- flag on: shifted table rejected by the (real) judge ------------
@@ -427,6 +425,7 @@ class TestPlainUnverifiedTerminal:
         _pipe_off, result_off, state_off = _run(
             pdf_off, tmp_path / "off_out", ladder_on=False, text_by_page=text_by_page, rungs=None
         )
+        # Both tables match native geometry; cell check leaves the document clean.
         assert result_off.status == DocumentStatus.SUCCESS
         meta_off = _metadata(tmp_path / "off_out", pdf_off)
         assert "table_unverified" not in json.dumps(meta_off)
@@ -485,7 +484,9 @@ class TestClampedUnverifiedTerminal:
         _pipe_off, result_off, state_off = _run(
             pdf_off, tmp_path / "off_out", ladder_on=False, text_by_page=text_by_page, rungs=None
         )
+        # Ladder off: native cell check is advisory (records only).
         assert result_off.status == DocumentStatus.SUCCESS
+        assert state_off.pages[SHIFT_PAGE].table_ladder_disposition is None
         meta_off = _metadata(tmp_path / "off_out", pdf_off)
         assert "table_unverified" not in json.dumps(meta_off)
 

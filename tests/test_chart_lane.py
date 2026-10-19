@@ -745,6 +745,7 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
         marks,
         patch("socr.pipeline.orchestrator.route_page", return_value=routed_decision),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_run_native_cell_binding_check"),
     ):
         pipeline._phase_agentic(state, tmp_path)
         out_dir = tmp_path / "out"

@@ -725,6 +725,11 @@ TABLE_SPACER_ROWS_DROPPED_KIND = "table_spacer_rows_dropped"
 #: line wrapped across two physical lines and the model emitted it as two
 #: table rows. Carries the merged label text so the join is auditable.
 TABLE_WRAPPED_LABEL_MERGED_KIND = "table_wrapped_label_merged"
+#: Default-on native per-cell binding check (``tables.native_cell_check``).
+NATIVE_CELL_CHECK_VERIFIED_KIND = "native_cell_check_verified"
+NATIVE_CELL_CHECK_CONTRADICTED_KIND = "native_cell_check_contradicted"
+NATIVE_CELL_CHECK_AMBIGUOUS_KIND = "native_cell_check_ambiguous"
+NATIVE_CELL_CHECK_SKIPPED_KIND = "native_cell_check_skipped"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.
