@@ -1281,6 +1281,16 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
                 suspect = False
+            # #1203 round 2: round 1 reported this skip to the orchestrator, which keyed
+            # the withhold on it plus "no witness event". Both halves were wrong. The
+            # report was gated on ``_is_table_page``, which asks ``has_numeric_columns``
+            # of the UNTRUSTED layer, so a layer with no numeric column silently skipped
+            # the rule (Argon P1b); and "a witness ran" is not "a witness checked the
+            # cells" (r-uben 1b: a witness that CONTRADICTED the model let the table
+            # ship). Round 4 removed the confirmation path altogether: on these pages
+            # EVERY model table is withheld by the one final gate in the orchestrator, so
+            # nothing here needs to be reported and nothing about it is derived from the
+            # layer.
         if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)

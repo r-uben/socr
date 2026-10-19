@@ -161,6 +161,14 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         CheckResult.UNKNOWN,
         "the table ladder ran out of witnesses on this page without reaching a verdict",
     ),
+    #: #1203. UNKNOWN, not FAIL: nothing refused this table. It is withheld because
+    #: nothing available on this host compares its cells against a second reading, and
+    #: the model's reading is retained in the sidecar for #1208 to release.
+    FailureMode.TABLE_WITHHELD_UNCONFIRMED: (
+        Check.SOURCE_EVIDENCE,
+        CheckResult.UNKNOWN,
+        "this page's table is withheld until an independent reader confirms its cells",
+    ),
     FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR: (
         Check.NATIVE_TABLE_VERIFIER,
         CheckResult.FAIL,

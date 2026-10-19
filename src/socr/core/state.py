@@ -156,6 +156,17 @@ class PageState:
     #: feeds suspicion). Kept beside #961's pair so each route stays separately visible.
     prior_ocr_layer: bool = False
     prior_ocr_layer_scan_failed: bool = False
+    #: #1203: the page's own text layer when ``native_text`` is empty because an early
+    #: born-digital rejection fired. Retained unshipped, for the sidecar only.
+    prior_ocr_layer_text: str = ""
+    #: #1203 round 1 (owner ruling 2026-10-18): the model's table, kept UNSHIPPED when the
+    #: ruling withheld it because nothing could witness it. The ruling's own words: "the
+    #: model's table stays in the sidecar, so a later second reader can release it by
+    #: re-finalizing, with no new OCR" -- and the sidecar otherwise keeps only an attempt
+    #: SUMMARY (engine, accepted, reason), never the attempt's text, so without this the
+    #: withheld reading was gone for good. Same shape as ``prior_ocr_layer_text``: written
+    #: only where it exists, never read as evidence, never shipped.
+    withheld_table_text: str = ""
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -325,6 +336,12 @@ class PageState:
     #: so a resumed run reports the same reason instead of silently falling
     #: back to "hallucination".
     scanned_table_no_witness: bool = False
+    #: #1203: the scanned floor above was applied by ``_withhold_unconfirmed_table``
+    #: because nothing confirmed this page's table's CELLS -- not because a witness
+    #: refused them and not because no witness ran. Qualifies the flag above the same
+    #: way ``scanned_table_no_witness`` does, and like it is DERIVED on resume from the
+    #: persisted winning ``failure_mode`` rather than given a sidecar key of its own.
+    scanned_table_withheld_unconfirmed: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``
@@ -849,6 +866,8 @@ class DocumentState:
                 ps.invisible_text_scan_failed = getattr(pa, "invisible_text_scan_failed", False)
                 ps.prior_ocr_layer = getattr(pa, "prior_ocr_layer", False)
                 ps.prior_ocr_layer_scan_failed = getattr(pa, "prior_ocr_layer_scan_failed", False)
+                # #1203: the layer of a page an early return left with no native text.
+                ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches
