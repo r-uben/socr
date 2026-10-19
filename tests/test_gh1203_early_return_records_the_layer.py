@@ -819,7 +819,7 @@ _MODEL_ONLY_CELLS = ("521", "380", "18")
 _LAYER_ONLY_CELLS = ("512", "-380", "-18")
 
 
-def _column_table_pdf(path: Path) -> Path:
+def _column_table_pdf(path: Path, *, early_return: bool = True) -> Path:
     """An early-return page with a COLUMN-LAID-OUT table, painted under a raster.
 
     No ruling lines, on purpose, and this is the whole reproduction: a RULED table reports
@@ -834,7 +834,14 @@ def _column_table_pdf(path: Path) -> Path:
     for i in range(2):
         page = doc.new_page(width=612, height=792)
         nonce = "w" * (i + 1)
-        page.insert_text((72, 90), f"{nonce} Reported in (/997) and again in (/985).", fontsize=10)
+        if early_return:
+            page.insert_text(
+                (72, 90), f"{nonce} Reported in (/997) and again in (/985).", fontsize=10
+            )
+        else:
+            # No early-return damage: the page is BORN-DIGITAL and flagged, which is
+            # #1202's own class and #1208's territory, not this rule's.
+            page.insert_text((72, 90), f"{nonce} Minutes of the Federal Open Market.", fontsize=10)
         page.insert_text((72, 108), f"{nonce} RESERVE AGGREGATES, MEMBER BANKS", fontsize=10)
         y = 130
         for value, x in zip(("Item", "Level", "Change", "Net"), _COLUMN_X):
@@ -893,10 +900,16 @@ def _run_table_arm(
     agree: bool,
     witness: bool,
     pdf: Path | None = None,
+    first_rung_witness_error: bool = False,
 ) -> dict:
-    """``process()`` with the real judge chain, over the four axes the ruling needs."""
+    """``process()`` with the real judge chain, over the axes the rule needs.
+
+    ``first_rung_witness_error`` gives the page a two-rung ladder and makes the witness
+    fail on its FIRST call only: the transient shape of Argon's P1a, where rung 1 emits
+    the page's no-witness event and rung 2's witness then reads the page.
+    """
     from socr.core.config import EngineType, PipelineConfig
-    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
     from socr.tables import source_evidence as se
 
@@ -908,14 +921,20 @@ def _run_table_arm(
         engine.table = _table_markdown(model_rows)
         m.setattr(orch, "get_engine", lambda engine_type: engine)
         if witness:
-            # A witness that READS something: its reading is of the page pixels, which on
-            # this fixture carry the layer's own numbers -- what a real tesseract on a real
-            # scan does. The arm only has to show the no-witness rule does not fire.
-            m.setattr(
-                se,
-                "classical_ocr_with_state",
-                lambda pix: (" ".join(c for r in _COLUMN_ROWS for c in r), se.WITNESS_READING, ""),
-            )
+            # A witness that READS the page's pixels. On this fixture the pixels carry the
+            # LAYER's numbers, which is what a real tesseract on a real scan reads -- so
+            # with ``agree=True`` the witness corroborates the model and with
+            # ``agree=False`` it contradicts it.
+            reading = " ".join(c for r in _COLUMN_ROWS for c in r)
+            calls: list[int] = []
+
+            def _witness(pix, _reading=reading, _calls=calls):
+                _calls.append(1)
+                if first_rung_witness_error and len(_calls) == 1:
+                    return "", se.WITNESS_EXEC_ERROR, "test: transient witness failure"
+                return _reading, se.WITNESS_READING, ""
+
+            m.setattr(se, "classical_ocr_with_state", _witness)
             m.setattr(se, "classical_ocr_backend_state", lambda: (se.WITNESS_READING, ""))
         else:
             m.setattr(
@@ -949,7 +968,11 @@ def _run_table_arm(
                 save_figures=True,
             )
         )
-        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._available_engines_for_agentic = lambda: (
+            [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
+            if first_rung_witness_error
+            else [PROFILE_QWEN_LOCAL]
+        )
         pipe._resolve_crop_vlm_model = lambda: None
         pipe._resolve_judge_model = lambda *a, **k: ""
         out = tmp_path / f"out-{tag}"
@@ -1013,19 +1036,169 @@ def test_an_unwitnessed_suspect_table_is_withheld(tmp_path: Path, monkeypatch, a
     assert "withheld_table_text" not in main["side"]
 
 
-def test_a_witness_that_ran_leaves_the_table_alone(tmp_path: Path, monkeypatch) -> None:
-    """Arm (iii): with a witness backend present the rule must not fire.
+def test_a_witness_that_contradicts_the_model_withholds_the_table(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Arm (iii). Round 1 pinned the OPPOSITE of this, and it was wrong (r-uben 1b).
 
-    The ruling is about tables nothing could check. Where the classical-OCR witness runs,
-    the page keeps today's ending -- otherwise this would withhold every suspect table on
-    a box that CAN check them, which is a different and much larger decision.
+    The witness runs and reads the page's pixels as 512/-380/-18; the model read
+    521/380/18. "A witness ran" was satisfied, so round 1's rule let the table ship
+    ``warning`` / ``table_unverified`` -- on a box with tesseract, main withholds that
+    page. The rule is "an independent reader CONFIRMED the cells", and a reader that
+    contradicted them confirmed nothing.
     """
     live = _run_table_arm(
-        tmp_path, monkeypatch, "w-live", route_live=True, agree=False, witness=True
+        tmp_path, monkeypatch, "iii-live", route_live=True, agree=False, witness=True
     )
-    assert live["ships_table"] is True, "a witnessed table was withheld by the no-witness rule"
-    assert live["page_status"] == "warning"
-    assert live["failure_mode"] == "table_unverified"
+    assert live["ships_table"] is False, (
+        "a table the witness CONTRADICTED shipped; confirmation is what the rule needs"
+    )
+    assert all(c not in live["text"] for c in _MODEL_ONLY_CELLS)
+    assert "unverifiable table — see image" in live["text"]
+    # The cause is the witness's own finding, not a missing install.
+    assert live["failure_mode"] == "hallucination"
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
+
+
+def test_a_witness_that_agrees_with_the_model_ships_the_table(tmp_path: Path, monkeypatch) -> None:
+    """Arm (iv): the only arm that ships. An independent reader confirmed the cells.
+
+    This is the arm that stops the rule from being "withhold every old-scan table": the
+    page's own pixels were read and they support the model's numbers, so the table ships
+    and nothing is retained.
+    """
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "iv-live", route_live=True, agree=True, witness=True
+    )
+    assert live["ships_table"] is True, "a witness-confirmed table was withheld"
+    assert "withheld_table_text" not in live["side"]
+    assert "unverifiable table — see image" not in live["text"]
+    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") is True
+
+
+@pytest.mark.parametrize("second_rung_agrees", [True, False])
+def test_a_transient_witness_error_does_not_destroy_a_later_corroboration(
+    tmp_path: Path, monkeypatch, second_rung_agrees: bool
+) -> None:
+    """Arm (v) and #658's cause (Argon P1a/P1b).
+
+    Rung 1's witness hits a transient execution error -- which emits the page's
+    no-witness event -- and rung 2's witness then reads the page. Round 1 keyed the
+    withhold on that event existing, so a table rung 2 had CORROBORATED was destroyed
+    anyway, and the recorded cause was overwritten with ``no_witness_backend`` even when
+    rung 2's witness had contradicted the table.
+
+    Both halves here: corroborated → ships; contradicted → withheld, and the cause stays
+    the witness's own finding.
+    """
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        f"v-{second_rung_agrees}",
+        route_live=True,
+        agree=second_rung_agrees,
+        witness=True,
+        first_rung_witness_error=True,
+    )
+    if second_rung_agrees:
+        assert live["ships_table"] is True, (
+            "a table a later rung's witness corroborated was destroyed by an earlier "
+            "transient witness error"
+        )
+        assert "withheld_table_text" not in live["side"]
+    else:
+        assert live["ships_table"] is False
+        assert live["failure_mode"] == "hallucination", (
+            "the cause was overwritten with a missing install, although a witness read "
+            "the page and contradicted the table"
+        )
+
+
+def test_a_layer_with_no_numeric_columns_still_withholds(tmp_path: Path, monkeypatch) -> None:
+    """Arm (vi): the rule must not be answered from the untrusted layer (Argon P1b).
+
+    Round 1 recorded the skipped row check only when ``_is_table_page`` was true, and that
+    predicate asks ``has_numeric_columns`` of the LAYER. A layer with one value per row
+    fails it, so the rule never fired and the unwitnessed table shipped. Nothing in the
+    rule reads the layer now, so this page is withheld like any other.
+    """
+    pdf = tmp_path / "one-column-layer.pdf"
+    doc = fitz.open()
+    for i in range(2):
+        page = doc.new_page(width=612, height=792)
+        nonce = "w" * (i + 1)
+        page.insert_text((72, 90), f"{nonce} Reported in (/997) and again in (/985).", fontsize=10)
+        y = 130
+        for row in _COLUMN_ROWS:
+            # ONE numeric column in the layer, where the model emits four.
+            page.insert_text((76, y), f"{row[0]} {row[1]}", fontsize=9)
+            y += 18
+        page.insert_text((72, y + 20), "The Committee reviewed conditions.", fontsize=10)
+        page.insert_image(page.rect, stream=_png(300, 400))
+    doc.save(pdf)
+    doc.close()
+
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "vi-live", route_live=True, agree=False, witness=False, pdf=pdf
+    )
+    assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: flagged"
+    assert live["ships_table"] is False, (
+        "an unwitnessed table shipped because the LAYER had no numeric columns"
+    )
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
+
+
+def test_a_suspect_page_with_no_table_is_not_touched(tmp_path: Path, monkeypatch) -> None:
+    """r-uben's nit, as a behaviour: the rule applies to TABLES.
+
+    Round 1's guard for this was ``_is_table_page``, which reads the layer; dropping it
+    survived the suite. The rule now asks whether the WINNER carries a table block, so a
+    flagged prose page is outside it by construction -- pinned, because "nothing happens
+    here" is exactly the claim a later change can break silently.
+    """
+    live = _run(tmp_path, monkeypatch, "no-table", accept=True, route_live=True)
+    assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: flagged"
+    assert "withheld_table_text" not in live["side"]
+    assert "unverifiable table — see image" not in live["text"]
+
+
+def test_a_withheld_page_does_not_also_claim_its_table_shipped(tmp_path: Path, monkeypatch) -> None:
+    """Argon P2: a withheld page was carrying #1048's stamping as well.
+
+    #1048's record means "the table shipped marked unverified". On a page whose table this
+    run WITHHELD, nothing shipped -- and the sidecar still said
+    ``unchecked_table_kind: unverified``, ``table_ladder_superseded`` and that sentence,
+    beside a marker-only body. Two readings of the same page in one file.
+    """
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "p2-stamp", route_live=True, agree=False, witness=False
+    )
+    assert live["ships_table"] is False, "fixture premise: the table is withheld"
+    side = live["side"]
+    assert side.get("unchecked_table_kind") in (None, ""), side.get("unchecked_table_kind")
+    assert side.get("table_ladder_superseded") in (None, ""), side.get("table_ladder_superseded")
+    assert "marked unverified" not in live["text"]
+
+
+def test_a_born_digital_flagged_page_does_not_grow_the_retention_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon P2, second half: the key belongs to the pages this rule withholds.
+
+    A BORN-DIGITAL flagged page with the same table is #1202's class and #1208's
+    territory; the rule's scope is early-return pages. If the capture ran on it, a page
+    whose table SHIPS would carry a "withheld" reading in its sidecar.
+    """
+    pdf = _column_table_pdf(tmp_path / "born-digital-flagged.pdf", early_return=False)
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "p2-born", route_live=True, agree=False, witness=False, pdf=pdf
+    )
+    assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: flagged"
+    # The sidecar does not record ``is_born_digital``, so the premise is asserted where it
+    # is decided -- the detector's own assessment of the same file.
+    assert BornDigitalDetector().detect(pdf).pages[0].is_born_digital is True, (
+        "fixture premise: a born-digital page, not an early-return one"
+    )
     assert "withheld_table_text" not in live["side"]
 
 

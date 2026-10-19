@@ -536,6 +536,18 @@ class PageOutput:
     #: gate's reason, which names the first unsupported tokens. Ships with the
     #: stronger "disputed" mark and a link to the page image.
     table_disputed: str = ""
+    #: #1203 round 2 (owner ruling 2026-10-18, as restated): True when an INDEPENDENT
+    #: reader confirmed this output's table cells -- the scanned-table gate
+    #: (``SourceEvidenceTableJudge``) ran its witness over the page's own pixels and
+    #: passed. It is the only confirmation that counts on a page whose text layer is an
+    #: earlier OCR run: the native row verifier reads that layer, so it is not
+    #: independent, and the heuristic leaf reads nothing.
+    #:
+    #: Candidate-associated, like the three fields above and for a sharper version of the
+    #: same reason: the question "was the table that SHIPS confirmed" is about one
+    #: attempt. A page-level flag said yes when rung 1's witness passed and rung 2 -- a
+    #: different, unconfirmed table -- was what shipped.
+    table_cells_witness_confirmed: bool = False
     #: #1125: the disputed tokens as a list. ``table_disputed`` stays the
     #: ``", "``-joined form for sidecar / mark-text compat; the mark counts
     #: THIS, never by splitting that string.
@@ -643,6 +655,10 @@ class PageOutput:
             d["table_unverifiable"] = self.table_unverifiable
         if self.table_disputed:
             d["table_disputed"] = self.table_disputed
+        # #1203 round 2: same omit-when-empty convention as the fields above, so no
+        # sidecar that never reached the scanned-table gate changes its bytes.
+        if self.table_cells_witness_confirmed:
+            d["table_cells_witness_confirmed"] = True
         if self.table_disputed_values:
             d["table_disputed_values"] = list(self.table_disputed_values)
         # #625: same omit-when-empty convention, same reason -- this field
@@ -698,6 +714,7 @@ class PageOutput:
             table_label_unverified=d.get("table_label_unverified", ""),
             table_unverifiable=d.get("table_unverifiable", ""),
             table_disputed=d.get("table_disputed", ""),
+            table_cells_witness_confirmed=bool(d.get("table_cells_witness_confirmed", False)),
             table_disputed_values=tuple(
                 str(v) for v in d.get("table_disputed_values", ()) if str(v)
             ),

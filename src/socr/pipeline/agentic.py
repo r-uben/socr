@@ -1159,6 +1159,17 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 data={"cause": ""},
             )
 
+        # #1203 round 2 (owner ruling as restated: "ships only if an independent reader
+        # CONFIRMED the cells"). Reaching here means this gate's witness READ the page's
+        # own pixels and passed the table's numerics: every other path has returned --
+        # a deferral to the native verifier above, and ``not verifiable or not passed``
+        # into the fail-closed ending. Recorded on the CANDIDATE, so the withhold rule can
+        # ask about the attempt that actually ships rather than about the page.
+        #
+        # ``content_unverified`` still lands here on purpose: its numerics ARE
+        # corroborated and only a label is unconfirmed, which is what that field says.
+        output.table_cells_witness_confirmed = True
+
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
@@ -1226,18 +1237,12 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         is_table_page: Callable[[int], bool],
         record_event: Callable[[object], None] | None = None,
         native_evidence_suspect: Callable[[int], bool] | None = None,
-        on_layer_not_evidence: Callable[[int], None] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
         self._native_evidence_suspect = native_evidence_suspect
-        # #1203 round 1 (owner ruling 2026-10-18): called when row-level verification of a
-        # TABLE page is skipped because the layer is not evidence and the pixels are the
-        # only possible witness. The caller records it on the page, and the scanned-table
-        # floor withholds the table when nothing could read those pixels.
-        self._on_layer_not_evidence = on_layer_not_evidence
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1287,23 +1292,15 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
                 suspect = False
-            # #1203 round 1 (owner ruling 2026-10-18, r-uben blocker 1): this is the skip
-            # whose consequence the ruling settles. The layer may neither pass nor fail the
-            # table, so the PIXELS are the only witness left -- and on a box with no
-            # classical-OCR witness nothing reads them, the ladder ends unverified and
-            # #1048 shipped the model's table marked. The ruling is to WITHHOLD it there.
-            # Reported to the caller rather than decided here: whether a witness actually
-            # RAN is known only after the source-evidence gate has adjudicated every
-            # attempt, which happens in the orchestrator, not inside this judge.
-            if (
-                suspect
-                and self._on_layer_not_evidence is not None
-                and self._is_table_page(page_num)
-            ):
-                try:
-                    self._on_layer_not_evidence(page_num)
-                except Exception:  # a bookkeeping failure must not change a verdict
-                    logger.warning("#1203: recording the skipped native check failed")
+            # #1203 round 2: round 1 reported this skip to the orchestrator, which keyed
+            # the withhold on it plus "no witness event". Both halves were wrong. The
+            # report was gated on ``_is_table_page``, which asks ``has_numeric_columns``
+            # of the UNTRUSTED layer, so a layer with no numeric column silently skipped
+            # the rule (Argon P1b); and "a witness ran" is not "a witness checked the
+            # cells" (r-uben 1b: a witness that CONTRADICTED the model let the table
+            # ship). The rule now reads the positive confirmation the scanned-table gate
+            # records on the candidate it passed, so nothing here needs to be reported and
+            # nothing about it is derived from the layer.
         if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)

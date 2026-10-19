@@ -159,13 +159,6 @@ class PageState:
     #: #1203: the page's own text layer when ``native_text`` is empty because an early
     #: born-digital rejection fired. Retained unshipped, for the sidecar only.
     prior_ocr_layer_text: str = ""
-    #: #1203 round 1 (owner ruling 2026-10-18): ``NativeTableVerifierJudge`` skipped
-    #: row-level verification of this page's table because the page's text layer is an
-    #: earlier OCR run and an opaque raster covers it -- so the layer may not pass or fail
-    #: the table, and the pixels are the only possible witness. Recorded as a FACT about
-    #: what ran, not re-derived from flags, because the consequence (withhold the table
-    #: when no witness could read those pixels) has to key on the check that was skipped.
-    native_table_check_skipped_no_evidence: bool = False
     #: #1203 round 1 (owner ruling 2026-10-18): the model's table, kept UNSHIPPED when the
     #: ruling withheld it because nothing could witness it. The ruling's own words: "the
     #: model's table stays in the sidecar, so a later second reader can release it by
