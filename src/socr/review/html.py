@@ -103,7 +103,10 @@ def _audit_event_kinds(sidecar: dict[str, Any]) -> list[str]:
     for event in sidecar.get("audit_events") or []:
         if isinstance(event, dict):
             kind = event.get("kind") or event.get("type") or event.get("event")
-            kinds.append(str(kind) if kind else "unnamed_event")
+            kind_str = str(kind) if kind else "unnamed_event"
+            if kind_str.startswith("native_cell_check_"):
+                continue
+            kinds.append(kind_str)
         else:
             kinds.append(str(event))
     return kinds

@@ -543,9 +543,11 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     assert trust_empty["counts_by_kind"]["table_structure_failed"] == 1
     assert "native_cell_check_skipped" not in trust_empty["counts_by_kind"]
 
-    assert 1 in trust_pop["untrusted_pages"]
-    assert trust_pop["counts_by_kind"]["native_cell_check_skipped"] == 1
-    assert "table_structure_failed" not in trust_pop["counts_by_kind"]
+    assert 1 not in trust_pop.get("untrusted_pages", [])
+    assert "native_cell_check_skipped" not in trust_pop.get("counts_by_kind", {})
+    adv = trust_pop.get("native_cell_advisory") or {}
+    assert adv.get("counts_by_kind", {}).get("native_cell_check_skipped") == 1
+    assert "table_structure_failed" not in trust_pop.get("counts_by_kind", {})
 
     # Persisted metadata error field / trust note, not merely the in-memory result.
     empty_metadata = _persisted_document_metadata(out_empty)
@@ -553,10 +555,10 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     empty_err = empty_metadata.get("error") or ""
     pop_err = populated_metadata.get("error") or ""
     assert TRUST_NOTE_PREFIX in empty_err
-    assert TRUST_NOTE_PREFIX in pop_err
     assert trust_empty["counts_by_kind"]["table_structure_failed"] == 1
-    assert trust_pop["counts_by_kind"]["native_cell_check_skipped"] == 1
+    assert adv.get("counts_by_kind", {}).get("native_cell_check_skipped") == 1
     assert "table_unverified" not in pop_err
+    assert TRUST_NOTE_PREFIX not in pop_err
     assert trust_empty["counts_by_kind"] != trust_pop["counts_by_kind"]
 
 

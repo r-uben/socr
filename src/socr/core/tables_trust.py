@@ -294,6 +294,17 @@ NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
     }
 )
 
+#: Default-on native per-cell check kinds. When ``native_cell_gating`` is off they
+#: are recorded for audit and sidecar binding but must not count as document
+#: distrust (metadata note, verified-table counts, review.html suspect labels).
+NATIVE_CELL_ADVISORY_DISTRUST_KINDS: frozenset[str] = frozenset(
+    {
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
+    }
+)
+
 #: GH-609 round 4: maps each ``NON_RESOLVABLE_DISTRUST_KINDS`` member to the
 #: kind whose matching, word-keyed event resolves it. A kind in
 #: ``NON_RESOLVABLE_DISTRUST_KINDS`` with no entry here can never clear at
@@ -431,6 +442,8 @@ class TablesTrust:
 
     pdf_filename: str
     pages: dict[int, PageTrust] = field(default_factory=dict)
+    #: Informational native-cell outcomes when ``native_cell_gating`` is off.
+    advisory_native_cell_pages: dict[int, PageTrust] = field(default_factory=dict)
     # Pages that WERE flagged but whose table was replaced by a better-measuring
     # read. Reported so the resolution is visible rather than merely absent.
     resolved_pages: list[int] = field(default_factory=list)
@@ -451,8 +464,15 @@ class TablesTrust:
                 out[reason] = out.get(reason, 0) + 1
         return out
 
+    def advisory_counts_by_kind(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for page in self.advisory_native_cell_pages.values():
+            for reason in page.reasons:
+                out[reason] = out.get(reason, 0) + 1
+        return out
+
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "pdf_filename": self.pdf_filename,
             # Top-level summary first: a consumer can gate on these three keys
             # without walking ``pages``.
@@ -466,6 +486,25 @@ class TablesTrust:
             ),
             "pages": {str(num): self.pages[num].to_dict() for num in self.untrusted_pages},
         }
+        if self.advisory_native_cell_pages:
+            payload["native_cell_advisory"] = {
+                "note": (
+                    "Advisory only: native per-cell binding check recorded these "
+                    "outcomes but did not demote the page (native_cell_gating off). "
+                    "Does not affect shipping, verified-table counts, or metadata notes."
+                ),
+                "page_count": len(self.advisory_native_cell_pages),
+                "pages": sorted(self.advisory_native_cell_pages),
+                "table_flags_n": sum(
+                    len(p.reasons) for p in self.advisory_native_cell_pages.values()
+                ),
+                "counts_by_kind": self.advisory_counts_by_kind(),
+                "pages_detail": {
+                    str(num): self.advisory_native_cell_pages[num].to_dict()
+                    for num in sorted(self.advisory_native_cell_pages)
+                },
+            }
+        return payload
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -491,6 +530,7 @@ def build_tables_trust(
     *,
     label_unverified_pages: frozenset[int] | None = None,
     ditto_unresolved_pages: frozenset[int] | None = None,
+    native_cell_advisory: bool = False,
 ) -> TablesTrust:
     """Derive the trust index from a run's audit events.
 
@@ -613,7 +653,9 @@ def build_tables_trust(
             if table_id is not None and (page_num, str(table_id)) in resolved_tables:
                 continue
 
-        page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
+        advisory_only = native_cell_advisory and kind in NATIVE_CELL_ADVISORY_DISTRUST_KINDS
+        bucket = trust.advisory_native_cell_pages if advisory_only else trust.pages
+        page = bucket.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)
 
         if kind == TABLE_LADDER_UNVERIFIED_KIND:
@@ -621,9 +663,10 @@ def build_tables_trust(
         else:
             detail = getattr(event, "detail", "") or LADDER_TERMINAL_NOTES.get(kind, "")
         if detail:
-            page.details.append(f"{kind}: {detail}")
+            prefix = "advisory: " if advisory_only else ""
+            page.details.append(f"{prefix}{kind}: {detail}")
 
-        if data.get("note") == PATCH_ELIGIBLE_NOTE:
+        if data.get("note") == PATCH_ELIGIBLE_NOTE and not advisory_only:
             page.patch_eligible = True
 
     return trust
