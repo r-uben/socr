@@ -360,6 +360,80 @@ Not in scope and worth naming: a sidecar from a PRE-#1156 build carries no suspi
 at all, so such a page resumes unflagged everywhere, not just here. That is the resume
 completeness question #1145/Part A already owns.
 
+## Round 2 of PR #1211
+
+Argon MERGE-AFTER-FIX with four P1s; Grok out, r-uben had not reviewed this head. Each
+reproduced before anything changed (`scratch/1205r2/`). **Two of the four are mistakes
+round 1 made**, and both are recorded at the code rather than smoothed over.
+
+* **`verify_scanned_table` ignored `layer_is_evidence` whenever `native_trusted` was not
+  `False`.** Round 1 removed the guard on the deferral, reasoning that the orchestrator
+  derives `native_trusted` from the same predicate so a suspect page always arrives with
+  `False`. True only of its non-raising path: `SourceEvidenceTableJudge` sets
+  `trusted=None` when its own trust source raises or is absent, and `None` is "not
+  False". Measured: `native_trusted=None` plus `layer_is_evidence=False` returned
+  `passed=True, deferred=True` for the layer's own reading, handing the layer inward.
+  Round 1's test passed only because it stubbed the function. All three arms now read
+  the flag, and the pin uses no stub.
+* **The resume ASSIGNED `prior_ocr_layer_suspect` from the sidecar.** A False written by
+  any build that could not see the flag cleared the suspicion `_phase_analyze` had just
+  established from the PDF, after which every gate in this file read the page as
+  admissible. It now takes the UNION of the sidecar and the live analysis; removing trust
+  is never destructive, so OR is the safe direction. With it, three more layer-derived
+  restores needed gating: `_apply_binding_adjudication_meta` at BOTH its call sites (the
+  resume skip gate and the restore — in production both run for a resumed page) and the
+  replay of the binding-boundary events.
+* **`table_crop_repair_unverifiable` was not replayed on resume.** It is in
+  `TABLE_DISTRUST_KINDS` and `CREDENTIAL_BLOCKING_EVENT_KINDS` and is emitted at the crop
+  reread, which a resumed page skips — so the page came back absent from
+  `tables_trust.json` with its credential restored. #1210 made that reachable by
+  admitting accepted prior-OCR pages to the ledger, which on the Fed scans are exactly
+  the pages this kind fires on.
+
+**The fourth, and the ruling that shaped it.** On a scan-failed page with no covering
+raster the composed judge convicted a PIXEL-CONFIRMED reading: the outer judge passed
+`-350` against its witness, and the native verifier then rejected it on the strength of
+the layer's `350`. The finding's literal wording — bypass native verification whenever
+the union says suspect — was trialled in a throwaway copy and turns **five** tests red,
+two of them shipped #1156 guards:
+`test_a_transparent_cover_is_not_an_independent_witness` and
+`test_a_detection_error_does_not_turn_a_swap_into_an_acceptance`.
+
+Owner ruling (2026-10-19): the narrow fix. The verifier may not convict a reading the
+PIXEL lane has independently confirmed; otherwise it keeps checking. The reason, recorded
+as asked: **on a page without an opaque cover the pixels ARE the layer's own ink**, so
+skipping the row check there would let a row swap through — which is what those two
+guards measure — and Argon's case is specifically a pixel-confirmed reading. A
+confirmation is recorded only when the check that passed had the layer EXCLUDED, so the
+layer agreeing with itself can never license the bypass. Both guards stay green, and
+`test_the_swap_guards_stay_green` fails the day someone takes the blanket route.
+
+**The residual, named rather than claimed closed:** the pixel check is multiset-based, so
+on a transparent-cover page it can confirm a reading whose values are right and whose row
+binding is swapped, and that confirmation now licenses the bypass. That is the
+transparent-cover case already drafted for #1208; this round narrows what reaches it but
+does not close it.
+
+## The replay audit (round 2, all 60 kinds)
+
+Every kind `resume_restore_kinds()` replays was classified by whether its producer reads
+the page's text layer and by its consequence class, read from the registries rather than
+judged by eye. **One needed gating: `table_ladder_accepted`, the only RESOLVING kind in
+the set** -- it CLEARS a table's distrust, and `data["reason"] == "verified_by_geometry"`
+says the clearing evidence was `bind()`'s check against this page's own layer. #1202 stops
+a live run producing that on a flagged page; a sidecar from an earlier run still carried
+it. Dropped on a flagged page, narrowly: an ordinary acceptance carries no reason and is
+replayed, and a blind-cell transcription is a third vendor reading the CROP, so it is too.
+
+The other 52 are safe for one of four reasons, enumerated in
+`leads/1205/report-r2.md`: they withhold or block with a layer-independent producer; they
+withhold with a layer-derived one (same direction); they are layer-derived disclosure with
+no consequence class at all (`native_table_verifier_exact_pass` among them, which #1181
+makes OWE the page a mark, so replaying it adds disclosure); or they never read the layer.
+Two qualifications: 52 of the 60 are classified from the emit site and the registries, not
+from a resumed-flagged-page run, and a producer reaching the layer through a deep helper
+could be misclassified.
+
 ## What was NOT measured
 
 * No model, no OCR, no provider: every reversal above is measured on deterministic PyMuPDF +

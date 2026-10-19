@@ -375,6 +375,15 @@ _RESUME_REPLAYED: dict[str, str] = {
         "otherwise lose the only record of why"
     ),
     TABLE_BINDING_ADJUDICATED_KIND: "GH-609: binding adjudication record",
+    "table_crop_repair_unverifiable": (
+        "#1205: the crop reading of this page's table was never verified, because the "
+        "only thing that could have approved a patch is a text layer that may not serve "
+        "as evidence. In TABLE_DISTRUST_KINDS and CREDENTIAL_BLOCKING_EVENT_KINDS, and "
+        "emitted at the crop reread -- which a resumed page skips -- so without this the "
+        "page comes back from a resume absent from tables_trust.json and with its "
+        "credential restored. #1210 made that reachable: it admits accepted prior-OCR "
+        "pages to the ledger, and on the Fed scans those are the pages this kind fires on"
+    ),
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND: (
         "GH-609 round 3: neither a ladder terminal nor resolvable by one "
         "(tables_trust.NON_RESOLVABLE_DISTRUST_KINDS); records which boundary word "
@@ -16075,7 +16084,14 @@ class UnifiedPipeline:
             # (UNVERIFIED reprocess): without it, bind() re-fires and
             # silently re-clamps a table whose contradictions were
             # already disproved.
-            self._apply_binding_adjudication_meta(state, page_num, meta)
+            #
+            # #1205 round 2 (Argon P1-4): not on a page whose text layer may not serve
+            # as evidence. ``bind()`` is a geometric check against that layer, so a
+            # restored adjudication is the layer's verdict on a reading, carried into a
+            # run that would refuse to recompute it -- in either direction, since the
+            # record both clears contradictions and preserves them.
+            if layer_is_admissible_evidence(state.pages.get(page_num)):
+                self._apply_binding_adjudication_meta(state, page_num, meta)
 
             # P1: the sidecar was written by a run whose table judge ladder
             # encountered transient rung unavailability. When a rung is attemptable
@@ -16774,7 +16790,18 @@ class UnifiedPipeline:
             # #1156 (Argon, stack review): without this a resumed page comes back with
             # no suspicion, so the assemble re-flush drops the flag and its mark, and the
             # page reads as checked on evidence nothing can see.
-            ps.prior_ocr_layer_suspect = bool(meta.get("prior_ocr_layer_suspect", False))
+            # Round 2 (Argon P1-4): the UNION of the sidecar and THIS run's live
+            # analysis, never an assignment. ``_phase_analyze`` runs on every resume and
+            # may have flagged the page from the PDF itself; a sidecar written by a build
+            # that could not see the flag (anything before #1156) carries False, and an
+            # assignment let that stale False clear the live True -- after which every
+            # gate in this file reads the page as admissible and the layer decides it
+            # again. Measured: a no-flag sidecar plus a live positive finding restored
+            # the per-cell verdict, the binding adjudication and their distrust events.
+            # Removing trust is never destructive, so OR is the safe direction.
+            ps.prior_ocr_layer_suspect = bool(meta.get("prior_ocr_layer_suspect", False)) or bool(
+                getattr(ps, "prior_ocr_layer_suspect", False)
+            )
             # #1156 round 1 (Argon C): the flag came back but the LAYER did not, so a
             # re-flush from restored state wrote the sidecar with ``native_text`` empty and
             # dropped ``prior_ocr_layer_text`` -- the one thing Part A retains for Part B to
@@ -17024,9 +17051,15 @@ class UnifiedPipeline:
             # it. This only refuses to ACT on it now.
             if isinstance(restored_native_cell, dict) and layer_is_admissible_evidence(ps):
                 ps.native_cell_binding = dict(restored_native_cell)
-            self._apply_binding_adjudication_meta(state, page_num, meta)
+            # #1205 round 2 (Argon P1-4): same guard as the resume gate's own call, for
+            # the same reason -- see there.
+            if layer_is_admissible_evidence(ps):
+                self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
-            from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
+            from socr.judge.table_verdict import (
+                TABLE_LADDER_ACCEPTED_KIND,
+                TABLE_LADDER_UNVERIFIED_KIND,
+            )
 
             # P4-R joins the allowlist for the same reason D1a wrote it: the
             # lane's dispositions -- above all a presence-guard REJECTION --
@@ -17062,7 +17095,19 @@ class UnifiedPipeline:
             # own rule: the suspect layer may not supply the contradiction that
             # withholds content any more than the agreement that ships it.
             if not layer_is_admissible_evidence(ps):
+                # Round 2 (Argon P1-4): the binding-boundary events belong with the
+                # per-cell kinds. ``table_binding_boundary_unresolved`` records which
+                # boundary words the LAYER's geometry could not rule out as table
+                # content, and it is a non-resolvable distrust kind -- so replaying it
+                # lists the page in ``tables_trust.json`` with the layer's reason and
+                # blocks its credential. Its companion RESOLVED event goes with it: on
+                # such a page neither the doubt nor its clearance is the layer's to give.
                 restore_kinds = restore_kinds - self.native_cell_check_event_kinds()
+                restore_kinds = restore_kinds - {
+                    TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+                    TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+                    TABLE_BINDING_ADJUDICATED_KIND,
+                }
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
@@ -17080,6 +17125,25 @@ class UnifiedPipeline:
                     _seen_skeletons.add(_key)
                 ev_detail = str(ev.get("detail", "") or "")
                 ev_data = dict(ev.get("data") or {})
+                # #1205 round 2 (the replay audit): ``table_ladder_accepted`` is the one
+                # RESOLVING kind this loop replays -- it CLEARS that table's distrust in
+                # ``tables_trust`` -- and ``data["reason"]`` says what cleared it. The
+                # key is present only when the readers were OVERRULED, and
+                # ``verified_by_geometry`` means the overruling evidence was ``bind()``'s
+                # check against this page's own text layer. #1202 stops a LIVE run
+                # producing that on a flagged page; a sidecar from an earlier run (or
+                # from before the page was flagged) still carried it, and replaying it
+                # resolved the distrust on the layer's say-so.
+                #
+                # Narrow on purpose: an ordinary ladder acceptance carries NO reason and
+                # is replayed, and ``verified_by_blind_cell_transcription`` is a third
+                # vendor reading the CROP pixels, which is independent of the layer and
+                # also stands. Only the geometry route is dropped.
+                if ev_kind == TABLE_LADDER_ACCEPTED_KIND and not layer_is_admissible_evidence(ps):
+                    from socr.judge.table_verdict import REASON_VERIFIED_BY_GEOMETRY
+
+                    if str(ev_data.get("reason", "")) == REASON_VERIFIED_BY_GEOMETRY:
+                        continue
                 if ev_kind == TABLE_LADDER_UNVERIFIED_KIND and "latched" not in ev_data:
                     # GH-581 cold review round 6, finding 1: a sidecar written
                     # by a pre-GH-581 build has NO ``latched``/``cause``/

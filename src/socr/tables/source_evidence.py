@@ -1337,13 +1337,19 @@ def verify_scanned_table(
     ``witness_lines`` from it -- and a page with no pixel witness falls to this lane's
     own fail-closed ending rather than to the layer.
 
-    The deferral below needs no guard of its own, and deliberately does not get one:
-    the orchestrator derives ``native_trusted`` from the SAME predicate
-    (``layer_is_admissible_evidence``), so a page that is suspect always arrives with
-    ``native_trusted=False`` and never reaches the deferral. A second check there would
-    be a line no test could kill.
+    Round 2 (Argon P1-1) corrects a mistake round 1 made here. Round 1 removed the
+    guard on the deferral below, reasoning that the orchestrator derives
+    ``native_trusted`` from the SAME predicate, so a suspect page always arrives with
+    ``native_trusted=False`` and the deferral is unreachable. That is true only of the
+    orchestrator's non-raising path: ``SourceEvidenceTableJudge`` sets ``trusted=None``
+    when its own trust source RAISES or is absent, and ``None`` is "not False" -- so the
+    page deferred to the native verifier with its suspect layer intact, which is the one
+    ending this function exists to deny it. Measured: ``native_trusted=None`` plus
+    ``layer_is_evidence=False`` returned ``passed=True, deferred=True`` for the layer's
+    own reading. Every arm that consults the layer now reads this flag: the deferral,
+    the born-digital bundle, and ``include_text_layer`` on the scanned bundle.
     """
-    if native_trusted is not False and page_has_native_words(page):
+    if native_trusted is not False and layer_is_evidence and page_has_native_words(page):
         return SourceEvidenceResult(
             verifiable=True,
             passed=True,
@@ -1380,7 +1386,7 @@ def verify_scanned_table(
         bundle = build_scanned_evidence(
             page,
             ocr_image_fn=ocr_image_fn,
-            include_text_layer=native_trusted is not False,
+            include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
     return verify_table_tokens(bundle, tokens)

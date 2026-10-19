@@ -13,6 +13,12 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 
 EXPECTED_RESUME_KINDS = frozenset(
     {
+        # #1205 round 2 (Argon P1-2 of the round-2 review): emitted at the crop
+        # reread, which a resumed page skips, and in both TABLE_DISTRUST_KINDS and
+        # CREDENTIAL_BLOCKING_EVENT_KINDS -- so without replay the page comes back
+        # absent from tables_trust.json with its credential restored. #1210 made that
+        # reachable by admitting accepted prior-OCR pages to the ledger.
+        "table_crop_repair_unverifiable",
         "chart_counts_derived",
         "chart_counts_not_derived",
         "chart_grid_contradicted",
@@ -121,5 +127,6 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # equation_latex_rejected_kept_crop), which were never replayed and are explained at
     # their lines above;
     # 55 with #1181's native_table_verifier_exact_pass;
-    # 59 with default-on native per-cell binding's four terminal kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 59
+    # 59 with default-on native per-cell binding's four terminal kinds;
+    # 60 with #1205's table_crop_repair_unverifiable.
+    assert len(EXPECTED_RESUME_KINDS) == 60

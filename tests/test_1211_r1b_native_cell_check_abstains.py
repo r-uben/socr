@@ -207,24 +207,37 @@ def test_a_resume_does_not_bring_the_cell_verdicts_back(tmp_path: Path) -> None:
         assert arm["untrusted"] == [], f"{label}: the page came back listed untrusted"
 
 
-def test_the_resume_gate_reads_the_flag_the_sidecar_restored(tmp_path: Path) -> None:
-    """The ordering this depends on, pinned rather than assumed.
+def test_the_resume_reads_suspicion_from_both_the_sidecar_and_this_run() -> None:
+    """Replaced in round 2 (Argon P1-4). What this pinned has been fixed underneath it.
 
-    Both gated sites read ``layer_is_admissible_evidence(ps)``, and on a resume the
-    page's flags come from the sidecar -- restored EARLIER in the same method. If the
-    two ever swap order the gate reads a page that has not been flagged yet and silently
-    stops working, which is how it behaved when this was first measured with a sidecar
-    that carried no flag at all.
+    It used to demonstrate the restore ORDER by showing that a sidecar carrying the
+    verdicts but NOT the suspicion flag restored them, while the same sidecar with the
+    flag did not. That first arm was the bug: the restore ASSIGNED
+    ``prior_ocr_layer_suspect`` from the sidecar, so a stale False -- anything written by
+    a build that could not see the flag -- cleared the suspicion ``_phase_analyze`` had
+    just established from the PDF, and every gate in the file then read the page as
+    admissible.
 
-    So: a sidecar carrying the verdicts but NOT the suspicion flag restores them, and
-    the same sidecar WITH the flag does not. That difference is only possible if the
-    flag is restored first.
+    It now takes the UNION of the sidecar and this run's live analysis, so either source
+    alone is enough. Both arms are pinned, with the neither-source arm as the control
+    that the restore still works at all.
     """
-    without = _resume_arm(tmp_path / "noflag", flags={"positive": True}, carries_flag=False)
-    assert without["bindings"] == ["p1-t0"], (
-        "a sidecar with no suspicion flag no longer restores its verdicts, so this pin "
-        "no longer demonstrates the ordering"
+    import pytest as _pytest
+
+    tmp = Path("scratch/1205r2/tmp_order")
+
+    both_absent = _resume_arm(tmp / "neither", flags={"positive": False}, carries_flag=False)
+    assert both_absent["bindings"] == ["p1-t0"], (
+        "control: nothing is restored even on an admissible page, so the arms below prove nothing"
     )
 
-    with_flag = _resume_arm(tmp_path / "flag", flags={"positive": True}, carries_flag=True)
-    assert with_flag["bindings"] == []
+    live_only = _resume_arm(tmp / "live-only", flags={"positive": True}, carries_flag=False)
+    assert live_only["bindings"] == [], (
+        "a stale sidecar False cleared the suspicion this run's own analysis found"
+    )
+
+    sidecar_only = _resume_arm(tmp / "sidecar-only", flags={"positive": False}, carries_flag=True)
+    assert sidecar_only["bindings"] == [], (
+        "the sidecar's own flag is not reaching the gates, so the restore order is wrong"
+    )
+    del _pytest

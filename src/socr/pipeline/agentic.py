@@ -1171,6 +1171,15 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 data={"cause": ""},
             )
 
+        # #1205 round 2 (Argon P1-2): this is the passing exit, and on a page whose
+        # layer was EXCLUDED from the check above the evidence behind it is the pixels
+        # alone. Tell the inner native verifier, which must not then convict the same
+        # reading from the layer. ``deferred`` results never reach here (they returned
+        # above), so this is a real reading, not an abstention.
+        if not layer_ok:
+            noted = getattr(self._inner, "_pixel_confirmed_pages", None)
+            if isinstance(noted, set):
+                noted.add(page_num)
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
@@ -1246,6 +1255,12 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         self._record_event = record_event
         self._native_evidence_suspect = native_evidence_suspect
         self._native_layer_found = native_layer_found
+        # #1205 round 2 (Argon P1-2): page numbers whose reading the PIXEL lane has
+        # independently confirmed. Written by the outer ``SourceEvidenceTableJudge``
+        # just before it delegates, and only when the layer was EXCLUDED from that
+        # check -- so the confirmation is of the pixels, never of the layer agreeing
+        # with itself. One page at a time; nothing accumulates across a document.
+        self._pixel_confirmed_pages: set[int] = set()
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1349,6 +1364,22 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
                 layer_found = False
+        # #1205 round 2 (Argon P1-2): a reading the pixel lane has independently
+        # confirmed is not the layer's to convict. Measured before the fix, through
+        # ``_build_page_judge`` on a scan-failed page with no covering raster: the
+        # outer judge PASSED the pixel-confirmed ``-350`` against its witness, then
+        # this verifier rejected it with ``value_guard_multiset_mismatch`` on the
+        # strength of the layer's ``350``.
+        #
+        # Deliberately NOT a blanket bypass on the union, which is what the finding's
+        # literal wording would be: on a page with no opaque cover the pixels ARE the
+        # layer's own ink, so dropping the row check there lets a row swap through --
+        # #1156's transparent-cover and detection-error guards both measure exactly
+        # that, and both go red under the blanket version. A confirmation requires a
+        # reading of the pixels that EXCLUDED the layer, which those pages do not have.
+        if suspect and page_num in self._pixel_confirmed_pages:
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, None, None)
         exact_pass_needs_a_judge = suspect and not layer_found
         if suspect and not layer_found:
             # Unknown, and nothing independent read these pixels: keep verifying, which
