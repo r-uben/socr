@@ -522,3 +522,75 @@ round's test file is larger than its diff:
   an EQUIVALENT mutant, not a hole: `suspect` is not reassigned between
   `union_suspect = suspect` and that line -- the flip to False is three lines below it. The
   branch where the two genuinely differ is the header repair, and `r3m15` kills that one.
+
+## Round 4 (2026-10-19): the abstention PASSES THROUGH, and resume reprocesses
+
+Argon's round-4 review, verdict BLOCK: one P0 and one P1 with three parts. Both real, both
+reproduced before anything changed. Full write-up in `leads/1205/report-r4.md`.
+
+**P0 — round 3's own fix lost content.** `_PromotionLayerAbstainJudge` answered
+`accept=False` on every suspect page, and a promotion that refuses is not a promotion:
+`settle_scanned_table_decision` falls to `_apply_scanned_table_floor`, which demotes
+`best_output` so the GH-90 branch rewrites the page with the D3 marker and the model's
+table is gone. Reproduced on Argon's fixture (`flags={"positive": True}`): the `-350`
+attempt promoted on `4d14411b`, `None` on `4865ee7c`. Refusing without retaining is what
+the owner's 2026-10-19 ruling forbade, so round 3 broke the ruling it was implementing.
+
+**The fix is not the one the review names.** Deleting the wrapper and widening the LIVE
+bypass to the union turns six tests red (measured, `scratch/1205r4/probe_blanket_bypass.py`),
+#1156's `test_a_transparent_cover_is_not_an_independent_witness` and
+`test_a_detection_error_does_not_turn_a_swap_into_an_acceptance` among them: on a page with
+no opaque cover the pixels ARE the layer's own ink, so dropping row-level verification lets
+a row swap through. **Owner ruling (2026-10-19): the layer's VERDICT is skipped and the
+normal judge and structural gate still decide.** The wrapper therefore runs exactly the two
+steps the native verifier's own bypass runs -- `self._inner.assess`, then
+`_apply_structural_gate(words=None, rules=None)` -- and skips `verify_native_table` alone.
+It is inserted only where the peeled core IS the native judge, because the skip works by
+calling past it.
+
+Measured after, scan-failed page with an empty witness, each reading run alone: the true
+`-350` is promoted keeping `-350`, the layer's `350` is promoted keeping `350`. Symmetric,
+so the layer picks nothing and nothing is lost. The asymmetric row -- `-350` refused,
+`350` promoted -- is round 3's P1-2B finding and is now the control inside the test.
+
+**P1 — resume stops patching records and reprocesses instead.** Dropping layer-caused
+records at restore left three consumers of the same verdict reading a story the events no
+longer told: `_load_terminal_page` still treated a layer-caused `table_withheld` as a
+content terminal and skipped re-OCR; `ps.table_ladder_disposition` was restored ungated, so
+`_credential_admission_refusal` still returned "adverse table-ladder disposition" (round
+3's own test hid this by zeroing the disposition first); and
+`_backfill_missing_table_ladder_terminals` re-emitted a terminal at assemble for the table
+whose event had just been dropped.
+
+So a sidecar carrying ANY layer-caused record, on a page suspect NOW (the union), is no
+longer a terminal ledger hit -- the page is read again and this run's own gated producers
+decide it. **One `return None` is the whole fix**, because the restore only runs for a page
+the gate returned (both call sites are `if resumed is not None`), which makes round 3's
+replay-drop machinery unreachable. **It is removed, not merely bypassed**;
+`test_the_replay_drop_machinery_is_gone` asserts the restore no longer mentions either
+registry, and the classification survives as `_sidecar_layer_caused_records`. Cost is
+bounded by construction: within one version the gated producers cannot write such a record,
+so this fires only where suspicion changed between runs.
+
+**Two of my own measurement errors, recorded because both looked like code faults.**
+My first P1 control fixture wrote the layer-caused record while the page was flagged --
+which a gated producer cannot do -- so the clean-page control reprocessed and read as a bug
+in the fix; the fixture was corrected, not the code. And three copies of the mutant harness
+ran concurrently and interleaved into one output file, yielding two BASELINE totals and
+contradictory verdicts for the same mutant; that file is kept as
+`mutants_r4_DISCARDED_interleaved.txt`, nothing from it is quoted, and the harness was
+re-run once in the foreground (10 mutants, all killed).
+
+**One correction to the review itself.** It quotes the lost table as replaced by
+`[TABLE ON PAGE 1 NOT EXTRACTED ...]`. That string appears nowhere in socr; the real marker
+is `[page N failed: unverifiable table -- see image]`. The mechanism is real and was
+reproduced; the quoted bytes were invented, and the round-3 comment that had copied them is
+fixed.
+
+**#1207 merged in** (`origin/main` `3b4fce48`, merge not rebase). One conflict, in
+`agentic.py`, and it was comment versus code: #1207's entire change to that region is ten
+lines of comment (verified against the merge base `c0a7fca8` -- zero code). This branch's
+code is kept and the comment carried to the place it describes. `orchestrator.py`
+auto-merged and both sides were then checked rather than assumed: #1207's three test files
+pass (158) and this PR's neighbourhood passes (181). Full suite on the merged tree:
+**8,624 passed, zero failures**; ruff format clean at 1005 files.
