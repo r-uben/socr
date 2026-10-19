@@ -1361,6 +1361,129 @@ def _resume_verdict_is_permanently_unverifiable(
     return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
 
+def _resume_prior_ocr_reading_was_accepted(
+    raw_meta: object, raw_winning: object, *, flagged_by_this_run: bool
+) -> bool:
+    """#1192: is this sidecar an ACCEPTED model reading of an earlier-OCR page?
+
+    #1156 Part A flags a page whose text layer is a PREVIOUS OCR run's reading rather than
+    the document's own characters. Such a page is never native-trusted and is routed to a
+    model. When the judge ACCEPTS that reading, the reading ships and the page is demoted
+    from SUCCESS to WARNING carrying one clause, ``prior_ocr_layer=UNKNOWN`` -- not because
+    anything was found wrong with it, but because one reading of a scan is one reading and
+    the page must be MARKED rather than CHECKED.
+
+    The ledger admits only a terminal SUCCESS page, so EVERY flagged page was re-OCR'd on
+    every resume, for ever -- the precise non-convergence #713's and #1145's exceptions
+    exist to prevent, reached through a third door. At Fed scale that is ~141,000 pages at a
+    measured 3.39 GPU-s each, ~133 H100-hours per resume, for a reading that cannot change:
+    same input, same fingerprint, same reading, same acceptance, same mark.
+
+    So this is the FOURTH deliberate exception, and it is deliberately narrow. It admits a
+    page only on POSITIVE evidence of that one outcome, and the REJECTED half of the same
+    family -- the fail-closed floor, where the readers looked and said no -- is excluded and
+    keeps re-reading exactly as today. That half is a pending owner ruling (#1192): a
+    different rung might yet rescue it, which is not true of a reading already accepted.
+
+    Every clause, and the single thing each one rules out:
+
+    * ``prior_ocr_layer_suspect``, in the sidecar AND on the page THIS run just analysed
+      -- the page is this family at all, and still is. The sidecar key is the UNION (a
+      failed detector scan included), because that is the set the CLAUSE fires on, so it is
+      the set for which "the only demotion is this mark" is true; requiring the current
+      run to agree is what stops a transient failed scan being locked in for ever (see the
+      ``flagged_by_this_run`` clause below).
+    * ``prior_ocr_layer_text`` present and non-empty -- the sidecar is COMPLETE. Part A
+      retains the earlier layer here, unshipped, as the one artefact Part B re-finalizes
+      from with no re-OCR. Skipping a page whose retention is missing would make that work
+      unrecoverable without ever saying so.
+    * ``audit_passed is True`` -- the reading was ACCEPTED. This is the same credential the
+      ordinary gate requires (GH-161: status says the extraction succeeded as an operation,
+      only the audit verdict says the CONTENT was accepted), and it is the clause that
+      excludes the floor, which is ``audit_passed=False`` by construction.
+    * the engine is NOT a native lane -- a MODEL read these pixels. ``native`` and
+      ``chart_asset`` both ship the page's own ``native_text``, which on this family IS the
+      suspect layer, so neither is a reading of the page that could be accepted in the sense
+      this exception means.
+    * ``status`` is exactly WARNING and ``failure_mode`` is exactly
+      ``PRIOR_OCR_LAYER_UNVERIFIED`` -- the ONLY demotion is this one.
+      ``_demote_for_verdict`` never overwrites a more specific mode that is already there,
+      so a page demoted for any other reason as well arrives here under that reason's mode
+      and is refused.
+    * the published verdict carries EXACTLY ONE clause, ``prior_ocr_layer=UNKNOWN`` -- the
+      same statement read from the other side, and the one that stops a page whose table
+      went unjudged or whose figure crop went unread from riding along on this exception.
+      Strictly stronger than ``REPROCESSABLE_CLAUSE_CHECKS``: here no second clause of any
+      kind is admitted.
+    * ``table_ladder_incomplete`` is false -- the GH-359 forfeiture, on the same grounds as
+      the D1b exception it was written for: if assemble had to backfill a terminal for a
+      table on this page, that table was never witnessed, and a page skip-and-kept for ever
+      would mean it never can be.
+
+    Returns False on ANY doubt, including an unparseable verdict and a mode this build does
+    not know. What this branch is protected by, stated exactly (the #1145 branch's comment
+    got this wrong once): the run fingerprint, which hashes every shipped ``socr`` source
+    file -- so any change to this logic re-OCRs the page -- the input checksum, the
+    verdict's presence and successful parse, and the non-empty-body and
+    failed-marker-body refusals in the caller. There is no finalized-body digest for this
+    class, exactly as there is none for #1145's, so a hand-edited fragment restores
+    verbatim here as it does on the SUCCESS path. Noted rather than half-built.
+    """
+    # Asked of ``manifest`` rather than respelled here: that module decides which lanes
+    # ship the page's own ``native_text``, and on this family that text IS the suspect
+    # layer. Two spellings of the same set could drift, and a drift in this direction
+    # would admit a lane whose "reading" is the layer under suspicion.
+    from socr.core.manifest import engine_ships_native_text
+    from socr.core.verdict import Check, CheckResult, PageVerdict
+
+    if not isinstance(raw_meta, dict) or not isinstance(raw_winning, dict):
+        return False
+
+    # The page is a #1156 flagged page, and its sidecar is complete.
+    if raw_meta.get("prior_ocr_layer_suspect") is not True:
+        return False
+    # ... and THIS run's analysis says so too (Argon, design review). The siblings a few
+    # hundred lines below -- ``minus_as_digit_suspect``, ``garbled_math_suspect``,
+    # ``table_not_reconstructed_suspect`` -- all cross-check the FRESH ``PageState``
+    # rather than trusting the cached one, because a suspicion flag is not in the run
+    # fingerprint and so everything else can match while the current analysis disagrees.
+    # This exception needs that check more than they do, not less: the flag is what
+    # CREATED the demotion being carried forward.
+    #
+    # The shape that reaches it: ``prior_ocr_layer_suspect`` is a UNION that folds the
+    # detector's FAILED SCANS in beside its positive findings (``state.py``:
+    # ``prior_ocr_layer_scan_failed``), and a failed scan is transient -- a run that could
+    # not decide demoted the page, and a run that CAN decide may find nothing wrong with
+    # it. Without this line that page would be skip-and-kept under a mark its own
+    # document no longer earns, and no later run could shed it.
+    if not flagged_by_this_run:
+        return False
+    retained = raw_meta.get("prior_ocr_layer_text")
+    if not isinstance(retained, str) or not retained:
+        return False
+
+    # An ACCEPTED reading, and a MODEL's.
+    if raw_winning.get("audit_passed") is not True:
+        return False
+    if engine_ships_native_text(raw_winning.get("engine")):
+        return False
+
+    # Demoted by this mark, and by nothing else.
+    if raw_winning.get("status") != PageStatus.WARNING.value:
+        return False
+    if raw_winning.get("failure_mode") != FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value:
+        return False
+    if raw_meta.get("table_ladder_incomplete"):
+        return False
+    try:
+        verdict = PageVerdict.from_dict(raw_meta.get("verdict"))
+    except Exception:
+        return False
+    return [(c.check, c.result) for c in verdict.clauses] == [
+        (Check.PRIOR_OCR_LAYER, CheckResult.UNKNOWN)
+    ]
+
+
 def _is_document_failed_stub(md_path: Path) -> bool:
     """Is this file one THIS code wrote -- a document-failed mark and nothing else?
 
@@ -15382,7 +15505,15 @@ class UnifiedPipeline:
           * The serialised ``winning_output`` is present and rebuilds into a
             ``PageOutput`` without error.
 
-        GH-353 TICKET-D1b, the one deliberate exception: a page whose sidecar
+        #1192, the FOURTH deliberate exception: an earlier-OCR page (#1156) whose
+        model reading was ACCEPTED is demoted to WARNING only because one reading of
+        a scan must be MARKED rather than CHECKED, never because a check found
+        anything wrong. It is final for the same input and config, so it is
+        skip-and-kept; see ``_resume_prior_ocr_reading_was_accepted`` for the
+        clause-by-clause scope. The REJECTED half of that family -- the fail-closed
+        floor -- is deliberately NOT admitted and keeps re-reading on every resume.
+
+        GH-353 TICKET-D1b, the first deliberate exception: a page whose sidecar
         ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` **and
         whose ``table_ladder_incomplete`` is false** skips
         the two checks above and IS skip-and-kept even though C3's
@@ -15719,8 +15850,31 @@ class UnifiedPipeline:
                 meta.get("verdict"), winning.get("failure_mode")
             )
 
+            # #1192, the FOURTH deliberate exception, and the same argument as the three
+            # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only
+            # because one reading of a scan must be MARKED rather than CHECKED, never
+            # because anything was found wrong with it. Under the same input and the same
+            # fingerprint the next run produces the same reading, the same acceptance and
+            # the same mark, so re-OCR'ing it buys nothing and the work never converges --
+            # ~141,000 such pages on the Fed corpus at a measured 3.39 GPU-s each.
+            #
+            # The REJECTED half of the same family is deliberately NOT admitted (a pending
+            # owner ruling): its reading was refused, and a different rung might yet read
+            # it, which is not true of one already accepted. See the predicate for the
+            # clause-by-clause scope.
+            is_accepted_prior_ocr_reading = _resume_prior_ocr_reading_was_accepted(
+                meta,
+                winning,
+                flagged_by_this_run=bool(
+                    ps_fresh is not None and getattr(ps_fresh, "prior_ocr_layer_suspect", False)
+                ),
+            )
+
             if not (
-                is_ladder_rejected or is_credentialed_judge_timeout or is_permanently_unverifiable
+                is_ladder_rejected
+                or is_credentialed_judge_timeout
+                or is_permanently_unverifiable
+                or is_accepted_prior_ocr_reading
             ):
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
                 # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
@@ -16193,12 +16347,12 @@ class UnifiedPipeline:
             # #1156 round 1 (Argon C): the flag came back but the LAYER did not, so a
             # re-flush from restored state wrote the sidecar with ``native_text`` empty and
             # dropped ``prior_ocr_layer_text`` -- the one thing Part A retains for Part B to
-            # re-finalize from. Latent today rather than live: the page ledger admits only a
-            # terminal SUCCESS page and a flagged page is always WARNING, so this restore is
-            # not reached on a flagged page in a normal resume (both halves are pinned by
-            # ``test_a_restored_page_keeps_the_retained_layer``). Restored anyway, because
-            # retention is Part A's own contract and Part B re-finalizes from exactly this
-            # key.
+            # re-finalize from. LIVE since #1192, which admits the accepted half of this
+            # family to the ledger: before it, the gate took only a terminal SUCCESS page
+            # and a flagged page is always WARNING, so this line was unreachable on a
+            # flagged page and was written against the day it stopped being (pinned at the
+            # seam by ``test_a_restored_page_keeps_the_retained_layer`` and now on the live
+            # path by ``test_gh1192_resume_accepted_prior_ocr.py``).
             _retained_layer = meta.get("prior_ocr_layer_text")
             if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
                 ps.native_text = _retained_layer
