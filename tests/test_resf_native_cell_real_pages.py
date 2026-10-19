@@ -65,8 +65,8 @@ class TestRealDocumentGoldenPages:
     def test_plfss_p38_tableau18(self) -> None:
         _run_page("plfss_p38.pdf", "p38_tableau18.md", table_idx=1)
 
-    def test_plfss_p44_compensation_slice(self) -> None:
-        _run_page("plfss_p44.pdf", "p44_compensation_slice.md")
+    def test_plfss_p44_native_golden(self) -> None:
+        _run_page("plfss_p44.pdf", "p44_native_draft.md")
 
     def test_plfss_p65_pharma_slice(self) -> None:
         _run_page("plfss_p65.pdf", "p65_pharma_slice.md")
