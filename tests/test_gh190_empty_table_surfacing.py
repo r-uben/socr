@@ -369,8 +369,8 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     one cell:
     - Empty run: gains table_structure_failed, DocumentStatus.AUDIT_FAILED,
       PageStatus.WARNING sidecar, tables_trust.json untrusted entry, and metadata note.
-    - Populated run: passes structure gate but native cell check skips (no geometry),
-      yielding WARNING / TABLE_UNVERIFIED with ``native_cell_check_skipped`` trust only.
+    - Populated run: passes structure gate; native cell check skips (no geometry) and
+      records ``native_cell_check_skipped`` in trust only (advisory — no demotion).
     """
     fitz = pytest.importorskip("fitz")
 
@@ -491,8 +491,8 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     # Document-level status
     assert result_empty.status is DocumentStatus.AUDIT_FAILED
     assert result_empty.audit_passed is False
-    assert result_pop.status is DocumentStatus.AUDIT_FAILED
-    assert result_pop.audit_passed is False
+    assert result_pop.status is DocumentStatus.SUCCESS
+    assert result_pop.audit_passed is True
 
     # Page-level sidecar JSON
     sidecar_empty = json.loads(next(out_empty.rglob("pages/00001.json")).read_text())
@@ -505,9 +505,9 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value
     )
 
-    assert sidecar_pop["winning_output"]["audit_passed"] is False
-    assert sidecar_pop["winning_output"]["status"] == PageStatus.WARNING.value
-    assert sidecar_pop["winning_output"]["failure_mode"] == FailureMode.TABLE_UNVERIFIED.value
+    assert sidecar_pop["winning_output"]["audit_passed"] is True
+    assert sidecar_pop["winning_output"]["status"] == PageStatus.SUCCESS.value
+    assert sidecar_pop["winning_output"].get("failure_mode") in (None, "", "none")
 
     # Audit log JSON: empty run records structure failure; populated run records
     # default-on native cell skip (no PDF table geometry on this prose-only fixture).
@@ -556,8 +556,8 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     assert TRUST_NOTE_PREFIX in pop_err
     assert trust_empty["counts_by_kind"]["table_structure_failed"] == 1
     assert trust_pop["counts_by_kind"]["native_cell_check_skipped"] == 1
-    assert "table_unverified" in pop_err
-    assert empty_err != pop_err
+    assert "table_unverified" not in pop_err
+    assert trust_empty["counts_by_kind"] != trust_pop["counts_by_kind"]
 
 
 # --------------------------------------------------------------------------

@@ -411,6 +411,10 @@ def test_the_blocking_policy_pins_its_exclusions_not_only_its_members() -> None:
         "structure_class_ladder_exhausted_floor",
         "structure_class_row_corroborated",
         "structure_floor_overrode_ladder",
+        # advisory native per-cell check (gating uses ladder disposition instead)
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
     }
     assert "table_unexplained_lanes" in CREDENTIAL_BLOCKING_EVENT_KINDS
 

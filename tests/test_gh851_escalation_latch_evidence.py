@@ -163,6 +163,77 @@ def test_the_two_runs_differ_only_in_whether_the_abandoned_call_finished(tmp_pat
     }
 
 
+def _run_with_native_cell_gating(root: Path, *, mode: str):
+    cfg = _config()
+    cfg.escalation_timeout_sec = _DEADLINE
+    cfg.local_engine = PROFILE_QWEN_LOCAL.engine
+    cfg.native_cell_gating = True
+    pdf = root / "doc.pdf"
+    if not pdf.exists():
+        _grid_pdf(pdf, pages=2)
+    pipeline = UnifiedPipeline(cfg)
+    release = threading.Event()
+    calls: list[int] = []
+    escalation_futures: list[concurrent.futures.Future] = []
+    real_submit = orch.submit_daemon
+
+    def _recording_submit(fn, *args, **kwargs):
+        fut = real_submit(fn, *args, **kwargs)
+        if getattr(fn, "__name__", "") == "run_provider":
+            escalation_futures.append(fut)
+        return fut
+
+    def _engine(state, pages, fallback, engine, mode_, **kwargs):
+        page_num = pages[0]
+        calls.append(page_num)
+        if page_num == 1 and mode != "healthy":
+            release.wait(timeout=30)
+        return [
+            PageOutput(
+                page_num=page_num,
+                text=_MISSING_COLUMNS_CANDIDATE,
+                status=PageStatus.SUCCESS,
+                engine=engine.value,
+            )
+        ]
+
+    def _score(state, page_num, ps, bo):
+        if page_num == 2 and mode == "slow_done":
+            release.set()
+            concurrent.futures.wait(escalation_futures[:1], timeout=10)
+            assert escalation_futures[0].done()
+        return True
+
+    try:
+        with (
+            patch.object(orch, "submit_daemon", _recording_submit),
+            patch.object(
+                pipeline,
+                "_available_engines_for_agentic",
+                return_value=[PROFILE_QWEN_LOCAL, PROFILE_GEMINI],
+            ),
+            patch.object(
+                pipeline,
+                "_probe_engines_for_agentic",
+                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], ""),
+            ),
+            patch.object(UnifiedPipeline, "_page_has_tables", return_value=False),
+            patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
+            patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_route_fn),
+            patch(
+                "socr.pipeline.agentic.HeuristicPageJudge.assess",
+                return_value=AcceptDecision(accept=True, reason="heuristics passed"),
+            ),
+            patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+        ):
+            result = pipeline.process(pdf, root / "out")
+    finally:
+        release.set()
+    return calls, _audit_events(root / "out"), result
+
+
 def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) -> None:
     """Pin the DIFFERENCE between runs; the fixture is otherwise identical."""
     _, _, healthy = _run(tmp_path / "healthy", mode="healthy")
@@ -171,17 +242,23 @@ def test_withheld_page_is_demoted_at_page_and_document_status(tmp_path: Path) ->
 
     slow_p2 = _page_sidecar(tmp_path / "slow" / "out", 2)
     wedge_p2 = _page_sidecar(tmp_path / "wedge" / "out", 2)
-    _, slow_events, _ = _run(tmp_path / "slow", mode="slow_done")
-    _, wedge_events, _ = _run(tmp_path / "wedge", mode="wedge")
+    _, slow_events, _ = _run_with_native_cell_gating(tmp_path / "slow_gating", mode="slow_done")
+    _, wedge_events, _ = _run_with_native_cell_gating(tmp_path / "wedge_gating", mode="wedge")
+    slow_p2_g = _page_sidecar(tmp_path / "slow_gating" / "out", 2)
+    wedge_p2_g = _page_sidecar(tmp_path / "wedge_gating" / "out", 2)
 
-    # Default-on native cell check: detector stubbed off → skipped → both demote p2.
+    # Advisory default: native cell skip does not add the unverified table mark.
     from socr.core.manifest import UNVERIFIED_TABLE_MARK
 
-    assert slow_p2["status"] == PageStatus.WARNING.value
-    assert wedge_p2["status"] == PageStatus.WARNING.value
-    assert UNVERIFIED_TABLE_MARK in slow_p2["text"]
-    assert UNVERIFIED_TABLE_MARK in wedge_p2["text"]
-    assert slow_p2["text"] == wedge_p2["text"]
+    assert UNVERIFIED_TABLE_MARK not in slow_p2["text"]
+    assert slow_p2["status"] == PageStatus.SUCCESS.value
+
+    # Fail-closed gating: detector stubbed off → skipped → both demote p2.
+    assert slow_p2_g["status"] == PageStatus.WARNING.value
+    assert wedge_p2_g["status"] == PageStatus.WARNING.value
+    assert UNVERIFIED_TABLE_MARK in slow_p2_g["text"]
+    assert UNVERIFIED_TABLE_MARK in wedge_p2_g["text"]
+    assert slow_p2_g["text"] == wedge_p2_g["text"]
     assert "native_cell_check_skipped" in _kinds(slow_events, 2)
     assert "native_cell_check_skipped" in _kinds(wedge_events, 2)
     # Escalation wedge is the DIFFERENCE between the two runs.

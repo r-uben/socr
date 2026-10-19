@@ -212,6 +212,13 @@ class PipelineConfig:
     # Default on: a flagged page never ships plain SUCCESS. ``--no-text-coverage``
     # turns it off (tests pin the on/off difference).
     check_text_coverage: bool = True
+    # Default-on per-cell native binding check (``tables.native_cell_check``) runs
+    # on every born-digital table page and records ``native_cell_binding`` plus
+    # ``native_cell_check_*`` audit events. By default the check is **advisory
+    # only**: it never demotes a page, adds marks, or blocks credentials.
+    # ``--native-cell-gating`` restores fail-closed demotion (WARNING /
+    # ``TABLE_UNVERIFIED`` / visible mark) on CONTRADICTED, AMBIGUOUS, or skip.
+    native_cell_gating: bool = False
 
     # --- Math recovery (font-corrupted equations, default ON) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted

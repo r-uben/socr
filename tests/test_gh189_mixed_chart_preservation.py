@@ -408,11 +408,11 @@ def test_one_failed_crop_is_visible_and_the_other_still_ships(tmp_path: Path) ->
     assert result.status is not DocumentStatus.SUCCESS
     assert result.audit_passed is False
 
-    # Finding 6: the loss must reach the FINALIZED page copy too, not only the
-    # whole-document status. Default-on native cell check also marks the table
-    # unverified here (markdown table, no locatable PDF grid on this fixture).
+    # Finding 6: chart loss reaches the finalized page copy. Native cell check
+    # records a skip here but is advisory (no TABLE_UNVERIFIED demotion).
     assert _final_page_status(out_dir) == "warning"
-    assert ps.best_output.status is PageStatus.WARNING
+    assert ps.best_output.status is PageStatus.SUCCESS
+    assert ps.best_output.failure_mode.value == "none"
     assert ps.best_output.audit_passed is True
     assert ps.native_cell_binding["p1-t0"]["skip_reason"] == "no_located_table_geometry"
 

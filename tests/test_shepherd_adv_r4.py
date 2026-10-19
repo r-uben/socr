@@ -202,7 +202,9 @@ def test_r4_orchestrator_skip_pairing_inconclusive_e2e(tmp_path: Path) -> None:
             side_effect=lambda _page, mds, _boxes: [None] * len(mds),
         ),
     ):
-        _pipe, _result, state, out_dir = pipe._run_page(tmp_path, "resf_p59.pdf", md)
+        _pipe, _result, state, out_dir = pipe._run_page(
+            tmp_path, "resf_p59.pdf", md, native_cell_gating=True
+        )
 
     sidecar = pipe._page_sidecar(out_dir, 1)
     win = sidecar["winning_output"]

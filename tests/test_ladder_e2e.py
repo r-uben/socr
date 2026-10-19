@@ -357,15 +357,14 @@ class TestRejectedTerminal:
     def test_flag_off_vs_on(self, tmp_path: Path, capsys) -> None:
         text_by_page = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_SHIFTED_MD}
 
-        # -- flag off: default-on native cell check flags the shifted table ----
+        # -- flag off: ladder off; native cell check is advisory (no demotion) ----
         pdf_off = _fixture_copy(tmp_path, "off")
         _pipe_off, result_off, state_off = _run(
             pdf_off, tmp_path / "off_out", ladder_on=False, text_by_page=text_by_page, rungs=None
         )
-        assert result_off.status == DocumentStatus.AUDIT_FAILED
-        assert state_off.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert result_off.status == DocumentStatus.SUCCESS
+        assert state_off.pages[SHIFT_PAGE].table_ladder_disposition is None
         meta_off = _metadata(tmp_path / "off_out", pdf_off)
-        assert "table_unverified" in json.dumps(meta_off)
         assert "table_rejected" not in json.dumps(meta_off)
 
         # -- flag on: shifted table rejected by the (real) judge ------------
@@ -485,11 +484,11 @@ class TestClampedUnverifiedTerminal:
         _pipe_off, result_off, state_off = _run(
             pdf_off, tmp_path / "off_out", ladder_on=False, text_by_page=text_by_page, rungs=None
         )
-        # Default-on native cell check runs with the ladder off and flags the shifted table.
-        assert result_off.status == DocumentStatus.AUDIT_FAILED
-        assert state_off.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        # Ladder off: native cell check is advisory (records only).
+        assert result_off.status == DocumentStatus.SUCCESS
+        assert state_off.pages[SHIFT_PAGE].table_ladder_disposition is None
         meta_off = _metadata(tmp_path / "off_out", pdf_off)
-        assert "table_unverified" in json.dumps(meta_off)
+        assert "table_unverified" not in json.dumps(meta_off)
 
         # Both tables get a high-confidence real PASS -- the ladder alone
         # would ACCEPT both; only the mechanical clamp demotes the shifted one.

@@ -420,9 +420,48 @@ class TestWithholdThroughTheWholePipeline:
         assert {c["kind"] for c in events[0].data["contradictions"]} == {nc.NUMBER_ABSENT}
 
     def test_ladder_off_leaves_the_table_alone(self, tmp_path: Path) -> None:
-        """With the ladder off, ``native_cell_check`` still runs and marks the page
+        """With the ladder off, ``native_cell_check`` gating marks the page
         TABLE_UNVERIFIED; ``native_contradiction`` withhold does not."""
-        _p, _r, state, *_ = _process(tmp_path, "off", MINUS_DROPPED_MD, ladder=False)
+        from socr.core.config import PipelineConfig
+
+        pdf = _pdf(tmp_path / "off")
+        cfg = PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            save_figures=False,
+            write_manifest=False,
+            table_judge_ladder=False,
+            native_cell_gating=True,
+        )
+        pipeline = UnifiedPipeline(cfg)
+        captured: dict = {}
+        original = pipeline._phase_assemble
+
+        def _spy(state, out_dir):
+            captured["state"] = state
+            return original(state, out_dir)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "socr.pipeline.orchestrator.route_page",
+                    side_effect=_route(_page_text(MINUS_DROPPED_MD)),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+                )
+            )
+            stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))
+            stack.enter_context(patch.object(pipeline, "_plan_native_table_first", return_value=None))
+            stack.enter_context(patch.object(pipeline, "_build_table_judge_rungs", return_value=[]))
+            stack.enter_context(patch.object(pipeline, "_phase_assemble", side_effect=_spy))
+            pipeline.process(pdf, tmp_path / "off" / "out")
+        state = captured["state"]
         assert state.pages[1].table_ladder_disposition is FailureMode.TABLE_UNVERIFIED
         assert not [e for e in state.events if e.kind == TABLE_LADDER_WITHHELD_KIND]
         assert [e for e in state.events if e.kind == "native_cell_check_contradicted"]

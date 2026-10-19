@@ -1919,6 +1919,8 @@ class UnifiedPipeline:
             # #1050: the coverage check rewrites flagged pages (WARNING + mark +
             # PNG). Toggling it must not resume a SUCCESS page as clean.
             "check_text_coverage": getattr(cfg, "check_text_coverage", True),
+            # Native cell check: advisory by default; gating changes demotion/mark bytes.
+            "native_cell_gating": getattr(cfg, "native_cell_gating", False),
             # #1050 step 2: recovery rewrites a flagged page's body (OCR'd words
             # placed in the prose or under the figure). Toggling it must not
             # resume a page written under the other setting.
@@ -8108,6 +8110,8 @@ class UnifiedPipeline:
     ) -> None:
         from socr.tables.native_cell_check import NativeCellOutcome as _NativeCellOutcome
 
+        if not self.config.native_cell_gating:
+            return
         if worst not in (_NativeCellOutcome.CONTRADICTED, _NativeCellOutcome.AMBIGUOUS):
             return
         if ps.table_ladder_disposition not in (
@@ -8131,8 +8135,10 @@ class UnifiedPipeline:
         """Default-on per-cell native binding check (``tables.native_cell_check``).
 
         Runs on born-digital pages whose model output contains markdown tables,
-        regardless of ``table_judge_ladder``. Skips that cannot run ``bind()``
-        still fail closed (AMBIGUOUS + visible mark), never plain success.
+        regardless of ``table_judge_ladder``. Always records ``native_cell_binding``
+        and ``native_cell_check_*`` audit events. Page demotion (WARNING /
+        ``TABLE_UNVERIFIED`` / visible mark) applies only when
+        ``config.native_cell_gating`` is True (``--native-cell-gating``).
 
         Legitimate no-ops (other checks own these pages): no model output,
         ``native_only``, native-engine winner, chart/failed candidates, scanned /
