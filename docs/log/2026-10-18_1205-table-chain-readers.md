@@ -326,6 +326,40 @@ credential; on the Fed scans that is every table page with a crop. It now runs t
 something. And the escalation backstop moved ABOVE `submit_daemon`, so a refused
 escalation is never billed (r-uben M4/M5).
 
+## Round 1b: the merge, and #1206's per-cell check
+
+`origin/main` was MERGED into the branch (not rebased -- the PR is pushed), bringing #1206
+(the advisory native per-cell table check) and #1210. No conflicts: the two sides touch
+different regions of `orchestrator.py`, `manifest.py` and `tables_trust.py`.
+
+Agreed with #1206's owner: on a page whose layer may not serve as evidence, the per-cell
+check abstains COMPLETELY -- no `native_cell_binding` verdicts, no `native_cell_check_*`
+events, no distrust, and no demotion under `--native-cell-gating`.
+
+**The LIVE path was already gated** by #1206 itself, at the top of
+`_run_native_cell_binding_check`. Measured over both gating states and all three flag
+states: no events, no bindings, no disposition, nothing untrusted, with the admissible
+control recording `native_cell_check_verified` and a binding. What this round adds there
+is the test its owner asked for, which is what makes that gate killable -- it had none.
+
+**The RESUME path was not, and that is a second emit site.** A sidecar from an earlier run
+restored its per-cell verdicts (`native_cell_binding`) and replayed their events, three of
+whose four kinds are in `TABLE_DISTRUST_KINDS` -- so a flagged page came back listed in
+`tables_trust.json` with a per-cell reason derived from the very layer the live gate
+refuses to read. Both sites now take the union. Nothing is deleted: the sidecar keeps what
+its run wrote, so a later build that can use it (one that re-reads the page, or Part B)
+still has it; this only refuses to ACT on it.
+
+One ordering the gate depends on, and it is pinned rather than assumed: on a resume the
+page's flags come from the sidecar, restored EARLIER in the same method. Measured the
+wrong way round first -- a probe whose sidecar carried no flag read the page as
+admissible and the gate appeared not to work. A sidecar carrying the verdicts but not the
+flag still restores them; the same sidecar with the flag does not.
+
+Not in scope and worth naming: a sidecar from a PRE-#1156 build carries no suspicion flag
+at all, so such a page resumes unflagged everywhere, not just here. That is the resume
+completeness question #1145/Part A already owns.
+
 ## What was NOT measured
 
 * No model, no OCR, no provider: every reversal above is measured on deterministic PyMuPDF +

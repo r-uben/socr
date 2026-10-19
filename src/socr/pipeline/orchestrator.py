@@ -17011,7 +17011,18 @@ class UnifiedPipeline:
             ps.page_retry = meta.get("page_retry") or None
             ps.timings_s = coerce_page_timings(meta.get("timings_s"))
             restored_native_cell = meta.get("native_cell_binding")
-            if isinstance(restored_native_cell, dict):
+            # #1205 round 1b (agreed with the owner of #1206): the per-cell native
+            # check abstains COMPLETELY on a page whose text layer may not serve as
+            # evidence, and a RESTORED verdict is still a verdict. The live gate sits
+            # at the top of ``_run_native_cell_binding_check``; without this one a
+            # resume brings the verdicts back from the sidecar and the page is listed
+            # untrusted on the strength of a check the live run refused to run. Takes
+            # the UNION, like every other evidence decision.
+            #
+            # Nothing is deleted: the sidecar keeps what its run wrote, so a build that
+            # can use it again (one that re-reads the page, or #1156 Part B) still has
+            # it. This only refuses to ACT on it now.
+            if isinstance(restored_native_cell, dict) and layer_is_admissible_evidence(ps):
                 ps.native_cell_binding = dict(restored_native_cell)
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
@@ -17043,6 +17054,15 @@ class UnifiedPipeline:
                 if e.page_num == page_num and e.kind in _skeleton_kinds
             }
             restore_kinds = self.resume_restore_kinds()
+            # #1205 round 1b: the same abstention for the EVENTS. Three of these four
+            # kinds are in ``TABLE_DISTRUST_KINDS``, so replaying them puts the page in
+            # ``tables_trust.json`` with a per-cell reason derived from the suspect
+            # layer; the fourth is a PASS, which such a layer may not give either.
+            # Dropping a contradiction as well as a pass is deliberate and is #1202's
+            # own rule: the suspect layer may not supply the contradiction that
+            # withholds content any more than the agreement that ships it.
+            if not layer_is_admissible_evidence(ps):
+                restore_kinds = restore_kinds - self.native_cell_check_event_kinds()
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
