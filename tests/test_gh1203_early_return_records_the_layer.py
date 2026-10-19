@@ -873,15 +873,24 @@ def _table_markdown(rows) -> str:
 
 
 class _ColumnTableEngine:
-    name = "qwen"
+    """The stub reading, reporting the engine it stands in for.
+
+    Argon P2 (round 4): this hardcoded ``engine="qwen"`` for every rung, so the escalation
+    arm's "second model" was indistinguishable from the first in the output and the arm did
+    not really exercise a second provider. The name now comes from the ``EngineType`` the
+    factory was asked for, and the per-rung counter is shared across instances so the
+    rung-dependent bodies still line up.
+    """
+
     table = ""
     #: Per-rung bodies, when an arm needs the two rungs to differ (Argon 3: rung 1 splits
     #: the table in two blocks, rung 2 emits it unified). Consumed in order; the last
     #: entry repeats.
     per_rung: list[str] | None = None
 
-    def __init__(self) -> None:
-        self._rung = 0
+    def __init__(self, name: str = "qwen", rung: list[int] | None = None) -> None:
+        self.name = name
+        self._rung_box = rung if rung is not None else [0]
 
     def is_available(self) -> bool:
         return True
@@ -889,17 +898,17 @@ class _ColumnTableEngine:
     def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
         body = self.table
         if self.per_rung:
-            body = self.per_rung[min(self._rung, len(self.per_rung) - 1)]
+            body = self.per_rung[min(self._rung_box[0], len(self.per_rung) - 1)]
         out = [
             PageOutput(
                 page_num=n,
                 text=f"RESERVE AGGREGATES, MEMBER BANKS\n\n{body}",
                 status=PageStatus.SUCCESS,
-                engine="qwen",
+                engine=self.name,
             )
             for n in page_nums
         ]
-        self._rung += 1
+        self._rung_box[0] += 1
         return out
 
 
@@ -917,6 +926,7 @@ def _run_table_arm(
     swap_rows: bool = False,
     verifier_raises: bool = False,
     escalate: bool = False,
+    html_table: str | None = None,
 ) -> dict:
     """``process()`` with the real judge chain, over the axes the rule needs.
 
@@ -940,10 +950,19 @@ def _run_table_arm(
     else:
         model_rows = [("Reserves", "521", "380", "18"), *_COLUMN_ROWS[1:]]
     with monkeypatch.context() as m:
-        engine = _ColumnTableEngine()
-        engine.table = _table_markdown(model_rows)
-        engine.per_rung = list(per_rung_tables) if per_rung_tables else None
-        m.setattr(orch, "get_engine", lambda engine_type: engine)
+        _rung_box = [0]
+        _engines: dict[str, _ColumnTableEngine] = {}
+
+        def _engine_for(engine_type):
+            name = getattr(engine_type, "value", str(engine_type))
+            if name not in _engines:
+                eng = _ColumnTableEngine(name, _rung_box)
+                eng.table = html_table if html_table is not None else _table_markdown(model_rows)
+                eng.per_rung = list(per_rung_tables) if per_rung_tables else None
+                _engines[name] = eng
+            return _engines[name]
+
+        m.setattr(orch, "get_engine", _engine_for)
         if witness:
             # A witness that READS the page's pixels. On this fixture the pixels carry the
             # LAYER's numbers, which is what a real tesseract on a real scan reads -- so
@@ -1096,36 +1115,44 @@ def test_a_witness_that_contradicts_the_model_withholds_the_table(
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
 
 
-def test_a_witness_that_agrees_with_the_model_ships_the_table(tmp_path: Path, monkeypatch) -> None:
-    """Arm (iv): the only arm that ships. An independent reader confirmed the cells.
+def test_even_an_agreeing_witness_does_not_release_the_table(tmp_path: Path, monkeypatch) -> None:
+    """Round 4 (orchestrator decision): there is no release path in this PR.
 
-    This is the arm that stops the rule from being "withhold every old-scan table": the
-    page's own pixels were read and they support the model's numbers, so the table ships
-    and nothing is retained.
+    Rounds 2 and 3 shipped the table when the scanned-table gate's witness agreed with it.
+    All three seats then broke the check that was supposed to make that agreement
+    trustworthy -- the subsequence skipped words; dropped, shifted and merged cells passed;
+    a dropped row passed; swapped header years passed -- and it could only fire at all on a
+    box with Tesseract, which CI and Rorqual are not. So the agreement no longer releases
+    anything: EVERY table on one of these pages is withheld and retained, which is the
+    owner's ruling taken literally. #1208 builds the comparator that can release them.
     """
     live = _run_table_arm(
-        tmp_path, monkeypatch, "iv-live", route_live=True, agree=True, witness=True
+        tmp_path, monkeypatch, "agree-live", route_live=True, agree=True, witness=True
     )
-    assert live["ships_table"] is True, "a witness-confirmed table was withheld"
-    assert "withheld_table_text" not in live["side"]
-    assert "unverifiable table — see image" not in live["text"]
-    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") is True
+    assert live["ships_table"] is False, (
+        "an agreeing witness released the table; this PR has no release path"
+    )
+    assert "unverifiable table — see image" in live["text"]
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or ""), (
+        "withheld without retention, which is a deletion"
+    )
 
 
 @pytest.mark.parametrize("second_rung_agrees", [True, False])
-def test_a_transient_witness_error_does_not_destroy_a_later_corroboration(
+def test_a_transient_witness_error_keeps_the_witnesss_own_cause(
     tmp_path: Path, monkeypatch, second_rung_agrees: bool
 ) -> None:
-    """Arm (v) and #658's cause (Argon P1a/P1b).
+    """#658's cause through a two-rung ladder (Argon P1a/P1b, rounds 2-3).
 
-    Rung 1's witness hits a transient execution error -- which emits the page's
-    no-witness event -- and rung 2's witness then reads the page. Round 1 keyed the
-    withhold on that event existing, so a table rung 2 had CORROBORATED was destroyed
-    anyway, and the recorded cause was overwritten with ``no_witness_backend`` even when
-    rung 2's witness had contradicted the table.
+    Rung 1's witness hits a transient execution error -- which emits the page's no-witness
+    event -- and rung 2's witness then reads the page. Round 2 keyed the withhold on that
+    event existing, so a table rung 2 had corroborated was destroyed; and the recorded
+    cause was overwritten with ``no_witness_backend`` even when rung 2's witness had
+    DISPUTED the table.
 
-    Both halves here: corroborated → ships; contradicted → withheld, and the cause stays
-    the witness's own finding.
+    Round 4 removes the release path, so BOTH arms are now withheld -- the question this
+    test still answers is the cause, which must follow the witness's own finding and not
+    the earlier missing install.
     """
     live = _run_table_arm(
         tmp_path,
@@ -1136,17 +1163,16 @@ def test_a_transient_witness_error_does_not_destroy_a_later_corroboration(
         witness=True,
         first_rung_witness_error=True,
     )
+    assert live["ships_table"] is False
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
     if second_rung_agrees:
-        assert live["ships_table"] is True, (
-            "a table a later rung's witness corroborated was destroyed by an earlier "
-            "transient witness error"
+        assert live["failure_mode"] == "no_witness_backend", (
+            "nothing refuted this table, so the cause is the reader that never ran"
         )
-        assert "withheld_table_text" not in live["side"]
     else:
-        assert live["ships_table"] is False
         assert live["failure_mode"] == "hallucination", (
             "the cause was overwritten with a missing install, although a witness read "
-            "the page and contradicted the table"
+            "the page and refused named cells"
         )
 
 
@@ -1209,14 +1235,26 @@ def test_a_withheld_page_does_not_also_claim_its_table_shipped(tmp_path: Path, m
     ``unchecked_table_kind: unverified``, ``table_ladder_superseded`` and that sentence,
     beside a marker-only body. Two readings of the same page in one file.
     """
+    # ``agree=True``: the arm where the SETTLING actually promotes an attempt and writes
+    # its claim. With a disagreeing table nothing is promoted, so the strip is never
+    # exercised and the assertions below pass for the wrong reason (measured).
     live = _run_table_arm(
-        tmp_path, monkeypatch, "p2-stamp", route_live=True, agree=False, witness=False
+        tmp_path, monkeypatch, "p2-stamp", route_live=True, agree=True, witness=False
     )
     assert live["ships_table"] is False, "fixture premise: the table is withheld"
     side = live["side"]
+    # The page's own record must not say a table shipped. Measured: without the clears,
+    # every withheld arm records these (``unverified`` / ``disputed`` and
+    # ``table_unverified``) beside a marker-only body.
     assert side.get("unchecked_table_kind") in (None, ""), side.get("unchecked_table_kind")
     assert side.get("table_ladder_superseded") in (None, ""), side.get("table_ladder_superseded")
+    assert side.get("unchecked_table_values") in (None, "", []), side.get("unchecked_table_values")
     assert "marked unverified" not in live["text"]
+    # r-uben 8 asked for a behavioural pin of the #1048 strip. There is nothing left to
+    # pin: round 4 removed the release path, so no page of this class ships a table and no
+    # arm produces the claim (measured over all five witness/agreement arms). The strip is
+    # removed with it; what remains, and what the mutants kill, is the clearing of the
+    # disposition and the ``unchecked_table_*`` fields asserted above.
 
 
 def test_a_born_digital_flagged_page_does_not_grow_the_retention_key(
@@ -1387,7 +1425,6 @@ def test_a_row_swap_is_not_confirmed_by_a_multiset_agreeing_witness(
         tmp_path, monkeypatch, "swap", route_live=True, agree=False, witness=True, swap_rows=True
     )
     assert live["ships_table"] is False, "a row swap shipped as confirmed"
-    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") in (None, False)
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
     # The swapped cells are nowhere in the body.
     assert "204" not in live["text"] or "unverifiable table" in live["text"]
@@ -1414,6 +1451,11 @@ def test_a_raised_verifier_withholds_with_retention(tmp_path: Path, monkeypatch)
     assert all(c not in live["text"] for c in _MODEL_ONLY_CELLS)
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or ""), (
         "withheld without retention, which is a deletion"
+    )
+    # r-uben 8: the CAUSE, asserted. A verifier that raised means nothing read the pixels,
+    # so the page must not blame the model for inventing the table.
+    assert live["failure_mode"] == "no_witness_backend", (
+        "a crashed verifier was recorded as a hallucination"
     )
 
 
@@ -1448,9 +1490,11 @@ def test_the_scan_failed_page_with_no_raster_is_not_confirmed(tmp_path: Path, mo
     ``build_born_digital_evidence``, whose evidence INCLUDES the PDF text layer — which on
     this page is the earlier OCR run. Round 2's flag was set from that bundle's verdict, so
     a model table agreeing with the layer was recorded as independently confirmed: the
-    exact licence the ruling removed, written down as provenance. ``witness_lines`` is
-    populated from pixel readings only, so this page cannot be confirmed, and the table is
-    withheld.
+    exact licence the ruling removed, written down as provenance. Round 4 removed the
+    confirmation path altogether, so this page is withheld like every other -- but the
+    fixture is kept because it is the one page class where a "pixel reading" is not
+    independent of the layer at all (the pixels show the layer's own ink), which is the
+    constraint #1208's comparator inherits.
 
     The page is reached through the scan-failed half of the union (the positive detectors
     need 0.90 raster cover), so the detector is made to raise.
@@ -1489,9 +1533,6 @@ def test_the_scan_failed_page_with_no_raster_is_not_confirmed(tmp_path: Path, mo
     with open_pdf(pdf) as _doc:
         assert page_has_page_covering_raster(_doc[0]) is False, "fixture premise: no raster"
     assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: scan-failed"
-    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") in (None, False), (
-        "the layer minted a confirmation"
-    )
     assert live["ships_table"] is False
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
 
@@ -1536,64 +1577,42 @@ def test_settling_can_never_ship_an_unconfirmed_rung_over_a_confirmed_one(
         witness=True,
         per_rung_tables=[split, unified],
     )
-    confirmed = live["side"]["winning_output"].get("table_cells_witness_confirmed") is True
-    if live["ships_table"]:
-        assert confirmed, "settling shipped a table no independent reader confirmed"
-    else:
-        assert (live["side"].get("withheld_table_text") or "").strip(), (
-            "withheld without retention, which is a deletion"
-        )
+    assert live["ships_table"] is False, (
+        "settling shipped a table; with no release path nothing on these pages ships one"
+    )
+    assert (live["side"].get("withheld_table_text") or "").strip(), (
+        "withheld without retention, which is a deletion"
+    )
 
 
-def test_the_confirmation_survives_a_page_output_round_trip() -> None:
-    """r-uben's nit: dropping the ``from_dict`` restore survived the suite.
+def test_an_html_table_is_withheld_too(tmp_path: Path, monkeypatch) -> None:
+    """Argon P0 (round 4): the gate read only markdown pipe tables.
 
-    Nothing reads the flag after the decision TODAY, so the restore is defence — but the
-    sidecar is what a resume and a re-finalize rebuild the page from, and the final gate
-    asks the winner whether it was confirmed. A flag that does not come back reads as "not
-    confirmed", which withholds a table a witness had confirmed.
+    `find_table_blocks` does not see `<table>`, so a model that emitted its table as HTML
+    walked through the final gate and shipped on a page where no reader had confirmed
+    anything. It matters on Rorqual: the engines there do emit HTML tables.
 
-    Both directions, because the field is written sparsely: True round-trips, False stays
-    absent from the dict so no existing sidecar changes its bytes.
+    The gate now detects every table form the scanned-table gate itself recognises --
+    markdown via `find_table_blocks`, HTML via `html_table_for_check` -- and the retention
+    is written on this floor too.
     """
-    confirmed = PageOutput(
-        page_num=1,
-        text="| a | b |\n| --- | --- |\n| 1 | 2 |",
-        status=PageStatus.SUCCESS,
-        engine="qwen",
-        table_cells_witness_confirmed=True,
+    html = (
+        "<table><tr><th>Item</th><th>Level</th></tr>"
+        "<tr><td>Reserves</td><td>521</td></tr>"
+        "<tr><td>Borrowings</td><td>204</td></tr></table>"
     )
-    as_dict = confirmed.to_dict()
-    assert as_dict["table_cells_witness_confirmed"] is True
-    assert PageOutput.from_dict(as_dict).table_cells_witness_confirmed is True
-
-    plain = PageOutput(page_num=1, text="x", status=PageStatus.SUCCESS, engine="qwen")
-    assert "table_cells_witness_confirmed" not in plain.to_dict()
-    assert PageOutput.from_dict(plain.to_dict()).table_cells_witness_confirmed is False
-
-
-def test_a_crop_patched_candidate_does_not_inherit_the_confirmation() -> None:
-    """Argon P2: patched text is NEW text, so the old confirmation must not ride along.
-
-    Pinned on the candidate builder rather than through ``process()``: the crop re-judge
-    needs a crop lane, a patch that changes the text and a VLM, and none of this round's
-    arms reach it — a reset nothing exercises is a reset nothing protects, so it is pinned
-    where it can fail.
-    """
-    from socr.pipeline.orchestrator import UnifiedPipeline
-
-    confirmed = PageOutput(
-        page_num=1,
-        text="| Item | Level |\n| --- | --- |\n| Reserves | 512 |",
-        status=PageStatus.SUCCESS,
-        engine="qwen",
-        table_cells_witness_confirmed=True,
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "html",
+        route_live=True,
+        agree=False,
+        witness=False,
+        html_table=html,
     )
-    candidate = UnifiedPipeline._crop_patch_candidate(
-        confirmed, "| Item | Level |\n| Reserves | 9 |"
-    )
-
-    assert candidate.text != confirmed.text, "premise: the patch changed the text"
-    assert candidate.table_cells_witness_confirmed is False, (
-        "patched cells inherited a confirmation no reader gave them"
+    assert "<table" not in live["text"], "an HTML table shipped on an unconfirmed page"
+    assert "521" not in live["text"]
+    assert "unverifiable table — see image" in live["text"]
+    assert "<table" in (live["side"].get("withheld_table_text") or ""), (
+        "the HTML table was withheld without retention, which is a deletion"
     )

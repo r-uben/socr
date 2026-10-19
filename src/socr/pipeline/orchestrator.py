@@ -1396,12 +1396,6 @@ def _is_document_failed_stub(md_path: Path) -> bool:
     return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
 
 
-#: #1203 round 3: #1048's settling writes this claim onto the winning attempt's
-#: ``judge_reason`` and from there into the sidecar's ``attempts_summary``. A page whose
-#: table the final gate withholds did not ship one, so the claim is stripped there.
-_SETTLED_TABLE_CLAIM_RE = re.compile(r"ladder exhausted; table shipped marked \w+ \(#1048\);?\s*")
-
-
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -5878,9 +5872,16 @@ class UnifiedPipeline:
         ps: PageState,
         figures_dir: Path | None,
     ) -> bool:
-        """#1203 round 3: THE gate. A suspect old-scan page's table ships only if an
-        independent reader positionally confirmed it; otherwise it is withheld, with the
-        reading retained.
+        """#1203: THE gate. A suspect old-scan page's table is WITHHELD, with the reading
+        retained, because nothing available here can confirm it.
+
+        Round 3 released a table an independent reader had positionally confirmed. Round 4
+        removed that path: all three review seats broke the check (the subsequence skipped
+        words; dropped, shifted and merged cells passed; a dropped row passed; swapped
+        header years passed), and it could only ever fire on a box with Tesseract, which
+        neither CI nor Rorqual is. The owner's ruling is "withhold until a second reader
+        confirms"; the second reader is #1208, and ``withheld_table_text`` is what it
+        releases from.
 
         Called at the point the page's shipped table is FINAL -- after routing, the
         settling, the crop re-judge and escalation -- because each of rounds 1 and 2 put
@@ -5891,10 +5892,12 @@ class UnifiedPipeline:
         Scope unchanged: an early-return page (not born-digital) whose layer is not
         admissible evidence. #1208 carries the born-digital pages.
 
-        "Contains a table" is read from the SHIPPED TEXT (``find_table_blocks``), never
-        from the layer -- a layer-derived predicate is what Argon P1b walked through.
-        Confirmation is ``table_cells_witness_confirmed``, which only a positional
-        row-level check against the witness's own pixel reading can set.
+        "Contains a table" is read from the SHIPPED TEXT, never from the layer -- a
+        layer-derived predicate is what Argon P1b walked through. EVERY table form the
+        scanned-table gate itself recognises counts: markdown pipe tables via
+        ``find_table_blocks`` and HTML via ``html_table_for_check``. Round 3 checked only
+        the first, so a model that emitted its table as ``<table>`` walked through this
+        gate (Argon P0, round 4) -- and on Rorqual the engines do emit HTML.
 
         Returns True when it withheld.
         """
@@ -5905,10 +5908,10 @@ class UnifiedPipeline:
         if not text.strip():
             return False
         from socr.tables.reconcile import find_table_blocks
+        from socr.tables.source_evidence import html_table_for_check
 
-        if not find_table_blocks(text):
-            return False
-        if getattr(bo, "table_cells_witness_confirmed", False):
+        _as_markdown, _html_unparsed = html_table_for_check(text)
+        if not find_table_blocks(_as_markdown) and not _html_unparsed:
             return False
 
         # ALWAYS retained, before anything demotes the winner. Round 2 captured this
@@ -5925,10 +5928,14 @@ class UnifiedPipeline:
         ps.unchecked_table_kind = ""
         ps.unchecked_table_values = ""
         ps.unchecked_table_value_list = []
-        if bo is not None:
-            bo.judge_accepted = False
-            bo.judge_outcome = ""
-            bo.judge_reason = _SETTLED_TABLE_CLAIM_RE.sub("", bo.judge_reason or "").strip("; ")
+        # No ``judge_reason`` rewrite here. Round 3 stripped #1048's "table shipped marked
+        # unverified" claim from the winner, because the settling had written it onto a
+        # page this gate then withheld (Argon P2). With round 4's removal of the release
+        # path, no page of this class ships a table at all, so no arm can produce that
+        # claim any more -- measured over all five witness/agreement arms: zero carry the
+        # sentence, in the journal or on the winner. A strip that cannot be exercised is
+        # not a guard, so it is gone; the field clears above ARE exercised (a mutant that
+        # drops them is killed).
 
         # The cause, from the attempts' own records rather than from a failure mode
         # (#1048's settling rewrites those; see round 2). A dispute wins over a missing
@@ -13912,30 +13919,6 @@ class UnifiedPipeline:
             return None
         return getattr(ps, "page_cost_usd", None)
 
-    @staticmethod
-    def _crop_patch_candidate(bo: PageOutput, patched_text: str) -> PageOutput:
-        """The crop-patched candidate to re-judge: new text, and no inherited verdicts.
-
-        Extracted so the one field whose reset has no end-to-end arm can be pinned
-        directly (#1203 round 3, Argon P2). ``table_cells_witness_confirmed`` is about the
-        BYTES a witness read; patched text is new bytes, so carrying the flag would let
-        cells no reader has seen inherit "confirmed" -- and #1203's final gate reads that
-        flag after this point. The judge re-reads the candidate and sets it again if its
-        own witness confirms the patched rows.
-        """
-        return replace(
-            bo,
-            text=patched_text,
-            status=PageStatus.SUCCESS,
-            failure_mode=FailureMode.NONE,
-            audit_passed=True,
-            rejection_class="",
-            judge_reason="",
-            audit_notes=list(bo.audit_notes),
-            figures=list(bo.figures),
-            table_cells_witness_confirmed=False,
-        )
-
     def _rejudge_crop_patched_page(
         self,
         state: DocumentState,
@@ -14020,7 +14003,17 @@ class UnifiedPipeline:
             )
             return bo
 
-        candidate = self._crop_patch_candidate(bo, patched_text)
+        candidate = replace(
+            bo,
+            text=patched_text,
+            status=PageStatus.SUCCESS,
+            failure_mode=FailureMode.NONE,
+            audit_passed=True,
+            rejection_class="",
+            judge_reason="",
+            audit_notes=list(bo.audit_notes),
+            figures=list(bo.figures),
+        )
 
         judge_events: list = []
         started = time.time()

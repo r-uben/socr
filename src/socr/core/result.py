@@ -536,26 +536,6 @@ class PageOutput:
     #: gate's reason, which names the first unsupported tokens. Ships with the
     #: stronger "disputed" mark and a link to the page image.
     table_disputed: str = ""
-    #: #1203 round 3 (owner ruling 2026-10-18, restated): True when an INDEPENDENT reader
-    #: confirmed this output's table cells POSITIONALLY -- every data row of the emitted
-    #: table was found, cells in order, on a line of the witness's own reading of the
-    #: page's PIXELS (``source_evidence.rows_confirmed_by_witness``).
-    #:
-    #: Positional because round 2 set it from the gate's token MULTISET, which a swap of
-    #: two rows leaves identical, so a swapped table shipped as confirmed (Grok P0). Pixel
-    #: readings only because on a page with no raster the gate's evidence bundle includes
-    #: the PDF TEXT LAYER, which on these pages is the earlier OCR run -- a confirmation
-    #: minted from it is the licence the ruling removed (r-uben should-fix 6).
-    #:
-    #: On a page whose layer is an earlier OCR run this is the only confirmation that
-    #: counts: the native row verifier reads that layer, so it is not independent, and the
-    #: heuristic leaf reads nothing. On any other page it is a record, not a gate.
-    #:
-    #: Candidate-associated, like the three fields above and for a sharper version of the
-    #: same reason: the question "was the table that SHIPS confirmed" is about one
-    #: attempt. A page-level flag said yes when rung 1's witness passed and rung 2 -- a
-    #: different, unconfirmed table -- was what shipped.
-    table_cells_witness_confirmed: bool = False
     #: #1125: the disputed tokens as a list. ``table_disputed`` stays the
     #: ``", "``-joined form for sidecar / mark-text compat; the mark counts
     #: THIS, never by splitting that string.
@@ -663,10 +643,6 @@ class PageOutput:
             d["table_unverifiable"] = self.table_unverifiable
         if self.table_disputed:
             d["table_disputed"] = self.table_disputed
-        # #1203 round 2: same omit-when-empty convention as the fields above, so no
-        # sidecar that never reached the scanned-table gate changes its bytes.
-        if self.table_cells_witness_confirmed:
-            d["table_cells_witness_confirmed"] = True
         if self.table_disputed_values:
             d["table_disputed_values"] = list(self.table_disputed_values)
         # #625: same omit-when-empty convention, same reason -- this field
@@ -722,7 +698,6 @@ class PageOutput:
             table_label_unverified=d.get("table_label_unverified", ""),
             table_unverifiable=d.get("table_unverifiable", ""),
             table_disputed=d.get("table_disputed", ""),
-            table_cells_witness_confirmed=bool(d.get("table_cells_witness_confirmed", False)),
             table_disputed_values=tuple(
                 str(v) for v in d.get("table_disputed_values", ()) if str(v)
             ),
