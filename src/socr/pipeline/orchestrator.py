@@ -20173,7 +20173,36 @@ class UnifiedPipeline:
                 )
                 continue
 
-            page_figure_blocks = self._build_figure_blocks(page_figs, doc_dir)
+            # #1192: this phase must be IDEMPOTENT over its own output, because a page
+            # RESTORED from the per-page ledger arrives here with its figure blocks
+            # already in its body -- they were written into the fragment by the run that
+            # first embedded them, and that fragment is what assemble reads back. The
+            # append below was unconditional, so every partial resume (a crash
+            # mid-document; the doc-level fast path never reaches this code) added a
+            # SECOND copy of each block, and of the description attached to it, to every
+            # restored page carrying a figure. Measured at ``process()`` on the ORDINARY
+            # terminal-SUCCESS gate, with no #1156 page involved: 1 ref before the resume,
+            # 2 after, growing by one per resume.
+            #
+            # The sibling phase in this same method already had this guard
+            # (``insert_descriptions`` "skips refs that are already described"), which is
+            # why the duplication showed up in the blocks and not in the descriptions.
+            #
+            # Keyed on the IMAGE REF, the one part of a block that identifies the asset:
+            # the header carries a description that a later run can legitimately change,
+            # so comparing whole blocks would fail to recognise a block it had itself
+            # written. Filtered per figure rather than per page, so a page that gained a
+            # NEW figure still gets that one embedded beside the ones already there.
+            already = page_bodies[idx]
+            fresh_figs = [
+                fig
+                for fig in page_figs
+                if not (fig.image_path and f"]({self._figure_ref_for(fig, doc_dir)})" in already)
+            ]
+            if not fresh_figs:
+                continue
+
+            page_figure_blocks = self._build_figure_blocks(fresh_figs, doc_dir)
             if not page_figure_blocks:
                 continue
 
@@ -21166,6 +21195,20 @@ class UnifiedPipeline:
         return ""
 
     @staticmethod
+    def _figure_ref_for(figures_fig, doc_dir: Path) -> str:
+        """The markdown image target this figure is embedded under.
+
+        One definition, used BOTH to write a block and (#1192) to recognise a block that is
+        already there on a page restored from the ledger. Two spellings of this path could
+        drift, and a drift would make the recognition silently fail and duplicate the
+        block again -- which is the defect that guard exists to stop.
+        """
+        try:
+            return str(Path(str(figures_fig.image_path)).relative_to(doc_dir))
+        except ValueError:
+            return Path(str(figures_fig.image_path)).name
+
+    @staticmethod
     def _build_figure_blocks(
         figures: list[FigureInfo],
         doc_dir: Path,
@@ -21180,14 +21223,9 @@ class UnifiedPipeline:
         """
         blocks = []
         for fig in figures:
-            # Compute a relative image path from the doc directory
-            if fig.image_path:
-                try:
-                    rel_path = Path(fig.image_path).relative_to(doc_dir)
-                except ValueError:
-                    rel_path = Path(fig.image_path).name
-            else:
+            if not fig.image_path:
                 continue
+            rel_path = UnifiedPipeline._figure_ref_for(fig, doc_dir)
 
             header = f"**Figure {fig.figure_num}** (page {fig.page_num})"
             if fig.description:
