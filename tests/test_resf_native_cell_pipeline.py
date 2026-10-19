@@ -191,9 +191,7 @@ def test_mutated_table_contradicted_advisory_no_demotion(tmp_path: Path) -> None
     ps = state.pages[1]
 
     assert ps.native_cell_binding
-    assert any(
-        v.get("outcome") == "contradicted" for v in ps.native_cell_binding.values()
-    )
+    assert any(v.get("outcome") == "contradicted" for v in ps.native_cell_binding.values())
     kinds = [e["kind"] for e in _audit_events(out_dir) if e.get("page_num") == 1]
     assert "native_cell_check_contradicted" in kinds
     trust = _tables_trust(out_dir)

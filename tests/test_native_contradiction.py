@@ -457,7 +457,9 @@ class TestWithholdThroughTheWholePipeline:
                 )
             )
             stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))
-            stack.enter_context(patch.object(pipeline, "_plan_native_table_first", return_value=None))
+            stack.enter_context(
+                patch.object(pipeline, "_plan_native_table_first", return_value=None)
+            )
             stack.enter_context(patch.object(pipeline, "_build_table_judge_rungs", return_value=[]))
             stack.enter_context(patch.object(pipeline, "_phase_assemble", side_effect=_spy))
             pipeline.process(pdf, tmp_path / "off" / "out")
