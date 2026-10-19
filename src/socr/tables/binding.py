@@ -86,6 +86,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from socr.tables.label_canonical import decode_label_cell
+from socr.tables.reconstruct import _LANE_X_TOL_PT
 from socr.tables.native_verifier import (
     _WELL_SEPARATED_GAP_PT,
     _cluster_x_positions,
@@ -94,6 +95,7 @@ from socr.tables.native_verifier import (
     _normalize_binding_numeric_token,
     _normalize_numeric_token,
     _well_separated_lanes_in_row,
+    binding_numeric_tokens_equivalent,
     is_numeric_token,
     label_key,
     label_key_is_bare_symbolic,
@@ -1059,6 +1061,113 @@ def _ambiguous_bands(bands: dict[int, list], ordered_band_idxs: list[int]) -> se
     return ambiguous
 
 
+_YEAR_LANE_TOKEN_RE = re.compile(r"^20\d{2}$")
+_NUMERIC_WORD_MERGE_GAP_PT = _LANE_X_TOL_PT
+
+
+def _fragments_may_merge(left: str, right: str) -> bool:
+    """False when *left* and *right* are separate numeric cells on one line (not thousands)."""
+    l = strip_presentation(left.strip())
+    r = strip_presentation(right.strip())
+    if not l or not r:
+        return False
+    if re.search(r"\.\d", l) and re.match(r"^\d", r):
+        return False
+    if (
+        re.search(r",\d{1,2}$", l)
+        and re.match(r"^\d", r)
+        and not re.match(r"^\d{3}(?:,\d{2})?$", r)
+    ):
+        return False
+    return True
+
+
+def _merged_numeric_text(left: str, right: str) -> str | None:
+    for sep in ("", " ", "\u00a0", "\u202f"):
+        candidate = strip_presentation(f"{left}{sep}{right}".strip())
+        if candidate and is_numeric_token(candidate):
+            return f"{left}{sep}{right}".strip()
+    return None
+
+
+def _coalesce_numeric_word_fragments(words: list) -> list:
+    if not words:
+        return words
+    by_y: dict[int, list] = {}
+    for w in words:
+        by_y.setdefault(round(w[1]), []).append(w)
+    out: list = []
+    for _y in sorted(by_y):
+        row = sorted(by_y[_y], key=lambda w: w[0])
+        i = 0
+        while i < len(row):
+            base = list(row[i])
+            text = base[4]
+            j = i + 1
+            while j < len(row):
+                nxt = row[j]
+                if nxt[0] - base[2] > _NUMERIC_WORD_MERGE_GAP_PT:
+                    break
+                if not _fragments_may_merge(text, nxt[4]):
+                    break
+                merged = _merged_numeric_text(text, nxt[4])
+                if merged is None:
+                    break
+                text = merged
+                base[0] = nxt[0]
+                base[2] = nxt[2]
+                base[3] = max(base[3], nxt[3])
+                base[4] = text
+                j += 1
+            out.append(tuple(base))
+            i = j if j > i + 1 else i + 1
+    return out
+
+
+def _year_header_lane_centers(words: list) -> list[float] | None:
+    _band_centers, y_to_band = _assign_bands(words)
+    bands: dict[int, list] = {}
+    for w in words:
+        bands.setdefault(y_to_band[round(w[1])], []).append(w)
+    best: list[float] | None = None
+    for band_words in bands.values():
+        years = [
+            w
+            for w in band_words
+            if _YEAR_LANE_TOKEN_RE.match(strip_presentation(w[4]))
+            and not _SPEC_NUMBER_RE.match(strip_presentation(w[4]))
+        ]
+        if len(years) < 2:
+            continue
+        nums = [
+            w
+            for w in band_words
+            if is_numeric_token(w[4]) and not _SPEC_NUMBER_RE.match(strip_presentation(w[4]))
+        ]
+        if len(nums) != len(years):
+            continue
+        centers = [w[0] for w in sorted(years, key=lambda w: w[0])]
+        if best is None or len(centers) > len(best):
+            best = centers
+    return best
+
+
+def _rebuild_lane_of_to_centers(
+    words: list, centers: list[float]
+) -> tuple[int, dict[float, int], list[float]]:
+    snap = _LANE_X_TOL_PT * 2.0
+    lane_of: dict[float, int] = {}
+    for w in words:
+        if not is_numeric_token(w[4]):
+            continue
+        if _SPEC_NUMBER_RE.match(strip_presentation(w[4])):
+            continue
+        nearest = min(range(len(centers)), key=lambda i: abs(centers[i] - w[0]))
+        if abs(centers[nearest] - w[0]) <= snap:
+            lane_of[w[0]] = nearest
+    return len(centers), lane_of, list(centers)
+
+
 def _presentation_normalized_for_lanes(words: list) -> list:
     """Return *words* with each numeric token's TEXT replaced by its
     presentation-stripped form (``strip_presentation``); every other word,
@@ -1208,6 +1317,15 @@ def _native_lane_geometry(
         ]
         lane_of = {x: merge_map[li] for x, li in lane_of.items() if li in merge_map}
         lane_count = n_cand_cols
+
+    year_centers = _year_header_lane_centers(words)
+    if (
+        year_centers
+        and n_cand_cols is not None
+        and len(year_centers) == n_cand_cols
+        and lane_count != n_cand_cols
+    ):
+        lane_count, lane_of, centers = _rebuild_lane_of_to_centers(words, year_centers)
 
     return lane_count, lane_of, centers
 
@@ -1495,6 +1613,29 @@ def build_column_header_paths(
 # --------------------------------------------------------------------------
 
 
+def _cell_binding_numeric_tokens(cell: str) -> list[str]:
+    """Numeric tokens in one model cell, merging space-separated PDF-style fragments."""
+    cell = _normalize_cell(cell).strip()
+    if not cell:
+        return []
+    parts = [p for p in re.split(r"\s+", cell) if p]
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        acc = parts[i]
+        j = i + 1
+        while j < len(parts):
+            merged = _merged_numeric_text(acc, parts[j])
+            if merged is None:
+                break
+            acc = merged
+            j += 1
+        if is_numeric_token(strip_presentation(acc)):
+            out.append(_normalize_binding_numeric_token(acc))
+        i = j if j > i + 1 else i + 1
+    return out
+
+
 def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
     """#690: value cells are decoded/dash-stripped (``_normalize_cell``)
     before the numeric check, not just labels -- an unlabeled row whose
@@ -1508,9 +1649,8 @@ def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
     """
     c: Counter = Counter()
     for cell in row[1:]:
-        for tok in re.split(r"\s+", _normalize_cell(cell).strip()):
-            if tok and is_numeric_token(tok):
-                c[_normalize_binding_numeric_token(tok)] += 1
+        for tok in _cell_binding_numeric_tokens(cell):
+            c[tok] += 1
     return c
 
 
@@ -2191,6 +2331,7 @@ def bind(
     (round 2).
     """
     words, boundary_words, unresolved_boundary_words = _partition_words_by_region(words, region)
+    words = _coalesce_numeric_word_fragments(words)
     result = BindingResult()
     result.boundary_words = boundary_words
     result.unresolved_boundary_words = unresolved_boundary_words
@@ -2609,10 +2750,35 @@ def bind(
                 # honest record of what the model actually emitted, the
                 # normalized form is only this check's internal detail --
                 # the same choice `UnboundCell` already makes for its token.
+                model_merged = _cell_binding_numeric_tokens(model_value or "")
+                if len(model_merged) > 1:
+                    result.ambiguous_count += 1
+                    continue
+                if len(model_merged) == 1:
+                    equiv = binding_numeric_tokens_equivalent(native_value, model_merged[0])
+                    if equiv is True:
+                        result.matched_cells.append(
+                            MatchedCell(
+                                row_path=native_row.row_path,
+                                col_path=col_path,
+                                value=native_value,
+                            )
+                        )
+                    elif equiv is None:
+                        result.ambiguous_count += 1
+                    else:
+                        result.contradicted_cells.append(
+                            ContradictedCell(
+                                row_path=native_row.row_path,
+                                col_path=col_path,
+                                native_token=native_value,
+                                model_token=model_value,
+                                native_bbox=native_row.lane_bboxes.get(lane),
+                            )
+                        )
+                    continue
                 model_value_normalized = _normalize_cell(model_value)
                 if not is_numeric_token(model_value_normalized):
-                    # candidate cell isn't a numeric token at all: treat as a
-                    # value mismatch against a native number.
                     result.contradicted_cells.append(
                         ContradictedCell(
                             row_path=native_row.row_path,
@@ -2623,14 +2789,15 @@ def bind(
                         )
                     )
                     continue
-                if _normalize_binding_numeric_token(
-                    native_value
-                ) == _normalize_binding_numeric_token(model_value_normalized):
+                equiv = binding_numeric_tokens_equivalent(native_value, model_value_normalized)
+                if equiv is True:
                     result.matched_cells.append(
                         MatchedCell(
                             row_path=native_row.row_path, col_path=col_path, value=native_value
                         )
                     )
+                elif equiv is None:
+                    result.ambiguous_count += 1
                 else:
                     result.contradicted_cells.append(
                         ContradictedCell(
