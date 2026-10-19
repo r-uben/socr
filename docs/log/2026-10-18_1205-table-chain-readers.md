@@ -270,6 +270,62 @@ with an unrelated kind as the control.
   before and after, all pre-existing); the new test file is clean. Only the format step is a
   CI gate.
 
+## Round 1 of PR #1211
+
+Grok MERGE-AFTER-FIX, Argon BLOCK, r-uben MERGE once two should-fixes land. Each finding
+was reproduced before anything was changed; the probes are in `scratch/1205r1/`.
+
+**Four more readers, all gated on the union.**
+
+* `verify_scanned_table` -> `build_born_digital_evidence` (`source_evidence.py:1354`).
+  On a suspect page with NO page-covering raster -- a scan-failed page, a cover under
+  50%, a `get_image_info` error -- the PDF text layer was unioned into the numeric
+  evidence, so the layer passed its own `350`. It now takes `layer_is_evidence`, and
+  excludes the layer on that arm exactly as GH-163's raster arm already did. The
+  orchestrator answers from the union; the judge's exception arm excludes the layer.
+  Measured on a visible-layer page with an injected pixel witness: the layer's `350`
+  goes from PASS to REFUSED while the pixels' `-350` passes. Stated so the claim does
+  not outrun it: with the layer included BOTH readings pass (the bundle is a union), so
+  what the exclusion removes is the layer passing its own error, not a refusal of the
+  correct reading -- that refusal needs a page with no pixel witness, and there real
+  tesseract reads the same ink the layer holds.
+* `_truncated_grid_reading_ids` (`manifest.py:1320`). Term (b) of `table_truncated`
+  scored the candidate's row count against the layer's own bands, so a judge-accepted
+  18-row reading carrying the correct `-100.0` was called truncated against 20 bands of
+  an earlier OCR run -- and the manifest then prefers a lower-confidence sibling or
+  drops the page to the structure-class floor. The layer is dropped, not the predicate:
+  term (a) reads the candidate's markdown alone and keeps firing, which is pinned.
+* `_maybe_repair_collapsed_headers` (`agentic.py`). It rewrites `output.text` -- the
+  bytes that SHIP -- from `fitz_page.get_text("words")`. That is the layer authoring
+  content, a stronger act than grading it, and round 1 left it open on a scan-failed
+  page. Now gated on the union, which is kept for the whole method as `union_suspect`
+  and never flipped.
+* The judge's exception arm **failed open**: `layer_found = True` meant "this layer is
+  established", which SKIPS native verification -- a raising trust source bought the
+  page a bypass. Now `False`: the page is unknown, it is verified, and it gets no
+  EXACT_PASS.
+
+**The unjudged EXACT_PASS ship is CONFIRMED, correcting this log's earlier entry.** Last
+round it was recorded as unreproducible because header attribution abstained on every
+fixture tried. On `_make_probability_table_page` it does not abstain: the clean arm
+accepts at confidence 1.0 with `reason='native_table_verifier: EXACT_PASS'` and the
+inner judge never consulted. The guard added last round is therefore load-bearing, not
+precautionary.
+
+**Which floor a scan-failed table page gets once every rung is refused** (r-uben's nit,
+measured at `_winning_page_output` rather than argued): the fail-closed
+`[page N failed: unverifiable table -- see image]` marker, on all three flag arms, with
+none of the layer's numbers in the shipped text. So "refusing cannot ship a wrong
+number" holds on that page -- its floor is a marker plus a page image, not its layer.
+
+**Two directions corrected from round 2/3 of this ticket.** The crop refusal fired
+whenever a crop existed, so a crop that AGREES with the accepted table -- the best
+evidence the table is right -- listed the page in `tables_trust.json` and voided its
+credential; on the Fed scans that is every table page with a crop. It now runs the same
+`auto_patch=True` reconcile the fallback would have run and emits only when that changed
+something. And the escalation backstop moved ABOVE `submit_daemon`, so a refused
+escalation is never billed (r-uben M4/M5).
+
 ## What was NOT measured
 
 * No model, no OCR, no provider: every reversal above is measured on deterministic PyMuPDF +

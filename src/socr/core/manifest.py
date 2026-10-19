@@ -1317,7 +1317,19 @@ def _truncated_grid_reading_ids(p) -> frozenset[int]:
     candidate, it still ships, flagged" clause) or when fewer than two
     candidates exist to compare.
     """
-    words = getattr(p, "native_words", None) or []
+    # #1205 round 1 (Argon P0 1.2): term (b) of ``table_truncated``
+    # (``_truncated_row_shortfall``) scores the candidate's row count against the
+    # page's OWN text layer, so on a suspect page a judge-accepted reading is called
+    # truncated on the strength of an earlier OCR run -- and is then replaced by a
+    # lower-confidence sibling or dropped to the structure-class floor. Measured: a
+    # correct 18-row reading against 20 layer bands is flagged, and is not flagged
+    # with the layer excluded.
+    #
+    # The layer is dropped, NOT the whole predicate: term (a)
+    # (``_final_row_truncated``) reads the candidate's own markdown and nothing else,
+    # so it keeps firing. Passing no words is exactly what this scorer sees on a page
+    # with no text layer, which it already handles.
+    words = (getattr(p, "native_words", None) or []) if layer_is_admissible_evidence(p) else []
     seen: set[int] = set()
     universe: list[PageOutput] = []
     for out in [p.best_output, *p.attempts]:

@@ -7121,6 +7121,31 @@ class UnifiedPipeline:
                             )
                         )
                         return False, bo
+                # #1205 round 1 (r-uben M4/M5): the backstop moved ABOVE the
+                # call. ``decide_escalation`` grades the candidate against this page's
+                # own text layer, so on a suspect page there is nothing that could keep
+                # a candidate -- and refusing AFTER ``submit_daemon`` billed a provider
+                # for a reading already decided against is pure waste. Production
+                # reaches this only through the guarded ``_table_page_needs_escalation``
+                # (so ``needs_escalation`` is already False), which is why it is a
+                # backstop; a caller that forces ``needs_escalation=True`` lands here.
+                if not self._table_layer_is_evidence(ps):
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_refused",
+                            engine=profile.engine.value,
+                            detail=(
+                                "this page's text layer is an earlier OCR run (or a "
+                                "failed detection scan): it is neither ground truth nor "
+                                "a value oracle, so no candidate could be judged; the "
+                                "escalation is not attempted and the incumbent ships"
+                            ),
+                            data={"gate": "none", "delta": None},
+                        )
+                    )
+                    self._mark_escalation_not_received(ps)
+                    return False, bo
                 incumbent_text = bo.text or ""
 
                 # A cloud CLI has no timeout of its own and was observed wedged for
@@ -7209,28 +7234,6 @@ class UnifiedPipeline:
                 self._reconcile_chart_table_grids(state, page_num, out)
                 self._suppress_chart_table_skeletons(state, page_num, out)
 
-                if not self._table_layer_is_evidence(ps):
-                    # #1205 round 2: a forced escalation still must not be JUDGED
-                    # against this page's own layer. The candidate was produced and
-                    # is billable; it is refused on the record, and the incumbent --
-                    # which no suspect layer has graded -- ships.
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="table_escalation_rejected",
-                            engine=profile.engine.value,
-                            detail=(
-                                "this page's text layer is an earlier OCR run (or a "
-                                "failed detection scan): it is neither ground truth nor "
-                                "a value oracle, so the candidate cannot be judged; "
-                                "keeping the incumbent"
-                            ),
-                            data={"gate": "none", "delta": None},
-                        )
-                    )
-                    _record_attempt_cost()
-                    self._mark_escalation_not_received(ps)
-                    return False, bo
                 try:
                     decision = decide_escalation(page, incumbent_text, out.text)
                 except Exception:
@@ -14239,10 +14242,12 @@ class UnifiedPipeline:
             # #1205 round 2 (Argon P1, owner ruling): this fallback is the one
             # place a crop reading may CHANGE numbers that the judge already
             # accepted, and ``crop_patch_improves_verification`` is what approves
-            # it. Two of its five severity terms come from the page's text layer
-            # and the other three from the markdown alone, so with the layer
-            # inadmissible a patch that merely fills in header cells scores as an
-            # improvement -- and a row-swapped crop rides in with it. There is no
+            # it. THREE of its five severity terms come from the page's text layer
+            # (the verifier hard fail, the label-binding failure, and the lane gap,
+            # which is zero unless the layer yields two or more lanes) and TWO from
+            # the markdown alone (the header collapse and the header gap), so with
+            # the layer inadmissible a patch that merely fills in header cells scores
+            # as an improvement -- and a row-swapped crop rides in with it. There is no
             # independent evidence here to put in the layer's place (the crops are
             # the thing being judged), so the fallback does not run: the page keeps
             # the bytes the judge accepted and says the patch went unverified.
@@ -14259,20 +14264,36 @@ class UnifiedPipeline:
                 )
             )
             if layer_inadmissible and not effective_auto_patch:
-                crop_repair_declined = True
-                state.events.append(
-                    AuditEvent(
-                        page_num=page_num,
-                        kind="table_crop_repair_unverifiable",
-                        engine=bo.engine or "",
-                        detail=(
-                            f"crop-repair fallback not run on p{page_num}: this page's "
-                            "text layer is an earlier OCR run (or a failed detection "
-                            "scan), so a patch could only be approved on header shape; "
-                            "the accepted bytes ship unchanged"
-                        ),
-                    )
+                # #1205 round 1 (r-uben should-fix 1, Argon P1): only when there was
+                # something to approve. The first version fired whenever a crop
+                # existed, so a crop that AGREES with the accepted table -- the best
+                # evidence the table is right -- listed the page in
+                # ``tables_trust.json`` and voided its credential. On the Fed scans
+                # every page is flagged, so that was every table page with a crop.
+                # The test is the layer-free one line 14290 already uses for
+                # ``crop_repair_declined``: run the same ``auto_patch=True`` reconcile
+                # the fallback would have run and ask whether it changed anything.
+                _would_patch = reconcile_page_tables(
+                    original_text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=True,
                 )
+                if _would_patch.patched or _would_patch.disagreements:
+                    crop_repair_declined = True
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_crop_repair_unverifiable",
+                            engine=bo.engine or "",
+                            detail=(
+                                f"crop-repair fallback not run on p{page_num}: the crop "
+                                "reading differs from the accepted table, and the only "
+                                "thing that could approve a patch is this page's text "
+                                "layer, which is an earlier OCR run (or a failed "
+                                "detection scan); the accepted bytes ship unchanged"
+                            ),
+                        )
+                    )
             if needs_crop_fallback and not effective_auto_patch:
                 candidate = reconcile_page_tables(
                     original_text,
@@ -14635,11 +14656,18 @@ class UnifiedPipeline:
                 return False
             return bool(ps.is_born_digital)
 
+        def layer_is_evidence(page_num: int) -> bool:
+            # #1205 round 1: the UNION, so a FAILED detection scan is included. Not
+            # the same question as ``native_trusted`` above, which is also False for
+            # an ordinary non-born-digital page.
+            return layer_is_admissible_evidence(state.pages.get(page_num))
+
         return SourceEvidenceTableJudge(
             inner=native_judge,
             get_fitz_page=get_fitz_page,
             record_event=record_event,
             native_trusted=native_trusted,
+            layer_is_evidence=layer_is_evidence,
         )
 
     def _make_page_renderer(self, state: DocumentState):

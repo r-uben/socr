@@ -971,6 +971,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         *,
         ocr_image_fn: Callable[[object], str] | None = None,
         native_trusted: Callable[[int], bool | None] | None = None,
+        layer_is_evidence: Callable[[int], bool] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
@@ -982,6 +983,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         # that same untrusted layer. None (no callable, or it cannot tell)
         # keeps the pre-GH-163 behaviour.
         self._native_trusted = native_trusted
+        self._layer_is_evidence = layer_is_evidence
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.reconcile import find_table_blocks
@@ -1008,11 +1010,21 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     trusted = self._native_trusted(page_num)
                 except Exception:  # noqa: BLE001 - unknown, not untrusted
                     trusted = None
+            # #1205: a separate question from ``native_trusted`` -- see
+            # ``verify_scanned_table``. A source that RAISES is not a licence to use
+            # the layer, so the exception arm excludes it.
+            layer_ok = True
+            if self._layer_is_evidence is not None:
+                try:
+                    layer_ok = bool(self._layer_is_evidence(page_num))
+                except Exception:  # noqa: BLE001 - not a licence to trust the layer
+                    layer_ok = False
             result = verify_scanned_table(
                 fitz_page,
                 check_text,
                 ocr_image_fn=self._ocr_image_fn,
                 native_trusted=trusted,
+                layer_is_evidence=layer_ok,
             )
         except _VERIFIER_FATAL:
             raise
@@ -1304,12 +1316,23 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         #   True on every render-mode-3 page, where the raster proxy answers False
         #   because there is no single page-covering image.
         # * the opaque raster -- something independent read these pixels. #1202's.
+        #
+        # ``union_suspect`` is kept for the whole method and never flipped: the union
+        # is what decides whether this page's layer may author anything (#1205 round 1,
+        # Argon P0 1.3). ``suspect`` below is the narrower "may verification be
+        # skipped" question and IS flipped.
+        union_suspect = suspect
         layer_found = False
         if self._native_layer_found is not None:
             try:
                 layer_found = bool(self._native_layer_found(page_num))
-            except Exception:  # a source that raises is not a licence to trust
-                layer_found = True
+            except Exception:
+                # #1205 round 1 (Argon P0 2, r-uben M13): fail CLOSED. ``True`` here
+                # would SKIP native verification on the strength of a failure -- the
+                # page would be treated as established -- which is the opposite of the
+                # rule the raster handler below follows. ``False`` leaves the page
+                # unknown: it is verified, and it gets no EXACT_PASS.
+                layer_found = False
         if suspect and not layer_found and self._get_fitz_page is not None:
             # Round 2/3 (Astra P1, then Argon -- the same weakening twice more):
             # coverage is not a witness. ``page_has_page_covering_raster`` is satisfied
@@ -1350,7 +1373,16 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
             furniture = self._document_furniture(fitz_page)
             vr = verify_native_table(fitz_page, output.text)
-            vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
+            # #1205 round 1 (Argon P0 1.3): ``_maybe_repair_collapsed_headers``
+            # rewrites ``output.text`` -- the bytes that ship -- from
+            # ``fitz_page.get_text("words")``. On a page whose layer may not serve as
+            # evidence that is the layer AUTHORING shipped content, which is a stronger
+            # act than grading one. Measured on Argon's own fixture: the scan-failed arm
+            # replaced the emitted header row with words taken from the layer. The
+            # UNION decides, so a failed detection scan is included; the verifier's
+            # rejection power above is untouched.
+            if not union_suspect:
+                vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except _VERIFIER_FATAL:
             raise
         except Exception as exc:

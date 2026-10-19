@@ -1293,6 +1293,7 @@ def verify_scanned_table(
     *,
     ocr_image_fn: OcrImageFn | None = None,
     native_trusted: bool | None = None,
+    layer_is_evidence: bool = True,
 ) -> SourceEvidenceResult:
     """Full scanned-page pipeline: defer native, else verify or fail closed.
 
@@ -1320,6 +1321,27 @@ def verify_scanned_table(
     A classification of trusted and a page with no words is a contradiction,
     and resolving it toward "run no check" is the fail-open direction this lane
     exists to prevent.
+
+    #1205 round 1 (Argon P0 1.1, Grok P1): ``layer_is_evidence=False`` says this
+    page's text layer may not serve as evidence at all --
+    ``state.layer_is_admissible_evidence``, the union, so a FAILED detection scan is
+    included. ``native_trusted=False`` is NOT that question: it is also False for an
+    ordinary non-born-digital page, where #1099's born-digital bundle is wanted. The
+    distinction is load-bearing and was measured on a flagged page with a VISIBLE layer
+    and no page-covering raster (a scan-failed page, a cover under 50%, an
+    ``get_image_info`` error): ``build_born_digital_evidence`` unions
+    ``page.get_text("rawdict")`` into the numeric evidence, so with no usable pixel
+    witness the layer's own ``350`` PASSED and a correct pixel ``-350`` was REFUSED as
+    unsupported. With the layer excluded the evidence is pixel-only -- the same bundle
+    the page-covering-raster branch already builds, and the same reason #1207 dropped
+    ``witness_lines`` from it -- and a page with no pixel witness falls to this lane's
+    own fail-closed ending rather than to the layer.
+
+    The deferral below needs no guard of its own, and deliberately does not get one:
+    the orchestrator derives ``native_trusted`` from the SAME predicate
+    (``layer_is_admissible_evidence``), so a page that is suspect always arrives with
+    ``native_trusted=False`` and never reaches the deferral. A second check there would
+    be a line no test could kill.
     """
     if native_trusted is not False and page_has_native_words(page):
         return SourceEvidenceResult(
@@ -1344,7 +1366,9 @@ def verify_scanned_table(
 
     if native_trusted is False:
         # GH-163 for image-dominant scans; born-digital text + crop OCR (#1099 / r2).
-        if page_has_page_covering_raster(page):
+        # #1205: a suspect layer is excluded on BOTH arms -- the raster arm already
+        # excluded it, and the born-digital arm is the hole Argon found.
+        if page_has_page_covering_raster(page) or not layer_is_evidence:
             bundle = build_scanned_evidence(
                 page,
                 ocr_image_fn=ocr_image_fn,

@@ -42,6 +42,7 @@ from test_ladder_binding_evidence import (  # noqa: E402
 
 from socr.core.audit_log import AuditEvent
 from socr.core.result import PageOutput, PageStatus
+from socr.core.manifest import _credential_admission_refusal
 from socr.core.tables_trust import build_tables_trust
 
 _CORPUS = Path("/Users/rubenffuertes/repos/tools/socr/scratch/routing-baseline/corpus/pdfs")
@@ -384,11 +385,15 @@ def test_a_second_reading_is_no_longer_promoted_by_scoring_100pct_against_the_la
     forced_out, forced_state, forced_provider = _escalation_arm(
         tmp_path, positive=True, needs_escalation=True
     )
-    assert forced_provider.calls == 1, "the forced arm must still ASK, or it pins the wrong thing"
+    # #1205 round 1 (r-uben M4/M5): the backstop now refuses BEFORE
+    # ``submit_daemon``, so a forced escalation on a flagged page never bills a
+    # provider for a reading already decided against. The previous version asked
+    # first and refused after, which is why this assertion inverted.
+    assert forced_provider.calls == 0, "a refused escalation still billed a provider call"
     assert _events_of_kind(forced_state, "table_escalation_accepted") == []
-    rejected = _events_of_kind(forced_state, "table_escalation_rejected")
-    assert rejected and (rejected[0].data or {}).get("gate") == "none", (
-        f"the candidate was judged against the suspect layer: {[e.detail for e in rejected]}"
+    refused = _events_of_kind(forced_state, "table_escalation_refused")
+    assert refused and (refused[0].data or {}).get("gate") == "none", (
+        f"the candidate was judged against the suspect layer: {[e.detail for e in refused]}"
     )
     assert forced_out.text == _TRUE_MD
 
@@ -411,11 +416,20 @@ def test_a_forced_escalation_is_not_judged_against_an_unknown_layer(tmp_path: Pa
     out, state, provider = _escalation_arm(
         tmp_path, positive=False, needs_escalation=True, scan_failed=True
     )
-    assert provider.calls == 1, "the provider must still be asked, or this pins nothing"
+    assert provider.calls == 0, "a refused escalation still billed a provider call"
     assert _events_of_kind(state, "table_escalation_accepted") == []
-    rejected = _events_of_kind(state, "table_escalation_rejected")
-    assert rejected and (rejected[0].data or {}).get("gate") == "none"
+    refused = _events_of_kind(state, "table_escalation_refused")
+    assert refused and (refused[0].data or {}).get("gate") == "none"
     assert out.text == _TRUE_MD
+
+    # The control that makes the two assertions above a difference: with the layer
+    # admissible the provider IS called and the candidate IS judged.
+    clean_out, clean_state, clean_provider = _escalation_arm(
+        tmp_path, positive=False, needs_escalation=True
+    )
+    assert clean_provider.calls == 1
+    assert _events_of_kind(clean_state, "table_escalation_accepted")
+    assert clean_out.text == _LAYER_MD
 
 
 # ---------------------------------------------------------------------------
@@ -472,10 +486,32 @@ def test_a_crop_patch_is_no_longer_credentialled_by_the_layer(tmp_path: Path) ->
     )
     assert "-350" not in clean_text
 
+    # #1205 round 1 (r-uben should-fix 1): a crop that AGREES with the accepted table
+    # is the best evidence the table is RIGHT. The first version emitted the refusal
+    # whenever a crop existed, so on the Fed scans -- where every page is flagged --
+    # every table page with a crop was listed in ``tables_trust.json`` and had its
+    # credential voided, including the confirmed ones. The event now requires something
+    # to approve.
     for label, kwargs in (
         ("positive finding", {"positive": True}),
         ("failed scan", {"positive": False, "scan_failed": True}),
     ):
+        agreed, agreed_text, agreed_state = _crop_arm(tmp_path, crop_md=_TRUE_MD, **kwargs)
+        assert agreed == 0 and agreed_text.strip() == _TRUE_MD.strip()
+        assert _events_of_kind(agreed_state, "table_crop_repair_unverifiable") == [], (
+            f"{label}: a crop that CONFIRMS the accepted table still marked the page unverifiable"
+        )
+        agreed_trust = build_tables_trust(agreed_state.handle.filename, agreed_state.events)
+        assert agreed_trust.untrusted_pages == [], (
+            f"{label}: a confirmed table still lists the page untrusted: "
+            f"{agreed_trust.untrusted_pages}"
+        )
+        agreed_ps = agreed_state.pages[1]
+        agreed_ps.table_ladder_disposition = None
+        assert (
+            _credential_admission_refusal(agreed_state, agreed_ps, 1, agreed_ps.best_output) == ""
+        ), f"{label}: a confirmed table still had its credential withheld"
+
         patched, text, state = _crop_arm(tmp_path, **kwargs)
         assert patched == 0, f"{label}: the layer still credentialled a change of numbers"
         assert text == _TRUE_MD
@@ -580,9 +616,10 @@ def _plain_table_pdf(tmp_path: Path, name: str = "plain.pdf") -> Path:
 def test_a_crop_patch_is_not_approved_on_header_shape_alone(tmp_path: Path) -> None:
     """Argon's P1 on round 1, and the owner's ruling on it.
 
-    Three of ``crop_patch_improves_verification``'s five severity terms come from the
-    markdown alone (header collapse, header gap) and two from the page's text layer
-    (hard fail, label-binding failure, plus the lane gap). With the layer gone a crop
+    Two of ``crop_patch_improves_verification``'s five severity terms come from the
+    markdown alone (header collapse, header gap) and three from the page's text layer
+    (the verifier hard fail, the label-binding failure, and the lane gap, which is zero
+    unless the layer yields two or more lanes). With the layer gone a crop
     that merely fills in header cells still scores as an improvement — so anything
     else it changed, a row swap included, rides in on the header fix. The ruling: with
     the layer gone the patch needs independent evidence or it stays unverified, and
