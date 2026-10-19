@@ -274,6 +274,9 @@ def test_watched_kinds_are_real_emitted_kinds():
         # through the shared ``DITTO_UNRESOLVED_KIND`` constant, same shape as
         # the ladder terminals above.
         "table_ditto_unresolved",
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
     }
     unknown = TABLE_DISTRUST_KINDS - literals - dynamic - pending
 
@@ -589,6 +592,17 @@ def test_a_page_wide_ladder_accept_with_no_table_id_is_a_no_op():
     assert trust.untrusted_pages == [5], "a no-table_id accept must not clear a different table"
     assert "table_ladder_rejected" in trust.to_dict()["pages"]["5"]["reasons"]
     assert trust.resolved_pages == []
+
+
+def test_native_cell_distrust_survives_table_escalation_accepted():
+    """Native per-cell flags must not be erased by a later page-wide escalation accept."""
+    events = [
+        AuditEvent(page_num=3, kind="native_cell_check_ambiguous", data={"table_id": "1"}),
+        AuditEvent(page_num=3, kind="table_escalation_accepted"),
+    ]
+    trust = build_tables_trust("doc.pdf", events)
+    assert trust.untrusted_pages == [3]
+    assert "native_cell_check_ambiguous" in trust.to_dict()["pages"]["3"]["reasons"]
 
 
 def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():

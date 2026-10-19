@@ -1323,10 +1323,12 @@ def test_a_restored_page_keeps_the_retained_layer(tmp_path: Path) -> None:
        so the next sidecar write saw ``native_text == ""`` and omitted
        ``prior_ocr_layer_text`` -- the only thing Part A stores for Part B to re-finalize
        from, gone without a word.
-    2. The page ledger admits only a TERMINAL SUCCESS page, and a flagged page is always
-       WARNING, so a normal resume never reaches that restore on a flagged page. That is
-       what made it latent; it is pinned here so a later change to either the ledger gate
-       or the page's status cannot make it live unnoticed.
+    2. This restore used to be unreachable on a flagged page: the ledger admitted only a
+       TERMINAL SUCCESS page and a flagged page is always WARNING. #1192 made it LIVE for
+       the accepted half of the family, which is what this half was pinned against -- see
+       ``test_gh1192_resume_accepted_prior_ocr.py``, where the same guarantee is asserted
+       on the live path at ``process()``. The seam-level pin stays: it is the cheaper of
+       the two and it fails first.
     """
     import json
 

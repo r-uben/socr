@@ -1604,6 +1604,20 @@ class TestTR4ValueGuard:
         assert _normalize_numeric_token("1,204") == "1204"
         assert _normalize_numeric_token("1,234,567") == "1234567"
 
+    def test_n2_normalization_french_decimal_comma(self):
+        """Thousands strip must not turn ``1,5`` into ``15``; binding maps ``1,5`` → ``1.5``."""
+        from socr.tables.native_verifier import (
+            _normalize_binding_numeric_token,
+            _normalize_numeric_token,
+        )
+
+        assert _normalize_numeric_token("1,5") == "1,5"
+        assert _normalize_numeric_token("1,5") != _normalize_numeric_token("15")
+        assert _normalize_binding_numeric_token("1,5") == "1.5"
+        assert _normalize_binding_numeric_token("1,5") != _normalize_binding_numeric_token("15")
+        assert _normalize_binding_numeric_token("-5,5") == "-5.5"
+        assert _normalize_binding_numeric_token("1 234,5") == "1234.5"
+
     def test_n2_normalization_parenthesis_wrapper(self):
         """N2 token normalization: '(0.014)' → '0.014' (econ negative-sign wrapper)."""
         from socr.tables.native_verifier import _normalize_numeric_token

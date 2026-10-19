@@ -117,6 +117,10 @@ from socr.judge.table_rung_ollama import (
     adjudicator_rung_reachable as table_judge_adjudicator_reachable,
 )
 from socr.judge.table_verdict import (
+    NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
+    NATIVE_CELL_CHECK_CONTRADICTED_KIND,
+    NATIVE_CELL_CHECK_SKIPPED_KIND,
+    NATIVE_CELL_CHECK_VERIFIED_KIND,
     RUNG_KIND_CELL_ADJUDICATOR,
     RUNG_KIND_GEMINI,
     RUNG_KIND_OLLAMA,
@@ -379,6 +383,18 @@ _RESUME_REPLAYED: dict[str, str] = {
     TABLE_BINDING_BOUNDARY_RESOLVED_KIND: (
         "GH-609 round 4: the companion resolution event; dropping it would un-resolve "
         "a table a prior run proved clean"
+    ),
+    NATIVE_CELL_CHECK_VERIFIED_KIND: (
+        "default-on native per-cell binding: terminal table outcome on a resumed page"
+    ),
+    NATIVE_CELL_CHECK_CONTRADICTED_KIND: (
+        "default-on native per-cell binding: contradiction recorded this run only"
+    ),
+    NATIVE_CELL_CHECK_AMBIGUOUS_KIND: (
+        "default-on native per-cell binding: inconclusive/skip outcome on a resumed page"
+    ),
+    NATIVE_CELL_CHECK_SKIPPED_KIND: (
+        "default-on native per-cell binding: geometry skip on a resumed page"
     ),
     VISUAL_VALUES_NOT_TRANSCRIBED_KIND: (
         "GH-519 / GH-563: the chart lane's debt is a standing property of the page; "
@@ -1361,6 +1377,134 @@ def _resume_verdict_is_permanently_unverifiable(
     return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
 
+def _resume_prior_ocr_reading_was_accepted(
+    raw_meta: object, raw_winning: object, *, flagged_by_this_run: bool
+) -> bool:
+    """#1192: is this sidecar an ACCEPTED model reading of an earlier-OCR page?
+
+    #1156 Part A flags a page whose text layer is a PREVIOUS OCR run's reading rather than
+    the document's own characters. Such a page is never native-trusted and is routed to a
+    model. When the judge ACCEPTS that reading, the reading ships and the page is demoted
+    from SUCCESS to WARNING carrying one clause, ``prior_ocr_layer=UNKNOWN`` -- not because
+    anything was found wrong with it, but because one reading of a scan is one reading and
+    the page must be MARKED rather than CHECKED.
+
+    The ledger admits only a terminal SUCCESS page, so EVERY flagged page was re-OCR'd on
+    every resume, for ever -- the precise non-convergence #713's and #1145's exceptions
+    exist to prevent, reached through a third door. At Fed scale that is ~141,000 pages at a
+    measured 3.39 GPU-s each, ~133 H100-hours per resume, for a reading that cannot change:
+    same input, same fingerprint, same reading, same acceptance, same mark.
+
+    So this is the FOURTH deliberate exception, and it is deliberately narrow. It admits a
+    page only on POSITIVE evidence of that one outcome, and the REJECTED half of the same
+    family -- the fail-closed floor, where the readers looked and said no -- is excluded and
+    keeps re-reading exactly as today. That half is a pending owner ruling (#1192): a
+    different rung might yet rescue it, which is not true of a reading already accepted.
+
+    Every clause, and the single thing each one rules out:
+
+    * ``prior_ocr_layer_suspect``, in the sidecar AND on the page THIS run just analysed
+      -- the page is this family at all, and still is. The sidecar key is the UNION (a
+      failed detector scan included), because that is the set the CLAUSE fires on, so it is
+      the set for which "the only demotion is this mark" is true; requiring the current
+      run to agree is what stops a transient failed scan being locked in for ever (see the
+      ``flagged_by_this_run`` clause below).
+    * ``prior_ocr_layer_text`` present and non-empty -- the sidecar is COMPLETE. Part A
+      retains the earlier layer here, unshipped, as the one artefact Part B re-finalizes
+      from with no re-OCR. Skipping a page whose retention is missing would make that work
+      unrecoverable without ever saying so.
+    * ``audit_passed is True`` -- the reading was ACCEPTED. This is the same credential the
+      ordinary gate requires (GH-161: status says the extraction succeeded as an operation,
+      only the audit verdict says the CONTENT was accepted), and it is the clause that
+      excludes the floor, which is ``audit_passed=False`` by construction.
+    * the engine is PRESENT and is not a native lane -- a MODEL read these pixels.
+      ``native`` and ``chart_asset`` both ship the page's own ``native_text``, which on this
+      family IS the suspect layer, so neither is a reading of the page that could be
+      accepted in the sense this exception means. An ABSENT engine is refused too (r-uben's
+      review, Grok P2): ``PageOutput`` defaults to ``engine=""`` beside
+      ``audit_passed=True``, so an empty string would read as "a model read this" on a
+      record that names no reader at all. No producer was found that reaches here in that
+      state; the docstring says doubt is refused, so it is refused.
+    * ``status`` is exactly WARNING and ``failure_mode`` is exactly
+      ``PRIOR_OCR_LAYER_UNVERIFIED`` -- the ONLY demotion is this one.
+      ``_demote_for_verdict`` never overwrites a more specific mode that is already there,
+      so a page demoted for any other reason as well arrives here under that reason's mode
+      and is refused.
+    * the published verdict carries EXACTLY ONE clause, ``prior_ocr_layer=UNKNOWN`` -- the
+      same statement read from the other side, and the one that stops a page whose table
+      went unjudged or whose figure crop went unread from riding along on this exception.
+      Strictly stronger than ``REPROCESSABLE_CLAUSE_CHECKS``: here no second clause of any
+      kind is admitted.
+    * ``table_ladder_incomplete`` is false -- the GH-359 forfeiture, on the same grounds as
+      the D1b exception it was written for: if assemble had to backfill a terminal for a
+      table on this page, that table was never witnessed, and a page skip-and-kept for ever
+      would mean it never can be.
+
+    Returns False on ANY doubt, including an unparseable verdict and a mode this build does
+    not know. What this branch is protected by, stated exactly (the #1145 branch's comment
+    got this wrong once): the run fingerprint, which hashes every shipped ``socr`` source
+    file -- so any change to this logic re-OCRs the page -- the input checksum, the
+    verdict's presence and successful parse, and the non-empty-body and
+    failed-marker-body refusals in the caller. There is no finalized-body digest for this
+    class, exactly as there is none for #1145's, so a hand-edited fragment restores
+    verbatim here as it does on the SUCCESS path. Noted rather than half-built.
+    """
+    # Asked of ``manifest`` rather than respelled here: that module decides which lanes
+    # ship the page's own ``native_text``, and on this family that text IS the suspect
+    # layer. Two spellings of the same set could drift, and a drift in this direction
+    # would admit a lane whose "reading" is the layer under suspicion.
+    from socr.core.manifest import engine_ships_native_text
+    from socr.core.verdict import Check, CheckResult, PageVerdict
+
+    if not isinstance(raw_meta, dict) or not isinstance(raw_winning, dict):
+        return False
+
+    # The page is a #1156 flagged page, and its sidecar is complete.
+    if raw_meta.get("prior_ocr_layer_suspect") is not True:
+        return False
+    # ... and THIS run's analysis says so too (Argon, design review). The siblings a few
+    # hundred lines below -- ``minus_as_digit_suspect``, ``garbled_math_suspect``,
+    # ``table_not_reconstructed_suspect`` -- all cross-check the FRESH ``PageState``
+    # rather than trusting the cached one, because a suspicion flag is not in the run
+    # fingerprint and so everything else can match while the current analysis disagrees.
+    # This exception needs that check more than they do, not less: the flag is what
+    # CREATED the demotion being carried forward.
+    #
+    # The shape that reaches it: ``prior_ocr_layer_suspect`` is a UNION that folds the
+    # detector's FAILED SCANS in beside its positive findings (``state.py``:
+    # ``prior_ocr_layer_scan_failed``), and a failed scan is transient -- a run that could
+    # not decide demoted the page, and a run that CAN decide may find nothing wrong with
+    # it. Without this line that page would be skip-and-kept under a mark its own
+    # document no longer earns, and no later run could shed it.
+    if not flagged_by_this_run:
+        return False
+    retained = raw_meta.get("prior_ocr_layer_text")
+    if not isinstance(retained, str) or not retained:
+        return False
+
+    # An ACCEPTED reading, and a MODEL's.
+    if raw_winning.get("audit_passed") is not True:
+        return False
+    engine = str(raw_winning.get("engine") or "")
+    if not engine or engine_ships_native_text(engine):
+        return False
+
+    # Demoted by this mark, and by nothing else.
+    if raw_winning.get("status") != PageStatus.WARNING.value:
+        return False
+    if raw_winning.get("failure_mode") != FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value:
+        return False
+    if raw_meta.get("table_ladder_incomplete"):
+        return False
+    try:
+        verdict = PageVerdict.from_dict(raw_meta.get("verdict"))
+    except Exception:
+        return False
+    return [(c.check, c.result) for c in verdict.clauses] == [
+        (Check.PRIOR_OCR_LAYER, CheckResult.UNKNOWN)
+    ]
+
+
 def _is_document_failed_stub(md_path: Path) -> bool:
     """Is this file one THIS code wrote -- a document-failed mark and nothing else?
 
@@ -1967,6 +2111,8 @@ class UnifiedPipeline:
             # #1050: the coverage check rewrites flagged pages (WARNING + mark +
             # PNG). Toggling it must not resume a SUCCESS page as clean.
             "check_text_coverage": getattr(cfg, "check_text_coverage", True),
+            # Native cell check: advisory by default; gating changes demotion/mark bytes.
+            "native_cell_gating": getattr(cfg, "native_cell_gating", False),
             # #1050 step 2: recovery rewrites a flagged page's body (OCR'd words
             # placed in the prose or under the figure). Toggling it must not
             # resume a page written under the other setting.
@@ -3819,6 +3965,32 @@ class UnifiedPipeline:
             "equation_sidecar_skipped_model_refused",
         }
     )
+
+    @staticmethod
+    def native_cell_check_event_kinds() -> frozenset[str]:
+        """Terminal audit kinds emitted by ``_run_native_cell_binding_check``."""
+        return frozenset(
+            {
+                NATIVE_CELL_CHECK_VERIFIED_KIND,
+                NATIVE_CELL_CHECK_CONTRADICTED_KIND,
+                NATIVE_CELL_CHECK_AMBIGUOUS_KIND,
+                NATIVE_CELL_CHECK_SKIPPED_KIND,
+            }
+        )
+
+    @staticmethod
+    def rollback_native_cell_page_state(
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        *,
+        block_count: int,
+    ) -> None:
+        """Drop native-cell audit events and sidecar entries for one page (error rollback)."""
+        kinds = UnifiedPipeline.native_cell_check_event_kinds()
+        state.events = [e for e in state.events if not (e.page_num == page_num and e.kind in kinds)]
+        for idx in range(block_count):
+            ps.native_cell_binding.pop(f"p{page_num}-t{idx}", None)
 
     @classmethod
     def resume_restore_kinds(cls) -> frozenset[str]:
@@ -8371,6 +8543,235 @@ class UnifiedPipeline:
                 )
             )
 
+    def _apply_native_cell_check_demotion(
+        self,
+        ps: PageState,
+        bo: PageOutput,
+        worst: "NativeCellOutcome",
+    ) -> None:
+        from socr.tables.native_cell_check import NativeCellOutcome as _NativeCellOutcome
+
+        if not self.config.native_cell_gating:
+            return
+        if worst not in (_NativeCellOutcome.CONTRADICTED, _NativeCellOutcome.AMBIGUOUS):
+            return
+        if ps.table_ladder_disposition not in (
+            FailureMode.TABLE_REJECTED,
+            FailureMode.TABLE_WITHHELD,
+        ):
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        if bo.status == PageStatus.SUCCESS:
+            bo.status = PageStatus.WARNING
+        if not bo.failure_mode:
+            bo.failure_mode = FailureMode.TABLE_UNVERIFIED
+        ps.unchecked_table_kind = "unverified"
+
+    def _run_native_cell_binding_check(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+    ) -> None:
+        """Default-on per-cell native binding check (``tables.native_cell_check``).
+
+        Runs on born-digital pages whose model output contains markdown tables,
+        regardless of ``table_judge_ladder``. Always records ``native_cell_binding``
+        and ``native_cell_check_*`` audit events. Page demotion (WARNING /
+        ``TABLE_UNVERIFIED`` / visible mark) applies only when
+        ``config.native_cell_gating`` is True (``--native-cell-gating``).
+
+        Legitimate no-ops (other checks own these pages): no model output,
+        ``native_only``, native-engine winner, chart/failed candidates, scanned /
+        non-born-digital pages, or pages with no markdown table blocks.
+        """
+        if bo is None or not bo.text or bo.engine == "chart_asset" or is_failed_candidate(bo):
+            return
+        if self.config.native_only:
+            return
+        if (bo.engine or "") == "native":
+            return
+        if not getattr(ps, "is_born_digital", False):
+            return
+        if not layer_is_admissible_evidence(ps):
+            return
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.native_cell_check import (
+            NativeCellOutcome,
+            binding_summary_payload,
+            check_table_cell_binding,
+            skipped_check_result,
+        )
+        from socr.tables.reconcile import find_table_blocks
+        from socr.tables.witness import prepare_table_witnesses
+
+        blocks = find_table_blocks(bo.text)
+        if not blocks:
+            return
+
+        worst: NativeCellOutcome | None = None
+
+        def _rollback_native_cell_page() -> None:
+            nonlocal worst
+            self.rollback_native_cell_page_state(state, page_num, ps, block_count=len(blocks))
+            worst = None
+
+        def _record_skip(table_id: str, reason: str) -> None:
+            nonlocal worst
+            result = skipped_check_result(table_id, reason)
+            payload = binding_summary_payload(result)
+            payload["skip_reason"] = reason
+            ps.native_cell_binding[table_id] = payload
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=NATIVE_CELL_CHECK_SKIPPED_KIND,
+                    engine=bo.engine or "",
+                    detail=f"table {table_id}: native cell check skipped ({reason})",
+                    data=payload,
+                )
+            )
+            if worst is None or worst is not NativeCellOutcome.CONTRADICTED:
+                worst = NativeCellOutcome.AMBIGUOUS
+
+        skip_reason: str | None = None
+        if not self._page_has_tables(page_num, ps):
+            skip_reason = "native_table_detector_negative"
+        try:
+            from socr.core.born_digital import flatten_page_spans
+            from socr.core.pdf import open_pdf
+            from socr.tables.locate import locate_tables
+
+            if skip_reason is None:
+                with open_pdf(state.handle.path) as doc:
+                    if page_num < 1 or page_num > doc.page_count:
+                        skip_reason = "pdf_page_unavailable"
+                    else:
+                        page = doc[page_num - 1]
+                        if page is None:
+                            skip_reason = "pdf_page_unavailable"
+                        else:
+                            located_boxes = locate_tables(page)
+                            if not located_boxes:
+                                skip_reason = "no_located_table_geometry"
+                            else:
+                                words = page.get_text("words")
+                                spans = flatten_page_spans(page)
+                                with prepare_table_witnesses(
+                                    state.handle.path, page_num, bo.text
+                                ) as witnesses:
+                                    if not witnesses:
+                                        skip_reason = "table_witness_unavailable"
+                                    else:
+                                        from socr.tables.native_contradiction import (
+                                            pair_regions,
+                                            unclaimed_locator_box_indices,
+                                        )
+
+                                        block_markdowns = [w.markdown for w in witnesses]
+                                        located_bboxes = [tuple(b.bbox) for b in located_boxes]
+                                        paired_regions = pair_regions(
+                                            page, block_markdowns, located_bboxes
+                                        )
+                                        for ui in unclaimed_locator_box_indices(
+                                            page,
+                                            block_markdowns,
+                                            located_bboxes,
+                                            paired_regions,
+                                        ):
+                                            _record_skip(
+                                                f"p{page_num}-native-region-{ui}",
+                                                "unpaired native table region (possible lost table)",
+                                            )
+                                        for wi, witness in enumerate(witnesses):
+                                            pick = (
+                                                paired_regions[wi]
+                                                if wi < len(paired_regions)
+                                                else None
+                                            )
+                                            crop_note = ""
+                                            if pick is not None:
+                                                region_bbox = pick
+                                                if witness.box is not None and tuple(
+                                                    witness.box.bbox
+                                                ) != tuple(pick):
+                                                    crop_note = (
+                                                        "content-paired located crop "
+                                                        "overrides witness box"
+                                                    )
+                                            elif witness.box is not None:
+                                                region_bbox = witness.box.bbox
+                                            else:
+                                                _record_skip(
+                                                    witness.table_id,
+                                                    "table-region pairing inconclusive",
+                                                )
+                                                continue
+                                            peer_regions = [
+                                                tuple(pr)
+                                                for j, pr in enumerate(paired_regions)
+                                                if j != wi and pr is not None
+                                            ]
+                                            result = check_table_cell_binding(
+                                                table_id=witness.table_id,
+                                                words=words,
+                                                markdown=witness.markdown,
+                                                region_bbox=region_bbox,
+                                                spans=spans,
+                                                peer_region_bboxes=peer_regions or None,
+                                                locator_boxes=located_bboxes,
+                                                page=page,
+                                            )
+                                            payload = binding_summary_payload(result)
+                                            ps.native_cell_binding[witness.table_id] = payload
+                                            if result.outcome is NativeCellOutcome.VERIFIED:
+                                                kind = NATIVE_CELL_CHECK_VERIFIED_KIND
+                                            elif result.outcome is NativeCellOutcome.CONTRADICTED:
+                                                kind = NATIVE_CELL_CHECK_CONTRADICTED_KIND
+                                            else:
+                                                kind = NATIVE_CELL_CHECK_AMBIGUOUS_KIND
+                                            detail = f"table {witness.table_id}: {result.detail}"
+                                            if crop_note:
+                                                detail = (
+                                                    f"table {witness.table_id}: {crop_note}; "
+                                                    f"{result.detail}"
+                                                )
+                                            state.events.append(
+                                                AuditEvent(
+                                                    page_num=page_num,
+                                                    kind=kind,
+                                                    engine=bo.engine or "",
+                                                    detail=detail,
+                                                    data=payload,
+                                                )
+                                            )
+                                            if (
+                                                worst is None
+                                                or result.outcome is NativeCellOutcome.CONTRADICTED
+                                            ):
+                                                worst = result.outcome
+                                            elif (
+                                                worst is not NativeCellOutcome.CONTRADICTED
+                                                and result.outcome is NativeCellOutcome.AMBIGUOUS
+                                            ):
+                                                worst = NativeCellOutcome.AMBIGUOUS
+            if skip_reason is not None:
+                for idx, _block in enumerate(blocks):
+                    _record_skip(f"p{page_num}-t{idx}", skip_reason)
+        except Exception as exc:
+            logger.warning(
+                "native cell binding check failed on p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            _rollback_native_cell_page()
+            for idx, _block in enumerate(blocks):
+                _record_skip(f"p{page_num}-t{idx}", f"check_error:{type(exc).__name__}")
+
+        if worst is not None:
+            self._apply_native_cell_check_demotion(ps, bo, worst)
+
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?
 
@@ -11524,6 +11925,8 @@ class UnifiedPipeline:
                     # assembly (unlike OutputNormalizer) and before the flush, so the
                     # fragment, the sidecar and the stitched body all see one text.
                     self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
+
+                    self._run_native_cell_binding_check(state, page_num, ps, bo)
 
                     # GH-359 ruling 6: THIS `if` produces content terminals. Assemble
                     # does not re-judge; it only backfills a missing terminal as
@@ -15383,6 +15786,9 @@ class UnifiedPipeline:
             # GH-367: per-table lift/hold record so a resumed run does not
             # silently re-clamp a table whose contradictions were disproved.
             "binding_adjudication": dict(ps.binding_adjudication) if ps else {},
+            "native_cell_binding": dict(getattr(ps, "native_cell_binding", None) or {})
+            if ps
+            else {},
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -15733,7 +16139,7 @@ class UnifiedPipeline:
             NOT a page-failure marker (a timed-out / ERROR / lossy-fallback page
             written terminal at assemble must be RE-OCR'd, never skipped) --
             UNLESS the page carries a GH-353 table-judge-ladder ``REJECTED``
-            disposition (see below), the ONE deliberate exception.
+            disposition (see below), the FIRST of four deliberate exceptions.
           * The winning output's ``audit_passed`` is exactly ``True`` (GH-161).
             Status says the extraction succeeded as an OPERATION; only the audit
             verdict says the CONTENT was accepted.  A judge-rejected scanned page
@@ -15743,7 +16149,15 @@ class UnifiedPipeline:
           * The serialised ``winning_output`` is present and rebuilds into a
             ``PageOutput`` without error.
 
-        GH-353 TICKET-D1b, the one deliberate exception: a page whose sidecar
+        #1192, the FOURTH deliberate exception: an earlier-OCR page (#1156) whose
+        model reading was ACCEPTED is demoted to WARNING only because one reading of
+        a scan must be MARKED rather than CHECKED, never because a check found
+        anything wrong. It is final for the same input and config, so it is
+        skip-and-kept; see ``_resume_prior_ocr_reading_was_accepted`` for the
+        clause-by-clause scope. The REJECTED half of that family -- the fail-closed
+        floor -- is deliberately NOT admitted and keeps re-reading on every resume.
+
+        GH-353 TICKET-D1b, the first deliberate exception: a page whose sidecar
         ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` **and
         whose ``table_ladder_incomplete`` is false** skips
         the two checks above and IS skip-and-kept even though C3's
@@ -15776,7 +16190,7 @@ class UnifiedPipeline:
         try:
             from ocr_output_contract import doc_dir_for, relative_key, safe_checksum
 
-            from socr.core.manifest import is_page_failed_marker
+            from socr.core.manifest import engine_ships_native_text, is_page_failed_marker
             from socr.core.verdict import PageVerdict
 
             scan_root = self._scan_root or state.handle.path.parent
@@ -15927,7 +16341,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and minus_as_digit_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "PP-5: p%d not resumed; its cached native text is suspect under the "
@@ -15939,7 +16353,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and garbled_math_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "#960: p%d not resumed; the current analysis flags garbled math",
@@ -15951,7 +16365,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and table_not_reconstructed_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "GH-994: p%d not resumed; the current analysis flags a flattened table",
@@ -16080,8 +16494,31 @@ class UnifiedPipeline:
                 meta.get("verdict"), winning.get("failure_mode")
             )
 
+            # #1192, the FOURTH deliberate exception, and the same argument as the three
+            # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only
+            # because one reading of a scan must be MARKED rather than CHECKED, never
+            # because anything was found wrong with it. Under the same input and the same
+            # fingerprint the next run produces the same reading, the same acceptance and
+            # the same mark, so re-OCR'ing it buys nothing and the work never converges --
+            # ~141,000 such pages on the Fed corpus at a measured 3.39 GPU-s each.
+            #
+            # The REJECTED half of the same family is deliberately NOT admitted (a pending
+            # owner ruling): its reading was refused, and a different rung might yet read
+            # it, which is not true of one already accepted. See the predicate for the
+            # clause-by-clause scope.
+            is_accepted_prior_ocr_reading = _resume_prior_ocr_reading_was_accepted(
+                meta,
+                winning,
+                flagged_by_this_run=bool(
+                    ps_fresh is not None and getattr(ps_fresh, "prior_ocr_layer_suspect", False)
+                ),
+            )
+
             if not (
-                is_ladder_rejected or is_credentialed_judge_timeout or is_permanently_unverifiable
+                is_ladder_rejected
+                or is_credentialed_judge_timeout
+                or is_permanently_unverifiable
+                or is_accepted_prior_ocr_reading
             ):
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
                 # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
@@ -16554,12 +16991,19 @@ class UnifiedPipeline:
             # #1156 round 1 (Argon C): the flag came back but the LAYER did not, so a
             # re-flush from restored state wrote the sidecar with ``native_text`` empty and
             # dropped ``prior_ocr_layer_text`` -- the one thing Part A retains for Part B to
-            # re-finalize from. Latent today rather than live: the page ledger admits only a
-            # terminal SUCCESS page and a flagged page is always WARNING, so this restore is
-            # not reached on a flagged page in a normal resume (both halves are pinned by
-            # ``test_a_restored_page_keeps_the_retained_layer``). Restored anyway, because
-            # retention is Part A's own contract and Part B re-finalizes from exactly this
-            # key.
+            # re-finalize from. LIVE since #1192, which admits the accepted half of this
+            # family to the ledger: before it, the gate took only a terminal SUCCESS page
+            # and a flagged page is always WARNING, so this line was unreachable on a
+            # flagged page and was written against the day it stopped being (pinned at the
+            # seam by ``test_a_restored_page_keeps_the_retained_layer`` and now on the live
+            # path by ``test_gh1192_resume_accepted_prior_ocr.py``).
+            # COORDINATION WITH #1207 -- RESOLVED. #1210 merged first and #1207 merged
+            # main in, so this line is #1207's version as that note directed: the layer
+            # is restored into ``ps.prior_ocr_layer_text`` and NEVER into
+            # ``ps.native_text``, which keeps a restored early-return page
+            # (``is_born_digital=False``) out of ``--native-only`` eligibility. #1210
+            # needs only that the layer survives the restore, which the narrower field
+            # gives it; see the #1203 note just below for why the wider one is unsafe.
             _retained_layer = meta.get("prior_ocr_layer_text")
             if isinstance(_retained_layer, str) and _retained_layer:
                 # #1203 (Argon, diff review, P0): restored into the retention CARRIER, and
@@ -16816,6 +17260,9 @@ class UnifiedPipeline:
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             ps.page_retry = meta.get("page_retry") or None
             ps.timings_s = coerce_page_timings(meta.get("timings_s"))
+            restored_native_cell = meta.get("native_cell_binding")
+            if isinstance(restored_native_cell, dict):
+                ps.native_cell_binding = dict(restored_native_cell)
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
             from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
@@ -20570,7 +21017,36 @@ class UnifiedPipeline:
                 )
                 continue
 
-            page_figure_blocks = self._build_figure_blocks(page_figs, doc_dir)
+            # #1192: this phase must be IDEMPOTENT over its own output, because a page
+            # RESTORED from the per-page ledger arrives here with its figure blocks
+            # already in its body -- they were written into the fragment by the run that
+            # first embedded them, and that fragment is what assemble reads back. The
+            # append below was unconditional, so every partial resume (a crash
+            # mid-document; the doc-level fast path never reaches this code) added a
+            # SECOND copy of each block, and of the description attached to it, to every
+            # restored page carrying a figure. Measured at ``process()`` on the ORDINARY
+            # terminal-SUCCESS gate, with no #1156 page involved: 1 ref before the resume,
+            # 2 after, growing by one per resume.
+            #
+            # The sibling phase in this same method already had this guard
+            # (``insert_descriptions`` "skips refs that are already described"), which is
+            # why the duplication showed up in the blocks and not in the descriptions.
+            #
+            # Keyed on the IMAGE REF, the one part of a block that identifies the asset:
+            # the header carries a description that a later run can legitimately change,
+            # so comparing whole blocks would fail to recognise a block it had itself
+            # written. Filtered per figure rather than per page, so a page that gained a
+            # NEW figure still gets that one embedded beside the ones already there.
+            already = page_bodies[idx]
+            fresh_figs = [
+                fig
+                for fig in page_figs
+                if not (fig.image_path and f"]({self._figure_ref_for(fig, doc_dir)})" in already)
+            ]
+            if not fresh_figs:
+                continue
+
+            page_figure_blocks = self._build_figure_blocks(fresh_figs, doc_dir)
             if not page_figure_blocks:
                 continue
 
@@ -21563,6 +22039,20 @@ class UnifiedPipeline:
         return ""
 
     @staticmethod
+    def _figure_ref_for(figures_fig, doc_dir: Path) -> str:
+        """The markdown image target this figure is embedded under.
+
+        One definition, used BOTH to write a block and (#1192) to recognise a block that is
+        already there on a page restored from the ledger. Two spellings of this path could
+        drift, and a drift would make the recognition silently fail and duplicate the
+        block again -- which is the defect that guard exists to stop.
+        """
+        try:
+            return str(Path(str(figures_fig.image_path)).relative_to(doc_dir))
+        except ValueError:
+            return Path(str(figures_fig.image_path)).name
+
+    @staticmethod
     def _build_figure_blocks(
         figures: list[FigureInfo],
         doc_dir: Path,
@@ -21577,14 +22067,9 @@ class UnifiedPipeline:
         """
         blocks = []
         for fig in figures:
-            # Compute a relative image path from the doc directory
-            if fig.image_path:
-                try:
-                    rel_path = Path(fig.image_path).relative_to(doc_dir)
-                except ValueError:
-                    rel_path = Path(fig.image_path).name
-            else:
+            if not fig.image_path:
                 continue
+            rel_path = UnifiedPipeline._figure_ref_for(fig, doc_dir)
 
             header = f"**Figure {fig.figure_num}** (page {fig.page_num})"
             if fig.description:

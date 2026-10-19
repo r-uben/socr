@@ -2010,3 +2010,140 @@ def test_two_readings_that_differ_only_by_an_empty_row_are_both_kept() -> None:
     assert (
         without[0][0] == _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n")[0][0]
     )
+
+
+# ---------------------------------------------------------------------------
+# #1210 (#1192) landed the FOURTH ledger exception while this PR was in review.
+# It skip-and-keeps an ACCEPTED reading of an earlier-OCR page on resume. A page THIS
+# PR withholds must never reach it: the withheld page ships the fail-closed floor, and
+# admitting it would freeze a marker-only body for ever with no run able to shed it.
+# ---------------------------------------------------------------------------
+
+
+class _CountingColumnTableEngine(_ColumnTableEngine):
+    """``_ColumnTableEngine`` that also records which PAGES a model was asked to read."""
+
+    def __init__(self, pages_read: list[int], name: str = "qwen") -> None:
+        super().__init__(name)
+        self._pages_read = pages_read
+
+    def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+        self._pages_read.extend(page_nums)
+        return super().process_pages(pdf_path, page_nums, config, dpi, subprocess_timeout, **_kw)
+
+
+def _run_withhold_doc(out_dir: Path, pdf: Path, monkeypatch, pages_read: list[int]):
+    """``process()`` over an early-return table document, with the REAL judge chain.
+
+    Same pinning as ``_run_table_arm`` (CLAUDE.md #841: ``primary_engine`` left AUTO makes
+    the outcome depend on which models this machine has pulled), plus the no-witness
+    backend, which is CI's and Rorqual's state and the one the Fed run meets.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+    from socr.tables import source_evidence as se
+
+    with monkeypatch.context() as m:
+        engine = _CountingColumnTableEngine(pages_read)
+        engine.table = _table_markdown(_COLUMN_ROWS)
+        m.setattr(orch, "get_engine", lambda engine_type: engine)
+        m.setattr(
+            se,
+            "classical_ocr_with_state",
+            lambda pix: ("", se.WITNESS_PACKAGE_MISSING, "test: no witness backend"),
+        )
+        m.setattr(
+            se,
+            "classical_ocr_backend_state",
+            lambda: (se.WITNESS_PACKAGE_MISSING, "test: no witness backend"),
+        )
+        pipe = orch.UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=True,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._resolve_crop_vlm_model = lambda: None
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        return pipe.process(pdf, output_dir=out_dir)
+
+
+def test_the_1192_ledger_exception_refuses_a_page_this_pr_withholds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1210's exception must not admit a withheld page -- at ``process()``, across a resume.
+
+    The exception admits a page only on POSITIVE evidence that a model's reading of an
+    earlier-OCR page was ACCEPTED. A withheld page is the opposite outcome of the same
+    family, so this asserts the refusal on the page's OWN sidecar rather than on a
+    constructed dict: a hand-built record could drift from what the pipeline writes, and
+    then the guard would hold only against a shape nothing produces.
+
+    Then the resume itself, because a predicate is only a claim about a gate: the document
+    loses page 2 to a crash and is re-run, and page 1 -- the withheld one -- must be read
+    again. ``_crash_after_page_one`` removes the assembled ``.md`` as well, or the
+    DOC-level fast path reports SKIPPED and the per-page ledger is never consulted.
+    """
+    from test_resume_figure_embed_idempotent import _crash_after_page_one
+
+    from socr.pipeline.orchestrator import _resume_prior_ocr_reading_was_accepted
+
+    pdf = _column_table_pdf(tmp_path / "withheld.pdf")
+    out = tmp_path / "out-withheld"
+    first: list[int] = []
+    _run_withhold_doc(out, pdf, monkeypatch, first)
+    assert 1 in first, "fixture premise: a model read page 1 on the first run"
+
+    side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    assert side["winning_output"]["status"] == PageStatus.ERROR.value, (
+        f"fixture premise: page 1 is withheld, got {side['winning_output']['status']}"
+    )
+    assert (side.get("withheld_table_text") or "").strip(), (
+        "fixture premise: the reading is retained"
+    )
+
+    # The predicate, on the real record. Refused, and it does not rest on one clause:
+    # the floor is ``audit_passed=False`` by construction, its mode is not
+    # PRIOR_OCR_LAYER_UNVERIFIED, and its verdict carries more than the single
+    # prior-OCR clause the exception allows.
+    assert (
+        _resume_prior_ocr_reading_was_accepted(
+            side, side["winning_output"], flagged_by_this_run=True
+        )
+        is False
+    ), (
+        "#1192's ledger exception admits a page #1203 withholds; a resume would then "
+        "skip-and-keep a marker-only body for ever"
+    )
+    assert side["winning_output"].get("audit_passed") is not True
+    assert (
+        side["winning_output"].get("failure_mode") != FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
+    )
+
+    # And the gate itself, not only the predicate.
+    _crash_after_page_one(out)
+    resumed: list[int] = []
+    _run_withhold_doc(out, pdf, monkeypatch, resumed)
+    assert 2 in resumed, (
+        "the resume did not reprocess the page the crash lost, so it never entered the "
+        f"page loop and the ledger was not the gate under test. Read = {resumed}"
+    )
+    assert 1 in resumed, (
+        "a WITHHELD page was skip-and-kept on resume. #1192's exception is for an "
+        f"ACCEPTED reading; this page shipped the fail-closed floor. Read = {resumed}"
+    )
+    side2 = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    assert (side2.get("withheld_table_text") or "").strip(), (
+        "the resumed run dropped the retention, so #1208 loses the reading"
+    )

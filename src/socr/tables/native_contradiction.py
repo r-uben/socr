@@ -478,6 +478,67 @@ def number_absent_contradictions(
     ]
 
 
+def _bbox_tuple(box) -> tuple[float, float, float, float]:
+    if hasattr(box, "bbox"):
+        box = box.bbox
+    return tuple(float(v) for v in box)  # type: ignore[arg-type]
+
+
+def _box_area_tuple(box: tuple[float, float, float, float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _box_contains(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    *,
+    margin: float = 2.0,
+) -> bool:
+    return (
+        inner[0] >= outer[0] - margin
+        and inner[1] >= outer[1] - margin
+        and inner[2] <= outer[2] + margin
+        and inner[3] <= outer[3] + margin
+        and _box_area_tuple(inner) < _box_area_tuple(outer) * 0.98
+    )
+
+
+def _table_number_counter(page, box: tuple[float, float, float, float]) -> Counter:
+    return Counter(v for v, _ in native_signed_numbers(page, box))
+
+
+def _boxes_for_table_pairing(
+    page,
+    boxes: list,
+    *,
+    min_boxes: int = 1,
+) -> list[tuple[float, float, float, float]]:
+    """Locator boxes that carry table numbers; drop spurious union boxes only."""
+    tuples = [_bbox_tuple(b) for b in boxes]
+    with_nums = [b for b in tuples if _table_number_counter(page, b)]
+    tuples = with_nums if with_nums else tuples
+    if len(tuples) <= 1:
+        return tuples
+    if len(tuples) > 2:
+        areas = [_box_area_tuple(b) for b in tuples]
+        med = sorted(areas)[len(areas) // 2]
+        cap = max(med * 1.75, med + 1.0)
+        sized = [b for b, a in zip(tuples, areas, strict=True) if a <= cap]
+        if len(sized) >= max(2, min_boxes):
+            tuples = sized
+    return tuples
+
+
+def locator_boxes_for_pairing(
+    page,
+    boxes: list,
+    *,
+    min_boxes: int = 1,
+) -> list[tuple[float, float, float, float]]:
+    """Filter locator boxes for content pairing (numbers + nested geometry)."""
+    return _boxes_for_table_pairing(page, boxes, min_boxes=min_boxes)
+
+
 def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     """One region per block, paired to the locator's boxes by CONTENT, else None.
 
@@ -488,7 +549,8 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
     other block claims it. Anything ambiguous abstains for that block.
     """
     count = len(block_markdowns)
-    if not boxes or len(boxes) != count:
+    boxes = locator_boxes_for_pairing(page, boxes, min_boxes=count)
+    if not boxes:
         return [None] * count
     in_box = [Counter(v for v, _ in native_signed_numbers(page, box)) for box in boxes]
     chosen: list[int | None] = []
@@ -497,9 +559,151 @@ def pair_regions(page, block_markdowns: list[str], boxes: list) -> list:
         overlap = [sum((wanted & printed).values()) for printed in in_box]
         best = max(overlap)
         winners = [k for k, value in enumerate(overlap) if value == best]
-        chosen.append(winners[0] if best > 0 and len(winners) == 1 else None)
+        if best <= 0 or not winners:
+            chosen.append(None)
+        elif len(winners) == 1:
+            chosen.append(winners[0])
+        else:
+            nested_tie = any(
+                _box_contains(boxes[a], boxes[b]) or _box_contains(boxes[b], boxes[a])
+                for a in winners
+                for b in winners
+                if a != b
+            )
+            if nested_tie:
+                winners.sort(key=lambda k: _box_area_tuple(boxes[k]))
+                chosen.append(winners[0])
+            else:
+                chosen.append(None)
     claims = Counter(k for k in chosen if k is not None)
     return [boxes[k] if k is not None and claims[k] == 1 else None for k in chosen]
+
+
+def _locator_boxes_for_lost_table_scan(
+    page,
+    boxes: list,
+) -> list[tuple[float, float, float, float]]:
+    """Every located box that carries table numbers (no area cap for lost-table scan)."""
+    tuples = [_bbox_tuple(b) for b in boxes]
+    with_nums = [b for b in tuples if _table_number_counter(page, b)]
+    return with_nums if with_nums else tuples
+
+
+def _markdown_number_counter(block_markdowns: list[str]) -> Counter:
+    covered = Counter()
+    for markdown in block_markdowns:
+        covered.update(_candidate_values(markdown))
+    return covered
+
+
+def _box_has_numbers_beyond_markdown(
+    page,
+    box: tuple[float, float, float, float],
+    covered: Counter,
+) -> bool:
+    """True when the box prints numeric values no emitted model table claims."""
+    in_box = _table_number_counter(page, box)
+    if not in_box:
+        return False
+    extra = in_box - covered
+    return sum(extra.values()) >= 1
+
+
+def _is_ruled_subpanel_geometry(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+) -> bool:
+    return (
+        _box_contains(outer, inner)
+        and (_box_area_tuple(inner) / max(_box_area_tuple(outer), 1.0)) < 0.55
+    )
+
+
+def refine_check_region(
+    region: tuple[float, float, float, float],
+    peer_regions: list[tuple[float, float, float, float]] | None = None,
+) -> tuple[float, float, float, float]:
+    """Crop an enclosing union box so peer tables do not leak into the bind region."""
+    if not peer_regions:
+        return region
+    x0, y0, x1, y1 = region
+    for peer in peer_regions:
+        if not _box_contains(region, peer):
+            continue
+        _px0, py0, px1, py1 = peer
+        if py1 <= y0 + (y1 - y0) * 0.7:
+            y0 = max(y0, py1 - 1.0)
+    return (x0, y0, x1, y1)
+
+
+_TRAILING_ROW_BAND_PT = 28.0
+
+
+def extend_check_region_for_trailing_words(
+    page,
+    region: tuple[float, float, float, float],
+    markdown: str,
+) -> tuple[float, float, float, float]:
+    """Extend region bottom when locator boxes clip the last model row by a few pt."""
+    if page is None or not markdown.strip():
+        return region
+    from socr.tables.native_verifier import is_numeric_token
+
+    x0, y0, x1, y1 = region
+    max_y = y1
+    for w in page.get_text("words"):
+        wx0, wy0, wx1, wy1, text = w[0], w[1], w[2], w[3], w[4]
+        if wx0 < x0 - 2 or wx1 > x1 + 2:
+            continue
+        if wy0 < y1 - 1 or wy0 > y1 + _TRAILING_ROW_BAND_PT:
+            continue
+        if is_numeric_token(text):
+            max_y = max(max_y, wy1)
+            continue
+        if text.strip().lower() in ("écart", "ecart", "production"):
+            max_y = max(max_y, wy1)
+    if max_y <= y1:
+        return region
+    return (x0, y0, x1, max_y)
+
+
+def unclaimed_locator_box_indices(
+    page,
+    block_markdowns: list[str],
+    boxes: list,
+    paired: list,
+) -> list[int]:
+    """Indices of native table regions (after pairing filter) with no model block."""
+    tuples = _locator_boxes_for_lost_table_scan(page, boxes)
+    if not tuples:
+        return []
+    covered = _markdown_number_counter(block_markdowns)
+    claimed = set()
+    claimed_boxes: list[tuple[float, float, float, float]] = []
+    for pick in paired:
+        if pick is None:
+            continue
+        pt = _bbox_tuple(pick)
+        claimed_boxes.append(pt)
+        for i, box in enumerate(tuples):
+            if box == pt:
+                claimed.add(i)
+                break
+    unclaimed: list[int] = []
+    for i, box in enumerate(tuples):
+        if i in claimed:
+            continue
+        if not _table_number_counter(page, box):
+            continue
+        if len(block_markdowns) == 1 and any(_box_contains(box, cb) for cb in claimed_boxes):
+            continue
+        if _box_has_numbers_beyond_markdown(page, box, covered):
+            unclaimed.append(i)
+            continue
+        if any(_box_contains(box, cb) for cb in claimed_boxes):
+            continue
+        unclaimed.append(i)
+    return unclaimed
 
 
 # -- entry point --------------------------------------------------------------------
