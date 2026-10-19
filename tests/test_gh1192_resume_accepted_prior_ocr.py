@@ -198,6 +198,16 @@ def _without(key: str):
     return lambda meta: {k: v for k, v in meta.items() if k != key}
 
 
+def _without_winning_key(key: str):
+    def mutate(meta: dict) -> dict:
+        return {
+            **meta,
+            "winning_output": {k: v for k, v in meta["winning_output"].items() if k != key},
+        }
+
+    return mutate
+
+
 def _with_winning(**fields):
     def mutate(meta: dict) -> dict:
         return {**meta, "winning_output": {**meta["winning_output"], **fields}}
@@ -226,9 +236,14 @@ _A_SECOND_CLAUSE = {
         # The reading was not accepted. This is the clause that excludes the REJECTED half.
         pytest.param(_with_winning(audit_passed=False), False, id="the_reading_was_not_accepted"),
         pytest.param(_with_winning(audit_passed="yes"), False, id="audit_passed_is_not_a_bool"),
-        # Not a model's reading of these pixels: both native lanes ship the suspect layer.
+        # Not a model's reading of these pixels: both native lanes ship the suspect layer,
+        # and a record naming NO reader is not evidence that a model read it (r-uben's
+        # review of #1210, Grok P2: ``PageOutput`` defaults to ``engine=""`` beside
+        # ``audit_passed=True``).
         pytest.param(_with_winning(engine="native"), False, id="a_native_winner"),
         pytest.param(_with_winning(engine="chart_asset"), False, id="a_chart_asset_winner"),
+        pytest.param(_with_winning(engine=""), False, id="an_empty_engine"),
+        pytest.param(_without_winning_key("engine"), False, id="no_engine_key_at_all"),
         # Demoted by something more, or something else, than this one mark.
         pytest.param(_with_winning(status="error"), False, id="a_worse_status"),
         pytest.param(
@@ -256,6 +271,22 @@ _A_SECOND_CLAUSE = {
             lambda meta: {**meta, "verdict": {"page_num": 1, "clauses": []}},
             False,
             id="no_clause_at_all",
+        ),
+        # The RESULT is load-bearing, not decoration (r-uben's surviving mutant on #1210):
+        # comparing the CHECK alone admits ``prior_ocr_layer=FAIL``, and the two mean
+        # opposite things -- UNKNOWN is "no check decided", FAIL is "one did, and found
+        # something wrong", which a later run may be able to put right. Same rule as
+        # ``PERMANENTLY_UNRESOLVABLE_MODES``, where keying on the check alone was a bug.
+        pytest.param(
+            lambda meta: {
+                **meta,
+                "verdict": {
+                    **meta["verdict"],
+                    "clauses": [{**meta["verdict"]["clauses"][0], "result": "FAIL"}],
+                },
+            },
+            False,
+            id="the_clause_says_FAIL_not_UNKNOWN",
         ),
         pytest.param(
             lambda meta: {**meta, "verdict": {"clauses": [{"check": "not_a_check"}]}},

@@ -1401,10 +1401,14 @@ def _resume_prior_ocr_reading_was_accepted(
       ordinary gate requires (GH-161: status says the extraction succeeded as an operation,
       only the audit verdict says the CONTENT was accepted), and it is the clause that
       excludes the floor, which is ``audit_passed=False`` by construction.
-    * the engine is NOT a native lane -- a MODEL read these pixels. ``native`` and
-      ``chart_asset`` both ship the page's own ``native_text``, which on this family IS the
-      suspect layer, so neither is a reading of the page that could be accepted in the sense
-      this exception means.
+    * the engine is PRESENT and is not a native lane -- a MODEL read these pixels.
+      ``native`` and ``chart_asset`` both ship the page's own ``native_text``, which on this
+      family IS the suspect layer, so neither is a reading of the page that could be
+      accepted in the sense this exception means. An ABSENT engine is refused too (r-uben's
+      review, Grok P2): ``PageOutput`` defaults to ``engine=""`` beside
+      ``audit_passed=True``, so an empty string would read as "a model read this" on a
+      record that names no reader at all. No producer was found that reaches here in that
+      state; the docstring says doubt is refused, so it is refused.
     * ``status`` is exactly WARNING and ``failure_mode`` is exactly
       ``PRIOR_OCR_LAYER_UNVERIFIED`` -- the ONLY demotion is this one.
       ``_demote_for_verdict`` never overwrites a more specific mode that is already there,
@@ -1465,7 +1469,8 @@ def _resume_prior_ocr_reading_was_accepted(
     # An ACCEPTED reading, and a MODEL's.
     if raw_winning.get("audit_passed") is not True:
         return False
-    if engine_ships_native_text(raw_winning.get("engine")):
+    engine = str(raw_winning.get("engine") or "")
+    if not engine or engine_ships_native_text(engine):
         return False
 
     # Demoted by this mark, and by nothing else.
@@ -15495,7 +15500,7 @@ class UnifiedPipeline:
             NOT a page-failure marker (a timed-out / ERROR / lossy-fallback page
             written terminal at assemble must be RE-OCR'd, never skipped) --
             UNLESS the page carries a GH-353 table-judge-ladder ``REJECTED``
-            disposition (see below), the ONE deliberate exception.
+            disposition (see below), the FIRST of four deliberate exceptions.
           * The winning output's ``audit_passed`` is exactly ``True`` (GH-161).
             Status says the extraction succeeded as an OPERATION; only the audit
             verdict says the CONTENT was accepted.  A judge-rejected scanned page
@@ -15546,7 +15551,7 @@ class UnifiedPipeline:
         try:
             from ocr_output_contract import doc_dir_for, relative_key, safe_checksum
 
-            from socr.core.manifest import is_page_failed_marker
+            from socr.core.manifest import engine_ships_native_text, is_page_failed_marker
             from socr.core.verdict import PageVerdict
 
             scan_root = self._scan_root or state.handle.path.parent
@@ -15697,7 +15702,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and minus_as_digit_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "PP-5: p%d not resumed; its cached native text is suspect under the "
@@ -15709,7 +15714,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and garbled_math_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "#960: p%d not resumed; the current analysis flags garbled math",
@@ -15721,7 +15726,7 @@ class UnifiedPipeline:
             if (
                 ps_fresh is not None
                 and table_not_reconstructed_suspect(ps_fresh)
-                and str(winning.get("engine") or "").startswith(("native", "chart_asset"))
+                and engine_ships_native_text(winning.get("engine"))
             ):
                 logger.debug(
                     "GH-994: p%d not resumed; the current analysis flags a flattened table",
@@ -16353,6 +16358,12 @@ class UnifiedPipeline:
             # flagged page and was written against the day it stopped being (pinned at the
             # seam by ``test_a_restored_page_keeps_the_retained_layer`` and now on the live
             # path by ``test_gh1192_resume_accepted_prior_ocr.py``).
+            # COORDINATION, #1207 (Argon, #1210 round 1): that PR writes this to
+            # ``ps.prior_ocr_layer_text`` instead, so a restored early-return page
+            # (``is_born_digital=False``) keeps ``ps.native_text`` empty. The two are not
+            # alternatives to choose between here -- whichever of the two PRs merges
+            # SECOND takes #1207's version of this line, because its field is the narrower
+            # one and this ticket needs only that the layer survives the restore.
             _retained_layer = meta.get("prior_ocr_layer_text")
             if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
                 ps.native_text = _retained_layer

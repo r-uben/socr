@@ -86,22 +86,61 @@ still gets that one embedded beside the ones already there. One shared helper
 (`_figure_ref_for`) now computes the ref for both writing and recognising it, so the two
 cannot drift. **It is a separable change and can be split into its own commit.**
 
-## The saving, from measured numbers only
+## The saving, measured through the predicate itself
+
+The first version of this section computed the saving from the pages the JUDGE accepted.
+r-uben's round-1 review (should-fix 2) pointed out that is not the same set: the predicate
+also requires EXACTLY ONE verdict clause, and he showed at `process()` that an accepted
+reading on a flagged page carrying a markdown table ends `table_unverified`,
+`audit_passed=False`, with clauses `[prior_ocr_layer, source_evidence]` — so it keeps
+re-reading, exactly as on main.
+
+So the count was redone by calling `_resume_prior_ocr_reading_was_accepted` on the 18 Oct
+pilot's real sidecars (`fed-repilot-1018`, 185 pages over 8 documents;
+`scratch/1192/measure_pilot.py`), with `flagged_by_this_run=True` — what a resume of the
+same input under this build sees. No reimplementation of the rule:
+
+| | pages |
+|---|---|
+| pilot pages with a sidecar | 185 |
+| flagged (prior OCR layer) | 76 |
+| **ADMITTED by the predicate** | **55 (72.4% of flagged)** |
+| refused | 21 |
+
+All 21 refusals are fail-closed FLOORS — 20 by #1156's own route
+(`fail_closed_marker`/`prior_ocr_layer_unread`), 1 by #1027's `invisible_scan_unread` — so
+every refusal is a page whose reading was refused, which is the half held back on purpose.
+**Zero pages are lost to the one-clause requirement:** 75 of the 76 flagged pages carry
+exactly one clause, and the single page with two (`native_coverage=FAIL` beside
+`prior_ocr_layer=UNKNOWN`) is already among the floors.
 
 | | pages | GPU-s each | per resume |
 |---|---|---|---|
 | all flagged pages (today) | 141,000 | 3.39 | **132.8 H100-h** |
-| accepted — no longer re-read | 102,039 | 3.39 | **96.1 H100-h saved** |
-| rejected — still re-read | 38,961 | 3.39 | 36.7 H100-h |
+| admitted — no longer re-read | 102,039 | 3.39 | **96.1 H100-h saved** |
+| refused (floors) — still re-read | 38,961 | 3.39 | 36.7 H100-h |
 
-Inputs, none of them measured in this ticket:
+So 96.1 H100-h is the figure the predicate actually buys on this pilot, not an upper bound
+on it. **But the pilot is a thin basis for the table claim specifically.** 3 of the 55
+admitted pages do carry a pipe table and were admitted anyway — on a suspect layer Part A
+makes the table judges ABSTAIN rather than fail, so no second clause is published — while
+r-uben's `process()` fixture did produce `source_evidence=UNKNOWN`. Three pages cannot
+settle which of those two behaviours the Fed corpus will show, and the pilot is 1951–1957
+material, lighter in tables than later decades. Read 96.1 as measured on this slice, and
+expect it to fall if later decades publish a second clause on their table pages.
+
+**This is a caveat, not an open ticket (owner, 2026-10-19).** The full Fed run's
+calibration — 70 documents across all decades, running as this lands — measures it: rerun
+`scratch/1192/measure_pilot.py` against its sidecars for the corpus-wide admitted share.
+
+Inputs not measured in this ticket:
 
 * **141,000** prior-OCR pages: 52.8% of a reconciled 4,248-page stratified sample,
   extrapolated by decade over a ≈218,000-page Fed corpus (#1156's measurement).
 * **3.39 GPU-s** per model-read page: measured earlier, over 111 documents.
-* **55 of 76 accepted**: the 18 Oct pilot measured 21 of 76 flagged pages REJECTED (28%).
-  76 pages is a small sample and the split scales the saving linearly, so read 96 H100-h as
-  "the accepted share of 133", not as a number with two significant figures.
+
+The admitted SHARE (55/76) is now measured rather than assumed, but on 76 pages; it scales
+the saving linearly.
 
 The saving is per RESUME and only for pages already read; it does not reduce the first
 run's cost (≈47 H100-h once, measured over 111 documents).
@@ -117,6 +156,44 @@ first full Fed run: how many rejected pages a different rung rescues. If none ev
 `PRIOR_OCR_LAYER_UNVERIFIED` can join the #1145 treatment and this exception's
 `audit_passed` clause relaxes; if some do, the re-read is the price of the rescue.
 
+## Round 1 (PR #1210: Grok MERGE, Argon MERGE-AFTER-FIX, r-uben MERGE once should-fix 1)
+
+Third commit on the branch. r-uben could not get the exception to admit a page that should
+be re-read; all three seats' remaining findings were either fixed here or filed.
+
+* **The per-figure filter is now pinned** (r-uben should-fix 1). The guard's comment claimed
+  it filters per FIGURE so a page that gained a new one still gets it; nothing tested that,
+  and collapsing it to a per-PAGE skip left all 644 tests in the 30 related files passing
+  while DROPPING the second figure — silent loss, worse than the duplicate the guard fixes.
+  His refs for (figure 1, figure 2): main `3bcc43d` (2, 1); this PR (1, 1); per-page mutant
+  (1, **0**). Pinned by a two-figure arm that cuts one block out of the restored fragment,
+  and the per-page mutant is now one of the twelve.
+* **The saving is measured** (should-fix 2) — see above.
+* **The clause comparison keeps its RESULT** (r-uben surviving mutant): comparing the check
+  alone admitted `prior_ocr_layer=FAIL`, and FAIL means a check DID decide and found
+  something wrong, which a later run may fix. Grid row added.
+* **A record naming no engine is refused** (r-uben nit, Grok P2): `PageOutput` defaults to
+  `engine=""` beside `audit_passed=True`, so an empty string read as "a model read this".
+  Two grid rows (empty string, missing key).
+* **Nits:** D1b is no longer called "the ONE deliberate exception"; the three sibling
+  suspect guards in the same function now ask `engine_ships_native_text` rather than
+  respelling the lane tuple (each of the three proved by its own existing tests — a mutant
+  reverting each one is killed by `test_gh913_minus_as_digit.py`,
+  `test_gh990_control_byte.py`, `test_gh960_garbled_math.py`,
+  `test_gh994_flattened_table.py`); and the figure test now reads the ledger's own decision
+  through a `_load_terminal_page` spy instead of `assert 1 not in pages_read`, which could
+  not fail on a fixture whose pages take a native lane.
+* **#1207 coordination** (Argon §5): a comment at the restore line records that whichever
+  of the two PRs merges SECOND takes #1207's `ps.prior_ocr_layer_text` version. No
+  behaviour change here.
+* **Filed, not fixed** (`leads/1192/issue-followups.md`): the ditto guard blocking resume
+  for ever and naming `unknown=UNKNOWN` (Argon §2, mechanism confirmed by reading the guard
+  chain); the doc-global figure counter shift (Argon §4a) and its general case, a changed
+  ref (Grok); `describe_figure` called on figures whose blocks are dropped (Argon §4b);
+  #1145's equation route missing the fresh-analysis cross-check (Argon §1); and GH-189's
+  duplicate suppression looking inert on one image (r-uben). Every one is a missed saving or
+  a duplicated block — none is a wrong or a lost number.
+
 ## Not measured
 
 * No OCR run, no Ollama OCR, no GPU time: the laptop rule. Every number above is quoted
@@ -126,7 +203,10 @@ first full Fed run: how many rejected pages a different rung rescues. If none ev
 * The byte-identity of the resumed page (body AND whole sidecar) was measured on the Part A
   fixture under one config — no dual-pass tables, no escalation, no equations, descriptions
   off. It is not a claim about every config.
-* The accepted/rejected split, the 141,000 and the 3.39 GPU-s are all inherited numbers.
+* The 141,000 and the 3.39 GPU-s are inherited numbers. The admitted share (55/76) is
+  measured, on 76 pages of 1951-57 material; whether a flagged TABLE page publishes a
+  second clause on table-heavier decades is not settled by the 3 such pages this pilot has,
+  and the full Fed run's 70-document calibration is what will settle it.
 * Whether a different rung would change a REJECTED page's verdict: unmeasured, and the
   reason the other half stays out of scope.
 

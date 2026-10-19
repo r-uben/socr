@@ -160,6 +160,45 @@ def _clean_pdf(path: Path, *, pages: int = 2) -> Path:
     return path
 
 
+def _promote_page_one_to_plain_success(sidecar_path: Path) -> None:
+    """Make page 1 a plain ACCEPTED SUCCESS, leaving its FRAGMENT exactly as the run wrote
+    it, so it resumes through the ORDINARY terminal-SUCCESS gate and nothing from #1192 is
+    involved in reaching this code."""
+    meta = json.loads(sidecar_path.read_text())
+    meta["winning_output"] |= {
+        "status": PageStatus.SUCCESS.value,
+        "audit_passed": True,
+        "engine": "qwen",
+        "failure_mode": FailureMode.NONE.value,
+    }
+    meta["verdict"] = {"page_num": 1, "clauses": []}
+    meta.pop("prior_ocr_layer_suspect", None)
+    meta.pop("prior_ocr_layer_text", None)
+    sidecar_path.write_text(json.dumps(meta))
+
+
+def _resume_watching_the_ledger(
+    out: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[int, bool]:
+    """Resume, recording which pages the ledger GRANTED a skip to.
+
+    r-uben's nit: ``assert 1 not in pages_read`` cannot fail on this fixture, because its
+    pages take a native lane and no model reads them on either run. The ledger's own
+    decision is the observable that can.
+    """
+    granted: dict[int, bool] = {}
+    real = UnifiedPipeline._load_terminal_page
+
+    def spy(self, state, page_num, output_dir):
+        got = real(self, state, page_num, output_dir)
+        granted[page_num] = got is not None
+        return got
+
+    monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", spy)
+    _run(out, pdf, monkeypatch, accept=True, pages_read=[])
+    return granted
+
+
 def test_a_restored_pages_figure_block_is_embedded_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -200,27 +239,96 @@ def test_a_restored_pages_figure_block_is_embedded_once(
         f"fixture premise: page 1 shipped {before.count('![Figure')} figure blocks, not 1"
     )
 
-    # Make page 1 a plain ACCEPTED SUCCESS, so it resumes through the ordinary gate and
-    # nothing in #1192 is involved. Its FRAGMENT is left exactly as the run wrote it.
-    meta = json.loads(sidecar_path.read_text())
-    meta["winning_output"] |= {
-        "status": PageStatus.SUCCESS.value,
-        "audit_passed": True,
-        "engine": "qwen",
-        "failure_mode": FailureMode.NONE.value,
-    }
-    meta["verdict"] = {"page_num": 1, "clauses": []}
-    meta.pop("prior_ocr_layer_suspect", None)
-    meta.pop("prior_ocr_layer_text", None)
-    sidecar_path.write_text(json.dumps(meta))
-
+    _promote_page_one_to_plain_success(sidecar_path)
     _crash_after_page_one(out)
-    resume: list[int] = []
-    _run(out, path, monkeypatch, accept=True, pages_read=resume)
+    granted = _resume_watching_the_ledger(out, path, monkeypatch)
     _side_after, after = _page_one(out)
 
-    assert 1 not in resume, "page 1 was re-read, so it was never restored and this shows nothing"
+    assert granted.get(1) is True, (
+        "the ledger did not restore page 1, so it was re-read and this shows nothing"
+    )
     assert after.count("![Figure") == before.count("![Figure"), (
         "the figure block was embedded a second time on a restored page:\n"
         f"before={before!r}\nafter={after!r}"
+    )
+
+
+def _two_figure_pdf(path: Path) -> Path:
+    """Page 1 carries TWO figures; page 2 is the page a crash loses."""
+    import fitz
+
+    doc = fitz.open()
+    for i in range(2):
+        page = doc.new_page(width=612, height=792)
+        for row in range(4):
+            page.insert_text(
+                (72, 120 + row * 24),
+                f"{'w' * (i + 1)} Ordinary visible prose line {row} of a born-digital page.",
+                fontsize=10,
+            )
+        page.insert_image(fitz.Rect(72, 300, 220, 420), stream=_png(180, 150))
+        page.insert_image(fitz.Rect(320, 300, 468, 420), stream=_png(150, 180))
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_a_figure_missing_from_a_restored_fragment_is_re_embedded_without_duplicating_the_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filter is per FIGURE, not per page -- r-uben's review of #1210, should-fix 1.
+
+    The comment on the guard claims "filtered per figure rather than per page, so a page
+    that gained a NEW figure still gets that one embedded beside the ones already there".
+    Nothing pinned that: collapsing the guard to a per-PAGE skip
+    (``if any(ref in already for fig in page_figs): continue``) left all 644 tests in the
+    30 resume/figure/#1156/#1145 files passing, and DROPPED the second figure entirely --
+    silent loss, worse than the duplicate the guard was added to stop.
+
+    How a real run reaches this state: ``_drop_chart_region_duplicates`` suppresses an
+    extracted figure only while its chart crop survives, so a crop that renders on run 1
+    and fails on the resume leaves the restored page one block short while the other is
+    already there. Reproduced here by cutting one block out of the fragment, which is that
+    state on disk without needing the render to fail.
+
+    Measured by r-uben at ``process()``, refs for (figure 1, figure 2):
+    main ``3bcc43d`` (2, 1); this PR (1, 1); the per-page mutant (1, **0**).
+    """
+    path = _two_figure_pdf(tmp_path / "two.pdf")
+    out = tmp_path / "out"
+    _run(out, path, monkeypatch, accept=True, pages_read=[])
+
+    frag_path = next(iter(out.rglob("pages/00001.md")))
+    sidecar_path = next(iter(out.rglob("pages/00001.json")))
+    before = frag_path.read_text()
+    refs = ("figures/figure_1_page1.png", "figures/figure_2_page1.png")
+    assert all(before.count(f"]({ref})") == 1 for ref in refs), (
+        "fixture premise: page 1 did not ship exactly one block per figure, so neither arm "
+        f"of this test means anything. refs = {[before.count(f']({r})') for r in refs]}"
+    )
+
+    # Cut the SECOND figure's block out of the fragment, leaving the first in place.
+    kept, dropped = refs
+    blocks = before.split("\n\n")
+    surviving = [b for b in blocks if f"]({dropped})" not in b]
+    assert len(surviving) == len(blocks) - 1, (
+        f"expected to cut exactly one block, cut {len(blocks) - len(surviving)}"
+    )
+    frag_path.write_text("\n\n".join(surviving))
+
+    _promote_page_one_to_plain_success(sidecar_path)
+    _crash_after_page_one(out)
+    granted = _resume_watching_the_ledger(out, path, monkeypatch)
+    after = frag_path.read_text()
+
+    assert granted.get(1) is True, (
+        "the ledger did not restore page 1, so the figure phase never saw a restored body"
+    )
+    assert after.count(f"]({dropped})") == 1, (
+        f"the figure missing from the restored fragment was not re-embedded ({dropped}): a "
+        "per-PAGE skip drops it entirely, which is silent content loss\n"
+        f"after={after!r}"
+    )
+    assert after.count(f"]({kept})") == 1, (
+        f"the figure already in the restored fragment was embedded twice ({kept})\nafter={after!r}"
     )
