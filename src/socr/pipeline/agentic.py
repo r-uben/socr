@@ -243,7 +243,9 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
 
 
 class _PromotionLayerAbstainJudge:
-    """#1205 round 3 (Argon P1-2B): the PROMOTION may not promote on the layer's word.
+    """#1205 round 3 (Argon P1-2B), CORRECTED in round 4 (Argon P0): in the PROMOTION
+    the layer's verdict is SKIPPED -- the normal judge and the structural gate still
+    decide.
 
     ``promote_unchecked_table_attempt`` peels ``SourceEvidenceTableJudge`` and calls the
     rest of the chain directly, so a candidate the pixel lane could not check -- no
@@ -257,15 +259,44 @@ class _PromotionLayerAbstainJudge:
     the layer neither promotes nor refuses, the table stays UNVERIFIED, and the promotion
     -- which requires an acceptance -- does not happen. The page keeps its floor.
 
-    Confined to the promotion chain ON PURPOSE (owner ruling 2026-10-19). Refusing EVERY
+    Round 3 implemented that as ``accept=False``, and that LOST CONTENT -- Argon's round-4
+    P0, reproduced in ``scratch/1205r4/repro_p0.py``. A promotion that refuses is not a
+    promotion: ``settle_scanned_table_decision`` then falls to
+    ``_apply_scanned_table_floor``, which demotes ``best_output`` so the GH-90 branch
+    rewrites the page, and the model's table is replaced by the D3 fail-closed marker
+    ``[page n failed: unverifiable table -- see image]``. (Argon's review quotes that
+    marker as ``[TABLE ON PAGE 1 NOT EXTRACTED ...]``, a string that appears nowhere in
+    socr; the mechanism it describes is real, the quoted bytes are not.) Measured on
+    Argon's own fixture
+    (``flags={"positive": True}``): the ``-350`` attempt promoted on ``4d14411b`` and
+    returned ``None`` on ``4865ee7c``. Refusing without retaining is exactly what the
+    owner's ruling forbade; round 3 broke the ruling it was implementing.
+
+    So the layer abstains and NOTHING ELSE CHANGES: this runs the same two steps the
+    native verifier's own bypass runs -- ``self._inner.assess`` and the string-only
+    ``_apply_structural_gate`` (``words=None``, ``rules=None``) -- and only
+    ``verify_native_table`` is skipped. A table the normal judge accepts is promoted and
+    ships with its mark; the layer can neither promote a reading nor refuse one.
+
+    **Why not Argon's literal fix (delete this and widen the live bypass to the union).**
+    Measured, ``scratch/1205r4/probe_blanket_bypass.py``: it turns SIX tests red,
+    #1156's ``test_a_transparent_cover_is_not_an_independent_witness`` and
+    ``test_a_detection_error_does_not_turn_a_swap_into_an_acceptance`` among them. On a
+    page with no opaque cover the pixels ARE the layer's own ink, so dropping row-level
+    verification there lets a row swap through. The LIVE chain keeps what round 2
+    settled; only the promotion, which has already exhausted every reader, abstains.
+
+    Confined to the promotion chain ON PURPOSE (owner ruling 2026-10-19): refusing every
     unconfirmed table on a suspect page is #1208's rule and has to ship with retention for
-    born-digital flagged pages; applied here alone it would refuse without retaining on
-    #1202's ~14,850 pages, which is content loss. Everywhere else the judge keeps the
-    behaviour round 2 settled.
+    born-digital flagged pages.
     """
 
-    def __init__(self, inner: PageJudge, native: object | None) -> None:
-        self._inner = inner
+    def __init__(self, native: object) -> None:
+        # One object under two names: ``_inner`` keeps the chain shape every inspector
+        # walks (``wrapper._inner`` is the native judge, exactly as before this wrapper
+        # existed), ``_native`` is what the skip reaches past. The insertion site only
+        # builds this when the peeled core IS the native judge, so they cannot diverge.
+        self._inner = native
         self._native = native
 
     def _layer_may_not_decide(self, output: PageOutput) -> bool:
@@ -277,7 +308,11 @@ class _PromotionLayerAbstainJudge:
             return False
         try:
             suspect = bool(suspect_fn(output.page_num))
-        except Exception:  # a trust source that raises is not a licence to trust
+        except Exception:
+            # A trust source that raises is not a licence to trust. Since round 4 this
+            # direction costs nothing: skipping the layer's verdict neither ships an
+            # unverified number as verified (the mark stays) nor loses the table, so the
+            # conservative answer is also the one that RETAINS content.
             suspect = True
         # No exemption for a pixel-confirmed candidate, deliberately -- though the
         # obvious one ("a candidate the pixel lane confirmed is not in this class, the
@@ -298,17 +333,17 @@ class _PromotionLayerAbstainJudge:
         return suspect
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        if self._layer_may_not_decide(output):
-            return AcceptDecision(
-                accept=False,
-                reason=(
-                    "promotion refused: this page's text layer may not serve as evidence "
-                    "and no reading of the pixels confirmed this candidate, so nothing "
-                    "verified this table"
-                ),
-                confidence=0.0,
-            )
-        return self._inner.assess(output, provider)
+        if not self._layer_may_not_decide(output):
+            return self._inner.assess(output, provider)
+        # The native verifier's OWN bypass, reached from outside it: its inner chain
+        # decides and the string-only structural gate still runs. Nothing between the
+        # top of ``NativeTableVerifierJudge.assess`` and that bypass does anything else
+        # (it computes the suspicion this wrapper has already computed, and pops a
+        # confirmation record that cannot hold a promotion probe -- the probe is a
+        # ``deepcopy``), so skipping the judge skips the layer and only the layer.
+        native = self._native
+        decision = native._inner.assess(output, provider)
+        return native._apply_structural_gate(decision, output, output.page_num, None, None)
 
 
 def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
@@ -354,10 +389,16 @@ def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
             break
         probe = getattr(probe, "_inner", None)
     # Only inserted where it can DO something: with no native judge in the chain the
-    # wrapper has no suspicion source and no confirmation record, so adding it would be
-    # an inert layer -- and one that changes the chain's shape for every caller that
-    # inspects it (#1125's own deadline test reads ``peeled._inner``).
-    wrapped = _PromotionLayerAbstainJudge(core, native) if native is not None else core
+    # wrapper has no suspicion source, so adding it would be an inert layer -- and one
+    # that changes the chain's shape for every caller that inspects it (#1125's own
+    # deadline test reads ``peeled._inner``).
+    #
+    # ``core is native`` as well, because the skip works by calling PAST the native
+    # judge: that is sound only where this wrapper sits directly on it. Production is
+    # ``SE(Native(_TimeoutJudge(leaf)))`` and the older shape is ``_TimeoutJudge(SE(...))``,
+    # so after peeling core IS native in both. A chain that nested it deeper gets main's
+    # behaviour instead of a wrapper reaching through judges it cannot see.
+    wrapped = _PromotionLayerAbstainJudge(native) if native is not None and core is native else core
     for tw in reversed(timeouts):
         wrapped = tw.__class__(
             wrapped,

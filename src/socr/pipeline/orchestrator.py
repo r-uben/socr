@@ -337,6 +337,37 @@ _LAYER_CAUSED_LADDER_KINDS: dict[str, tuple[str, frozenset[str]]] = {
     "table_ladder_unverified": ("cause", frozenset({"binding_contradiction", "abstained"})),
 }
 
+
+def _sidecar_layer_caused_records(meta: dict) -> list[str]:
+    """#1205 round 4 (Argon P1): the sidecar records whose CAUSE was the text layer.
+
+    A kind alone is not the answer -- the two ladder kinds carry plenty of layer-free
+    causes (a rung outage, a budget, a blind MISMATCH) -- so the ladder kinds are matched
+    on their typed discriminator and the escalation lane, which is the layer's end to
+    end, on the kind.
+
+    Round 3 used this knowledge to DROP such records at restore. That left three paths
+    disagreeing (Argon P1): ``_load_terminal_page`` still read a layer-caused
+    ``table_withheld`` as a content terminal and skipped re-OCR, the disposition was
+    restored ungated so ``_credential_admission_refusal`` still refused the page, and
+    ``_backfill_missing_table_ladder_terminals`` re-emitted a terminal for the table
+    whose event had just been dropped. Patching a record is what made that possible, so
+    round 4 stops patching: a page like this is simply not terminal and is read again.
+    """
+    found: list[str] = []
+    for ev in meta.get("audit_events", []) or []:
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("kind", "") or "")
+        if kind in _ESCALATION_LAYER_GRADED_KINDS:
+            found.append(kind)
+            continue
+        spec = _LAYER_CAUSED_LADDER_KINDS.get(kind)
+        if spec is not None and str((ev.get("data") or {}).get(spec[0], "")) in spec[1]:
+            found.append(kind)
+    return found
+
+
 _RESUME_REPLAYED: dict[str, str] = {
     PROVIDER_EMPTY_RESPONSE_KIND: (
         "a provider answered this page with no text; emitted by the engine call, which a "
@@ -16128,6 +16159,33 @@ class UnifiedPipeline:
             if not _suspect_either_way:
                 self._apply_binding_adjudication_meta(state, page_num, meta)
 
+            # #1205 round 4 (Argon P1): REPROCESS, do not patch. A sidecar that carries a
+            # record the layer caused, on a page that is suspect now, is not a terminal
+            # ledger hit at all -- the page is read again, and this run's own producers
+            # (all gated) decide it. Round 3 instead dropped those records at restore and
+            # left three paths behind: the terminal skip itself, the ungated disposition,
+            # and the assemble-time backfill that re-emitted what had been dropped.
+            #
+            # Returning None here is the WHOLE fix, because the restore never runs for a
+            # page the gate refuses (both call sites are ``if resumed is not None``). So
+            # nothing downstream needs a second guard, and round 3's replay-drop is now
+            # dead code -- removed with this commit rather than left to rot.
+            #
+            # The cost is bounded and small: within one socr version the gated producers
+            # CANNOT write such a record, so this fires only where suspicion changed
+            # between runs -- a sidecar from before the page was flagged, or from a build
+            # without these gates. Rare by construction, and the re-read is the honest
+            # answer when the evidence behind the old verdict is no longer admissible.
+            _layer_caused = _sidecar_layer_caused_records(meta) if _suspect_either_way else []
+            if _layer_caused:
+                logger.debug(
+                    "PP-5: p%d not resumed; its sidecar carries %s, caused by a text "
+                    "layer that may not serve as evidence on this run",
+                    page_num,
+                    ", ".join(sorted(set(_layer_caused))),
+                )
+                return None
+
             # P1: the sidecar was written by a run whose table judge ladder
             # encountered transient rung unavailability. When a rung is attemptable
             # NOW, refuse the skip so the page is re-judged. When rungs remain
@@ -17174,30 +17232,15 @@ class UnifiedPipeline:
                 # is replayed, and ``verified_by_blind_cell_transcription`` is a third
                 # vendor reading the CROP pixels, which is independent of the layer and
                 # also stands. Only the geometry route is dropped.
-                # #1205 round 3 (Argon P1-3): five more replayed kinds are
-                # layer-derived, which round 2's audit table got WRONG -- it classified
-                # them from their emit site without following the cause through. Each
-                # withholds content or blocks a #713 credential, and each carries a TYPED
-                # discriminator saying what produced it:
-                #
-                #  * ``table_ladder_withheld`` with ``reason`` ``native_contradiction``
-                #    or ``sibling_of_contradicted`` -- from ``contradictions_for_tables``,
-                #    which reads the layer;
-                #  * ``table_ladder_unverified`` with ``cause`` ``binding_contradiction``
-                #    or ``abstained`` -- from ``bind()``, likewise;
-                #  * the three ``table_escalation_*`` kinds -- their lane grades the page
-                #    with ``score_page`` / ``native_rows_from_page``, so the refusal, the
-                #    timeout and the withholding all describe a decision the layer drove.
-                #
-                # Gated on the CAUSE, not the kind: those two ladder kinds carry plenty of
-                # layer-free causes (a rung outage, a budget, a blind MISMATCH) and those
-                # still replay -- dropping them would withhold a page the pixels decided.
-                if not layer_is_admissible_evidence(ps):
-                    if ev_kind in _ESCALATION_LAYER_GRADED_KINDS:
-                        continue
-                    _spec = _LAYER_CAUSED_LADDER_KINDS.get(ev_kind)
-                    if _spec is not None and str(ev_data.get(_spec[0], "")) in _spec[1]:
-                        continue
+                # #1205 round 4 (Argon P1): round 3 dropped the five layer-caused
+                # records HERE, and that is gone. Dropping a record patches the page's
+                # history and leaves every other consumer of the same verdict -- the
+                # terminal skip, the restored disposition, the assemble-time backfill --
+                # reading a story the events no longer tell. ``_load_terminal_page`` now
+                # refuses such a page outright, so this loop never sees one: the restore
+                # only runs for a page the gate returned. The classification itself
+                # survives as ``_sidecar_layer_caused_records``, which is what the gate
+                # asks.
                 if ev_kind == TABLE_LADDER_ACCEPTED_KIND and not layer_is_admissible_evidence(ps):
                     from socr.judge.table_verdict import REASON_VERIFIED_BY_GEOMETRY
 
