@@ -189,6 +189,15 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # reach it, so nothing here changes; the scoping lives at the emit site.
         "table_unexplained_lanes",
         "table_not_scorable",
+        # #1205: a crop reread patched the page, but the only thing that could have
+        # APPROVED the patch is this page's own text layer -- which is an earlier OCR
+        # run, or a detection scan that failed. The accepted bytes ship unchanged and
+        # the crop reading went unverified, so a consumer must be told the verification
+        # never completed. Listed here for the same reason GH-166's crop TIMEOUT kind
+        # had to be: the event was emitted and not listed, so ``tables_trust.json``
+        # reported no untrusted pages after an incomplete verification and the page read
+        # as verified.
+        "table_crop_repair_unverifiable",
         # GH-151 TICKET-B1 review: a fourth shape of the same rule. A2/A2b's
         # structural gate demotes a page to WARNING/audit_passed=False when the
         # native grid genuinely splits a row's label from its values (ragged

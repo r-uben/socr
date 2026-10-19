@@ -6781,6 +6781,33 @@ class UnifiedPipeline:
             return True
         return bool(ladder) and not decision.accepted and len(attempts) >= len(ladder)
 
+    @staticmethod
+    def _table_layer_is_evidence(ps) -> bool:
+        """#1205: whether the table chain may read this page's text layer AT ALL.
+
+        Takes the UNION, ``layer_is_admissible_evidence`` -- scan-failed included.
+        This is #1156 Part A's own split, and round 2 of this ticket got it wrong
+        in one direction (Argon P1, owner ruling 2026-10-18): an EVIDENCE decision
+        takes the union, because refusing evidence is never destructive and
+        "unknown" is not a reason to trust the words either; only WITHHOLDING the
+        layer's own text takes the positive finding. The first version keyed every
+        reader here on the positive finding, which left a page whose DETECTION SCAN
+        FAILED grading a correct reading down and promoting a candidate that
+        matched the layer -- an unknown layer deciding a number.
+
+        The sites that read it are listed in
+        ``docs/log/2026-10-18_1205-table-chain-readers.md``, so a new reader has one
+        place to look, and each is pinned by BEHAVIOUR in
+        ``tests/test_1205_table_chain_evidence_readers.py``. Per-site gating is the
+        design: a text-free page HANDLE was built and dropped, because the table phase
+        opens the page in four separate places and the witness path takes a path
+        rather than a page, so the handle was three wraps rather than one entry point
+        -- and with these guards in place, deleting any of the three changed no
+        outcome. The cost of per-site gating is that a new reader is a new hole, which
+        the log also records.
+        """
+        return layer_is_admissible_evidence(ps)
+
     def _table_page_needs_escalation(
         self, state: DocumentState, page_num: int, page, ps, bo
     ) -> bool:
@@ -6828,6 +6855,26 @@ class UnifiedPipeline:
         from socr.benchmark.table_exactness import score_page
         from socr.core.audit_log import AuditEvent
         from socr.tables.native_rows import native_rows_from_page, rows_establish_grid
+
+        # #1205: this page's own text layer is the GROUND TRUTH below, so the
+        # first question is whether it may be read at all. Checked BEFORE the
+        # parse, so nothing is derived from a layer that may not serve as
+        # evidence. Same ending as a page with no scorable grid -- no ground
+        # truth, and the absence SURFACED rather than passing silently.
+        if not self._table_layer_is_evidence(ps):
+            if self._page_has_scorable_table_evidence(page_num, ps):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="table_not_scorable",
+                        detail=(
+                            "this page's text layer is an earlier OCR run (or a failed "
+                            "detection scan); it is not ground truth, so the table is "
+                            "not scorable"
+                        ),
+                    )
+                )
+            return False
 
         try:
             gt_rows = native_rows_from_page(page)
@@ -7162,6 +7209,28 @@ class UnifiedPipeline:
                 self._reconcile_chart_table_grids(state, page_num, out)
                 self._suppress_chart_table_skeletons(state, page_num, out)
 
+                if not self._table_layer_is_evidence(ps):
+                    # #1205 round 2: a forced escalation still must not be JUDGED
+                    # against this page's own layer. The candidate was produced and
+                    # is billable; it is refused on the record, and the incumbent --
+                    # which no suspect layer has graded -- ships.
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_rejected",
+                            engine=profile.engine.value,
+                            detail=(
+                                "this page's text layer is an earlier OCR run (or a "
+                                "failed detection scan): it is neither ground truth nor "
+                                "a value oracle, so the candidate cannot be judged; "
+                                "keeping the incumbent"
+                            ),
+                            data={"gate": "none", "delta": None},
+                        )
+                    )
+                    _record_attempt_cost()
+                    self._mark_escalation_not_received(ps)
+                    return False, bo
                 try:
                     decision = decide_escalation(page, incumbent_text, out.text)
                 except Exception:
@@ -8643,7 +8712,20 @@ class UnifiedPipeline:
         self._table_judge_gate_rungs = list(rungs)
 
         try:
-            with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
+            # #1205: the pairing corroboration may not take its swap verdict
+            # from a suspect layer -- a contradicted pair gets NO crop, so nothing
+            # can look at that table and it reaches the ladder UNVERIFIED. That is
+            # content withheld on the layer's say-so, the shape #1202 gated at the
+            # ``contradictions_for_tables`` call, and round 2 widened it to the
+            # union: an "unknown" layer may not withhold a crop either.
+            # ``prepare_table_witnesses`` opens the page itself (for boxes and crops
+            # as well as words), so it is handed the ANSWER rather than a view.
+            with prepare_table_witnesses(
+                state.handle.path,
+                page_num,
+                bo.text,
+                layer_is_evidence=self._table_layer_is_evidence(ps),
+            ) as witnesses:
                 if not witnesses:
                     # No table blocks in bo.text. Assemble completeness
                     # backfills if the shipped text later contains tables.
@@ -14154,15 +14236,43 @@ class UnifiedPipeline:
             # with a FAILED crop patch anyway by this route. `failed_crops`
             # joins `had_timeout` here for the same reason it does above --
             # partial coverage is partial however the crop failed.
+            # #1205 round 2 (Argon P1, owner ruling): this fallback is the one
+            # place a crop reading may CHANGE numbers that the judge already
+            # accepted, and ``crop_patch_improves_verification`` is what approves
+            # it. Two of its five severity terms come from the page's text layer
+            # and the other three from the markdown alone, so with the layer
+            # inadmissible a patch that merely fills in header cells scores as an
+            # improvement -- and a row-swapped crop rides in with it. There is no
+            # independent evidence here to put in the layer's place (the crops are
+            # the thing being judged), so the fallback does not run: the page keeps
+            # the bytes the judge accepted and says the patch went unverified.
+            # Never a fall back to the layer.
+            layer_inadmissible = not self._table_layer_is_evidence(ps)
             needs_crop_fallback = (
                 not had_timeout
                 and not failed_crops
+                and not layer_inadmissible
                 and page_needs_crop_repair_fallback(
                     original_text,
                     native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
                     fitz_page=fitz_page,
                 )
             )
+            if layer_inadmissible and not effective_auto_patch:
+                crop_repair_declined = True
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="table_crop_repair_unverifiable",
+                        engine=bo.engine or "",
+                        detail=(
+                            f"crop-repair fallback not run on p{page_num}: this page's "
+                            "text layer is an earlier OCR run (or a failed detection "
+                            "scan), so a patch could only be approved on header shape; "
+                            "the accepted bytes ship unchanged"
+                        ),
+                    )
+                )
             if needs_crop_fallback and not effective_auto_patch:
                 candidate = reconcile_page_tables(
                     original_text,
@@ -14491,12 +14601,22 @@ class UnifiedPipeline:
             ps = state.pages.get(page_num)
             return ps is not None and not layer_is_admissible_evidence(ps)
 
+        def native_layer_found(page_num: int) -> bool:
+            # #1205: the POSITIVE finding, the narrower of #1156 Part A's two keys.
+            # ``native_evidence_suspect`` above is the union; the judge needs both,
+            # because they govern different halves of the verifier (see its assess).
+            from socr.core.manifest import prior_ocr_layer_found
+
+            ps = state.pages.get(page_num)
+            return ps is not None and prior_ocr_layer_found(ps)
+
         native_judge = NativeTableVerifierJudge(
             inner=timed_leaf,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
             record_event=record_event,
             native_evidence_suspect=native_evidence_suspect,
+            native_layer_found=native_layer_found,
         )
 
         def native_trusted(page_num: int) -> bool | None:

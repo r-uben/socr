@@ -172,6 +172,7 @@ def prepare_table_witnesses(
     markdown: str,
     *,
     crop_dpi: int = DEFAULT_CROP_DPI,
+    layer_is_evidence: bool = True,
 ) -> Iterator[list[TableWitness]]:
     """Yield one ``TableWitness`` per emitted table block on ``page_num``.
 
@@ -184,6 +185,18 @@ def prepare_table_witnesses(
     against native numeric-token evidence ("pairing corroboration" — see
     module docstring): a demonstrated swap demotes the pair to ``AMBIGUOUS``;
     absent or tied evidence is NEUTRAL and ships the index pairing.
+
+    #1205: ``layer_is_evidence=False`` says this page's text layer is an EARLIER
+    OCR run (``manifest.prior_ocr_layer_found``), so it may not supply the swap
+    verdict. The corroboration evidence is then empty for every box, which is
+    NEUTRAL by construction and ships the index pairing -- the same ending a
+    page with no native words already gets. The demotion it removes is not a
+    free extra check: a corroboration-contradicted pair gets no crop at all, so
+    nothing can look at that table and it reaches the ladder UNVERIFIED. That is
+    content withheld on the strength of the suspect layer, which is exactly the
+    shape #1202 gated at the ``contradictions_for_tables`` call. Box location
+    and every crop are unaffected -- they are geometry and pixels, read from the
+    real page.
     """
     blocks = find_table_blocks(markdown)
     witnesses: list[TableWitness] = []
@@ -196,7 +209,11 @@ def prepare_table_witnesses(
             contradicted: set[int] = set()
             if status is WitnessStatus.LOCATED and len(blocks) >= 2:
                 contradicted = _corroboration_contradicted_indices(
-                    pdf_path, page_num, boxes, block_mds
+                    pdf_path,
+                    page_num,
+                    boxes,
+                    block_mds,
+                    layer_is_evidence=layer_is_evidence,
                 )
             # Count-mismatch AMBIGUOUS (from _classify, not corroboration)
             # gets one full-page crop shared by every block on the page.
@@ -379,7 +396,12 @@ def _render_page_safe(pdf_path: Path, page_num: int, crop_dpi: int) -> Path | No
 
 
 def _corroboration_contradicted_indices(
-    pdf_path: Path, page_num: int, boxes: list[TableBox], block_mds: list[str]
+    pdf_path: Path,
+    page_num: int,
+    boxes: list[TableBox],
+    block_mds: list[str],
+    *,
+    layer_is_evidence: bool = True,
 ) -> set[int]:
     """Pairwise swap-contradiction check for a count-matched page (n >= 2).
 
@@ -388,7 +410,9 @@ def _corroboration_contradicted_indices(
     evidence for every box, which is NEUTRAL by construction (no matched
     evidence can ever exceed 0), so the index pairing ships unchanged.
     """
-    native = _native_numeric_multisets(pdf_path, page_num, boxes)
+    native = _native_numeric_multisets(
+        pdf_path, page_num, boxes, layer_is_evidence=layer_is_evidence
+    )
     output = [_numeric_multiset_from_tokens(_numeric_tokens_from_text(md)) for md in block_mds]
     n = len(boxes)
     overlap = [[_multiset_overlap(native[i], output[j]) for j in range(n)] for i in range(n)]
@@ -409,7 +433,11 @@ def _multiset_overlap(a: Counter, b: Counter) -> int:
 
 
 def _native_numeric_multisets(
-    pdf_path: Path, page_num: int, boxes: list[TableBox]
+    pdf_path: Path,
+    page_num: int,
+    boxes: list[TableBox],
+    *,
+    layer_is_evidence: bool = True,
 ) -> list[Counter]:
     """Best-effort per-box native numeric-token multiset. Never raises.
 
@@ -418,6 +446,13 @@ def _native_numeric_multisets(
     text layer once for all boxes rather than once per box.
     """
     empty = [Counter() for _ in boxes]
+    # #1205: the page is not opened at all when its layer may not serve as
+    # evidence. Empty evidence for every box is NEUTRAL by construction (no
+    # matched evidence can exceed 0), which is the same ending a page with no
+    # native words already gets -- and the boxes and crops, which are geometry and
+    # pixels, are read elsewhere and are untouched.
+    if not layer_is_evidence:
+        return empty
     try:
         doc = open_pdf(pdf_path)
     except Exception as exc:  # pragma: no cover - defensive

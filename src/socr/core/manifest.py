@@ -2077,6 +2077,15 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         "dualpass_flagged",
         "dualpass_crop_timeout",
         "dualpass_crop_failed",
+        # #1205: the crop-repair fallback did not run, because the only thing that
+        # could have APPROVED the patch is this page's own text layer, which is an
+        # earlier OCR run (or a failed detection scan). Same family as the two crop
+        # kinds above and it blocks for the same reason: a crop reading of this page's
+        # table exists and nothing verified it, so admitting a stand-in that says every
+        # table was accepted would admit it over an outstanding "verification never
+        # completed". Nothing retires it today, so it blocks; when an explicit
+        # applicable resolution exists, retire it there rather than exempting the kind.
+        "table_crop_repair_unverifiable",
         "native_table_verifier_warn",
         "native_table_verifier_hard_fail",
         "table_value_drift_unadjudicated",

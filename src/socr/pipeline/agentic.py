@@ -1226,12 +1226,14 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         is_table_page: Callable[[int], bool],
         record_event: Callable[[object], None] | None = None,
         native_evidence_suspect: Callable[[int], bool] | None = None,
+        native_layer_found: Callable[[int], bool] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
         self._native_evidence_suspect = native_evidence_suspect
+        self._native_layer_found = native_layer_found
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1266,21 +1268,70 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                 suspect = bool(self._native_evidence_suspect(page_num))
             except Exception:  # a trust source that raises is not a licence to trust
                 suspect = True
-        if suspect and self._get_fitz_page is not None:
+        # #1205 round 2 (Argon P0). Rounds 2/3 narrowed the bypass to
+        # ``page_has_opaque_page_covering_raster`` on the ground that suspicion must
+        # never make a check weaker: dropping row-level verification is only safe when
+        # something INDEPENDENT read the pixels. That reasoning was sound about the
+        # REJECTION half of this verifier and blind to the other half. ``EXACT_PASS``
+        # below is an ACCEPTING exit that skips ``self._inner.assess`` entirely and
+        # stamps confidence 1.0 -- so on a page whose layer is an earlier OCR run, a
+        # model reading that reproduces the layer's own error is waved through by that
+        # error, with no judge consulted. Measured consequence on the #1205 fixture:
+        # the layer reads ``350`` where the page says ``-350``; a model that drops the
+        # minus matches the layer exactly and ships at 1.0.
+        #
+        # So the two halves are split by the two #1156 keys:
+        #
+        # * a POSITIVE finding (``prior_ocr_layer`` / ``invisible_text_over_raster``)
+        #   bypasses native verification altogether -- this layer is established as a
+        #   previous reading, and #1202 already gives the page the pixel lane
+        #   (``SourceEvidenceTableJudge``'s raster witness), the visual table ladder
+        #   and the blind cell guard, so bypassing is not an absence of checking;
+        # * a FAILED detection scan ("unknown") keeps row-level verification, because
+        #   that page may well be genuinely born-digital and the rejection is the
+        #   stronger direction -- but it may never take the ``EXACT_PASS``
+        #   short-circuit, since an unknown layer may not pass a reading unjudged.
+        #
+        # #1202's own bypass is KEPT and this one JOINS it. Round 3 of this ticket
+        # replaced it, and #1202's test caught the consequence: a page that is suspect
+        # but not established, and that carries an opaque page-covering raster, had its
+        # pixels read independently by the outer ``SourceEvidenceTableJudge`` -- so
+        # verifying it against its own layer can only veto a reading that already has
+        # a better witness. The two bypasses answer different questions and both are
+        # sufficient:
+        #
+        # * ``layer_found`` -- the layer IS an earlier OCR run. The question itself.
+        #   True on every render-mode-3 page, where the raster proxy answers False
+        #   because there is no single page-covering image.
+        # * the opaque raster -- something independent read these pixels. #1202's.
+        layer_found = False
+        if self._native_layer_found is not None:
+            try:
+                layer_found = bool(self._native_layer_found(page_num))
+            except Exception:  # a source that raises is not a licence to trust
+                layer_found = True
+        if suspect and not layer_found and self._get_fitz_page is not None:
             # Round 2/3 (Astra P1, then Argon -- the same weakening twice more):
             # coverage is not a witness. ``page_has_page_covering_raster`` is satisfied
             # by an image drawn with alpha 0, which leaves the pixels unchanged; and
             # coverage by an OPAQUE image is still satisfied by a born-digital table
             # drawn ON TOP of a background photo. The pixels are an independent reading
-            # only of text that lies UNDER them, which is the positive question
-            # ``_has_prior_ocr_layer`` asks.
+            # only of text that lies UNDER them.
             from socr.core.born_digital import page_has_opaque_page_covering_raster
 
             try:
-                suspect = bool(page_has_opaque_page_covering_raster(self._get_fitz_page(page_num)))
+                layer_found = bool(
+                    page_has_opaque_page_covering_raster(self._get_fitz_page(page_num))
+                )
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
-                suspect = False
+                layer_found = False
+        exact_pass_needs_a_judge = suspect and not layer_found
+        if suspect and not layer_found:
+            # Unknown, and nothing independent read these pixels: keep verifying, which
+            # is the direction that cannot ship a wrong number. The EXACT_PASS guard
+            # below is what stops the layer PASSING a reading on its own.
+            suspect = False
         if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)
@@ -1414,6 +1465,29 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # a gate rejection below can never be mistaken for this one.
             if not decision.accept:
                 output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
+            return self._apply_structural_gate(
+                decision, output, page_num, words, rules, furniture=furniture
+            )
+
+        if vr.state == VerifierState.EXACT_PASS and exact_pass_needs_a_judge:
+            # #1205 round 2: the layer is "unknown" (a FAILED detection scan). Its
+            # agreement with the model is not a pass -- it may be the same OCR error
+            # twice -- so the one accepting exit that consults no judge is closed and
+            # the inner judge decides. The verifier's REJECTION power is untouched:
+            # a hard fail above still refuses, which is the direction that cannot
+            # ship a wrong number.
+            self._emit_event(
+                page_num=page_num,
+                kind="table_value_drift_unadjudicated",
+                engine=output.engine or "",
+                detail=(
+                    "deterministic EXACT_PASS withheld: this page's text layer could "
+                    "not be established as the document's own characters, so its "
+                    "agreement with the reading is not a pass; deferring to the judge"
+                ),
+                data={"verifier_state": vr.state, "adjudicated": False},
+            )
+            decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(
                 decision, output, page_num, words, rules, furniture=furniture
             )
