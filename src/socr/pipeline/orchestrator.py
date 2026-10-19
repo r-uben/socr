@@ -335,6 +335,20 @@ _LAYER_CAUSED_LADDER_KINDS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"native_contradiction", "sibling_of_contradicted"}),
     ),
     "table_ladder_unverified": ("cause", frozenset({"binding_contradiction", "abstained"})),
+    # #1205 round 5 (Argon P1). The one RESOLVING kind here, and the only one whose
+    # layer-caused form is an ACCEPTANCE rather than a withholding -- which is why four
+    # rounds of looking for adverse records missed it. ``reason`` is present only when
+    # the readers were OVERRULED, and ``verified_by_geometry`` means the overruling
+    # evidence was ``bind()``'s check against this page's own text layer: the visual
+    # readers refused the table and the layer alone granted it. On a page where that
+    # layer may not serve as evidence the acceptance has no author, so the page is
+    # re-read like any other -- the direction matters not at all, only the authorship.
+    #
+    # Narrow, and the controls say why: an ordinary acceptance carries no ``reason`` and
+    # is a verdict of the readers themselves, and ``verified_by_blind_cell_transcription``
+    # is a third vendor reading the CROP pixels. Both stay terminal; re-reading them
+    # would throw away work the pixels did.
+    "table_ladder_accepted": ("reason", frozenset({"verified_by_geometry"})),
 }
 
 
@@ -17639,11 +17653,16 @@ class UnifiedPipeline:
                 # only runs for a page the gate returned. The classification itself
                 # survives as ``_sidecar_layer_caused_records``, which is what the gate
                 # asks.
-                if ev_kind == TABLE_LADDER_ACCEPTED_KIND and not layer_is_admissible_evidence(ps):
-                    from socr.judge.table_verdict import REASON_VERIFIED_BY_GEOMETRY
-
-                    if str(ev_data.get("reason", "")) == REASON_VERIFIED_BY_GEOMETRY:
-                        continue
+                # #1205 round 5 (Argon P1): round 2's drop of a geometry-overruled
+                # acceptance stood HERE, the last survivor of the patch-the-record
+                # approach round 4 replaced. It is gone for the same reason the other
+                # five went: the kind is now in ``_LAYER_CAUSED_LADDER_KINDS``, so
+                # ``_load_terminal_page`` refuses the page and this loop never sees one.
+                # Keeping both would have been worse than either -- the gate admitted
+                # the page as terminal, this dropped its only ladder terminal, and
+                # ``_backfill_missing_table_ladder_terminals`` then stamped the skipped
+                # page ``table_ladder_unverified(missing_table_terminal)`` and listed it
+                # untrusted. Measured before the fix in ``scratch/1205r5/repro_p1.py``.
                 if ev_kind == TABLE_LADDER_UNVERIFIED_KIND and "latched" not in ev_data:
                     # GH-581 cold review round 6, finding 1: a sidecar written
                     # by a pre-GH-581 build has NO ``latched``/``cause``/

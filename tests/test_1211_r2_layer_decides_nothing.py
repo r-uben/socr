@@ -432,49 +432,58 @@ def _accepted_event(reason: str | None) -> dict:
     }
 
 
-def test_a_geometry_overruled_acceptance_is_not_replayed_on_a_flagged_page(
+def test_a_geometry_overruled_acceptance_is_not_restored_on_a_flagged_page(
     tmp_path: Path,
 ) -> None:
-    """Found by auditing all 60 replayed kinds for this round.
+    """Found by auditing all 60 replayed kinds in round 2; UPGRADED in round 5.
 
-    ``table_ladder_accepted`` is the ONLY resolving kind the replay loop carries: it
-    CLEARS that table's distrust in ``tables_trust``. ``data["reason"]`` says what
-    cleared it, and the key is present only when the readers were OVERRULED.
-    ``verified_by_geometry`` means the overruling evidence was ``bind()``'s check against
-    this page's own text layer -- which #1202 stops a LIVE run producing on a flagged
-    page, while a sidecar from an earlier run still carried it.
+    ``table_ladder_accepted`` is the only RESOLVING kind the replay loop carries: it
+    CLEARS that table's distrust. ``data["reason"]`` is present only when the readers
+    were OVERRULED, and ``verified_by_geometry`` means the overruling evidence was
+    ``bind()``'s check against this page's own text layer.
 
-    Narrow, and the two controls are what make it narrow: an ordinary acceptance carries
-    no reason and is replayed, and ``verified_by_blind_cell_transcription`` is a third
-    vendor reading the CROP pixels, independent of the layer, so it is replayed too.
+    **Round 2 pinned the DROP of that event at restore; round 5 removed the drop.** Not a
+    weakening: the kind is now in ``_LAYER_CAUSED_LADDER_KINDS``, so the page is refused
+    at the gate and never restored at all -- a strictly stronger outcome than dropping
+    one event from a page that is kept. Round 2's version could not have caught what was
+    wrong with dropping, because it drove the restore directly and so never saw the gate
+    admit the page; Argon's round-5 P1 did. This test now asserts the stronger thing,
+    with round 2's three controls intact.
+
+    The consequence pins live with the round-5 fixture
+    (``test_1211_r3_layer_caused_replays.py``), which drives the gate and the backfill.
     """
+    from test_1211_r3_layer_caused_replays import (
+        _accepted_event,
+        _resume_through_the_gate,
+        _sidecar_run,
+    )
+
     from socr.judge.table_verdict import (
         REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION,
         REASON_VERIFIED_BY_GEOMETRY,
     )
 
-    def replayed(reason: str | None, *, flagged: bool) -> bool:
-        sidecar = {
-            "prior_ocr_layer_suspect": True if flagged else False,
-            "audit_events": [_accepted_event(reason)],
-        }
+    def terminal(reason: str | None, *, flagged: bool) -> bool:
         tag = f"{reason or 'plain'}-{flagged}"
-        state, _ps = _resume(tmp_path / tag, sidecar, live_flags={"positive": flagged})
-        return "table_ladder_accepted" in {e.kind for e in state.events}
+        pipeline, pdf, out_dir = _sidecar_run(
+            tmp_path / tag, [_accepted_event(reason)], flagged_then=False, disposition=None
+        )
+        return _resume_through_the_gate(pipeline, pdf, out_dir, flagged_now=flagged)["terminal"]
 
-    assert replayed(REASON_VERIFIED_BY_GEOMETRY, flagged=False), (
-        "control: a geometry-overruled acceptance is not replayed even on an admissible "
-        "page, so the assertion below is not about suspicion"
+    assert terminal(REASON_VERIFIED_BY_GEOMETRY, flagged=False), (
+        "control: a geometry-overruled acceptance is not a ledger hit even on an "
+        "admissible page, so the assertion below is not about suspicion"
     )
-    assert not replayed(REASON_VERIFIED_BY_GEOMETRY, flagged=True), (
-        "a flagged page's distrust was cleared by the layer's own binding check, "
-        "restored from an earlier run"
+    assert not terminal(REASON_VERIFIED_BY_GEOMETRY, flagged=True), (
+        "a flagged page whose table the layer's own binding check accepted was skipped "
+        "instead of re-read"
     )
-    assert replayed(None, flagged=True), (
-        "an ORDINARY ladder acceptance carries no overruling reason and must still be "
-        "replayed; dropping it would withhold a page the pixels cleared"
+    assert terminal(None, flagged=True), (
+        "an ORDINARY ladder acceptance carries no overruling reason and is the readers' "
+        "own verdict; re-reading it would throw away work the pixels did"
     )
-    assert replayed(REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION, flagged=True), (
+    assert terminal(REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION, flagged=True), (
         "a blind-cell transcription is a third vendor reading the CROP, independent of "
-        "the layer, and must still be replayed"
+        "the layer, and must stay terminal"
     )

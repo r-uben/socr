@@ -45,6 +45,16 @@ def test_loaded_source_is_this_checkout() -> None:
     assert Path(socr.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
 
 
+def _code_only(src: str) -> str:
+    """``src`` with comment lines dropped.
+
+    These assertions are about what the restore DOES. The comments that explain why it
+    no longer drops records name the registries being checked for, so matching raw source
+    text would fail on its own explanation -- which it did, the first time.
+    """
+    return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+
+
 def _out(text: str) -> PageOutput:
     return PageOutput(
         page_num=1, text=text, status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
@@ -257,7 +267,13 @@ def test_the_live_chain_still_verifies_what_round_two_settled() -> None:
 # replaces all of round 3's drop machinery.
 
 
-def _sidecar_run(root: Path, events: list[dict], *, flagged_then: bool):
+def _sidecar_run(
+    root: Path,
+    events: list[dict],
+    *,
+    flagged_then: bool,
+    disposition: object = "withheld",
+):
     """Write a real sidecar for a page WITHHELD, with ``events`` in its audit trail.
 
     ``flagged_then`` is the suspicion of the run that WROTE it. Default False, which is
@@ -277,7 +293,12 @@ def _sidecar_run(root: Path, events: list[dict], *, flagged_then: bool):
     out = _out(_MD)
     ps.attempts.append(out)
     ps.best_output = out
-    ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+    # ``disposition`` is the page's ladder outcome in the run that wrote the sidecar.
+    # Round 4's records are adverse (WITHHELD); round 5's is an ACCEPTANCE, and an
+    # accepted page carries no adverse disposition at all.
+    ps.table_ladder_disposition = (
+        FailureMode.TABLE_WITHHELD if disposition == "withheld" else disposition
+    )
     for ev in events:
         state.events.append(
             AuditEvent(
@@ -433,7 +454,7 @@ def test_the_replay_drop_machinery_is_gone() -> None:
 
     from socr.pipeline import orchestrator as orch
 
-    src = inspect.getsource(orch.UnifiedPipeline._restore_terminal_page_state)
+    src = _code_only(inspect.getsource(orch.UnifiedPipeline._restore_terminal_page_state))
     assert "_ESCALATION_LAYER_GRADED_KINDS" not in src, (
         "the restore still drops layer-caused records; round 4 replaced that with the gate"
     )
@@ -612,3 +633,104 @@ def test_no_native_judge_in_the_chain_means_no_wrapper() -> None:
     peeled = _promotion_inner_judge(SourceEvidenceTableJudge(inner=leaf, get_fitz_page=None))
     assert peeled is leaf
     assert not isinstance(peeled, _PromotionLayerAbstainJudge)
+
+
+# ---------------------------------------------------------------------------
+# Round 5 (Argon P1): the layer-caused ACCEPTANCE
+# ---------------------------------------------------------------------------
+
+
+def _accepted_event(reason: str | None) -> dict:
+    data: dict = {"table_id": "p1-t0", "rung_trail": [], "witness_scope": "located"}
+    if reason is not None:
+        data["reason"] = reason
+    return _event("table_ladder_accepted", data)
+
+
+def test_a_geometry_overruled_acceptance_makes_the_page_not_terminal(tmp_path: Path) -> None:
+    """Argon's round-5 P1, and the one layer-caused record four rounds of looking missed.
+
+    Every record gated before this one WITHHOLDS. This one ACCEPTS: the visual readers
+    refused the table and ``bind()``'s check against the page's own text layer overruled
+    them (``reason == "verified_by_geometry"``). Authorship is what matters, not
+    direction -- on a page where that layer may not serve as evidence the acceptance has
+    no author -- so the page is re-read like any other.
+
+    Measured before the fix (``scratch/1205r5/repro_p1.py``): the page was admitted as
+    terminal, the restore then dropped its only ladder terminal, and
+    ``_backfill_missing_table_ladder_terminals`` stamped the SKIPPED page
+    ``table_ladder_unverified(missing_table_terminal)`` and listed it untrusted -- so the
+    page was neither re-read nor shipped, which is the worst of both.
+
+    Three controls, each one a reason the gate is narrow.
+    """
+    from socr.judge.table_verdict import (
+        REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION,
+        REASON_VERIFIED_BY_GEOMETRY,
+    )
+
+    def resume(reason: str | None, *, flagged_now: bool) -> dict:
+        tag = f"{reason or 'plain'}-{flagged_now}"
+        pipeline, pdf, out_dir = _sidecar_run(
+            tmp_path / tag,
+            [_accepted_event(reason)],
+            flagged_then=False,
+            disposition=None,
+        )
+        return _resume_through_the_gate(pipeline, pdf, out_dir, flagged_now=flagged_now)
+
+    # Control: on an admissible page the acceptance stands and the page is skipped. If
+    # this ever fails, the fixture is not a ledger hit at all and nothing below means
+    # anything.
+    clean = resume(REASON_VERIFIED_BY_GEOMETRY, flagged_now=False)
+    assert clean["terminal"] is True, (
+        "control: a geometry-overruled acceptance is not terminal even on an admissible "
+        "page, so the flagged arm proves nothing"
+    )
+    assert clean["untrusted"] == [] and clean["refusal"] == ""
+
+    flagged = resume(REASON_VERIFIED_BY_GEOMETRY, flagged_now=True)
+    assert flagged["terminal"] is False, (
+        "a page whose table was accepted only by the layer's own binding check was "
+        "skipped on a run that will not read that layer"
+    )
+    # ... and because it is re-read rather than patched, the backfill never runs on a
+    # skipped page, so the untrusted listing and the credential refusal both stay empty.
+    assert flagged["untrusted"] == []
+    assert flagged["refusal"] == ""
+
+    # Control: an ORDINARY acceptance carries no overruling reason -- it is the readers'
+    # own verdict -- and must stay terminal.
+    plain = resume(None, flagged_now=True)
+    assert plain["terminal"] is True, (
+        "an ordinary ladder acceptance was re-read; that throws away a verdict the "
+        "readers reached without the layer"
+    )
+
+    # Control: a blind cell transcription is a third vendor reading the CROP pixels.
+    blind = resume(REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION, flagged_now=True)
+    assert blind["terminal"] is True, (
+        "a blind third-vendor cell transcription is independent of the layer and must stay terminal"
+    )
+
+
+def test_the_geometry_acceptance_drop_is_gone_from_the_restore() -> None:
+    """Round 2's drop was the last survivor of patching records; it is removed.
+
+    Keeping both would have been worse than either: the gate admitted the page, the drop
+    removed its only terminal, and the backfill then marked the skipped page untrusted.
+    """
+    import inspect
+
+    from socr.pipeline import orchestrator as orch
+
+    src = _code_only(inspect.getsource(orch.UnifiedPipeline._restore_terminal_page_state))
+    assert "REASON_VERIFIED_BY_GEOMETRY" not in src, (
+        "the restore still drops the geometry-overruled acceptance; round 5 replaced that "
+        "with the gate"
+    )
+    assert orch._sidecar_layer_caused_records(
+        {"audit_events": [_accepted_event("verified_by_geometry")]}
+    ) == ["table_ladder_accepted"]
+    for benign in (None, "verified_by_blind_cell_transcription"):
+        assert orch._sidecar_layer_caused_records({"audit_events": [_accepted_event(benign)]}) == []
