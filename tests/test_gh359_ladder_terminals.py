@@ -593,8 +593,15 @@ class TestAssembleWriterOfIncomplete:
         pipeline = UnifiedPipeline(_make_config())
 
         @contextmanager
-        def _witnesses(path, page_num, text):
-            with _real_witnesses(path, page_num, text) as found:
+        # #1205: ``prepare_table_witnesses`` gained a ``layer_is_evidence``
+        # keyword (whether this page's text layer may supply the pairing swap
+        # verdict). This stand-in forwards it rather than accepting a fixed
+        # argument list: a double that rejects the real signature does not stand in
+        # for the function any more, and the way it fails here is the #1202 round-3
+        # shape -- witness preparation raises, every table on the page reads
+        # UNVERIFIED, and the suite blames the gate.
+        def _witnesses(path, page_num, text, **kwargs):
+            with _real_witnesses(path, page_num, text, **kwargs) as found:
                 yield list(found) if witness_both else list(found)[:1]
 
         # The two-grid page also yields one spanning ``booktabs`` box covering

@@ -1,0 +1,596 @@
+# #1205 — the table chain's remaining readers of a suspect text layer
+
+Built on `origin/main` `3bcc43db` (#1202 / Part A merged). Processor only: no OCR run, no
+Ollama, no model call anywhere in this ticket, so nothing here is a claim about what a
+model does. The design note and its probes are at
+`scratch/routing-baseline/leads/1205/{design.md,notes-1205.md,*.py,*.txt}`; this ticket's
+own probes are in `scratch/1205/`.
+
+## What ships
+
+Every reader in the table chain that decided something from the page's own text layer now
+abstains when that layer may not serve as evidence, on ONE predicate:
+`UnifiedPipeline._table_layer_is_evidence`, which is `layer_is_admissible_evidence` — the
+UNION, scan-failed included.
+
+| reader | site | what it decided with the layer | now |
+|---|---|---|---|
+| `_table_page_needs_escalation` (both callers: `_surface_table_scoring`, `_escalate_table_page`) | `orchestrator.py:6811` | `native_rows_from_page` → `score_page`: escalate or not, and the `table_not_scorable` / `table_unexplained_lanes` events that drive `tables_trust` | abstains BEFORE the parse; same ending as a page with no scorable grid, and the absence is SURFACED as `table_not_scorable` |
+| `decide_escalation` → `score_page` ×2 and `judge_escalation`'s value oracle | `escalation_decision.py:121`, guarded at `orchestrator.py:7212` | the layer as GROUND TRUTH for the exactness gate and as the canary's oracle: the path where a correct `-350` loses to the layer's `350` | the candidate is refused on the record (`gate=none`), the incumbent ships, and the page is marked as not having received its escalation |
+| `page_needs_crop_repair_fallback`, `crop_patch_improves_verification` → `verify_native_table` | `crop_repair.py:93,144`, guarded at `orchestrator.py:14254` | the trigger for a crop repair and the credential for a patch that CHANGES numbers already accepted by the judge | the fallback does not run; the accepted bytes ship and the page records `table_crop_repair_unverifiable`, a new kind registered in `TABLE_DISTRUST_KINDS` |
+| `prepare_table_witnesses` → `_corroboration_contradicted_indices` → `_native_numeric_multisets` | `witness.py:212,399,436` | demotes a count-matched pairing to AMBIGUOUS with NO crop, so nothing can look at that table and it reaches the ladder UNVERIFIED | the page is not opened; empty evidence is NEUTRAL by construction and the index pairing ships with its crops |
+| `NativeTableVerifierJudge.assess` → `verify_native_table`, `_maybe_repair_collapsed_headers` | `agentic.py:1301,1626` | rejects a reading that disagrees with the layer, and ACCEPTS one that matches it through `EXACT_PASS`, an exit that consults no judge | split by the two keys — see below |
+| `_record_unresolved_binding_boundary`'s re-read | `orchestrator.py:7994` | "resolved" proof for a standing boundary distrust | unchanged (#1202 gated it); **pinned here**, which it was not |
+
+## The two #1156 keys, and the direction round 1 got wrong
+
+Part A's split is by ACTION, not by site, and the first version of this ticket keyed every
+reader on the wrong half of it:
+
+* **EVIDENCE takes the UNION** (`layer_is_admissible_evidence`, `prior_ocr_layer_suspect`,
+  scan-failed included). Refusing evidence is never destructive — the reader behaves as it
+  does on a page with no text layer, a state every one of them already handles — and
+  "unknown" is no reason to trust the words either.
+* **WITHHOLDING the layer's own text takes the POSITIVE finding** (`prior_ocr_layer_found`).
+  That is #1156's withholding floor and it is not this ticket's business.
+
+Round 1 gated all four sites on the positive finding. Argon's review (P1) found the
+consequence and the owner ruled on it: a page whose DETECTION SCAN FAILED still graded a
+correct reading down, promoted the candidate that matched its own layer, credentialled a
+crop patch, and withheld a crop from the visual ladder. Every one of those is an evidence
+decision, so every one takes the union. Pinned in all three flag states.
+
+The one place the narrower key is still needed is `NativeTableVerifierJudge.assess`, because
+the two halves of that function need opposite answers (below).
+
+## The P0 at the judge, and why my own reason for leaving it was wrong
+
+This site was deliberately left alone in round 1, on the ground that the layer could only
+REJECT there — so the worst case was a missing number, which this corpus prefers to a wrong
+one. That was wrong, and Argon found it. `VerifierState.EXACT_PASS` is an ACCEPTING exit
+that passes `inner_consulted=False` and stamps confidence 1.0: on a page whose layer is an
+earlier OCR run, a model reading that reproduces the layer's own error can be waved through
+by that error.
+
+The site's previous gate narrowed the union down to `page_has_opaque_page_covering_raster`,
+over two review rounds whose finding was that suspicion must never make a check weaker —
+dropping row-level verification is only safe when something INDEPENDENT read the pixels.
+Sound about the rejection half, blind to the accepting one. So the halves are now split:
+
+* a **POSITIVE finding** bypasses native verification altogether. The layer is established
+  as a previous reading, and #1202 already gives the page the pixel lane
+  (`SourceEvidenceTableJudge`'s raster witness), the visual table ladder and the blind cell
+  guard, so this is not an absence of checking;
+* a **FAILED scan** keeps row-level verification, because that page may be genuinely
+  born-digital and rejection cannot ship a wrong number — but it may never take the
+  `EXACT_PASS` short-circuit. The inner judge is consulted instead, and the withholding is
+  recorded.
+
+#1202's `page_has_opaque_page_covering_raster` bypass is KEPT and the new one JOINS it.
+Round 3 of this ticket replaced it, and #1202's own test caught the consequence
+(`test_the_suspect_layer_cannot_veto_the_reading_that_replaced_it`): a page that is suspect
+but NOT established, and that carries an opaque page-covering raster, has had its pixels read
+independently by the outer `SourceEvidenceTableJudge` — so verifying it against its own
+unknown layer can only veto a reading that already has a better witness. The two bypasses
+answer different questions and either is sufficient: the positive finding says the layer IS
+an earlier OCR run (true on every render-mode-3 page, where the raster proxy answers False
+because there is no single page-covering image), and the raster says something independent
+read these pixels.
+
+**What is NOT established, recorded rather than claimed.** Argon's second direction — that
+such a reading SHIPS at confidence 1.0 — could not be reproduced. On every synthetic ruled
+table tried here the header-attribution chain abstains (`native_header_row` returns `None`),
+and #245 makes an abstain on that path delegate to the inner judge, so the layer-matching
+reading reached a judge anyway. The exit exists in code and the guard closes it; its firing
+is pinned by the event it emits, not by a confidence of 1.0, and no claim is made about how
+often the 1.0 ship is reachable on real pages.
+
+## The new distrust kind, and exactly what registering it buys
+
+The crop-repair refusal emits `table_crop_repair_unverifiable`, which is registered in
+`tables_trust.TABLE_DISTRUST_KINDS`. The first version emitted it without registering, which
+is the defect this very file fixed once before: GH-166's crop TIMEOUT kind was emitted and
+not listed, so `tables_trust.json` reported no untrusted pages after an incomplete
+verification and the page read as verified.
+
+Measured rather than claimed, because the first pin for it was inert: on this page
+`dualpass_flagged` also fires and is already registered, so the page appears in
+`untrusted_pages` either way. What the registration buys is the REASON — a consumer reading
+`counts_by_kind()` is told the crop reading went unverified, rather than only that a crop
+disagreed. The pin is on `counts_by_kind()` for that reason; pinned on `untrusted_pages` it
+survived the mutant that deletes the registration.
+
+## The design: per-site gating, and the handle that was built and dropped
+
+The brief chose Option B — a text-free page HANDLE for the chain's evidence reads — on the
+grounds that it covers present and future readers with no per-site knowledge. It was built
+(`TextFreePage`, delegating everything but `get_text`), measured, and then removed. Three
+things, in order:
+
+1. **There is no single place the table phase opens the page.** Counted, not assumed:
+   `orchestrator.py` opens it for this chain at 6970 (scoring), 7058 (escalation), 14305
+   (crop repair) and 14565 (the judge's own getter, which is shared with the PIXEL judge and
+   therefore must not be wrapped); `witness.py` opens it four more times, three of them for
+   boxes and crops. `prepare_table_witnesses` takes a PATH, not a page, so no handle can
+   reach it at all — it has to be handed the answer.
+2. **So the handle was three wraps, not one entry point**, and the owner's condition for
+   keeping it (one entry point, pinned there directly) could not be met.
+3. **The mutants showed all three wraps inert.** With the union guards in place, deleting
+   any one of them changed no outcome: the guard abstains first. A guard never seen to fail
+   has not been shown to guard anything, so it went.
+
+**The cost, stated rather than smoothed over:** per-site gating means every future reader of
+this page's text layer is a new hole, which is exactly the complaint #1205 was filed about —
+#1202 needed four review rounds to find four such sites, and this ticket found five more.
+The mitigation is only partial: there is ONE predicate, its docstring names the log, and the
+log's table above lists every site, so a new reader has one place to look. Anyone adding a
+reader to this chain has to consult it. If that proves not to be enough, the structural fix
+is the refactor this ticket declined — the table phase opening each page once and passing one
+handle down — and it should be done as its own change, not smuggled in as three wraps.
+
+What the handle's own measurement DID establish, and worth keeping for that refactor: a
+stripped-copy version of it is not sound. The design note measured a text-stripped page as
+pixel-identical on 60 of 60 page/DPI cells, but only because those pages' layers are
+entirely hidden; the detector's rule admits a page whose VISIBLE words all sit at repeated
+furniture slots, and stripping such a page removes its running header. A VIEW does not have
+that failure. Either way nothing in what ships touches pixels: the witness crops are
+byte-identical across both arms, with the canary that the fixture's visible header does
+contribute pixels at 72/150/300 dpi.
+
+## Readers found by the sweep, OUTSIDE the table chain
+
+Named so the next round does not have to find them again:
+
+* `escalation_canary.region_presence_verdict` at `orchestrator.py:4355` and `:20799` — the
+  EQUATION lane's numeric-presence guard (`--detect-equations`, default off). Takes
+  `native_text` as a string, and is rejection-only: a spurious `PRESENCE_INVENTED` from a
+  prior-OCR layer refuses a LaTeX sidecar and the page keeps its native prose. Content lost
+  on the layer's say-so, in a lane the Fed run does not enable.
+* `manifest.py:765` `presence_verdict_from_text`, the D3-superseding path. Same shape.
+* `born_digital.py:4763` `verify_native_table_region`, which checks socr's own native
+  reconstruction against the same layer. It runs during ASSESSMENT, before the #1156 flag
+  exists, so it cannot consult a predicate derived from its own output.
+
+Not holes, checked: `_read_page_words` (`orchestrator.py:12888`) sits behind
+`_is_native_table_first_candidate`, which is False whenever `needs_ocr_enhancement` is set —
+every flagged page — and requires `is_born_digital`. `_record_figure_recoverable_labels` is
+log-only. `locate_tables` / `_horizontal_rules` / `find_tables` read drawings.
+`core/page_credential._table_blocks_of` works from markdown alone. `benchmark/` is offline
+tooling.
+
+## Tests and mutants
+
+`tests/test_1205_table_chain_evidence_readers.py`, 14 tests. Every pin is a DIFFERENCE run
+twice in one process, changing only the flag, with a control arm in which the layer DOES
+count and a third arm for a FAILED scan. Nothing is pinned by grepping the source — that is
+how #1202's round-3 guard shipped a crash that read as green.
+
+One fixture carries most of it: a ruled two-row table whose native layer reads `350` where
+the page says `-350` (the measured #1156 round-3 defect, a dropped minus sign). On the
+control arm, measured:
+
+* the correct reading scores **75%** against the layer and the layer-matching one **100%**,
+  so the page is marked as needing escalation;
+* a forced escalation whose candidate reproduces the layer is ACCEPTED (`gate=exactness`,
+  75.0% → 100.0%) and the correct `-350` is replaced — Argon's #1207 round-3 case, observed
+  rather than argued;
+* `verify_native_table` CERTAIN_FAILs the correct reading, and at the judge it does so with
+  the inner judge never consulted — one deterministic check, answered from an earlier OCR
+  run, discarding the right numbers on its own.
+
+On the flagged and scan-failed arms each of those reverses. The forced-escalation arm is the
+one that matters: the provider is still called and the candidate still produced, so what is
+pinned is that the layer no longer GRADES, not merely that the page is no longer escalated.
+
+The witness pin uses a two-table side-by-side page (so `locate_tables` returns exactly two
+boxes and corroboration runs at all) with the blocks emitted in the opposite order: control
+demotes both tables to AMBIGUOUS with no crop, the flagged arm ships the index pairing with
+its crops, and a second control with the blocks in the right order is LOCATED on both arms —
+so the demotion is the swap verdict and not an artefact. The orchestrator's own derivation
+of the flag is observed by capturing what `_run_table_judge_gate` actually passes, over all
+three flag states.
+
+**A correction to Argon's crop-repair finding, measured.** It said the layer's verifier would
+have REFUSED a row-swapped patch, so round 1 had removed a real check. It would not:
+`verify_native_table` returns EXACT_PASS for the swapped crop, because the numeric multiset
+is identical and only the row binding differs — the GH-273 shape this verifier is blind to at
+page scope. So this guard is a STRENGTHENING, not the restoration of a lost check, and the
+clean arm pins that measurement so it cannot quietly change underneath the claim.
+
+Thirteen external mutants (`scratch/1205/mutants_1205.py`), each on a copy of `src` + `tests` +
+`pyproject.toml` outside the repo — `pyproject` because its `pythonpath = ["src"]` shadows an
+external `PYTHONPATH`, so without it the mutant would test this checkout. Every anchor is
+counted UNCAPPED and asserted `== 1` before any replacement, a stale anchor reports
+`ANCHOR-STALE` rather than reading as a kill, and the copy's own
+`test_loaded_source_is_this_checkout` resolves `socr.__file__` against the copy's tree. It
+passed on all thirteen. **All thirteen killed**, each by the pin written for it:
+
+| mutant | killed by |
+|---|---|
+| the predicate neutered to `True` | 5 tests |
+| the predicate narrowed back to the positive finding | 5 tests |
+| the escalation scorer's guard removed | 3 |
+| the forced-escalation guard removed | 2 |
+| the crop-repair fallback guard removed | 2 |
+| the witness caller hard-codes `True` | the witness-caller pin |
+| the witness reader ignores the answer | the pairing-swap pin |
+| the judge's positive-finding bypass removed | the judge pin |
+| the unjudged-accept guard removed | the judge pin |
+| #1202's boundary guard deleted | the boundary pin |
+| the new distrust kind unregistered | the crop pin, via `counts_by_kind()` |
+| #1202's opaque-raster bypass removed | #1202's own veto test |
+| the credential policy exempts the new kind | the credential pin, and #713's drift guard |
+
+The previous round's 15 mutants are recorded for the record: 12 killed, and the 3 that
+survived were the three page wraps, which is what settled their removal.
+
+## Two test stand-ins updated, and why that is not an expectation change
+
+`prepare_table_witnesses` gained a `layer_is_evidence` keyword, and four tests in two files
+stood in for it with a fixed argument list. They now forward `**kwargs`. A double that
+rejects the real signature does not stand in for the function any more, and the way it fails
+is the #1202 round-3 shape: witness preparation raises, every table on the page reads
+UNVERIFIED, and the suite blames the gate.
+
+`test_gh696_review_probes.py` asserted the call as a single source STRING, which this change
+reformatted across several lines. The property it pins is unchanged and is checked the same
+way — the witness is built from `bo.text`, the object `assess` rewrote, not from a cached or
+pre-repair copy — by reading the call's arguments instead of matching one line of source. No
+expectation was loosened.
+
+## Two defects of my own, caught after round 3 and recorded
+
+Both were found by the full suite and by a mutant, not by review, and both are the shape
+this ticket exists to prevent — a change that removes a check while looking like it adds one:
+
+1. **The judge's new bypass REPLACED #1202's instead of joining it.** Consequence above; it
+   is now additive and #1202's test is what pins it.
+2. **The new distrust kind was emitted but not registered**, so its reason never reached the
+   sidecar. Fixed, and the pin was then found to be inert and re-pinned on the reason.
+
+## The credential decision #713's drift guard demanded
+
+Adding a kind to `TABLE_DISTRUST_KINDS` fails
+`test_the_blocking_policy_pins_its_exclusions_not_only_its_members` until someone decides in
+writing which side of the credential policy it belongs on. It BLOCKS, for the same reason
+`dualpass_crop_timeout` and `dualpass_crop_failed` do: a crop reading of this page's table
+exists and nothing verified it, so admitting a stand-in that says every table was accepted
+would admit it over an outstanding "verification never completed". Nothing retires it today.
+Pinned at `_credential_admission_refusal`, the predicate the credential actually consults,
+with an unrelated kind as the control.
+
+## Gates
+
+* **Full suite, frozen tree, under the shared lead lock: `8247 passed, 2 skipped, 4 xfailed`
+  in 6m09s, zero failures.** The tree was not touched during the run (`scratch/1205/suite_tree_r5.txt`
+  records what was modified); the three earlier runs are kept beside it, including the two
+  that were red and why.
+* `uvx ruff@0.16.0 format --check .` -- 981 files already formatted.
+* `ruff check` on the two large touched files is unchanged from `3bcc43db` (746 findings
+  before and after, all pre-existing); the new test file is clean. Only the format step is a
+  CI gate.
+
+## Round 1 of PR #1211
+
+Grok MERGE-AFTER-FIX, Argon BLOCK, r-uben MERGE once two should-fixes land. Each finding
+was reproduced before anything was changed; the probes are in `scratch/1205r1/`.
+
+**Four more readers, all gated on the union.**
+
+* `verify_scanned_table` -> `build_born_digital_evidence` (`source_evidence.py:1354`).
+  On a suspect page with NO page-covering raster -- a scan-failed page, a cover under
+  50%, a `get_image_info` error -- the PDF text layer was unioned into the numeric
+  evidence, so the layer passed its own `350`. It now takes `layer_is_evidence`, and
+  excludes the layer on that arm exactly as GH-163's raster arm already did. The
+  orchestrator answers from the union; the judge's exception arm excludes the layer.
+  Measured on a visible-layer page with an injected pixel witness: the layer's `350`
+  goes from PASS to REFUSED while the pixels' `-350` passes. Stated so the claim does
+  not outrun it: with the layer included BOTH readings pass (the bundle is a union), so
+  what the exclusion removes is the layer passing its own error, not a refusal of the
+  correct reading -- that refusal needs a page with no pixel witness, and there real
+  tesseract reads the same ink the layer holds.
+* `_truncated_grid_reading_ids` (`manifest.py:1320`). Term (b) of `table_truncated`
+  scored the candidate's row count against the layer's own bands, so a judge-accepted
+  18-row reading carrying the correct `-100.0` was called truncated against 20 bands of
+  an earlier OCR run -- and the manifest then prefers a lower-confidence sibling or
+  drops the page to the structure-class floor. The layer is dropped, not the predicate:
+  term (a) reads the candidate's markdown alone and keeps firing, which is pinned.
+* `_maybe_repair_collapsed_headers` (`agentic.py`). It rewrites `output.text` -- the
+  bytes that SHIP -- from `fitz_page.get_text("words")`. That is the layer authoring
+  content, a stronger act than grading it, and round 1 left it open on a scan-failed
+  page. Now gated on the union, which is kept for the whole method as `union_suspect`
+  and never flipped.
+* The judge's exception arm **failed open**: `layer_found = True` meant "this layer is
+  established", which SKIPS native verification -- a raising trust source bought the
+  page a bypass. Now `False`: the page is unknown, it is verified, and it gets no
+  EXACT_PASS.
+
+**The unjudged EXACT_PASS ship is CONFIRMED, correcting this log's earlier entry.** Last
+round it was recorded as unreproducible because header attribution abstained on every
+fixture tried. On `_make_probability_table_page` it does not abstain: the clean arm
+accepts at confidence 1.0 with `reason='native_table_verifier: EXACT_PASS'` and the
+inner judge never consulted. The guard added last round is therefore load-bearing, not
+precautionary.
+
+**Which floor a scan-failed table page gets once every rung is refused** (r-uben's nit,
+measured at `_winning_page_output` rather than argued): the fail-closed
+`[page N failed: unverifiable table -- see image]` marker, on all three flag arms, with
+none of the layer's numbers in the shipped text. So "refusing cannot ship a wrong
+number" holds on that page -- its floor is a marker plus a page image, not its layer.
+
+**Two directions corrected from round 2/3 of this ticket.** The crop refusal fired
+whenever a crop existed, so a crop that AGREES with the accepted table -- the best
+evidence the table is right -- listed the page in `tables_trust.json` and voided its
+credential; on the Fed scans that is every table page with a crop. It now runs the same
+`auto_patch=True` reconcile the fallback would have run and emits only when that changed
+something. And the escalation backstop moved ABOVE `submit_daemon`, so a refused
+escalation is never billed (r-uben M4/M5).
+
+## Round 1b: the merge, and #1206's per-cell check
+
+`origin/main` was MERGED into the branch (not rebased -- the PR is pushed), bringing #1206
+(the advisory native per-cell table check) and #1210. No conflicts: the two sides touch
+different regions of `orchestrator.py`, `manifest.py` and `tables_trust.py`.
+
+Agreed with #1206's owner: on a page whose layer may not serve as evidence, the per-cell
+check abstains COMPLETELY -- no `native_cell_binding` verdicts, no `native_cell_check_*`
+events, no distrust, and no demotion under `--native-cell-gating`.
+
+**The LIVE path was already gated** by #1206 itself, at the top of
+`_run_native_cell_binding_check`. Measured over both gating states and all three flag
+states: no events, no bindings, no disposition, nothing untrusted, with the admissible
+control recording `native_cell_check_verified` and a binding. What this round adds there
+is the test its owner asked for, which is what makes that gate killable -- it had none.
+
+**The RESUME path was not, and that is a second emit site.** A sidecar from an earlier run
+restored its per-cell verdicts (`native_cell_binding`) and replayed their events, three of
+whose four kinds are in `TABLE_DISTRUST_KINDS` -- so a flagged page came back listed in
+`tables_trust.json` with a per-cell reason derived from the very layer the live gate
+refuses to read. Both sites now take the union. Nothing is deleted: the sidecar keeps what
+its run wrote, so a later build that can use it (one that re-reads the page, or Part B)
+still has it; this only refuses to ACT on it.
+
+One ordering the gate depends on, and it is pinned rather than assumed: on a resume the
+page's flags come from the sidecar, restored EARLIER in the same method. Measured the
+wrong way round first -- a probe whose sidecar carried no flag read the page as
+admissible and the gate appeared not to work. A sidecar carrying the verdicts but not the
+flag still restores them; the same sidecar with the flag does not.
+
+Not in scope and worth naming: a sidecar from a PRE-#1156 build carries no suspicion flag
+at all, so such a page resumes unflagged everywhere, not just here. That is the resume
+completeness question #1145/Part A already owns.
+
+## Round 2 of PR #1211
+
+Argon MERGE-AFTER-FIX with four P1s; Grok out, r-uben had not reviewed this head. Each
+reproduced before anything changed (`scratch/1205r2/`). **Two of the four are mistakes
+round 1 made**, and both are recorded at the code rather than smoothed over.
+
+* **`verify_scanned_table` ignored `layer_is_evidence` whenever `native_trusted` was not
+  `False`.** Round 1 removed the guard on the deferral, reasoning that the orchestrator
+  derives `native_trusted` from the same predicate so a suspect page always arrives with
+  `False`. True only of its non-raising path: `SourceEvidenceTableJudge` sets
+  `trusted=None` when its own trust source raises or is absent, and `None` is "not
+  False". Measured: `native_trusted=None` plus `layer_is_evidence=False` returned
+  `passed=True, deferred=True` for the layer's own reading, handing the layer inward.
+  Round 1's test passed only because it stubbed the function. All three arms now read
+  the flag, and the pin uses no stub.
+* **The resume ASSIGNED `prior_ocr_layer_suspect` from the sidecar.** A False written by
+  any build that could not see the flag cleared the suspicion `_phase_analyze` had just
+  established from the PDF, after which every gate in this file read the page as
+  admissible. It now takes the UNION of the sidecar and the live analysis; removing trust
+  is never destructive, so OR is the safe direction. With it, three more layer-derived
+  restores needed gating: `_apply_binding_adjudication_meta` at BOTH its call sites (the
+  resume skip gate and the restore — in production both run for a resumed page) and the
+  replay of the binding-boundary events.
+* **`table_crop_repair_unverifiable` was not replayed on resume.** It is in
+  `TABLE_DISTRUST_KINDS` and `CREDENTIAL_BLOCKING_EVENT_KINDS` and is emitted at the crop
+  reread, which a resumed page skips — so the page came back absent from
+  `tables_trust.json` with its credential restored. #1210 made that reachable by
+  admitting accepted prior-OCR pages to the ledger, which on the Fed scans are exactly
+  the pages this kind fires on.
+
+**The fourth, and the ruling that shaped it.** On a scan-failed page with no covering
+raster the composed judge convicted a PIXEL-CONFIRMED reading: the outer judge passed
+`-350` against its witness, and the native verifier then rejected it on the strength of
+the layer's `350`. The finding's literal wording — bypass native verification whenever
+the union says suspect — was trialled in a throwaway copy and turns **five** tests red,
+two of them shipped #1156 guards:
+`test_a_transparent_cover_is_not_an_independent_witness` and
+`test_a_detection_error_does_not_turn_a_swap_into_an_acceptance`.
+
+Owner ruling (2026-10-19): the narrow fix. The verifier may not convict a reading the
+PIXEL lane has independently confirmed; otherwise it keeps checking. The reason, recorded
+as asked: **on a page without an opaque cover the pixels ARE the layer's own ink**, so
+skipping the row check there would let a row swap through — which is what those two
+guards measure — and Argon's case is specifically a pixel-confirmed reading. A
+confirmation is recorded only when the check that passed had the layer EXCLUDED, so the
+layer agreeing with itself can never license the bypass. Both guards stay green, and
+`test_the_swap_guards_stay_green` fails the day someone takes the blanket route.
+
+**The residual, named rather than claimed closed:** the pixel check is multiset-based, so
+on a transparent-cover page it can confirm a reading whose values are right and whose row
+binding is swapped, and that confirmation now licenses the bypass. That is the
+transparent-cover case already drafted for #1208; this round narrows what reaches it but
+does not close it.
+
+## The replay audit (round 2, all 60 kinds)
+
+Every kind `resume_restore_kinds()` replays was classified by whether its producer reads
+the page's text layer and by its consequence class, read from the registries rather than
+judged by eye. **One needed gating: `table_ladder_accepted`, the only RESOLVING kind in
+the set** -- it CLEARS a table's distrust, and `data["reason"] == "verified_by_geometry"`
+says the clearing evidence was `bind()`'s check against this page's own layer. #1202 stops
+a live run producing that on a flagged page; a sidecar from an earlier run still carried
+it. Dropped on a flagged page, narrowly: an ordinary acceptance carries no reason and is
+replayed, and a blind-cell transcription is a third vendor reading the CROP, so it is too.
+
+The other 52 are safe for one of four reasons, enumerated in
+`leads/1205/report-r2.md`: they withhold or block with a layer-independent producer; they
+withhold with a layer-derived one (same direction); they are layer-derived disclosure with
+no consequence class at all (`native_table_verifier_exact_pass` among them, which #1181
+makes OWE the page a mark, so replaying it adds disclosure); or they never read the layer.
+Two qualifications: 52 of the 60 are classified from the emit site and the registries, not
+from a resumed-flagged-page run, and a producer reaching the layer through a deep helper
+could be misclassified.
+
+## What was NOT measured
+
+* No model, no OCR, no provider: every reversal above is measured on deterministic PyMuPDF +
+  arithmetic fixtures, not on a run that caught a wrong number in the corpus.
+* The corpus EXPOSURE is the design note's, not re-measured here: 720 census pages (~9,300
+  corpus pages, ×12.9) reach the scoring/promotion class on a local-only run, 1,283 (~16,600)
+  reach the verify/witness class as an upper bound.
+* Whether the judge's unjudged `EXACT_PASS` ship at confidence 1.0 is reachable on real
+  pages, and how often. See above.
+* Cost: the guards are one boolean per page. Not profiled.
+
+## Round 3 (2026-10-19): the promotion, the candidate scope, and five replayed kinds
+
+Argon's round-3 review, verdict MERGE-AFTER-FIX, three P1s. All reproduced before anything
+changed. Full write-up in `scratch/routing-baseline/leads/1205/report-r3.md`.
+
+1. **The resume SKIP gate now takes the union.** `_load_terminal_page` ran before
+   `_restore_terminal_page_state` folds the sidecar's suspicion onto the page, so a page
+   whose SIDECAR said suspect -- the very run that wrote the binding record -- restored
+   that record whenever this run's detection happened to disagree.
+2. **A pixel confirmation belongs to the CANDIDATE, not the page.** Round 2 keyed it by
+   page number and never cleared it, so a rung-1 confirmation licensed skipping
+   `verify_native_table` on an unconfirmed rung 2: the layer's `350` rode in on the
+   confirmation the true `-350` earned. Now a `dict[int, object]` keyed by `id(output)`
+   with the object held as the value (the `id` cannot be reused while the entry lives) and
+   popped once on use.
+3. **The promotion may not promote on the layer's word.**
+   `promote_unchecked_table_attempt` PEELS `SourceEvidenceTableJudge`, so an unwitnessed
+   candidate reached `NativeTableVerifierJudge` and the layer chose which reading shipped
+   -- measured with an empty witness on a scan-failed page: the true `-350` refused, the
+   layer's own `350` promoted. `_PromotionLayerAbstainJudge` now answers for the chain
+   there, so nothing verifies and nothing is promoted.
+
+   **Owner ruling (2026-10-19): confined to the promotion chain.** Refusing every
+   unconfirmed table on a suspect page is #1208's rule and must ship with retention for
+   born-digital flagged pages; applied here alone it would refuse without retaining on
+   #1202's ~14,850 pages, which is content loss. The wrapper also sits INSIDE the deadline,
+   because #1125 r2 requires `_TimeoutJudge` to stay outermost, and is inserted only when
+   the peeled chain actually has a native judge -- otherwise it would be an inert layer
+   that changes the chain's shape for every caller that inspects it.
+4. **Five replayed kinds are layer-CAUSED**, and round 2's audit called them clean: the
+   three `table_escalation_*` (their lane grades the page with `score_page` /
+   `native_rows_from_page`), `table_ladder_withheld` with `reason` `native_contradiction`
+   or `sibling_of_contradicted` (`contradictions_for_tables`), and
+   `table_ladder_unverified` with `cause` `binding_contradiction` or `abstained` (`bind()`).
+   Each is in `TABLE_DISTRUST_KINDS` AND `CREDENTIAL_BLOCKING_EVENT_KINDS`, so one replayed
+   event listed the page untrusted and voided its #713 credential on the suspect layer's
+   say-so. Gated on the typed CAUSE, never the kind: the same kinds carry layer-free causes
+   (a rung outage, a budget, a blind MISMATCH) and those still replay, because dropping
+   them would withhold a page the pixels decided.
+
+**Why round 2 got those five wrong, stated as a method error.** They were classified from
+their EMIT SITE. "Fail-closed is the right direction for this family" was the reasoning
+behind the error: fail-closed is the right default for a reading socr could not check, and
+is NOT a licence to withhold on the strength of a source that may not be evidence.
+
+The re-check is scoped by consequence, not by producer: of the 60 replayed kinds **15 are
+in a consequence set** and 45 are disclosure-only, and a disclosure-only kind's producer
+cannot matter to this gate. Those 15 were each read by hand to their producer.
+`table_ladder_rejected` -- the one the handover flagged as unchecked -- **is not
+layer-derived**: its only producer is `run_table_ladder`'s last-rung FAIL, GH-359 ruling 4
+fixes rung input at "crop + markdown, nothing else", and both rung implementations are crop
+VLMs; the gate produces WITHHELD, never REJECTED. The two other places the literal appears
+are `terminal_kinds` MEMBERSHIP sets, not emit sites -- which is exactly how reading emit
+sites misleads. A mechanical call-graph trace (`scratch/1205r3/producer_trace.py`) was built
+and is NOT usable as the answer in either direction: over-approximating by simple name makes
+`page_retry` "reach" `score_page`, and a layer read done by the caller and passed in as an
+argument is invisible to it.
+
+**Two mutants found missing pins and one found dead code**, which is the main reason this
+round's test file is larger than its diff:
+
+* `r3m1` (the union reverted to the live flag) survived: P1-1's fix was real and its pin
+  was not. Round 2's skip-gate test drives the opposite direction, so the live flag alone
+  satisfies it. Pinned now with the sidecar-only arm Argon's repro describes.
+* `r3m7` (a raising `_native_evidence_suspect` read as "not suspect") survived: the
+  fail-closed arm had no test.
+* `r3m6` survived because the branch it mutated **could not fire.** The
+  pixel-confirmation exemption inside the promotion wrapper is unreachable:
+  `SourceEvidenceTableJudge` is the only writer of that record and this chain peels it off,
+  and the candidate arriving is `promote_unchecked_table_attempt`'s `deepcopy`. Measured,
+  not argued (`scratch/1205r3/probe_dead_branch.py`: empty record at every call, exemption
+  fired zero times). **The branch is removed** rather than pinned with a test no production
+  path exercises.
+* `r3m14` (the pixel bypass reading `suspect` instead of `union_suspect`) survives and is
+  an EQUIVALENT mutant, not a hole: `suspect` is not reassigned between
+  `union_suspect = suspect` and that line -- the flip to False is three lines below it. The
+  branch where the two genuinely differ is the header repair, and `r3m15` kills that one.
+
+## Round 4 (2026-10-19): the abstention PASSES THROUGH, and resume reprocesses
+
+Argon's round-4 review, verdict BLOCK: one P0 and one P1 with three parts. Both real, both
+reproduced before anything changed. Full write-up in `leads/1205/report-r4.md`.
+
+**P0 — round 3's own fix lost content.** `_PromotionLayerAbstainJudge` answered
+`accept=False` on every suspect page, and a promotion that refuses is not a promotion:
+`settle_scanned_table_decision` falls to `_apply_scanned_table_floor`, which demotes
+`best_output` so the GH-90 branch rewrites the page with the D3 marker and the model's
+table is gone. Reproduced on Argon's fixture (`flags={"positive": True}`): the `-350`
+attempt promoted on `4d14411b`, `None` on `4865ee7c`. Refusing without retaining is what
+the owner's 2026-10-19 ruling forbade, so round 3 broke the ruling it was implementing.
+
+**The fix is not the one the review names.** Deleting the wrapper and widening the LIVE
+bypass to the union turns six tests red (measured, `scratch/1205r4/probe_blanket_bypass.py`),
+#1156's `test_a_transparent_cover_is_not_an_independent_witness` and
+`test_a_detection_error_does_not_turn_a_swap_into_an_acceptance` among them: on a page with
+no opaque cover the pixels ARE the layer's own ink, so dropping row-level verification lets
+a row swap through. **Owner ruling (2026-10-19): the layer's VERDICT is skipped and the
+normal judge and structural gate still decide.** The wrapper therefore runs exactly the two
+steps the native verifier's own bypass runs -- `self._inner.assess`, then
+`_apply_structural_gate(words=None, rules=None)` -- and skips `verify_native_table` alone.
+It is inserted only where the peeled core IS the native judge, because the skip works by
+calling past it.
+
+Measured after, scan-failed page with an empty witness, each reading run alone: the true
+`-350` is promoted keeping `-350`, the layer's `350` is promoted keeping `350`. Symmetric,
+so the layer picks nothing and nothing is lost. The asymmetric row -- `-350` refused,
+`350` promoted -- is round 3's P1-2B finding and is now the control inside the test.
+
+**P1 — resume stops patching records and reprocesses instead.** Dropping layer-caused
+records at restore left three consumers of the same verdict reading a story the events no
+longer told: `_load_terminal_page` still treated a layer-caused `table_withheld` as a
+content terminal and skipped re-OCR; `ps.table_ladder_disposition` was restored ungated, so
+`_credential_admission_refusal` still returned "adverse table-ladder disposition" (round
+3's own test hid this by zeroing the disposition first); and
+`_backfill_missing_table_ladder_terminals` re-emitted a terminal at assemble for the table
+whose event had just been dropped.
+
+So a sidecar carrying ANY layer-caused record, on a page suspect NOW (the union), is no
+longer a terminal ledger hit -- the page is read again and this run's own gated producers
+decide it. **One `return None` is the whole fix**, because the restore only runs for a page
+the gate returned (both call sites are `if resumed is not None`), which makes round 3's
+replay-drop machinery unreachable. **It is removed, not merely bypassed**;
+`test_the_replay_drop_machinery_is_gone` asserts the restore no longer mentions either
+registry, and the classification survives as `_sidecar_layer_caused_records`. Cost is
+bounded by construction: within one version the gated producers cannot write such a record,
+so this fires only where suspicion changed between runs.
+
+**Two of my own measurement errors, recorded because both looked like code faults.**
+My first P1 control fixture wrote the layer-caused record while the page was flagged --
+which a gated producer cannot do -- so the clean-page control reprocessed and read as a bug
+in the fix; the fixture was corrected, not the code. And three copies of the mutant harness
+ran concurrently and interleaved into one output file, yielding two BASELINE totals and
+contradictory verdicts for the same mutant; that file is kept as
+`mutants_r4_DISCARDED_interleaved.txt`, nothing from it is quoted, and the harness was
+re-run once in the foreground (10 mutants, all killed).
+
+**One correction to the review itself.** It quotes the lost table as replaced by
+`[TABLE ON PAGE 1 NOT EXTRACTED ...]`. That string appears nowhere in socr; the real marker
+is `[page N failed: unverifiable table -- see image]`. The mechanism is real and was
+reproduced; the quoted bytes were invented, and the round-3 comment that had copied them is
+fixed.
+
+**#1207 merged in** (`origin/main` `3b4fce48`, merge not rebase). One conflict, in
+`agentic.py`, and it was comment versus code: #1207's entire change to that region is ten
+lines of comment (verified against the merge base `c0a7fca8` -- zero code). This branch's
+code is kept and the comment carried to the place it describes. `orchestrator.py`
+auto-merged and both sides were then checked rather than assumed: #1207's three test files
+pass (158) and this PR's neighbourhood passes (181). Full suite on the merged tree:
+**8,624 passed, zero failures**; ruff format clean at 1005 files.

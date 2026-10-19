@@ -409,7 +409,15 @@ class TestCoordinateContract:
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         gate = inspect.getsource(UnifiedPipeline._run_table_judge_gate)
-        assert "prepare_table_witnesses(state.handle.path, page_num, bo.text)" in gate
+        # #1205 reformatted this call across several lines when it gained the
+        # ``layer_is_evidence`` keyword, so the single-line spelling no longer
+        # occurs. The property being pinned is unchanged and is checked the same
+        # way: the witness is built from ``bo.text``, the object ``assess``
+        # rewrote, and not from a cached or pre-repair copy.
+        call = gate.split("prepare_table_witnesses(")[1].split(") as witnesses")[0]
+        assert "state.handle.path" in call
+        assert "bo.text" in call
+        assert "page_num" in call
 
         guard = inspect.getsource(UnifiedPipeline._resolve_table_guard_chain)
         assert "resolve_cell_refs(witness.markdown, refs)" in guard

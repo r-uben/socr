@@ -242,6 +242,110 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     return True
 
 
+class _PromotionLayerAbstainJudge:
+    """#1205 round 3 (Argon P1-2B), CORRECTED in round 4 (Argon P0): in the PROMOTION
+    the layer's verdict is SKIPPED -- the normal judge and the structural gate still
+    decide.
+
+    ``promote_unchecked_table_attempt`` peels ``SourceEvidenceTableJudge`` and calls the
+    rest of the chain directly, so a candidate the pixel lane could not check -- no
+    witness installed, or an empty reading -- reaches ``NativeTableVerifierJudge``
+    unwitnessed. There the layer chose which reading was promoted: measured on a
+    scan-failed page with an empty witness, the true ``-350`` was refused and the layer's
+    own ``350`` was promoted.
+
+    So on a page whose layer may not serve as evidence, and for a candidate no reading of
+    the pixels confirmed, this wrapper answers for the chain instead of letting it run:
+    the layer neither promotes nor refuses, the table stays UNVERIFIED, and the promotion
+    -- which requires an acceptance -- does not happen. The page keeps its floor.
+
+    Round 3 implemented that as ``accept=False``, and that LOST CONTENT -- Argon's round-4
+    P0, reproduced in ``scratch/1205r4/repro_p0.py``. A promotion that refuses is not a
+    promotion: ``settle_scanned_table_decision`` then falls to
+    ``_apply_scanned_table_floor``, which demotes ``best_output`` so the GH-90 branch
+    rewrites the page, and the model's table is replaced by the D3 fail-closed marker
+    ``[page n failed: unverifiable table -- see image]``. (Argon's review quotes that
+    marker as ``[TABLE ON PAGE 1 NOT EXTRACTED ...]``, a string that appears nowhere in
+    socr; the mechanism it describes is real, the quoted bytes are not.) Measured on
+    Argon's own fixture
+    (``flags={"positive": True}``): the ``-350`` attempt promoted on ``4d14411b`` and
+    returned ``None`` on ``4865ee7c``. Refusing without retaining is exactly what the
+    owner's ruling forbade; round 3 broke the ruling it was implementing.
+
+    So the layer abstains and NOTHING ELSE CHANGES: this runs the same two steps the
+    native verifier's own bypass runs -- ``self._inner.assess`` and the string-only
+    ``_apply_structural_gate`` (``words=None``, ``rules=None``) -- and only
+    ``verify_native_table`` is skipped. A table the normal judge accepts is promoted and
+    ships with its mark; the layer can neither promote a reading nor refuse one.
+
+    **Why not Argon's literal fix (delete this and widen the live bypass to the union).**
+    Measured, ``scratch/1205r4/probe_blanket_bypass.py``: it turns SIX tests red,
+    #1156's ``test_a_transparent_cover_is_not_an_independent_witness`` and
+    ``test_a_detection_error_does_not_turn_a_swap_into_an_acceptance`` among them. On a
+    page with no opaque cover the pixels ARE the layer's own ink, so dropping row-level
+    verification there lets a row swap through. The LIVE chain keeps what round 2
+    settled; only the promotion, which has already exhausted every reader, abstains.
+
+    Confined to the promotion chain ON PURPOSE (owner ruling 2026-10-19): refusing every
+    unconfirmed table on a suspect page is #1208's rule and has to ship with retention for
+    born-digital flagged pages.
+    """
+
+    def __init__(self, native: object) -> None:
+        # One object under two names: ``_inner`` keeps the chain shape every inspector
+        # walks (``wrapper._inner`` is the native judge, exactly as before this wrapper
+        # existed), ``_native`` is what the skip reaches past. The insertion site only
+        # builds this when the peeled core IS the native judge, so they cannot diverge.
+        self._inner = native
+        self._native = native
+
+    def _layer_may_not_decide(self, output: PageOutput) -> bool:
+        native = self._native
+        if native is None:
+            return False
+        suspect_fn = getattr(native, "_native_evidence_suspect", None)
+        if suspect_fn is None:
+            return False
+        try:
+            suspect = bool(suspect_fn(output.page_num))
+        except Exception:
+            # A trust source that raises is not a licence to trust. Since round 4 this
+            # direction costs nothing: skipping the layer's verdict neither ships an
+            # unverified number as verified (the mark stays) nor loses the table, so the
+            # conservative answer is also the one that RETAINS content.
+            suspect = True
+        # No exemption for a pixel-confirmed candidate, deliberately -- though the
+        # obvious one ("a candidate the pixel lane confirmed is not in this class, the
+        # native judge's own bypass handles it") was written here first.
+        #
+        # It cannot fire, and an untestable guard guards nothing. The only writer of
+        # that record is ``SourceEvidenceTableJudge``, which this chain PEELS OFF, and
+        # the candidate arriving here is ``promote_unchecked_table_attempt``'s
+        # ``deepcopy`` -- a fresh object whose ``id`` is in no record, with the
+        # original's entry already consumed by the live assess. Measured rather than
+        # argued (``scratch/1205r3/probe_dead_branch.py``): across both readings of the
+        # round-3 promotion fixture the record was empty at every call and the exemption
+        # fired zero times, and mutating the branch to ``return True`` killed no test
+        # (mutant r3m6).
+        #
+        # ``output`` is kept in the signature because ``assess`` passes the candidate and
+        # a later rule may need it; nothing about the page is read from it today.
+        return suspect
+
+    def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        if not self._layer_may_not_decide(output):
+            return self._inner.assess(output, provider)
+        # The native verifier's OWN bypass, reached from outside it: its inner chain
+        # decides and the string-only structural gate still runs. Nothing between the
+        # top of ``NativeTableVerifierJudge.assess`` and that bypass does anything else
+        # (it computes the suspicion this wrapper has already computed, and pops a
+        # confirmation record that cannot hold a promotion probe -- the probe is a
+        # ``deepcopy``), so skipping the judge skips the layer and only the layer.
+        native = self._native
+        decision = native._inner.assess(output, provider)
+        return native._apply_structural_gate(decision, output, output.page_num, None, None)
+
+
 def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
     """The chain inside ``SourceEvidenceTableJudge``, deadline kept.
 
@@ -267,7 +371,34 @@ def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
             core = getattr(core, "_inner", None)
             continue
         break
-    wrapped = core
+    # #1205 round 3 (Argon P1-2B): the promotion's own abstention, wrapped around the
+    # peeled core and INSIDE any deadline. #1125 r2 requires ``_TimeoutJudge`` to stay
+    # outermost so the promotion keeps the deadline and its timeout callback -- a test
+    # pins that class name -- and inside is the right place on its own terms: a
+    # deliberate abstention should be subject to the same deadline as the work it
+    # replaces, not placed where it could answer after the clock was meant to fire.
+    #
+    # ``native`` is the peeled chain's own native judge, so the wrapper reads the same
+    # suspicion source and the same confirmation record the live run does. ``None`` when
+    # the chain has no such judge, where the wrapper is inert.
+    native = None
+    probe = core
+    while probe is not None:
+        if probe.__class__.__name__ == "NativeTableVerifierJudge":
+            native = probe
+            break
+        probe = getattr(probe, "_inner", None)
+    # Only inserted where it can DO something: with no native judge in the chain the
+    # wrapper has no suspicion source, so adding it would be an inert layer -- and one
+    # that changes the chain's shape for every caller that inspects it (#1125's own
+    # deadline test reads ``peeled._inner``).
+    #
+    # ``core is native`` as well, because the skip works by calling PAST the native
+    # judge: that is sound only where this wrapper sits directly on it. Production is
+    # ``SE(Native(_TimeoutJudge(leaf)))`` and the older shape is ``_TimeoutJudge(SE(...))``,
+    # so after peeling core IS native in both. A chain that nested it deeper gets main's
+    # behaviour instead of a wrapper reaching through judges it cannot see.
+    wrapped = _PromotionLayerAbstainJudge(native) if native is not None and core is native else core
     for tw in reversed(timeouts):
         wrapped = tw.__class__(
             wrapped,
@@ -971,6 +1102,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         *,
         ocr_image_fn: Callable[[object], str] | None = None,
         native_trusted: Callable[[int], bool | None] | None = None,
+        layer_is_evidence: Callable[[int], bool] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
@@ -982,6 +1114,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         # that same untrusted layer. None (no callable, or it cannot tell)
         # keeps the pre-GH-163 behaviour.
         self._native_trusted = native_trusted
+        self._layer_is_evidence = layer_is_evidence
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.reconcile import find_table_blocks
@@ -1008,11 +1141,21 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     trusted = self._native_trusted(page_num)
                 except Exception:  # noqa: BLE001 - unknown, not untrusted
                     trusted = None
+            # #1205: a separate question from ``native_trusted`` -- see
+            # ``verify_scanned_table``. A source that RAISES is not a licence to use
+            # the layer, so the exception arm excludes it.
+            layer_ok = True
+            if self._layer_is_evidence is not None:
+                try:
+                    layer_ok = bool(self._layer_is_evidence(page_num))
+                except Exception:  # noqa: BLE001 - not a licence to trust the layer
+                    layer_ok = False
             result = verify_scanned_table(
                 fitz_page,
                 check_text,
                 ocr_image_fn=self._ocr_image_fn,
                 native_trusted=trusted,
+                layer_is_evidence=layer_ok,
             )
         except _VERIFIER_FATAL:
             raise
@@ -1159,6 +1302,15 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 data={"cause": ""},
             )
 
+        # #1205 round 2 (Argon P1-2): this is the passing exit, and on a page whose
+        # layer was EXCLUDED from the check above the evidence behind it is the pixels
+        # alone. Tell the inner native verifier, which must not then convict the same
+        # reading from the layer. ``deferred`` results never reach here (they returned
+        # above), so this is a real reading, not an abstention.
+        if not layer_ok:
+            noted = getattr(self._inner, "_pixel_confirmed_candidates", None)
+            if isinstance(noted, dict):
+                noted[id(output)] = output
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
@@ -1226,12 +1378,29 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         is_table_page: Callable[[int], bool],
         record_event: Callable[[object], None] | None = None,
         native_evidence_suspect: Callable[[int], bool] | None = None,
+        native_layer_found: Callable[[int], bool] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._is_table_page = is_table_page
         self._record_event = record_event
         self._native_evidence_suspect = native_evidence_suspect
+        self._native_layer_found = native_layer_found
+        # #1205 round 2 (Argon P1-2), scoped to the CANDIDATE in round 3 (Argon
+        # P1-2A). The outer ``SourceEvidenceTableJudge`` records here, just before it
+        # delegates, that the PIXEL lane confirmed one reading -- and only when the
+        # layer was EXCLUDED from that check, so the confirmation is of the pixels and
+        # never of the layer agreeing with itself.
+        #
+        # Keyed by the candidate OBJECT, not by the page, and consumed once. Round 2
+        # keyed it by page number and never cleared it, so a rung-1 confirmation
+        # licensed skipping ``verify_native_table`` on an unconfirmed rung 2 -- measured:
+        # the layer's own ``350`` rode in on the confirmation the true ``-350`` earned.
+        # The object is HELD as the dict's value so its ``id`` cannot be reused by a
+        # later candidate while the entry lives (the #1156 furniture-cache lesson), and
+        # the promotion path's ``deepcopy`` is a different object, so it inherits
+        # nothing.
+        self._pixel_confirmed_candidates: dict[int, object] = {}
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1266,21 +1435,75 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                 suspect = bool(self._native_evidence_suspect(page_num))
             except Exception:  # a trust source that raises is not a licence to trust
                 suspect = True
-        if suspect and self._get_fitz_page is not None:
+        # #1205 round 2 (Argon P0). Rounds 2/3 narrowed the bypass to
+        # ``page_has_opaque_page_covering_raster`` on the ground that suspicion must
+        # never make a check weaker: dropping row-level verification is only safe when
+        # something INDEPENDENT read the pixels. That reasoning was sound about the
+        # REJECTION half of this verifier and blind to the other half. ``EXACT_PASS``
+        # below is an ACCEPTING exit that skips ``self._inner.assess`` entirely and
+        # stamps confidence 1.0 -- so on a page whose layer is an earlier OCR run, a
+        # model reading that reproduces the layer's own error is waved through by that
+        # error, with no judge consulted. Measured consequence on the #1205 fixture:
+        # the layer reads ``350`` where the page says ``-350``; a model that drops the
+        # minus matches the layer exactly and ships at 1.0.
+        #
+        # So the two halves are split by the two #1156 keys:
+        #
+        # * a POSITIVE finding (``prior_ocr_layer`` / ``invisible_text_over_raster``)
+        #   bypasses native verification altogether -- this layer is established as a
+        #   previous reading, and #1202 already gives the page the pixel lane
+        #   (``SourceEvidenceTableJudge``'s raster witness), the visual table ladder
+        #   and the blind cell guard, so bypassing is not an absence of checking;
+        # * a FAILED detection scan ("unknown") keeps row-level verification, because
+        #   that page may well be genuinely born-digital and the rejection is the
+        #   stronger direction -- but it may never take the ``EXACT_PASS``
+        #   short-circuit, since an unknown layer may not pass a reading unjudged.
+        #
+        # #1202's own bypass is KEPT and this one JOINS it. Round 3 of this ticket
+        # replaced it, and #1202's test caught the consequence: a page that is suspect
+        # but not established, and that carries an opaque page-covering raster, had its
+        # pixels read independently by the outer ``SourceEvidenceTableJudge`` -- so
+        # verifying it against its own layer can only veto a reading that already has
+        # a better witness. The two bypasses answer different questions and both are
+        # sufficient:
+        #
+        # * ``layer_found`` -- the layer IS an earlier OCR run. The question itself.
+        #   True on every render-mode-3 page, where the raster proxy answers False
+        #   because there is no single page-covering image.
+        # * the opaque raster -- something independent read these pixels. #1202's.
+        #
+        # ``union_suspect`` is kept for the whole method and never flipped: the union
+        # is what decides whether this page's layer may author anything (#1205 round 1,
+        # Argon P0 1.3). ``suspect`` below is the narrower "may verification be
+        # skipped" question and IS flipped.
+        union_suspect = suspect
+        layer_found = False
+        if self._native_layer_found is not None:
+            try:
+                layer_found = bool(self._native_layer_found(page_num))
+            except Exception:
+                # #1205 round 1 (Argon P0 2, r-uben M13): fail CLOSED. ``True`` here
+                # would SKIP native verification on the strength of a failure -- the
+                # page would be treated as established -- which is the opposite of the
+                # rule the raster handler below follows. ``False`` leaves the page
+                # unknown: it is verified, and it gets no EXACT_PASS.
+                layer_found = False
+        if suspect and not layer_found and self._get_fitz_page is not None:
             # Round 2/3 (Astra P1, then Argon -- the same weakening twice more):
             # coverage is not a witness. ``page_has_page_covering_raster`` is satisfied
             # by an image drawn with alpha 0, which leaves the pixels unchanged; and
             # coverage by an OPAQUE image is still satisfied by a born-digital table
             # drawn ON TOP of a background photo. The pixels are an independent reading
-            # only of text that lies UNDER them, which is the positive question
-            # ``_has_prior_ocr_layer`` asks.
+            # only of text that lies UNDER them.
             from socr.core.born_digital import page_has_opaque_page_covering_raster
 
             try:
-                suspect = bool(page_has_opaque_page_covering_raster(self._get_fitz_page(page_num)))
+                layer_found = bool(
+                    page_has_opaque_page_covering_raster(self._get_fitz_page(page_num))
+                )
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
-                suspect = False
+                layer_found = False
             # #1203 round 2: round 1 reported this skip to the orchestrator, which keyed
             # the withhold on it plus "no witness event". Both halves were wrong. The
             # report was gated on ``_is_table_page``, which asks ``has_numeric_columns``
@@ -1291,6 +1514,32 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # EVERY model table is withheld by the one final gate in the orchestrator, so
             # nothing here needs to be reported and nothing about it is derived from the
             # layer.
+            # (#1205: this branch keeps the answer in ``layer_found`` rather than
+            # overwriting ``suspect``, because the union has to stay readable further
+            # down -- same probe, same conclusion, different variable.)
+        # #1205 round 2 (Argon P1-2): a reading the pixel lane has independently
+        # confirmed is not the layer's to convict. Measured before the fix, through
+        # ``_build_page_judge`` on a scan-failed page with no covering raster: the
+        # outer judge PASSED the pixel-confirmed ``-350`` against its witness, then
+        # this verifier rejected it with ``value_guard_multiset_mismatch`` on the
+        # strength of the layer's ``350``.
+        #
+        # Deliberately NOT a blanket bypass on the union, which is what the finding's
+        # literal wording would be: on a page with no opaque cover the pixels ARE the
+        # layer's own ink, so dropping the row check there lets a row swap through --
+        # #1156's transparent-cover and detection-error guards both measure exactly
+        # that, and both go red under the blanket version. A confirmation requires a
+        # reading of the pixels that EXCLUDED the layer, which those pages do not have.
+        pixel_confirmed = self._pixel_confirmed_candidates.pop(id(output), None) is output
+        if union_suspect and pixel_confirmed:
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, None, None)
+        exact_pass_needs_a_judge = suspect and not layer_found
+        if suspect and not layer_found:
+            # Unknown, and nothing independent read these pixels: keep verifying, which
+            # is the direction that cannot ship a wrong number. The EXACT_PASS guard
+            # below is what stops the layer PASSING a reading on its own.
+            suspect = False
         if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)
@@ -1309,7 +1558,16 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
             furniture = self._document_furniture(fitz_page)
             vr = verify_native_table(fitz_page, output.text)
-            vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
+            # #1205 round 1 (Argon P0 1.3): ``_maybe_repair_collapsed_headers``
+            # rewrites ``output.text`` -- the bytes that ship -- from
+            # ``fitz_page.get_text("words")``. On a page whose layer may not serve as
+            # evidence that is the layer AUTHORING shipped content, which is a stronger
+            # act than grading one. Measured on Argon's own fixture: the scan-failed arm
+            # replaced the emitted header row with words taken from the layer. The
+            # UNION decides, so a failed detection scan is included; the verifier's
+            # rejection power above is untouched.
+            if not union_suspect:
+                vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except _VERIFIER_FATAL:
             raise
         except Exception as exc:
@@ -1424,6 +1682,29 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # a gate rejection below can never be mistaken for this one.
             if not decision.accept:
                 output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
+            return self._apply_structural_gate(
+                decision, output, page_num, words, rules, furniture=furniture
+            )
+
+        if vr.state == VerifierState.EXACT_PASS and exact_pass_needs_a_judge:
+            # #1205 round 2: the layer is "unknown" (a FAILED detection scan). Its
+            # agreement with the model is not a pass -- it may be the same OCR error
+            # twice -- so the one accepting exit that consults no judge is closed and
+            # the inner judge decides. The verifier's REJECTION power is untouched:
+            # a hard fail above still refuses, which is the direction that cannot
+            # ship a wrong number.
+            self._emit_event(
+                page_num=page_num,
+                kind="table_value_drift_unadjudicated",
+                engine=output.engine or "",
+                detail=(
+                    "deterministic EXACT_PASS withheld: this page's text layer could "
+                    "not be established as the document's own characters, so its "
+                    "agreement with the reading is not a pass; deferring to the judge"
+                ),
+                data={"verifier_state": vr.state, "adjudicated": False},
+            )
+            decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(
                 decision, output, page_num, words, rules, furniture=furniture
             )
