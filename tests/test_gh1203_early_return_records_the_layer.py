@@ -36,7 +36,7 @@ import pytest
 fitz = pytest.importorskip("fitz")
 
 from socr.core.born_digital import BornDigitalDetector  # noqa: E402
-from socr.core.result import PageOutput, PageStatus  # noqa: E402
+from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 
 #: Tokens of the fixture's own text layer. A number among them, because what the owner's
 #: ruling protects is a number the earlier OCR run read wrong.
@@ -922,6 +922,7 @@ def _run_table_arm(
     witness: bool,
     pdf: Path | None = None,
     first_rung_witness_error: bool = False,
+    witness_empty: bool = False,
     per_rung_tables: list[str] | None = None,
     swap_rows: bool = False,
     verifier_raises: bool = False,
@@ -968,10 +969,14 @@ def _run_table_arm(
             # LAYER's numbers, which is what a real tesseract on a real scan reads -- so
             # with ``agree=True`` the witness corroborates the model and with
             # ``agree=False`` it contradicts it.
-            # ONE LINE PER ROW, which is what ``pytesseract.image_to_string`` produces on
-            # a table and what the row-level confirmation reads. A single-line reading
-            # confirms nothing, by design: see ``_line_carries_cells``.
-            reading = "\n".join(" ".join(r) for r in _COLUMN_ROWS)
+            # ONE LINE PER ROW, which is what ``pytesseract.image_to_string`` produces
+            # on a table. Round 4 removed the row-level confirmation this once fed; the
+            # arm is kept because an AGREEING witness must still not release the table.
+            # ``witness_empty``: the backend RAN and returned nothing. r-uben's third
+            # arm in his should-fix 9 table, and distinct from both others -- the
+            # package is installed (so not ``no witness backend``) and the call did not
+            # fail (so not an exec error); it simply read no text off the raster.
+            reading = "" if witness_empty else "\n".join(" ".join(r) for r in _COLUMN_ROWS)
             calls: list[int] = []
 
             def _witness(pix, _reading=reading, _calls=calls):
@@ -1227,8 +1232,24 @@ def test_a_suspect_page_with_no_table_is_not_touched(tmp_path: Path, monkeypatch
     assert "unverifiable table — see image" not in live["text"]
 
 
-def test_a_withheld_page_does_not_also_claim_its_table_shipped(tmp_path: Path, monkeypatch) -> None:
-    """Argon P2: a withheld page was carrying #1048's stamping as well.
+@pytest.mark.parametrize(
+    "arm,witness_kw",
+    [
+        # The three arms r-uben's should-fix 9 names. They differ in WHY no reader
+        # vouched for the cells, and the Fed run meets all three: CI and Rorqual have no
+        # Tesseract at all; a transient failure of an installed one is the exec error;
+        # and a backend that ran and read nothing off the raster is the empty reading
+        # (the shape `tesseract-is-the-weaker-reader-on-crops` measured on 27 of 91
+        # figure crops).
+        ("no-witness", {"witness": False}),
+        ("exec-error", {"witness": True, "first_rung_witness_error": True}),
+        ("empty-reading", {"witness": True, "witness_empty": True}),
+    ],
+)
+def test_a_withheld_page_does_not_also_claim_its_table_shipped(
+    tmp_path: Path, monkeypatch, arm: str, witness_kw: dict
+) -> None:
+    """Argon P2 / r-uben should-fix 9: a withheld page was carrying #1048's stamping.
 
     #1048's record means "the table shipped marked unverified". On a page whose table this
     run WITHHELD, nothing shipped -- and the sidecar still said
@@ -1239,7 +1260,7 @@ def test_a_withheld_page_does_not_also_claim_its_table_shipped(tmp_path: Path, m
     # its claim. With a disagreeing table nothing is promoted, so the strip is never
     # exercised and the assertions below pass for the wrong reason (measured).
     live = _run_table_arm(
-        tmp_path, monkeypatch, "p2-stamp", route_live=True, agree=True, witness=False
+        tmp_path, monkeypatch, f"p2-stamp-{arm}", route_live=True, agree=True, **witness_kw
     )
     assert live["ships_table"] is False, "fixture premise: the table is withheld"
     side = live["side"]
@@ -1250,11 +1271,29 @@ def test_a_withheld_page_does_not_also_claim_its_table_shipped(tmp_path: Path, m
     assert side.get("table_ladder_superseded") in (None, ""), side.get("table_ladder_superseded")
     assert side.get("unchecked_table_values") in (None, "", []), side.get("unchecked_table_values")
     assert "marked unverified" not in live["text"]
-    # r-uben 8 asked for a behavioural pin of the #1048 strip. There is nothing left to
-    # pin: round 4 removed the release path, so no page of this class ships a table and no
-    # arm produces the claim (measured over all five witness/agreement arms). The strip is
-    # removed with it; what remains, and what the mutants kill, is the clearing of the
-    # disposition and the ``unchecked_table_*`` fields asserted above.
+    # r-uben 9 / Argon P2, round 5. Round 4 removed the strip after measuring the claim
+    # in the page BODY only and concluding no arm could produce it. It was in the
+    # SIDECAR the whole time: on head 92b2c420 the no-witness arm wrote
+    # ``winning_output.judge_reason = "ladder exhausted; table shipped marked unverified
+    # (#1048); ..."``, the same sentence into ``attempts_summary[0].rejection_reason``,
+    # and ``judge_accepted: true``; the exec-error and empty-reading arms wrote
+    # ``judge_accepted: true`` beside a marker-only body too. So on every arm at least
+    # one of these three assertions was failing before the fix, and the assertions are
+    # on the SIDECAR -- not the body, which is what round 4 measured and why it
+    # concluded wrongly.
+    assert "table shipped marked" not in json.dumps(side), (
+        "the sidecar still claims this page's table shipped"
+    )
+    assert side["winning_output"].get("judge_accepted") is not True, (
+        f"[{arm}] the sidecar records an accepted judgement for a page with a marker body"
+    )
+    assert not any(
+        "table shipped marked" in (att.get("rejection_reason") or "")
+        for att in (side.get("attempts_summary") or [])
+    ), f"[{arm}] attempts_summary still claims the table shipped"
+    assert not side["winning_output"].get("judge_outcome"), side["winning_output"].get(
+        "judge_outcome"
+    )
 
 
 def test_a_born_digital_flagged_page_does_not_grow_the_retention_key(
@@ -1615,4 +1654,359 @@ def test_an_html_table_is_withheld_too(tmp_path: Path, monkeypatch) -> None:
     assert "unverifiable table — see image" in live["text"]
     assert "<table" in (live["side"].get("withheld_table_text") or ""), (
         "the HTML table was withheld without retention, which is a deletion"
+    )
+
+
+def test_an_upstream_floor_still_retains_the_rejected_rungs_table(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon P0, round 5: a withhold that keeps nothing is a deletion.
+
+    The ladder's own floor (``orchestrator.py``, at the routing site) runs BEFORE this
+    PR's gate and replaces the body with the marker. The gate read only
+    ``ps.best_output``, so when the winner it left behind carried no table the gate
+    returned early -- and the table the ladder had refused was gone from the run.
+
+    The repro is Argon's: rung 1 emits a table with a RAGGED row, which the
+    source-evidence judge rejects and ``promote_unchecked_table_attempt`` cannot promote;
+    rung 2 emits prose only. Measured on head 92b2c420: body is the marker,
+    ``withheld_table_text`` is absent. The ruling forbids losing a model reading, so the
+    retention now covers every attempt, not only the winner.
+    """
+    ragged = (
+        "| Item | Level | Change | Net |\n| --- | --- | --- | --- |\n"
+        "| Reserves | 521 | 380 |\n"
+        + "\n".join(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |" for r in _COLUMN_ROWS[1:])
+        + "\n"
+    )
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "p0-upstream",
+        route_live=True,
+        agree=True,
+        witness=False,
+        per_rung_tables=[ragged, "The Committee reviewed conditions in the economy.\n"],
+    )
+    assert live["ships_table"] is False, "fixture premise: no table ships"
+    assert "unverifiable table — see image" in live["text"], live["text"][:200]
+    retained = live["side"].get("withheld_table_text") or ""
+    assert "| Reserves | 521 | 380 |" in retained, (
+        "the rejected rung's table was withheld without retention, which is a deletion"
+    )
+    # The retention's first segment is a COMPLETE candidate body, not a bare block: the
+    # body here is the marker, so that rung's prose around the table ships nowhere else
+    # and #1208 needs it to know what the table was a table OF.
+    assert retained.startswith("RESERVE AGGREGATES, MEMBER BANKS"), repr(retained[:80])
+    # This page IS withheld -- the body is the marker -- so it must also carry the
+    # withhold's record, not just the retention. Without this the gate could satisfy the
+    # retention through the retain-only path and leave #1048's claim standing.
+    assert "table shipped marked" not in json.dumps(live["side"])
+    assert live["side"]["winning_output"].get("judge_accepted") is not True
+    assert live["side"].get("table_ladder_disposition") in (None, "")
+    # The shipped bytes are the marker, so "the page judge completed" is not a statement
+    # about them. This is also what separates a WITHHELD page from a retain-only one,
+    # which keeps its judge record: a gate that reached the retention through the
+    # retain-only path would leave this standing.
+    assert not live["side"]["winning_output"].get("judge_outcome"), live["side"][
+        "winning_output"
+    ].get("judge_outcome")
+
+
+def test_every_attempts_distinct_table_is_retained_not_only_the_winners(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The second half of Argon P0: a rung with TWO tables, a winner with one.
+
+    Retaining ``ps.best_output.text`` alone keeps whichever tables the winner happened to
+    carry. Measured on head 92b2c420 with these bodies: the retention held rung 2's single
+    table and rung 1's second table was gone.
+
+    The dedup is pinned here too: rung 1's FIRST table is identical to rung 2's, and it
+    must appear once, not twice. ``table_grid_identity`` is order-sensitive, so this is a
+    claim about identical readings only -- two rungs that differ in one cell are two
+    readings and both are kept.
+    """
+    second = _table_markdown([("Borrowings", "12", "3", "9"), ("Excess", "4", "1", "3")])
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "p0-twotable",
+        route_live=True,
+        agree=True,
+        witness=False,
+        per_rung_tables=[
+            _table_markdown(_COLUMN_ROWS) + "\n\nSome prose.\n\n" + second,
+            _table_markdown(_COLUMN_ROWS),
+        ],
+    )
+    assert live["ships_table"] is False, "fixture premise: no table ships"
+    retained = live["side"].get("withheld_table_text") or ""
+    assert "| Borrowings | 12 | 3 | 9 |" in retained, (
+        "the rejected rung's SECOND table was lost; retention followed the winner only"
+    )
+    assert retained.count("| Monetary base | 721 | -154 | -23 |") == 1, (
+        f"the shared table was retained twice: {retained}"
+    )
+
+
+def test_an_unparsable_html_table_is_retained_too(tmp_path: Path, monkeypatch) -> None:
+    """r-uben 10: the unparsed-HTML half of the gate's detector is load-bearing.
+
+    ``html_table_for_check`` returns ``(converted, an HTML table remains unparsed)``.
+    ``convert_html_tables`` never deletes content, so a ``<table>`` it cannot read as rows
+    survives the conversion and ``find_table_blocks`` cannot see it either. Dropping the
+    ``_html_unparsed`` conjunct left all 237 tests of round 4 green while losing the
+    reading at ``process()``: the scanned gate still floored the page, and nothing was
+    retained.
+
+    ``<table>\n</table>`` is the minimal such block -- no rows to parse.
+    """
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "html-unparsed",
+        route_live=True,
+        agree=False,
+        witness=False,
+        html_table="<table>\n</table>\n\nReserves were 521 on the week.\n",
+    )
+    assert "unverifiable table — see image" in live["text"], live["text"][:200]
+    assert "<table" not in live["text"], "an unreadable HTML table shipped"
+    assert "<table" in (live["side"].get("withheld_table_text") or ""), (
+        "an HTML table the house parser could not read was floored with no retention"
+    )
+
+
+def test_a_corroborated_table_is_not_recorded_as_a_fabrication(tmp_path: Path, monkeypatch) -> None:
+    """Argon P1, round 5: the floor had two causes where the page has three.
+
+    ``HALLUCINATION`` means a witness READ the pixels and the model's numbers were not
+    there. The floor picked it for everything that was not ``NO_WITNESS_BACKEND``, so a
+    page where a witness read the pixels and AGREED -- withheld only because nothing
+    compares its CELLS -- was recorded as a fabrication. Measured on head 92b2c420:
+    ``failure_mode: hallucination`` on the ``witness=True, agree=True`` arm.
+
+    A DIFFERENCE, not a pinned tuple: the corroborated arm and the contradicted arm run in
+    the same process over the same fixture, and only the witness's verdict changes. Both
+    withhold; the recorded causes must differ, and only the contradicted one may accuse
+    the model.
+    """
+    corroborated = _run_table_arm(
+        tmp_path, monkeypatch, "p1-agree", route_live=True, agree=True, witness=True
+    )
+    contradicted = _run_table_arm(
+        tmp_path, monkeypatch, "p1-contra", route_live=True, agree=False, witness=True
+    )
+    assert corroborated["ships_table"] is False and contradicted["ships_table"] is False, (
+        "fixture premise: both arms withhold"
+    )
+    assert contradicted["failure_mode"] == FailureMode.HALLUCINATION.value, contradicted[
+        "failure_mode"
+    ]
+    assert corroborated["failure_mode"] != contradicted["failure_mode"], (
+        "a witness-corroborated table is recorded with the cause that means a witness "
+        "contradicted it"
+    )
+    assert corroborated["failure_mode"] == FailureMode.TABLE_WITHHELD_UNCONFIRMED.value, (
+        corroborated["failure_mode"]
+    )
+    # The cause must survive into the operator-facing clause, not just the enum: a mode
+    # with no ``_MODE_CLAUSES`` row is invisible in the page verdict.
+    from socr.core.verdict import _MODE_CLAUSES
+
+    assert FailureMode.TABLE_WITHHELD_UNCONFIRMED in _MODE_CLAUSES
+
+    # The floor stamps the cause in TWO places and both are load-bearing: the sidecar is
+    # rebuilt by the manifest from the page flag, and the WINNER OBJECT is written
+    # through to the page blob cache, which a replay reads back. A mutant that reverts
+    # only the in-memory branch leaves the sidecar correct and the cache saying
+    # ``hallucination`` -- measured, and it is why this assertion is on the blobs.
+    def _cache_modes(tag: str) -> set[str]:
+        root = tmp_path / f"out-{tag}"
+        return {
+            json.loads(blob.read_text()).get("failure_mode")
+            for blob in root.rglob("cache/*/*.json")
+        }
+
+    assert _cache_modes("p1-agree") == {FailureMode.TABLE_WITHHELD_UNCONFIRMED.value}, (
+        f"the replay cache accuses the model: {_cache_modes('p1-agree')}"
+    )
+    assert _cache_modes("p1-contra") == {FailureMode.HALLUCINATION.value}, (
+        f"the contradicted arm lost its honest cause: {_cache_modes('p1-contra')}"
+    )
+
+
+def test_the_withheld_unconfirmed_cause_survives_a_resume(tmp_path: Path, monkeypatch) -> None:
+    """The new cause is DERIVED on resume from the persisted mode, like #658's.
+
+    No new sidecar key -- the P6 key set stays frozen -- so the page flag and the recorded
+    mode can never disagree. A page restored from a sidecar written before this ticket
+    records ``hallucination`` and restores ``False``, which is what that record meant.
+    """
+    from socr.core.result import PageOutput, PageStatus
+    from socr.core.state import PageState
+
+    for mode, expected in (
+        (FailureMode.TABLE_WITHHELD_UNCONFIRMED, True),
+        (FailureMode.HALLUCINATION, False),
+        (FailureMode.NO_WITNESS_BACKEND, False),
+    ):
+        ps = PageState(page_num=1)
+        ps.scanned_table_evidence_failed = True
+        out = PageOutput(page_num=1, text="x", status=PageStatus.ERROR, failure_mode=mode)
+        ps.scanned_table_withheld_unconfirmed = (
+            ps.scanned_table_evidence_failed
+            and out.failure_mode is FailureMode.TABLE_WITHHELD_UNCONFIRMED
+        )
+        assert ps.scanned_table_withheld_unconfirmed is expected, mode
+        assert PageOutput.from_dict(out.to_dict()).failure_mode is mode
+
+
+def test_the_disputed_arm_is_what_makes_the_value_clears_non_vacuous(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """r-uben's nit on round 4: the ``unchecked_table_values`` assertions were vacuous.
+
+    ``test_a_withheld_page_does_not_also_claim_its_table_shipped`` runs the no-witness
+    arm, where #1048's settling fills ``unchecked_table_kind`` but leaves the VALUES
+    empty -- so asserting they are empty after the gate proved nothing about the clears.
+
+    Only a DISPUTED arm fills them: a witness that read the pixels and refused cells.
+    Measured with the gate disabled, this fixture leaves ``unchecked_table_values:
+    "521, 380, 18"`` and the matching list; the no-witness arm leaves ``""``. The two
+    arms run here so the difference is in one place, and the gate must clear both.
+    """
+    from socr.pipeline import orchestrator as orch
+
+    def _arm(tag, **kw):
+        return _run_table_arm(tmp_path, monkeypatch, tag, route_live=True, **kw)["side"]
+
+    with monkeypatch.context() as m:
+        m.setattr(orch.UnifiedPipeline, "_withhold_unconfirmed_table", lambda *a, **k: False)
+        ungated = _arm("values-off", agree=False, witness=True)
+    assert ungated.get("unchecked_table_values"), (
+        "fixture premise: the disputed arm must FILL the values, or the clear below is "
+        f"vacuous -- got {ungated.get('unchecked_table_values')!r}"
+    )
+    assert ungated.get("unchecked_table_value_list"), ungated.get("unchecked_table_value_list")
+
+    gated = _arm("values-on", agree=False, witness=True)
+    assert gated.get("unchecked_table_values") in (None, ""), gated.get("unchecked_table_values")
+    assert gated.get("unchecked_table_value_list") in (None, []), gated.get(
+        "unchecked_table_value_list"
+    )
+    assert gated.get("unchecked_table_kind") in (None, ""), gated.get("unchecked_table_kind")
+
+
+def test_a_losing_rungs_unparsable_html_table_is_retained(tmp_path: Path, monkeypatch) -> None:
+    """The unparsed-HTML branch of ``_table_blocks_for_retention``, which only a
+    NON-WINNER attempt can reach.
+
+    ``test_an_unparsable_html_table_is_retained_too`` pins the GATE's detector, but there
+    the winner carries the HTML and the retention is its whole text -- so the helper's
+    own branch is never what saves it, and a mutant that disables that branch survives
+    (measured). The branch matters when a LOSING rung emitted the unreadable ``<table>``
+    and the winner's table is markdown: then the only way rung 1's reading survives is
+    for the helper to isolate it as a block.
+    """
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "html-losing-rung",
+        route_live=True,
+        agree=True,
+        witness=False,
+        per_rung_tables=["<table>\n</table>\n", _table_markdown(_COLUMN_ROWS)],
+    )
+    assert live["ships_table"] is False, "fixture premise: no table ships"
+    retained = live["side"].get("withheld_table_text") or ""
+    assert "| Monetary base |" in retained, "the winner's own table was not retained"
+    assert "<table" in retained, (
+        "the losing rung's unreadable HTML table was dropped from the retention"
+    )
+
+
+def test_a_table_the_page_does_not_ship_is_retained_even_with_no_floor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon's round-5 "variant B", the one repro of its three that actually runs.
+
+    Rung 1 emits a SHORT table whose numbers the witness corroborates, so the
+    source-evidence gate passes it -- and the PAGE judge then refuses it for word count.
+    Rung 2 emits enough prose to win. Nothing rejected a table, so no floor fires; the
+    winner carries no table; and measured on this fixture the page shipped rung 2's prose
+    with ``withheld_table_text`` unset. A table a model read on this page was gone from
+    the run and #1208 could never release it.
+
+    The page's ENDING is main's and must not move -- flooring a page whose accepted
+    reading is prose would be new content loss. So this pins a difference in the
+    retention ONLY: same body, same status, the reading now on disk.
+    """
+    short_table = "| Item | Level |\n| --- | --- |\n| Reserves | 512 |\n"
+    prose = " ".join(f"word{i}" for i in range(35)) + "\n"
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "variant-b",
+        route_live=True,
+        agree=True,
+        witness=True,
+        per_rung_tables=[short_table, prose],
+    )
+    assert "unverifiable table — see image" not in live["text"], (
+        "the retain-only path floored a page whose accepted reading is prose"
+    )
+    assert "word34" in live["text"], "fixture premise: the prose rung's reading ships"
+    assert "| Reserves | 512 |" not in live["text"], "fixture premise: no table ships"
+    assert "| Reserves | 512 |" in (live["side"].get("withheld_table_text") or ""), (
+        "a table a model read on this page is neither shipped nor retained"
+    )
+    # ...and the page keeps its OWN judge record. The clears below the withhold describe
+    # a page whose body was replaced by a marker; this page's body is its model reading,
+    # and erasing "the judge completed and refused it" would be a second false record in
+    # the opposite direction.
+    assert live["side"]["winning_output"].get("judge_outcome") == "page_judge_completed", live[
+        "side"
+    ]["winning_output"].get("judge_outcome")
+
+
+def test_an_unclosed_html_table_does_not_duplicate_the_block_beside_it() -> None:
+    """The no-closing-tag fallback must isolate the tail, not re-dump the whole text.
+
+    Dumping the whole text appends any table already captured above a second time, so
+    one reading lands twice in ``withheld_table_text`` -- once isolated and once inside
+    the dump -- and #1208 reads a one-table page as a two-table page.
+    """
+    from socr.pipeline.orchestrator import _table_blocks_for_retention
+
+    blocks = _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<table")
+
+    assert len(blocks) == 2, blocks
+    assert blocks[0][1] == "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    assert blocks[1][1] == "<table", blocks[1][1]
+    assert "| 1 | 2 |" not in blocks[1][1], "the parsed table was re-dumped inside the tail"
+
+
+def test_two_readings_that_differ_only_by_an_empty_row_are_both_kept() -> None:
+    """``table_grid_identity`` alone collapses readings the retention must keep.
+
+    ``_parse_grid`` drops a row whose populated cells are all ``-`` and a row that is
+    entirely blank. So a rung that read a missing-data row as ``| - | - |`` and a rung
+    that omitted the row produce the SAME grid identity (measured), and a dedup keyed on
+    it alone silently drops one of the two readings. The identity therefore carries the
+    block's own bytes as well.
+    """
+    from socr.pipeline.orchestrator import _table_blocks_for_retention
+
+    with_dashes = _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n| - | - |\n")
+    without = _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+    blank = _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n|  |  |\n")
+
+    assert with_dashes[0][0] != without[0][0], "the dash row collapsed into its absence"
+    assert blank[0][0] != without[0][0], "the blank row collapsed into its absence"
+    # A genuinely identical reading must still dedupe, or the retention stores every
+    # rung of an agreeing ladder.
+    assert (
+        without[0][0] == _table_blocks_for_retention("| A | B |\n| --- | --- |\n| 1 | 2 |\n")[0][0]
     )

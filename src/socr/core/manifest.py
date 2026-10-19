@@ -4357,9 +4357,16 @@ def _select_page_output_tagged(
             # invented the table. The floor is unchanged -- same marker text,
             # same ERROR, same provenance -- only the recorded cause follows the
             # page's own flag.
+            # #1203 adds the third cause. The two-way choice called a table a
+            # fabrication whenever no witness was MISSING -- including the case where a
+            # witness read the pixels and AGREED, and the table is withheld only because
+            # nothing compared its cells. That page's record accused the model of a
+            # contradiction that never happened.
             failure_mode=(
                 FailureMode.NO_WITNESS_BACKEND
                 if getattr(p, "scanned_table_no_witness", False)
+                else FailureMode.TABLE_WITHHELD_UNCONFIRMED
+                if getattr(p, "scanned_table_withheld_unconfirmed", False)
                 else FailureMode.HALLUCINATION
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED

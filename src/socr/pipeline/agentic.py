@@ -1287,9 +1287,10 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             # of the UNTRUSTED layer, so a layer with no numeric column silently skipped
             # the rule (Argon P1b); and "a witness ran" is not "a witness checked the
             # cells" (r-uben 1b: a witness that CONTRADICTED the model let the table
-            # ship). The rule now reads the positive confirmation the scanned-table gate
-            # records on the candidate it passed, so nothing here needs to be reported and
-            # nothing about it is derived from the layer.
+            # ship). Round 4 removed the confirmation path altogether: on these pages
+            # EVERY model table is withheld by the one final gate in the orchestrator, so
+            # nothing here needs to be reported and nothing about it is derived from the
+            # layer.
         if suspect or not self._is_table_page(page_num) or self._get_fitz_page is None:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)

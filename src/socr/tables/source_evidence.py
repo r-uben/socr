@@ -22,7 +22,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from socr.tables.image_locate import DETECT_DPI as _TEXT_LAYER_INK_DPI
 from socr.tables.native_verifier import (

@@ -336,6 +336,12 @@ class PageState:
     #: so a resumed run reports the same reason instead of silently falling
     #: back to "hallucination".
     scanned_table_no_witness: bool = False
+    #: #1203: the scanned floor above was applied by ``_withhold_unconfirmed_table``
+    #: because nothing confirmed this page's table's CELLS -- not because a witness
+    #: refused them and not because no witness ran. Qualifies the flag above the same
+    #: way ``scanned_table_no_witness`` does, and like it is DERIVED on resume from the
+    #: persisted winning ``failure_mode`` rather than given a sidecar key of its own.
+    scanned_table_withheld_unconfirmed: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``
