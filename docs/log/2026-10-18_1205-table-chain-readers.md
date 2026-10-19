@@ -444,3 +444,81 @@ could be misclassified.
 * Whether the judge's unjudged `EXACT_PASS` ship at confidence 1.0 is reachable on real
   pages, and how often. See above.
 * Cost: the guards are one boolean per page. Not profiled.
+
+## Round 3 (2026-10-19): the promotion, the candidate scope, and five replayed kinds
+
+Argon's round-3 review, verdict MERGE-AFTER-FIX, three P1s. All reproduced before anything
+changed. Full write-up in `scratch/routing-baseline/leads/1205/report-r3.md`.
+
+1. **The resume SKIP gate now takes the union.** `_load_terminal_page` ran before
+   `_restore_terminal_page_state` folds the sidecar's suspicion onto the page, so a page
+   whose SIDECAR said suspect -- the very run that wrote the binding record -- restored
+   that record whenever this run's detection happened to disagree.
+2. **A pixel confirmation belongs to the CANDIDATE, not the page.** Round 2 keyed it by
+   page number and never cleared it, so a rung-1 confirmation licensed skipping
+   `verify_native_table` on an unconfirmed rung 2: the layer's `350` rode in on the
+   confirmation the true `-350` earned. Now a `dict[int, object]` keyed by `id(output)`
+   with the object held as the value (the `id` cannot be reused while the entry lives) and
+   popped once on use.
+3. **The promotion may not promote on the layer's word.**
+   `promote_unchecked_table_attempt` PEELS `SourceEvidenceTableJudge`, so an unwitnessed
+   candidate reached `NativeTableVerifierJudge` and the layer chose which reading shipped
+   -- measured with an empty witness on a scan-failed page: the true `-350` refused, the
+   layer's own `350` promoted. `_PromotionLayerAbstainJudge` now answers for the chain
+   there, so nothing verifies and nothing is promoted.
+
+   **Owner ruling (2026-10-19): confined to the promotion chain.** Refusing every
+   unconfirmed table on a suspect page is #1208's rule and must ship with retention for
+   born-digital flagged pages; applied here alone it would refuse without retaining on
+   #1202's ~14,850 pages, which is content loss. The wrapper also sits INSIDE the deadline,
+   because #1125 r2 requires `_TimeoutJudge` to stay outermost, and is inserted only when
+   the peeled chain actually has a native judge -- otherwise it would be an inert layer
+   that changes the chain's shape for every caller that inspects it.
+4. **Five replayed kinds are layer-CAUSED**, and round 2's audit called them clean: the
+   three `table_escalation_*` (their lane grades the page with `score_page` /
+   `native_rows_from_page`), `table_ladder_withheld` with `reason` `native_contradiction`
+   or `sibling_of_contradicted` (`contradictions_for_tables`), and
+   `table_ladder_unverified` with `cause` `binding_contradiction` or `abstained` (`bind()`).
+   Each is in `TABLE_DISTRUST_KINDS` AND `CREDENTIAL_BLOCKING_EVENT_KINDS`, so one replayed
+   event listed the page untrusted and voided its #713 credential on the suspect layer's
+   say-so. Gated on the typed CAUSE, never the kind: the same kinds carry layer-free causes
+   (a rung outage, a budget, a blind MISMATCH) and those still replay, because dropping
+   them would withhold a page the pixels decided.
+
+**Why round 2 got those five wrong, stated as a method error.** They were classified from
+their EMIT SITE. "Fail-closed is the right direction for this family" was the reasoning
+behind the error: fail-closed is the right default for a reading socr could not check, and
+is NOT a licence to withhold on the strength of a source that may not be evidence.
+
+The re-check is scoped by consequence, not by producer: of the 60 replayed kinds **15 are
+in a consequence set** and 45 are disclosure-only, and a disclosure-only kind's producer
+cannot matter to this gate. Those 15 were each read by hand to their producer.
+`table_ladder_rejected` -- the one the handover flagged as unchecked -- **is not
+layer-derived**: its only producer is `run_table_ladder`'s last-rung FAIL, GH-359 ruling 4
+fixes rung input at "crop + markdown, nothing else", and both rung implementations are crop
+VLMs; the gate produces WITHHELD, never REJECTED. The two other places the literal appears
+are `terminal_kinds` MEMBERSHIP sets, not emit sites -- which is exactly how reading emit
+sites misleads. A mechanical call-graph trace (`scratch/1205r3/producer_trace.py`) was built
+and is NOT usable as the answer in either direction: over-approximating by simple name makes
+`page_retry` "reach" `score_page`, and a layer read done by the caller and passed in as an
+argument is invisible to it.
+
+**Two mutants found missing pins and one found dead code**, which is the main reason this
+round's test file is larger than its diff:
+
+* `r3m1` (the union reverted to the live flag) survived: P1-1's fix was real and its pin
+  was not. Round 2's skip-gate test drives the opposite direction, so the live flag alone
+  satisfies it. Pinned now with the sidecar-only arm Argon's repro describes.
+* `r3m7` (a raising `_native_evidence_suspect` read as "not suspect") survived: the
+  fail-closed arm had no test.
+* `r3m6` survived because the branch it mutated **could not fire.** The
+  pixel-confirmation exemption inside the promotion wrapper is unreachable:
+  `SourceEvidenceTableJudge` is the only writer of that record and this chain peels it off,
+  and the candidate arriving is `promote_unchecked_table_attempt`'s `deepcopy`. Measured,
+  not argued (`scratch/1205r3/probe_dead_branch.py`: empty record at every call, exemption
+  fired zero times). **The branch is removed** rather than pinned with a test no production
+  path exercises.
+* `r3m14` (the pixel bypass reading `suspect` instead of `union_suspect`) survives and is
+  an EQUIVALENT mutant, not a hole: `suspect` is not reassigned between
+  `union_suspect = suspect` and that line -- the flip to False is three lines below it. The
+  branch where the two genuinely differ is the header repair, and `r3m15` kills that one.

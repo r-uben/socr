@@ -242,6 +242,75 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     return True
 
 
+class _PromotionLayerAbstainJudge:
+    """#1205 round 3 (Argon P1-2B): the PROMOTION may not promote on the layer's word.
+
+    ``promote_unchecked_table_attempt`` peels ``SourceEvidenceTableJudge`` and calls the
+    rest of the chain directly, so a candidate the pixel lane could not check -- no
+    witness installed, or an empty reading -- reaches ``NativeTableVerifierJudge``
+    unwitnessed. There the layer chose which reading was promoted: measured on a
+    scan-failed page with an empty witness, the true ``-350`` was refused and the layer's
+    own ``350`` was promoted.
+
+    So on a page whose layer may not serve as evidence, and for a candidate no reading of
+    the pixels confirmed, this wrapper answers for the chain instead of letting it run:
+    the layer neither promotes nor refuses, the table stays UNVERIFIED, and the promotion
+    -- which requires an acceptance -- does not happen. The page keeps its floor.
+
+    Confined to the promotion chain ON PURPOSE (owner ruling 2026-10-19). Refusing EVERY
+    unconfirmed table on a suspect page is #1208's rule and has to ship with retention for
+    born-digital flagged pages; applied here alone it would refuse without retaining on
+    #1202's ~14,850 pages, which is content loss. Everywhere else the judge keeps the
+    behaviour round 2 settled.
+    """
+
+    def __init__(self, inner: PageJudge, native: object | None) -> None:
+        self._inner = inner
+        self._native = native
+
+    def _layer_may_not_decide(self, output: PageOutput) -> bool:
+        native = self._native
+        if native is None:
+            return False
+        suspect_fn = getattr(native, "_native_evidence_suspect", None)
+        if suspect_fn is None:
+            return False
+        try:
+            suspect = bool(suspect_fn(output.page_num))
+        except Exception:  # a trust source that raises is not a licence to trust
+            suspect = True
+        # No exemption for a pixel-confirmed candidate, deliberately -- though the
+        # obvious one ("a candidate the pixel lane confirmed is not in this class, the
+        # native judge's own bypass handles it") was written here first.
+        #
+        # It cannot fire, and an untestable guard guards nothing. The only writer of
+        # that record is ``SourceEvidenceTableJudge``, which this chain PEELS OFF, and
+        # the candidate arriving here is ``promote_unchecked_table_attempt``'s
+        # ``deepcopy`` -- a fresh object whose ``id`` is in no record, with the
+        # original's entry already consumed by the live assess. Measured rather than
+        # argued (``scratch/1205r3/probe_dead_branch.py``): across both readings of the
+        # round-3 promotion fixture the record was empty at every call and the exemption
+        # fired zero times, and mutating the branch to ``return True`` killed no test
+        # (mutant r3m6).
+        #
+        # ``output`` is kept in the signature because ``assess`` passes the candidate and
+        # a later rule may need it; nothing about the page is read from it today.
+        return suspect
+
+    def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        if self._layer_may_not_decide(output):
+            return AcceptDecision(
+                accept=False,
+                reason=(
+                    "promotion refused: this page's text layer may not serve as evidence "
+                    "and no reading of the pixels confirmed this candidate, so nothing "
+                    "verified this table"
+                ),
+                confidence=0.0,
+            )
+        return self._inner.assess(output, provider)
+
+
 def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
     """The chain inside ``SourceEvidenceTableJudge``, deadline kept.
 
@@ -267,7 +336,28 @@ def _promotion_inner_judge(judge: PageJudge | None) -> PageJudge | None:
             core = getattr(core, "_inner", None)
             continue
         break
-    wrapped = core
+    # #1205 round 3 (Argon P1-2B): the promotion's own abstention, wrapped around the
+    # peeled core and INSIDE any deadline. #1125 r2 requires ``_TimeoutJudge`` to stay
+    # outermost so the promotion keeps the deadline and its timeout callback -- a test
+    # pins that class name -- and inside is the right place on its own terms: a
+    # deliberate abstention should be subject to the same deadline as the work it
+    # replaces, not placed where it could answer after the clock was meant to fire.
+    #
+    # ``native`` is the peeled chain's own native judge, so the wrapper reads the same
+    # suspicion source and the same confirmation record the live run does. ``None`` when
+    # the chain has no such judge, where the wrapper is inert.
+    native = None
+    probe = core
+    while probe is not None:
+        if probe.__class__.__name__ == "NativeTableVerifierJudge":
+            native = probe
+            break
+        probe = getattr(probe, "_inner", None)
+    # Only inserted where it can DO something: with no native judge in the chain the
+    # wrapper has no suspicion source and no confirmation record, so adding it would be
+    # an inert layer -- and one that changes the chain's shape for every caller that
+    # inspects it (#1125's own deadline test reads ``peeled._inner``).
+    wrapped = _PromotionLayerAbstainJudge(core, native) if native is not None else core
     for tw in reversed(timeouts):
         wrapped = tw.__class__(
             wrapped,
@@ -1177,9 +1267,9 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         # reading from the layer. ``deferred`` results never reach here (they returned
         # above), so this is a real reading, not an abstention.
         if not layer_ok:
-            noted = getattr(self._inner, "_pixel_confirmed_pages", None)
-            if isinstance(noted, set):
-                noted.add(page_num)
+            noted = getattr(self._inner, "_pixel_confirmed_candidates", None)
+            if isinstance(noted, dict):
+                noted[id(output)] = output
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
@@ -1255,12 +1345,21 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         self._record_event = record_event
         self._native_evidence_suspect = native_evidence_suspect
         self._native_layer_found = native_layer_found
-        # #1205 round 2 (Argon P1-2): page numbers whose reading the PIXEL lane has
-        # independently confirmed. Written by the outer ``SourceEvidenceTableJudge``
-        # just before it delegates, and only when the layer was EXCLUDED from that
-        # check -- so the confirmation is of the pixels, never of the layer agreeing
-        # with itself. One page at a time; nothing accumulates across a document.
-        self._pixel_confirmed_pages: set[int] = set()
+        # #1205 round 2 (Argon P1-2), scoped to the CANDIDATE in round 3 (Argon
+        # P1-2A). The outer ``SourceEvidenceTableJudge`` records here, just before it
+        # delegates, that the PIXEL lane confirmed one reading -- and only when the
+        # layer was EXCLUDED from that check, so the confirmation is of the pixels and
+        # never of the layer agreeing with itself.
+        #
+        # Keyed by the candidate OBJECT, not by the page, and consumed once. Round 2
+        # keyed it by page number and never cleared it, so a rung-1 confirmation
+        # licensed skipping ``verify_native_table`` on an unconfirmed rung 2 -- measured:
+        # the layer's own ``350`` rode in on the confirmation the true ``-350`` earned.
+        # The object is HELD as the dict's value so its ``id`` cannot be reused by a
+        # later candidate while the entry lives (the #1156 furniture-cache lesson), and
+        # the promotion path's ``deepcopy`` is a different object, so it inherits
+        # nothing.
+        self._pixel_confirmed_candidates: dict[int, object] = {}
         # #988 M2: repeated word positions, scanned once per document.
         self._furniture: dict[str, DocumentFurniture] = {}
 
@@ -1377,7 +1476,8 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         # #1156's transparent-cover and detection-error guards both measure exactly
         # that, and both go red under the blanket version. A confirmation requires a
         # reading of the pixels that EXCLUDED the layer, which those pages do not have.
-        if suspect and page_num in self._pixel_confirmed_pages:
+        pixel_confirmed = self._pixel_confirmed_candidates.pop(id(output), None) is output
+        if union_suspect and pixel_confirmed:
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, None, None)
         exact_pass_needs_a_judge = suspect and not layer_found

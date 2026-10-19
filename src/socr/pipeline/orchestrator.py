@@ -311,6 +311,32 @@ class _AbandonedEscalation:
 #: keeps it and ``audit_log.json`` / the CLI summary silently lose it unless it is
 #: replayed (the #252 / GH-353 D1a shape). Per-run kinds that ARE re-emitted every run
 #: (e.g. ``orphan_word_dropped``) are deliberately absent: replaying them double-counts.
+#: #1205 round 3: the escalation lane's three non-acceptance records. The lane's decision
+#: is driven by ``score_page`` / ``native_rows_from_page`` against the page's OWN text
+#: layer, so on a page whose layer may not serve as evidence none of the three may be
+#: replayed: each is in ``TABLE_DISTRUST_KINDS`` and ``CREDENTIAL_BLOCKING_EVENT_KINDS``,
+#: so one replayed event withholds the page's credential on the layer's say-so. Unlike the
+#: ladder kinds there is no layer-free cause to keep -- the lane itself is the layer's.
+_ESCALATION_LAYER_GRADED_KINDS: frozenset[str] = frozenset(
+    {
+        "table_escalation_refused",
+        "table_escalation_timeout",
+        "table_escalation_withheld",
+    }
+)
+
+#: #1205 round 3: ``{kind: (data key, the values that mean "the layer caused this")}``.
+#: Literal strings rather than imports for the same reason the ladder terminals in
+#: ``tables_trust`` are: these are sidecar DATA from older runs, and a rename must not
+#: silently stop matching what is already on disk.
+_LAYER_CAUSED_LADDER_KINDS: dict[str, tuple[str, frozenset[str]]] = {
+    "table_ladder_withheld": (
+        "reason",
+        frozenset({"native_contradiction", "sibling_of_contradicted"}),
+    ),
+    "table_ladder_unverified": ("cause", frozenset({"binding_contradiction", "abstained"})),
+}
+
 _RESUME_REPLAYED: dict[str, str] = {
     PROVIDER_EMPTY_RESPONSE_KIND: (
         "a provider answered this page with no text; emitted by the engine call, which a "
@@ -16090,7 +16116,16 @@ class UnifiedPipeline:
             # restored adjudication is the layer's verdict on a reading, carried into a
             # run that would refuse to recompute it -- in either direction, since the
             # record both clears contradictions and preserves them.
-            if layer_is_admissible_evidence(state.pages.get(page_num)):
+            # #1205 round 3 (Argon P1-1): the UNION, computed HERE. This gate runs
+            # BEFORE ``_restore_terminal_page_state`` copies the sidecar's suspicion onto
+            # the page, so reading the live flag alone let a page whose SIDECAR says
+            # suspect -- the run that wrote these records -- restore them because this
+            # run's analysis happened to say otherwise. Measured: the record was applied
+            # even on a page the gate then refused.
+            _suspect_either_way = bool(meta.get("prior_ocr_layer_suspect", False)) or not (
+                layer_is_admissible_evidence(state.pages.get(page_num))
+            )
+            if not _suspect_either_way:
                 self._apply_binding_adjudication_meta(state, page_num, meta)
 
             # P1: the sidecar was written by a run whose table judge ladder
@@ -17139,6 +17174,30 @@ class UnifiedPipeline:
                 # is replayed, and ``verified_by_blind_cell_transcription`` is a third
                 # vendor reading the CROP pixels, which is independent of the layer and
                 # also stands. Only the geometry route is dropped.
+                # #1205 round 3 (Argon P1-3): five more replayed kinds are
+                # layer-derived, which round 2's audit table got WRONG -- it classified
+                # them from their emit site without following the cause through. Each
+                # withholds content or blocks a #713 credential, and each carries a TYPED
+                # discriminator saying what produced it:
+                #
+                #  * ``table_ladder_withheld`` with ``reason`` ``native_contradiction``
+                #    or ``sibling_of_contradicted`` -- from ``contradictions_for_tables``,
+                #    which reads the layer;
+                #  * ``table_ladder_unverified`` with ``cause`` ``binding_contradiction``
+                #    or ``abstained`` -- from ``bind()``, likewise;
+                #  * the three ``table_escalation_*`` kinds -- their lane grades the page
+                #    with ``score_page`` / ``native_rows_from_page``, so the refusal, the
+                #    timeout and the withholding all describe a decision the layer drove.
+                #
+                # Gated on the CAUSE, not the kind: those two ladder kinds carry plenty of
+                # layer-free causes (a rung outage, a budget, a blind MISMATCH) and those
+                # still replay -- dropping them would withhold a page the pixels decided.
+                if not layer_is_admissible_evidence(ps):
+                    if ev_kind in _ESCALATION_LAYER_GRADED_KINDS:
+                        continue
+                    _spec = _LAYER_CAUSED_LADDER_KINDS.get(ev_kind)
+                    if _spec is not None and str(ev_data.get(_spec[0], "")) in _spec[1]:
+                        continue
                 if ev_kind == TABLE_LADDER_ACCEPTED_KIND and not layer_is_admissible_evidence(ps):
                     from socr.judge.table_verdict import REASON_VERIFIED_BY_GEOMETRY
 
