@@ -1025,7 +1025,11 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             # reading of the page and it ships on zero corroboration.
             return self._reject_unverified(output, exc, page_num)
 
-        from socr.tables.source_evidence import REASON_NO_TABLE_BLOCKS
+        from socr.tables.source_evidence import (
+            REASON_NO_TABLE_BLOCKS,
+            rows_confirmed_by_witness,
+            table_rows_from_markdown,
+        )
 
         # A deferral to the native verifier stands. "No markdown table to read" is not one
         # when an HTML table the check could not parse is what the candidate holds.
@@ -1159,16 +1163,27 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 data={"cause": ""},
             )
 
-        # #1203 round 2 (owner ruling as restated: "ships only if an independent reader
-        # CONFIRMED the cells"). Reaching here means this gate's witness READ the page's
-        # own pixels and passed the table's numerics: every other path has returned --
-        # a deferral to the native verifier above, and ``not verifiable or not passed``
-        # into the fail-closed ending. Recorded on the CANDIDATE, so the withhold rule can
-        # ask about the attempt that actually ships rather than about the page.
+        # #1203 round 3: confirmation is POSITIONAL, and this is the only place it is
+        # minted. Round 2 set it whenever this gate passed, and that verdict is a token
+        # MULTISET (``verify_table_tokens``): exchanging two rows leaves the multiset
+        # identical, so a row swap shipped as "confirmed" (Grok P0 -- witness Reserves
+        # 512 / Borrowings 204, model Reserves 204 / Borrowings 512). The row check the
+        # native verifier would have caught it with is skipped on these pages, because it
+        # reads the suspect layer.
         #
-        # ``content_unverified`` still lands here on purpose: its numerics ARE
-        # corroborated and only a label is unconfirmed, which is what that field says.
-        output.table_cells_witness_confirmed = True
+        # So the cells are checked against the WITNESS's OWN READING, row by row, using
+        # the line structure its reading carries. ``witness_lines`` is populated from
+        # PIXEL readings only -- a table crop or the full-page raster -- never from the
+        # text layer, which on these pages is the earlier OCR run (r-uben should-fix 6):
+        # on a page with no raster the bundle is ``build_born_digital_evidence``, whose
+        # evidence includes that layer, and a confirmation minted from it would be exactly
+        # the licence the ruling removed, written down as provenance.
+        #
+        # No witness reading -> no lines -> not confirmed, which is the withholding
+        # direction and costs nothing: the reading is retained.
+        output.table_cells_witness_confirmed = rows_confirmed_by_witness(
+            table_rows_from_markdown(check_text), result.witness_lines
+        )
 
         return self._inner.assess(output, provider)
 

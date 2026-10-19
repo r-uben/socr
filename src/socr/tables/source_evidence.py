@@ -22,7 +22,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from socr.tables.image_locate import DETECT_DPI as _TEXT_LAYER_INK_DPI
 from socr.tables.native_verifier import (
@@ -234,6 +234,17 @@ class SourceEvidenceBundle:
     #: #1085: dash-led numbers the witness read but that support nothing. Counts
     #: as a reading (``has_content_evidence``), never as support.
     ambiguous_numeric: int = 0
+    #: #1203 round 3: the witness's reading, kept as LINES of words, and only from
+    #: readings taken from the PIXELS (a table crop, or the full-page raster). The text
+    #: layer never contributes to it -- on the pages this exists for, that layer is an
+    #: earlier OCR run, and a confirmation minted from it is the licence the owner's
+    #: ruling took away (r-uben should-fix 6).
+    #:
+    #: Needed because every other field here is order-free: ``numeric`` is a multiset and
+    #: ``content`` a set, so a table with two rows SWAPPED carries the same evidence as the
+    #: correct one and passed as "confirmed" (Grok P0). A row-level check needs the row
+    #: structure, and ``pytesseract.image_to_string`` preserves it in its line breaks.
+    witness_lines: tuple[tuple[str, ...], ...] = ()
 
     @property
     def no_reading(self) -> bool:
@@ -278,6 +289,11 @@ class SourceEvidenceResult:
     #: #1048: EVERY unsupported token of a verifiable-and-failed verdict, as
     #: bare strings (no cap: the reason text keeps its own 5-token excerpt), so the in-text "disputed" mark can name them. Empty otherwise.
     disputed_values: tuple[str, ...] = ()
+    #: #1203 round 3: the witness's reading as lines of words, carried through from the
+    #: bundle so a caller can run a ROW-level check instead of trusting the token
+    #: multiset. Pixel readings only; the text layer never contributes. Empty whenever no
+    #: witness read the pixels, which is the state that withholds.
+    witness_lines: tuple[tuple[str, ...], ...] = ()
 
 
 def page_has_native_words(page) -> bool:
@@ -997,6 +1013,13 @@ def _merge_source_bundles(
         witness_state=witness_state,
         witness_detail=detail,
         ambiguous_numeric=ambiguous,
+        # #1203 round 3: carried from the PIXEL half only. The text half is built by
+        # ``build_born_digital_evidence`` from the page's own text layer and never has
+        # lines, which is the invariant that keeps a confirmation from being minted by an
+        # earlier OCR run (r-uben should-fix 6); taking the union here rather than
+        # ``pixel_witness.witness_lines`` alone would silently start trusting whatever a
+        # future text bundle puts there.
+        witness_lines=pixel_witness.witness_lines,
     )
 
 
@@ -1025,7 +1048,18 @@ def build_born_digital_evidence(
         ocr_image_fn=ocr_image_fn,
         include_text_layer=False,
     )
-    return _merge_source_bundles(text_bundle, pixel_bundle)
+    merged = _merge_source_bundles(text_bundle, pixel_bundle)
+    # #1203 round 3: no ``witness_lines`` from this builder, whatever the pixel half read.
+    # This bundle is for a page with NO page-covering raster, where the pixels show the
+    # text layer's own ink -- so a "pixel reading" of it necessarily agrees with the
+    # layer, and on these pages that layer is an earlier OCR run. Confirmation there would
+    # be the layer confirming itself (r-uben should-fix 6), which is the licence the
+    # owner's ruling removed. Measured while building this: on such a page the merged
+    # bundle arrived with real lines read off the page, and the row check passed on them.
+    #
+    # So positional confirmation counts only where the layer is HIDDEN under an opaque
+    # raster, which is the one arrangement that makes a pixel reading independent of it.
+    return replace(merged, witness_lines=())
 
 
 def build_scanned_evidence(
@@ -1080,6 +1114,7 @@ def build_scanned_evidence(
     numeric: Counter = Counter()
     content: set[str] = set()
     ambiguous = 0
+    witness_lines: list[tuple[str, ...]] = []
 
     if include_text_layer:
         if text_layer_from_words:
@@ -1110,6 +1145,7 @@ def build_scanned_evidence(
                 continue
             crop_text, crop_state, crop_detail = read_witness(pix)
             record(crop_state, crop_detail)
+            witness_lines.extend(_witness_lines(crop_text))
             n_crop, c_crop, a_crop = _tokens_and_dash_led(crop_text)
             ambiguous += a_crop
             numeric, content = _merge_evidence(numeric, content, n_crop, c_crop)
@@ -1130,6 +1166,7 @@ def build_scanned_evidence(
             pix = page.get_pixmap(matrix=mat)
             page_text, page_state, page_detail = read_witness(pix)
             record(page_state, page_detail)
+            witness_lines.extend(_witness_lines(page_text))
             n_page, c_page, a_page = _tokens_and_dash_led(page_text)
             ambiguous += a_page
             numeric, content = _merge_evidence(numeric, content, n_page, c_page)
@@ -1147,7 +1184,113 @@ def build_scanned_evidence(
         witness_state=witness_state,
         witness_detail=witness_details.get(witness_state, ""),
         ambiguous_numeric=ambiguous,
+        witness_lines=tuple(witness_lines),
     )
+
+
+def _witness_lines(reading: str) -> list[tuple[str, ...]]:
+    """The witness's reading as lines of words (#1203 round 3).
+
+    ``pytesseract.image_to_string`` keeps one text line per output line, which is the only
+    positional structure this witness contract carries -- it returns a string, not boxes.
+    Row-level is also the level the defect needs: a swap of two ROWS is what the token
+    multiset cannot see.
+    """
+    lines: list[tuple[str, ...]] = []
+    for raw in (reading or "").splitlines():
+        words = tuple(w for w in raw.split() if w)
+        if words:
+            lines.append(words)
+    return lines
+
+
+def table_rows_from_markdown(markdown: str) -> list[list[str]]:
+    """The DATA rows of every markdown table in *markdown*, as lists of cells.
+
+    Separator rows and the header are dropped: the header is page furniture the witness
+    may legitimately read differently (font, hyphenation), while a data row is the claim
+    about the page's numbers. Built from ``find_table_blocks`` + ``_split_row``, the same
+    parse the token collector uses, so the rows checked are the rows that ship.
+    """
+    rows: list[list[str]] = []
+    lines = markdown.splitlines()
+    for block in find_table_blocks(markdown):
+        # ``_is_separator_row`` takes the SPLIT cells, not the raw line (it was handed the
+        # line here at first, matched nothing, and the ``| --- |`` row then counted as a
+        # data row that no witness line could confirm -- every table read as unconfirmed).
+        split = [
+            [c.strip() for c in _split_row(line)] for line in lines[block.start : block.end + 1]
+        ]
+        data = [cells for cells in split if cells and not _is_separator_row(cells)]
+        for cells in data[1:]:
+            if any(cells):
+                rows.append(cells)
+    return rows
+
+
+def rows_confirmed_by_witness(
+    table_rows: list[list[str]], witness_lines: tuple[tuple[str, ...], ...]
+) -> bool:
+    """Does the witness's own reading carry EVERY row of this table, in order (#1203 r3)?
+
+    One row is confirmed when some witness line contains all of its cells as an ordered
+    subsequence -- order along the line, so two rows whose cells are exchanged cannot both
+    be confirmed by the lines that read them. Cells are compared as whole words, so a
+    dropped minus (``380`` against ``-380``) is not a match either.
+
+    Every row must be confirmed. A table is one claim: a page where the witness read three
+    of five rows has not confirmed the table, and under the owner's ruling an unconfirmed
+    table is withheld with its reading retained.
+
+    Returns False on an empty table or an empty reading, which is the direction that
+    withholds.
+    """
+    if not table_rows or not witness_lines:
+        return False
+    for row in table_rows:
+        cells = [c for c in (cell.strip() for cell in row) if c]
+        if not cells:
+            return False
+        if not any(_line_carries_cells(line, cells) for line in witness_lines):
+            return False
+    return True
+
+
+def _line_carries_cells(line: tuple[str, ...], cells: list[str]) -> bool:
+    """This line BEGINS with the row's first cell and then carries the rest, in order.
+
+    Cells are matched as WORD SEQUENCES, not as single tokens: a label like
+    ``Monetary base`` is one markdown cell and two words in the witness's reading, and
+    comparing it to the line's first word alone failed every table that had one (caught
+    while building this, on the fixture's own ``Monetary base`` row).
+
+    Anchored at the line's start. An unanchored "in order somewhere on the line" match is
+    defeated by a witness that reads the whole table onto ONE line: the swapped row
+    ``Reserves 204`` matches ``Reserves 512 ... Borrowings 204`` as an ordered
+    subsequence, which is the very defect this check exists for. Anchoring means a row is
+    confirmed only by a line that reads as THAT row, and a witness that cannot separate
+    the rows confirms nothing -- the withholding direction.
+    """
+    if not line or not cells:
+        return False
+    first = cells[0].split()
+    if not first or tuple(line[: len(first)]) != tuple(first):
+        return False
+    position = len(first)
+    for cell in cells[1:]:
+        words = cell.split()
+        if not words:
+            continue
+        found = False
+        while position + len(words) <= len(line):
+            if tuple(line[position : position + len(words)]) == tuple(words):
+                position += len(words)
+                found = True
+                break
+            position += 1
+        if not found:
+            return False
+    return True
 
 
 def _resolve_witness_state(states: list[str]) -> str:
@@ -1261,6 +1404,10 @@ def verify_table_tokens(
         passed=True,
         reason="source evidence supports emitted table tokens",
         content_unverified=content_unverified,
+        # #1203 round 3: carried on the PASSING verdict only, because that is the one a
+        # caller may upgrade to a positional confirmation. A failed or unverifiable verdict
+        # withholds whatever the lines say.
+        witness_lines=bundle.witness_lines,
     )
 
 

@@ -1396,6 +1396,12 @@ def _is_document_failed_stub(md_path: Path) -> bool:
     return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
 
 
+#: #1203 round 3: #1048's settling writes this claim onto the winning attempt's
+#: ``judge_reason`` and from there into the sidecar's ``attempts_summary``. A page whose
+#: table the final gate withholds did not ship one, so the claim is stripped there.
+_SETTLED_TABLE_CLAIM_RE = re.compile(r"ladder exhausted; table shipped marked \w+ \(#1048\);?\s*")
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -5826,6 +5832,122 @@ class UnifiedPipeline:
                 exc,
             )
             return ""
+
+    @staticmethod
+    def _floor_cause_is_no_witness(records: "list[tuple[str, str, object]]") -> bool:
+        """#658's cause for the scanned-table floor: did NOTHING read the pixels?
+
+        One helper for both callers (#1203 round 3): the floor is applied from the ladder
+        loop and from the final withhold gate, and each had its own copy of this rule --
+        so a mutant that broke one was masked by the other. Takes
+        ``(reason, disputed, failure_mode)`` per attempt, because the two callers hold
+        different objects (``ProviderAttempt`` with ``.reason``, ``PageOutput`` with
+        ``.judge_reason``).
+
+        A CONTRADICTION wins -- reporting a witness's refusal as a missing install is the
+        #658 regression Argon found -- and it is read from BOTH signals, which is the
+        union #658's own producer shape needs:
+
+        * ``failure_mode is HALLUCINATION``, which is how the gate leaves an UNSETTLED
+          attempt (and what ``test_a_later_contradiction_beats_an_earlier_missing_witness``
+          builds; dropping it broke that test, which is how this was caught);
+        * ``table_disputed``, which is what survives #1048's settling -- that rewrites the
+          mode to NONE while the attempt keeps the witness's list of refused cells.
+
+        Either one alone is blind to a real case, so the rule takes both.
+
+        A verifier that RAISED counts as no-witness, because nothing read the pixels then
+        either.
+        """
+        from socr.core.result import FailureMode as _FailureMode
+        from socr.tables.source_evidence import CAUSE_NO_WITNESS_BACKEND
+
+        if any(
+            disputed or mode is _FailureMode.HALLUCINATION for _reason, disputed, mode in records
+        ):
+            return False
+        return any(
+            f"[{CAUSE_NO_WITNESS_BACKEND}] " in reason or "table_verifier_error" in reason
+            for reason, _disputed, _mode in records
+        )
+
+    def _withhold_unconfirmed_table(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        figures_dir: Path | None,
+    ) -> bool:
+        """#1203 round 3: THE gate. A suspect old-scan page's table ships only if an
+        independent reader positionally confirmed it; otherwise it is withheld, with the
+        reading retained.
+
+        Called at the point the page's shipped table is FINAL -- after routing, the
+        settling, the crop re-judge and escalation -- because each of rounds 1 and 2 put
+        this rule upstream of one of those and a reviewer then found the path around it
+        (``denylist-safety-lanes-leak-every-round``). One gate on the bytes that are about
+        to ship cannot be bypassed by a step that produces different bytes.
+
+        Scope unchanged: an early-return page (not born-digital) whose layer is not
+        admissible evidence. #1208 carries the born-digital pages.
+
+        "Contains a table" is read from the SHIPPED TEXT (``find_table_blocks``), never
+        from the layer -- a layer-derived predicate is what Argon P1b walked through.
+        Confirmation is ``table_cells_witness_confirmed``, which only a positional
+        row-level check against the witness's own pixel reading can set.
+
+        Returns True when it withheld.
+        """
+        if ps.is_born_digital or layer_is_admissible_evidence(ps):
+            return False
+        bo = ps.best_output
+        text = (bo.text or "") if bo is not None else ""
+        if not text.strip():
+            return False
+        from socr.tables.reconcile import find_table_blocks
+
+        if not find_table_blocks(text):
+            return False
+        if getattr(bo, "table_cells_witness_confirmed", False):
+            return False
+
+        # ALWAYS retained, before anything demotes the winner. Round 2 captured this
+        # inside one branch of the old condition, so Argon's ragged-row case withheld
+        # with ``withheld_table_text`` unset -- a withhold that loses the reading is a
+        # deletion, which the ruling does not allow.
+        ps.withheld_table_text = text
+
+        # The page is NOT shipping a table, so #1048's record of one must go with it
+        # (Argon P2). The settling also writes its claim onto the winner's judge fields
+        # and from there into ``attempts_summary``, so those are corrected too: a page
+        # whose body is a marker must not carry "table shipped marked unverified".
+        ps.table_ladder_disposition = None
+        ps.unchecked_table_kind = ""
+        ps.unchecked_table_values = ""
+        ps.unchecked_table_value_list = []
+        if bo is not None:
+            bo.judge_accepted = False
+            bo.judge_outcome = ""
+            bo.judge_reason = _SETTLED_TABLE_CLAIM_RE.sub("", bo.judge_reason or "").strip("; ")
+
+        # The cause, from the attempts' own records rather than from a failure mode
+        # (#1048's settling rewrites those; see round 2). A dispute wins over a missing
+        # witness; a verifier that RAISED counts as "nothing read it", because nothing
+        # did.
+        _no_witness = self._floor_cause_is_no_witness(
+            [
+                (
+                    getattr(att, "judge_reason", "") or "",
+                    getattr(att, "table_disputed", "") or "",
+                    getattr(att, "failure_mode", None),
+                )
+                for att in ps.attempts
+            ]
+        )
+        self._apply_scanned_table_floor(
+            ps, state.handle.path, page_num, figures_dir, no_witness=_no_witness
+        )
+        return True
 
     def _apply_scanned_table_floor(
         self,
@@ -10680,161 +10802,40 @@ class UnifiedPipeline:
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
                             for att in _source_ev_attempts
                         )
-                        # #1203 round 2: the LAST source-evidence verdict's own cause,
-                        # taken from the reason string. The gate embeds
-                        # ``[no_witness_backend]`` inside its load-bearing
-                        # ``source_evidence_table:`` prefix (#658 reviewer item 3), and
-                        # that survives #1048's settling, which rewrites the failure mode
-                        # but appends to the reason.
-                        from socr.tables.source_evidence import CAUSE_NO_WITNESS_BACKEND
-
-                        # A CONTRADICTION wins, which is #658's own precedence and not
-                        # positional: reading "the last attempt" assumed an order the
-                        # attempt list does not promise, and on the rung-1-error /
-                        # rung-2-contradiction page it picked rung 1 and stamped
-                        # ``no_witness_backend`` over a witness's finding (measured).
-                        # A DISPUTE is a contradiction whatever the failure mode says.
-                        # ``_source_ev_contradicted`` above reads the mode, and #1048's
-                        # settling rewrites that to NONE: measured on the
-                        # rung-1-error / rung-2-dispute page, the mode read NONE while the
-                        # attempt carried ``table_disputed = "521, 380, 18"`` -- the
-                        # witness's own list of the cells it refused. The field survives
-                        # the settling, so the field is what is read.
-                        _source_ev_disputed = any(
-                            getattr(att.output, "table_disputed", "") for att in _source_ev_attempts
-                        )
-                        _last_verdict_no_witness = bool(
-                            not _source_ev_contradicted
-                            and not _source_ev_disputed
-                            and any(
-                                f"[{CAUSE_NO_WITNESS_BACKEND}] " in (att.reason or "")
-                                for att in _source_ev_attempts
-                            )
-                        )
-                        # #1048 / #1124: the floor is for a ladder that ended
-                        # without an accepted reading that carries a passed
-                        # table. ``settle_scanned_table_decision`` un-accepts a
-                        # prose (or unread-table) winner and may promote a
-                        # marked candidate; ``decision.accepted`` is then true
-                        # only for a verified later table or a promoted mark.
+                        # #1048 / #1124: the floor is for a ladder that ended without an
+                        # accepted reading carrying a passed table. This is main's own
+                        # condition, unchanged.
                         #
-                        # #1203 round 1 (OWNER RULING 2026-10-18, r-uben blocker 1): and
-                        # when nothing could witness the table at all. Since #1202 a
-                        # suspect page under an opaque raster skips row-level verification
-                        # -- correctly, the layer is not evidence -- which leaves the
-                        # PIXELS as the only witness. With no classical-OCR witness
-                        # installed (CI's state and the cluster's) nothing reads them, the
-                        # heuristic leaf accepts, ``decision.accepted`` is True, and the
-                        # model's table shipped under #1048's unverified mark. Measured on
-                        # r-uben's fixture: the table shipped carrying 521/380/18 where the
-                        # layer read 512/-380/-18.
-                        #
-                        # The ruling is to WITHHOLD: the outcome is UNVERIFIED, so the
-                        # table goes to this floor -- page picture plus mark -- and the
-                        # model's table stays in ``ps.attempts``, hence in the sidecar,
-                        # where a later second reader can release it by re-finalizing with
-                        # no new OCR.
-                        #
-                        # The layer is consulted NEITHER to pass nor to fail, which is why
-                        # this is not "re-run the native verifier": that would hand the
-                        # layer back both its veto (the -350 case) and its licence to pass
-                        # a table that happens to agree with it.
-                        #
-                        # Round 2 restates the rule the owner ruled: a table on one of
-                        # these pages ships ONLY IF AN INDEPENDENT READER CONFIRMED ITS
-                        # CELLS. Round 1 keyed it on whether a witness RAN, and both
-                        # reviewers broke that from opposite sides:
-                        #
-                        # * r-uben 1b: a witness that RAN and CONTRADICTED the model
-                        #   (it read 512/-380/-18, the model 521/380/18) let the table
-                        #   ship, because "ran" was satisfied;
-                        # * Argon P1a: rung 1 hit a transient WITNESS_EXEC_ERROR and rung
-                        #   2's witness then CORROBORATED the table -- which was withheld
-                        #   anyway, because a no-witness event existed for the page.
-                        #
-                        # So the key is the positive confirmation, recorded by the only
-                        # independent reader these pages have (the scanned-table gate's
-                        # witness over the page's own pixels) on the CANDIDATE it passed.
-                        # The native row verifier reads the suspect layer, so it is not
-                        # independent; the heuristic leaf reads nothing. Nothing here is
-                        # derived from the layer -- no ``_is_table_page``, no
-                        # ``has_numeric_columns`` (Argon P1b) -- and nothing is derived
-                        # from the absence of an event.
-                        # No ``find_table_blocks`` term here. One was written and then
-                        # removed: ``_source_ev_rejected`` below already means the
-                        # scanned-table gate adjudicated a table on this page, so a
-                        # "the winner carries a table" conjunct could not be made to fail
-                        # on any input -- a flagged table page whose model reading was
-                        # PROSE behaved identically with and without it (measured,
-                        # ``scratch/1203/r2_prose_winner.py``). An unkillable guard is not
-                        # a guard; the behaviour it was meant to protect is pinned by
-                        # ``test_a_suspect_page_with_no_table_is_not_touched``.
-                        _winner = ps.best_output
-                        _winner_table_confirmed = bool(
-                            _winner is not None
-                            and getattr(_winner, "table_cells_witness_confirmed", False)
-                        )
-                        _unconfirmed_table_on_suspect_layer = bool(
-                            not ps.is_born_digital
-                            and not layer_is_admissible_evidence(ps)
-                            and not _winner_table_confirmed
-                        )
-                        _withhold_table = bool(
-                            _source_ev_rejected
-                            and not ps.is_born_digital
-                            and (not decision.accepted or _unconfirmed_table_on_suspect_layer)
-                        )
-                        if _withhold_table and _unconfirmed_table_on_suspect_layer:
-                            # Captured BEFORE the floor demotes the winner, and ONLY when
-                            # the table is actually being withheld (Argon P2): the reading
-                            # survives in the sidecar, unshipped, for a second reader to
-                            # release by re-finalizing. A page that SHIPS its table never
-                            # grows the key.
-                            ps.withheld_table_text = (_winner.text or "") if _winner else ""
-                        if _withhold_table:
+                        # #1203 round 3: the WITHHOLD this PR adds is NOT here. Rounds 1
+                        # and 2 each put a condition at this point -- upstream of
+                        # escalation, the settling and the crop re-judge -- and each round
+                        # a reviewer found a path that reached shipping around it (a raised
+                        # verifier whose reason is ``table_verifier_error``, so
+                        # ``_source_ev_rejected`` stayed False; escalation swapping in an
+                        # unjudged table scored against the SUSPECT LAYER; the settling
+                        # promoting an unconfirmed rung over a confirmed one). There is now
+                        # ONE gate, on the table about to ship:
+                        # ``_withhold_unconfirmed_table``, called just before the page is
+                        # finalised. See ``denylist-safety-lanes-leak-every-round``.
+                        if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
                                 page_num,
                                 _chart_figures_dir,
-                                # #658's cause, from the LAST source-evidence verdict
-                                # rather than from any of them (Argon P1b): when rung 1
-                                # hit a transient no-witness error and rung 2's witness
-                                # then CONTRADICTED the table, the finding is
-                                # HALLUCINATION, and an ``any()`` over the attempts
-                                # stamped ``no_witness_backend`` over it. The marker is
-                                # read from the reason string because #1048's settling
-                                # clears the attempt's failure mode to NONE, which is what
-                                # made ``_source_ev_no_witness`` read False on exactly the
-                                # page whose table shipped unwitnessed.
-                                # ``_source_ev_no_witness`` is narrowed by the same
-                                # dispute signal: its own ``not _source_ev_contradicted``
-                                # guard reads the failure mode, which #1048's settling
-                                # clears, so on the rung-1-error / rung-2-dispute page it
-                                # read True and stamped a missing install over a witness's
-                                # refusal of three named cells (Argon P1b). A page with
-                                # both signals is exactly that page.
-                                no_witness=(_source_ev_no_witness and not _source_ev_disputed)
-                                or _last_verdict_no_witness,
+                                no_witness=self._floor_cause_is_no_witness(
+                                    [
+                                        (
+                                            att.reason or "",
+                                            getattr(att.output, "table_disputed", "") or "",
+                                            att.output.failure_mode,
+                                        )
+                                        for att in _source_ev_attempts
+                                    ]
+                                ),
                             )
-                        # #1048: the gate could not check a scanned page's table and
-                        # the candidate was accepted, so it ships. Record the page's
-                        # disposition as TABLE_UNVERIFIED -- the existing state every
-                        # surface (page status, document status, metadata, CLI,
-                        # ``tables`` counts) already reads for a table that shipped
-                        # unchecked, and the one ``_apply_ladder_disposition_guard``
-                        # demotes (``audit_passed`` on the SELECTED attempt stays
-                        # untouched). A stronger terminal the ladder sets later wins.
-                        #
-                        # #1203 round 2 (Argon P2): not on a page whose table this run
-                        # WITHHELD. #1048's stamping says "the table shipped marked
-                        # unverified"; on a withheld page nothing shipped, and the sidecar
-                        # carried ``unchecked_table_kind``, ``table_ladder_superseded``
-                        # and that sentence beside a marker-only body.
-                        if (
-                            _unchecked_table_attempt is not None
-                            and ps.table_ladder_disposition is None
-                            and not _withhold_table
+                        if _unchecked_table_attempt is not None and (
+                            ps.table_ladder_disposition is None
                         ):
                             _un_out = _unchecked_table_attempt.output
                             # Owner ruling 2026-10-12: a disputed table ships with the
@@ -11405,6 +11406,14 @@ class UnifiedPipeline:
                 # fragment. Timed as flush. Sidecar write is AFTER finalize so
                 # ``timings_s.total`` is the independent page wall, not a value
                 # that includes writing itself.
+                # #1203 round 3: THE withhold gate, here because here the page's table is
+                # final -- routing, the settling, the crop re-judge and escalation have all
+                # run, and nothing between this line and the finalize can produce a
+                # different table. ``bo`` is re-read from the page state afterwards
+                # because the floor demotes the winner in place.
+                if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
+                    bo = ps.best_output or bo
+
                 try:
                     from ocr_output_contract import PAGE_MARKER_RE
 
@@ -13903,6 +13912,30 @@ class UnifiedPipeline:
             return None
         return getattr(ps, "page_cost_usd", None)
 
+    @staticmethod
+    def _crop_patch_candidate(bo: PageOutput, patched_text: str) -> PageOutput:
+        """The crop-patched candidate to re-judge: new text, and no inherited verdicts.
+
+        Extracted so the one field whose reset has no end-to-end arm can be pinned
+        directly (#1203 round 3, Argon P2). ``table_cells_witness_confirmed`` is about the
+        BYTES a witness read; patched text is new bytes, so carrying the flag would let
+        cells no reader has seen inherit "confirmed" -- and #1203's final gate reads that
+        flag after this point. The judge re-reads the candidate and sets it again if its
+        own witness confirms the patched rows.
+        """
+        return replace(
+            bo,
+            text=patched_text,
+            status=PageStatus.SUCCESS,
+            failure_mode=FailureMode.NONE,
+            audit_passed=True,
+            rejection_class="",
+            judge_reason="",
+            audit_notes=list(bo.audit_notes),
+            figures=list(bo.figures),
+            table_cells_witness_confirmed=False,
+        )
+
     def _rejudge_crop_patched_page(
         self,
         state: DocumentState,
@@ -13987,17 +14020,7 @@ class UnifiedPipeline:
             )
             return bo
 
-        candidate = replace(
-            bo,
-            text=patched_text,
-            status=PageStatus.SUCCESS,
-            failure_mode=FailureMode.NONE,
-            audit_passed=True,
-            rejection_class="",
-            judge_reason="",
-            audit_notes=list(bo.audit_notes),
-            figures=list(bo.figures),
-        )
+        candidate = self._crop_patch_candidate(bo, patched_text)
 
         judge_events: list = []
         started = time.time()

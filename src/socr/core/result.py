@@ -536,12 +536,20 @@ class PageOutput:
     #: gate's reason, which names the first unsupported tokens. Ships with the
     #: stronger "disputed" mark and a link to the page image.
     table_disputed: str = ""
-    #: #1203 round 2 (owner ruling 2026-10-18, as restated): True when an INDEPENDENT
-    #: reader confirmed this output's table cells -- the scanned-table gate
-    #: (``SourceEvidenceTableJudge``) ran its witness over the page's own pixels and
-    #: passed. It is the only confirmation that counts on a page whose text layer is an
-    #: earlier OCR run: the native row verifier reads that layer, so it is not
-    #: independent, and the heuristic leaf reads nothing.
+    #: #1203 round 3 (owner ruling 2026-10-18, restated): True when an INDEPENDENT reader
+    #: confirmed this output's table cells POSITIONALLY -- every data row of the emitted
+    #: table was found, cells in order, on a line of the witness's own reading of the
+    #: page's PIXELS (``source_evidence.rows_confirmed_by_witness``).
+    #:
+    #: Positional because round 2 set it from the gate's token MULTISET, which a swap of
+    #: two rows leaves identical, so a swapped table shipped as confirmed (Grok P0). Pixel
+    #: readings only because on a page with no raster the gate's evidence bundle includes
+    #: the PDF TEXT LAYER, which on these pages is the earlier OCR run -- a confirmation
+    #: minted from it is the licence the ruling removed (r-uben should-fix 6).
+    #:
+    #: On a page whose layer is an earlier OCR run this is the only confirmation that
+    #: counts: the native row verifier reads that layer, so it is not independent, and the
+    #: heuristic leaf reads nothing. On any other page it is a record, not a gate.
     #:
     #: Candidate-associated, like the three fields above and for a sharper version of the
     #: same reason: the question "was the table that SHIPS confirmed" is about one

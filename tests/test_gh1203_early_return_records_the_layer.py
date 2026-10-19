@@ -875,20 +875,32 @@ def _table_markdown(rows) -> str:
 class _ColumnTableEngine:
     name = "qwen"
     table = ""
+    #: Per-rung bodies, when an arm needs the two rungs to differ (Argon 3: rung 1 splits
+    #: the table in two blocks, rung 2 emits it unified). Consumed in order; the last
+    #: entry repeats.
+    per_rung: list[str] | None = None
+
+    def __init__(self) -> None:
+        self._rung = 0
 
     def is_available(self) -> bool:
         return True
 
     def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
-        return [
+        body = self.table
+        if self.per_rung:
+            body = self.per_rung[min(self._rung, len(self.per_rung) - 1)]
+        out = [
             PageOutput(
                 page_num=n,
-                text=f"RESERVE AGGREGATES, MEMBER BANKS\n\n{self.table}",
+                text=f"RESERVE AGGREGATES, MEMBER BANKS\n\n{body}",
                 status=PageStatus.SUCCESS,
                 engine="qwen",
             )
             for n in page_nums
         ]
+        self._rung += 1
+        return out
 
 
 def _run_table_arm(
@@ -901,6 +913,10 @@ def _run_table_arm(
     witness: bool,
     pdf: Path | None = None,
     first_rung_witness_error: bool = False,
+    per_rung_tables: list[str] | None = None,
+    swap_rows: bool = False,
+    verifier_raises: bool = False,
+    escalate: bool = False,
 ) -> dict:
     """``process()`` with the real judge chain, over the axes the rule needs.
 
@@ -910,22 +926,33 @@ def _run_table_arm(
     """
     from socr.core.config import EngineType, PipelineConfig
     from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
+    from socr.pipeline import agentic as agentic_mod
     from socr.pipeline import orchestrator as orch
     from socr.tables import source_evidence as se
 
-    model_rows = (
-        list(_COLUMN_ROWS) if agree else [("Reserves", "521", "380", "18"), *_COLUMN_ROWS[1:]]
-    )
+    if swap_rows:
+        # Grok P0: two rows EXCHANGED. The token multiset is identical to the correct
+        # table, so a multiset verdict passes it; a row-level check cannot.
+        first, second = _COLUMN_ROWS[0], _COLUMN_ROWS[1]
+        model_rows = [(first[0], *second[1:]), (second[0], *first[1:]), *_COLUMN_ROWS[2:]]
+    elif agree:
+        model_rows = list(_COLUMN_ROWS)
+    else:
+        model_rows = [("Reserves", "521", "380", "18"), *_COLUMN_ROWS[1:]]
     with monkeypatch.context() as m:
         engine = _ColumnTableEngine()
         engine.table = _table_markdown(model_rows)
+        engine.per_rung = list(per_rung_tables) if per_rung_tables else None
         m.setattr(orch, "get_engine", lambda engine_type: engine)
         if witness:
             # A witness that READS the page's pixels. On this fixture the pixels carry the
             # LAYER's numbers, which is what a real tesseract on a real scan reads -- so
             # with ``agree=True`` the witness corroborates the model and with
             # ``agree=False`` it contradicts it.
-            reading = " ".join(c for r in _COLUMN_ROWS for c in r)
+            # ONE LINE PER ROW, which is what ``pytesseract.image_to_string`` produces on
+            # a table and what the row-level confirmation reads. A single-line reading
+            # confirms nothing, by design: see ``_line_carries_cells``.
+            reading = "\n".join(" ".join(r) for r in _COLUMN_ROWS)
             calls: list[int] = []
 
             def _witness(pix, _reading=reading, _calls=calls):
@@ -947,6 +974,15 @@ def _run_table_arm(
                 "classical_ocr_backend_state",
                 lambda: (se.WITNESS_PACKAGE_MISSING, "test: no witness backend"),
             )
+        if verifier_raises:
+            # Grok P0 / Argon P1b: the gate RAISES, so its rejection reason is
+            # ``table_verifier_error``, which ``_source_ev_rejected`` never matched -- the
+            # path an unconfirmed table used to reach shipping around rounds 1 and 2.
+            def _raise(*_a, **_k):
+                raise RuntimeError("test: verify_scanned_table raised")
+
+            m.setattr(agentic_mod, "verify_scanned_table", _raise, raising=False)
+            m.setattr(se, "verify_scanned_table", _raise)
         if not route_live:
             m.setattr(
                 BornDigitalDetector,
@@ -970,7 +1006,7 @@ def _run_table_arm(
         )
         pipe._available_engines_for_agentic = lambda: (
             [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
-            if first_rung_witness_error
+            if (first_rung_witness_error or escalate or per_rung_tables)
             else [PROFILE_QWEN_LOCAL]
         )
         pipe._resolve_crop_vlm_model = lambda: None
@@ -1152,9 +1188,12 @@ def test_a_suspect_page_with_no_table_is_not_touched(tmp_path: Path, monkeypatch
     """r-uben's nit, as a behaviour: the rule applies to TABLES.
 
     Round 1's guard for this was ``_is_table_page``, which reads the layer; dropping it
-    survived the suite. The rule now asks whether the WINNER carries a table block, so a
-    flagged prose page is outside it by construction -- pinned, because "nothing happens
-    here" is exactly the claim a later change can break silently.
+    survived the suite. Round 2's docstring then said the rule "asks whether the WINNER
+    carries a table block" -- it did not, that term had been removed as unkillable, and
+    r-uben caught the stale sentence. Round 3's final gate DOES ask exactly that, of the
+    shipped text (``find_table_blocks`` on the winner), so a flagged prose page is outside
+    the rule by construction. Pinned, because "nothing happens here" is the claim a later
+    change breaks silently.
     """
     live = _run(tmp_path, monkeypatch, "no-table", accept=True, route_live=True)
     assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: flagged"
@@ -1326,3 +1365,235 @@ def _hermetic_pipeline():
     )
     pipe._resolve_judge_model = lambda *a, **k: ""
     return pipe
+
+
+# ---------------------------------------------------------------------------
+# Round 3: ONE final gate, and confirmation that is POSITIONAL
+# ---------------------------------------------------------------------------
+
+
+def test_a_row_swap_is_not_confirmed_by_a_multiset_agreeing_witness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Grok P0. Two rows exchanged; the witness reads the page correctly.
+
+    Round 2 minted the confirmation from ``verify_table_tokens``, a token MULTISET, which
+    a swap leaves identical — so the swapped table shipped as "confirmed", carrying
+    Reserves' values on Borrowings' row. The row check that would have caught it is the
+    native verifier's, and that one is skipped here because it reads the suspect layer.
+    Confirmation is now a ROW-level check against the witness's own reading.
+    """
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "swap", route_live=True, agree=False, witness=True, swap_rows=True
+    )
+    assert live["ships_table"] is False, "a row swap shipped as confirmed"
+    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") in (None, False)
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
+    # The swapped cells are nowhere in the body.
+    assert "204" not in live["text"] or "unverifiable table" in live["text"]
+
+
+def test_a_raised_verifier_withholds_with_retention(tmp_path: Path, monkeypatch) -> None:
+    """Grok P0 / Argon P1b: ``verify_scanned_table`` raises.
+
+    Its rejection reason is then ``table_verifier_error``, which the upstream condition
+    (`"source_evidence_table" in att.reason`) never matched, so `_source_ev_rejected`
+    stayed False and the unconfirmed table shipped with no retention. The gate now runs on
+    the table that is about to ship and does not care which upstream condition fired.
+    """
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "raise",
+        route_live=True,
+        agree=False,
+        witness=False,
+        verifier_raises=True,
+    )
+    assert live["ships_table"] is False, "a raised verifier shipped an unconfirmed table"
+    assert all(c not in live["text"] for c in _MODEL_ONLY_CELLS)
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or ""), (
+        "withheld without retention, which is a deletion"
+    )
+
+
+def test_an_escalated_second_model_table_is_not_shipped_unconfirmed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon P1a: escalation swaps in an unjudged second-model table.
+
+    ``_escalate_table_page`` grades candidates against the page's own native rows — the
+    SUSPECT LAYER here — and ships the winner without the scanned-table gate judging it,
+    so a table that scores 100% against the earlier OCR run replaced a confirmed one. The
+    final gate sees whatever ends up in the winner, so an unjudged table arrives
+    unconfirmed and is withheld.
+    """
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "escalate",
+        route_live=True,
+        agree=False,
+        witness=False,
+        escalate=True,
+    )
+    assert live["ships_table"] is False
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
+
+
+def test_the_scan_failed_page_with_no_raster_is_not_confirmed(tmp_path: Path, monkeypatch) -> None:
+    """r-uben should-fix 6: the confirmation must never be minted from the layer.
+
+    On a page with no page-covering raster the evidence bundle is
+    ``build_born_digital_evidence``, whose evidence INCLUDES the PDF text layer — which on
+    this page is the earlier OCR run. Round 2's flag was set from that bundle's verdict, so
+    a model table agreeing with the layer was recorded as independently confirmed: the
+    exact licence the ruling removed, written down as provenance. ``witness_lines`` is
+    populated from pixel readings only, so this page cannot be confirmed, and the table is
+    withheld.
+
+    The page is reached through the scan-failed half of the union (the positive detectors
+    need 0.90 raster cover), so the detector is made to raise.
+    """
+    pdf = tmp_path / "no-raster.pdf"
+    doc = fitz.open()
+    for i in range(2):
+        page = doc.new_page(width=612, height=792)
+        nonce = "w" * (i + 1)
+        page.insert_text((72, 90), f"{nonce} Reported in (/997) and again in (/985).", fontsize=10)
+        y = 130
+        for value, x in zip(("Item", "Level", "Change", "Net"), _COLUMN_X):
+            page.insert_text((x, y), value, fontsize=9)
+        y += 18
+        for row in _COLUMN_ROWS:
+            for value, x in zip(row, _COLUMN_X):
+                page.insert_text((x, y), value, fontsize=9)
+            y += 18
+        # NO page-covering raster.
+    doc.save(pdf)
+    doc.close()
+
+    def _raise(self, page, slots, folios, **kw):
+        raise RuntimeError("#1203: scan failed")
+
+    monkeypatch.setattr(BornDigitalDetector, "_has_prior_ocr_layer", _raise)
+    # WITH a witness, deliberately: this page has no covering raster, so a witness reading
+    # of its pixels reads the LAYER's own ink and would agree with it. A no-witness arm
+    # would pass for the wrong reason (nothing to confirm with).
+    live = _run_table_arm(
+        tmp_path, monkeypatch, "no-raster", route_live=True, agree=True, witness=True, pdf=pdf
+    )
+    from socr.core.pdf import open_pdf
+    from socr.tables.source_evidence import page_has_page_covering_raster
+
+    with open_pdf(pdf) as _doc:
+        assert page_has_page_covering_raster(_doc[0]) is False, "fixture premise: no raster"
+    assert live["side"].get("prior_ocr_layer_suspect") is True, "fixture premise: scan-failed"
+    assert live["side"]["winning_output"].get("table_cells_witness_confirmed") in (None, False), (
+        "the layer minted a confirmation"
+    )
+    assert live["ships_table"] is False
+    assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
+
+
+def test_a_non_suspect_scan_is_unchanged_by_the_final_gate(tmp_path: Path, monkeypatch) -> None:
+    """Control: the same page with the detection route neutralised keeps main's ending."""
+    main = _run_table_arm(
+        tmp_path, monkeypatch, "ctl-main", route_live=False, agree=True, witness=False
+    )
+    assert "withheld_table_text" not in main["side"]
+    assert main["ships_table"] is True, (
+        "an unflagged scan lost its table, so the gate is not scoped to suspect pages"
+    )
+
+
+def test_settling_can_never_ship_an_unconfirmed_rung_over_a_confirmed_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon §3: ``settle_scanned_table_decision`` can un-accept a CONFIRMED rung.
+
+    Its rule is about how many marked table blocks each candidate accounts for, not about
+    who confirmed what: rung 1 splitting the table into two blocks and rung 2 emitting it
+    unified makes it promote rung 1. Rounds 1 and 2 put the withhold upstream of the
+    settling, so whichever way it went was final.
+
+    The answer this PR takes is the second one the brief allows: the final gate runs AFTER
+    the settling, so whatever it hands over is judged on its own confirmation. The two
+    invariants are asserted directly — never ship unconfirmed, never withhold without
+    retention — because which rung settling picks is its business, not this rule's.
+    """
+    split = (
+        "| Item | Level |\n| --- | --- |\n| Reserves | 512 |\n\n"
+        "| Item | Change | Net |\n| --- | --- | --- |\n| Reserves | -380 | -18 |\n"
+    )
+    unified = _table_markdown(list(_COLUMN_ROWS))
+    live = _run_table_arm(
+        tmp_path,
+        monkeypatch,
+        "settle",
+        route_live=True,
+        agree=True,
+        witness=True,
+        per_rung_tables=[split, unified],
+    )
+    confirmed = live["side"]["winning_output"].get("table_cells_witness_confirmed") is True
+    if live["ships_table"]:
+        assert confirmed, "settling shipped a table no independent reader confirmed"
+    else:
+        assert (live["side"].get("withheld_table_text") or "").strip(), (
+            "withheld without retention, which is a deletion"
+        )
+
+
+def test_the_confirmation_survives_a_page_output_round_trip() -> None:
+    """r-uben's nit: dropping the ``from_dict`` restore survived the suite.
+
+    Nothing reads the flag after the decision TODAY, so the restore is defence — but the
+    sidecar is what a resume and a re-finalize rebuild the page from, and the final gate
+    asks the winner whether it was confirmed. A flag that does not come back reads as "not
+    confirmed", which withholds a table a witness had confirmed.
+
+    Both directions, because the field is written sparsely: True round-trips, False stays
+    absent from the dict so no existing sidecar changes its bytes.
+    """
+    confirmed = PageOutput(
+        page_num=1,
+        text="| a | b |\n| --- | --- |\n| 1 | 2 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        table_cells_witness_confirmed=True,
+    )
+    as_dict = confirmed.to_dict()
+    assert as_dict["table_cells_witness_confirmed"] is True
+    assert PageOutput.from_dict(as_dict).table_cells_witness_confirmed is True
+
+    plain = PageOutput(page_num=1, text="x", status=PageStatus.SUCCESS, engine="qwen")
+    assert "table_cells_witness_confirmed" not in plain.to_dict()
+    assert PageOutput.from_dict(plain.to_dict()).table_cells_witness_confirmed is False
+
+
+def test_a_crop_patched_candidate_does_not_inherit_the_confirmation() -> None:
+    """Argon P2: patched text is NEW text, so the old confirmation must not ride along.
+
+    Pinned on the candidate builder rather than through ``process()``: the crop re-judge
+    needs a crop lane, a patch that changes the text and a VLM, and none of this round's
+    arms reach it — a reset nothing exercises is a reset nothing protects, so it is pinned
+    where it can fail.
+    """
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    confirmed = PageOutput(
+        page_num=1,
+        text="| Item | Level |\n| --- | --- |\n| Reserves | 512 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        table_cells_witness_confirmed=True,
+    )
+    candidate = UnifiedPipeline._crop_patch_candidate(
+        confirmed, "| Item | Level |\n| Reserves | 9 |"
+    )
+
+    assert candidate.text != confirmed.text, "premise: the patch changed the text"
+    assert candidate.table_cells_witness_confirmed is False, (
+        "patched cells inherited a confirmation no reader gave them"
+    )
