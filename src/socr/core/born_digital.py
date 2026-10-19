@@ -2597,6 +2597,14 @@ class PageAssessment:
     #: meaning because #1027 may DELETE a page's native text on it.
     prior_ocr_layer: bool = False
     prior_ocr_layer_scan_failed: bool = False
+    #: #1203: the page's OWN text layer, retained UNSHIPPED for a page that an early
+    #: born-digital rejection leaves with no ``native_text`` to retain. Empty on every
+    #: other page, the born-digital prior-OCR page included: there ``native_text`` already
+    #: carries the layer and is what the sidecar writes, so filling this too would change
+    #: the bytes of every sidecar Part A already writes. Never a shipping source -- it is
+    #: deliberately NOT ``native_text``, because ``native_text`` on a rejected page is what
+    #: makes it native-eligible under ``--native-only``.
+    prior_ocr_layer_text: str = ""
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3324,6 +3332,70 @@ class BornDigitalDetector:
         except Exception:
             return []
 
+    @staticmethod
+    def _prior_ocr_note(scan_failed: bool) -> str:
+        """#1156's note, in ONE wording, for both of its stamping points (#1203)."""
+        return (
+            "text layer is an earlier OCR reading (hidden under the page raster)"
+            + (" (scan failed: unknown)" if scan_failed else "")
+            + " -> OCR"
+        )
+
+    def _assess_prior_ocr_layer(self, page: fitz.Page) -> tuple[bool, bool]:
+        """#1156's drawing-order answer for one page: ``(found, scan_failed)``.
+
+        Factored out of ``_assess_page_signals`` for #1203. That body returns TEN times
+        before it reached this check, and each of those returns is a born-digital
+        rejection -- so a page rejected for another reason recorded no answer at all, and
+        lost the mark, the sidecar retention, the document bucket and both meter lanes.
+        Measured on THIS tree, before and after (``scratch/1203/``): 307 of the 355
+        unflagged pages the 455-PDF Fed census recorded gain the flag (~3,960 of the
+        5,870-PDF corpus at the census's x12.9), and 80 pages of the corpus probe set --
+        which is the count the issue reports. Zero in the other direction and zero routing
+        changes.
+
+        Round 1 correction (Argon P1, r-uben should-fix 2): "zero pages change what they
+        SHIP" was WRONG, and so was the reason given for it. Most native floors sit inside
+        ``manifest.py``'s ``if p.is_born_digital and p.native_text`` branch, which these
+        pages satisfy neither half of -- but ``UNVERIFIABLE_TABLE_SCANNED`` (~4246) is
+        reached by ``not p.is_born_digital and scanned_table_evidence_failed``, i.e. on
+        exactly these pages, and #649's ``native_prose_floor_text`` shipped the earlier OCR
+        run's own paragraphs from there. That is now gated on ``prior_ocr_layer_found``,
+        so such a page falls to its marker plus page image and the layer stays retained,
+        unshipped. See ``docs/log/2026-10-18_1203-early-returns.md``.
+
+        Called ONCE per page, from ``_assess_page``, which is the stamping point every
+        early return already passes through.
+        """
+        try:
+            return (
+                self._has_prior_ocr_layer(
+                    page,
+                    getattr(self, "_repeated_slots", frozenset()),
+                    getattr(self, "_doc_folio_slots", frozenset()),
+                ),
+                False,
+            )
+        except Exception:
+            # Fail towards suspicion: an unreadable page is never evidence of trust.
+            logger.warning("#1156: prior-OCR-layer scan failed", exc_info=True)
+            return (False, True)
+
+    def _retained_layer_text(self, page: fitz.Page) -> str:
+        """The page's own text layer, cleaned exactly as ``_assess_page_signals`` cleans it.
+
+        Same extraction and same boundary clean as the native reading, so Part B
+        re-finalizes from one representation whichever return the page took. Guarded like
+        every other ``get_text`` in this module: an unreadable layer retains nothing
+        rather than raising out of the detector.
+        """
+        try:
+            raw, _zw, _spaces = clean_native_text(page.get_text("text"))
+        except Exception:
+            logger.warning("#1203: the prior-OCR layer could not be retained", exc_info=True)
+            return ""
+        return raw
+
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
 
@@ -3356,14 +3428,47 @@ class BornDigitalDetector:
         # that the code did not actually make good on, plus a second full
         # detection pass on the hot path of every page in the corpus.
         self._detected_regions_this_page = self._detect_table_regions(page)
+        # #1203: computed HERE, before the signals body, because that body returns ten
+        # times before its own #1156 check and a page rejected early recorded nothing.
+        prior_ocr = self._assess_prior_ocr_layer(page)
 
         try:
             blocks = page.get_text("dict").get("blocks", [])
         except Exception:
             blocks = []
         direction = dominant_text_direction(blocks)
+        # Handed over on a side channel the body CONSUMES at its top, so a direct caller
+        # of ``_assess_page_signals`` can never be answered from the previous page's
+        # value. Set on the line BEFORE the call (Argon, diff review): anything that can
+        # raise between the two leaves the value on ``self`` for the next caller, and
+        # ``dominant_text_direction`` above is not inside the guard.
+        self._prior_ocr_this_page = prior_ocr
         assessment = self._assess_page_signals(page, page_num, direction)
         assessment.dominant_text_direction = direction
+        # #1203: stamped for EVERY return site, the same single-stamping-point discipline
+        # the direction and the GH-520 counts use below. Idempotent on the born-digital
+        # path, which read the same pair from the side channel above.
+        #
+        # ``is_born_digital`` discriminates the early returns exactly: the ONLY
+        # ``PageAssessment`` built with ``is_born_digital=True`` is the final return of
+        # ``_assess_page_signals``, which is also the only site that appends the note.
+        assessment.prior_ocr_layer, assessment.prior_ocr_layer_scan_failed = prior_ocr
+        if (prior_ocr[0] or prior_ocr[1]) and not assessment.is_born_digital:
+            assessment.notes.append(self._prior_ocr_note(prior_ocr[1]))
+        # The retention. ``native_text`` is empty on a rejected page BY DESIGN -- the
+        # layer is not trusted -- so Part A's sidecar retention had nothing to write
+        # there, and Part B could not re-finalize these pages without re-running
+        # detection. Gated on the native reading being ABSENT, which keeps every sidecar
+        # Part A already writes byte-identical.
+        #
+        # NOT widened to the sidecar's four-flag union (Argon, design review): #961's two
+        # keys are computed in the same stretch of the signals body as #1156's, AFTER all
+        # ten early returns, so they are provably False on every page that reaches here
+        # with no native text. Including them would be a guard that cannot fail.
+        if not assessment.native_text and (
+            assessment.prior_ocr_layer or assessment.prior_ocr_layer_scan_failed
+        ):
+            assessment.prior_ocr_layer_text = self._retained_layer_text(page)
         if assessment.is_born_digital and assessment.native_text:
             assessment.native_paragraphs = page_paragraphs(page)
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
@@ -3398,6 +3503,18 @@ class BornDigitalDetector:
         low-quality baked-in OCR layers.
         """
         notes: list[str] = []
+
+        # #1203: #1156's answer is computed in ``_assess_page``, before this body runs,
+        # and handed over on a side channel that is CONSUMED HERE -- at the top, ahead of
+        # every early return, because an early return would otherwise leave the value in
+        # place for the NEXT caller to be answered from (a direct call after a rejected
+        # page read True off it; pinned by
+        # ``test_a_direct_signals_call_is_never_answered_from_the_previous_page``). A
+        # caller that did not come through ``_assess_page`` gets a fresh call, so the
+        # predicate still runs exactly once per page either way.
+        prior_ocr = self.__dict__.pop("_prior_ocr_this_page", None)
+        if prior_ocr is None:
+            prior_ocr = self._assess_prior_ocr_layer(page)
 
         # Extract raw text from the PDF text layer, then clean it at the boundary:
         # native text never passes through OutputNormalizer, so publisher-injected
@@ -3787,25 +3904,10 @@ class BornDigitalDetector:
         # its unverified prior-OCR text as a clean SUCCESS (63 of 63 Fed pilot pages,
         # "3 Y, per cent" among them). #1027's delete key (``invisible_text_over_raster``)
         # is deliberately left alone.
-        prior_ocr_layer = False
-        prior_ocr_layer_scan_failed = False
-        try:
-            prior_ocr_layer = self._has_prior_ocr_layer(
-                page,
-                getattr(self, "_repeated_slots", frozenset()),
-                getattr(self, "_doc_folio_slots", frozenset()),
-            )
-        except Exception:
-            # Fail towards suspicion: an unreadable page is never evidence of trust.
-            logger.warning("#1156: prior-OCR-layer scan failed", exc_info=True)
-            prior_ocr_layer_scan_failed = True
+        prior_ocr_layer, prior_ocr_layer_scan_failed = prior_ocr
         if prior_ocr_layer or prior_ocr_layer_scan_failed:
             needs_ocr_enhancement = True
-            notes.append(
-                "text layer is an earlier OCR reading (hidden under the page raster)"
-                + (" (scan failed: unknown)" if prior_ocr_layer_scan_failed else "")
-                + " -> OCR"
-            )
+            notes.append(self._prior_ocr_note(prior_ocr_layer_scan_failed))
 
         # #960: math the text layer garbled (private-use glyphs, math-alphanumeric codepoints,
         # letters of a script no corpus page is written in, or a math font ``_MATH_FONT_RE``

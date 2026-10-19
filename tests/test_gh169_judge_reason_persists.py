@@ -140,9 +140,19 @@ def test_the_production_sites_are_the_ones_being_described() -> None:
         f"expected exactly one per-attempt judge_reason assignment, got {len(attempt_assigns)}"
     )
     other_rhs = sorted(ast.unparse(a.value) for a in assigns if a is not attempt_assigns[0])
-    assert other_rhs == ["decision.reason or ''"], (
-        f"unexpected judge_reason assignment site(s) in the orchestrator: {other_rhs}"
-    )
+    # #1203 adds a THIRD site, and this enumeration is what surfaced it rather than
+    # letting it pass unseen -- which is the job described above. The site strips #1048's
+    # "table shipped marked unverified" claim when the final withhold gate takes that
+    # page's table to the floor: the page ships a marker, so a judge_reason still
+    # claiming the table shipped is a second reading of the same page (Argon P2). It only
+    # ever REMOVES that one sentence; it never invents a reason, which is the property
+    # GH-169 is about. Round 4 deleted the site after measuring the claim in the page
+    # BODY only; round 5 measured the SIDECAR and put it back, now over every attempt
+    # rather than the winner alone, because the claim is a page-level statement.
+    assert other_rhs == [
+        "_SETTLED_TABLE_CLAIM_RE.sub('', _reason).strip('; ')",
+        "decision.reason or ''",
+    ], f"unexpected judge_reason assignment site(s) in the orchestrator: {other_rhs}"
     assigns = attempt_assigns
     rhs = ast.unparse(assigns[0].value)
     assert "att.reason" in rhs, f"judge_reason is not taken from the attempt: {rhs}"

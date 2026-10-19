@@ -1504,6 +1504,19 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
             except Exception:
                 # Fail closed the way that keeps MORE checking: verify natively.
                 layer_found = False
+            # #1203 round 2: round 1 reported this skip to the orchestrator, which keyed
+            # the withhold on it plus "no witness event". Both halves were wrong. The
+            # report was gated on ``_is_table_page``, which asks ``has_numeric_columns``
+            # of the UNTRUSTED layer, so a layer with no numeric column silently skipped
+            # the rule (Argon P1b); and "a witness ran" is not "a witness checked the
+            # cells" (r-uben 1b: a witness that CONTRADICTED the model let the table
+            # ship). Round 4 removed the confirmation path altogether: on these pages
+            # EVERY model table is withheld by the one final gate in the orchestrator, so
+            # nothing here needs to be reported and nothing about it is derived from the
+            # layer.
+            # (#1205: this branch keeps the answer in ``layer_found`` rather than
+            # overwriting ``suspect``, because the union has to stay readable further
+            # down -- same probe, same conclusion, different variable.)
         # #1205 round 2 (Argon P1-2): a reading the pixel lane has independently
         # confirmed is not the layer's to convict. Measured before the fix, through
         # ``_build_page_judge`` on a scan-failed page with no covering raster: the

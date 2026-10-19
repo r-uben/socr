@@ -1606,6 +1606,70 @@ def _is_document_failed_stub(md_path: Path) -> bool:
     return bool(body) and DOCUMENT_FAILED_MARK_RE.fullmatch(body) is not None
 
 
+#: #1203: #1048's settling writes this onto the winner's ``judge_reason``, and from there
+#: into the sidecar's ``attempts_summary``. On a page this PR withholds, the sentence is a
+#: false statement about what shipped.
+_SETTLED_TABLE_CLAIM_RE = re.compile(r"ladder exhausted; table shipped marked \w+ \(#1048\);?\s*")
+
+#: #1203: a whole ``<table>`` element, for retaining one the house parser could not read.
+_HTML_TABLE_ELEMENT_RE = re.compile(r"<table\b.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+
+#: #1203: the opening tag alone, for an element with no closing tag.
+_HTML_TABLE_OPEN_RE = re.compile(r"<table\b", re.IGNORECASE)
+
+
+def _block_identity(grid_identity: str, source: str) -> tuple[str, str]:
+    """What makes two retained table blocks the SAME reading (#1203).
+
+    BOTH the parsed grid and the block's own normalised bytes, because
+    ``table_grid_identity`` alone collapses readings that differ. ``_parse_grid`` drops a
+    row whose populated cells are all ``-`` and a row that is entirely blank, so a rung
+    that read a missing-data row as ``| - | - |`` and a rung that omitted the row
+    altogether produce the identical grid (measured). Dropping one of those is the
+    deletion this retention exists to stop, and keeping a near-duplicate costs nothing:
+    this text is never shipped.
+    """
+    return (grid_identity, " ".join(source.split()))
+
+
+def _table_blocks_for_retention(text: str) -> list[tuple[str, str]]:
+    """``(identity, source)`` for every table block in ``text`` (#1203, Argon P0 round 5).
+
+    Every form the scanned-table gate itself recognises, because the retention has to
+    cover whatever that gate adjudicated: markdown pipe tables, read out of the text
+    ``html_table_for_check`` converts, plus the raw ``<table>`` elements that conversion
+    could not parse into rows.
+
+    The identity is what dedup compares -- ``table_grid_identity`` is order-sensitive, so
+    two rungs that disagree about a single cell or a row ORDER count as distinct readings
+    and both are kept. When an unparsed ``<table>`` cannot be isolated as an element (no
+    closing tag), the WHOLE text is retained under a synthetic identity: this text is
+    never shipped, so retaining too much costs nothing and retaining too little is the
+    deletion this helper exists to stop.
+    """
+    from socr.tables.reconcile import find_table_blocks, table_grid_identity
+    from socr.tables.source_evidence import html_table_for_check
+
+    as_markdown, html_unparsed = html_table_for_check(text or "")
+    lines = as_markdown.splitlines()
+    blocks = [
+        (_block_identity(table_grid_identity(b.grid), src), src)
+        for b, src in (
+            (b, "\n".join(lines[b.start : b.end + 1])) for b in find_table_blocks(as_markdown)
+        )
+    ]
+    if html_unparsed:
+        raw = _HTML_TABLE_ELEMENT_RE.findall(as_markdown)
+        if not raw:
+            # No closing tag, so the element cannot be isolated. Take the tail from the
+            # opening tag rather than the whole text: dumping the whole text re-appends
+            # any table already captured above, so the same reading lands twice.
+            opened = _HTML_TABLE_OPEN_RE.search(as_markdown)
+            raw = [as_markdown[opened.start() :]] if opened else []
+        blocks += [(_block_identity("", one), one) for one in raw]
+    return blocks
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -6065,6 +6129,241 @@ class UnifiedPipeline:
             )
             return ""
 
+    @staticmethod
+    def _floor_cause_is_contradiction(records: "list[tuple[str, str, object]]") -> bool:
+        """Did a witness actually REFUSE this page's table?
+
+        Lifted out of ``_floor_cause_is_no_witness`` by #1203, which needs the positive
+        answer and not only its negation: the floor now has THREE causes, and
+        "not no-witness" is no longer the same statement as "contradicted".
+
+        Both signals, which is the union #658's own producer shape needs: the mode, which
+        is how the gate leaves an UNSETTLED attempt, and ``table_disputed``, which is what
+        survives #1048's settling (that rewrites the mode to NONE while the attempt keeps
+        the witness's list of refused cells). Either one alone is blind to a real case.
+        """
+        from socr.core.result import FailureMode as _FailureMode
+
+        return any(
+            disputed or mode is _FailureMode.HALLUCINATION for _reason, disputed, mode in records
+        )
+
+    @staticmethod
+    def _floor_cause_is_no_witness(records: "list[tuple[str, str, object]]") -> bool:
+        """#658's cause for the scanned-table floor: did NOTHING read the pixels?
+
+        One helper for both callers (#1203 round 3): the floor is applied from the ladder
+        loop and from the final withhold gate, and each had its own copy of this rule --
+        so a mutant that broke one was masked by the other. Takes
+        ``(reason, disputed, failure_mode)`` per attempt, because the two callers hold
+        different objects (``ProviderAttempt`` with ``.reason``, ``PageOutput`` with
+        ``.judge_reason``).
+
+        A CONTRADICTION wins -- reporting a witness's refusal as a missing install is the
+        #658 regression Argon found -- and it is read from BOTH signals, which is the
+        union #658's own producer shape needs:
+
+        * ``failure_mode is HALLUCINATION``, which is how the gate leaves an UNSETTLED
+          attempt (and what ``test_a_later_contradiction_beats_an_earlier_missing_witness``
+          builds; dropping it broke that test, which is how this was caught);
+        * ``table_disputed``, which is what survives #1048's settling -- that rewrites the
+          mode to NONE while the attempt keeps the witness's list of refused cells.
+
+        Either one alone is blind to a real case, so the rule takes both.
+
+        A verifier that RAISED counts as no-witness, because nothing read the pixels then
+        either.
+        """
+        from socr.tables.source_evidence import CAUSE_NO_WITNESS_BACKEND
+
+        if UnifiedPipeline._floor_cause_is_contradiction(records):
+            return False
+        return any(
+            f"[{CAUSE_NO_WITNESS_BACKEND}] " in reason or "table_verifier_error" in reason
+            for reason, _disputed, _mode in records
+        )
+
+    def _withhold_unconfirmed_table(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        figures_dir: Path | None,
+    ) -> bool:
+        """#1203: THE gate. A suspect old-scan page's table is WITHHELD, with the reading
+        retained, because nothing available here can confirm it.
+
+        Round 3 released a table an independent reader had positionally confirmed. Round 4
+        removed that path: all three review seats broke the check (the subsequence skipped
+        words; dropped, shifted and merged cells passed; a dropped row passed; swapped
+        header years passed), and it could only ever fire on a box with Tesseract, which
+        neither CI nor Rorqual is. The owner's ruling is "withhold until a second reader
+        confirms"; the second reader is #1208, and ``withheld_table_text`` is what it
+        releases from.
+
+        Called at the point the page's shipped table is FINAL -- after routing, the
+        settling, the crop re-judge and escalation -- because each of rounds 1 and 2 put
+        this rule upstream of one of those and a reviewer then found the path around it
+        (``denylist-safety-lanes-leak-every-round``). One gate on the bytes that are about
+        to ship cannot be bypassed by a step that produces different bytes.
+
+        Scope unchanged: an early-return page (not born-digital) whose layer is not
+        admissible evidence. #1208 carries the born-digital pages.
+
+        "Contains a table" is read from the SHIPPED TEXT, never from the layer -- a
+        layer-derived predicate is what Argon P1b walked through. EVERY table form the
+        scanned-table gate itself recognises counts: markdown pipe tables via
+        ``find_table_blocks`` and HTML via ``html_table_for_check``. Round 3 checked only
+        the first, so a model that emitted its table as ``<table>`` walked through this
+        gate (Argon P0, round 4) -- and on Rorqual the engines do emit HTML.
+
+        Returns True when it withheld.
+        """
+        if ps.is_born_digital or layer_is_admissible_evidence(ps):
+            return False
+        from socr.tables.reconcile import find_table_blocks
+        from socr.tables.source_evidence import html_table_for_check
+
+        bo = ps.best_output
+        text = (bo.text or "") if bo is not None else ""
+        _as_markdown, _html_unparsed = html_table_for_check(text)
+        _winner_has_table = bool(text.strip()) and bool(
+            find_table_blocks(_as_markdown) or _html_unparsed
+        )
+        # A floor UPSTREAM of this gate (the ladder's own, at the routing site) already
+        # replaced the body with the marker. Argon P0, round 5: this gate read only
+        # ``ps.best_output``, so when the ladder floored the page and the winner it left
+        # behind carried no table -- rung 1's table rejected and unpromotable, rung 2
+        # prose only -- the gate returned here and rung 1's reading was LOST. A withhold
+        # that keeps nothing is a deletion whichever floor performed it, so the trigger
+        # is "a table on this page is being withheld", by this gate OR by that one.
+        _already_floored = bool(ps.scanned_table_evidence_failed)
+        _withholding = _winner_has_table or _already_floored
+        # And the third case, which Argon's round-5 "variant B" produced at ``process()``
+        # after its first two repros did not: rung 1 emits a SHORT table the witness
+        # corroborates but the page judge refuses for word count, and rung 2 emits enough
+        # prose to win. No source-evidence rejection, so no floor; the winner carries no
+        # table; and the table a model read on this page was neither shipped nor retained,
+        # so #1208 could never release it. No floor withheld it -- winner selection
+        # dropped it -- but the ruling forbids LOSING a model reading however it is lost.
+        _others = [att for att in ps.attempts if att is not bo]
+        _other_has_table = any(
+            _table_blocks_for_retention(getattr(att, "text", "") or "") for att in _others
+        )
+        if not _withholding and not _other_has_table:
+            return False
+
+        # ALWAYS retained, before anything demotes the winner. Round 2 captured this
+        # inside one branch of the old condition, so Argon's ragged-row case withheld
+        # with ``withheld_table_text`` unset.
+        #
+        # EVERY attempt, not only the winner: the ruling forbids losing a model reading,
+        # and the reading that is lost is precisely the one the ladder refused. The
+        # winner's text is retained whole, as before; a block from any other attempt is
+        # appended only when no retained block already has its identity, so a ladder
+        # whose rungs agree does not store the same table twice.
+        # The retention's FIRST segment is always a COMPLETE candidate page body, and
+        # each later segment is one table block under a provenance line naming its rung.
+        # #1208 reads this, and a reading it cannot attribute is a reading it cannot
+        # compare: splitting on the provenance marker gives it the winner's body and then
+        # one rejected block at a time. The seed is the winner's text when the winner
+        # carried a table; when an upstream floor already replaced the body with the
+        # marker, it is the first table-bearing attempt's whole text, so the prose around
+        # that rung's table is retained with it rather than sliced away.
+        _retained = text if _winner_has_table else ""
+        if not _retained:
+            for _att in _others:
+                if _table_blocks_for_retention(getattr(_att, "text", "") or ""):
+                    _retained = getattr(_att, "text", "") or ""
+                    _others = [a for a in _others if a is not _att]
+                    break
+        _seen = {ident for ident, _src in _table_blocks_for_retention(_retained)}
+        for _att in _others:
+            _rung = ps.attempts.index(_att) + 1
+            for _ident, _src in _table_blocks_for_retention(getattr(_att, "text", "") or ""):
+                if _ident in _seen:
+                    continue
+                _seen.add(_ident)
+                _retained += (
+                    f"\n\n<!-- #1203 withheld: also read on attempt {_rung} by "
+                    f"{getattr(_att, 'engine', '') or 'unknown'}, which is not the page's "
+                    f"winner -->\n{_src}\n"
+                )
+        if _retained.strip():
+            ps.withheld_table_text = _retained
+
+        if not _withholding:
+            # Retain-only. Nothing withheld this page's table: the ladder simply chose a
+            # prose winner, and that choice is main's. The page keeps the body, the
+            # status and the judge record it already had -- the clears below describe a
+            # withhold and would be false here -- and the lost reading is now on disk for
+            # #1208. Deliberately NOT a floor: flooring a page whose accepted reading is
+            # prose would be new content loss, outside this ruling.
+            return False
+
+        # The page is NOT shipping a table, so #1048's record of one must go with it
+        # (Argon P2). The settling also writes its claim onto the winner's judge fields
+        # and from there into ``attempts_summary``, so those are corrected too: a page
+        # whose body is a marker must not carry "table shipped marked unverified".
+        ps.table_ladder_disposition = None
+        ps.unchecked_table_kind = ""
+        ps.unchecked_table_values = ""
+        ps.unchecked_table_value_list = []
+        # The sidecar must not say the table shipped. The settling writes
+        # "ladder exhausted; table shipped marked unverified (#1048)" onto the winner's
+        # judge fields, and from there into ``attempts_summary``; on a page whose body is
+        # a marker that sentence, ``judge_accepted`` and ``judge_outcome`` are all false
+        # statements about what shipped, so a reader of the sidecar sees two readings.
+        #
+        # Round 3 added this; round 4 removed it after measuring the substring in the
+        # BODY only and concluding it could not occur. It was in the sidecar all along.
+        # Measured at ``process()`` on head 92b2c420: ``judge_accepted`` is True on the
+        # no-witness, witness-agrees, witness-contradicts and witness-exec-error arms,
+        # and the sentence itself is on the first and third -- so neither clear is
+        # vacuous. The strip runs over every attempt because the claim is a PAGE-level
+        # statement, false wherever it is written, not a rung's own verdict.
+        if bo is not None:
+            bo.judge_accepted = False
+            bo.judge_outcome = ""
+        for _att in ([bo] if bo is not None else []) + list(ps.attempts):
+            _reason = getattr(_att, "judge_reason", "") or ""
+            if _reason:
+                _att.judge_reason = _SETTLED_TABLE_CLAIM_RE.sub("", _reason).strip("; ")
+
+        if not _winner_has_table:
+            # An upstream floor already demoted this page and recorded its own cause.
+            # That floor fires on ordinary non-suspect scanned pages too, so its cause is
+            # main's to decide; this gate has only retained what it was about to lose.
+            return True
+
+        # The cause, from the attempts' own records rather than from a failure mode
+        # (#1048's settling rewrites those; see round 2). A dispute wins over a missing
+        # witness; a verifier that RAISED counts as "nothing read it", because nothing
+        # did.
+        _records = [
+            (
+                getattr(att, "judge_reason", "") or "",
+                getattr(att, "table_disputed", "") or "",
+                getattr(att, "failure_mode", None),
+            )
+            for att in ps.attempts
+        ]
+        _no_witness = self._floor_cause_is_no_witness(_records)
+        # Argon P1, round 5: the floor had two causes and picked HALLUCINATION for
+        # everything that was not no-witness -- so a table a witness had READ and
+        # CORROBORATED was recorded as a fabrication. Nothing contradicted it; it is
+        # withheld because nothing compared its cells. That is its own cause.
+        _unconfirmed = not _no_witness and not self._floor_cause_is_contradiction(_records)
+        self._apply_scanned_table_floor(
+            ps,
+            state.handle.path,
+            page_num,
+            figures_dir,
+            no_witness=_no_witness,
+            withheld_unconfirmed=_unconfirmed,
+        )
+        return True
+
     def _apply_scanned_table_floor(
         self,
         ps: PageState,
@@ -6073,6 +6372,7 @@ class UnifiedPipeline:
         figures_dir: Path | None,
         *,
         no_witness: bool = False,
+        withheld_unconfirmed: bool = False,
     ) -> None:
         """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
 
@@ -6091,6 +6391,10 @@ class UnifiedPipeline:
         # attempt-level reason died one selection later and the shipped sidecar
         # still accused the model.
         ps.scanned_table_no_witness = bool(no_witness)
+        # #1203: the third cause. Only ``_withhold_unconfirmed_table`` passes it, never
+        # the ladder floor at the routing site -- that one also fires on ordinary
+        # non-suspect scanned pages, which are main's behaviour and outside this rule.
+        ps.scanned_table_withheld_unconfirmed = bool(withheld_unconfirmed) and not no_witness
         if figures_dir is not None:
             ps.d3_floor_png_ref = self._render_d3_floor_png(
                 pdf_path,
@@ -6100,8 +6404,16 @@ class UnifiedPipeline:
         if ps.best_output is not None:
             ps.best_output.status = PageStatus.ERROR
             ps.best_output.audit_passed = False
+            # #1203: three causes, not two. ``not no_witness`` used to mean
+            # "a witness contradicted the model", and on a page this PR withholds that
+            # was simply false -- a witness could have READ the pixels and AGREED, and
+            # the table is withheld only because nothing compared its cells.
             ps.best_output.failure_mode = (
-                FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION
+                FailureMode.NO_WITNESS_BACKEND
+                if no_witness
+                else FailureMode.TABLE_WITHHELD_UNCONFIRMED
+                if withheld_unconfirmed
+                else FailureMode.HALLUCINATION
             )
 
     # ------------------------------------------------------------------
@@ -7565,6 +7877,7 @@ class UnifiedPipeline:
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
                 "scanned_table_no_witness",  # #658: qualifies the flag above
+                "scanned_table_withheld_unconfirmed",  # #1203: likewise
             )
             if getattr(ps, name, False)
         ]
@@ -11232,28 +11545,38 @@ class UnifiedPipeline:
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
                             for att in _source_ev_attempts
                         )
-                        # #1048 / #1124: the floor is for a ladder that ended
-                        # without an accepted reading that carries a passed
-                        # table. ``settle_scanned_table_decision`` un-accepts a
-                        # prose (or unread-table) winner and may promote a
-                        # marked candidate; ``decision.accepted`` is then true
-                        # only for a verified later table or a promoted mark.
+                        # #1048 / #1124: the floor is for a ladder that ended without an
+                        # accepted reading carrying a passed table. This is main's own
+                        # condition, unchanged.
+                        #
+                        # #1203 round 3: the WITHHOLD this PR adds is NOT here. Rounds 1
+                        # and 2 each put a condition at this point -- upstream of
+                        # escalation, the settling and the crop re-judge -- and each round
+                        # a reviewer found a path that reached shipping around it (a raised
+                        # verifier whose reason is ``table_verifier_error``, so
+                        # ``_source_ev_rejected`` stayed False; escalation swapping in an
+                        # unjudged table scored against the SUSPECT LAYER; the settling
+                        # promoting an unconfirmed rung over a confirmed one). There is now
+                        # ONE gate, on the table about to ship:
+                        # ``_withhold_unconfirmed_table``, called just before the page is
+                        # finalised. See ``denylist-safety-lanes-leak-every-round``.
                         if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
                                 page_num,
                                 _chart_figures_dir,
-                                no_witness=_source_ev_no_witness,
+                                no_witness=self._floor_cause_is_no_witness(
+                                    [
+                                        (
+                                            att.reason or "",
+                                            getattr(att.output, "table_disputed", "") or "",
+                                            att.output.failure_mode,
+                                        )
+                                        for att in _source_ev_attempts
+                                    ]
+                                ),
                             )
-                        # #1048: the gate could not check a scanned page's table and
-                        # the candidate was accepted, so it ships. Record the page's
-                        # disposition as TABLE_UNVERIFIED -- the existing state every
-                        # surface (page status, document status, metadata, CLI,
-                        # ``tables`` counts) already reads for a table that shipped
-                        # unchecked, and the one ``_apply_ladder_disposition_guard``
-                        # demotes (``audit_passed`` on the SELECTED attempt stays
-                        # untouched). A stronger terminal the ladder sets later wins.
                         if _unchecked_table_attempt is not None and (
                             ps.table_ladder_disposition is None
                         ):
@@ -11320,8 +11643,25 @@ class UnifiedPipeline:
                         # found. The marker that ships in place of the earlier OCR layer
                         # has to point at something a reader can check, and this is the
                         # only thing on the page that was never re-read.
+                        #
+                        # #1203 round 1 (Argon P2b): and ONLY on a page that can reach an
+                        # ending which references it. Both readers of
+                        # ``prior_ocr_page_png_ref`` -- the #1156 floor (``manifest.py``
+                        # ~4578) and the disputed-grid branch (~4766) -- live inside
+                        # ``if p.is_born_digital and p.native_text:`` (~4366), so on a page
+                        # an early born-digital rejection produced, this render had no
+                        # reader at all: one page rasterised and written per page, ~3,960
+                        # of them on the Fed run, referenced by nothing.
+                        #
+                        # Stopped rather than referenced, deliberately. The ending such a
+                        # page ships is either its own table floor, which already carries
+                        # the page image it rendered itself (``d3_floor_png_ref``), or a
+                        # model reading with no marker to hang a link on -- and appending a
+                        # link there would change the shipped bytes of every one of those
+                        # pages, which is a shipping decision and not this round's.
                         if (
                             getattr(ps, "prior_ocr_layer", False)
+                            and getattr(ps, "is_born_digital", False)
                             and not getattr(ps, "invisible_text_over_raster", False)
                             and not decision.accepted
                             and _chart_figures_dir is not None
@@ -11811,6 +12151,14 @@ class UnifiedPipeline:
                 # fragment. Timed as flush. Sidecar write is AFTER finalize so
                 # ``timings_s.total`` is the independent page wall, not a value
                 # that includes writing itself.
+                # #1203 round 3: THE withhold gate, here because here the page's table is
+                # final -- routing, the settling, the crop re-judge and escalation have all
+                # run, and nothing between this line and the finalize can produce a
+                # different table. ``bo`` is re-read from the page state afterwards
+                # because the floor demotes the winner in place.
+                if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
+                    bo = ps.best_output or bo
+
                 try:
                     from ocr_output_contract import PAGE_MARKER_RE
 
@@ -14498,6 +14846,9 @@ class UnifiedPipeline:
             # released page that kept it would report a no-witness floor it no
             # longer sits under.
             ps.scanned_table_no_witness = False
+            # #1203: same reason. A released page that kept this would report a
+            # withheld-pending-confirmation floor it no longer sits under.
+            ps.scanned_table_withheld_unconfirmed = False
             # #1048: the patched text PASSED the source-evidence check (this judge
             # chain contains it), so the unchecked/disputed claims about the old
             # reading no longer describe what ships: clear them, the disposition
@@ -15676,9 +16027,19 @@ class UnifiedPipeline:
             # something: the withholding counter is Part B's, and a page whose text the
             # floor replaced is exactly the page whose original must survive. Stored
             # untransformed, which is what makes Part B's single transform possible.
-            layer = getattr(ps, "native_text", "") or ""
+            # #1203: ``native_text`` first, so every sidecar Part A already writes keeps
+            # its bytes; the second carrier is the layer of a page an early born-digital
+            # rejection left with no native text at all, which the census puts at ~3,960
+            # Fed pages (#1203).
+            layer = getattr(ps, "native_text", "") or getattr(ps, "prior_ocr_layer_text", "") or ""
             if layer:
                 payload["prior_ocr_layer_text"] = layer
+
+        # #1203 round 1 (owner ruling 2026-10-18): the table this run withheld because
+        # nothing could witness it. Sparse for the same reason as the key above -- absent
+        # on every page that did not hit the rule, so their sidecar bytes are unchanged.
+        if ps is not None and getattr(ps, "withheld_table_text", ""):
+            payload["withheld_table_text"] = ps.withheld_table_text
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor
@@ -16904,15 +17265,44 @@ class UnifiedPipeline:
             # flagged page and was written against the day it stopped being (pinned at the
             # seam by ``test_a_restored_page_keeps_the_retained_layer`` and now on the live
             # path by ``test_gh1192_resume_accepted_prior_ocr.py``).
-            # COORDINATION, #1207 (Argon, #1210 round 1): that PR writes this to
-            # ``ps.prior_ocr_layer_text`` instead, so a restored early-return page
-            # (``is_born_digital=False``) keeps ``ps.native_text`` empty. The two are not
-            # alternatives to choose between here -- whichever of the two PRs merges
-            # SECOND takes #1207's version of this line, because its field is the narrower
-            # one and this ticket needs only that the layer survives the restore.
+            # COORDINATION WITH #1207 -- RESOLVED. #1210 merged first and #1207 merged
+            # main in, so this line is #1207's version as that note directed: the layer
+            # is restored into ``ps.prior_ocr_layer_text`` and NEVER into
+            # ``ps.native_text``, which keeps a restored early-return page
+            # (``is_born_digital=False``) out of ``--native-only`` eligibility. #1210
+            # needs only that the layer survives the restore, which the narrower field
+            # gives it; see the #1203 note just below for why the wider one is unsafe.
             _retained_layer = meta.get("prior_ocr_layer_text")
-            if isinstance(_retained_layer, str) and _retained_layer and not ps.native_text:
-                ps.native_text = _retained_layer
+            if isinstance(_retained_layer, str) and _retained_layer:
+                # #1203 (Argon, diff review, P0): restored into the retention CARRIER, and
+                # no longer into ``native_text``.
+                #
+                # Part A put it in ``native_text`` because that was the only carrier
+                # between this restore and the re-flush. It now has its own, and the
+                # re-flush reads ``native_text or prior_ocr_layer_text``, so retention
+                # survives for both page classes without this line.
+                #
+                # Writing ``native_text`` had become unsafe: since #1203 the sidecar key
+                # is also written for a page an EARLY RETURN rejected, where
+                # ``native_text`` is empty precisely because the layer is not trusted.
+                # ``not ps.native_text`` is always true there, so every restored
+                # early-return page came back with an earlier OCR run's numbers sitting in
+                # the field that makes a page native-eligible under ``--native-only``.
+                # ``is_born_digital`` cannot gate it either: this restore never brings
+                # that field back, so the gate would be answered from an unrestored field
+                # and would always be False.
+                ps.prior_ocr_layer_text = _retained_layer
+            # #1203 round 1 (owner ruling 2026-10-18): the table the ruling withheld, for
+            # the same reason the layer above is restored -- the re-flush rebuilds the
+            # sidecar from PageState, so a field that does not come back is a key that
+            # disappears, and this one is the whole release path for ~1,700 Fed pages.
+            # Defence rather than a live path, and for the same reason: a withheld page is
+            # ERROR, so the page ledger never admits it and this restore is not reached in
+            # a normal resume. Both halves are pinned
+            # (``test_the_withheld_table_survives_a_flush_a_restore_and_a_re_flush``).
+            _withheld_table = meta.get("withheld_table_text")
+            if isinstance(_withheld_table, str) and _withheld_table:
+                ps.withheld_table_text = _withheld_table
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.
@@ -17017,6 +17407,14 @@ class UnifiedPipeline:
             ps.scanned_table_no_witness = (
                 ps.scanned_table_evidence_failed
                 and page_out.failure_mode is FailureMode.NO_WITNESS_BACKEND
+            )
+            # #1203: DERIVED the same way and for the same reason -- no new sidecar key,
+            # so the P6 key set stays frozen and the two can never disagree. A sidecar
+            # written before this ticket records HALLUCINATION and restores False, which
+            # is what that record meant when it was written.
+            ps.scanned_table_withheld_unconfirmed = (
+                ps.scanned_table_evidence_failed
+                and page_out.failure_mode is FailureMode.TABLE_WITHHELD_UNCONFIRMED
             )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of

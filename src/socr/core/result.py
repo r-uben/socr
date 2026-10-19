@@ -254,6 +254,23 @@ class FailureMode(str, Enum):
     #: with no tesseract. The page still fails closed under this mode; only the
     #: reason changes.
     NO_WITNESS_BACKEND = "no_witness_backend"
+    #: #1203: an early-return page whose PDF text layer is an earlier OCR run shipped the
+    #: fail-closed floor because NO independent reader confirmed its table's cells --
+    #: not because any reader refused them.
+    #:
+    #: NOT a reuse of ``HALLUCINATION``, which says a witness read the pixels and the
+    #: model's numbers were not there. Nothing contradicted this table; a witness may
+    #: even have corroborated it. And NOT a reuse of ``NO_WITNESS_BACKEND``, which says
+    #: nothing read the pixels at all -- here something did. The owner's ruling
+    #: (2026-10-18) is that a multiset or whole-page agreement is not a confirmation of
+    #: CELLS, so the table is withheld until a reader that compares cells positionally
+    #: exists; #1208 is that reader, and the model's reading is retained unshipped in the
+    #: page sidecar's ``withheld_table_text`` so it can be released with no new OCR.
+    #:
+    #: The ENDING is unchanged (``SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED``:
+    #: marker + page image, ERROR, ``audit_passed`` False); only the recorded cause
+    #: differs, which is exactly how #658 added ``NO_WITNESS_BACKEND``.
+    TABLE_WITHHELD_UNCONFIRMED = "table_withheld_unconfirmed"
     #: #713: the PAGE judge never returned a verdict for this candidate -- the
     #: call timed out (infrastructure), so nothing rejected the reading and
     #: nothing confirmed it either. Deliberately NOT a reuse of ``TIMEOUT``

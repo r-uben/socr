@@ -3624,6 +3624,24 @@ def native_prose_floor_text(
     """
     from socr.core.born_digital import text_layer_trusted
 
+    # #1203 round 1 (Argon P1, r-uben should-fix 2): a third way to abstain, and the only
+    # one that is about WHOSE text this is rather than about whether it can be delimited.
+    # On a page whose layer is an earlier OCR run, these bytes are that run's reading, so
+    # #1156's interim ruling forbids shipping them with no accepted reading of the page --
+    # the same condition ``structure_class_floor_text`` already applies at the S1 floor
+    # (~2784) and ``UNVERIFIABLE_TABLE_NATIVE`` at ~4416. This branch sits OUTSIDE
+    # ``is_born_digital and native_text``, which is why #1156 Part A missed it: it is
+    # reached by ``not p.is_born_digital and scanned_table_evidence_failed``, i.e. on
+    # exactly the Fed old scans. Reproduced at ``process()`` on this round's fixture and
+    # on Argon's real census pages (1966-02-08 bluebook p8/p9/p13/p15-17, 1941-09-27 p5).
+    #
+    # POSITIVE findings only (``prior_ocr_layer_found``), never a failed scan: this
+    # abstention WITHHOLDS text, and "unknown" must not buy deletion rights. Returning
+    # ``None`` leaves the caller's own bare marker plus the page image, an ending this
+    # branch already has, so nothing new is introduced.
+    if prior_ocr_layer_found(p):
+        return None
+
     words = getattr(p, "native_words", None) or []
     if not words:
         return None
@@ -4381,9 +4399,16 @@ def _select_page_output_tagged(
             # invented the table. The floor is unchanged -- same marker text,
             # same ERROR, same provenance -- only the recorded cause follows the
             # page's own flag.
+            # #1203 adds the third cause. The two-way choice called a table a
+            # fabrication whenever no witness was MISSING -- including the case where a
+            # witness read the pixels and AGREED, and the table is withheld only because
+            # nothing compared its cells. That page's record accused the model of a
+            # contradiction that never happened.
             failure_mode=(
                 FailureMode.NO_WITNESS_BACKEND
                 if getattr(p, "scanned_table_no_witness", False)
+                else FailureMode.TABLE_WITHHELD_UNCONFIRMED
+                if getattr(p, "scanned_table_withheld_unconfirmed", False)
                 else FailureMode.HALLUCINATION
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
