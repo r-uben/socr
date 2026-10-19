@@ -94,6 +94,7 @@ __all__ = [
     "PAGE_TOP_MARK_1145_DIFFERENCES",
     "VERDICT_SIDECAR_1145_DIFFERENCES",
     "CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES",
+    "NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES",
 ]
 
 #: Volatile keys excluded from canonical byte comparison.
@@ -143,6 +144,10 @@ ADDITIVE_SIDECAR_KEYS: frozenset[str] = frozenset(
         # nothing -- and by tests/test_gh1155_chart_witness.py for the page where it is
         # True.
         "chart_floor_body",
+        # Default-on per-cell native binding summary (``tables.native_cell_check``).
+        # Pinned per page by ``NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES``; empty on
+        # this corpus because ``capture()`` exercises assemble only.
+        "native_cell_binding",
     }
 )
 
@@ -1441,6 +1446,21 @@ CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES: list[ExpectedDiff] = [
     ),
 ]
 
+#: Default-on native cell binding sidecar (assemble-only capture: always empty).
+NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", f"p6_corpus/pages/{page:05d}.json", "native_cell_binding"),
+        old_value=None,
+        new_value={},
+        description=(
+            "native_cell_binding: page "
+            f"{page} gains the additive sidecar key. Empty dict: assemble capture "
+            "does not run the agentic per-cell check."
+        ),
+    )
+    for page in range(1, 13)
+]
+
 
 EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *BUCKET_DIFFERENCES,
@@ -1455,6 +1475,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *PAGE_TOP_MARK_1145_DIFFERENCES,
     *VERDICT_SIDECAR_1145_DIFFERENCES,
     *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
+    *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
 ]
 
 #: Exactly one entry per leaf path. The dict below would silently keep only the last entry

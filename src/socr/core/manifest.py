@@ -932,6 +932,21 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
 _NATIVE_TEXT_LANES = ("native", "chart_asset")
 
 
+def engine_ships_native_text(engine: object) -> bool:
+    """Does a winner from this engine ship the page's OWN ``native_text``?
+
+    The public reading of ``_NATIVE_TEXT_LANES``, for callers outside this package. It
+    matters wherever a flag about ``native_text`` has to cover the chart lane too, whose
+    engine is ``chart_asset`` rather than ``native`` -- the gap #1156 round 1 found, where
+    a passing chart winner on a prior-OCR page shipped the whole suspect layer.
+
+    #1192 reads it from the resume ledger for the same reason: on a page whose text layer
+    is an earlier OCR run, neither lane's output is an independent READING of the page, so
+    neither can be the accepted reading that exception is about.
+    """
+    return str(engine or "").startswith(_NATIVE_TEXT_LANES)
+
+
 def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     """Whether ``out`` is a non-native reading that authored a table grid,
     with NO judge/rejection verdict applied either way.
@@ -2140,6 +2155,12 @@ CREDENTIAL_NON_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         "structure_class_ladder_exhausted_floor",
         "structure_class_row_corroborated",
         "structure_floor_overrode_ladder",
+        # Default-on native cell check is advisory: distrust is recorded in
+        # tables_trust.json but does not block #713 credentials unless
+        # ``native_cell_gating`` demoted the page (table_ladder_disposition).
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
     }
 )
 

@@ -166,6 +166,11 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # keeps the two copies from diverging silently.
         "table_ladder_rejected",
         "table_ladder_unverified",
+        # Default-on per-cell native binding check: active disagreement or
+        # incomplete geometry on a born-digital table page.
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
         # P1 (owner ruling Q2): the table's bytes did NOT ship -- the region
         # is a fail-closed marker plus the page image. Registered here for the
         # same reason the other two terminals are: a consumer reading the
@@ -278,7 +283,16 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
 # this set is the word-keyed mechanism below (``_boundary_fully_resolved_tables``),
 # never a generic ACCEPTED and never merely the ABSENCE of a current
 # unresolved event.
-NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset({TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND})
+NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
+    {
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        # Per-cell native binding: geometry/content doubt is independent of a
+        # later page-wide table escalation replacing markdown.
+        "native_cell_check_contradicted",
+        "native_cell_check_ambiguous",
+        "native_cell_check_skipped",
+    }
+)
 
 #: GH-609 round 4: maps each ``NON_RESOLVABLE_DISTRUST_KINDS`` member to the
 #: kind whose matching, word-keyed event resolves it. A kind in

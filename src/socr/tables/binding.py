@@ -91,6 +91,7 @@ from socr.tables.native_verifier import (
     _cluster_x_positions,
     _lane_count_from_words,
     _normalize_cell,
+    _normalize_binding_numeric_token,
     _normalize_numeric_token,
     _well_separated_lanes_in_row,
     is_numeric_token,
@@ -1086,7 +1087,11 @@ def _presentation_normalized_for_lanes(words: list) -> list:
         text = wd[4]
         if is_numeric_token(text):
             stripped = strip_presentation(text)
-            if stripped != text:
+            if _SPEC_NUMBER_RE.match(stripped):
+                # Footnote markers like (1) sit beside row labels; they must not
+                # become data lanes (RESF p.59 T2 and similar).
+                wd = (wd[0], wd[1], wd[2], wd[3], "", *wd[5:])
+            elif stripped != text:
                 wd = (wd[0], wd[1], wd[2], wd[3], stripped, *wd[5:])
         normalized.append(wd)
     return normalized
@@ -1159,7 +1164,9 @@ def _native_lane_geometry(
             band_lanes = {
                 raw_lane_of[word[0]]
                 for word in band_words
-                if is_numeric_token(word[4]) and word[0] in raw_lane_of
+                if is_numeric_token(word[4])
+                and not _SPEC_NUMBER_RE.match(strip_presentation(word[4]))
+                and word[0] in raw_lane_of
             }
             if len(band_lanes) > 1:
                 data_lanes.update(band_lanes)
@@ -1181,7 +1188,28 @@ def _native_lane_geometry(
     remap = {raw: new for new, raw in enumerate(surviving_raw)}
     centers = [all_centers[i] for i in surviving_raw]
     lane_of = {x: remap[li] for x, li in raw_lane_of.items() if li in remap}
-    return len(surviving_raw), lane_of, centers
+    lane_count = len(surviving_raw)
+
+    # Indented sub-rows often shift numeric x slightly into extra lane clusters
+    # (same 3 columns → 6 native lanes). Collapse to candidate width when known.
+    if n_cand_cols is not None and lane_count > n_cand_cols and lane_count == 2 * n_cand_cols:
+        order = sorted(range(lane_count), key=lambda i: centers[i])
+        merge_map: dict[int, int] = {}
+        new_centers = [0.0] * n_cand_cols
+        counts = [0] * n_cand_cols
+        for rank, old_li in enumerate(order):
+            new_li = min(n_cand_cols - 1, (rank * n_cand_cols) // lane_count)
+            merge_map[old_li] = new_li
+            new_centers[new_li] += centers[old_li]
+            counts[new_li] += 1
+        centers = [
+            (new_centers[i] / counts[i]) if counts[i] else centers[min(i, lane_count - 1)]
+            for i in range(n_cand_cols)
+        ]
+        lane_of = {x: merge_map[li] for x, li in lane_of.items() if li in merge_map}
+        lane_count = n_cand_cols
+
+    return lane_count, lane_of, centers
 
 
 def _native_rows(
@@ -1242,7 +1270,11 @@ def _native_rows(
 
     for bidx in data_positions:
         band_words = bands[bidx]
-        numeric_words = [w for w in band_words if is_numeric_token(w[4])]
+        numeric_words = [
+            w
+            for w in band_words
+            if is_numeric_token(w[4]) and not _SPEC_NUMBER_RE.match(strip_presentation(w[4]))
+        ]
         data_words = [w for w in band_words if lane_of.get(w[0]) is not None]
         label, label_bbox = _row_label_and_bbox(band_words, lane_of)
         band_ambiguous = bidx in ambiguous_bands
@@ -1301,7 +1333,7 @@ def _native_rows(
             else:
                 lane_tokens[li] = (text, token_ambiguous)
                 lane_bboxes[li] = (word[0], word[1], word[2], word[3])
-            multiset[_normalize_numeric_token(text)] += 1
+            multiset[_normalize_binding_numeric_token(text)] += 1
 
         rows.append(
             _NativeRow(
@@ -1478,7 +1510,7 @@ def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
     for cell in row[1:]:
         for tok in re.split(r"\s+", _normalize_cell(cell).strip()):
             if tok and is_numeric_token(tok):
-                c[_normalize_numeric_token(tok)] += 1
+                c[_normalize_binding_numeric_token(tok)] += 1
     return c
 
 
@@ -1661,6 +1693,7 @@ class UnboundCell:
     row_path: tuple[str, ...]
     col_path: tuple[str, ...]
     token: str
+    token_bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -1702,6 +1735,13 @@ class BindingResult:
     native_rows: list = field(default_factory=list)
     row_binding: dict = field(default_factory=dict)
     candidate_row_labels: tuple[str, ...] = ()
+    #: Body rows ``bind()`` actually row-bound against (post-spacer, post-merge).
+    candidate_rows: tuple[tuple[str, ...], ...] = ()
+    native_header_row_indices: frozenset[int] = frozenset()
+    #: Bottom y of native header bands (band-centre + half pitch); tokens above
+    #: ``native_data_y_min`` are column-header orphans, not data rows.
+    native_header_band_y_max: float | None = None
+    native_data_y_min: float | None = None
     row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
     #: Words the region membership predicate rejected but that still touch
     #: *region* (positive overlap, at or under the majority-overlap
@@ -1856,9 +1896,9 @@ def _best_lane_column_map(
                 cand_normalized = _normalize_cell(cand_text) if cand_text else ""
                 if not cand_normalized or not is_numeric_token(cand_normalized):
                     continue
-                if _normalize_numeric_token(native_text) == _normalize_numeric_token(
-                    cand_normalized
-                ):
+                if _normalize_binding_numeric_token(
+                    native_text
+                ) == _normalize_binding_numeric_token(cand_normalized):
                     score[lane][col_idx] += 1
 
     dp = [[0] * (n_cand_cols + 1) for _ in range(lane_count + 1)]
@@ -1935,7 +1975,12 @@ def _record_inventions_on_parent_row(
         chp = header_paths_by_lane.get(lane) if lane is not None else None
         col_path = chp.path if chp is not None else ()
         result.model_unbound.append(
-            UnboundCell(row_path=native_row.row_path, col_path=col_path, token=cand_text)
+            UnboundCell(
+                row_path=native_row.row_path,
+                col_path=col_path,
+                token=cand_text,
+                token_bbox=native_row.lane_bboxes.get(lane) if lane is not None else None,
+            )
         )
 
 
@@ -2191,6 +2236,22 @@ def bind(
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
 
     native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols, spans)
+    result.native_header_row_indices = frozenset(header_band_idxs or ())
+    if header_band_idxs and band_centers:
+        pitches = [
+            abs(band_centers[header_band_idxs[i + 1]] - band_centers[header_band_idxs[i]])
+            for i in range(len(header_band_idxs) - 1)
+            if i + 1 < len(header_band_idxs)
+        ]
+        half_pitch = (max(pitches) / 2.0) if pitches else 8.0
+        result.native_header_band_y_max = (
+            max(band_centers[i] for i in header_band_idxs) + half_pitch
+        )
+    data_ys = [
+        nr.label_bbox[1] for nr in native_rows if nr.label_bbox is not None and not nr.is_parent
+    ]
+    if data_ys:
+        result.native_data_y_min = min(data_ys)
     lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (
@@ -2235,6 +2296,7 @@ def bind(
     result.candidate_row_labels = tuple(
         (row[0].strip() if row else "") for row in candidate_grid.rows
     )
+    result.candidate_rows = tuple(candidate_grid.rows)
     bound_candidate_idxs = set(row_binding)
     bound_native_idxs = set(row_binding.values())
     result.candidate_valueless_unbound = sum(
@@ -2331,7 +2393,12 @@ def bind(
             chp = header_paths_by_lane.get(lane)
             col_path = chp.path if chp else (str(lane),)
             result.native_unbound.append(
-                UnboundCell(row_path=nr.row_path, col_path=col_path, token=text)
+                UnboundCell(
+                    row_path=nr.row_path,
+                    col_path=col_path,
+                    token=text,
+                    token_bbox=nr.lane_bboxes.get(lane),
+                )
             )
 
     # HIGH 2: the candidate-side mirror of BLOCKING 1. An invented candidate
@@ -2445,7 +2512,12 @@ def bind(
                 chp = header_paths_by_lane.get(lane)
                 col_path = chp.path if chp else (str(lane),)
                 result.native_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=text)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=text,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
 
             for col_idx in range(physical_n_cand_cols):
@@ -2511,11 +2583,21 @@ def bind(
                 )
             elif native_value is None and model_value is not None:
                 result.model_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=model_value)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=model_value,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
             elif native_value is not None and model_value is None:
                 result.native_unbound.append(
-                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=native_value)
+                    UnboundCell(
+                        row_path=native_row.row_path,
+                        col_path=col_path,
+                        token=native_value,
+                        token_bbox=native_row.lane_bboxes.get(lane),
+                    )
                 )
             else:
                 # #766: decode entities/strip presentation BEFORE the numeric
@@ -2541,9 +2623,9 @@ def bind(
                         )
                     )
                     continue
-                if _normalize_numeric_token(native_value) == _normalize_numeric_token(
-                    model_value_normalized
-                ):
+                if _normalize_binding_numeric_token(
+                    native_value
+                ) == _normalize_binding_numeric_token(model_value_normalized):
                     result.matched_cells.append(
                         MatchedCell(
                             row_path=native_row.row_path, col_path=col_path, value=native_value

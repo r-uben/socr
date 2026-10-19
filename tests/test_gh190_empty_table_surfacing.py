@@ -369,7 +369,8 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
     one cell:
     - Empty run: gains table_structure_failed, DocumentStatus.AUDIT_FAILED,
       PageStatus.WARNING sidecar, tables_trust.json untrusted entry, and metadata note.
-    - Populated run: achieves DocumentStatus.SUCCESS, PageStatus.SUCCESS, no trust flags.
+    - Populated run: passes structure gate; native cell check skips (no geometry) and
+      records ``native_cell_check_skipped`` in trust only (advisory — no demotion).
     """
     fitz = pytest.importorskip("fitz")
 
@@ -506,37 +507,57 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
 
     assert sidecar_pop["winning_output"]["audit_passed"] is True
     assert sidecar_pop["winning_output"]["status"] == PageStatus.SUCCESS.value
+    assert sidecar_pop["winning_output"].get("failure_mode") in (None, "", "none")
 
-    # Audit log JSON events: only the rejected run needs an audit artifact.
+    # Audit log JSON: empty run records structure failure; populated run records
+    # default-on native cell skip (no PDF table geometry on this prose-only fixture).
     empty_audit_paths = list(out_empty.rglob("audit_log.json"))
     populated_audit_paths = list(out_pop.rglob("audit_log.json"))
     assert len(empty_audit_paths) == 1
-    assert populated_audit_paths == []
+    assert len(populated_audit_paths) == 1
     audit_empty = json.loads(empty_audit_paths[0].read_text())
+    audit_pop = json.loads(populated_audit_paths[0].read_text())
 
     kinds_empty = [e.get("kind") for e in audit_empty.get("events", [])]
     assert "table_structure_failed" in kinds_empty
+    assert "native_cell_check_skipped" not in kinds_empty
+
+    kinds_pop = [e.get("kind") for e in audit_pop.get("events", [])]
+    assert kinds_pop == ["native_cell_check_skipped"]
+    assert "table_structure_failed" not in kinds_pop
 
     defect_event = next(
         e for e in audit_empty["events"] if e.get("kind") == "table_structure_failed"
     )
     assert defect_event["data"]["defect"] == DEFECT_TABLE_CONTENT_EMPTY
 
-    # Tables trust sidecar JSON: only the rejected run needs a trust artifact.
+    # Tables trust sidecar: both runs flag distrust, but for different defect kinds.
     empty_trust_paths = list(out_empty.rglob("tables_trust.json"))
     populated_trust_paths = list(out_pop.rglob("tables_trust.json"))
     assert len(empty_trust_paths) == 1
-    assert populated_trust_paths == []
+    assert len(populated_trust_paths) == 1
     trust_empty = json.loads(empty_trust_paths[0].read_text())
+    trust_pop = json.loads(populated_trust_paths[0].read_text())
 
     assert 1 in trust_empty["untrusted_pages"]
     assert trust_empty["counts_by_kind"]["table_structure_failed"] == 1
+    assert "native_cell_check_skipped" not in trust_empty["counts_by_kind"]
+
+    assert 1 in trust_pop["untrusted_pages"]
+    assert trust_pop["counts_by_kind"]["native_cell_check_skipped"] == 1
+    assert "table_structure_failed" not in trust_pop["counts_by_kind"]
 
     # Persisted metadata error field / trust note, not merely the in-memory result.
     empty_metadata = _persisted_document_metadata(out_empty)
     populated_metadata = _persisted_document_metadata(out_pop)
-    assert TRUST_NOTE_PREFIX in (empty_metadata.get("error") or "")
-    assert TRUST_NOTE_PREFIX not in (populated_metadata.get("error") or "")
+    empty_err = empty_metadata.get("error") or ""
+    pop_err = populated_metadata.get("error") or ""
+    assert TRUST_NOTE_PREFIX in empty_err
+    assert TRUST_NOTE_PREFIX in pop_err
+    assert trust_empty["counts_by_kind"]["table_structure_failed"] == 1
+    assert trust_pop["counts_by_kind"]["native_cell_check_skipped"] == 1
+    assert "table_unverified" not in pop_err
+    assert trust_empty["counts_by_kind"] != trust_pop["counts_by_kind"]
 
 
 # --------------------------------------------------------------------------
