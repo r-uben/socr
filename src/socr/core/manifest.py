@@ -6279,6 +6279,62 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, text=f"{text.rstrip()}\n\n{ref}")
 
 
+def _apply_unshipped_figure_guard(output: PageOutput, p) -> PageOutput:
+    """#1187: append the crops of a figure the page NAMES and does not show.
+
+    The decision is the orchestrator's (``_agentic_unshipped_figure_page``); this applies it
+    to the FINALIZED copy, so the flush, the stitch and a resume replay all see one body --
+    the shape ``_apply_scanned_figure_guard`` already has.
+
+    Abstains when the body, as it now stands, already carries an image: a guard above may
+    have replaced the text with a floor marker that ships its own page image, and two
+    pictures of one page is the defect this lane exists to avoid, inverted. Idempotent on its
+    own refs, which is what lets the re-finalize tool run twice and change nothing.
+
+    Status is untouched. A picture shipping is not a failure, and the page that could NOT be
+    given one is marked by its verdict clause (``verdict._unshipped_figure_clauses``), not
+    here -- one writer per statement.
+    """
+    # ``isinstance`` rather than truthiness: ``p`` is a stand-in object in much of the suite,
+    # and a bare ``Mock`` hands back another ``Mock`` for any attribute -- which is truthy, so
+    # ``or []`` keeps it and iterating it raises inside the finalisation seam for every page in
+    # those tests. The same shape ``verdict._chart_floor_clauses`` uses, for the same reason.
+    raw_refs = getattr(p, "unshipped_figure_refs", None)
+    refs = [str(ref) for ref in raw_refs if ref] if isinstance(raw_refs, (list, tuple)) else []
+    if not refs:
+        return output
+    text = output.text or ""
+    if not text.strip():
+        return output
+    from socr.figures.scanned_figures import close_open_code_fence
+    from socr.figures.unshipped_figures import body_shows_a_picture, figure_block
+
+    # ONE gate, and it is the broad one: a body that already shows a picture. A narrower
+    # "is this exact ref already here" test was written above it first, and the mutation
+    # check found it unkillable -- this lane's own block opens a line with ``![``, so the
+    # broad gate is what makes a second application a no-op, and a second guard that can
+    # never fire is not a guard (CLAUDE.md).
+    if body_shows_a_picture(text):
+        return output
+
+    raw_caps = getattr(p, "unshipped_figure_captions", None)
+    captions = tuple(str(c) for c in raw_caps) if isinstance(raw_caps, (list, tuple)) else ()
+    block = figure_block(_page_num_of(output), refs, captions)
+    if not block:
+        return output
+    # A fence the page left open runs to the end of the document: close it, or the image
+    # renders as literal code while the report says it shipped (#1030's lesson, same seam).
+    return replace(output, text=f"{close_open_code_fence(text).rstrip()}\n\n{block}")
+
+
+def _page_num_of(output: PageOutput) -> int:
+    """The page number of *output*, 0 when it carries none (only reachable from a stub)."""
+    try:
+        return int(getattr(output, "page_num", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _apply_halt_unprocessed_guard(output: PageOutput, p) -> PageOutput:
     """GH-995: a page the halted loop never reached is not a clean, finished page.
 
@@ -6486,6 +6542,7 @@ def _select_and_finalize_page(
       8. _apply_ditto_guard
       9. _apply_chart_region_guard
       9b. _apply_scanned_figure_guard (#1030)
+      9b2. _apply_unshipped_figure_guard (#1187)
       9c. _apply_native_paragraphs (#1074)
       9d. _apply_unverified_table_mark (#1048)
       9e. _apply_unaccepted_output_mark (#1129)
@@ -6519,6 +6576,7 @@ def _select_and_finalize_page(
         output = _apply_chart_region_guard(output, p)
         output = _apply_halt_unprocessed_guard(output, p)
         output = _apply_scanned_figure_guard(output, p)
+        output = _apply_unshipped_figure_guard(output, p)
         # #1156 Part B: the masked layer ships exactly as built from the retained original.
         # The reflow rebuilds lines from the page's native geometry, which carries the
         # UNMASKED layer, and a re-finalisation of a finished run has no geometry at all.
@@ -6647,6 +6705,23 @@ def _select_and_finalize_page(
         selection_provenance=provenance,
         verdict=verdict,
     )
+
+
+def refinalize_unshipped_figure_page(output: PageOutput, p, page_num: int, published=None):
+    """#1187: apply this lane's two finalisation steps to an ALREADY-SELECTED page.
+
+    The public seam ``socr-refinalize-unshipped-figures`` uses, because ``pipeline`` may not
+    import ``core``'s private names (``test_package_layering``) -- and because the ORDER of the
+    two steps is part of the contract: the guard appends the crop, then the verdict seam reads
+    the final bytes and puts any mark above them. ``_select_and_finalize_page`` applies the same
+    two in the same order, which is what makes a re-finalized page byte-identical to a page a
+    live run produced.
+
+    No selection runs here: the page's winner was decided by the run that shipped it, and this
+    lane never changes it.
+    """
+    output = _apply_unshipped_figure_guard(output, p)
+    return _apply_verdict_marks(output, p, page_num, published=published)
 
 
 def finalized_page_record(

@@ -1017,6 +1017,7 @@ def render_chart_region_crops(
     figures_dir: Path,
     *,
     indices: list[int] | None = None,
+    filename=None,
 ) -> list:
     """GH-189: render one PNG crop per chart-region bbox, reporting EVERY outcome.
 
@@ -1041,6 +1042,11 @@ def render_chart_region_crops(
 
     ``indices`` are 1-based detector ordinals; ``None`` means every region.
     Never raises.
+
+    ``filename`` is ``(page_num, region_index) -> str``; ``None`` keeps
+    ``chart_region_filename``, so every existing caller renders the same bytes to the same
+    name. #1187 passes its own so a page that carries BOTH an unshipped-figure crop and a
+    chart-region crop cannot have one lane's asset overwritten by the other's.
     """
     from socr.figures.chart_regions import ChartRegionAsset, chart_region_filename  # noqa: PLC0415
 
@@ -1051,7 +1057,7 @@ def render_chart_region_crops(
             continue
         bbox = bboxes[region_idx - 1]
         rect = (float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1))
-        fname = chart_region_filename(page_num, region_idx)
+        fname = (filename or chart_region_filename)(page_num, region_idx)
         out_path = figures_dir / fname
         try:
             import fitz

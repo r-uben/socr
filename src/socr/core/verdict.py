@@ -435,6 +435,38 @@ def _scanned_figure_clause(p: Any) -> VerdictClause | None:
     )
 
 
+def _unshipped_figure_clauses(p: Any) -> list[VerdictClause]:
+    """#1187: one clause per figure this page NAMES and socr could neither show nor locate.
+
+    Status-INDEPENDENT (it lives in ``silent_success_clauses``) because the pages it is for
+    ship SUCCESS: on run 23319732 all 3,082 model-read pages count CHECKED while 142 of them
+    name a figure they do not show, 39 of which this lane cannot give a picture. A clause that
+    only fired on an already-demoted page would be blind to exactly that population.
+
+    Records in, clauses out. The orchestrator writes the captions; the lane's own module
+    renders them into clause records, and ``_apply_verdict_marks`` renders the page's lines
+    from those -- one source, so the line and the record cannot disagree (#1155's lesson).
+
+    ``isinstance`` rather than truthiness: ``p`` is a stand-in object in much of the suite,
+    and a bare ``Mock`` hands back another ``Mock`` for any attribute, which would iterate
+    as a non-empty sequence of ``Mock``s here -- while a ``MagicMock`` iterates as EMPTY and
+    reads as "no clauses", the vacuous shape this repo keeps finding.
+    """
+    captions = getattr(p, "unshipped_figure_unlocated", None)
+    if not isinstance(captions, (list, tuple)) or not captions:
+        return []
+    from socr.figures.unshipped_figures import unlocated_clause_records
+
+    page_num = int(getattr(p, "page_num", 0) or 0)
+    clauses: list[VerdictClause] = []
+    for record in unlocated_clause_records(page_num, tuple(str(c) for c in captions)):
+        try:
+            clauses.append(VerdictClause.from_dict(record))
+        except Exception:
+            logger.warning("#1187: unreadable unshipped-figure record %r", record)
+    return clauses
+
+
 def _native_glyph_clause(
     p: Any, output: PageOutput, provenance: Any = None
 ) -> VerdictClause | None:
@@ -809,6 +841,7 @@ def silent_success_clauses(
         _chart_values_clause(event_kinds),
         _exact_pass_unjudged_clause(output, event_kinds),
         _prior_ocr_layer_clause(output, p),
+        *_unshipped_figure_clauses(p),
     ):
         if clause is not None:
             clauses.append(clause)

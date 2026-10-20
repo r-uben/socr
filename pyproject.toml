@@ -95,6 +95,7 @@ socr-score-sep-ground-truth = "socr.figures.score_sep_ground_truth:main"
 socr-measure-ship-gate-gaps = "socr.benchmark.ship_gate_gaps:main"
 socr-acceptance = "socr.benchmark.acceptance:main"
 socr-refinalize-prior-ocr = "socr.pipeline.refinalize_prior_ocr:main"
+socr-refinalize-unshipped-figures = "socr.pipeline.refinalize_unshipped_figures:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]
