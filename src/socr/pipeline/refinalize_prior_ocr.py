@@ -60,7 +60,10 @@ _PNG_FIELDS = (
 _EXACT_JUDGE_OUTCOMES = frozenset({"page_judge_completed"})
 
 #: Sidecar keys that are ``PageState`` fields but not inputs to finalisation.
-_NOT_RESTORED = frozenset({"page_num", "timings_s", "page_cost_usd"})
+#: ``prior_ocr_table_seen`` is the live gate's MEMO, kept so one run cannot flip a page
+#: between two finalisations. Restored here it would answer the gate before any signal is
+#: read (Argon, round 2 re-review), so the tool recomputes the answer from every signal.
+_NOT_RESTORED = frozenset({"page_num", "timings_s", "page_cost_usd", "prior_ocr_table_seen"})
 
 _FAILED_LIST_RE = re.compile(r"^page\(s\) ([0-9, ]+) (?P<note>.*)$")
 
@@ -124,6 +127,9 @@ def _rebuild_state(sidecar: dict, page_count: int):
             setattr(p, f.name, value)
     p.native_text = sidecar.get("prior_ocr_layer_text") or ""
     p.prior_ocr_layer_suspect = True
+    # The attempt record, which says of each reading whether it held a table: the gate's
+    # one signal that lives in the readings, which the sidecar does not keep.
+    p.attempts_summary_restored = [dict(row) for row in sidecar.get("attempts_summary") or []]
     state.pages[page_num] = p
     for ev in sidecar.get("audit_events") or ():
         state.events.append(
@@ -173,7 +179,85 @@ def _with_table_standing(sidecar: dict, assessment) -> dict | None:
     out = dict(sidecar)
     for key in _TABLE_STANDING_KEYS:
         out[key] = bool(getattr(pa, key, False))
-    out["detected_table_count"] = int(getattr(pa, "detected_table_count", 0) or 0)
+    # Sparse, as a run writes it (Argon, round 2 re-review).
+    count = int(getattr(pa, "detected_table_count", 0) or 0)
+    if count > 0:
+        out["detected_table_count"] = count
+    return out
+
+
+def _analyse_pdf(pdf_dir: Path | None, meta: dict, expected_checksum: str):
+    """``(the document's page analysis, None)``, or ``(None, why not)``.
+
+    The analysis decides whether a table page ships its rows, so it is accepted only for
+    the very file the run read: same checksum, same page count (Fable / Argon, round 2).
+    Model-free: socr's own born-digital page analysis, no OCR.
+    """
+    if pdf_dir is None:
+        return None, "table findings not in the sidecar, and no --pdf-dir"
+    pdf = pdf_dir / str(meta.get("key") or "")
+    if not pdf.is_file():
+        return None, "PDF not found under --pdf-dir"
+    from ocr_output_contract import safe_checksum
+
+    if not expected_checksum or safe_checksum(pdf) != expected_checksum:
+        return None, "PDF under --pdf-dir is not the run's input (checksum)"
+    from socr.core.born_digital import BornDigitalDetector
+
+    assessment = BornDigitalDetector().detect(pdf)
+    if len(assessment.pages) != int(meta.get("pages") or 0):
+        return None, "PDF under --pdf-dir is not the run's input (page count)"
+    return assessment, None
+
+
+def _cached_readings(doc_dir: Path) -> dict[int, list[dict]]:
+    """Every model reading the run kept in the document's content-addressed cache, by page.
+
+    The cache stores each attempt's whole output, rejected ones included; the sidecar keeps
+    only a summary. Measured on the Fed calibration run: each of its 390 floor pages has its
+    one rejected reading there, and 23 of those readings hold a table.
+    """
+    out: dict[int, list[dict]] = {}
+    for blob in sorted((doc_dir / "cache").glob("*/*.json")):
+        try:
+            data = _read_json(blob)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("page_num"), int) and "text" in data:
+            out.setdefault(data["page_num"], []).append(data)
+    return out
+
+
+def _judged(sidecar: dict) -> bool:
+    rows = sidecar.get("attempts_summary") or []
+    return bool(rows) and all("held_a_table" in row for row in rows)
+
+
+def _with_readings_judged(sidecar: dict, cached: dict[int, list[dict]]) -> dict | None:
+    """*sidecar* with ``held_a_table`` on its attempt record, from itself (a run since #1156
+    round 3 writes it) or from the rejected reading in the cache; ``None`` when neither
+    can say. On an exact case the record holds one model attempt, so the reading is the
+    page's one rejected cached output of that engine."""
+    from socr.core.manifest import reading_holds_a_table
+    from socr.core.result import PageOutput
+
+    rows = sidecar.get("attempts_summary") or []
+    if _judged(sidecar):
+        return sidecar
+    if len(rows) != 1:
+        return None
+    engine = rows[0].get("engine")
+    found = [
+        r
+        for r in cached.get(int(sidecar["page_num"]), [])
+        if r.get("engine") == engine and r.get("audit_passed") is False
+    ]
+    if len(found) != 1:
+        return None
+    out = dict(sidecar)
+    out["attempts_summary"] = [
+        {**rows[0], "held_a_table": reading_holds_a_table(PageOutput.from_dict(found[0]))}
+    ]
     return out
 
 
@@ -189,6 +273,12 @@ def is_exact_case(sidecar: dict) -> bool:
     A sidecar that does carry it is restored like every other flag, and the table gate
     reads it -- so the proof is required either way, which only ever keeps a page on its
     floor.
+
+    The proof is NOT sufficient on its own, and nothing may treat it as such (Fable,
+    round 2 P2-1): the lookahead returns False for a page that is not born-digital (a
+    #1203 page), whatever its tables, so such a table page reaches a floor too. That is
+    why the table findings (``_with_table_standing``) are required on every page, from the
+    sidecar or from the run's own PDF, and the page is skipped when neither has them.
     """
     attempts = sidecar.get("attempts_summary") or []
     if not (
@@ -371,16 +461,17 @@ def refinalize_document(
     doc_md = md_paths[0].read_text(encoding="utf-8")
     assessment: list = []  # the document's page analysis, run once and only if needed
 
-    def page_analysis():
+    def page_analysis(expected_checksum: str):
         if not assessment:
-            pdf = (pdf_dir / str(meta.get("key") or "")) if pdf_dir is not None else None
-            if pdf is None or not pdf.is_file():
-                assessment.append(None)
-            else:
-                from socr.core.born_digital import BornDigitalDetector
-
-                assessment.append(BornDigitalDetector().detect(pdf))
+            assessment.append(_analyse_pdf(pdf_dir, meta, expected_checksum))
         return assessment[0]
+
+    cache: list = []  # the document's cached readings, read once and only if needed
+
+    def cached_readings():
+        if not cache:
+            cache.append(_cached_readings(doc_dir))
+        return cache[0]
 
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
@@ -394,12 +485,20 @@ def refinalize_document(
             continue
         standing = _with_table_standing(sidecar, None)
         if standing is None:
-            standing = _with_table_standing(sidecar, page_analysis())
-        if standing is None:
-            skipped["table findings not in the sidecar (pass --pdf-dir)"] += 1
-            continue
+            analysis, why_not = page_analysis(
+                str(sidecar.get("input_checksum") or meta.get("checksum") or "")
+            )
+            if analysis is None:
+                skipped[why_not] += 1
+                continue
+            standing = _with_table_standing(sidecar, analysis)
         recomputed = standing is not sidecar
-        sidecar = standing
+        judged = _with_readings_judged(standing, {} if _judged(standing) else cached_readings())
+        if judged is None:
+            skipped["the rejected reading is not in the run's cache"] += 1
+            continue
+        from_cache = judged is not standing
+        sidecar = judged
         record = refinalize_sidecar(sidecar, page_count)
         if record is None:
             skipped["the floor is still the right ending (a table, or no prose)"] += 1
@@ -418,6 +517,8 @@ def refinalize_document(
         new_sidecar = _updated_sidecar(sidecar, record)
         if recomputed:
             new_sidecar["refinalized_from"]["table_findings"] = "recomputed from the PDF"
+        if from_cache:
+            new_sidecar["refinalized_from"]["readings"] = "judged from the run's cache"
         fragments.append((fragment_path, new_fragment))
         sidecars.append((sidecar_path, new_sidecar))
         changes.append(

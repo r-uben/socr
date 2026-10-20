@@ -758,3 +758,139 @@ def test_the_tool_replaces_an_older_copy_of_its_own_event(tmp_path: Path, monkey
     assert len(events) == 1 and events[0]["engine"] == "qwen"
     own = [e for e in json.loads(path.read_text())["audit_events"] if e["kind"] == stale["kind"]]
     assert len(own) == 1 and own[0]["engine"] == "qwen"
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: what the tool may trust on a sidecar from before Part B
+# ---------------------------------------------------------------------------
+
+
+def _pre_part_b(doc: Path) -> Path:
+    """Strip a floor page's sidecar back to what socr 6ebb603e (the Fed run) wrote: no
+    table findings, no gate answer, no per-reading table record."""
+    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS
+
+    path = doc / "pages" / "00001.json"
+    side = json.loads(path.read_text())
+    for key in (*_TABLE_STANDING_KEYS, "prior_ocr_table_seen"):
+        side.pop(key, None)
+    for row in side.get("attempts_summary") or []:
+        row.pop("held_a_table", None)
+    path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+    return doc
+
+
+def _cached_reading(doc: Path) -> Path:
+    for blob in (doc / "cache").glob("*/*.json"):
+        data = json.loads(blob.read_text())
+        if data.get("page_num") == 1 and data.get("engine") == "qwen" and not data["audit_passed"]:
+            return blob
+    raise AssertionError("the run cached no rejected reading")
+
+
+@pytest.mark.parametrize(
+    ("reading", "masks"),
+    [
+        ("A MODEL READING", True),
+        ("| Item | 1964 |\n| --- | --- |\n| Loans | 12 |\n| Gold | 4 |", False),
+        ("<table><tr><td>Loans</td><td>12</td></tr></table>", False),
+    ],
+    ids=["prose", "markdown-table", "html-table"],
+)
+def test_the_tool_judges_the_rejected_reading_from_the_runs_cache(
+    tmp_path: Path, monkeypatch, reading: str, masks: bool
+) -> None:
+    """Fable P1-2 / Argon P0-1, measured: 23 of the calibration run's 390 floor pages hold
+    a rejected reading with a table, and the tool masked such pages (1964 Greenbook
+    supplement p36). The cache keeps each attempt's whole output; the sidecar does not."""
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
+    blob = _cached_reading(doc)
+    data = json.loads(blob.read_text())
+    data["text"] = reading
+    blob.write_text(json.dumps(data))
+    changes = refinalize_document(doc, pdf_dir=tmp_path)
+    assert bool(changes) is masks
+    if masks:
+        side = json.loads((doc / "pages" / "00001.json").read_text())
+        assert side["attempts_summary"][0]["held_a_table"] is False
+        assert side["refinalized_from"]["readings"] == "judged from the run's cache"
+
+
+def test_a_reading_missing_from_the_cache_leaves_the_page_on_its_floor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from collections import Counter
+
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
+    _cached_reading(doc).unlink()
+    skipped: Counter = Counter()
+    assert refinalize_document(doc, pdf_dir=tmp_path, skipped=skipped) == []
+    assert skipped == Counter({"the rejected reading is not in the run's cache": 1})
+
+
+@pytest.mark.parametrize(
+    "case", ["no-pdf-dir", "missing", "other-file", "other-page-count", "the-input"]
+)
+def test_the_pdf_must_be_the_runs_own_input(tmp_path: Path, monkeypatch, case: str) -> None:
+    """Fable P1-1 / Argon P1-2: a wrong file decided whether a table page shipped its rows.
+    Each refusal is counted under its own reason (Fable P2-2)."""
+    from collections import Counter
+
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "scan.pdf"
+    if case == "other-file":
+        _scan_pdf(pdf)
+        with fitz.open(pdf) as d:  # same pages, different bytes
+            d.set_metadata({"title": "not the run's input"})
+            d.save(pdf.with_suffix(".tmp"))
+        pdf.with_suffix(".tmp").replace(pdf)
+    elif case == "other-page-count":
+        import shutil
+
+        shutil.copy(tmp_path / "scan.pdf", pdf)
+        side_meta = doc / "metadata.json"
+        meta = json.loads(side_meta.read_text())
+        meta["pages"] = meta["pages"] + 1  # the run recorded a different document length
+        side_meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    elif case == "the-input":
+        import shutil
+
+        shutil.copy(tmp_path / "scan.pdf", pdf)
+    skipped: Counter = Counter()
+    changes = refinalize_document(
+        doc, pdf_dir=None if case == "no-pdf-dir" else pdf_dir, skipped=skipped
+    )
+    expected = {
+        "no-pdf-dir": "table findings not in the sidecar, and no --pdf-dir",
+        "missing": "PDF not found under --pdf-dir",
+        "other-file": "PDF under --pdf-dir is not the run's input (checksum)",
+        "other-page-count": "PDF under --pdf-dir is not the run's input (page count)",
+    }
+    if case == "the-input":
+        assert changes and not skipped
+    else:
+        assert changes == [] and skipped == Counter({expected[case]: 1})
+
+
+def test_the_tool_recomputes_the_gate_rather_than_trust_its_memo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon round 2 P1-1: a restored ``prior_ocr_table_seen: False`` answered the gate
+    before any signal was read. The memo is the live run's; the tool asks again."""
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _floor_run(tmp_path, monkeypatch)
+    path = doc / "pages" / "00001.json"
+    side = json.loads(path.read_text())
+    assert side["prior_ocr_table_seen"] is False
+    side["audit_events"] = [*side["audit_events"], {"kind": "table_structure_failed"}]
+    path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+    assert refinalize_document(doc) == []

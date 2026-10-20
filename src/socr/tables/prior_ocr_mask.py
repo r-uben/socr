@@ -89,7 +89,10 @@ _NUMBER_RE = re.compile(rf"(?<!\d){_SIGN}{_BODY}")
 #: one of them stays an entity (named, so it carries no digit); decoding it would turn a
 #: layer's "&#60;script&#62;" into raw HTML on the page.
 _MARKUP_ENTITIES = {"<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;"}
-_CHAR_REF_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
+#: The closing ";" is optional: an HTML parser decodes "&#xBD" as "\u00bd" without it, and
+#: those hex digits are letters, so neither the grammar nor the invariant would see the
+#: numeral it writes (Argon, round 2 re-review).
+_CHAR_REF_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
 
 
 def _decode_character_references(text: str) -> str:
@@ -261,7 +264,12 @@ def masked_layer_text(
     # grammar is a list of the forms a number takes, and a list is what leaked three rounds
     # running; this asks the opposite question of the text that would ship, and a page
     # that fails it keeps its floor (round 2, orchestrator).
-    if confirmed == frozenset() and carries_a_numeral(kept, token):
+    #
+    # Asked of the layer with EVERY number withheld, confirmed or not, so a confirmed
+    # position never switches the check off for the rest of the page: what remains after
+    # the full mask is what the grammar missed (Fable, round 2 P2-3).
+    fully_masked, _all = mask_numbers(layer or "", frozenset(), token=token)
+    if carries_a_numeral(withhold_shreds(fully_masked)[0], token):
         return "", withheld, shreds
     return kept, withheld, shreds
 
@@ -306,10 +314,13 @@ def holds_a_stacked_column(text: str, token: str = NUMBER_WITHHELD) -> bool:
 
 
 def carries_a_numeral(text: str, token: str = NUMBER_WITHHELD) -> bool:
-    """Whether any character of *text*, outside the withheld-number tokens, is a numeral
-    (Unicode ``Nd``, ``No`` or ``Nl``)."""
+    """Whether any character of *text*, outside the withheld-number tokens, is a numeral:
+    Unicode ``Nd``, ``No`` or ``Nl``, or any character Unicode gives a numeric value --
+    the CJK numerals are letters (``Lo``) by category (Argon, round 2 re-review). The
+    grammar masks only the first kind; a page carrying the second keeps its floor."""
     import unicodedata
 
     return any(
-        unicodedata.category(ch) in ("Nd", "No", "Nl") for ch in (text or "").replace(token, "")
+        ch.isnumeric() or unicodedata.category(ch) in ("Nd", "No", "Nl")
+        for ch in (text or "").replace(token, "")
     )

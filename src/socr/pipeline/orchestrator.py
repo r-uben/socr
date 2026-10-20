@@ -741,6 +741,15 @@ def _attempts_summary(ps) -> list[dict]:
         ja = getattr(a, "judge_accepted", None)
         if ja is not None:
             row["judge_accepted"] = ja
+        # #1156 Part B round 3 (Fable P1-2): the sidecar keeps no reading's text, and the
+        # masked ending's gate asks whether a reading held a table -- so a re-finalisation
+        # can only reproduce that answer if it is recorded here. Sparse, like the other
+        # #1156 keys: on a page whose layer is under suspicion, so every other sidecar
+        # keeps its bytes.
+        if getattr(ps, "prior_ocr_layer_suspect", False):
+            from socr.core.manifest import reading_holds_a_table
+
+            row["held_a_table"] = reading_holds_a_table(a)
         out.append(row)
     return out
 

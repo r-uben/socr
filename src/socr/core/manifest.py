@@ -1197,7 +1197,18 @@ def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
     if getattr(p, "scanned_figure_png_ref", ""):
         return True
     ref = floor_page_image_ref(p)
-    return bool(ref) and ref in (shipped_body or "")
+    if ref and ref in (shipped_body or ""):
+        return True
+    # #1156 Part B round 3 (Argon P1-4): a masked layer whose page image failed to render
+    # ships no image, and the extractor would then take the page's raster as a "figure"
+    # and caption it -- text added after the mask, which may carry the numbers the mask
+    # withheld. The page is a scan; it has no figure of its own to extract.
+    from socr.tables.prior_ocr_mask import NUMBER_WITHHELD, NUMBER_WITHHELD_NO_IMAGE
+
+    body = shipped_body or ""
+    return prior_ocr_layer_found(p) and (
+        NUMBER_WITHHELD in body or NUMBER_WITHHELD_NO_IMAGE in body
+    )
 
 
 def retained_prior_ocr_layer(p) -> str:
@@ -1258,6 +1269,13 @@ def page_saw_an_unplaced_table(state, page_num: int) -> bool:
             # The first attempt's readings are not kept, only whether one held a table
             # (Argon, round 2 re-review).
             or first_attempt.get("reading_held_a_table") is True
+            # A page rebuilt from its sidecar has no readings either; the sidecar's attempt
+            # record says whether each held one (round 3, Fable P1-2).
+            or any(
+                isinstance(row, dict) and row.get("held_a_table") is True
+                for row in (getattr(p, "attempts_summary_restored", None) or ())
+                if p is not None
+            )
             or (p is not None and _page_flags_a_table(p))
             or (p is not None and any(reading_holds_a_table(a) for a in p.attempts))
         )
