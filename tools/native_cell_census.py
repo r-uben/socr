@@ -76,6 +76,7 @@ def _scan_page(page_dir: Path) -> list[dict]:
     if not pdf.is_file() or not md_path.is_file():
         return []
     text = md_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
     blocks = find_table_blocks(text)
     if not blocks:
         return [
@@ -94,16 +95,20 @@ def _scan_page(page_dir: Path) -> list[dict]:
     spans = flatten_page_spans(page)
     located = locate_tables(page)
     raw = [tuple(b.bbox) for b in located]
-    mds = [b.markdown for b in blocks]
-    paired = pair_regions(page, mds, raw)
+    block_markdowns = [
+        "\n".join(lines[block.start : block.end + 1]) + "\n" for block in blocks
+    ]
+    paired = pair_regions(page, block_markdowns, raw)
     out: list[dict] = []
     for i, block in enumerate(blocks):
+        table_id = f"t{i}"
+        block_md = block_markdowns[i]
         pick = paired[i] if i < len(paired) else None
         is_paired = pick is not None
         if not is_paired:
             out.append(
                 {
-                    "table_id": block.table_id or f"t{i}",
+                    "table_id": table_id,
                     "outcome": NativeCellOutcome.AMBIGUOUS.value,
                     "paired": False,
                     "matched": 0,
@@ -114,9 +119,9 @@ def _scan_page(page_dir: Path) -> list[dict]:
             continue
         peers = [tuple(p) for j, p in enumerate(paired) if j != i and p is not None]
         res = check_table_cell_binding(
-            table_id=block.table_id or f"t{i}",
+            table_id=table_id,
             words=words,
-            markdown=block.markdown,
+            markdown=block_md,
             region_bbox=pick,
             spans=spans,
             peer_region_bboxes=peers or None,
@@ -133,7 +138,7 @@ def _scan_page(page_dir: Path) -> list[dict]:
         )
         out.append(
             {
-                "table_id": block.table_id or f"t{i}",
+                "table_id": table_id,
                 "outcome": res.outcome.value,
                 "paired": True,
                 "matched": matched,
