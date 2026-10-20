@@ -7,6 +7,7 @@ The re-finalize tool's round-3 paths (the cache, the PDF's identity) are pinned 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -166,3 +167,35 @@ def test_a_resumed_suspect_pages_record_gains_its_table_answer() -> None:
     assert _attempts_summary(p) == [{"engine": "qwen", "accepted": True, "held_a_table": True}]
     p.prior_ocr_layer_suspect = False
     assert _attempts_summary(p) == [{"engine": "qwen", "accepted": True}]
+
+
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+
+def test_a_judge_reason_longer_than_the_record_still_finds_its_reading(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The socr bot, round 4 re-review: nothing pinned the cut. The run records a reason cut
+    to the summary limit, so the tool must cut the cached reading's reason the same way."""
+    from collections import Counter
+
+    from socr.pipeline.agentic import AcceptDecision
+    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    import test_gh1156b_masked_layer as e2e
+
+    long_reason = "  the reading  drops\na row; " * ATTEMPT_SUMMARY_REASON_MAX_CHARS
+    monkeypatch.setattr(
+        e2e._RejectingJudge,
+        "assess",
+        lambda self, output, provider: AcceptDecision(accept=False, reason=long_reason),
+    )
+    doc = e2e._pre_part_b(e2e._floor_run(tmp_path, monkeypatch))
+    row = json.loads((doc / "pages" / "00001.json").read_text())["attempts_summary"][0]
+    assert len(row["rejection_reason"]) == ATTEMPT_SUMMARY_REASON_MAX_CHARS, "control: cut"
+    skipped: Counter = Counter()
+    assert refinalize_document(doc, pdf_dir=tmp_path, skipped=skipped)
+    assert skipped == Counter()
