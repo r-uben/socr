@@ -140,6 +140,9 @@ class PageState:
     #: ``glyph_recovery.count_minus_as_digit_hits``.
     minus_as_digit_hits: int = 0
     minus_as_digit_scan_failed: bool = False
+    #: #1185: the page's text layer, read on every page (``PageAssessment.own_layer_text``).
+    #: The reference a model reading's numbers are compared with; in memory only.
+    own_layer_text: str = ""
     #: #990: control characters before a digit in the native text; see ``PageAssessment``.
     control_byte_digit_hits: int = 0
     control_byte_scan_failed: bool = False
@@ -878,6 +881,7 @@ class DocumentState:
                 ps.prior_ocr_layer_scan_failed = getattr(pa, "prior_ocr_layer_scan_failed", False)
                 # #1203: the layer of a page an early return left with no native text.
                 ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
+                ps.own_layer_text = getattr(pa, "own_layer_text", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches

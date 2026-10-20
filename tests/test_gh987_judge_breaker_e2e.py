@@ -27,6 +27,8 @@ from socr.core.result import DocumentStatus, PageOutput, PageStatus
 from socr.pipeline import agentic as agentic_mod
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
 fitz = pytest.importorskip("fitz")
 
 #: Scaled judge deadline: the stand-in judge outlives it, so the timeout is real.
@@ -37,10 +39,15 @@ BREAKER_EVENT = "judge_wedged_circuit_open"
 _VOLATILE = {"input_checksum", "timings_s"}
 
 
-def _pdf(tmp_path: Path) -> Path:
+def _pdf(tmp_path: Path, *, layer_numbers: bool = False) -> Path:
     doc = fitz.open()
     for n in range(_PAGES):
         page = doc.new_page()
+        if layer_numbers:
+            # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+            # The reading repeats "page N" eight times, and agreement counts occurrences,
+            # so the layer carries the same eight occurrences.
+            page.insert_text((60, 320), f"page {n + 1} " * 8, fontsize=9)
         y = 80
         for _ in range(14):
             page.insert_text((60, y), f"Estimated coefficient 0.08{n} significant", fontsize=9)
@@ -151,11 +158,11 @@ def _event_kinds(out_dir: Path) -> list[str]:
     return [e.get("kind") for e in (data["events"] if isinstance(data, dict) else data)]
 
 
-def _run(tmp_path: Path, monkeypatch, probe, **kw):
+def _run(tmp_path: Path, monkeypatch, probe, *, layer_numbers: bool = False, **kw):
     judge_calls: list[int] = []
     pipe = _make_pipeline(monkeypatch, probe=probe, judge_calls=judge_calls, **kw)
     out = tmp_path / "out"
-    result = pipe.process(_pdf(tmp_path), output_dir=out)
+    result = pipe.process(_pdf(tmp_path, layer_numbers=layer_numbers), output_dir=out)
     return {
         "result": result,
         "judge_calls": len(judge_calls),
@@ -252,15 +259,20 @@ def test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healt
     candidate is re-judged (#1013, no OCR), or all four are re-OCRed when re-judging is
     disabled (`rejudge_attempts=0`).
     """
-    control = _run(tmp_path / "c", monkeypatch, ALIVE, judge="accept")
+    calls = spy_agreement(monkeypatch)  # #1185: must be installed before the code under test runs
+    control = _run(tmp_path / "c", monkeypatch, ALIVE, judge="accept", layer_numbers=True)
     assert control["judge_calls"] == _PAGES
     assert all(_passed(sc) for sc in control["sidecars"].values()), "control must pass"
+    # #1185: each control reading was compared against its own layer and agreed.
+    for n in range(1, _PAGES + 1):
+        assert_agreed_on(calls, f"text for page {n} ")
     control["pipe"].config.reprocess = True  # past the document-level skip only
     control["pipe"].ocr_calls.clear()
     control["pipe"].process(control["pdf"], output_dir=control["out"])
     assert control["pipe"].ocr_calls == [], "a terminal-SUCCESS page must be skipped"
 
-    wedged = _run(tmp_path / "w", monkeypatch, WEDGED)
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    wedged = _run(tmp_path / "w", monkeypatch, WEDGED, layer_numbers=True)
     assert wedged["events"].count(BREAKER_EVENT) == 1
     wedged["pipe"].ocr_calls.clear()
     # #1013 changed HOW they are re-read, not WHETHER: the kept timed-out candidates are
@@ -285,6 +297,9 @@ def test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healt
     resumed.process(wedged["pdf"], output_dir=wedged["out"])
     assert resumed.ocr_calls == [], "every kept candidate is re-judged, not re-OCRed"
     assert all(_passed(sc) for sc in _sidecars(wedged["out"]).values())
+    # #1185: the re-judged pages' readings were compared against their own layer and agreed.
+    for n in range(1, _PAGES + 1):
+        assert_agreed_on(calls, f"text for page {n} ")
 
 
 def test_the_breaker_event_rides_a_page_sidecar_and_is_replayed_on_resume(

@@ -788,7 +788,13 @@ class TestFinalizationKeepsTheLiteralBody:
             tmp_path,
         )
 
-        assert finalized == selected
+        # #1185: finalization prepends the text_layer_numbers mark (the model reading has no own
+        # text layer, so it is MARKED). The body after that one canonical line is byte-identical.
+        unchecked_mark = (
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+            "text layer of its own to check the reading's numbers against]"
+        )
+        assert finalized == f"{unchecked_mark}\n\n{selected}"
         assert "Bank" in finalized
         assert "following domestic policy directive:" in finalized
 
@@ -945,7 +951,13 @@ class TestTheWithholdingLaneShipsLiteralCharactersToo:
         ps = _page(prose_below=_WITHHOLDING_ACTIVES)
         shipped = _ship(ps).text
 
-        assert _finalized_text(ps, tmp_path) == shipped
+        # #1185: finalization prepends the text_layer_numbers mark (MARKED, no own text layer).
+        # The literal body after that one canonical line is unchanged.
+        unchecked_mark = (
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+            "text layer of its own to check the reading's numbers against]"
+        )
+        assert _finalized_text(ps, tmp_path) == f"{unchecked_mark}\n\n{shipped}"
 
     def test_the_escaping_survives_resume(self) -> None:
         """And the next run. The frozen bytes come back through the typed

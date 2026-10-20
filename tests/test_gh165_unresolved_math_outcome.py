@@ -474,7 +474,13 @@ def test_math_reporting_never_changes_which_table_ships(tmp_path: Path) -> None:
         outputs[damaged] = finalized_page_record(state, 1).output
 
     damaged_out, clean_out = outputs[True], outputs[False]
-    assert damaged_out.text == clean_out.text == grid, (
+    # #1185: both arms are model readings with no own text layer, so both carry the same
+    # text_layer_numbers mark above the table; the difference pinned is still the table.
+    mark = (
+        "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; "
+        "reason=this page has no text layer of its own to check the reading's numbers against]"
+    )
+    assert damaged_out.text == clean_out.text == mark + "\n\n" + grid, (
         "the accepted table was replaced because math was unresolved"
     )
     assert damaged_out.engine == clean_out.engine == "qwen"
@@ -484,8 +490,10 @@ def test_math_reporting_never_changes_which_table_ships(tmp_path: Path) -> None:
     )
     # #1005: the damage is in the NATIVE layer, which this page does not ship (a clean
     # model table won), so the report does not apply: the two outputs are identical.
-    assert clean_out.status is PageStatus.SUCCESS
-    assert damaged_out.status is PageStatus.SUCCESS
+    # #1185: both arms are demoted to WARNING by the text_layer_numbers clause (no own text
+    # layer); identical status in both arms is what this pins.
+    assert clean_out.status is PageStatus.WARNING
+    assert damaged_out.status is PageStatus.WARNING
     assert not any("unmapped math glyphs" in n for n in damaged_out.audit_notes)
 
 

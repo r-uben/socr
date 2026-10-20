@@ -103,6 +103,10 @@ def _build_fixture_pdf(tmp_path: Path) -> Path:
         tokens.append((170.0, x, value))
     for y, x, word in tokens:
         page.insert_text((x, y), word, fontsize=9)
+    # #1185 round 2 (approved fixture change, Argon finding 8): the page prints the caption
+    # the candidate reads ("Table 2 ..."), so the reading's numbers are the page's own and
+    # the page is CHECKED -- the judged-bytes property this file pins, unmarked.
+    page.insert_text((80.0, 40.0), "Table 2 reports estimated treatment effects", fontsize=9)
     pdf_path = tmp_path / "doc.pdf"
     doc.save(str(pdf_path))
     doc.close()
@@ -268,3 +272,16 @@ class TestJudgedBytesShip:
             e for e in events if e.get("data", {}).get("site") == "post_route_recheck"
         ]
         assert post_route_sites == []
+
+
+def test_the_fixture_page_is_checked_by_its_own_text_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1185 round 2 (approved fixture change): the caption added to the fixture PDF makes
+    the reading's numbers the page's own; prove the check ran, compared, agreed and raised
+    no clause, so the unmarked bytes above are a CHECKED page and not a skipped check."""
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
+    calls = spy_agreement(monkeypatch)
+    _run_pipeline(tmp_path)
+    assert_agreed_on(calls, "Table 2 reports")

@@ -334,8 +334,11 @@ class TestPhaseAssemble:
         # Canon body: '## Page N' header per page, splittable back to the text.
         from ocr_output_contract import assemble_pages, split_native_pages
 
-        assert md_path.read_text() == assemble_pages(["Hello world"])
-        assert split_native_pages(md_path.read_text()) == ["Hello world"]
+        # #1185: hand-built PageState has no own_layer_text, so the model reading is
+        # MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+        marked = "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nHello world"
+        assert md_path.read_text() == assemble_pages([marked])
+        assert split_native_pages(md_path.read_text()) == [marked]
 
     def test_assemble_writes_canonical_metadata(self, tmp_path: Path) -> None:
         """_phase_assemble writes per-doc + root metadata.json keyed by the

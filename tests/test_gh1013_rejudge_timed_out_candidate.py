@@ -32,9 +32,13 @@ from socr.pipeline.agentic import (  # noqa: E402
 )
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # noqa: E402
+
 _MODEL_TEXT = "model read of the page: the estimate is 0.42 with n = 117 observations"
 _OTHER_TEXT = "a DIFFERENT model read produced by the ladder in run 2, estimate 0.43"
 _NATIVE_TEXT = "native layer of the page with garbled symbols and enough words to count"
+# #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+_CONTROL_LAYER = "born-digital layer of the page: the estimate is 0.42 with n = 117 observations"
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +101,8 @@ class _Harness:
         self.runs = 0
         self.judge_identity = "vlm-test"
         self.judge_backend = config.pop("judge_backend", "heuristic")
+        # #1185: the page's own text layer; empty unless a test passes one (default unchanged).
+        self.own_layer_text = ""
 
     def run(self, *, real_builder: bool = False):
         # A recorded AUDIT_FAILED document is skipped at the root index, so the real
@@ -130,6 +136,7 @@ class _Harness:
                     native_text=_NATIVE_TEXT,
                     confidence=0.9,
                     needs_ocr_enhancement=True,
+                    own_layer_text=self.own_layer_text,
                 )
             ],
         )
@@ -204,7 +211,13 @@ def test_a_accepting_rejudge_ships_the_candidate_without_ocr(tmp_path) -> None:
     assert _OTHER_TEXT not in h.shipped()
     sidecar = h.sidecar()
     assert sidecar["failure_mode"] != FailureMode.NATIVE_UNTRUSTED_JUDGE_TIMEOUT.value
-    assert sidecar["winning_output"]["text"] == _MODEL_TEXT
+    # #1185: the model reading has no own text layer (hand-built PageState), so the page is
+    # MARKED (text_layer_numbers=UNKNOWN) above the judged body; the body is unchanged.
+    unchecked_mark = (
+        "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+        "text layer of its own to check the reading's numbers against]"
+    )
+    assert sidecar["winning_output"]["text"] == f"{unchecked_mark}\n\n{_MODEL_TEXT}"
     kinds = [e["kind"] for e in sidecar["audit_events"]]
     assert kinds.count("rejudge_accepted") == 1
 
@@ -317,9 +330,10 @@ def test_rejudge_candidate_stops_on_first_non_timeout_answer() -> None:
     assert j.n == 2
 
 
-def _timed_out_then(tmp_path, tag, mode, *, edit=None, identity=None):
+def _timed_out_then(tmp_path, tag, mode, *, edit=None, identity=None, layer=""):
     """Run 1 times out; optionally edit the sidecar; run 2 uses ``mode``."""
     h = _Harness(tmp_path / tag)
+    h.own_layer_text = layer  # #1185: "" for every caller that does not pass one
     _run1_times_out(h)
     if edit is not None:
         side = h.sidecar()
@@ -407,7 +421,16 @@ def test_item4_shipped_bytes_hash_equals_judged_hash(tmp_path) -> None:
     h = _timed_out_then(tmp_path, "hash", "accept")
     assert h.ocr_calls == []
     shipped = h.sidecar()["winning_output"]["text"]
-    assert [sha256_text(t) for t in h.judge.calls] == [sha256_text(shipped)]
+    # #1185: the text_layer_numbers mark is prepended AFTER the judge saw the kept bytes, so the
+    # judged bytes equal the shipped body with that one canonical mark line (and its blank line)
+    # removed.
+    unchecked_mark = (
+        "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+        "text layer of its own to check the reading's numbers against]"
+    )
+    assert shipped.startswith(f"{unchecked_mark}\n\n")
+    shipped_body = shipped[len(unchecked_mark) + 2 :]
+    assert [sha256_text(t) for t in h.judge.calls] == [sha256_text(shipped_body)]
 
     # A judge chain that rewrites the text it was shown has not judged the kept bytes.
     m = _timed_out_then(tmp_path, "mut", "accept_mutating")
@@ -416,13 +439,17 @@ def test_item4_shipped_bytes_hash_equals_judged_hash(tmp_path) -> None:
     assert "(rewritten)" not in m.shipped()
 
 
-def test_fields_set_by_verification_survive_to_the_ship(tmp_path) -> None:
+def test_fields_set_by_verification_survive_to_the_ship(tmp_path, monkeypatch) -> None:
     """Label disclosure set on the judged snapshot must reach the shipped page (WARNING)."""
-    plain = _timed_out_then(tmp_path, "plain", "accept")
-    flagged = _timed_out_then(tmp_path, "flagged", "accept_label_unverified")
+    calls = spy_agreement(monkeypatch)  # #1185: must be installed before the code under test runs
+    plain = _timed_out_then(tmp_path, "plain", "accept", layer=_CONTROL_LAYER)
+    flagged = _timed_out_then(tmp_path, "flagged", "accept_label_unverified", layer=_CONTROL_LAYER)
     for h in (plain, flagged):
         assert h.ocr_calls == [] and "rejudge_accepted" in _kinds(h)
         assert _MODEL_TEXT in h.shipped()
+    # #1185: the control reading was compared against its own layer and agreed.
+    assert_agreed_on(calls, "0.42 with n = 117")
+    assert plain.sidecar()["winning_output"]["engine"] == "qwen"  # still a model reading
     # Differ in exactly the verification annotation.
     assert plain.sidecar()["winning_output"]["status"] == "success"
     assert not plain.sidecar()["winning_output"].get("table_label_unverified")

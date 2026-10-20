@@ -94,6 +94,7 @@ socr-measure-chart-bins = "socr.figures.measure_chart_bins:main"
 socr-score-sep-ground-truth = "socr.figures.score_sep_ground_truth:main"
 socr-measure-ship-gate-gaps = "socr.benchmark.ship_gate_gaps:main"
 socr-acceptance = "socr.benchmark.acceptance:main"
+socr-refinalize-own-text = "socr.pipeline.refinalize_own_text:main"
 socr-refinalize-prior-ocr = "socr.pipeline.refinalize_prior_ocr:main"
 
 [build-system]

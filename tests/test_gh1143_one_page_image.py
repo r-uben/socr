@@ -345,7 +345,16 @@ class TestThroughProcess:
         the page's scan verdict are all patched."""
         for label in ("three", "one"):
             fragment = arms[label]["surfaces"]["fragment"]
-            assert fragment.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
+            # #1185: finalization prepends the text_layer_numbers mark (the model reading ships
+            # no number while the page's own layer prints some, so it is MARKED and the mark
+            # counts them); the recovery banner follows it.
+            unchecked_mark = (
+                "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=the reading "
+                "ships no number, while the page's text layer prints "
+            )
+            banner = SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1)
+            assert fragment.startswith(unchecked_mark)
+            assert fragment.split("\n\n", 1)[1].startswith(banner)
             assert MARKER in fragment
 
     def test_every_surface_shows_three_markers_and_one_image(self, arms: dict) -> None:

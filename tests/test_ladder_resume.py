@@ -40,6 +40,8 @@ from socr.core.result import (
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
 
 def _make_pipeline(**overrides) -> UnifiedPipeline:
     kwargs = dict(
@@ -75,6 +77,9 @@ def _seed_and_flush(
     out_dir: Path,
     disposition: FailureMode | None,
     incomplete: bool = False,
+    *,
+    body: str | None = None,
+    own_layer: str = "",
 ) -> Path:
     """Mirror what B1's gate leaves behind for a demoted page: an ACCEPTED
     ``audit_passed=True`` attempt whose PageState disposition is set to
@@ -86,7 +91,7 @@ def _seed_and_flush(
     ps = state.pages[1]
     accepted = PageOutput(
         page_num=1,
-        text="plausible, judge-accepted-as-extraction body text " * 3,
+        text=body if body is not None else "plausible, judge-accepted-as-extraction body text " * 3,
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=True,
@@ -96,6 +101,10 @@ def _seed_and_flush(
     ps.best_output = accepted
     ps.table_ladder_disposition = disposition
     ps.table_ladder_incomplete = incomplete
+    ps.own_layer_text = own_layer
+    # #1185 round 2 (approved fixture change, Argon finding 8): a control given a layer is
+    # given a born-digital one; agreement with a refused layer is no longer a CHECK
+    ps.is_born_digital = bool(own_layer)
 
     # The fragment must be written from the FINALIZED record, as production does. Every
     # production call site of ``_flush_page_fragment`` passes finalized text --
@@ -350,22 +359,32 @@ class TestUnverifiedAlwaysReprocesses:
 
 
 class TestBaselineUntouched:
-    def test_no_ladder_disposition_behaves_as_before(self, tmp_path: Path) -> None:
+    def test_no_ladder_disposition_behaves_as_before(self, tmp_path: Path, monkeypatch) -> None:
         """Control: a page with no ladder record at all (flag off / no
         tables / ladder ACCEPTED) keeps status=SUCCESS, audit_passed=True and
         must still skip through the ORIGINAL checks -- proves this ticket did
         not disturb the pre-existing gate for the non-ladder majority case."""
+        calls = spy_agreement(
+            monkeypatch
+        )  # #1185: must be installed before the code under test runs
         pdf_path = _real_pdf(tmp_path)
         out_dir = tmp_path / "out"
         pipeline = _make_pipeline()
         pipeline._scan_root = pdf_path.parent
         state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
 
-        sidecar_path = _seed_and_flush(pipeline, state, out_dir, None)
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+        control_body = "plausible, judge-accepted-as-extraction body text, the estimate is 4.25."
+        sidecar_path = _seed_and_flush(
+            pipeline, state, out_dir, None, body=control_body, own_layer=control_body
+        )
         meta = json.loads(sidecar_path.read_text())
         assert meta["table_ladder_disposition"] is None
         assert meta["winning_output"]["status"] == PageStatus.SUCCESS.value
         assert meta["winning_output"]["audit_passed"] is True
+        assert meta["winning_output"]["engine"] == "qwen"  # #1185: still a model reading
+        # #1185: the control reading was compared against its own layer and agreed.
+        assert_agreed_on(calls, "estimate is 4.25")
 
         resumed = pipeline._load_terminal_page(state, 1, out_dir)
         assert resumed is not None

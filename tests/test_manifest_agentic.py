@@ -263,7 +263,14 @@ def test_replay_zero_model_calls(tmp_path):
     cold_store = BlobStore(tmp_path / "cache")
     out = replay(reloaded, cold_store)
 
-    expected = assemble_pages(["OCR text page 1", "OCR text page 2"])
+    # #1185: hand-built PageState has no own_layer_text, so each model reading
+    # is MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+    expected = assemble_pages(
+        [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR text page 1",
+            "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR text page 2",
+        ]
+    )
     assert out == expected
 
 

@@ -161,7 +161,10 @@ def test_a_clean_page_is_untouched(tmp_path: Path) -> None:
     clean = "Prose above.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nProse below.\n"
     fragment, sidecar = _flush(tmp_path / "clean", clean)
 
-    assert sidecar["status"] == "success", f"the control page was failed: {sidecar['status']!r}"
+    # #1185: the control's model reading has no own text layer (scanned fixture), so the page is
+    # MARKED (text_layer_numbers=UNKNOWN) and demoted to warning. The guard is not what changed
+    # it; the body assertions below still pin that the guard leaves a clean body alone.
+    assert sidecar["status"] == "warning", f"the control page was failed: {sidecar['status']!r}"
     assert "| a | b |" in fragment, "a valid table was stripped from the fragment"
     assert fragment.strip() == sidecar["winning_output"]["text"].strip()
 

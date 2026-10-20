@@ -146,7 +146,13 @@ def test_resume_reprocesses_pages_the_halt_skipped(tmp_path: Path) -> None:
     resumed = _sidecars(out)
     for n in range(HALT_AT + 1, PAGES + 1):
         assert resumed[n]["terminal"] is True
-        assert resumed[n]["status"] == "success"
+        if resumed[n]["winning_output"]["engine"] == "native":
+            assert resumed[n]["status"] == "success"
+        else:
+            # #1185: a routed model reading with no own text layer is MARKED
+            # (text_layer_numbers=UNKNOWN), so it is WARNING rather than SUCCESS.
+            assert resumed[n]["status"] == "warning"
+            assert resumed[n]["failure_mode"] == "numbers_unchecked"
 
 
 def test_native_pages_past_halt_flagged_even_if_previously_terminal(tmp_path: Path) -> None:

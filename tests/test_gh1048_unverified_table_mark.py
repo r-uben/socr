@@ -570,7 +570,9 @@ def test_a_later_rung_that_verifies_ships_unmarked_and_is_called(tmp_path, monke
     assert UNVERIFIED_TABLE_MARK not in two_frag and UNVERIFIED_TABLE_MARK not in two_final
     assert _TABLE.rstrip() in two_frag and "99.9" not in two_frag
     assert two_side["failure_mode"] != FailureMode.TABLE_REJECTED.value
-    assert two_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the model reading has no own text layer (scanned fixture), so the page is MARKED
+    # (text_layer_numbers=UNKNOWN); the table marks above are what this test pins.
+    assert two_side["status"] == PageStatus.WARNING.value
 
 
 def test_both_rungs_disputed_ships_the_last_candidate_marked(tmp_path, monkeypatch) -> None:
@@ -641,7 +643,9 @@ def test_later_rung_without_a_table_promotes_the_marked_earlier(tmp_path, monkey
     # Later rung verified: unmarked table, SUCCESS. Later prose: marked earlier table.
     assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
     assert _TABLE.rstrip() in ver_frag and "99.9" not in ver_frag
-    assert ver_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the verified model reading has no own text layer (scanned fixture), so it is MARKED.
+    # The table mark difference asserted below is unchanged.
+    assert ver_side["status"] == PageStatus.WARNING.value
     assert "99.9" in prose_frag and "99.9" in prose_final
     assert len(DISPUTED_TABLE_MARK_RE.findall(prose_frag)) == 1
     assert prose_side["failure_mode"] == FailureMode.TABLE_REJECTED.value
@@ -719,7 +723,8 @@ def test_maths_only_later_rung_does_not_lift_the_floor(tmp_path, monkeypatch) ->
     assert ver_calls == [EngineType.QWEN, EngineType.GEMINI]
     assert maths_calls == [EngineType.QWEN, EngineType.GEMINI]
     assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
-    assert ver_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the verified model reading has no own text layer (scanned fixture), so it is MARKED.
+    assert ver_side["status"] == PageStatus.WARNING.value
     assert "99.9" in maths_frag and "99.9" in maths_final
     assert DISPUTED_TABLE_MARK_RE.search(maths_frag)
     assert maths_side["unchecked_table_kind"] == "disputed"
@@ -762,7 +767,8 @@ def test_flaky_witness_unverifiable_first_rung_does_not_veto_verified_later(
     assert "41.5" in frag and "17.2" in frag
     assert "41.6" not in frag and "41.6" not in final
     assert not UNVERIFIED_TABLE_MARK_RE.search(frag)
-    assert side["status"] == PageStatus.SUCCESS.value
+    # #1185: the verified model reading has no own text layer (scanned fixture), so it is MARKED.
+    assert side["status"] == PageStatus.WARNING.value
     assert side.get("unchecked_table_kind", "") == ""
 
 
@@ -794,7 +800,9 @@ def test_later_rung_dropping_witness_supported_rows_promotes_marked(tmp_path, mo
     assert drop_side["unchecked_table_kind"] == "disputed"
     assert "17.2" not in keep_frag
     assert not DISPUTED_TABLE_MARK_RE.search(keep_frag)
-    assert keep_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the model reading has no own text layer (scanned fixture), so the clean arm is MARKED.
+    # The disputed-mark difference asserted above is what this test pins.
+    assert keep_side["status"] == PageStatus.WARNING.value
 
 
 def test_later_rung_dropping_a_table_promotes_the_marked(tmp_path, monkeypatch) -> None:
@@ -826,7 +834,9 @@ def test_later_rung_dropping_a_table_promotes_the_marked(tmp_path, monkeypatch) 
     assert drop_side["unchecked_table_kind"] == "disputed"
     assert "99.9" not in keep_frag
     assert not DISPUTED_TABLE_MARK_RE.search(keep_frag)
-    assert keep_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the model reading has no own text layer (scanned fixture), so the clean arm is MARKED.
+    # The disputed-mark difference asserted above is what this test pins.
+    assert keep_side["status"] == PageStatus.WARNING.value
 
 
 def test_promotion_honours_the_judge_deadline() -> None:
@@ -1288,7 +1298,9 @@ def test_html_retry_is_checked_not_waved_through(tmp_path, monkeypatch) -> None:
     # Verified HTML: accepted by the check, unmarked, shipped as emitted.
     assert "<table>" in ok_frag and "alpha" in ok_frag
     assert "[table " not in ok_frag and "[page unchecked" not in ok_frag
-    assert ok_side["status"] == PageStatus.SUCCESS.value
+    # #1185: the verified HTML reading has no own text layer (scanned fixture), so it is MARKED.
+    # Its table is still unmarked, which is what this test pins.
+    assert ok_side["status"] == PageStatus.WARNING.value
     # Disputed HTML: promoted, every table marked, page mark first.
     assert "99.9" in dis_frag and DISPUTED_TABLE_MARK_RE.search(dis_frag)
     assert dis_frag.index("> [table disputed") < dis_frag.index("<table>")
