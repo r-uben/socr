@@ -53,11 +53,17 @@ class _Ev:
         self.data: dict = {}
 
 
-def _state(tmp_path, *, kinds=(), text: str = WITH_PROSE, **output_kw) -> DocumentState:
+def _state(
+    tmp_path, *, kinds=(), text: str = WITH_PROSE, own_layer: str | None = None, **output_kw
+) -> DocumentState:
     pdf = tmp_path / "doc.pdf"
     pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
     state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1, page_count_known=True))
     ps = state.pages[1]
+    if own_layer is not None:
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+        ps.own_layer_text = own_layer
+        ps.is_born_digital = True
     base = dict(
         page_num=1,
         text=text,
@@ -85,7 +91,7 @@ def _record(tmp_path, **kw):
 # ---------------------------------------------------------------------------
 
 
-def test_the_mark_turns_on_the_exact_pass_accept_and_nothing_else(tmp_path) -> None:
+def test_the_mark_turns_on_the_exact_pass_accept_and_nothing_else(tmp_path, monkeypatch) -> None:
     """Two runs of the seam in one process, differing only in how the page was accepted.
 
     An absolute outcome is not pinned: what is pinned is the DIFFERENCE. The bytes, the
@@ -93,8 +99,11 @@ def test_the_mark_turns_on_the_exact_pass_accept_and_nothing_else(tmp_path) -> N
     status, mode and mark is whether the page came through the exit where no judge was
     called -- the lane's event plus the accepting reason that proves it.
     """
-    bypassed = _record(tmp_path, kinds=EXACT_PASS)
-    judged = _record(tmp_path, kinds=(), judge_reason="faithful")
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
+    bypassed = _record(tmp_path, kinds=EXACT_PASS, own_layer=WITH_PROSE)
+    judged = _record(tmp_path, kinds=(), judge_reason="faithful", own_layer=WITH_PROSE)
 
     assert bypassed.output.status is PageStatus.WARNING
     assert judged.output.status is PageStatus.SUCCESS, (
@@ -106,6 +115,7 @@ def test_the_mark_turns_on_the_exact_pass_accept_and_nothing_else(tmp_path) -> N
     assert canonical_marks(judged.output.text, 1) == []
     # The marked arm's body is its input body plus the mark block, nothing else.
     assert strip_verdict_marks(bypassed.output.text, 1).strip() == WITH_PROSE.strip()
+    assert_agreed_on(calls, "0.80")
 
 
 def test_a_table_only_page_is_marked_too(tmp_path) -> None:
@@ -121,9 +131,14 @@ def test_a_table_only_page_is_marked_too(tmp_path) -> None:
     rec = _record(tmp_path, kinds=EXACT_PASS, text=TABLE_ONLY)
 
     assert rec.output.status is PageStatus.WARNING
-    assert [c.check for c in rec.verdict.clauses] == [Check.PAGE_JUDGE]
+    # #1185: the model reading has no own text layer, so text_layer_numbers (UNKNOWN) is a
+    # second clause and a second line; the page_judge line stays first.
+    assert [c.check for c in rec.verdict.clauses] == [
+        Check.PAGE_JUDGE,
+        Check.TEXT_LAYER_NUMBERS,
+    ]
     marks = canonical_marks(rec.output.text, 1)
-    assert len(marks) == 1 and "nothing outside the table" in marks[0], marks
+    assert len(marks) == 2 and "nothing outside the table" in marks[0], marks
 
 
 def test_the_clause_says_what_was_compared_and_never_that_the_table_was_verified(
@@ -140,7 +155,9 @@ def test_the_clause_says_what_was_compared_and_never_that_the_table_was_verified
     rec = _record(tmp_path, kinds=EXACT_PASS)
     marks = canonical_marks(rec.output.text, 1)
 
-    assert len(marks) == 1, marks
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) adds a second line; the
+    # page_judge line is the first one and is what the wording pins.
+    assert len(marks) == 2, marks
     assert f"{Check.PAGE_JUDGE.value}={CheckResult.UNKNOWN.value}" in marks[0], marks[0]
     assert "no judge saw this page" in marks[0]
     assert "not their columns or row labels" in marks[0]
@@ -162,21 +179,25 @@ def test_the_clause_says_what_was_compared_and_never_that_the_table_was_verified
 # ---------------------------------------------------------------------------
 
 
-def test_a_page_without_the_event_is_untouched(tmp_path) -> None:
+def test_a_page_without_the_event_is_untouched(tmp_path, monkeypatch) -> None:
     """Including the verifier's sibling kinds, so "any verifier event" would fail here."""
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
     for kinds in (
         (),
         ("native_table_verifier_warn",),
         ("native_table_verifier_hard_fail",),
         ("value_guard_row_count_warning",),
     ):
-        rec = _record(tmp_path, kinds=kinds)
+        rec = _record(tmp_path, kinds=kinds, own_layer=WITH_PROSE)
         assert rec.output.status is PageStatus.SUCCESS, kinds
         assert rec.verdict.clauses == (), kinds
         assert leading_marks(rec.output.text, 1) == [], kinds
+    assert_agreed_on(calls, "0.80")
 
 
-def test_a_page_the_gate_delegated_to_the_judge_is_untouched(tmp_path) -> None:
+def test_a_page_the_gate_delegated_to_the_judge_is_untouched(tmp_path, monkeypatch) -> None:
     """Fable's finding on the diagnosis, and the reason the accepting reason is required.
 
     The event is emitted BEFORE ``_apply_structural_gate``, which on a header-attribution
@@ -184,10 +205,14 @@ def test_a_page_the_gate_delegated_to_the_judge_is_untouched(tmp_path) -> None:
     the event and ships model-JUDGED, so a clause keyed on the event alone would tell its
     reader no judge saw a page a judge accepted.
     """
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
     for reason in ("faithful", "", "native_table_verifier: AMBIGUOUS"):
-        rec = _record(tmp_path, kinds=EXACT_PASS, judge_reason=reason)
+        rec = _record(tmp_path, kinds=EXACT_PASS, judge_reason=reason, own_layer=WITH_PROSE)
         assert rec.output.status is PageStatus.SUCCESS, reason
         assert rec.verdict.clauses == (), reason
+    assert_agreed_on(calls, "0.80")
 
 
 def test_the_marked_page_is_stable_when_the_seam_runs_again(tmp_path) -> None:
@@ -211,7 +236,11 @@ def test_the_marked_page_is_stable_when_the_seam_runs_again(tmp_path) -> None:
     )
     assert second.output.text == first.output.text
     assert second.output.status is first.output.status
-    assert [c.check for c in second.verdict.clauses] == [Check.PAGE_JUDGE]
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) is also re-derived each pass.
+    assert [c.check for c in second.verdict.clauses] == [
+        Check.PAGE_JUDGE,
+        Check.TEXT_LAYER_NUMBERS,
+    ]
     assert canonical_marks(second.output.text, 1) == canonical_marks(first.output.text, 1)
 
 
@@ -422,9 +451,11 @@ def test_the_real_exact_pass_exit_produces_a_reason_the_clause_marks(tmp_path) -
         _state(tmp_path, kinds=EXACT_PASS, text=markdown, judge_reason=decision.reason), 1
     )
 
-    assert [c.check for c in rec.verdict.clauses] == [Check.PAGE_JUDGE], (
-        f"the exit's own reason {decision.reason!r} is not the one the clause requires"
-    )
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) is also derived on this page.
+    assert [c.check for c in rec.verdict.clauses] == [
+        Check.PAGE_JUDGE,
+        Check.TEXT_LAYER_NUMBERS,
+    ], f"the exit's own reason {decision.reason!r} is not the one the clause requires"
     assert rec.output.status is PageStatus.WARNING
     assert canonical_marks(rec.output.text, 1), rec.output.text
 

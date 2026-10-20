@@ -401,11 +401,16 @@ def test_the_pua_class_names_native_glyphs_as_failed_not_unknown() -> None:
     out, verdict = _apply_verdict_marks(
         _output("Prose with unrecovered math.", failure_mode=FailureMode.NONE), _PuaFlags(), 1
     )
-    assert [c.check for c in verdict.clauses] == [Check.NATIVE_GLYPHS], verdict
-    assert verdict.clauses[0].result is CheckResult.FAIL, (
+    # #1185: the page's engine is a model reading with no own text layer, so the
+    # text_layer_numbers clause (UNKNOWN) comes first; the glyph clause is the second one.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.NATIVE_GLYPHS,
+    ], verdict
+    assert verdict.clauses[1].result is CheckResult.FAIL, (
         "the glyph check ran and found damage; UNKNOWN says it never decided"
     )
-    assert f"{Check.NATIVE_GLYPHS.value}=FAIL" in canonical_marks(out.text, 1)[0]
+    assert any(f"{Check.NATIVE_GLYPHS.value}=FAIL" in m for m in canonical_marks(out.text, 1))
 
 
 def test_the_math_font_class_is_report_only_and_puts_no_line_on_the_page() -> None:
@@ -427,7 +432,12 @@ def test_the_math_font_class_is_report_only_and_puts_no_line_on_the_page() -> No
     assert Check.NATIVE_GLYPHS not in {c.check for c in verdict.clauses}, verdict
     # It is still not CHECKED -- it is a WARNING page -- but the reason is the fallback,
     # not a glyph check that nobody ran.
-    assert [c.check for c in verdict.clauses] == [Check.UNKNOWN_CHECK], verdict
+    # #1185: the model reading has no own text layer, so text_layer_numbers (UNKNOWN) is
+    # also present; the fallback clause is the second one.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.UNKNOWN_CHECK,
+    ], verdict
     assert all(Check.NATIVE_GLYPHS.value not in ln for ln in canonical_marks(out.text, 1)), (
         canonical_marks(out.text, 1)
     )
@@ -445,9 +455,16 @@ def test_two_sources_for_one_check_collapse_to_the_more_specific_line() -> None:
     out, verdict = _apply_verdict_marks(
         _output("Prose.", failure_mode=FailureMode.NATIVE_GARBLED_MATH), _PuaFlags(), 1
     )
-    assert [c.check for c in verdict.clauses] == [Check.NATIVE_GLYPHS], verdict
-    assert "no reading replaced it" in verdict.clauses[0].reason, verdict.clauses[0].reason
-    assert len(canonical_marks(out.text, 1)) == 1
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) is a different check, so it
+    # gets its own line; what is pinned is that the glyph check still gets exactly one.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.NATIVE_GLYPHS,
+    ], verdict
+    assert "no reading replaced it" in verdict.clauses[1].reason, verdict.clauses[1].reason
+    marks = canonical_marks(out.text, 1)
+    assert len(marks) == 2
+    assert sum(Check.NATIVE_GLYPHS.value in m for m in marks) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +473,9 @@ def test_two_sources_for_one_check_collapse_to_the_more_specific_line() -> None:
 
 
 @pytest.mark.parametrize("status", [PageStatus.WARNING, PageStatus.ERROR])
-def test_the_fail_closed_fallback_marks_a_page_whose_reason_socr_cannot_name(status) -> None:
+def test_the_fail_closed_fallback_marks_a_page_whose_reason_socr_cannot_name(
+    status, monkeypatch
+) -> None:
     """``warning_unmarked`` must not be able to go non-zero by OMISSION.
 
     Measured on run 23117187: 34 of the 322 ``failure_mode=none`` WARNING pages carry no
@@ -468,18 +487,32 @@ def test_the_fail_closed_fallback_marks_a_page_whose_reason_socr_cannot_name(sta
     fallback that fired on everything would pass here while demoting the whole corpus.
     """
     from socr.core.result import FailureMode
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
 
     unnamed = _output("Prose that ships.", status=status, failure_mode=FailureMode.NONE)
     out, verdict = _apply_verdict_marks(unnamed, _Flags(), 1)
 
-    assert [c.check for c in verdict.clauses] == [Check.UNKNOWN_CHECK], verdict
-    assert verdict.clauses[0].result is CheckResult.UNKNOWN
-    assert status.value in verdict.clauses[0].reason, verdict.clauses[0].reason
+    # #1185: a model reading with no own text layer is also UNKNOWN on text_layer_numbers.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.UNKNOWN_CHECK,
+    ], verdict
+    assert verdict.clauses[1].result is CheckResult.UNKNOWN
+    assert status.value in verdict.clauses[1].reason, verdict.clauses[1].reason
     marks = canonical_marks(out.text, 1)
-    assert len(marks) == 1 and f"{Check.UNKNOWN_CHECK.value}=" in marks[0], marks
+    fallback = [m for m in marks if f"{Check.UNKNOWN_CHECK.value}=" in m]
+    assert len(fallback) == 1, marks
 
-    checked = _output("Prose that ships.", status=PageStatus.SUCCESS, failure_mode=FailureMode.NONE)
-    out_ok, verdict_ok = _apply_verdict_marks(checked, _Flags(), 1)
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    from types import SimpleNamespace
+
+    checked_text = "Prose that ships 4.25."
+    checked = _output(checked_text, status=PageStatus.SUCCESS, failure_mode=FailureMode.NONE)
+    layer = SimpleNamespace(own_layer_text="Prose that ships 4.25.", is_born_digital=True)
+    out_ok, verdict_ok = _apply_verdict_marks(checked, layer, 1)
+    assert_agreed_on(calls, "4.25")
     assert verdict_ok.checked, "the fallback fired on a page socr DID confirm"
     assert out_ok.text == checked.text
 
@@ -497,9 +530,19 @@ def test_the_fallback_line_is_withheld_when_a_legacy_mark_already_discloses() ->
     body = disclosed + "\n\nProse that ships."
     out, verdict = _apply_verdict_marks(_output(body, failure_mode=FailureMode.NONE), _Flags(), 1)
 
-    assert [c.check for c in verdict.clauses] == [Check.UNKNOWN_CHECK], verdict
-    assert canonical_marks(out.text, 1) == [], "a generic line was put above a specific one"
-    assert out.text == body
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) is still a line. The pinned
+    # property is that the generic fallback line is withheld, and the body is unchanged
+    # apart from that one #1185 line.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.UNKNOWN_CHECK,
+    ], verdict
+    marks = canonical_marks(out.text, 1)
+    assert all(Check.UNKNOWN_CHECK.value not in m for m in marks), (
+        "a generic line was put above a specific one"
+    )
+    assert len(marks) == 1 and Check.TEXT_LAYER_NUMBERS.value in marks[0], marks
+    assert out.text == marks[0] + "\n\n" + body
 
 
 # ---------------------------------------------------------------------------
@@ -976,7 +1019,11 @@ def test_the_1050_recovered_block_is_not_a_mark_and_its_page_gets_a_clause() -> 
         "Recovered text.\n\n(OCR, not verified)", failure_mode=FailureMode.TEXT_INK_UNREAD
     )
     out, verdict = _apply_verdict_marks(ink, _Flags(), 3)
-    assert [c.check for c in verdict.clauses] == [Check.NATIVE_COVERAGE], verdict
+    # #1185: text_layer_numbers (UNKNOWN, no own text layer) is a second line on this page.
+    assert [c.check for c in verdict.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.NATIVE_COVERAGE,
+    ], verdict
     assert canonical_marks(out.text, 3), "a #1050 page shipped with no disclosure at all"
 
     # Where production actually PUTS that mark, which is the correction Fable's round 2
@@ -1002,9 +1049,13 @@ def test_the_1050_recovered_block_is_not_a_mark_and_its_page_gets_a_clause() -> 
     out2, verdict2 = _apply_verdict_marks(
         _output(production_shaped, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
     )
-    assert [c.check for c in verdict2.clauses] == [Check.NATIVE_COVERAGE], verdict2
+    # #1185: text_layer_numbers (UNKNOWN) joins native_coverage on this page.
+    assert [c.check for c in verdict2.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.NATIVE_COVERAGE,
+    ], verdict2
     top = canonical_marks(out2.text, 3)
-    assert len(top) == 1 and f"{Check.NATIVE_COVERAGE.value}=" in top[0], top
+    assert len(top) == 2 and any(f"{Check.NATIVE_COVERAGE.value}=" in m for m in top), top
     assert disclosed in out2.text, "#1050's own note was displaced or dropped"
     assert out2.text.endswith(disclosed), "the note moved out of the position #1050 chose"
 
@@ -1016,9 +1067,19 @@ def test_the_1050_recovered_block_is_not_a_mark_and_its_page_gets_a_clause() -> 
     out3, verdict3 = _apply_verdict_marks(
         _output(on_top, failure_mode=FailureMode.TEXT_INK_UNREAD), _Flags(), 3
     )
-    assert [c.check for c in verdict3.clauses] == [Check.NATIVE_COVERAGE], verdict3
-    assert canonical_marks(out3.text, 3) == [], "a second line was added above #1050's own"
-    assert out3.text == on_top
+    # #1185: text_layer_numbers (UNKNOWN) is the only line added; it goes ABOVE #1050's own
+    # note, which is still the leading block's native_coverage suppression target.
+    assert [c.check for c in verdict3.clauses] == [
+        Check.TEXT_LAYER_NUMBERS,
+        Check.NATIVE_COVERAGE,
+    ], verdict3
+    assert [m for m in canonical_marks(out3.text, 3) if Check.NATIVE_COVERAGE.value in m] == [], (
+        "a second line was added above #1050's own"
+    )
+    assert out3.text == (
+        "> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+        "text layer of its own to check the reading's numbers against]\n\n" + on_top
+    )
 
 
 def test_every_prose_recovery_banner_form_is_skipped_by_the_recovery_gate() -> None:

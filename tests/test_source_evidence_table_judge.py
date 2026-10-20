@@ -381,7 +381,14 @@ class TestScannedTableFloorManifest:
         passing = _make_output(1, "Good OCR prose without tables.")
         ps.best_output = passing
         winner = _winning_page_output(state, 1, None)
-        assert winner.text == passing.text
+        # #1185: the page is a model reading with no own text layer, so it is MARKED
+        # (text_layer_numbers UNKNOWN); the winner is still the passing output.
+        assert (
+            winner.text
+            == "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]"
+            + "\n\n"
+            + passing.text
+        )
         assert winner.audit_passed is True
 
 

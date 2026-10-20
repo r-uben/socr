@@ -42,6 +42,8 @@ from socr.core.state import DocumentState  # noqa: E402
 from socr.engines.base import BaseEngine  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -191,7 +193,14 @@ class TestCanonicalBodyAndReplay:
         body = assemble_pages(texts)
         # One '## Page N' marker per page, round-trips bit-for-bit.
         assert body.count("## Page ") == 2
-        assert split_native_pages(body) == ["body of page 1", "body of page 2"]
+        # #1185: hand-built PageState has no own_layer_text, so each model reading
+        # is MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+        assert split_native_pages(body) == [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + "body of page 1",
+            "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + "body of page 2",
+        ]
 
     def test_whole_doc_blob_does_not_double_header(self, tmp_path):
         """A whole-doc blob that already carries '## Page N' is split then
@@ -222,27 +231,42 @@ class TestCanonicalBodyAndReplay:
 
         body = assemble_pages(canonical_page_texts(state))
         assert body.count("## Page ") == 2
-        assert split_native_pages(body) == ["alpha", "beta"]
+        # #1185: hand-built PageState has no own_layer_text, so each model reading
+        # is MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+        assert split_native_pages(body) == [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + "alpha",
+            "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + "beta",
+        ]
 
-    def test_replay_is_bit_identical_to_saved_body(self, tmp_path):
+    def test_replay_is_bit_identical_to_saved_body(self, tmp_path, monkeypatch):
         from socr.core.cache import BlobStore
         from socr.core.manifest import build_manifest, replay
 
+        calls = spy_agreement(
+            monkeypatch
+        )  # #1185: must be installed before the code under test runs
         pdf = _real_pdf(tmp_path / "paper.pdf", n_pages=3)
         handle = DocumentHandle.from_path(pdf)
         state = DocumentState(handle=handle)
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
         for i in (1, 2, 3):
+            state.pages[i].own_layer_text = f"text {i} measured 4.2{i}"
             state.pages[i].best_output = PageOutput(
                 page_num=i,
-                text=f"text {i}",
+                text=f"text {i} measured 4.2{i}",
                 status=PageStatus.SUCCESS,
                 engine="deepseek",
                 audit_passed=True,
             )
-        saved_body = assemble_pages([f"text {i}" for i in (1, 2, 3)])
+        saved_body = assemble_pages([f"text {i} measured 4.2{i}" for i in (1, 2, 3)])
 
         store = BlobStore(tmp_path / "cache")
         manifest = build_manifest(state, store, dpi=120, saved_body=saved_body)
+        # #1185: each control reading was compared against its own layer and agreed.
+        for i in (1, 2, 3):
+            assert_agreed_on(calls, f"measured 4.2{i}")
         assert replay(manifest, store) == saved_body
 
     def test_phase_assemble_split_count_matches_page_count(self, tmp_path):

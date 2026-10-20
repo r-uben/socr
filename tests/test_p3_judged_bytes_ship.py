@@ -221,16 +221,26 @@ class TestJudgedBytesShip:
         p1_flushes = [body for page_num, body in flushed if page_num == 1]
         assert p1_flushes, "page 1 was never flushed"
         for body in p1_flushes:
-            assert _without_native_cell_marks(body) == captured["text"], (
-                "every provisional in-loop flush body must equal the judge-accepted text exactly"
-            )
+            # #1185: the reading names "2" (the caption) which the fixture text layer
+            # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
+            assert (
+                _without_native_cell_marks(body)
+                == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
+                + captured["text"]
+            ), "every provisional in-loop flush body must equal the judge-accepted text exactly"
 
     def test_page_fragment_on_disk_matches_accepted_text(self, tmp_path: Path) -> None:
         _result, out_dir, captured, _flushed = _run_pipeline(tmp_path)
         fragment_candidates = list(out_dir.rglob("pages/00001.md"))
         assert fragment_candidates, f"no pages/00001.md found under {out_dir}"
         fragment_text = fragment_candidates[0].read_text(encoding="utf-8")
-        assert _without_native_cell_marks(fragment_text) == captured["text"], (
+        # #1185: the reading names "2" (the caption) which the fixture text layer
+        # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
+        assert (
+            _without_native_cell_marks(fragment_text)
+            == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
+            + captured["text"]
+        ), (
             "the pages/00001.md fragment after authoritative rewrite must equal "
             "the judge-accepted text exactly"
         )
@@ -245,7 +255,13 @@ class TestJudgedBytesShip:
 
         pages = split_native_pages(final_markdown)
         assert len(pages) >= 1
-        assert _without_native_cell_marks(pages[0]) == captured["text"], (
+        # #1185: the reading names "2" (the caption) which the fixture text layer
+        # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
+        assert (
+            _without_native_cell_marks(pages[0])
+            == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
+            + captured["text"]
+        ), (
             "page 1 of the final stitched document must be BYTE-IDENTICAL to "
             "the text the judge accepted -- not merely contain it"
         )

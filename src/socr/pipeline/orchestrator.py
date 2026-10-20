@@ -16764,6 +16764,24 @@ class UnifiedPipeline:
             is_permanently_unverifiable = _resume_verdict_is_permanently_unverifiable(
                 meta.get("verdict"), winning.get("failure_mode")
             )
+            # #1185: the two ``text_layer_numbers`` modes are written ONLY by the verdict
+            # demotion of a SUCCESS page, which makes it WARNING. A sidecar carrying one
+            # with any other status is not a page this run demoted, so doubt reprocesses
+            # (found by ``test_non_success_status_reprocessed``: an ERROR page kept for
+            # ever on the strength of its mode alone).
+            if is_permanently_unverifiable:
+                from socr.core.result import FailureMode as _FM
+                from socr.core.verdict import TEXT_LAYER_NUMBERS_MODES
+
+                try:
+                    _mode = _FM(str(winning.get("failure_mode") or ""))
+                except ValueError:
+                    _mode = None
+                if (
+                    _mode in TEXT_LAYER_NUMBERS_MODES
+                    and winning.get("status") != PageStatus.WARNING.value
+                ):
+                    is_permanently_unverifiable = False
 
             # #1192, the FOURTH deliberate exception, and the same argument as the three
             # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only

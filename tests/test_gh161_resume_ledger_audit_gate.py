@@ -31,6 +31,8 @@ from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
 
 def _make_pipeline() -> UnifiedPipeline:
     return UnifiedPipeline(
@@ -70,6 +72,8 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
     """
     from socr.core import manifest as manifest_mod
 
+    calls = spy_agreement(monkeypatch)  # #1185: must be installed before the code under test runs
+
     monkeypatch.setattr(manifest_mod, "_finalize_best_output_unverified", lambda output: output)
     monkeypatch.setattr(
         manifest_mod,
@@ -87,10 +91,13 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
     ps = state.pages[1]
     ps.is_born_digital = False
     ps.native_text = ""
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    ps.own_layer_text = "Goldman Sachs 2.3 1.9 judge-rejected body text"
 
     rejected = PageOutput(
         page_num=1,
-        text="plausible but judge-rejected body text without demotion guards",
+        # #1185 (approved fixture change): the reading ships the same number as its own layer
+        text="Goldman Sachs 2.3 plausible but judge-rejected body text without demotion guards",
         status=PageStatus.SUCCESS,
         engine="qwen",
         audit_passed=False,
@@ -106,6 +113,8 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
     meta = json.loads(sidecar.read_text())
     assert meta["winning_output"]["status"] == PageStatus.SUCCESS.value
     assert meta["winning_output"]["audit_passed"] is False
+    # #1185: the reading was compared against its own layer and agreed (the check ran).
+    assert_agreed_on(calls, "Goldman Sachs 2.3 plausible")
 
     resumed = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed is None
@@ -192,13 +201,16 @@ def test_error_status_audit_false_emits_no_resume_ledger_event(tmp_path: Path) -
     assert not [ev for ev in state.events if ev.kind == "resume_ledger_audit_reject"]
 
 
-def test_audit_passed_success_page_is_still_resume_skippable(tmp_path: Path) -> None:
+def test_audit_passed_success_page_is_still_resume_skippable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Reverse regression: the gate must still SKIP a genuinely clean page.
 
     A fix that simply stopped granting skips would satisfy the test above and
     silently destroy resume — every page re-OCR'd on every re-run.  Same setup,
     same sidecar shape, only the audit verdict differs.
     """
+    calls = spy_agreement(monkeypatch)  # #1185: must be installed before the code under test runs
     pdf_path = _real_pdf(tmp_path)
     out_dir = tmp_path / "out"
 
@@ -209,6 +221,8 @@ def test_audit_passed_success_page_is_still_resume_skippable(tmp_path: Path) -> 
     ps = state.pages[1]
     ps.is_born_digital = False
     ps.native_text = ""
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    ps.own_layer_text = "Goldman Sachs 2.3 1.9 accepted body text"
 
     accepted = PageOutput(
         page_num=1,
@@ -227,6 +241,9 @@ def test_audit_passed_success_page_is_still_resume_skippable(tmp_path: Path) -> 
     meta = json.loads(sidecar.read_text())
     assert meta["winning_output"]["status"] == PageStatus.SUCCESS.value, meta["winning_output"]
     assert meta["winning_output"]["audit_passed"] is True, meta["winning_output"]
+    assert meta["winning_output"]["engine"] == "qwen"  # #1185: still a model reading
+    # #1185: the control reading was compared against its own layer and agreed.
+    assert_agreed_on(calls, "Goldman Sachs | 2.3")
 
     resumed = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed is not None, (

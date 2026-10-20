@@ -167,8 +167,17 @@ def _golden_expected_markdown() -> str:
     """Compute the expected golden markdown for the 3-page fixture (p1 OCR, p2 native, p3 OCR)."""
     from ocr_output_contract import assemble_pages
 
+    # #1185: the two model readings (pages 1 and 3) have no own text layer to check
+    # their numbers against, so each is MARKED (text_layer_numbers UNKNOWN) at the top
+    # of its text. Page 2 is native text and carries no clause.
     return assemble_pages(
-        [_GOLDEN_OCR_P1, _GOLDEN_NATIVE_P2.rstrip(), _GOLDEN_OCR_P3],
+        [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + _GOLDEN_OCR_P1,
+            _GOLDEN_NATIVE_P2.rstrip(),
+            "> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n"
+            + _GOLDEN_OCR_P3,
+        ],
         page_numbers=[1, 2, 3],
     )
 

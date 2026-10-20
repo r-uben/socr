@@ -407,12 +407,15 @@ def test_header_binding_unverified_sidecar_is_not_resume_skippable(tmp_path: Pat
 
 
 def test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """Reverse regression, same fixture family: a fix that made the gate
     refuse to skip ANYTHING would satisfy the test above and silently
     destroy resume. Only the status/audit_passed/failure_mode differ.
     """
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
     pdf_path = _make_pdf(tmp_path)
     out_dir = tmp_path / "out"
 
@@ -423,6 +426,8 @@ def test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference(
     ps = state.pages[1]
     ps.is_born_digital = True
     ps.native_text = NATIVE_PROSE
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    ps.own_layer_text = STRICT_MD
 
     clean = PageOutput(
         page_num=1,
@@ -440,6 +445,7 @@ def test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference(
     resumed = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed is not None, "an ordinary clean SUCCESS page must still be resume-skippable"
     assert resumed.status is PageStatus.SUCCESS
+    assert_agreed_on(calls, "110.0")
 
 
 def test_to_dict_omits_table_corroboration_key_when_unset() -> None:

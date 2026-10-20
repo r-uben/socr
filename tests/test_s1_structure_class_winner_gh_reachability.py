@@ -509,7 +509,7 @@ def test_structure_class_floor_applies_false_with_no_model_rung(
 
 
 def test_ordinary_already_passing_non_native_winner_is_not_an_s1_event(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """The false-positive this segment found and fixed.
 
@@ -522,8 +522,13 @@ def test_ordinary_already_passing_non_native_winner_is_not_an_s1_event(
     regression in document-level status for the common case, not a fix for
     the 2026-08-20 measurement's defect (native silently winning).
     """
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
     state = _state(_born_digital_pdf(tmp_path))  # MODEL_GRID; case (i)-shaped text
     ps = state.pages[1]
+    # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+    ps.own_layer_text = MODEL_GRID
     # The pivotal difference from every other fixture in this module: the
     # model's own grid-authoring attempt is ALREADY best_output, not native.
     model_attempt = ps.attempts[1]
@@ -542,6 +547,7 @@ def test_ordinary_already_passing_non_native_winner_is_not_an_s1_event(
         "an ordinary already-passing non-native winner must not be flagged "
         "as a case (iii) floor page"
     )
+    assert_agreed_on(calls, "0.91")
 
 
 def test_structure_class_floor_applies_false_for_non_structure_class(
@@ -1590,7 +1596,7 @@ def test_stage_c_bucket_membership_survives_resume_via_the_public_disposition(
 
 
 def test_a_legacy_sidecar_without_a_disposition_resumes_as_an_ordinary_passing_page(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """A pre-stage-A sidecar carries no ``disposition`` key at all.
 
@@ -1616,10 +1622,13 @@ def test_a_legacy_sidecar_without_a_disposition_resumes_as_an_ordinary_passing_p
     half; the fixture comparison is the half that cannot drift.
     """
     import p6_corpus_fixture
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
 
     from socr.core.manifest import PageEnding, PagePrimaryReason, SelectionProvenance
 
+    calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
     measured = p6_corpus_fixture.legacy_resume_capture(tmp_path)
+    assert_agreed_on(calls, "0.91")
 
     # Fixture sanity: the legacy flag came back and no disposition did. Without
     # both, every assertion below is about some other page shape.
