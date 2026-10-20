@@ -1215,28 +1215,79 @@ _TABLE_EVENT_PREFIXES = ("table_", "source_evidence_table_", "possible_table_")
 
 
 def page_saw_an_unplaced_table(state, page_num: int) -> bool:
-    """#1156 Part B: did any audit event of this page concern a table?
-
-    Read from the events because they are what the sidecar persists, so a
-    re-finalisation of a finished run answers exactly as the live run did.
+    """#1156 Part B: did the run see a table on this page, by any signal it has?
 
     Answered ONCE per page and remembered on it (Argon, diff review): ``_phase_assemble``
     appends events of its own between the first finalisation and the last, some of them
     table events derived from the shipped body, and a second answer would flip the page to
     its floor while the saved masked body overrode the floor's text -- a record that
-    contradicts its own bytes.
+    contradicts its own bytes. Persisted in the sidecar, so a re-finalisation reads the
+    live run's answer.
+
+    Round 2 (Argon P0-2, reproduced): events alone missed a rejected reading that held an
+    HTML table, so the question is asked of every signal the run has, and the masked
+    ending requires all of them to say "no table" -- positive evidence, not a list of
+    event kinds that grows each round:
+
+    * any audit event of the page whose kind names a table (the prefixes below);
+    * any table flag of the page's own assessment;
+    * any model reading of the page that holds a table, markdown or HTML.
+
+    The layer's own shape is the masker's question (``prior_ocr_mask.masked_layer_text``
+    refuses a layer with a stacked column), because the re-finalisation of a finished run
+    can ask it too.
     """
     p = state.pages.get(page_num)
     seen = getattr(p, "prior_ocr_table_seen", None) if p is not None else None
     if seen is None:
-        seen = any(
-            getattr(ev, "page_num", None) == page_num
-            and str(getattr(ev, "kind", "") or "").startswith(_TABLE_EVENT_PREFIXES)
-            for ev in getattr(state, "events", None) or ()
+        # ``--retry-failed-pages`` moves a first attempt's events out of the run's stream
+        # and keeps them in ``page_retry``; a table that attempt saw is still a table
+        # (Fable P2-7).
+        first_attempt = (getattr(p, "page_retry", None) or {}).get("first_attempt") or {}
+        seen = (
+            any(
+                getattr(ev, "page_num", None) == page_num
+                and str(getattr(ev, "kind", "") or "").startswith(_TABLE_EVENT_PREFIXES)
+                for ev in getattr(state, "events", None) or ()
+            )
+            or any(
+                str(ev.get("kind", "") or "").startswith(_TABLE_EVENT_PREFIXES)
+                for ev in first_attempt.get("audit_events") or ()
+                if isinstance(ev, dict)
+            )
+            # The first attempt's readings are not kept, only whether one held a table
+            # (Argon, round 2 re-review).
+            or first_attempt.get("reading_held_a_table") is True
+            or (p is not None and _page_flags_a_table(p))
+            or (p is not None and any(reading_holds_a_table(a) for a in p.attempts))
         )
         if p is not None:
             p.prior_ocr_table_seen = seen
     return seen
+
+
+def _page_flags_a_table(p) -> bool:
+    """Any table finding of the page's own assessment."""
+    return bool(
+        getattr(p, "has_tables", False)
+        or getattr(p, "possible_table_structure_not_reconstructed", False)
+        or getattr(p, "table_not_reconstructed", False)
+        or (getattr(p, "detected_table_count", 0) or 0) > 0
+        # A table ladder ran on the page, so something on it was read as a table.
+        or getattr(p, "table_ladder_disposition", None) is not None
+    )
+
+
+def reading_holds_a_table(attempt) -> bool:
+    """Whether a model reading of the page holds a table block, markdown or HTML."""
+    text = getattr(attempt, "text", "") or ""
+    if not text or str(getattr(attempt, "engine", "") or "").startswith(_NATIVE_TEXT_LANES):
+        return False
+    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.source_evidence import html_table_for_check
+
+    converted, html_unparsed = html_table_for_check(text)
+    return html_unparsed or bool(find_table_blocks(converted))
 
 
 def prior_ocr_masked_body(p) -> tuple[str, int]:
@@ -4665,13 +4716,11 @@ def _select_page_output_tagged(
         #   table inside the layer, so its rows would ship as loose text, which the
         #   withhold rules (#1144/#1155) never allow. 17 of the 239 #1027 pages in the
         #   Fed calibration run carry such an event.
-        # * ``is_structure_class`` is asked directly as well as through the lookahead:
-        #   the lookahead declines on a structure-class page whose model table was kept
-        #   flagged, or on which no model ran, and Part A's floor shipped a marker there
-        #   while this ending would ship the layer's table rows (Argon, diff review).
+        # * The lookahead declines on a structure-class page whose model table was kept
+        #   flagged, or on which no model ran; the table gate below reads ``has_tables``
+        #   itself, so such a page keeps its floor (Argon, diff review).
         if (
             prior_ocr_layer_found(p)
-            and not p.is_structure_class()
             and not _reaches_structure_class_branch(p)
             and not page_saw_an_unplaced_table(state, page_num)
         ):

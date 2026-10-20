@@ -440,6 +440,11 @@ def test_e2e_the_rejected_scan_ships_masked_prose_and_keeps_the_original(
     assert side["disposition"]["primary_reason"] == "prior_ocr_layer_masked"
     assert side["status"] == "warning" and side["audit_passed"] is False
     assert got["manifest"]["entries"]["1"]["disposition"] == side["disposition"]
+    # Round 2 (Argon P0-1): the table gate's inputs, persisted as the live run used them.
+    assert side["has_tables"] is False and side["prior_ocr_table_seen"] is False
+    assert side["possible_table_structure_not_reconstructed"] is False
+    assert side["table_not_reconstructed"] is False
+    assert floor["side"]["has_tables"] is False
     assert got["meta"]["status"] != DocumentStatus.SUCCESS.value
     assert "page_failed" not in got["audit_kinds"] and "page_failed" in floor["audit_kinds"]
     assert "prior_ocr_layer_retained" in got["audit_kinds"]
@@ -471,6 +476,7 @@ _RECORD_KEYS = (
     "winning_output",
     "page_fingerprint",
     "prior_ocr_layer_text",
+    "prior_ocr_table_seen",
 )
 
 
@@ -557,3 +563,198 @@ def test_figure_extraction_skips_only_a_page_that_ships_its_own_image() -> None:
     p2.scanned_figure_png_ref = "![f](figures/scanned_figure_page_p1.png)"
     assert page_ships_its_own_page_image(p2, "")
     assert not page_ships_its_own_page_image(PageState(page_num=1), "anything")
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: the re-finalize tool
+# ---------------------------------------------------------------------------
+
+
+def _floor_run(tmp_path: Path, monkeypatch, name: str = "old") -> Path:
+    return _run(tmp_path, monkeypatch, name, masked=False)
+
+
+@pytest.mark.parametrize(
+    ("edit", "masks"),
+    [
+        ({}, True),
+        # A table page's sidecar as a live run writes it: the flag and the gate's answer.
+        ({"has_tables": True, "prior_ocr_table_seen": True}, False),
+        ({"has_tables": False}, True),
+        # Persisted or not, the selection proof is required: a distrust flag keeps the floor.
+        ({"has_tables": False, "native_table_unverifiable": True}, False),
+        # A sidecar written before round 2 carries no table findings: they are recomputed
+        # from the PDF by the page analysis, and the selection proof still applies.
+        ({"OLD": None, "native_table_unverifiable": True}, False),
+        ({"OLD": None}, True),
+        # ... and without the PDF the page is left on its floor, never inferred.
+        ({"OLD": None, "NO_PDF": None}, False),
+    ],
+    ids=[
+        "as-written",
+        "table-page",
+        "not-a-table",
+        "not-a-table-distrust",
+        "old-sidecar-distrust",
+        "old-sidecar",
+        "old-sidecar-no-pdf",
+    ],
+)
+def test_the_tool_masks_only_a_page_whose_table_standing_is_known(
+    tmp_path: Path, monkeypatch, edit: dict, masks: bool
+) -> None:
+    """Argon P0-1: the table findings were never persisted, and the tool cannot infer them."""
+    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
+
+    doc = _floor_run(tmp_path, monkeypatch)
+    path = doc / "pages" / "00001.json"
+    side = json.loads(path.read_text())
+    for key, value in edit.items():
+        if key == "OLD":
+            for standing in (*_TABLE_STANDING_KEYS, "prior_ocr_table_seen"):
+                side.pop(standing, None)
+        elif value is not None:
+            side[key] = value
+    path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+    changes = refinalize_document(doc, pdf_dir=None if "NO_PDF" in edit else tmp_path)
+    assert bool(changes) is masks
+
+
+def test_an_old_sidecar_whose_page_analysis_finds_a_table_keeps_its_floor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Measured on the Fed calibration run: 4 masked pages carry the possible-table flag,
+    which only the page analysis of the PDF can show for a sidecar written before it was
+    persisted."""
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
+
+    def old_style(doc: Path) -> Path:
+        path = doc / "pages" / "00001.json"
+        side = json.loads(path.read_text())
+        for standing in (*_TABLE_STANDING_KEYS, "prior_ocr_table_seen"):
+            side.pop(standing, None)
+        path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+        return doc
+
+    plain = old_style(_floor_run(tmp_path, monkeypatch, "plain"))
+    tabled = old_style(_floor_run(tmp_path, monkeypatch, "tabled"))
+    assert refinalize_document(plain, pdf_dir=tmp_path), "control: masks"
+    side = json.loads((plain / "pages" / "00001.json").read_text())
+    assert side["refinalized_from"]["table_findings"] == "recomputed from the PDF"
+    # The gate's answer, written as a fresh run writes it, on a sidecar that had none.
+    assert side["prior_ocr_table_seen"] is False
+
+    original = BornDigitalDetector._assess_page
+
+    def flagged(self, page, page_num):
+        pa = original(self, page, page_num)
+        pa.possible_table_structure_not_reconstructed = True
+        return pa
+
+    monkeypatch.setattr(BornDigitalDetector, "_assess_page", flagged)
+    assert refinalize_document(tabled, pdf_dir=tmp_path) == []
+
+
+def test_the_tool_restores_the_ladder_disposition_as_the_enum(tmp_path: Path, monkeypatch) -> None:
+    """Argon P1-1: restored as a plain string, the ladder guard never matched it."""
+    from socr.core.result import FailureMode
+    from socr.pipeline.refinalize_prior_ocr import _rebuild_state
+
+    doc = _floor_run(tmp_path, monkeypatch)
+    side = json.loads((doc / "pages" / "00001.json").read_text())
+    side["table_ladder_disposition"] = "table_withheld"
+    state, page_num = _rebuild_state(side, 2)
+    assert state.pages[page_num].table_ladder_disposition is FailureMode.TABLE_WITHHELD
+
+
+def test_one_bad_document_does_not_stop_the_sweep(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Argon P1-1 / Fable P2-3: reported per document; the others are still done."""
+    from socr.pipeline.refinalize_prior_ocr import main
+
+    good = _floor_run(tmp_path, monkeypatch, "good")
+    bad = _floor_run(tmp_path, monkeypatch, "bad")
+    md = next(iter(bad.glob("*.md")))
+    md.write_text(md.read_text() + "\n" + md.read_text())  # the page twice: inconsistent
+    rc = main([str(tmp_path)])
+    out = capsys.readouterr()
+    assert rc == 1 and "FAILED" in out.err and str(bad) in out.err
+    assert "prior_ocr_layer_masked" in (good / "pages" / "00001.json").read_text()
+    assert "prior_ocr_layer_unread" in (bad / "pages" / "00001.json").read_text()
+
+
+@pytest.mark.parametrize("dies_writing", ["manifest.json", "audit_log.json", "00001.json"])
+def test_an_interrupted_run_is_completed_by_running_again(
+    tmp_path: Path, monkeypatch, dies_writing: str
+) -> None:
+    """Fable P2-4: the sidecars are written last and every step is repeatable, so a crash
+    anywhere before them leaves a page the next run redoes -- to the same bytes as a run
+    that was never interrupted."""
+    from socr.pipeline import refinalize_prior_ocr as tool
+
+    clean = _floor_run(tmp_path, monkeypatch, "clean")
+    crashed = _floor_run(tmp_path, monkeypatch, "crashed")
+    tool.refinalize_document(clean)
+
+    real = tool._write_json
+
+    def crash(path, data):
+        if path.name == dies_writing:
+            raise RuntimeError("killed")
+        real(path, data)
+
+    monkeypatch.setattr(tool, "_write_json", crash)
+    with pytest.raises(RuntimeError, match="killed"):
+        tool.refinalize_document(crashed)
+    monkeypatch.setattr(tool, "_write_json", real)
+    assert "prior_ocr_layer_unread" in (crashed / "pages" / "00001.json").read_text()
+    tool.refinalize_document(crashed)
+
+    # Two pipeline runs differ in their timings; everything the tool writes must not.
+    assert (crashed / "pages/00001.md").read_text() == (clean / "pages/00001.md").read_text()
+    assert (
+        next(iter(crashed.glob("*.md"))).read_text() == next(iter(clean.glob("*.md"))).read_text()
+    )
+    entries = [json.loads((d / "manifest.json").read_text())["entries"] for d in (crashed, clean)]
+    assert entries[0] == entries[1]
+    volatile = {"timestamp", "processing_time", "output_path"}
+    meta = [
+        {
+            k: v
+            for k, v in json.loads((d / "metadata.json").read_text()).items()
+            if k not in volatile
+        }
+        for d in (crashed, clean)
+    ]
+    assert meta[0] == meta[1]
+    audit = [json.loads((d / "audit_log.json").read_text())["events"] for d in (crashed, clean)]
+    assert audit[0] == audit[1]
+    side = [json.loads((d / "pages/00001.json").read_text()) for d in (crashed, clean)]
+    for key in _RECORD_KEYS:
+        assert side[0].get(key) == side[1].get(key), key
+
+
+def test_the_tool_replaces_an_older_copy_of_its_own_event(tmp_path: Path, monkeypatch) -> None:
+    """One event of each kind per page, as a fresh run writes it (Argon, round 2)."""
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _floor_run(tmp_path, monkeypatch)
+    path = doc / "pages" / "00001.json"
+    side = json.loads(path.read_text())
+    stale = {"kind": "prior_ocr_layer_retained", "engine": "native", "detail": "old", "data": {}}
+    side["audit_events"] = [*side.get("audit_events", []), stale]
+    path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+    audit_path = doc / "audit_log.json"
+    audit = json.loads(audit_path.read_text())
+    audit["events"].append({"page_num": 1, **stale})
+    audit_path.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
+
+    assert refinalize_document(doc)
+    events = [
+        e
+        for e in json.loads(audit_path.read_text())["events"]
+        if e.get("page_num") == 1 and e["kind"] == "prior_ocr_layer_retained"
+    ]
+    assert len(events) == 1 and events[0]["engine"] == "qwen"
+    own = [e for e in json.loads(path.read_text())["audit_events"] if e["kind"] == stale["kind"]]
+    assert len(own) == 1 and own[0]["engine"] == "qwen"

@@ -12306,7 +12306,13 @@ class UnifiedPipeline:
         so nothing they said is lost, an empty provider answer included. Spend is a
         recorded fact, so the first attempt's cost stays on the page.
         """
+        from socr.core.manifest import reading_holds_a_table
+
         spent = state.pages[page_num].page_cost_usd
+        # #1156 Part B: the readings themselves are dropped with the first attempt, so
+        # whether one held a table -- which keeps an earlier-OCR page off the masked
+        # ending -- is recorded with its events.
+        held_a_table = any(reading_holds_a_table(a) for a in state.pages[page_num].attempts)
         moved = {id(ev) for ev in first_events}
         state.events[:] = [ev for ev in state.events if id(ev) not in moved]
         fresh = copy.deepcopy(snapshot)
@@ -12319,6 +12325,7 @@ class UnifiedPipeline:
                 "ending": first.disposition.ending.value,
                 "primary_reason": first.disposition.primary_reason.value,
                 "audit_events": [ev.to_dict() for ev in first_events],
+                "reading_held_a_table": held_a_table,
             },
             "retry_ladder": [p.id or p.engine.value for p in ladder],
         }
@@ -16067,6 +16074,17 @@ class UnifiedPipeline:
             layer = retained_prior_ocr_layer(ps)
             if layer:
                 payload["prior_ocr_layer_text"] = layer
+            # #1156 Part B round 2 (Argon P0-1): the inputs of the masked ending's table
+            # gate, persisted as the live run used them, so a re-finalisation of this run
+            # reads them rather than inferring them. ``has_tables`` is the structure-class
+            # flag; the latch is the gate's own answer, absent until the gate was asked.
+            payload["has_tables"] = bool(getattr(ps, "has_tables", False))
+            payload["possible_table_structure_not_reconstructed"] = bool(
+                getattr(ps, "possible_table_structure_not_reconstructed", False)
+            )
+            payload["table_not_reconstructed"] = bool(getattr(ps, "table_not_reconstructed", False))
+            if getattr(ps, "prior_ocr_table_seen", None) is not None:
+                payload["prior_ocr_table_seen"] = bool(ps.prior_ocr_table_seen)
 
         # #1203 round 1 (owner ruling 2026-10-18): the table this run withheld because
         # nothing could witness it. Sparse for the same reason as the key above -- absent

@@ -42,6 +42,8 @@ _FLOOR_REASONS = ("prior_ocr_layer_unread", "invisible_scan_unread")
 
 #: Events the replaced floor wrote, which a fresh run of the masked ending does not.
 _FLOOR_EVENT_KINDS = frozenset({"page_failed", "invisible_scan_unread"})
+#: Events a fresh run of the masked ending writes for the page.
+_ENDING_EVENT_KINDS = frozenset({"native_fallback", "prior_ocr_layer_retained"})
 
 #: The image stems each floor renders, and the state field each one is read from.
 _PNG_FIELDS = (
@@ -76,6 +78,7 @@ def _rebuild_state(sidecar: dict, page_count: int):
     """The page state the floor was selected from, as far as the sidecar records it."""
     from socr.core.audit_log import AuditEvent
     from socr.core.document import DocumentHandle
+    from socr.core.result import FailureMode
     from socr.core.state import DocumentState, PageState
 
     page_num = int(sidecar["page_num"])
@@ -109,6 +112,14 @@ def _rebuild_state(sidecar: dict, page_count: int):
         if f.name in _NOT_RESTORED or f.name not in sidecar:
             continue
         value, default = sidecar[f.name], getattr(defaults, f.name)
+        if value is not None and "FailureMode" in str(f.type):
+            # The one enum-typed field (``table_ladder_disposition``). Restored as the
+            # enum, as resume restores it: the ladder guard compares by identity, and a
+            # plain string silently never matched (Argon P1-1, reproduced).
+            try:
+                value = FailureMode(value)
+            except ValueError:
+                continue
         if default is None or isinstance(value, type(default)):
             setattr(p, f.name, value)
     p.native_text = sidecar.get("prior_ocr_layer_text") or ""
@@ -127,14 +138,67 @@ def _rebuild_state(sidecar: dict, page_count: int):
     return state, page_num
 
 
+#: The native-table distrust flags. On a page with any of them a flagged model table can be
+#: kept, and the structure-class lookahead then declines -- the one way a table page could
+#: have reached a floor this tool replaces (see ``is_exact_case``).
+_TABLE_DISTRUST_FLAGS = (
+    "native_table_structure_failed",
+    "native_table_unverifiable",
+    "native_table_structure_defective",
+    "native_table_header_unattributed",
+)
+
+
+#: The page assessment's table findings that the masked ending's gate reads. Sidecars
+#: written since #1156 round 2 carry them; an older sidecar does not, and they are then
+#: recomputed from the PDF by socr's own page analysis -- no OCR, no model -- or the page
+#: is left on its floor. Measured on the Fed calibration run: 4 of the 345 pages the tool
+#: would otherwise mask carry ``possible_table_structure_not_reconstructed`` (a two-column
+#: label and value layout), which only the PDF can show.
+_TABLE_STANDING_KEYS = (
+    "has_tables",
+    "possible_table_structure_not_reconstructed",
+    "table_not_reconstructed",
+)
+
+
+def _with_table_standing(sidecar: dict, assessment) -> dict | None:
+    """*sidecar* with the table findings filled in, from itself or from *assessment*
+    (the document's page analysis), or ``None`` when neither has them."""
+    if all(key in sidecar for key in _TABLE_STANDING_KEYS):
+        return sidecar
+    if assessment is None:
+        return None
+    pa = assessment.pages[int(sidecar["page_num"]) - 1]
+    out = dict(sidecar)
+    for key in _TABLE_STANDING_KEYS:
+        out[key] = bool(getattr(pa, key, False))
+    out["detected_table_count"] = int(getattr(pa, "detected_table_count", 0) or 0)
+    return out
+
+
 def is_exact_case(sidecar: dict) -> bool:
-    """A terminal page with exactly one attempt, judged to completion."""
+    """A terminal page with exactly one MODEL attempt, judged to completion, whose
+    structure-class standing is known.
+
+    A sidecar written before #1156 round 2 does not carry ``has_tables`` (Argon P0-1), and
+    it is not inferred from anything else: the page qualifies only when the live run's own
+    selection proves it was not a table page. With a model attempt and no native-table
+    distrust flag, ``_reaches_structure_class_branch`` returns True for every table page,
+    so a table page could never have ended on either floor; ending there is the proof.
+    A sidecar that does carry it is restored like every other flag, and the table gate
+    reads it -- so the proof is required either way, which only ever keeps a page on its
+    floor.
+    """
     attempts = sidecar.get("attempts_summary") or []
-    return (
+    if not (
         sidecar.get("terminal") is True
         and len(attempts) == 1
         and attempts[0].get("judge_outcome") in _EXACT_JUDGE_OUTCOMES
-    )
+        and not str(attempts[0].get("engine") or "").startswith("native")
+    ):
+        return False
+    return not any(sidecar.get(flag) for flag in _TABLE_DISTRUST_FLAGS)
 
 
 def is_floor_page(sidecar: dict) -> bool:
@@ -179,11 +243,18 @@ def _updated_sidecar(sidecar: dict, record) -> dict:
     if record.verdict is not None:
         out["verdict"] = record.verdict.to_dict()
     out["winning_output"] = winning
+    # The table gate's answer, as a fresh run persists it: the masked ending is reached
+    # only when the gate said "no table" (Argon, round 2 re-review).
+    out["prior_ocr_table_seen"] = False
     out["page_fingerprint"] = (
         _page_blob_key(winning) if not is_page_failed_marker(winning.get("text", "")) else ""
     )
+    # The floor's events go, and so does any older copy of the two this ending writes:
+    # one event of each kind per page, as a fresh run writes it.
     events = [
-        e for e in sidecar.get("audit_events") or () if e.get("kind") not in _FLOOR_EVENT_KINDS
+        e
+        for e in sidecar.get("audit_events") or ()
+        if e.get("kind") not in _FLOOR_EVENT_KINDS | _ENDING_EVENT_KINDS
     ]
     # The two events a fresh run writes for this ending, in the order it writes them: the
     # page needed a reading, one ran and did not pass, and the page shipped its own
@@ -237,64 +308,118 @@ def _drop_from_error(error: str | None, pages: set[int]) -> str | None:
     return tail or None
 
 
+def _read_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Atomically, UTF-8 whatever the platform's default: the layers carry "−", "½"
+    and accented names (Fable P2-3)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_json(path: Path, data) -> None:
     """Atomically, in the writers' own format: two-space indent, UTF-8, and the trailing
     newline exactly when the file being replaced had one (``manifest.json`` does)."""
     newline = "\n" if path.is_file() and path.read_bytes().endswith(b"\n") else ""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + newline)
-    tmp.replace(path)
+    _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
+
+
+def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:
+    """Replace the one copy of *old* with *new*, or accept that an interrupted run already
+    did: every step of the rewrite must be repeatable, because the page sidecar is written
+    LAST and a page whose sidecar still names the floor is redone in full (Fable P2-4)."""
+    if haystack.count(old) == 1:
+        return haystack.replace(old, new)
+    if old not in haystack and haystack.count(new) == 1:
+        return haystack
+    raise RuntimeError(f"{where}: the page's text is not exactly once in it")
 
 
 def refinalize_document(
-    doc_dir: Path, *, dry_run: bool = False, skipped: Counter | None = None
+    doc_dir: Path,
+    *,
+    dry_run: bool = False,
+    skipped: Counter | None = None,
+    pdf_dir: Path | None = None,
 ) -> list[PageChange]:
     """Re-finalize one document's floor pages; *skipped* counts the floor pages left alone,
-    by reason."""
+    by reason.
+
+    Write order: page fragments, the document ``.md``, the manifest and its cache, the
+    metadata, the root index, the audit log -- and the page sidecars LAST. Each step is
+    repeatable, so a run interrupted anywhere is completed by running the tool again: the
+    sidecar still names the floor, and the page is redone.
+    """
     skipped = Counter() if skipped is None else skipped
     pages_dir = doc_dir / "pages"
     meta_path = doc_dir / "metadata.json"
     if not pages_dir.is_dir() or not meta_path.is_file():
         return []
-    meta = json.loads(meta_path.read_text())
+    meta = _read_json(meta_path)
     page_count = int(meta.get("pages") or 0)
     md_paths = sorted(p for p in doc_dir.glob("*.md"))
     if len(md_paths) != 1:
         # A document whose every page was floored has no ``.md`` at all; writing one is
-        # the assembler's job, not this tool's. Left as it is, and said so.
-        print(f"skipped {doc_dir}: {len(md_paths)} document .md files", file=sys.stderr)
+        # the assembler's job, not this tool's. Left as it is, and counted.
         for sidecar_path in pages_dir.glob("*.json"):
-            if is_floor_page(json.loads(sidecar_path.read_text())):
+            if is_floor_page(_read_json(sidecar_path)):
                 skipped["document has no .md (every page floored)"] += 1
         return []
-    doc_md = md_paths[0].read_text()
+    doc_md = md_paths[0].read_text(encoding="utf-8")
+    assessment: list = []  # the document's page analysis, run once and only if needed
+
+    def page_analysis():
+        if not assessment:
+            pdf = (pdf_dir / str(meta.get("key") or "")) if pdf_dir is not None else None
+            if pdf is None or not pdf.is_file():
+                assessment.append(None)
+            else:
+                from socr.core.born_digital import BornDigitalDetector
+
+                assessment.append(BornDigitalDetector().detect(pdf))
+        return assessment[0]
+
     changes: list[PageChange] = []
-    writes: list[tuple[Path, object]] = []
+    fragments: list[tuple[Path, str]] = []
+    sidecars: list[tuple[Path, dict]] = []
     for sidecar_path in sorted(pages_dir.glob("*.json")):
-        sidecar = json.loads(sidecar_path.read_text())
+        sidecar = _read_json(sidecar_path)
         if not is_floor_page(sidecar):
             continue
         if not is_exact_case(sidecar):
-            skipped["attempt history not reproducible (re-run the page)"] += 1
+            skipped["attempt history or table standing not reproducible (re-run the page)"] += 1
             continue
+        standing = _with_table_standing(sidecar, None)
+        if standing is None:
+            standing = _with_table_standing(sidecar, page_analysis())
+        if standing is None:
+            skipped["table findings not in the sidecar (pass --pdf-dir)"] += 1
+            continue
+        recomputed = standing is not sidecar
+        sidecar = standing
         record = refinalize_sidecar(sidecar, page_count)
         if record is None:
-            skipped["the floor is still the right ending (table seen, or no word reads)"] += 1
+            skipped["the floor is still the right ending (a table, or no prose)"] += 1
             continue
         fragment_path = sidecar_path.with_suffix(".md")
-        old_fragment = fragment_path.read_text()
+        old_fragment = fragment_path.read_text(encoding="utf-8")
         new_text = record.output.text
-        # The fragment is the winning text plus whatever line ending the writer added.
         old_text = (sidecar.get("winning_output") or {}).get("text") or ""
-        if not old_fragment.startswith(old_text):
+        if old_fragment.startswith(old_text):
+            new_fragment = new_text + old_fragment[len(old_text) :]
+        elif old_fragment.startswith(new_text):
+            new_fragment = old_fragment  # an interrupted run already wrote it
+        else:
             raise RuntimeError(f"{fragment_path}: fragment does not carry its sidecar's text")
-        new_fragment = new_text + old_fragment[len(old_text) :]
-        if doc_md.count(old_text) != 1:
-            raise RuntimeError(f"{fragment_path}: page text is not exactly once in the document")
-        doc_md = doc_md.replace(old_text, new_text)
+        doc_md = _swap_once(doc_md, old_text, new_text, md_paths[0])
         new_sidecar = _updated_sidecar(sidecar, record)
-        writes.append((fragment_path, new_fragment))
-        writes.append((sidecar_path, new_sidecar))
+        if recomputed:
+            new_sidecar["refinalized_from"]["table_findings"] = "recomputed from the PDF"
+        fragments.append((fragment_path, new_fragment))
+        sidecars.append((sidecar_path, new_sidecar))
         changes.append(
             PageChange(
                 doc=doc_dir.name,
@@ -310,52 +435,33 @@ def refinalize_document(
     if not changes or dry_run:
         return changes
     changed = {c.page_num for c in changes}
+    for path, text in fragments:
+        _write_text(path, text)
+    _write_text(md_paths[0], doc_md)
     manifest_path = doc_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else None
-    if manifest is not None:
+    if manifest_path.is_file():
         from socr.core.cache import BlobStore
         from socr.core.result import PageOutput
 
+        manifest = _read_json(manifest_path)
         store = BlobStore(doc_dir / "cache")
-        for path, data in writes:
-            if isinstance(data, dict):
-                entry = manifest["entries"][str(data["page_num"])]
-                entry["blob_ref"] = store.put_page(PageOutput.from_dict(data["winning_output"]))
-                entry["disposition"] = data["disposition"]
+        for _path, data in sidecars:
+            entry = manifest["entries"][str(data["page_num"])]
+            entry["blob_ref"] = store.put_page(PageOutput.from_dict(data["winning_output"]))
+            entry["disposition"] = data["disposition"]
+        _write_json(manifest_path, manifest)
     # A document with no error carries no ``error`` key at all; a null would differ.
     error = _drop_from_error(meta.get("error"), changed)
     if error is None:
         meta.pop("error", None)
     else:
         meta["error"] = error
-    audit_path = doc_dir / "audit_log.json"
-    audit = json.loads(audit_path.read_text()) if audit_path.is_file() else None
-    if audit is not None:
-        events = [
-            e
-            for e in audit.get("events") or ()
-            if not (e.get("page_num") in changed and e.get("kind") in _FLOOR_EVENT_KINDS)
-        ]
-        for path, data in writes:
-            if isinstance(data, dict):
-                for e in data["audit_events"]:
-                    if e["kind"] in ("native_fallback", "prior_ocr_layer_retained"):
-                        events.append({"page_num": data["page_num"], **e})
-        audit["events"] = events
-        audit["event_count"] = len(events)
-        audit["counts"] = dict(Counter(e.get("kind") for e in events))
-    for path, data in writes:
-        if isinstance(data, str):
-            path.write_text(data)
-        else:
-            _write_json(path, data)
-    md_paths[0].write_text(doc_md)
     _write_json(meta_path, meta)
     # The run's root index mirrors each document's record (``RootIndex``), keyed by the
     # document's input-relative path.
     root_path = doc_dir.parent / "metadata.json"
     if root_path.is_file():
-        root = json.loads(root_path.read_text())
+        root = _read_json(root_path)
         entry = (root.get("files") or {}).get(meta.get("key"))
         if entry is not None:
             if meta.get("error") is None:
@@ -363,10 +469,33 @@ def refinalize_document(
             else:
                 entry["error"] = meta["error"]
             _write_json(root_path, root)
-    if audit is not None:
+    audit_path = doc_dir / "audit_log.json"
+    if audit_path.is_file():
+        audit = _read_json(audit_path)
+        events = [
+            e
+            for e in audit.get("events") or ()
+            if not (e.get("page_num") in changed and e.get("kind") in _FLOOR_EVENT_KINDS)
+        ]
+        for _path, data in sidecars:
+            for e in data["audit_events"]:
+                if e["kind"] in _ENDING_EVENT_KINDS:
+                    # One event of each kind per page, as a fresh run writes it: an older
+                    # copy (another engine, another detail) is replaced, not kept beside it.
+                    events = [
+                        old
+                        for old in events
+                        if not (
+                            old.get("page_num") == data["page_num"] and old.get("kind") == e["kind"]
+                        )
+                    ]
+                    events.append({"page_num": data["page_num"], **e})
+        audit["events"] = events
+        audit["event_count"] = len(events)
+        audit["counts"] = dict(Counter(e.get("kind") for e in events))
         _write_json(audit_path, audit)
-    if manifest is not None:
-        _write_json(manifest_path, manifest)
+    for path, data in sidecars:
+        _write_json(path, data)
     return changes
 
 
@@ -374,14 +503,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="socr-refinalize-prior-ocr", description=__doc__)
     parser.add_argument("out_dir", type=Path)
     parser.add_argument("--dry-run", action="store_true", help="count, write nothing")
+    parser.add_argument(
+        "--pdf-dir",
+        type=Path,
+        default=None,
+        help="the run's input PDFs, for sidecars older than #1156 round 2: their table "
+        "findings are recomputed by socr's page analysis (no OCR, no model)",
+    )
     args = parser.parse_args(argv)
     counts: Counter = Counter()
     skipped: Counter = Counter()
+    failed: list[tuple[Path, str]] = []
     withheld = 0
     for meta_path in sorted(args.out_dir.rglob("metadata.json")):
         if not (meta_path.parent / "pages").is_dir():
             continue
-        for change in refinalize_document(meta_path.parent, dry_run=args.dry_run, skipped=skipped):
+        # One inconsistent document is reported and the sweep goes on (Argon P1-1, Fable
+        # P2-3): its pages are untouched, because nothing is written until every page of
+        # the document has been checked.
+        try:
+            changes = refinalize_document(
+                meta_path.parent, dry_run=args.dry_run, skipped=skipped, pdf_dir=args.pdf_dir
+            )
+        except Exception as exc:  # noqa: BLE001 -- reported per document, never swallowed
+            failed.append((meta_path.parent, f"{type(exc).__name__}: {exc}"))
+            continue
+        for change in changes:
             counts[(change.before, change.after)] += 1
             withheld += change.numbers_withheld
     for (before, after), n in sorted(counts.items()):
@@ -389,7 +536,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{sum(counts.values()):6d}  pages re-finalized; {withheld} numbers withheld")
     for reason, n in sorted(skipped.items()):
         print(f"{n:6d}  left on the floor: {reason}")
-    return 0
+    for doc_dir, why in failed:
+        print(f"FAILED  {doc_dir}: {why}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
