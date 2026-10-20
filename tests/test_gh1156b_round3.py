@@ -123,3 +123,46 @@ def test_a_masked_page_without_its_image_is_not_mined_for_figures() -> None:
     assert not page_ships_its_own_page_image(p, "A model reading with no token.")
     p.prior_ocr_layer = False
     assert not page_ships_its_own_page_image(p, f"Rates rose to {NUMBER_WITHHELD_NO_IMAGE}.")
+
+
+# ---------------------------------------------------------------------------
+# Review round 4
+# ---------------------------------------------------------------------------
+
+
+def test_a_first_attempt_refused_as_an_invalid_table_is_a_table() -> None:
+    """Argon round 3 P1-1: the emission guard refuses a malformed table without a table
+    event; on a retried page only the first attempt's failure mode says so."""
+    from socr.core.manifest import SelectionProvenance, _select_and_finalize_page
+
+    for mode, masks in (("table_emission_invalid", False), ("audit_failed", True)):
+        state = _suspect()
+        state.pages[1].page_retry = {"first_attempt": {"audit_events": [], "failure_mode": mode}}
+        provenance = _select_and_finalize_page(state, 1).selection_provenance
+        assert (provenance is SelectionProvenance.PRIOR_OCR_LAYER_MASKED) is masks, mode
+
+
+def test_a_masked_page_with_nothing_to_withhold_is_not_mined_either() -> None:
+    """Fable round 3 P2-2: keyed on the token, a masked layer with no number was mined."""
+    from socr.core.manifest import page_ships_its_own_page_image
+
+    p = _suspect().pages[1]
+    banner = (
+        "> [page 1 unchecked: prior_ocr_layer=UNKNOWN; scope=page; reason=earlier OCR, not re-read]"
+    )
+    assert page_ships_its_own_page_image(p, f"{banner}\n\nPlain prose with no number.")
+    assert not page_ships_its_own_page_image(p, "Plain prose with no number.")
+
+
+def test_a_resumed_suspect_pages_record_gains_its_table_answer() -> None:
+    """Argon round 3 P2-2: a record restored from before ``held_a_table`` existed."""
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.orchestrator import _attempts_summary
+
+    p = _suspect().pages[1]
+    table = "| a | b |\n| --- | --- |\n| Loans | 1 |\n| Gold | 2 |"
+    p.attempts = [PageOutput(page_num=1, text=table, status=PageStatus.SUCCESS, engine="qwen")]
+    p.attempts_summary_restored = [{"engine": "qwen", "accepted": True}]
+    assert _attempts_summary(p) == [{"engine": "qwen", "accepted": True, "held_a_table": True}]
+    p.prior_ocr_layer_suspect = False
+    assert _attempts_summary(p) == [{"engine": "qwen", "accepted": True}]

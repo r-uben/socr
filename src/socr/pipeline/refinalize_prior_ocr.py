@@ -233,32 +233,54 @@ def _judged(sidecar: dict) -> bool:
     return bool(rows) and all("held_a_table" in row for row in rows)
 
 
-def _with_readings_judged(sidecar: dict, cached: dict[int, list[dict]]) -> dict | None:
-    """*sidecar* with ``held_a_table`` on its attempt record, from itself (a run since #1156
-    round 3 writes it) or from the rejected reading in the cache; ``None`` when neither
-    can say. On an exact case the record holds one model attempt, so the reading is the
-    page's one rejected cached output of that engine."""
+_NOT_IN_CACHE = "the rejected reading is not in the run's cache"
+_MORE_THAN_ONE = "more than one cached reading matches the recorded attempt"
+
+
+def _with_readings_judged(
+    sidecar: dict, cached: dict[int, list[dict]]
+) -> tuple[dict | None, str | None]:
+    """``(sidecar with held_a_table on its attempt record, None)``, or ``(None, why not)``.
+
+    From the sidecar itself (a run since #1156 round 3 writes it), or from the rejected
+    reading in the cache. The cache is bound to the RECORDED attempt, not just to the page
+    (Fable, round 3 P2-1): the reading's ``judge_reason``, whitespace-normalised and cut as
+    the summary cuts it, must equal the row's ``rejection_reason`` (390 of 390 calibration
+    floor pages), and exactly one reading may match -- a resumed or retried document holds
+    several, and another reading of the same page standing in for this one could judge a
+    table reading as prose."""
+    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
     from socr.core.manifest import reading_holds_a_table
     from socr.core.result import PageOutput
 
     rows = sidecar.get("attempts_summary") or []
     if _judged(sidecar):
-        return sidecar
+        return sidecar, None
     if len(rows) != 1:
-        return None
-    engine = rows[0].get("engine")
+        return None, _NOT_IN_CACHE
+    row = rows[0]
+
+    def recorded_reason(reading: dict) -> str:
+        return " ".join(str(reading.get("judge_reason") or "").split())[
+            :ATTEMPT_SUMMARY_REASON_MAX_CHARS
+        ]
+
     found = [
         r
         for r in cached.get(int(sidecar["page_num"]), [])
-        if r.get("engine") == engine and r.get("audit_passed") is False
+        if r.get("engine") == row.get("engine")
+        and r.get("audit_passed") is False
+        and recorded_reason(r) == (row.get("rejection_reason") or "")
     ]
-    if len(found) != 1:
-        return None
+    if not found:
+        return None, _NOT_IN_CACHE
+    if len(found) > 1:
+        return None, _MORE_THAN_ONE
     out = dict(sidecar)
     out["attempts_summary"] = [
-        {**rows[0], "held_a_table": reading_holds_a_table(PageOutput.from_dict(found[0]))}
+        {**row, "held_a_table": reading_holds_a_table(PageOutput.from_dict(found[0]))}
     ]
-    return out
+    return out, None
 
 
 def is_exact_case(sidecar: dict) -> bool:
@@ -480,6 +502,12 @@ def refinalize_document(
         sidecar = _read_json(sidecar_path)
         if not is_floor_page(sidecar):
             continue
+        if sidecar.get("page_retry"):
+            # ``--retry-failed-pages`` moved the first attempt out of the record: its
+            # reading, and whether it held a table, are not there to judge (Argon, round 3
+            # P1-1). Calibration: 0 of 390 floor pages.
+            skipped["a retried page: its first attempt is not in the record"] += 1
+            continue
         if not is_exact_case(sidecar):
             skipped["attempt history or table standing not reproducible (re-run the page)"] += 1
             continue
@@ -493,9 +521,11 @@ def refinalize_document(
                 continue
             standing = _with_table_standing(sidecar, analysis)
         recomputed = standing is not sidecar
-        judged = _with_readings_judged(standing, {} if _judged(standing) else cached_readings())
+        judged, why_not = _with_readings_judged(
+            standing, {} if _judged(standing) else cached_readings()
+        )
         if judged is None:
-            skipped["the rejected reading is not in the run's cache"] += 1
+            skipped[why_not] += 1
             continue
         from_cache = judged is not standing
         sidecar = judged
@@ -582,15 +612,20 @@ def refinalize_document(
             for e in data["audit_events"]:
                 if e["kind"] in _ENDING_EVENT_KINDS:
                     # One event of each kind per page, as a fresh run writes it: an older
-                    # copy (another engine, another detail) is replaced, not kept beside it.
-                    events = [
-                        old
-                        for old in events
-                        if not (
-                            old.get("page_num") == data["page_num"] and old.get("kind") == e["kind"]
-                        )
+                    # copy (another engine, another detail) is replaced IN PLACE, so a run
+                    # redone after an interruption writes the same bytes (Fable, round 3
+                    # P2-3); a new event is appended.
+                    new_event = {"page_num": data["page_num"], **e}
+                    at = [
+                        i
+                        for i, old in enumerate(events)
+                        if old.get("page_num") == data["page_num"] and old.get("kind") == e["kind"]
                     ]
-                    events.append({"page_num": data["page_num"], **e})
+                    if at:
+                        events[at[0]] = new_event
+                        events = [old for i, old in enumerate(events) if i not in at[1:]]
+                    else:
+                        events.append(new_event)
         audit["events"] = events
         audit["event_count"] = len(events)
         audit["counts"] = dict(Counter(e.get("kind") for e in events))

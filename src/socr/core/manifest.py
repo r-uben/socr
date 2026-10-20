@@ -1186,6 +1186,12 @@ def floor_page_image_ref(p) -> str:
     return ""
 
 
+#: The tail of the verdict mark every page carrying an earlier OCR layer ships with
+#: (``verdict._prior_ocr_layer_clause``): ``> [page N unchecked: prior_ocr_layer=UNKNOWN;
+#: scope=page; reason=earlier OCR, not re-read]``.
+PRIOR_OCR_MARK_REASON = "reason=earlier OCR, not re-read"
+
+
 def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
     """Whether figure extraction must skip this page: it already ships an image of itself.
 
@@ -1203,11 +1209,14 @@ def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
     # ships no image, and the extractor would then take the page's raster as a "figure"
     # and caption it -- text added after the mask, which may carry the numbers the mask
     # withheld. The page is a scan; it has no figure of its own to extract.
+    # Keyed on the ending's own mark, not on a by-product of the mask: a masked layer with
+    # no number carries no withheld token (Fable, round 3 P2-2). A scan has no figure of
+    # its own to extract whichever way it ended.
     from socr.tables.prior_ocr_mask import NUMBER_WITHHELD, NUMBER_WITHHELD_NO_IMAGE
 
     body = shipped_body or ""
     return prior_ocr_layer_found(p) and (
-        NUMBER_WITHHELD in body or NUMBER_WITHHELD_NO_IMAGE in body
+        PRIOR_OCR_MARK_REASON in body or NUMBER_WITHHELD in body or NUMBER_WITHHELD_NO_IMAGE in body
     )
 
 
@@ -1269,6 +1278,9 @@ def page_saw_an_unplaced_table(state, page_num: int) -> bool:
             # The first attempt's readings are not kept, only whether one held a table
             # (Argon, round 2 re-review).
             or first_attempt.get("reading_held_a_table") is True
+            # A first attempt refused as an invalid table emission emitted a table, and
+            # says so only in its failure mode (Argon, round 3 P1-1).
+            or first_attempt.get("failure_mode") == FailureMode.TABLE_EMISSION_INVALID.value
             # A page rebuilt from its sidecar has no readings either; the sidecar's attempt
             # record says whether each held one (round 3, Fable P1-2).
             or any(

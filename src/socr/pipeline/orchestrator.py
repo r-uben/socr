@@ -728,7 +728,20 @@ def _attempts_summary(ps) -> list[dict]:
     """#1027: compact per-rung attempt record for the page sidecar (additive; never read back)."""
     restored = getattr(ps, "attempts_summary_restored", None)
     if restored is not None and len(getattr(ps, "attempts", None) or []) <= 1:
-        return restored  # a skipped page: nothing ran this time, keep the original record
+        # A skipped page: nothing ran this time, keep the original record. #1156 Part B
+        # round 3 (Argon P2-2): a record written before ``held_a_table`` existed is given
+        # it from the one reading the resumed page still holds.
+        attempts = getattr(ps, "attempts", None) or []
+        if (
+            getattr(ps, "prior_ocr_layer_suspect", False)
+            and len(restored) == 1 == len(attempts)
+            and isinstance(restored[0], dict)
+            and "held_a_table" not in restored[0]
+        ):
+            from socr.core.manifest import reading_holds_a_table
+
+            return [{**restored[0], "held_a_table": reading_holds_a_table(attempts[0])}]
+        return restored
     out: list[dict] = []
     for a in getattr(ps, "attempts", None) or []:
         reason = " ".join(str(a.judge_reason or "").split())

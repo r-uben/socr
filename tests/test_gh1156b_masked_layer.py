@@ -894,3 +894,79 @@ def test_the_tool_recomputes_the_gate_rather_than_trust_its_memo(
     side["audit_events"] = [*side["audit_events"], {"kind": "table_structure_failed"}]
     path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
     assert refinalize_document(doc) == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 4
+# ---------------------------------------------------------------------------
+
+
+def test_a_retried_page_is_left_on_its_floor(tmp_path: Path, monkeypatch) -> None:
+    """Argon round 3 P1-1: the first attempt of a retried page is not in its record."""
+    from collections import Counter
+
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
+    path = doc / "pages" / "00001.json"
+    side = json.loads(path.read_text())
+    side["page_retry"] = {"first_attempt": {"failure_mode": "table_emission_invalid"}}
+    path.write_text(json.dumps(side, indent=2, ensure_ascii=False))
+    skipped: Counter = Counter()
+    assert refinalize_document(doc, pdf_dir=tmp_path, skipped=skipped) == []
+    assert skipped == Counter({"a retried page: its first attempt is not in the record": 1})
+
+
+@pytest.mark.parametrize("case", ["own", "other-reason", "two-matching", "own-and-other"])
+def test_the_cached_reading_is_bound_to_the_recorded_attempt(
+    tmp_path: Path, monkeypatch, case: str
+) -> None:
+    """Fable round 3 P2-1: matched on the page alone, another reading could stand in."""
+    import hashlib
+    from collections import Counter
+
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
+    blob = _cached_reading(doc)
+    own = json.loads(blob.read_text())
+
+    def add(reading: dict) -> None:
+        raw = json.dumps(reading, sort_keys=True)
+        h = hashlib.sha256(raw.encode()).hexdigest()
+        (doc / "cache" / h[:2]).mkdir(exist_ok=True)
+        (doc / "cache" / h[:2] / f"{h}.json").write_text(raw)
+
+    table = "| Item | 1964 |\n| --- | --- |\n| Loans | 12 |\n| Gold | 4 |"
+    if case in ("other-reason", "own-and-other"):
+        add({**own, "judge_reason": "another run's verdict", "text": table})
+    if case == "other-reason":
+        blob.unlink()
+    if case == "two-matching":
+        add({**own, "processing_time": 99.0})
+    skipped: Counter = Counter()
+    changes = refinalize_document(doc, pdf_dir=tmp_path, skipped=skipped)
+    expected = {
+        "own": Counter(),
+        "own-and-other": Counter(),
+        "other-reason": Counter({"the rejected reading is not in the run's cache": 1}),
+        "two-matching": Counter({"more than one cached reading matches the recorded attempt": 1}),
+    }[case]
+    assert skipped == expected
+    assert bool(changes) is (case in ("own", "own-and-other"))
+
+
+def test_a_redone_page_keeps_its_events_in_place(tmp_path: Path, monkeypatch) -> None:
+    """Fable round 3 P2-3: an older copy is replaced where it stands, not moved to the end."""
+    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+
+    doc = _floor_run(tmp_path, monkeypatch)
+    audit_path = doc / "audit_log.json"
+    audit = json.loads(audit_path.read_text())
+    stale = {"page_num": 1, "kind": "prior_ocr_layer_retained", "engine": "x", "detail": "old"}
+    audit["events"].insert(0, stale)
+    audit_path.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
+    assert refinalize_document(doc)
+    events = json.loads(audit_path.read_text())["events"]
+    assert events[0]["kind"] == "prior_ocr_layer_retained" and events[0]["engine"] == "qwen"
+    assert sum(e["kind"] == "prior_ocr_layer_retained" for e in events) == 1
