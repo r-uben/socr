@@ -30,3 +30,25 @@ Goldens represent **model markdown** (what OCR would emit). They must **not** be
 | `p63_tableau7.md` | `resf_p63.pdf` | Image read Tableau 7; section headers added from image |
 
 Mechanical mutants: `tools/native_cell_golden_eval.py`. Realistic OCR mutants: `mut_model_digit`, `mut_model_column_shift`, `mut_model_minus_drop`.
+
+## Batch 2 (cursor/native-cell-goldens-batch2)
+
+Raster PNGs under `/opt/cursor/artifacts/batch2-raster/` at verification time. Sources are **PLFSS 2025 Annexe 3** and **RESF PLF 2025** single-page fixture PDFs (not VMM / évaluations préalables — see below).
+
+| Fixture | Image check notes |
+| --- | --- |
+| `p31_tableau15.md` | Tableau 15 branch split; image uses spaced thousands, golden uses digits without interior spaces (text layer uses spaces — documented disagreement). |
+| `p42_prestations_slice.md` | Tableau situation État/SS; € columns and programme codes from image. |
+| `p43_exonerations_slice.md` | Same layout family as p44 (€ exonerations); Apprentissage / aide domicile rows from image. |
+| `p68_csg_activite_montants.md` | p65-like organ + montant + year band; montant row only (year cells hold multi-line pt splits in PDF). |
+| `p67_annexe_csg_placement.md` | CSG/CRDS placement rows; montant columns from image. |
+| `p61_tableau5_slice.md` | RESF p.61 Tableau 5; dash cells for blank years; minus signs from image. |
+
+## Census documents not in repo (wanted, not invented)
+
+No source PDF for these in `tests/fixtures/` or the workspace uploads. To extend batch 3 from census-heavy corpora, add:
+
+- **VMM tome II** — table pages with multi-year numeric grids and merged row labels (exact page numbers from the Shepherd census manifest once available).
+- **Évaluations préalables** — draft budget table pages with organism/amount + year bands and dash-filled model cells.
+
+Until those PDFs are checked in, batch 2 uses RESF/PLFSS annexe pages that match the same layout failure modes (p65/p67/p44 families).

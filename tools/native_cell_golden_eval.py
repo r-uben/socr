@@ -85,10 +85,29 @@ IMAGE_EXTENDED_GOLDENS: list[GoldenCase] = [
     GoldenCase("RESF p63 T7", FIX / "resf_p63.pdf", FIX / "p63_tableau7.md"),
 ]
 
+# Batch 2: PLFSS/RESF census-like layouts (image-checked; see GOLDEN_VERIFICATION.md).
+BATCH2_GOLDENS: list[GoldenCase] = [
+    GoldenCase("PLFSS p31 T15", FIX / "plfss_p31.pdf", FIX / "p31_tableau15.md"),
+    GoldenCase("PLFSS p42 prestations", FIX / "plfss_p42.pdf", FIX / "p42_prestations_slice.md"),
+    GoldenCase("PLFSS p43 exo slice", FIX / "plfss_p43.pdf", FIX / "p43_exonerations_slice.md"),
+    GoldenCase(
+        "PLFSS p68 CSG activité",
+        FIX / "plfss_p68.pdf",
+        FIX / "p68_csg_activite_montants.md",
+    ),
+    GoldenCase(
+        "PLFSS p67 CSG placement",
+        FIX / "plfss_p67_annexe.pdf",
+        FIX / "p67_annexe_csg_placement.md",
+        locator_table_index=0,
+    ),
+    GoldenCase("RESF p61 T5 slice", FIX / "resf_p61.pdf", FIX / "p61_tableau5_slice.md"),
+]
+
 GOLDEN_SETS: dict[str, list[GoldenCase]] = {
     "track2": TRACK2_GOLDENS,
-    "extended": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS,
-    "all": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS,
+    "extended": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS + BATCH2_GOLDENS,
+    "all": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS + BATCH2_GOLDENS,
 }
 
 GOLDENS: list[GoldenCase] = GOLDEN_SETS["extended"]
