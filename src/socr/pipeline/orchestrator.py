@@ -733,7 +733,20 @@ def _attempts_summary(ps) -> list[dict]:
     """#1027: compact per-rung attempt record for the page sidecar (additive; never read back)."""
     restored = getattr(ps, "attempts_summary_restored", None)
     if restored is not None and len(getattr(ps, "attempts", None) or []) <= 1:
-        return restored  # a skipped page: nothing ran this time, keep the original record
+        # A skipped page: nothing ran this time, keep the original record. #1156 Part B
+        # round 3 (Argon P2-2): a record written before ``held_a_table`` existed is given
+        # it from the one reading the resumed page still holds.
+        attempts = getattr(ps, "attempts", None) or []
+        if (
+            getattr(ps, "prior_ocr_layer_suspect", False)
+            and len(restored) == 1 == len(attempts)
+            and isinstance(restored[0], dict)
+            and "held_a_table" not in restored[0]
+        ):
+            from socr.core.manifest import reading_holds_a_table
+
+            return [{**restored[0], "held_a_table": reading_holds_a_table(attempts[0])}]
+        return restored
     out: list[dict] = []
     for a in getattr(ps, "attempts", None) or []:
         reason = " ".join(str(a.judge_reason or "").split())
@@ -746,6 +759,15 @@ def _attempts_summary(ps) -> list[dict]:
         ja = getattr(a, "judge_accepted", None)
         if ja is not None:
             row["judge_accepted"] = ja
+        # #1156 Part B round 3 (Fable P1-2): the sidecar keeps no reading's text, and the
+        # masked ending's gate asks whether a reading held a table -- so a re-finalisation
+        # can only reproduce that answer if it is recorded here. Sparse, like the other
+        # #1156 keys: on a page whose layer is under suspicion, so every other sidecar
+        # keeps its bytes.
+        if getattr(ps, "prior_ocr_layer_suspect", False):
+            from socr.core.manifest import reading_holds_a_table
+
+            row["held_a_table"] = reading_holds_a_table(a)
         out.append(row)
     return out
 
@@ -839,6 +861,23 @@ def _page_blob_key(page_output_dict: dict) -> str:
 
 # GH-214: process-lifetime cache for the source digest. Computed once, not per page.
 _SOURCE_DIGEST_CACHE: str | None = None
+
+#: The audit detail of a page that needed OCR and shipped its native text flagged. A
+#: constant for the same reason as the one below.
+NATIVE_FALLBACK_EVENT_DETAIL = (
+    "structured/enhancement page did not ship a passing OCR "
+    "result (OCR failed, was skipped, or ran under --native-only); "
+    "native text shipped flagged"
+)
+
+#: #1156: the audit detail of a page whose text layer is an earlier OCR run. A constant
+#: so ``pipeline.refinalize_prior_ocr`` writes the same event a fresh run does.
+PRIOR_OCR_RETAINED_EVENT_DETAIL = (
+    "this page's text layer is an EARLIER OCR run's reading, not "
+    "the document's own characters (or the scan for that failed), and no "
+    "independent reading has agreed with it; the page is marked "
+    '"earlier OCR, not re-read" and is never counted CHECKED'
+)
 
 
 def _manifest_versions() -> tuple[str, str]:
@@ -12294,7 +12333,13 @@ class UnifiedPipeline:
         so nothing they said is lost, an empty provider answer included. Spend is a
         recorded fact, so the first attempt's cost stays on the page.
         """
+        from socr.core.manifest import reading_holds_a_table
+
         spent = state.pages[page_num].page_cost_usd
+        # #1156 Part B: the readings themselves are dropped with the first attempt, so
+        # whether one held a table -- which keeps an earlier-OCR page off the masked
+        # ending -- is recorded with its events.
+        held_a_table = any(reading_holds_a_table(a) for a in state.pages[page_num].attempts)
         moved = {id(ev) for ev in first_events}
         state.events[:] = [ev for ev in state.events if id(ev) not in moved]
         fresh = copy.deepcopy(snapshot)
@@ -12307,6 +12352,7 @@ class UnifiedPipeline:
                 "ending": first.disposition.ending.value,
                 "primary_reason": first.disposition.primary_reason.value,
                 "audit_events": [ev.to_dict() for ev in first_events],
+                "reading_held_a_table": held_a_table,
             },
             "retry_ladder": [p.id or p.engine.value for p in ladder],
         }
@@ -16050,9 +16096,22 @@ class UnifiedPipeline:
             # its bytes; the second carrier is the layer of a page an early born-digital
             # rejection left with no native text at all, which the census puts at ~3,960
             # Fed pages (#1203).
-            layer = getattr(ps, "native_text", "") or getattr(ps, "prior_ocr_layer_text", "") or ""
+            from socr.core.manifest import retained_prior_ocr_layer
+
+            layer = retained_prior_ocr_layer(ps)
             if layer:
                 payload["prior_ocr_layer_text"] = layer
+            # #1156 Part B round 2 (Argon P0-1): the inputs of the masked ending's table
+            # gate, persisted as the live run used them, so a re-finalisation of this run
+            # reads them rather than inferring them. ``has_tables`` is the structure-class
+            # flag; the latch is the gate's own answer, absent until the gate was asked.
+            payload["has_tables"] = bool(getattr(ps, "has_tables", False))
+            payload["possible_table_structure_not_reconstructed"] = bool(
+                getattr(ps, "possible_table_structure_not_reconstructed", False)
+            )
+            payload["table_not_reconstructed"] = bool(getattr(ps, "table_not_reconstructed", False))
+            if getattr(ps, "prior_ocr_table_seen", None) is not None:
+                payload["prior_ocr_table_seen"] = bool(ps.prior_ocr_table_seen)
 
         # #1203 round 1 (owner ruling 2026-10-18): the table this run withheld because
         # nothing could witness it. Sparse for the same reason as the key above -- absent
@@ -19221,9 +19280,7 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="native_fallback",
                         engine="native",
-                        detail="structured/enhancement page did not ship a passing OCR "
-                        "result (OCR failed, was skipped, or ran under --native-only); "
-                        "native text shipped flagged",
+                        detail=NATIVE_FALLBACK_EVENT_DETAIL,
                     )
                 )
             for n in judge_timeout_native_pages:
@@ -19331,10 +19388,7 @@ class UnifiedPipeline:
                             if state.pages[n].best_output
                             else "native"
                         ),
-                        detail="this page's text layer is an EARLIER OCR run's reading, not "
-                        "the document's own characters (or the scan for that failed), and no "
-                        "independent reading has agreed with it; the page is marked "
-                        '"earlier OCR, not re-read" and is never counted CHECKED',
+                        detail=PRIOR_OCR_RETAINED_EVENT_DETAIL,
                     )
                 )
             for n in numbers_disagree_pages:
@@ -21299,7 +21353,22 @@ class UnifiedPipeline:
                 )
         # #1030: a page that already ships its scanned-figure page image must not get a second
         # one (the extractor would emit the same raster as a full-page "figure").
-        _own_image = {n for n, _p in state.pages.items() if _p.scanned_figure_png_ref}
+        # #1156 Part B: the same for the earlier-OCR page image, but only where the page's
+        # SHIPPED body carries it. The masked layer now ships as prose, so the extractor's
+        # full-page "figure" was embedded beside the page image -- the same raster twice.
+        # The ref is rendered before selection, so a page that ships a model reading
+        # instead also carries it, and skipping on the ref alone dropped that page's
+        # figures (Argon, diff review).
+        from socr.core.manifest import page_ships_its_own_page_image
+
+        _shipped_bodies = split_native_pages(text)
+        _own_image = {
+            n
+            for n, _p in state.pages.items()
+            if page_ships_its_own_page_image(
+                _p, _shipped_bodies[n - 1] if 0 < n <= len(_shipped_bodies) else ""
+            )
+        }
         if _own_image:
             skip_pages = (skip_pages or set()) | _own_image
         extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)

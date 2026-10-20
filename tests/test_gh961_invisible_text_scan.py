@@ -311,19 +311,18 @@ def test_e2e_provider_absent_is_never_trusted_success(tmp_path, monkeypatch) -> 
     on, _ = _e2e(tmp_path, "b_on", monkeypatch, provider=False)
     assert _sidecar(tmp_path, "b_off")["status"] == "success"
     assert off.status is DocumentStatus.SUCCESS
-    # #1156 Part A, round 1: the owner's interim rule is that a flagged page whose
-    # reading was rejected OR NEVER RAN ships no prior-layer text and no numbers. This
-    # fixture page is flagged by BOTH routes, so the no-attempt arm is now floored by
-    # #1156 instead of retaining its layer. Every other assertion in this test is
-    # unchanged -- the page is still not success, the document is still not SUCCESS, and
-    # the engine that produced it is still named. Only the two claims the ruling
-    # overrides move: the failure mode, and "no content dropped".
+    # #1156 Part A, round 1: the owner's interim rule was that a flagged page whose
+    # reading was rejected OR NEVER RAN ships no prior-layer text and no numbers. Part B
+    # (below) replaces that floor: the layer's prose ships with every number withheld.
+    # Every other assertion in this test is unchanged -- the page is still not success, the
+    # document is still not SUCCESS, and the engine that produced it is still named.
     side = _sidecar(tmp_path, "b_on")
     assert side["status"] != "success"
     assert side["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
     assert on.status is not DocumentStatus.SUCCESS
     body = _page_text(tmp_path, "b_on")
-    assert "estimated effect" not in body, "the earlier OCR layer shipped"
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert "estimated effect" in body, "the readable earlier OCR prose must ship"
     assert "earlier OCR, not re-read" in body, "the page does not say why its text is gone"
 
 
@@ -337,13 +336,13 @@ def test_e2e_native_only_retains_the_page_but_demotes_it(tmp_path, monkeypatch) 
     side = _sidecar(tmp_path, "c_on")
     assert eng_on.calls == 0
     assert side["status"] == "warning"
-    # #1156 Part A, round 1: see the note on the provider-absent test above. The page is
-    # still WARNING and the engine is still never called; only the mode and the retention
-    # move, because the ruling replaces the retention.
+    # #1156 Part A, round 1 (see the provider-absent note above): the page is still WARNING
+    # and the engine is still never called. Part B replaces the retention with masked prose.
     assert side["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
     assert on.status is not DocumentStatus.SUCCESS
     body = _page_text(tmp_path, "c_on")
-    assert "estimated effect" not in body, "the earlier OCR layer shipped"
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert "estimated effect" in body, "the readable earlier OCR prose must ship"
     assert "earlier OCR, not re-read" in body
 
 

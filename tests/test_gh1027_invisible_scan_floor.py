@@ -74,24 +74,26 @@ def _page(*, over_raster: bool, scan_failed: bool = False, minus: int = 0, attem
 
 def test_invisible_layer_with_rejected_model_ships_floor_not_native() -> None:
     out, prov = _select_page_output_tagged(_page(over_raster=True), 1)
-    assert prov is SelectionProvenance.INVISIBLE_SCAN_UNREAD
-    assert out.failure_mode is FailureMode.INVISIBLE_SCAN_UNREAD
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert prov is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
+    assert out.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
     assert out.status is PageStatus.WARNING
     assert out.audit_passed is False
-    assert "estimated effect" not in out.text and _OCR_MARK not in out.text
-    assert manifest.is_page_failed_marker(out.text)
+    assert "estimated effect" in out.text and _OCR_MARK not in out.text
+    assert not any(ch.isdigit() for ch in out.text), "the prose fixture has no numbers"
+    assert not manifest.is_page_failed_marker(out.text)
     disp = manifest.provenance_to_disposition(prov)
-    assert disp.ending is PageEnding.FAIL_CLOSED_MARKER
-    assert disp.primary_reason is PagePrimaryReason.INVISIBLE_SCAN_UNREAD
-    # The reason is also recoverable from the shipped bytes alone.
-    assert manifest._shipped_marker_reason(out.text) is PagePrimaryReason.INVISIBLE_SCAN_UNREAD
+    assert disp.ending is PageEnding.DEMOTED_NATIVE
+    assert disp.primary_reason is PagePrimaryReason.PRIOR_OCR_LAYER_MASKED
 
 
 def test_difference_same_page_without_the_invisible_flag_is_unchanged() -> None:
     """A non-invisible needs_ocr_enhancement page keeps the native fallback."""
     on, on_prov = _select_page_output_tagged(_page(over_raster=True), 1)
     off, off_prov = _select_page_output_tagged(_page(over_raster=False), 1)
-    assert on_prov is SelectionProvenance.INVISIBLE_SCAN_UNREAD
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert on_prov is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
+    assert "estimated effect" in on.text and _OCR_MARK not in on.text
     assert off_prov is SelectionProvenance.NATIVE_FALLBACK
     assert off.status is PageStatus.WARNING and off.audit_passed is False
     assert "estimated effect" in off.text
@@ -129,16 +131,17 @@ def test_no_model_attempt_is_floored_by_1156_not_retained() -> None:
     goes instead: it used to fall to the native fallback and ship the earlier OCR layer,
     and the gap between #1027's attempt gate and #1156's old route exclusion was measured
     at ``process()`` as 4,252 bytes of that layer with no marker at all (Grok 1,
-    r-uben 1a). It now reaches #1156's floor, which withholds the layer and keeps the
-    marker plus the page image.
+    r-uben 1a). It now reaches the #1156 Part B masked ending: the layer's prose ships with
+    every number withheld, plus the page image.
     """
     out, prov = _select_page_output_tagged(_page(over_raster=True, attempts=False), 1)
     assert prov is not SelectionProvenance.INVISIBLE_SCAN_UNREAD, (
         "#1027's floor must still keep its own attempt gate"
     )
-    assert prov is SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
-    assert "estimated effect" not in out.text, "the earlier OCR layer shipped"
-    assert "earlier OCR, not re-read" in out.text
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert prov is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
+    assert "estimated effect" in out.text, "the readable earlier OCR prose must ship"
+    assert out.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
 
 
 def test_failure_mode_ordering_invisible_outranks_minus_as_digit() -> None:
@@ -235,17 +238,18 @@ def test_e2e_rejected_vs_accepted_same_scan(tmp_path, monkeypatch) -> None:
     assert _OCR_MARK in acc_text
     assert acc_side["failure_mode"] != FailureMode.INVISIBLE_SCAN_UNREAD.value
 
-    # Rejected: neither the layer nor the rejected reading; the floor, honestly named.
-    assert _OCR_MARK not in rej_text and "estimated effect" not in rej_text
-    assert "invisible OCR layer unread" in rej_text
-    assert "invisible_scan_page_p1" in rej_text, "the marker carries the page image"
-    assert rej_side["failure_mode"] == FailureMode.INVISIBLE_SCAN_UNREAD.value
+    # Rejected: the rejected reading is not shipped; the layer's prose ships, numbers withheld.
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert _OCR_MARK not in rej_text and "estimated effect" in rej_text
+    assert "earlier OCR, not re-read" in rej_text, "the canonical unchecked mark is present"
+    assert "invisible_scan_page_p1" in rej_text, "the page image rides beside the prose"
+    assert rej_side["failure_mode"] == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
     assert rej_side["status"] == "warning"
     assert rej_side["audit_passed"] is False
     assert rej.status is not DocumentStatus.SUCCESS
     kinds = {e["kind"] for e in rej_events}
-    assert "invisible_scan_unread" in kinds
-    assert "page_failed" not in kinds, "its own event replaces the generic one"
+    assert "invisible_scan_unread" not in kinds, "the floor event no longer fires on this page"
+    assert "page_failed" not in kinds
     assert "invisible_scan_unread" not in {e["kind"] for e in acc_events}
 
     # Sidecar transparency: the rung that ran is visible, reason truncated to the constant.
@@ -301,7 +305,10 @@ def test_marker_points_at_image_only_when_one_exists() -> None:
     with_png.pages[1].invisible_scan_png_ref = "![p](figures/x.png)"
     out_png, _ = _select_page_output_tagged(with_png, 1)
     out_bare, _ = _select_page_output_tagged(_page(over_raster=True), 1)
-    assert "see image" in out_png.text and "figures/x.png" in out_png.text
-    assert "see image" not in out_bare.text and "see PDF page 1" in out_bare.text
-    assert manifest.is_page_failed_marker(out_bare.text)
-    assert manifest._shipped_marker_reason(out_bare.text) is PagePrimaryReason.INVISIBLE_SCAN_UNREAD
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert "figures/x.png" in out_png.text, "the image rides beside the prose when one exists"
+    assert "figures/" not in out_bare.text, "no image ref is shipped when none was rendered"
+    assert not manifest.is_page_failed_marker(out_bare.text)
+    assert manifest._shipped_marker_reason(out_bare.text) is not (
+        PagePrimaryReason.INVISIBLE_SCAN_UNREAD
+    )
