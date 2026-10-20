@@ -112,9 +112,16 @@ def test_status_follows_the_shipped_output(tmp_path: Path, damage: str) -> None:
     native = finalized_page_record(_state(tmp_path, "n", damage, model_ships=False), 1).output
     model = finalized_page_record(_state(tmp_path, "m", damage, model_ships=True), 1).output
 
-    assert model.text == MODEL_TEXT
-    assert model.status is PageStatus.SUCCESS
-    assert model.failure_mode is FailureMode.NONE
+    # #1185: the model reading has no own text layer (hand-built PageState), so the page is
+    # MARKED (text_layer_numbers=UNKNOWN) and demoted to WARNING. The mark and the demotion are
+    # identical for every damage kind, so the damage itself changes nothing on the model arm.
+    unchecked_mark = (
+        "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no "
+        "text layer of its own to check the reading's numbers against]"
+    )
+    assert model.text == f"{unchecked_mark}\n\n{MODEL_TEXT}"
+    assert model.status is PageStatus.WARNING
+    assert model.failure_mode is FailureMode.NUMBERS_UNCHECKED
     assert model.audit_passed is True
     assert not [n for n in model.audit_notes if "native" in n]
     # The difference: the same flagged page, native shipping, is demoted (or noted).

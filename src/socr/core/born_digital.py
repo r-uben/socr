@@ -2605,6 +2605,13 @@ class PageAssessment:
     #: deliberately NOT ``native_text``, because ``native_text`` on a rejected page is what
     #: makes it native-eligible under ``--native-only``.
     prior_ocr_layer_text: str = ""
+    #: #1185: the page's text layer as ``_retained_layer_text`` reads it, on EVERY page and
+    #: whatever the routing verdict, because a page the detector refuses for routing (an
+    #: eaten digit, a garbage ratio) still carries its own characters, and a model reading
+    #: of it is checked against them. In memory only: never written to a sidecar, never
+    #: shipped. Whether the layer is the document's own characters is decided by the
+    #: caller from the #1156 flags, not here.
+    own_layer_text: str = ""
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3469,6 +3476,9 @@ class BornDigitalDetector:
             assessment.prior_ocr_layer or assessment.prior_ocr_layer_scan_failed
         ):
             assessment.prior_ocr_layer_text = self._retained_layer_text(page)
+        # #1185: every page, so a model reading can be checked against the page's own
+        # characters whichever return the signals body took.
+        assessment.own_layer_text = self._retained_layer_text(page)
         if assessment.is_born_digital and assessment.native_text:
             assessment.native_paragraphs = page_paragraphs(page)
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)

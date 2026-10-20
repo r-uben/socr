@@ -1072,68 +1072,68 @@ PAGE_TOP_MARK_1145_DIFFERENCES: list[ExpectedDiff] = [
     ExpectedDiff(
         path=("manifest", 0, "entries", "3", "blob_ref"),
         old_value="2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
-        new_value="8e145ec962b4e7c4166aea9f0210504628c470ec06f40e3352590fe25facb1c8",
-        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+        new_value="850504a6bda02079673ac65b4f78b1efa7b5c3e8ebe31f5bffbcd928191e2a5e",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("manifest", 0, "entries", "8", "blob_ref"),
         old_value="9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
-        new_value="597b18ef36a1a1eb1fc26e544f827b0c90f5e630a4d750cb0dff0f16ef6c21e0",
-        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+        new_value="05d4235a4aec93b4a742054b4537ed104c9873127383a4faf7e9184567298154",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("markdown", "p6_corpus/p6_corpus.md"),
         old_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
-        new_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\n> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
-        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+        new_value="## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table — see image]\n\n## Page 3\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\n> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n## Page 4\n\n> [page 4 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\n> [page 5 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\n> [page 7 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nPlain model prose for page seven.\n\n## Page 8\n\n> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n> [page 8 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission — table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table — see image]\n\n## Page 11\n\n> [page 11 unchecked: equation_fidelity=FAIL; scope=page; reason=a corrupt equation candidate ships on this page without a verified reading]\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission — table_width_mismatch]\n",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("markdown", "p6_corpus/pages/00003.md"),
         old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\n> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("markdown", "p6_corpus/pages/00008.md"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n> [page 8 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("page_contract", 2, "winning_output", "text"),
         old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
-        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\n> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]\n\n![p](figures/p.png)\n",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("page_contract", 7, "winning_output", "text"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n> [page 8 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: the assembled document carries both the unaccepted banner (pages 3 and 8) and the canonical unchecked line (pages 3, 8 and 11). This leaf is the product of both changes, so it is enumerated once, here, rather than twice at the same path. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00003.json", "page_fingerprint"),
         old_value="sha256:2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
-        new_value="sha256:8e145ec962b4e7c4166aea9f0210504628c470ec06f40e3352590fe25facb1c8",
-        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="sha256:850504a6bda02079673ac65b4f78b1efa7b5c3e8ebe31f5bffbcd928191e2a5e",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00003.json", "winning_output", "text"),
         old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
-        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`judge_only`); check against the page image before citing]\n\n> [page 3 unchecked: native_table_verifier=FAIL; scope=page; reason=a model table ships here over a native floor that failed verification]\n\n> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table — kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted — verify against the page image before citing]",
+        description="#1129 + #1145: page 3 (d3_model_kept) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00008.json", "page_fingerprint"),
         old_value="sha256:9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
-        new_value="sha256:597b18ef36a1a1eb1fc26e544f827b0c90f5e630a4d750cb0dff0f16ef6c21e0",
-        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="sha256:05d4235a4aec93b4a742054b4537ed104c9873127383a4faf7e9184567298154",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00008.json", "winning_output", "text"),
         old_value="| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
-        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here.",
+        new_value="> [page unaccepted: socr kept this model reading but the page judge did not accept it (`ambiguous_deferred`); check against the page image before citing]\n\n> [page 8 unchecked: native_table_verifier=FAIL; scope=page; reason=no table-ladder rung accepted this page's table and the model reading still ships]\n\n> [page 8 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+        description="#1129 + #1145: page 8 (struct_model_passing) keeps #1129's unaccepted banner as its first line and gains the canonical unchecked line below it, in the same leading block. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. This leaf is the product of both changes, so it is enumerated once, here. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
 ]
 
@@ -1172,35 +1172,61 @@ VERDICT_SIDECAR_1145_DIFFERENCES: list[ExpectedDiff] = [
         path=("sidecars", "p6_corpus/pages/00003.json", "verdict"),
         old_value=None,
         new_value={
-            "page_num": 3,
             "clauses": [
                 {
+                    "check": "text_layer_numbers",
+                    "reason": "this page has no text layer of its own to check the reading's numbers against",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                },
+                {
                     "check": "native_table_verifier",
+                    "reason": "a model table ships here over a native floor that failed verification",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "a model table ships here over a native floor that failed verification",
                 },
                 {
                     "check": "page_judge",
+                    "reason": "the page judge did not accept the bytes that ship",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "the page judge did not accept the bytes that ship",
                 },
             ],
+            "page_num": 3,
         },
-        description="#1145: page 3 (d3_model_kept) gains the additive ``verdict`` sidecar key. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written.",
+        description="#1145: page 3 (d3_model_kept) gains the additive ``verdict`` sidecar key. a model table ships over a failed native floor AND the judge refused it; #1129's banner covers page_judge, so only the native_table_verifier line is written. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00004.json", "verdict"),
         old_value=None,
-        new_value={"page_num": 4, "clauses": []},
-        description="#1145: page 4 (cold_review_shape_one) gains the additive ``verdict`` sidecar key. CHECKED: the D3 flags are on the native candidate, but the model reading that ships was accepted by the judge, so no check failed on the shipped bytes.",
+        new_value={
+            "clauses": [
+                {
+                    "check": "text_layer_numbers",
+                    "reason": "this page has no text layer of its own to check the reading's numbers against",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                }
+            ],
+            "page_num": 4,
+        },
+        description="#1145: page 4 (cold_review_shape_one) gains the additive ``verdict`` sidecar key. CHECKED: the D3 flags are on the native candidate, but the model reading that ships was accepted by the judge, so no check failed on the shipped bytes. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00005.json", "verdict"),
         old_value=None,
-        new_value={"page_num": 5, "clauses": []},
-        description="#1145: page 5 (cold_review_shape_two) gains the additive ``verdict`` sidecar key. CHECKED, same shape as page 4.",
+        new_value={
+            "clauses": [
+                {
+                    "check": "text_layer_numbers",
+                    "reason": "this page has no text layer of its own to check the reading's numbers against",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                }
+            ],
+            "page_num": 5,
+        },
+        description="#1145: page 5 (cold_review_shape_two) gains the additive ``verdict`` sidecar key. CHECKED, same shape as page 4. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00006.json", "verdict"),
@@ -1221,52 +1247,68 @@ VERDICT_SIDECAR_1145_DIFFERENCES: list[ExpectedDiff] = [
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00007.json", "verdict"),
         old_value=None,
-        new_value={"page_num": 7, "clauses": []},
-        description="#1145: page 7 (passing_model) gains the additive ``verdict`` sidecar key. CHECKED: a passing model reading.",
+        new_value={
+            "clauses": [
+                {
+                    "check": "text_layer_numbers",
+                    "reason": "this page has no text layer of its own to check the reading's numbers against",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                }
+            ],
+            "page_num": 7,
+        },
+        description="#1145: page 7 (passing_model) gains the additive ``verdict`` sidecar key. CHECKED: a passing model reading. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00008.json", "verdict"),
         old_value=None,
         new_value={
-            "page_num": 8,
             "clauses": [
                 {
+                    "check": "text_layer_numbers",
+                    "reason": "this page has no text layer of its own to check the reading's numbers against",
+                    "result": "UNKNOWN",
+                    "scope": "page",
+                },
+                {
                     "check": "native_table_verifier",
+                    "reason": "no table-ladder rung accepted this page's table and the model reading still ships",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "no table-ladder rung accepted this page's table and the model reading still ships",
                 },
                 {
                     "check": "page_judge",
+                    "reason": "the page judge did not accept the bytes that ship",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "the page judge did not accept the bytes that ship",
                 },
             ],
+            "page_num": 8,
         },
-        description="#1145: page 8 (struct_model_passing) gains the additive ``verdict`` sidecar key. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written.",
+        description="#1145: page 8 (struct_model_passing) gains the additive ``verdict`` sidecar key. the structure-class ladder accepted no rung AND the judge refused; #1129's banner covers page_judge, so only the native_table_verifier line is written. #1185: the current output also carries the text_layer_numbers clause (an UNKNOWN mark or verdict line); this leaf is the value after that clause.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00009.json", "verdict"),
         old_value=None,
         new_value={
-            "page_num": 9,
             "clauses": [
                 {
                     "check": "table_structure",
+                    "reason": "a table on this page cannot be represented faithfully and was withheld",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "a table on this page cannot be represented faithfully and was withheld",
                 },
                 {
                     "check": "page_judge",
+                    "reason": "the page judge did not accept the bytes that ship",
                     "result": "FAIL",
                     "scope": "page",
-                    "reason": "the page judge did not accept the bytes that ship",
                 },
             ],
+            "page_num": 9,
         },
-        description="#1145: page 9 (struct_model_rewritten) gains the additive ``verdict`` sidecar key. the table was withheld as an invalid emission and the judge refused; the body is the [page 9 failed: ...] marker, so neither clause writes a line.",
+        description="#1145: page 9 (struct_model_rewritten) gains the additive ``verdict`` sidecar key. the table was withheld as an invalid emission and the judge refused; the body is the [page 9 failed: ...] marker, so neither clause writes a line. #1185: no text_layer_numbers clause, because a page-failed marker ships none of the reading.",
     ),
     ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00010.json", "verdict"),
@@ -1469,6 +1511,215 @@ NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES: list[ExpectedDiff] = [
 ]
 
 
+#: #1185: the text_layer_numbers clause (src/socr/core/verdict.py). A model-read page whose
+#: numbers have no own text layer to be checked against is MARKED, not CHECKED: the canonical
+#: unchecked line goes at the top of its text, the page is demoted to WARNING with
+#: failure_mode numbers_unchecked, and the verdict gains a text_layer_numbers UNKNOWN clause.
+#: Old values are the pre-change golden; new values are the current capture. Leaves that
+#: #1129/#1145 already enumerate were updated in place, not duplicated.
+TEXT_LAYER_NUMBERS_1185_DIFFERENCES: list[ExpectedDiff] = [
+    # #1185: the legacy-resume page is the approved control (given an own text layer that
+    # agrees with its grid), so its status and text match the pre-change golden: no entry.
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "4", "blob_ref"),
+        old_value="9ab10f282d69bbe94e83cf767bcc4dd40e43187109b41defe01ff3209a5ef124",
+        new_value="a4d557826c04c1e8c28ac4c8351826b684e22a8179e71baafafbfea4172dad4d",
+        description="#1185: page None's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "5", "blob_ref"),
+        old_value="8d07b226ffbdd6b975418d2681a1e3663805209d06ab1206a9a3b96d1617503c",
+        new_value="00602bce7467b5e6ac3dc5f5b7666b9689d48a3cbfa8443b8aa1333965a48ef4",
+        description="#1185: page None's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "7", "blob_ref"),
+        old_value="60d6c02e1296e142fea1a13e09fcfaa674f3637da1016601b69749497fbbfdaf",
+        new_value="35fd6529254be606d11d401967e4a1a52251aa400b05238b6bf868fb710395a3",
+        description="#1185: page None's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00004.md"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        new_value="> [page 4 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        description="#1185: page 4 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00005.md"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        new_value="> [page 5 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        description="#1185: page 5 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("markdown", "p6_corpus/pages/00007.md"),
+        old_value="Plain model prose for page seven.",
+        new_value="> [page 7 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nPlain model prose for page seven.",
+        description="#1185: page 7 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 3, "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 3, "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 3, "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n",
+        new_value="> [page 4 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n",
+        description="#1185: page None is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 4, "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 4, "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 4, "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n",
+        new_value="> [page 5 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n",
+        description="#1185: page None is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 6, "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 6, "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page None is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("page_contract", 6, "winning_output", "text"),
+        old_value="Plain model prose for page seven.\n",
+        new_value="> [page 7 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nPlain model prose for page seven.\n",
+        description="#1185: page None is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 4 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "page_fingerprint"),
+        old_value="sha256:9ab10f282d69bbe94e83cf767bcc4dd40e43187109b41defe01ff3209a5ef124",
+        new_value="sha256:a4d557826c04c1e8c28ac4c8351826b684e22a8179e71baafafbfea4172dad4d",
+        description="#1185: page 4's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 4 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 4 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 4 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00004.json", "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        new_value="> [page 4 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        description="#1185: page 4 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 5 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "page_fingerprint"),
+        old_value="sha256:8d07b226ffbdd6b975418d2681a1e3663805209d06ab1206a9a3b96d1617503c",
+        new_value="sha256:00602bce7467b5e6ac3dc5f5b7666b9689d48a3cbfa8443b8aa1333965a48ef4",
+        description="#1185: page 5's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 5 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 5 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 5 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00005.json", "winning_output", "text"),
+        old_value="The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        new_value="> [page 5 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
+        description="#1185: page 5 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 7 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "page_fingerprint"),
+        old_value="sha256:60d6c02e1296e142fea1a13e09fcfaa674f3637da1016601b69749497fbbfdaf",
+        new_value="sha256:35fd6529254be606d11d401967e4a1a52251aa400b05238b6bf868fb710395a3",
+        description="#1185: page 7's shipped text now carries the text_layer_numbers mark, so this content hash moves with it.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 7 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "winning_output", "failure_mode"),
+        old_value="none",
+        new_value="numbers_unchecked",
+        description="#1185: page 7 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "winning_output", "status"),
+        old_value="success",
+        new_value="warning",
+        description="#1185: page 7 is a model reading with no own text layer, so it is demoted SUCCESS->WARNING with failure_mode numbers_unchecked (text_layer_numbers UNKNOWN).",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00007.json", "winning_output", "text"),
+        old_value="Plain model prose for page seven.",
+        new_value="> [page 7 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nPlain model prose for page seven.",
+        description="#1185: page 7 is a model reading with no own text layer, so the canonical text_layer_numbers UNKNOWN mark is written at the top of its text.",
+    ),
+]
+
 EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *BUCKET_DIFFERENCES,
     *STATE_EVENT_DIFFERENCES,
@@ -1483,6 +1734,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *VERDICT_SIDECAR_1145_DIFFERENCES,
     *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
+    *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
 ]
 
 #: Exactly one entry per leaf path. The dict below would silently keep only the last entry

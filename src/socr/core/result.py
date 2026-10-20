@@ -248,6 +248,14 @@ class FailureMode(str, Enum):
     #: ``PERMANENTLY_UNRESOLVABLE_MODES``: a later run may route the page to a judge, so
     #: such a page must stay eligible for reprocessing.
     MODEL_OUTPUT_UNJUDGED = "model_output_unjudged"
+    #: #1185: a model reading ships numbers the page's own text layer does not contain
+    #: (``-8`` where the page prints ``-.8``). The page's mark names every one. In
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: the same config re-reads the same numbers.
+    NUMBERS_DISAGREE_WITH_TEXT_LAYER = "numbers_disagree_with_text_layer"
+    #: #1185: a model reading whose numbers nothing could check: the page has no text
+    #: layer of its own, or the reading ships no number to compare. Until a second,
+    #: independent reader exists (#1208) no run can do better, so it is permanent.
+    NUMBERS_UNCHECKED = "numbers_unchecked"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

@@ -6058,14 +6058,38 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
     #: something false about the page and dragged in ``PERMANENTLY_UNRESOLVABLE_MODES``
     #: (Argon P0-3, reproduced).
     by_scope_kind = {("figure", Check.FIGURE_TEXT): FailureMode.FIGURE_NOT_SHOWN}
+    # #1185: one check, two modes -- a FAIL names numbers a new reading may fix; an
+    # UNKNOWN has nothing to compare against until #1208.
+    by_result = {
+        (Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL): FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
+        (Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN): FailureMode.NUMBERS_UNCHECKED,
+    }
+    # Three lookups over disjoint checks (#1187's FIGURE_TEXT by scope, #1185's
+    # TEXT_LAYER_NUMBERS by result, the shared one by check), so a page carrying BOTH lanes'
+    # clauses gets the mode of whichever comes first in its own clause order and keeps the
+    # other lane's clause and mark untouched. Neither lane undoes the other.
     for clause in clauses:
         scoped = by_scope_kind.get((str(clause.scope).split(":", 1)[0], clause.check))
         if scoped is not None:
             return scoped
-        mode = by_check.get(clause.check)
+        mode = by_check.get(clause.check) or by_result.get((clause.check, clause.result))
         if mode is not None:
             return mode
     return FailureMode.NONE
+
+
+def apply_verdict_marks(
+    output: PageOutput,
+    p,
+    page_num: int,
+    published: PageVerdict | None = None,
+    provenance: SelectionProvenance | None = None,
+    event_kinds: frozenset[str] = frozenset(),
+) -> tuple[PageOutput, PageVerdict]:
+    """The verdict seam, for a tool outside ``core`` that re-finalizes a finished page
+    (``pipeline/refinalize_own_text.py``, #1185): the SAME function a run uses, so the
+    page's mark, status and failure mode are what a run of this code writes."""
+    return _apply_verdict_marks(output, p, page_num, published, provenance, event_kinds)
 
 
 def _apply_verdict_marks(
@@ -6818,6 +6842,16 @@ def _strip_leading_page_marker(text: str) -> str:
     m = PAGE_MARKER_RE.match(stripped)
     if m:
         return stripped[m.end() :].lstrip("\n")
+    # #1185: a page mark put at the top of such a page sits ABOVE its own header, which
+    # then survived and doubled the canonical one (found by the conformance check in
+    # ``test_assemble_writes_canonical_metadata``). Any mark can cause it; #1185 marks far
+    # more model-read pages, so it surfaced there. The marks stay first; only the
+    # header under them goes.
+    banners, body = _split_page_top_banners(stripped)
+    if banners:
+        m = PAGE_MARKER_RE.match(body.lstrip())
+        if m:
+            return _with_page_top_banners(body.lstrip()[m.end() :].lstrip("\n"), banners)
     return text
 
 

@@ -464,18 +464,25 @@ class TestWiringUnits:
         assert out.audit_passed is False
         assert out.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
 
-    def test_manifest_passing_non_native_winner_is_unaffected_by_the_flag(self) -> None:
+    def test_manifest_passing_non_native_winner_is_unaffected_by_the_flag(
+        self, monkeypatch
+    ) -> None:
         """(6) The flag only gates the NATIVE attempt. A passing non-native
         (e.g. VLM) winner must return immediately, unmodified -- the flag on
         a native page must never veto an already-won non-native page."""
+        from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
+
+        calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
         state = DocumentState(handle=_bare_handle())
         ps = state.pages[1]
         ps.is_born_digital = True
         ps.native_text = "native text"
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+        ps.own_layer_text = "native text 4.25"
         ps.native_table_structure_defective = True
         bo = PageOutput(
             page_num=1,
-            text="qwen text",
+            text="qwen text 4.25",
             status=PageStatus.SUCCESS,
             engine="qwen",
             audit_passed=True,
@@ -488,6 +495,7 @@ class TestWiringUnits:
         assert out is bo
         assert out.status == PageStatus.SUCCESS
         assert out.audit_passed is True
+        assert_agreed_on(calls, "4.25")
 
     def test_clear_fail_closed_flags_releases_the_flag(self) -> None:
         """(5) A measured improvement (table escalation accepted) must

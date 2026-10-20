@@ -34,6 +34,7 @@ Two deliberate differences from the guards
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -44,6 +45,7 @@ from socr.core.marks import (
     CheckResult,
     FAMILY_COVERAGE,
     families_of,
+    line_is_mark,
     page_failed_coverage,
     page_unchecked_clause_mark,
 )
@@ -684,8 +686,24 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
     {
         FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        # #1185: no own text layer, or no number in the reading. The check that could
+        # resolve it is a second, independent reader (#1208), which does not exist yet;
+        # when it does, the source digest in the run fingerprint re-OCRs the page anyway.
+        FailureMode.NUMBERS_UNCHECKED,
+        # #1185, and Argon's plan review: a disagreement is permanent for the SAME input
+        # and config too. The same fingerprint re-reads the same page into the same
+        # numbers, so reprocessing it on every resume would never converge (#1192's
+        # argument). A changed model or prompt changes the fingerprint and re-reads it.
+        FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
     }
 )
+
+#: #1185: the demotion modes of the ``text_layer_numbers`` clause, and the check each one
+#: records. Both are permanent (``PERMANENTLY_UNRESOLVABLE_MODES``).
+TEXT_LAYER_NUMBERS_MODES: dict[FailureMode, Check] = {
+    FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER: Check.TEXT_LAYER_NUMBERS,
+    FailureMode.NUMBERS_UNCHECKED: Check.TEXT_LAYER_NUMBERS,
+}
 
 
 #: Checks whose clause a REPROCESS could still resolve, so a page carrying one must never
@@ -834,6 +852,209 @@ def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     )
 
 
+#: #1185: the engines whose output is a MODEL READING of the page, by positive evidence:
+#: the reading engines socr can be configured with. A native lane, a chart picture, a blank
+#: receipt or an equation crop is not a reading of the page's characters by a model, and a
+#: native lane compared with its own layer would agree by construction.
+def model_reading_engines() -> frozenset[str]:
+    from socr.core.config import EngineType
+
+    return frozenset(e.value for e in EngineType if e is not EngineType.AUTO)
+
+
+#: The page judge can say "faithful" of a reading that turned ``-.8`` into ``-8``; the
+#: page's own characters cannot. These are the clause's two UNKNOWN reasons.
+#: The audit event a document records for each page this clause FAILs (#1185).
+NUMBERS_DISAGREE_KIND = "numbers_disagree_with_text_layer"
+NUMBERS_DISAGREE_EVENT_DETAIL = (
+    "the model reading ships a number this page's own text layer does not hold; the "
+    "numbers are named in the page's mark, nothing was corrected, and the page is never "
+    "counted CHECKED (#1185)"
+)
+
+
+def numbers_disagree_note(pages: list[int]) -> str:
+    """The document's ``error`` note naming the pages this clause FAILs: written by a run
+    and by ``socr-refinalize-own-text`` alike, so the two cannot word it differently."""
+    return (
+        "model reading ships numbers the page's own text layer does not hold on page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " (named on each page)"
+    )
+
+
+NO_OWN_TEXT_REASON = "this page has no text layer of its own to check the reading's numbers against"
+NO_NUMBER_REASON = "the reading ships no number to check against the page's text layer"
+#: The same, on a page whose own layer DOES print numbers: the reading may have dropped
+#: them. Counted, not named -- they include page numbers and running heads, and checking
+#: drops is issue #1218 (owner/orchestrator ruling, 2026-10-20).
+NO_NUMBER_LAYER_HAS_SOME_REASON = (
+    "the reading ships no number, while the page's text layer prints {count} "
+    "(numbers a reading drops are not checked yet: #1218)"
+)
+DAMAGED_LAYER_PREFIX = "this page's text layer is damaged, and it does not confirm: "
+#: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
+#: CHECK: the owner's ruling asks for the page's OWN born-digital text, and a refused layer
+#: may be an earlier OCR run's the analysis could not name (Argon, PR #1219 review: #961's
+#: invisible-OCR test runs after the analysis's early returns, so such a layer reached the
+#: comparator as the page's own). Overrules the round-1 asymmetry (agreement counted).
+DAMAGED_LAYER_AGREES_REASON = (
+    "the reading's numbers agree with this page's text layer, but socr's page analysis "
+    "refused that layer or found its digits damaged, so the agreement confirms nothing"
+)
+
+#: The detector's findings that a layer's DIGITS are unreliable on this page: a minus or a
+#: control byte standing in for a sign or a decimal point, an unmapped symbol font. A
+#: disagreement with such a layer may be the layer's fault (Argon, plan review: an eaten
+#: ``1`` would make "text layer says 2.8, reading says 12.8" blame a faithful reading), so
+#: it is reported as UNKNOWN, and so is an agreement with it (round 2: see
+#: ``DAMAGED_LAYER_AGREES_REASON``).
+_DAMAGED_LAYER_FLAGS = (
+    "control_byte_digit_hits",
+    "control_byte_scan_failed",
+    "minus_as_digit_hits",
+    "minus_as_digit_scan_failed",
+    "has_unrecovered_symbol_glyphs",
+)
+#: #136's COSMETIC class (lost spaces, fused words): the detector routes digit damage to
+#: OCR before it sets this, so the layer's numbers are its own and an agreement with them
+#: is a CHECK. A fused pair (``2.32.5``) can still hide a number from the comparator, so a
+#: DISPUTE on such a layer is UNKNOWN, as on a damaged one.
+_COSMETIC_LAYER_FLAGS = ("has_encoding_hygiene_suspect",)
+
+
+def _layer_is_damaged(p: Any) -> bool:
+    # A page the detector refused as born-digital may carry its own characters (an eaten
+    # digit, a garbage ratio) or an earlier OCR run's; it is compared so a dispute is
+    # NAMED, and the refusal is the damage finding either way.
+    return not _flag(p, "is_born_digital") or any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+
+
+#: How socr's OWN quoted notes open, exactly: every quote opener socr emits (marks.py,
+#: manifest.py and the chart and figure lanes). Their other lines continue the same quote
+#: block. Any other quote is the model's transcription and is checked: the earlier prefixes
+#: ``> **`` and ``> [`` also dropped a model's ``> **Note:** The rate was 9.31`` and a whole
+#: ``> **Table 3 …**`` quoted table shipping a wrong ``-8`` (socr bot, PR #1219 decision).
+_SOCR_QUOTE_OPENINGS = (
+    "> [page ",
+    "> [table unverified: ",
+    "> [table disputed: ",
+    "> **Chart region",
+    "> **Chart grids on page",
+    "> **Unresolved chart placement on page",
+    "> *Figure description",
+)
+_PAGE_HEADER_RE = re.compile(r"#{1,6}\s*Page\s+\d+\s*", re.IGNORECASE)
+
+
+def reading_numbers_text(text: str, page_num: int) -> str:
+    """The part of a shipped page that is the model's reading: socr's own lines removed.
+
+    Dropped: any recognised mark line (wherever it sits); every quote block that socr
+    opened (``_SOCR_QUOTE_OPENINGS``) -- its page and region numbers are socr's, not the
+    reading's; and a ``## Page N`` header, which assembly strips and which is not one of
+    the page's numbers. A quote the MODEL transcribed is kept and checked: dropping every
+    quote let a wrong number inside one ship on a page counted CHECKED (Argon, diff
+    review).
+    """
+    kept = []
+    in_socr_quote = False
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(">"):
+            in_socr_quote = False
+        elif not in_socr_quote and stripped.startswith(_SOCR_QUOTE_OPENINGS):
+            in_socr_quote = True
+        if (
+            not stripped
+            or in_socr_quote
+            or line_is_mark(stripped, page_num)
+            or _PAGE_HEADER_RE.fullmatch(stripped)
+        ):
+            continue
+        kept.append(line.lstrip("> ") if stripped.startswith(">") else line)
+    return "\n".join(kept)
+
+
+def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """#1185: a model reading is CHECKED only if its numbers occur in the page's own text.
+
+    Measured on the Fed calibration run: 2018 Tealbook p125 shipped ``-8`` for a printed
+    ``-.8`` with ``judge_reason=faithful`` and nothing comparing the table's numbers with
+    the layer. The comparison is ``tables.reading_agreement.compare_numbers`` (a page
+    multiset; what it cannot see is stated there).
+
+    * Not a model reading, no text, or a page-failed marker (no reading ships): no clause.
+    * The page's layer is an earlier OCR run (#1156): no clause here -- #1156's own clause
+      already marks the page, and #1217 is that layer's agreement path.
+    * No text layer of its own: UNKNOWN. The seam for #1208: an independent reader's
+      agreement would be the evidence that clears this; nothing produces one yet.
+    * The reading ships no number: UNKNOWN. Agreement over nothing is vacuous (the owner's
+      ruling: CHECKED requires ``compared > 0``).
+    * Numbers the layer has and the reading lacks are NOT checked here (issue #1218).
+    * A shipped number the layer does not hold: FAIL, and every one is NAMED -- UNKNOWN
+      when the detector refused the layer or found its digits damaged (still named).
+    * Every number agrees, on a layer the detector refused or found damaged: UNKNOWN. Only
+      agreement with a born-digital, undamaged layer is a CHECK.
+    """
+    from socr.tables.reading_agreement import (
+        PROVENANCE_OWN_CHARACTERS,
+        compare_numbers,
+        describe_disputes,
+    )
+
+    from socr.core.manifest import is_page_failed_marker
+
+    if (output.engine or "") not in model_reading_engines() or not (output.text or "").strip():
+        return None
+    # A page that ships socr's ``[page N failed: ...]`` marker ships none of the reading,
+    # so there is nothing to compare; its marker already marks it. Without this the
+    # sidecar carried an UNKNOWN clause that no line on the page states, because
+    # ``_apply_verdict_marks`` never writes above a whole-page failure marker -- one
+    # surface saying what another does not (found by the p6 stage C oracle, page 9).
+    if is_page_failed_marker(output.text):
+        return None
+    if _flag(p, "prior_ocr_layer_suspect"):
+        return None
+    reference = getattr(p, "own_layer_text", "")
+    if not isinstance(reference, str) or not reference.strip():
+        return VerdictClause(
+            Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, NO_OWN_TEXT_REASON
+        )
+    record = compare_numbers(
+        reference,
+        reading_numbers_text(output.text, output.page_num),
+        provenance=PROVENANCE_OWN_CHARACTERS,
+    )
+    if record.compared == 0:
+        layer_count = record.reference_only
+        reason = (
+            NO_NUMBER_LAYER_HAS_SOME_REASON.format(count=layer_count)
+            if layer_count
+            else NO_NUMBER_REASON
+        )
+        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+    if _layer_is_damaged(p):
+        reason = (
+            DAMAGED_LAYER_PREFIX + describe_disputes(record)
+            if record.disputed
+            else DAMAGED_LAYER_AGREES_REASON
+        )
+        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+    if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
+        return VerdictClause(
+            Check.TEXT_LAYER_NUMBERS,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            DAMAGED_LAYER_PREFIX + describe_disputes(record),
+        )
+    if record.disputed:
+        return VerdictClause(
+            Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)
+        )
+    return None
+
+
 def silent_success_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
 ) -> tuple[VerdictClause, ...]:
@@ -846,17 +1067,55 @@ def silent_success_clauses(
     does the judge-crashed winner whose ``audit_passed`` stayed True (measured 0 pages, and
     the hole confirmed at the seam -- see the slice-2 log).
     """
-    clauses: list[VerdictClause] = []
-    for clause in (
+    numbers = text_layer_numbers_clause(output, p)
+    return (
+        *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
+        *((numbers,) if numbers is not None else ()),
+    )
+
+
+def _clauses_ahead_of_text_layer_numbers(
+    output: PageOutput, p: Any, event_kinds: frozenset[str]
+) -> tuple[VerdictClause, ...]:
+    clauses = (
         _equation_fidelity_clause(event_kinds),
         _chart_values_clause(event_kinds),
         _exact_pass_unjudged_clause(output, event_kinds),
         _prior_ocr_layer_clause(output, p),
+        # #1187 (merge with #1185): INSIDE the ahead tuple, not after the numbers clause.
+        # This tuple is the single ordering authority -- ``with_text_layer_numbers_clause``
+        # slots #1185's clause by the COUNT of what precedes it -- so a lane that derived its
+        # clauses anywhere else would make a re-finalized page's marks sit in a different
+        # order from a fresh run's. The two lanes are independent and BOTH may mark one page:
+        # a figure this page names and does not show, and numbers its text layer disputes,
+        # are different facts and neither undoes the other.
         *_unshipped_figure_clauses(p),
-    ):
-        if clause is not None:
-            clauses.append(clause)
-    return tuple(clauses)
+    )
+    return tuple(clause for clause in clauses if clause is not None)
+
+
+def with_text_layer_numbers_clause(
+    published: PageVerdict,
+    clause: VerdictClause,
+    output: PageOutput,
+    p: Any,
+    event_kinds: frozenset[str],
+) -> PageVerdict:
+    """*published* (a verdict written without #1185) with *clause* where a run of this code
+    puts it: after the silent-success clauses that precede it in
+    :func:`silent_success_clauses`, before every status-dependent one. Those precede it by
+    COUNT, not by check: a status clause about the same check replaces a silent one in
+    place (``_merge_clause``), so the slot is the silent clause's whatever its wording.
+    *p* and *event_kinds* are what the writing run saw (Argon, PR #1219 review: appending
+    put the mark below Tealbook p125's chart mark, unlike a fresh run).
+
+    It assumes the run derived the silent-success clauses this code derives. A run older
+    than one of them (run 23319732 predates #1181's ``page_judge`` clause) published fewer,
+    so on a page that also carries a status clause the slot is one late; at most the 5
+    EXACT_PASS pages of that run (Fable, round-2 review P2-3)."""
+    ahead = len(_clauses_ahead_of_text_layer_numbers(output, p, event_kinds))
+    clauses = published.clauses
+    return replace(published, clauses=(*clauses[:ahead], clause, *clauses[ahead:]))
 
 
 def derive_clauses(
@@ -1023,6 +1282,16 @@ def _status_is_explained(
         return any(
             c.check is Check.FIGURE_TEXT and str(c.scope).startswith("figure:") for c in clauses
         )
+    # #1185: a mode whose clause wording names the page's own numbers cannot sit in
+    # ``_MODE_CLAUSES`` (a fixed reason there would REPLACE the named one in
+    # ``_merge_clause``). It is explained when the clause it records is present.
+    #
+    # Two independent early returns, deliberately: a page can carry BOTH a figure it does not
+    # show and numbers its layer disputes, and the mode records only the one that demoted it
+    # first. Each asks about its own clause, so neither lane's answer depends on the other's.
+    check = TEXT_LAYER_NUMBERS_MODES.get(output.failure_mode)
+    if check is not None and any(c.check is check for c in clauses):
+        return True
     status_free = set(silent_success_clauses(output, p, event_kinds))
     return bool([c for c in clauses if c not in status_free])
 

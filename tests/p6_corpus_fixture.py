@@ -426,6 +426,8 @@ def legacy_resume_capture(tmp_dir: Path) -> dict:
         page.is_born_digital = True
         page.has_tables = True
         page.native_text = LEGACY_RESUME_NATIVE_FLATTENED
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+        page.own_layer_text = LEGACY_RESUME_MODEL_GRID
         return state
 
     native_attempt = PageOutput(

@@ -33,6 +33,8 @@ from socr.core.result import DocumentStatus, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
+from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
 # ---------------------------------------------------------------------------
 # Shared helpers (mirror the PP-2 harness)
 # ---------------------------------------------------------------------------
@@ -91,19 +93,33 @@ def _make_pipeline(config: PipelineConfig | None = None) -> UnifiedPipeline:
 
 
 def _bd_assessment(
-    page_count: int, born_digital_pages: set[int] | None = None
+    page_count: int,
+    born_digital_pages: set[int] | None = None,
+    own_layers: dict[int, str] | None = None,
 ) -> DocumentAssessment:
     bd = born_digital_pages or set()
+    layers = own_layers or {}
     pages = [
         PageAssessment(
             page_num=i,
             is_born_digital=i in bd,
             native_text=f"native text for page {i} " * 5 if i in bd else "",
             confidence=0.9,
+            own_layer_text=layers.get(i, ""),
         )
         for i in range(1, page_count + 1)
     ]
     return DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=pages)
+
+
+def _born_digital_layer(assessment: DocumentAssessment) -> DocumentAssessment:
+    """#1185 round 2 (approved fixture change, Argon finding 8): the control's own layer is
+    born-digital -- agreement with a refused layer is no longer a CHECK. Its native text
+    stays empty, so the page still routes to the model reading under test."""
+    for page in assessment.pages:
+        if page.own_layer_text:
+            page.is_born_digital = True
+    return assessment
 
 
 def _real_pdf(tmp_path: Path, page_count: int = 3) -> Path:
@@ -117,7 +133,7 @@ def _real_pdf(tmp_path: Path, page_count: int = 3) -> Path:
     return path
 
 
-def _counting_route(route_calls: list[int]):
+def _counting_route(route_calls: list[int], texts: dict[int, str] | None = None):
     """route_page side_effect that records each page routed and returns its text."""
 
     def _route(page_num, ladder, run_provider, judge, **kwargs):
@@ -126,7 +142,7 @@ def _counting_route(route_calls: list[int]):
         route_calls.append(page_num)
         out = PageOutput(
             page_num=page_num,
-            text=_PAGE_TEXTS[page_num],
+            text=(texts or _PAGE_TEXTS)[page_num],
             status=PageStatus.SUCCESS,
             engine="gemini",
             audit_passed=True,
@@ -147,11 +163,20 @@ def _counting_route(route_calls: list[int]):
     return _route
 
 
-def _run(pipeline: UnifiedPipeline, pdf_path: Path, out_dir: Path, route_calls: list[int]):
+def _run(
+    pipeline: UnifiedPipeline,
+    pdf_path: Path,
+    out_dir: Path,
+    route_calls: list[int],
+    texts: dict[int, str] | None = None,
+):
     """Drive a full process() run with a hermetic ladder + counting route_page."""
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_GEMINI]),
-        patch("socr.pipeline.orchestrator.route_page", side_effect=_counting_route(route_calls)),
+        patch(
+            "socr.pipeline.orchestrator.route_page",
+            side_effect=_counting_route(route_calls, texts),
+        ),
     ):
         return pipeline.process(pdf_path, out_dir)
 
@@ -537,18 +562,29 @@ class TestNonTerminalNotSkipped:
             f"A terminal sidecar without its fragment must reprocess; got {run2_calls}"
         )
 
-    def test_non_success_status_reprocessed(self, tmp_path: Path) -> None:
+    def test_non_success_status_reprocessed(self, tmp_path: Path, monkeypatch) -> None:
         """A terminal sidecar whose winning_output status is NOT success (e.g. an
         ERROR / timed-out page written terminal at assemble) must be RE-OCR'd,
         never skipped — this is the cascade-halt silent-data-loss vector."""
+        # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
+        calls = spy_agreement(monkeypatch)  # must be installed before the code under test runs
+        control_text = _PAGE_TEXTS[1] + " The estimate is 4.25."
+        texts = {**_PAGE_TEXTS, 1: control_text}
+        layers = {1: control_text}
         pdf_path = _real_pdf(tmp_path, page_count=2)
         pipeline = _make_pipeline(_make_config())
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _bd_assessment(2)
+        pipeline.bd_detector.detect.return_value = _born_digital_layer(
+            _bd_assessment(2, own_layers=layers)
+        )
 
         run1_calls: list[int] = []
-        _run(pipeline, pdf_path, tmp_path, run1_calls)
+        _run(pipeline, pdf_path, tmp_path, run1_calls, texts=texts)
         assert sorted(run1_calls) == [1, 2]
+        # #1185: the control reading was compared against its own layer and agreed.
+        assert_agreed_on(calls, "estimate is 4.25")
+        meta1 = json.loads((_doc_dir(tmp_path) / "pages" / "00001.json").read_text())
+        assert meta1["winning_output"]["engine"] == "gemini"  # still a model reading
 
         pages_dir = _doc_dir(tmp_path) / "pages"
         # Demote p2's winning output to ERROR status (terminal stays True, same fp,
@@ -559,9 +595,11 @@ class TestNonTerminalNotSkipped:
 
         pipeline2 = _make_pipeline(_make_config(reprocess=True))
         pipeline2.bd_detector = MagicMock()
-        pipeline2.bd_detector.detect.return_value = _bd_assessment(2)
+        pipeline2.bd_detector.detect.return_value = _born_digital_layer(
+            _bd_assessment(2, own_layers=layers)
+        )
         run2_calls: list[int] = []
-        _run(pipeline2, pdf_path, tmp_path, run2_calls)
+        _run(pipeline2, pdf_path, tmp_path, run2_calls, texts=texts)
 
         assert run2_calls == [2], (
             f"A non-SUCCESS terminal page must be re-OCR'd; p1 (clean) skipped. got {run2_calls}"
@@ -672,7 +710,9 @@ class TestNonTerminalNotSkipped:
         meta = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
         assert meta["winning_output"]["engine"] == "marker", meta["winning_output"]
         assert "recovered whole-doc body" in meta["winning_output"]["text"]
-        assert meta["status"] == PageStatus.SUCCESS.value
+        # #1185: the marked engine is a model reading with no own text layer (hand-built
+        # PageState), so the page is MARKED (text_layer_numbers=UNKNOWN) and is WARNING.
+        assert meta["status"] == PageStatus.WARNING.value
 
     def test_failure_marker_body_reprocessed(self, tmp_path: Path) -> None:
         """A terminal page whose fragment body is a page-failure marker must be

@@ -40,6 +40,18 @@ from socr.pipeline import refinalize_unshipped_figures as tool
 from socr.pipeline.orchestrator import UNSHIPPED_FIGURE_EVENT_KINDS, UnifiedPipeline
 
 
+def _figure_clauses(verdict) -> list:
+    """This lane's clauses only.
+
+    After the #1185 merge a stub ``PageState`` has no own text layer, so
+    ``text_layer_numbers_clause`` fires on one too. These tests are about THIS lane, and the
+    two lanes are independent: a figure a page does not show and numbers its layer disputes
+    are different facts and neither undoes the other. Asserting an EMPTY clause list would
+    now be asserting that the other lane is switched off.
+    """
+    return [c for c in verdict.clauses if c.check is Check.FIGURE_TEXT]
+
+
 def test_loaded_source_is_this_checkout() -> None:
     import socr
 
@@ -219,19 +231,22 @@ def test_verdict_difference_unlocated_caption_vs_none() -> None:
     marked = build_page_verdict(
         page_num=1, output=out, p=_p([], unshipped_figure_unlocated=["Figure 7"])
     )
-    assert clean.clauses == (), "a page whose crop shipped is not marked"
-    assert [c.check for c in marked.clauses] == [Check.FIGURE_TEXT]
-    assert marked.clauses[0].result is CheckResult.UNKNOWN
-    assert marked.clauses[0].scope == "figure:1"
+    assert _figure_clauses(clean) == [], "no figure clause when this lane did not mark"
+    figure = _figure_clauses(marked)
+    assert [c.check for c in figure] == [Check.FIGURE_TEXT]
+    assert figure[0].result is CheckResult.UNKNOWN
+    assert figure[0].scope == "figure:1"
 
 
 def test_an_unlocated_caption_demotes_a_success_page_and_records_why() -> None:
     out = _out("Figure 7: Bias and MSE.\n\nNote: ...")
-    clean, _ = manifest._apply_verdict_marks(out, _p(REFS), 1)
+    clean, _v_clean = manifest._apply_verdict_marks(out, _p(REFS), 1)
     marked, verdict = manifest._apply_verdict_marks(
         out, _p([], unshipped_figure_unlocated=["Figure 7"]), 1
     )
-    assert clean.text == out.text and clean.status is PageStatus.SUCCESS
+    assert clean.status is PageStatus.SUCCESS or Check.TEXT_LAYER_NUMBERS in {
+        c.check for c in _v_clean.clauses
+    }, "the control page is demoted by the other lane only, if at all"
     assert marked.status is PageStatus.WARNING, "the status is what other consumers read"
     assert marked.failure_mode is FailureMode.FIGURE_NOT_SHOWN
     assert leading_marks(marked.text, 1), "the page is MARKED: its first block is the mark"
@@ -661,7 +676,10 @@ def test_the_finalisation_seam_applies_the_lane(tmp_path: Path) -> None:
     assert all(f"]({ref})" not in (bare.output.text or "") for ref in REFS)
     for ref in REFS:
         assert f"]({ref})" in (shipped.output.text or "")
-    assert (shipped.output.text or "").startswith(_MODEL_BODY)
+    # The other lane marks this stub page too (no own text layer), so the body is no longer
+    # the first thing on it. What this test is about is that the crops arrived and the page's
+    # own reading survived intact.
+    assert _MODEL_BODY in (shipped.output.text or "")
 
     p.unshipped_figure_refs = []
     p.unshipped_figure_unlocated = ["Figure 7"]
@@ -669,6 +687,7 @@ def test_the_finalisation_seam_applies_the_lane(tmp_path: Path) -> None:
     assert leading_marks(marked.output.text or "", 1), "the seam marks an unshown figure"
     assert marked.output.status is PageStatus.WARNING
     assert any(c.check is Check.FIGURE_TEXT for c in marked.verdict.clauses)
+    assert any(c.scope.startswith("figure:") for c in marked.verdict.clauses)
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +943,7 @@ def test_re_deriving_a_marked_page_adds_no_second_contradictory_clause() -> None
     first, v1 = manifest._apply_verdict_marks(out, p, 1)
     second, v2 = manifest._apply_verdict_marks(first, p, 1)
     third, v3 = manifest._apply_verdict_marks(second, p, 1)
-    assert [(c.check, c.scope) for c in v1.clauses] == [(Check.FIGURE_TEXT, "figure:1")]
+    assert [(c.check, c.scope) for c in _figure_clauses(v1)] == [(Check.FIGURE_TEXT, "figure:1")]
     assert v1.to_dict() == v2.to_dict() == v3.to_dict(), "no second clause, ever"
     assert first.text == second.text == third.text, "and the body is idempotent"
     assert "ships as an image" not in second.text
@@ -1133,3 +1152,95 @@ def test_an_interrupted_run_on_an_ALREADY_marked_page_is_repaired_not_doubled(
         path.write_bytes(raw)
     assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path), "the page comes back unanswered"
     assert _tree(out) == once, "redoing an interrupted run must give the same bytes"
+
+
+# =========================================================================================
+# The #1185 merge: two independent lanes, one page.
+# =========================================================================================
+
+
+def test_a_figure_mark_and_a_numbers_mark_co_exist_on_one_page() -> None:
+    """Neither lane undoes the other, and the order matches a fresh run.
+
+    #1185 marks a page whose text layer disputes the reading's numbers; #1187 marks a page
+    that names a figure it does not show. They are different facts about different things and
+    a page can carry both. ``_clauses_ahead_of_text_layer_numbers`` is the single ordering
+    authority, and this lane's clauses are inside it, so the figure clause precedes the
+    numbers clause on a fresh run.
+    """
+    from socr.core.verdict import silent_success_clauses
+
+    out = _out("Figure 7: X.\n\nprose")
+    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
+    clauses = silent_success_clauses(out, p)
+    checks = [c.check for c in clauses]
+    assert Check.FIGURE_TEXT in checks, "this lane's clause survives the merge"
+    assert Check.TEXT_LAYER_NUMBERS in checks, "the other lane's clause survives too"
+    assert checks.index(Check.FIGURE_TEXT) < checks.index(Check.TEXT_LAYER_NUMBERS), (
+        "a fresh run puts the figure clause ahead of the numbers clause"
+    )
+
+    marked, verdict = manifest._apply_verdict_marks(out, p, 1)
+    from socr.core.marks import leading_mark_blocks
+
+    assert leading_marks(marked.text, 1), "the page is MARKED"
+    # Two separate blockquote blocks, so ``leading_marks`` (the meter's question -- is the
+    # FIRST block all marks) sees one and ``leading_mark_blocks`` walks both.
+    assert len(leading_mark_blocks(marked.text, 1)) == 2, "both marks are written, not one"
+    assert "Figure 7" in marked.text and "numbers" in marked.text
+
+
+def test_the_other_lanes_tool_counts_this_lanes_clauses() -> None:
+    """``with_text_layer_numbers_clause`` slots its clause by the COUNT ahead of it.
+
+    ``socr-refinalize-own-text`` rebuilds a stand-in ``PageState`` to compute that count. If
+    it does not restore this lane's two fields, the count is short on a page that also names
+    a figure it does not show, and the numbers mark lands ABOVE the figure mark — unlike a
+    fresh run (Fable, round-2 P2).
+    """
+    from socr.core.state import PageState
+    from socr.core.verdict import _clauses_ahead_of_text_layer_numbers
+
+    out = _out("Figure 7: X.\n\nprose")
+    blind = PageState(page_num=1)
+    seeing = PageState(page_num=1)
+    seeing.unshipped_figure_unlocated = ["Figure 7"]
+    seeing.unshipped_figure_kind = UNLOCATED_KIND
+    assert (
+        len(_clauses_ahead_of_text_layer_numbers(out, seeing, frozenset()))
+        == len(_clauses_ahead_of_text_layer_numbers(out, blind, frozenset())) + 1
+    ), "this lane's clause must be counted among those ahead"
+
+    # Behavioural, not a grep: the stand-in the other lane's tool builds must produce the
+    # same count as the page state a live run had.
+    from socr.pipeline.refinalize_own_text import slot_reference_state
+
+    stand_in = slot_reference_state(
+        {"unshipped_figure_unlocated": ["Figure 7"], "unshipped_figure_kind": UNLOCATED_KIND}, 1
+    )
+    assert len(_clauses_ahead_of_text_layer_numbers(out, stand_in, frozenset())) == len(
+        _clauses_ahead_of_text_layer_numbers(out, seeing, frozenset())
+    ), "the other lane's stand-in must count what a live page state counts"
+
+
+def test_this_lanes_tool_keeps_a_numbers_clause_behind_its_own(tmp_path: Path) -> None:
+    """The mirror: this tool must not append its clause below one the other lane wrote.
+
+    Appending would order the two marks one way when this tool runs after
+    ``socr-refinalize-own-text`` and the other way when it runs before — and neither would
+    match a fresh run on a page both lanes touch.
+    """
+    numbers = {
+        "check": "text_layer_numbers",
+        "result": "UNKNOWN",
+        "scope": "page",
+        "reason": "this page has no text layer of its own",
+    }
+    verdict = tool._published_verdict(
+        {"verdict": {"clauses": [numbers]}},
+        1,
+        clause_records(1, ("Figure 7",), UNLOCATED_KIND),
+    )
+    checks = [c.check for c in verdict.clauses]
+    assert checks.index(Check.FIGURE_TEXT) < checks.index(Check.TEXT_LAYER_NUMBERS)
+    assert len(checks) == 2, "neither clause is dropped"

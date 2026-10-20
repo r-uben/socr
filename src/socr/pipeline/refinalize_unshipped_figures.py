@@ -215,10 +215,21 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
     """
     from socr.core.verdict import PageVerdict, VerdictClause
 
-    recorded = (sidecar.get("verdict") or {}).get("clauses") or []
+    # #1187 (merge with #1185): this lane's clauses go AHEAD of a ``text_layer_numbers``
+    # clause, because ``verdict._clauses_ahead_of_text_layer_numbers`` puts them there on a
+    # fresh run. Appending them would order the two marks one way when this tool runs after
+    # ``socr-refinalize-own-text`` and the other way round when it runs before -- and neither
+    # would match a fresh run on a page both lanes touch.
+    from socr.core.marks import Check as _Check
+
+    recorded_all = (sidecar.get("verdict") or {}).get("clauses") or []
+    _numbers = _Check.TEXT_LAYER_NUMBERS.value
+    ahead = [r for r in recorded_all if r.get("check") != _numbers]
+    behind = [r for r in recorded_all if r.get("check") == _numbers]
+    recorded = ahead
     clauses: list = []
     seen: set[tuple[str, str, str, str]] = set()
-    for record in [*recorded, *new_records]:
+    for record in [*recorded, *new_records, *behind]:
         try:
             clause = VerdictClause.from_dict(record)
         except Exception:  # noqa: BLE001 -- an unreadable record states nothing

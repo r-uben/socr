@@ -129,10 +129,17 @@ def test_build_and_replay_matches_canonical_body(tmp_path):
 
     # Replay now emits the canonical '## Page N' body (assemble_pages), the same
     # assembler socr uses for the saved .md — bit-consistent with disk.
-    assert out == assemble_pages(["OCR output for page 1", "OCR output for page 2"])
+    # #1185: hand-built PageState has no own_layer_text, so each model reading
+    # is MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+    assert out == assemble_pages(
+        [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 1",
+            "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 2",
+        ]
+    )
     assert split_native_pages(out) == [
-        "OCR output for page 1",
-        "OCR output for page 2",
+        "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 1",
+        "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 2",
     ]
 
 
@@ -154,7 +161,15 @@ def test_replay_from_disk_invokes_no_engine(tmp_path):
 
     from ocr_output_contract import assemble_pages
 
-    expected = assemble_pages([f"OCR output for page {i}" for i in range(1, 4)])
+    # #1185: hand-built PageState has no own_layer_text, so each model reading
+    # is MARKED (text_layer_numbers UNKNOWN) at the top of its page.
+    expected = assemble_pages(
+        [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 1",
+            "> [page 2 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 2",
+            "> [page 3 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nOCR output for page 3",
+        ]
+    )
     assert out == expected
 
 
@@ -339,4 +354,11 @@ def test_ocr_pages_get_image_hash_native_pages_do_not(tmp_path):
 
     from ocr_output_contract import assemble_pages
 
-    assert replay(manifest, store) == assemble_pages(["ocr p1", "native p2"])
+    # #1185: page 1 is a model reading with no own_layer_text, so it is MARKED
+    # (text_layer_numbers UNKNOWN). Page 2 is native text and carries no clause.
+    assert replay(manifest, store) == assemble_pages(
+        [
+            "> [page 1 unchecked: text_layer_numbers=UNKNOWN; scope=page; reason=this page has no text layer of its own to check the reading's numbers against]\n\nocr p1",
+            "native p2",
+        ]
+    )

@@ -145,7 +145,12 @@ from socr.pipeline.agentic import (
     route_page,
 )
 from socr.core.ollama_utils import probe_model_generation
-from socr.core.verdict import NATIVE_TABLE_EXACT_PASS_KIND
+from socr.core.verdict import (
+    NATIVE_TABLE_EXACT_PASS_KIND,
+    NUMBERS_DISAGREE_EVENT_DETAIL,
+    NUMBERS_DISAGREE_KIND,
+    numbers_disagree_note,
+)
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
@@ -16998,6 +17003,24 @@ class UnifiedPipeline:
             is_permanently_unverifiable = _resume_verdict_is_permanently_unverifiable(
                 meta.get("verdict"), winning.get("failure_mode")
             )
+            # #1185: the two ``text_layer_numbers`` modes are written ONLY by the verdict
+            # demotion of a SUCCESS page, which makes it WARNING. A sidecar carrying one
+            # with any other status is not a page this run demoted, so doubt reprocesses
+            # (found by ``test_non_success_status_reprocessed``: an ERROR page kept for
+            # ever on the strength of its mode alone).
+            if is_permanently_unverifiable:
+                from socr.core.result import FailureMode as _FM
+                from socr.core.verdict import TEXT_LAYER_NUMBERS_MODES
+
+                try:
+                    _mode = _FM(str(winning.get("failure_mode") or ""))
+                except ValueError:
+                    _mode = None
+                if (
+                    _mode in TEXT_LAYER_NUMBERS_MODES
+                    and winning.get("status") != PageStatus.WARNING.value
+                ):
+                    is_permanently_unverifiable = False
 
             # #1192, the FOURTH deliberate exception, and the same argument as the three
             # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only
@@ -18826,6 +18849,23 @@ class UnifiedPipeline:
             and p.best_output
             and n not in failed_pages
         ]
+        # #1185: a model reading that ships a number its page's own (born-digital) text
+        # layer does not hold. The page is WARNING and names the numbers; the document
+        # cannot report a clean SUCCESS over it (Fable, PR #1219 review: it did). Only the
+        # FAIL: the clause's UNKNOWN (no own layer, no number, a damaged layer) stays at the
+        # page, as the equation / chart / unjudged clauses do (#1145) -- it says the check
+        # could not run, not that a number is contradicted.
+        from socr.core.verdict import Check as _Check, CheckResult as _CheckResult
+
+        numbers_disagree_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.verdict is not None
+            and any(
+                c.check is _Check.TEXT_LAYER_NUMBERS and c.result is _CheckResult.FAIL
+                for c in r.verdict.clauses
+            )
+        )
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -19048,6 +19088,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not minus_retained_pages
         pages_ok = pages_ok and not invisible_retained_pages
         pages_ok = pages_ok and not prior_ocr_retained_pages
+        pages_ok = pages_ok and not numbers_disagree_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -19376,6 +19417,7 @@ class UnifiedPipeline:
             or minus_retained_pages
             or invisible_retained_pages
             or prior_ocr_retained_pages
+            or numbers_disagree_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -19549,6 +19591,17 @@ class UnifiedPipeline:
                             else "native"
                         ),
                         detail=PRIOR_OCR_RETAINED_EVENT_DETAIL,
+                    )
+                )
+            for n in numbers_disagree_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=NUMBERS_DISAGREE_KIND,
+                        engine=(
+                            state.pages[n].best_output.engine if state.pages[n].best_output else ""
+                        ),
+                        detail=NUMBERS_DISAGREE_EVENT_DETAIL,
                     )
                 )
             for n in garbled_math_retained_pages:
@@ -19919,6 +19972,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(prior_ocr_retained_pages)} page(s) carry an earlier "
                         "OCR run's text layer that no independent reading has agreed with "
                         f"(marked, not checked): {prior_ocr_retained_pages}[/yellow]"
+                    )
+                if numbers_disagree_pages:
+                    console.print(
+                        f"  [yellow]{len(numbers_disagree_pages)} model-read page(s) ship a "
+                        "number the page's own text layer does not hold (named on the page): "
+                        f"{numbers_disagree_pages}[/yellow]"
                     )
                 if garbled_math_retained_pages:
                     console.print(
@@ -20487,6 +20546,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_scanned_fig_note}"
             else:
                 final_result.error = _scanned_fig_note
+        # #1185: and the pages whose numbers their own text layer contradicts.
+        if numbers_disagree_pages:
+            _numbers_note = numbers_disagree_note(numbers_disagree_pages)
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_numbers_note}"
+            else:
+                final_result.error = _numbers_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
