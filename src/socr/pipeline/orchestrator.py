@@ -835,6 +835,23 @@ def _page_blob_key(page_output_dict: dict) -> str:
 # GH-214: process-lifetime cache for the source digest. Computed once, not per page.
 _SOURCE_DIGEST_CACHE: str | None = None
 
+#: The audit detail of a page that needed OCR and shipped its native text flagged. A
+#: constant for the same reason as the one below.
+NATIVE_FALLBACK_EVENT_DETAIL = (
+    "structured/enhancement page did not ship a passing OCR "
+    "result (OCR failed, was skipped, or ran under --native-only); "
+    "native text shipped flagged"
+)
+
+#: #1156: the audit detail of a page whose text layer is an earlier OCR run. A constant
+#: so ``pipeline.refinalize_prior_ocr`` writes the same event a fresh run does.
+PRIOR_OCR_RETAINED_EVENT_DETAIL = (
+    "this page's text layer is an EARLIER OCR run's reading, not "
+    "the document's own characters (or the scan for that failed), and no "
+    "independent reading has agreed with it; the page is marked "
+    '"earlier OCR, not re-read" and is never counted CHECKED'
+)
+
 
 def _manifest_versions() -> tuple[str, str]:
     """(NORMALIZER_VERSION, ASSEMBLY_VERSION), read at call time.
@@ -16045,7 +16062,9 @@ class UnifiedPipeline:
             # its bytes; the second carrier is the layer of a page an early born-digital
             # rejection left with no native text at all, which the census puts at ~3,960
             # Fed pages (#1203).
-            layer = getattr(ps, "native_text", "") or getattr(ps, "prior_ocr_layer_text", "") or ""
+            from socr.core.manifest import retained_prior_ocr_layer
+
+            layer = retained_prior_ocr_layer(ps)
             if layer:
                 payload["prior_ocr_layer_text"] = layer
 
@@ -19179,9 +19198,7 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="native_fallback",
                         engine="native",
-                        detail="structured/enhancement page did not ship a passing OCR "
-                        "result (OCR failed, was skipped, or ran under --native-only); "
-                        "native text shipped flagged",
+                        detail=NATIVE_FALLBACK_EVENT_DETAIL,
                     )
                 )
             for n in judge_timeout_native_pages:
@@ -19289,10 +19306,7 @@ class UnifiedPipeline:
                             if state.pages[n].best_output
                             else "native"
                         ),
-                        detail="this page's text layer is an EARLIER OCR run's reading, not "
-                        "the document's own characters (or the scan for that failed), and no "
-                        "independent reading has agreed with it; the page is marked "
-                        '"earlier OCR, not re-read" and is never counted CHECKED',
+                        detail=PRIOR_OCR_RETAINED_EVENT_DETAIL,
                     )
                 )
             for n in garbled_math_retained_pages:
@@ -21233,7 +21247,22 @@ class UnifiedPipeline:
                 )
         # #1030: a page that already ships its scanned-figure page image must not get a second
         # one (the extractor would emit the same raster as a full-page "figure").
-        _own_image = {n for n, _p in state.pages.items() if _p.scanned_figure_png_ref}
+        # #1156 Part B: the same for the earlier-OCR page image, but only where the page's
+        # SHIPPED body carries it. The masked layer now ships as prose, so the extractor's
+        # full-page "figure" was embedded beside the page image -- the same raster twice.
+        # The ref is rendered before selection, so a page that ships a model reading
+        # instead also carries it, and skipping on the ref alone dropped that page's
+        # figures (Argon, diff review).
+        from socr.core.manifest import page_ships_its_own_page_image
+
+        _shipped_bodies = split_native_pages(text)
+        _own_image = {
+            n
+            for n, _p in state.pages.items()
+            if page_ships_its_own_page_image(
+                _p, _shipped_bodies[n - 1] if 0 < n <= len(_shipped_bodies) else ""
+            )
+        }
         if _own_image:
             skip_pages = (skip_pages or set()) | _own_image
         extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)

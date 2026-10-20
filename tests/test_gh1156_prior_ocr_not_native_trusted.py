@@ -207,8 +207,9 @@ def test_suspicion_alone_does_not_delete_the_native_text() -> None:
 
     * suspicion ALONE (the union flag, e.g. from another route's failed scan) keeps the
       page's text -- a detector false positive must not destroy clean born-digital prose;
-    * #1027's key (``invisible_text_over_raster``) keeps its own floor, unchanged;
-    * #1156's POSITIVE detection withholds the layer, which is the owner's interim ruling;
+    * #1027's key (``invisible_text_over_raster``) with surviving words takes the masked
+      ending, the same as #1156's key (#1156 Part B);
+    * #1156's POSITIVE detection takes the masked ending: prose ships, numbers withheld;
     * #1156's FAILED scan ("unknown") keeps the text, because unknown is not a finding.
     """
     suspect_only, prov_suspect = _select_page_output_tagged(
@@ -225,21 +226,21 @@ def test_suspicion_alone_does_not_delete_the_native_text() -> None:
     )
     assert "estimated effect" in suspect_only.text
 
-    assert prov_floor is SelectionProvenance.INVISIBLE_SCAN_UNREAD
-    assert "estimated effect" not in floor.text
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert prov_floor is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
+    assert "estimated effect" in floor.text
+    assert floor.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
 
-    assert prov_detected is SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
-    assert "estimated effect" not in detected.text, (
-        "the earlier OCR layer shipped; the interim rule is marker plus page image only"
-    )
-    assert "earlier OCR, not re-read" in detected.text
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert prov_detected is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
+    assert "estimated effect" in detected.text, "the masked ending dropped the layer's prose"
     assert detected.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
 
 
 def test_the_withheld_page_ships_no_number_of_the_old_layer() -> None:
-    """The ruling is "no prior-layer text and NO numbers", so pin the numbers too.
+    """The ruling is "prose ships, NO numbers", so pin the numbers too.
 
-    A prose-only fixture cannot show this: a floor that stripped letters and kept digits
+    A prose-only fixture cannot show this: a masking that stripped letters and kept digits
     would pass the test above. The layer here is numeric, and not one of its figures may
     appear in anything the page ships.
     """
@@ -248,12 +249,12 @@ def test_the_withheld_page_ships_no_number_of_the_old_layer() -> None:
     state.pages[1].native_text = layer
     shipped, provenance = _select_page_output_tagged(state, 1)
 
-    assert provenance is SelectionProvenance.PRIOR_OCR_LAYER_UNREAD
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert provenance is SelectionProvenance.PRIOR_OCR_LAYER_MASKED
     digits = [tok for tok in ("2.2", "3.1", "48,392", "1957") if tok in shipped.text]
     assert digits == [], f"the withheld layer's numbers reached the page: {digits}"
-    # The page number itself is the one numeral the marker may carry, and it comes from
-    # ``page_num``, not from the layer.
-    assert "earlier OCR, not re-read" in shipped.text
+    assert "Series A" in shipped.text, "the layer's prose did not ship"
+    assert "[number withheld" in shipped.text, "the masked ending did not withhold numbers"
 
 
 def test_a_failed_scan_is_suspect_but_not_deletable() -> None:
@@ -477,20 +478,14 @@ def test_a_detected_hit_reaches_the_sidecar_and_the_shipped_text(
     )
     assert quiet_trust is True and hit_trust is False
     assert "estimated effect" in quiet_text.text
-    # The hit reaches the shipped TEXT too: whichever route found it, the earlier OCR
-    # layer does not ship. The ROUTE decides which floor owns the page -- #961/#1027 keep
-    # their own marker on their own key -- so the mode is pinned per route rather than
-    # collapsed to one value both would satisfy.
-    assert "estimated effect" not in hit_text.text, (
-        "the detected hit did not reach the shipped text either"
+    # The hit reaches the shipped TEXT too: whichever route found it, the layer's prose
+    # ships under the same masked ending with its numbers withheld.
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert "estimated effect" in hit_text.text, (
+        "the detected hit did not reach the shipped text (its prose should ship, masked)"
     )
-    expected = (
-        FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
-        if route == "prior_ocr_layer"
-        else FailureMode.INVISIBLE_SCAN_UNREAD
-    )
-    assert hit_text.failure_mode is expected
-    assert quiet_text.failure_mode is not expected
+    assert hit_text.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
+    assert quiet_text.failure_mode is not FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
 
 
 # ---------------------------------------------------------------------------

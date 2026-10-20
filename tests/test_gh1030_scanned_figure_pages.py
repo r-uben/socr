@@ -435,8 +435,11 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
     # carries none says "see PDF page N". Stripping the image is therefore no longer
     # enough to make them identical. The pointer difference is asserted explicitly, which
     # is a stronger statement than the old equality: it says WHICH way each page points.
-    pointer = "see image"
-    _NOpointer = "not transcribed, see PDF page 1"
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR
+    # layer ships its prose, numbers withheld, instead of the floor. The pointer now sits on
+    # each withheld number, not on a marker line.
+    pointer = "[number withheld, see image]"
+    _NOpointer = "[number withheld, see PDF page]"
     if pointer in stripped or _NOpointer in off_text:
         assert pointer in stripped, "the page that ships an image does not point at it"
         assert _NOpointer in off_text, "the page with no image still claims one"
@@ -501,21 +504,24 @@ def test_e2e_no_provider_a_flagged_scan_withholds_the_layer_not_shreds_it(
     from socr.core.manifest import is_page_failed_marker
 
     body_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith(">")]
-    assert is_page_failed_marker(body_lines[0]), f"no floor marker: {body_lines[:2]}"
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert not any(is_page_failed_marker(ln) for ln in body_lines), "the floor still fired"
     assert "earlier OCR, not re-read" in text
 
     # The shredding this page's fence existed to prevent: never shipped, fenced or not.
     assert SPELLED_FENCE_OPEN not in text, "a fence implies the layer shipped"
     assert _AXIS_TITLE not in text, "the spelled axis title shipped"
     assert "\n".join(_AXIS_TITLE) not in text, "the axis title shipped one letter per line"
-    assert "estimated effect" not in text, "the earlier OCR layer's prose shipped"
+    # The layer's prose ships; its caption number does not.
+    assert "estimated effect" in text, "the readable earlier OCR prose must ship"
+    assert "Market 5" not in text, "a number of the earlier OCR layer shipped"
 
     # Still surfaced, still not clean: the page image is there and the page is marked.
     # Round 3 (r-uben soft 5): the `or "![" in text` escape accepted ANY image, so the
     # assertion could be satisfied by a figure crop while the page image itself was gone.
     assert "![Scanned figure page 1]" in text, "the page image is gone too"
-    # ... and the marker must point at it, which is the round-2 rule this page exercises.
-    assert "see image" in text, "the marker does not point at the image it ships with"
+    # ... and each withheld number must point at it, which is the round-2 rule this page exercises.
+    assert "[number withheld, see image]" in text, "the number token does not point at the image"
 
 
 class _CountingEngine(_Engine):

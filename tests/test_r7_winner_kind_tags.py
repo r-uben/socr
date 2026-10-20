@@ -80,7 +80,8 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     # return -- that one appends the disclosure notes, and appending them to a
     # restored body would duplicate them on every resume.
     # #1156 Part A: +1 -- the earlier-OCR-layer floor is a new ending of the cascade.
-    assert len(_returns(fn)) == 20
+    # #1156 Part B: +1 -- the masked-layer ending ships different bytes from both floors.
+    assert len(_returns(fn)) == 21
 
 
 def test_every_ending_carries_a_tag() -> None:
@@ -98,9 +99,10 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 24, "two endings share a tag or tag count != 24"
+    # #1156 Part B: +1, ``PRIOR_OCR_LAYER_MASKED``.
+    assert len(used) == len(set(used)) == 25, "two endings share a tag or tag count != 25"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 24
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 25
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -203,8 +205,9 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 24 (#1156 Part A: +1).
-    assert len(list(SelectionProvenance)) == 24
+    # 1. Total count of mapped provenance members must be exactly 25 (#1156 Part A: +1,
+    #    Part B: +1).
+    assert len(list(SelectionProvenance)) == 25
 
     # 2. Check full disposition equivalence groups (exactly 15 distinct disposition pairs)
     #    #713's two new members join EXISTING groups rather than making new ones:
@@ -215,7 +218,9 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
     #    #1156 Part A's earlier-OCR floor joins the EXISTING fail-closed-marker group
     #    (ending FAIL_CLOSED_MARKER) but under its own reason, so the disposition pair is
     #    new: +1 here, and the reason groups below gain one too.
-    assert len(by_disposition) == 16
+    #    #1156 Part B's masked-layer ending is DEMOTED_NATIVE under a reason of its own,
+    #    so it is a new pair and a new single-member group: +1 to each count below.
+    assert len(by_disposition) == 17
 
     expected_multi_dispositions = {
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS): {
@@ -249,10 +254,10 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
 
     single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
-    assert single_disposition_count == 12
+    assert single_disposition_count == 13
 
     # 3. Check primary reason equivalence groups (exactly 14 distinct primary reasons)
-    assert len(by_reason) == 14
+    assert len(by_reason) == 15
 
     expected_multi_reasons = {
         PagePrimaryReason.STRUCTURE_CLASS: {
@@ -283,4 +288,4 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         assert by_reason[reason] == members, f"mismatch for multi-member reason {reason}"
 
     single_reason_count = sum(1 for members in by_reason.values() if len(members) == 1)
-    assert single_reason_count == 10
+    assert single_reason_count == 11

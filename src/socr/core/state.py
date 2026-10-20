@@ -159,6 +159,16 @@ class PageState:
     #: #1203: the page's own text layer when ``native_text`` is empty because an early
     #: born-digital rejection fired. Retained unshipped, for the sidecar only.
     prior_ocr_layer_text: str = ""
+    #: #1156 Part B, THE SEAM for #1208: a second, independent reader's agreement with
+    #: the retained layer, as ``tables.prior_ocr_mask.independently_confirmed_positions``
+    #: reads it. Nothing writes it yet, so every number of a masked layer is withheld.
+    #: A writer must also persist it to the sidecar and restore it on resume, or a
+    #: re-finalisation from the sidecar masks what the live run unmasked.
+    reading_agreement: dict = field(default_factory=dict)
+    #: #1156 Part B: whether the run saw a table on this page, answered once by
+    #: ``manifest.page_saw_an_unplaced_table`` and then reused, so later events cannot
+    #: flip the page's ending between two finalisations of the same run.
+    prior_ocr_table_seen: bool | None = None
     #: #1203 round 1 (owner ruling 2026-10-18): the model's table, kept UNSHIPPED when the
     #: ruling withheld it because nothing could witness it. The ruling's own words: "the
     #: model's table stays in the sidecar, so a later second reader can release it by

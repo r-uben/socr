@@ -639,25 +639,27 @@ def test_the_floored_page_is_visible_to_the_shared_marker_recogniser() -> None:
         _UNACCEPTED_OUTPUT_MARK_EXCLUDED_PROVENANCES,
         PagePrimaryReason,
         _select_and_finalize_page,
-        _shipped_marker_reason,
         is_page_failed_marker,
     )
 
     for attempts in (True, False):
         record = _select_and_finalize_page(_suspect_state(attempts=attempts), 1)
-        body = next(
-            line
-            for line in record.output.text.splitlines()
-            if line.strip() and not line.startswith(">")
+        lines = record.output.text.splitlines()
+        # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+        # The masked ending is NOT a failed marker, so the shared recogniser must not claim it.
+        body = next(line for line in lines if line.strip() and not line.startswith(">"))
+        assert not is_page_failed_marker(body), (
+            f"the masked ending was read as a failed marker: {body!r}"
         )
-        assert is_page_failed_marker(body), (
-            f"the floored body is invisible to the shared recogniser: {body!r}"
-        )
-        assert _shipped_marker_reason(body) is PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD, (
-            "the shipped bytes do not name which floor they came from"
+        assert record.output.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
+        assert "earlier OCR, not re-read" in record.output.text
+        assert "Raised discount rates" in record.output.text, "the layer's prose did not ship"
+        layer_lines = [ln for ln in lines if ln.strip() and not ln.startswith((">", "!["))]
+        assert not any(ch in "0123456789" for ln in layer_lines for ch in ln), (
+            "a number of the earlier OCR layer reached the page"
         )
         assert "socr kept this model reading" not in record.output.text, (
-            "the page claims a model reading shipped, which the floor deleted"
+            "the page claims a model reading shipped, which the masking dropped"
         )
 
     assert ("earlier OCR, not re-read", PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD) in (
@@ -678,15 +680,21 @@ def test_a_clean_page_is_untouched() -> None:
 
 
 def test_1027s_own_pages_keep_1027s_ending() -> None:
-    """Scoping pin: #961's key is not widened, so #1027's pages are byte-for-byte as they
-    were. Part A's floor is placed AFTER that branch for exactly this reason."""
+    """Scoping pin: #961's key is not widened, so #1027's pages keep #961's branch.
+
+    #1156 Part B: a #1027 page whose layer still has words after masking now takes the
+    masked ending, the same as a #1156 page. #1027's own floor fires only when no word
+    survives, so that case is no longer pinned here.
+    """
     from socr.core.manifest import _select_and_finalize_page
 
     record = _select_and_finalize_page(
         _suspect_state(attempts=True, detected=False, invisible=True), 1
     )
-    assert record.output.failure_mode is FailureMode.INVISIBLE_SCAN_UNREAD
-    assert "invisible OCR layer unread" in record.output.text
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert record.output.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
+    assert "earlier OCR, not re-read" in record.output.text
+    assert "invisible OCR layer unread" not in record.output.text
 
 
 # ---------------------------------------------------------------------------
@@ -852,12 +860,11 @@ def test_a_refinalised_body_is_byte_identical(attempts: bool) -> None:
 
     ``_phase_assemble`` re-finalises every page with its saved text, and a resume does
     the same from the sidecar, so any transform applied to the page's text runs more than
-    once unless it is derived from the source. Part A's floor replaces the body outright
-    rather than transforming it, which is what makes it idempotent -- this pins that,
-    because Part B will replace this branch with a transform and must not lose it.
+    once unless it is derived from the source. Part A's floor replaced the body outright;
+    Part B's masked ending is a transform, so this pins that it runs once per set of bytes.
 
-    The withheld marker is itself a page-failed marker, so a second pass over it is
-    exactly where "[page [number withheld] unchecked" came from in the Part B attempt.
+    Part B's masked body is derived from the source text, but its mark is added during
+    finalisation, so a second pass must not add a second mark or re-mask the masked body.
     """
     from socr.core.manifest import _select_and_finalize_page
 
@@ -867,13 +874,12 @@ def test_a_refinalised_body_is_byte_identical(attempts: bool) -> None:
 
     assert again.output.text == first.output.text
     assert again.output.failure_mode is first.output.failure_mode
-    # The re-finalised body must not have re-wrapped socr's own lines. On a FLOORED page
-    # the marker IS the mark, so the verdict banner is suppressed exactly as it is for
-    # #1027's and #263's floors -- that suppression depends on the marker being visible to
-    # ``is_page_failed_marker``, which its own test pins. What must not happen is the
-    # marker being wrapped, doubled, or re-marked by a second pass.
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert again.output.numbers_withheld == first.output.numbers_withheld > 0
+    # The re-finalised body must not have re-wrapped or doubled socr's own lines: the mark
+    # appears exactly once, and the withheld body is not transformed a second time.
     assert again.output.text.count("earlier OCR, not re-read") == 1
-    assert "[page 1 unchecked:" not in again.output.text
+    assert again.output.text.count("[page 1 unchecked:") == 1
     assert "3 Y," not in again.output.text and "400" not in again.output.text
 
 
@@ -1281,20 +1287,33 @@ def test_e2e_the_provider_path_floor_ships_the_marker_and_the_page_image(
 
     result, side, text, events = _provider_run(tmp_path, monkeypatch, "rej", accept=False)
 
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
     body = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith(">")]
-    assert is_page_failed_marker(body[0]), f"the floor marker is not recognisable: {body[:2]}"
+    assert not is_page_failed_marker(body[0]), (
+        f"the masked ending is not a failed marker, but was read as one: {body[:2]}"
+    )
     assert "earlier OCR, not re-read" in text
+    assert "Discount rates were raised" in text, "the layer's prose did not ship"
+    # socr's own figure caption ("**Figure 1** (page 1)") carries the page number, not layer text.
+    layer_lines = [ln for ln in body if not ln.startswith(("![", "**"))]
+    assert not any(ch in "0123456789" for ln in layer_lines for ch in ln), (
+        f"a number of the earlier OCR layer reached the page: {layer_lines}"
+    )
     # The page IMAGE, which only this path renders.
     assert "prior_ocr_layer_page_p1" in text, f"the page image is missing: {text[:300]}"
     assert "see image" in text, "the marker does not point at the image it shipped with"
 
-    # Neither the layer nor the rejected reading.
+    # Neither the layer's numbers nor the rejected reading.
     assert "3 Y," not in text and "$400 million" not in text
     assert "A MODEL READING OF THE PAGE" not in text
 
-    # A floored page is NOT a native fallback: that event claims native text shipped.
+    # #1156 Part B: the event says native text shipped flagged because no reading passed,
+    # which is now TRUE -- the masked layer is the page's own text. Under Part A the
+    # floor shipped none of it, and the event would have been false. It is not a failed
+    # page either.
     kinds = [e.get("kind") for e in events if e.get("page_num") == 1]
-    assert "native_fallback" not in kinds, f"the floored page was called a native fallback: {kinds}"
+    assert "native_fallback" in kinds, f"the masked page is not reported as native: {kinds}"
+    assert "page_failed" not in kinds, f"the masked page was reported as failed: {kinds}"
 
     assert side["prior_ocr_layer_suspect"] is True
     assert side["winning_output"]["status"] != "success"
@@ -1774,7 +1793,8 @@ def test_a_failed_scan_keeps_each_lanes_own_ending(tmp_path: Path) -> None:
         "a failed scan pushed the page out of the math lane, so its hybrid was suppressed "
         f"on 'unknown' alone (ended in {endings['scanfailed']!r})"
     )
-    assert endings["positive"] == "prior_ocr_layer_unread", (
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert endings["positive"] == "prior_ocr_layer_masked", (
         f"a positively flagged page stayed in the math lane (ended in {endings['positive']!r})"
     )
 
