@@ -29,7 +29,7 @@ def test_advisory_native_cell_in_separate_trust_section() -> None:
         AuditEvent(page_num=1, kind="native_cell_check_ambiguous", data={"table_id": "t0"}),
     ]
     trust = build_tables_trust("doc.pdf", events, native_cell_advisory=True)
-    assert not trust.pages
+    assert not trust.untrusted_pages
     assert 1 in trust.advisory_native_cell_pages
     payload = trust.to_dict()
     assert "native_cell_advisory" in payload

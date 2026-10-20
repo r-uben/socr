@@ -174,10 +174,12 @@ def _resume_arm(tmp_path: Path, *, flags: dict, carries_flag: bool):
     )
     pipeline._restore_terminal_page_state(state, 1, page_out, output_dir)
     kinds = UnifiedPipeline.native_cell_check_event_kinds()
+    trust = build_tables_trust(state.handle.filename, state.events)
     return {
         "events": sorted({e.kind for e in state.events if e.kind in kinds}),
         "bindings": sorted(getattr(ps, "native_cell_binding", None) or {}),
-        "untrusted": build_tables_trust(state.handle.filename, state.events).untrusted_pages,
+        "untrusted": trust.untrusted_pages,
+        "advisory_native_cell": sorted(trust.advisory_native_cell_pages),
     }
 
 
@@ -198,13 +200,15 @@ def test_a_resume_does_not_bring_the_cell_verdicts_back(tmp_path: Path) -> None:
         "below proves nothing"
     )
     assert clean["bindings"] == ["p1-t0"]
-    assert clean["untrusted"] == [1]
+    assert clean["untrusted"] == []
+    assert clean["advisory_native_cell"] == [1]
 
     for label, flags in _ARMS[1:]:
         arm = _resume_arm(tmp_path / label.replace(" ", "-"), flags=flags, carries_flag=True)
         assert arm["events"] == [], f"{label}: a cell-check event was replayed"
         assert arm["bindings"] == [], f"{label}: a per-cell verdict was restored"
         assert arm["untrusted"] == [], f"{label}: the page came back listed untrusted"
+        assert arm["advisory_native_cell"] == [], f"{label}: advisory native-cell distrust replayed"
 
 
 def test_the_resume_reads_suspicion_from_both_the_sidecar_and_this_run() -> None:

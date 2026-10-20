@@ -607,8 +607,10 @@ def test_native_cell_distrust_survives_table_escalation_accepted():
         AuditEvent(page_num=3, kind="table_escalation_accepted"),
     ]
     trust = build_tables_trust("doc.pdf", events)
-    assert trust.untrusted_pages == [3]
-    assert "native_cell_check_ambiguous" in trust.to_dict()["pages"]["3"]["reasons"]
+    assert trust.untrusted_pages == []
+    assert 3 in trust.advisory_native_cell_pages
+    detail = trust.to_dict()["native_cell_advisory"]["pages_detail"]["3"]
+    assert "native_cell_check_ambiguous" in detail["reasons"]
 
 
 def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():
