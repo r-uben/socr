@@ -7,12 +7,12 @@
 | Contribution due par les entreprises exploitant des médicaments bénéficiant d'une AMM (art. L 245-6 CSS) | ACOSS | 596 | 579 | - | - | - | - | - | - | - | - | - | - | - |
 | Droit perçu au titre des demandes d'AMM, d'enregistrement et d'avis de publicité (art.1635 bis AE CGI) | DGFiP | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Taxe annuelle sur les inscriptions de dispositifs médicaux (art 1635 bis AH du CGI) | DGFiP | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| Taxe annuelle sur les inscriptions de médicaments (art 1635 bis AF du CGI) | DGFiP | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Taxe annuelle sur les inscriptions de médicaments (art 1635 bis AF du CGI) | DGFiP | 70 | 71 | - | - | - | - | - | - | - | - | - | - | - |
 | Taxe annuelle sur les inscriptions de produits de santé (art 1635 bis AG du CGI) | DGFiP | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Droit perçu au titre des analyses, inspections, fournitures de substance à la pharmacopée et délivrances réalisées par l'ANSM (art L. 5321-3 CSP) | DGFiP | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Taxe sur conventions d'assurances (TSCA) sur les VTM (art.1001-5 quater CGI) | DGFiP | 1285 | 1247 | - | - | - | - | - | - | - | - | - | - | - |
 | Taxe de solidarité additionnelle aux cotisations d'assurance afférentes aux garanties de protection complémentaire en matière de frais de soins de santé (art L.862-4 CSS) | ACOSS | 6354 | 6189 | - | - | - | - | - | - | - | - | - | - | - |
 | Contrats d'assurance sur la vie en déshérence (art. L. 1126-1 5° CGPPP) | DGFiP | 20 | 20 | - | - | - | - | - | - | - | - | - | - | - |
 | Contribution des OC au financement forfaitaire des médecins traitants | ACOSS | 373 | 367 | - | - | - | - | - | - | - | - | - | - | - |
-| IMPOTS, TAXES ET CONTRIBUTIONS SUR L'INDUSTRIE PHARMACEUTIQUE | - | 70 | 71 | - | - | - | - | - | - | - | - | - | - | - |
+| IMPOTS, TAXES ET CONTRIBUTIONS SUR L'INDUSTRIE PHARMACEUTIQUE | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | IMPOTS, TAXES ET CONTRIBUTIONS SUR LES CONTRATS D'ASSURANCE | - | - | - | - | - | - | - | - | - | - | - | - | - | - |

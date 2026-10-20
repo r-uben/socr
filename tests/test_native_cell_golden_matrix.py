@@ -13,7 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_golden_matrix_no_mutant_verifies() -> None:
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "native_cell_golden_eval.py"), "--json"],
+        [
+            sys.executable,
+            str(ROOT / "tools" / "native_cell_golden_eval.py"),
+            "--set",
+            "extended",
+            "--json",
+        ],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -33,3 +39,9 @@ def test_golden_matrix_no_mutant_verifies() -> None:
         )
         for name, mut in row["mutants"].items():
             assert mut["outcome"] != "verified", f"{row['page']} mutant {name} must not VERIFY"
+        if row["correct"]["outcome"] == "verified":
+            for key in ("mut_model_digit", "mut_model_column_shift", "mut_model_minus_drop"):
+                if key in row["mutants"]:
+                    assert row["mutants"][key]["outcome"] != "verified", (
+                        f"{row['page']} {key} must not VERIFY"
+                    )

@@ -53,9 +53,7 @@ def diagnose(
     else:
         pick, peers = pr[0], None
     if pick and peers:
-        region = extend_check_region_for_trailing_words(
-            page, refine_check_region(pick, peers), md
-        )
+        region = extend_check_region_for_trailing_words(page, refine_check_region(pick, peers), md)
     else:
         region = pick
     res = check_table_cell_binding(
@@ -79,11 +77,17 @@ def diagnose(
         f"matched={len(b.matched_cells)} ambiguous={b.ambiguous_count}"
     )
     print(f"header_year_mismatch={_header_year_mismatch(b, md)}")
-    print(f"row_label_contr={len(b.row_label_contradictions)} soft={_row_label_contradictions_are_soft(b)}")
-    print(f"contr_cells={len(b.contradicted_cells)} native_unbound={len(b.native_unbound)} model_unbound={len(b.model_unbound)}")
+    print(
+        f"row_label_contr={len(b.row_label_contradictions)} soft={_row_label_contradictions_are_soft(b)}"
+    )
+    print(
+        f"contr_cells={len(b.contradicted_cells)} native_unbound={len(b.native_unbound)} model_unbound={len(b.model_unbound)}"
+    )
     mm, cmp, per_row = _row_anchor_scan(b, md)
     hard = [m for m in mm if m[2] not in ("ambiguous_label",) and m[1] != "ambiguous_locale"]
-    print(f"row_scan comparisons={cmp} hard_mismatches={hard[:8]} ambiguous_locale={sum(1 for m in mm if m[1]=='ambiguous_locale')}")
+    print(
+        f"row_scan comparisons={cmp} hard_mismatches={hard[:8]} ambiguous_locale={sum(1 for m in mm if m[1] == 'ambiguous_locale')}"
+    )
     print(
         f"numeric_unbound_blocks={_numeric_unbound_blocks_verify(b, region)} "
         f"covers_native={_model_covers_native_data_rows(b, md)} "
@@ -91,7 +95,9 @@ def diagnose(
     )
     if b.contradicted_cells[:3]:
         for c in b.contradicted_cells[:5]:
-            print(f"  CONTR cell {c.row_path[-1][:40] if c.row_path else ''} native={c.native_token} model={c.model_token}")
+            print(
+                f"  CONTR cell {c.row_path[-1][:40] if c.row_path else ''} native={c.native_token} model={c.model_token}"
+            )
     nu = [c for c in b.native_unbound if c.token and c.col_path]
     if nu[:5]:
         print("  native_unbound sample:", [(c.token, c.col_path) for c in nu[:5]])

@@ -10,12 +10,15 @@
 | Dépense publique (hors CI, en Md€) | 1694 | 1668 |
 | Évolution de la dépense publique hors CI en volume (%)1 | 0,4 | 0,8 |
 | Principales dépenses d'investissement (en Md€)2 | 31 | 34 |
+| Administrations publiques centrales | | |
 | Solde | -4,5 | -4,3 |
 | Dépense publique (hors CI, en Md€) | 663 | 658 |
 | Évolution de la dépense publique en volume (%)3 | 0,2 | 1,9 |
+| Administrations publiques locales | | |
 | Solde | -0,7 | -0,2 |
 | Dépense publique (hors CI, en Md€) | 343 | 329 |
 | Évolution de la dépense publique hors CI en volume (%)3 | 0,2 | 0,2 |
+| Administrations de sécurité sociale | | |
 | Solde | 0,2 | 0,7 |
 | Dépense publique (hors CI, en Md€) | 795 | 779 |
 | Évolution de la dépense publique hors CI en volume (%)3 | 0,6 | 0,3 |

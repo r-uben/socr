@@ -12,10 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import fitz
-
 ROOT = Path(__file__).resolve().parents[1]
-FIX = ROOT / "tests" / "fixtures" / "resf_native_cell"
 
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -27,7 +24,7 @@ from socr.tables.native_cell_check import check_table_cell_binding  # noqa: E402
 from socr.tables.native_contradiction import pair_regions  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tools"))
-from native_cell_golden_eval import GOLDENS, GoldenCase, _run_case  # noqa: E402
+from native_cell_golden_eval import GOLDEN_SETS, GoldenCase, _run_case  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -46,7 +43,9 @@ def _patch(module, name: str, replacement):
     return enter
 
 
-def _run_with_toggles(case: GoldenCase, md: str, toggles: list[Callable[[], Callable[[], None]]]) -> dict:
+def _run_with_toggles(
+    case: GoldenCase, md: str, toggles: list[Callable[[], Callable[[], None]]]
+) -> dict:
     restores: list[Callable[[], None]] = []
     for enter in toggles:
         restores.append(enter())
@@ -59,8 +58,15 @@ def _run_with_toggles(case: GoldenCase, md: str, toggles: list[Callable[[], Call
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--set",
+        choices=sorted(GOLDEN_SETS),
+        default="track2",
+        help="Golden set (default track2 = comparable baseline pages)",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    goldens = GOLDEN_SETS[args.set]
 
     toggles = [
         Toggle(
@@ -82,7 +88,7 @@ def main() -> int:
     ]
 
     rows: list[dict] = []
-    for case in GOLDENS:
+    for case in goldens:
         md = case.md.read_text(encoding="utf-8")
         baseline = _run_case(case, md)
         row = {"page": case.tag, "baseline": baseline, "toggles": {}}

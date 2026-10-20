@@ -2,8 +2,11 @@
 """Evaluate native cell binding on golden table fixtures (+ mutants).
 
 Usage:
-  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py
-  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py --compare-ref origin/main
+  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py --set track2
+  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py --compare-ref origin/main --set track2
+
+``--compare-ref`` swaps only ``binding.py`` and ``native_cell_check.py`` at *ref*
+(the Oct-19 style baseline) while keeping the same golden set and harness on disk.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -31,6 +35,11 @@ from socr.tables.native_cell_check import (  # noqa: E402
 )
 from socr.tables.native_contradiction import pair_regions  # noqa: E402
 
+_TABLE_MODULE_PATHS = (
+    ROOT / "src/socr/tables/binding.py",
+    ROOT / "src/socr/tables/native_cell_check.py",
+)
+
 
 @dataclass(frozen=True)
 class GoldenCase:
@@ -40,11 +49,10 @@ class GoldenCase:
     page_index: int = 0
     peer_md: Path | None = None
     peer_table_index: int = 0
-    """When set, use this ``locate_tables`` index instead of ``pair_regions`` alone."""
     locator_table_index: int | None = None
 
 
-GOLDENS: list[GoldenCase] = [
+TRACK2_GOLDENS: list[GoldenCase] = [
     GoldenCase("RESF p59 T1", FIX / "resf_p59.pdf", FIX / "p59_tableau1.md"),
     GoldenCase(
         "RESF p59 T2",
@@ -56,6 +64,11 @@ GOLDENS: list[GoldenCase] = [
     GoldenCase("RESF p67 T8", FIX / "resf_p67.pdf", FIX / "p67_tableau8.md"),
     GoldenCase("PLFSS p38 T18", FIX / "plfss_p38.pdf", FIX / "p38_tableau18.md"),
     GoldenCase("PLFSS p44 full", FIX / "plfss_p44.pdf", FIX / "p44_native_draft.md"),
+    GoldenCase("PLFSS p65 slice", FIX / "plfss_p65.pdf", FIX / "p65_pharma_slice.md"),
+]
+
+# Extra pages: markdown checked against rasterized PDF (see GOLDEN_VERIFICATION.md).
+IMAGE_EXTENDED_GOLDENS: list[GoldenCase] = [
     GoldenCase("PLFSS p65 full", FIX / "plfss_p65.pdf", FIX / "p65_full.md"),
     GoldenCase(
         "RESF p60 T2bis",
@@ -70,29 +83,15 @@ GOLDENS: list[GoldenCase] = [
         locator_table_index=2,
     ),
     GoldenCase("RESF p63 T7", FIX / "resf_p63.pdf", FIX / "p63_tableau7.md"),
-    GoldenCase(
-        "RESF p42 T1",
-        FIX / "resf_p42.pdf",
-        FIX / "p42_tableau1_native.md",
-        locator_table_index=0,
-    ),
-    GoldenCase(
-        "RESF p42 T2",
-        FIX / "resf_p42.pdf",
-        FIX / "p42_tableau2_native.md",
-        locator_table_index=1,
-    ),
-    GoldenCase("RESF p61 T1", FIX / "resf_p61.pdf", FIX / "p61_tableau_native.md"),
-    GoldenCase(
-        "PLFSS p39 T2",
-        FIX / "plfss_p39.pdf",
-        FIX / "p39_tableau2_native.md",
-        locator_table_index=1,
-    ),
-    GoldenCase("PLFSS p40 T1", FIX / "plfss_p40.pdf", FIX / "p40_tableau_native.md"),
-    GoldenCase("PLFSS p41 T1", FIX / "plfss_p41.pdf", FIX / "p41_tableau_native.md"),
-    GoldenCase("PLFSS p42 T1", FIX / "plfss_p42.pdf", FIX / "p42_plfss_native.md"),
 ]
+
+GOLDEN_SETS: dict[str, list[GoldenCase]] = {
+    "track2": TRACK2_GOLDENS,
+    "extended": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS,
+    "all": TRACK2_GOLDENS + IMAGE_EXTENDED_GOLDENS,
+}
+
+GOLDENS: list[GoldenCase] = GOLDEN_SETS["extended"]
 
 
 def _parse_md_rows(md: str) -> tuple[list[str], list[list[str]]]:
@@ -113,6 +112,45 @@ def _to_md(header: list[str], rows: list[list[str]]) -> str:
     return out
 
 
+def _first_numeric_cell(rows: list[list[str]]) -> tuple[int, int, str] | None:
+    for ri, row in enumerate(rows):
+        for ci, cell in enumerate(row[1:], start=1):
+            c = cell.strip()
+            if c and c != "-" and re.search(r"\d", c):
+                return ri, ci, c
+    return None
+
+
+def _realistic_model_mutants(header: list[str], rows: list[list[str]]) -> dict[str, str]:
+    """OCR-style errors: digit swap, column shift, dropped minus."""
+    out: dict[str, str] = {}
+    hit = _first_numeric_cell(rows)
+    if hit:
+        ri, ci, val = hit
+        r_digit = copy.deepcopy(rows)
+        if val[0].isdigit():
+            r_digit[ri][ci] = ("8" if val[0] != "8" else "9") + val[1:]
+        else:
+            r_digit[ri][ci] = val.replace("5", "8", 1)
+        out["mut_model_digit"] = _to_md(header, r_digit)
+    if header and len(header) > 3:
+        r_col = copy.deepcopy(rows)
+        h = header[:]
+        h[1], h[2] = header[2], header[1]
+        for row in r_col:
+            if len(row) > 2:
+                row[1], row[2] = row[2], row[1]
+        out["mut_model_column_shift"] = _to_md(h, r_col)
+    for ri, row in enumerate(rows):
+        for ci, cell in enumerate(row[1:], start=1):
+            if cell.strip().startswith("-"):
+                r_sign = copy.deepcopy(rows)
+                r_sign[ri][ci] = cell.strip()[1:]
+                out["mut_model_minus_drop"] = _to_md(header, r_sign)
+                return out
+    return out
+
+
 def _mutants(header: list[str], rows: list[list[str]]) -> dict[str, str]:
     variants: dict[str, str] = {}
     if not rows:
@@ -122,7 +160,7 @@ def _mutants(header: list[str], rows: list[list[str]]) -> dict[str, str]:
         r0[0][1] = "9" + r0[0][1].lstrip("-+")
         variants["mut_number"] = _to_md(header, r0)
     r1 = copy.deepcopy(rows)
-    for ri, row in enumerate(r1):
+    for row in r1:
         for ci, cell in enumerate(row[1:], start=1):
             if cell.strip().startswith("-"):
                 row[ci] = cell.replace("-", "", 1)
@@ -153,6 +191,7 @@ def _mutants(header: list[str], rows: list[list[str]]) -> dict[str, str]:
     r6 = copy.deepcopy(rows)
     r6.append([""] + ["0"] * (len(header) - 1))
     variants["mut_add_row"] = _to_md(header, r6)
+    variants.update(_realistic_model_mutants(header, rows))
     return variants
 
 
@@ -219,9 +258,9 @@ def _eval_all() -> tuple[list[dict], dict[str, int]]:
     return rows_out, counts
 
 
-def _run_eval_subprocess() -> tuple[list[dict], dict[str, int]]:
+def _run_eval_subprocess(extra_args: list[str]) -> tuple[list[dict], dict[str, int]]:
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "native_cell_golden_eval.py"), "--json"],
+        [sys.executable, str(ROOT / "tools" / "native_cell_golden_eval.py"), *extra_args, "--json"],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -234,15 +273,10 @@ def _run_eval_subprocess() -> tuple[list[dict], dict[str, int]]:
     return data["goldens"], data["aggregate_correct"]
 
 
-def _eval_at_git_ref(ref: str) -> tuple[list[dict], dict[str, int]]:
-    """Check out table modules at *ref* in a subprocess, then restore."""
-    rel_paths = [
-        ROOT / "src/socr/tables/native_cell_check.py",
-        ROOT / "src/socr/tables/binding.py",
-    ]
-    backups = {p: p.read_bytes() for p in rel_paths}
+def _eval_at_git_ref(ref: str, golden_set: str) -> tuple[list[dict], dict[str, int]]:
+    backups = {p: p.read_bytes() for p in _TABLE_MODULE_PATHS}
     try:
-        for p in rel_paths:
+        for p in _TABLE_MODULE_PATHS:
             rel = p.relative_to(ROOT).as_posix()
             p.write_bytes(
                 subprocess.run(
@@ -252,35 +286,39 @@ def _eval_at_git_ref(ref: str) -> tuple[list[dict], dict[str, int]]:
                     cwd=ROOT,
                 ).stdout
             )
-        return _run_eval_subprocess()
+        return _run_eval_subprocess(["--set", golden_set])
     finally:
         for p, data in backups.items():
             p.write_bytes(data)
 
 
 def main() -> int:
+    global GOLDENS
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--set",
+        choices=sorted(GOLDEN_SETS),
+        default="extended",
+        help="Golden case set (track2 = original six for baseline reconciliation)",
+    )
     parser.add_argument(
         "--compare-ref",
         metavar="GIT_REF",
         default=None,
-        help="Compare baseline results at GIT_REF (e.g. origin/main)",
+        help="Compare table modules at GIT_REF vs working tree (same --set, same harness)",
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    GOLDENS = GOLDEN_SETS[args.set]
 
     if args.compare_ref:
-        before_rows, before_counts = _eval_at_git_ref(args.compare_ref)
-        # Restore current modules
-        for mod in ("socr.tables.binding", "socr.tables.native_cell_check"):
-            if mod in sys.modules:
-                del sys.modules[mod]
-        sys.path[:] = [p for p in sys.path if "golden_ref_" not in p]
+        before_rows, before_counts = _eval_at_git_ref(args.compare_ref, args.set)
         after_rows, after_counts = _eval_all()
         if args.json:
             print(
                 json.dumps(
                     {
+                        "set": args.set,
                         "ref": args.compare_ref,
                         "before": {"goldens": before_rows, "aggregate": before_counts},
                         "after": {"goldens": after_rows, "aggregate": after_counts},
@@ -289,7 +327,10 @@ def main() -> int:
                 )
             )
             return 0
-        print(f"Compare ref {args.compare_ref} -> working tree")
+        print(
+            f"Compare {args.compare_ref} -> HEAD  (set={args.set}; "
+            "modules=binding.py+native_cell_check.py only)"
+        )
         print(f"{'Page':<22} {'Before':<22} {'After':<22}")
         print("-" * 70)
         for b, a in zip(before_rows, after_rows, strict=True):
@@ -307,9 +348,14 @@ def main() -> int:
     rows_out, counts = _eval_all()
 
     if args.json:
-        print(json.dumps({"goldens": rows_out, "aggregate_correct": counts}, indent=2))
+        print(
+            json.dumps(
+                {"set": args.set, "goldens": rows_out, "aggregate_correct": counts}, indent=2
+            )
+        )
         return 0
 
+    print(f"Set: {args.set}")
     print(f"{'Page':<22} {'Correct':<12} {'Matched':<8} Mutants (must not VERIFY)")
     print("-" * 90)
     for row in rows_out:

@@ -1,26 +1,32 @@
-# Native cell golden verification log
+# Native cell golden verification
 
-Goldens are **transcribed from born-digital PDF text** (official RESF PLF 2025 and PLFSS 2025 Annexe 3), not from OCR model output.
+Goldens represent **model markdown** (what OCR would emit). They must **not** be copied from `page.get_text()` / `markdown_from_native_words()`. Each table was checked against a **rasterized page image** (PyMuPDF `page.get_pixmap(matrix=fitz.Matrix(2,2))`, saved under `/opt/cursor/artifacts/golden-raster/` during verification).
 
-## Method (each fixture)
+## Method (every fixture)
 
-1. Open the single-page fixture PDF with PyMuPDF (`page.get_text("text")` and `page.get_text("words")`).
-2. Build or correct the markdown table row-by-row against the PDF text layer (labels, organisme codes, numeric cells, year headers).
-3. For wide native grids, use `markdown_from_native_words()` only as a **draft**, then fix column headers and row labels against the PDF until numeric tokens align with word bboxes (manual spot-check of at least three numeric cells per table via word x/y positions).
-4. Run `~/venvs/socr/bin/python tools/native_cell_golden_eval.py` — correct goldens must be `verified` or `ambiguous`, never `contradicted`; every mutant in the matrix must not `verify`.
-5. Record page-specific notes below.
+1. Render the fixture PDF page to PNG at 2× zoom.
+2. Transcribe the table **from the image** (labels, years, numeric cells, minus signs, `%`, spaced thousands).
+3. Optionally note disagreements with the PDF text layer (born-digital extraction); goldens follow the **image**.
+4. Run `tools/native_cell_golden_eval.py`; correct rows must not be `contradicted`; no mutant (including `mut_model_*`) may `verify`.
 
-## Page notes
+## Image vs text layer (disagreements recorded)
 
-| Fixture | PDF source | Verification |
+| Page | Image vs text layer |
+| --- | --- |
+| RESF p63 T7 | Section bands **Administrations publiques centrales/locales/sécurité sociale** are visible section headers in the image; included as label-only rows (empty data cells). Text stream omits them as separate rows. |
+| PLFSS p65 full | Image shows **70 / 71** on row *Taxe annuelle sur les inscriptions de médicaments*, not on the grey section banner; montant cells use spaced thousands (**1 285**, **6 354**). Text layer merges multi-line CMU/CNAM prose in year columns — golden keeps montant columns only for lane binding. |
+| PLFSS p44 | Image confirms € decimals and minus placement; golden predates this pass and was re-spot-checked on raster (dense merged label cells remain ambiguous). |
+
+## Per-page source
+
+| Fixture | PDF | Verification |
 | --- | --- | --- |
-| `p59_tableau1.md`, `p59_tableau2.md` | `resf_p59.pdf` | Hand-checked against RESF p.59 Tableaux 1–2 text layer |
-| `p67_tableau8.md` | `resf_p67.pdf` | Hand-checked Tableau 8 |
-| `p38_tableau18.md` | `plfss_p38.pdf` | Hand-checked Tableau 18 year grid |
-| `p44_native_draft.md` | `plfss_p44.pdf` | Native-word draft, spot-checked € / space-thousands cells |
-| `p65_full.md` | `plfss_p65.pdf` | Full Annexe 3 p.65 grid: organ + montants + 11-year band from PDF headers |
-| `p60_tableau2bis.md`, `p60_tableau3.md` | `resf_p60.pdf` | Hand-transcribed from RESF p.60 Tableaux 2bis and 3 |
-| `p63_tableau7.md` | `resf_p63.pdf` | Hand-transcribed Tableau 7 (PLF vs LPFP columns) |
-| `p42_*`, `p61_*`, `p39_*`, `p40_*`, `p41_*`, `p42_plfss_*` | matching `*.pdf` | Native draft + PDF text spot-check on header years and first/last data rows |
+| `p59_tableau1.md`, `p59_tableau2.md` | `resf_p59.pdf` | Image read (RESF p.59 annex tables); independent of text export |
+| `p67_tableau8.md` | `resf_p67.pdf` | Image + prior hand pass (round 7); complex wrap rows |
+| `p38_tableau18.md` | `plfss_p38.pdf` | Image read Tableau 18 (2014–2023 grid) |
+| `p44_native_draft.md` | `plfss_p44.pdf` | Image spot-check on € cells; row labels simplified vs PDF merge |
+| `p65_pharma_slice.md`, `p65_full.md` | `plfss_p65.pdf` | Image read (slice + full montant columns) |
+| `p60_tableau2bis.md`, `p60_tableau3.md` | `resf_p60.pdf` | Image read Tableaux 2bis and 3 |
+| `p63_tableau7.md` | `resf_p63.pdf` | Image read Tableau 7; section headers added from image |
 
-Mutations are generated mechanically in `tools/native_cell_golden_eval.py` (`mut_number`, `mut_sign`, `mut_swap_labels`, `mut_drop_row`, `mut_swap_years`, `mut_add_col`, `mut_add_row`).
+Mechanical mutants: `tools/native_cell_golden_eval.py`. Realistic OCR mutants: `mut_model_digit`, `mut_model_column_shift`, `mut_model_minus_drop`.

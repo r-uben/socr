@@ -95,9 +95,7 @@ def _scan_page(page_dir: Path) -> list[dict]:
     spans = flatten_page_spans(page)
     located = locate_tables(page)
     raw = [tuple(b.bbox) for b in located]
-    block_markdowns = [
-        "\n".join(lines[block.start : block.end + 1]) + "\n" for block in blocks
-    ]
+    block_markdowns = ["\n".join(lines[block.start : block.end + 1]) + "\n" for block in blocks]
     paired = pair_regions(page, block_markdowns, raw)
     out: list[dict] = []
     for i, block in enumerate(blocks):
@@ -215,8 +213,7 @@ def main() -> int:
     for entry in report:
         if entry["outcome"] not in ("verified", "skip"):
             flags = [
-                f"{t['table_id']}:{t['outcome']}(m={t.get('matched',0)})"
-                for t in entry["tables"]
+                f"{t['table_id']}:{t['outcome']}(m={t.get('matched', 0)})" for t in entry["tables"]
             ]
             print(
                 f"  {entry['page']}: outcome={entry['outcome']} "
