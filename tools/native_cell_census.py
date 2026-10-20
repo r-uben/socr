@@ -163,7 +163,7 @@ def main() -> int:
     root = args.pages_root
     if args.doc_sha:
         root = root / args.doc_sha
-    page_dirs = sorted(p for p in root.glob(args.page-glob) if p.is_dir())
+    page_dirs = sorted(p for p in root.glob(args.page_glob) if p.is_dir())
     if not page_dirs:
         print(f"No page directories under {root}", file=sys.stderr)
         return 1
