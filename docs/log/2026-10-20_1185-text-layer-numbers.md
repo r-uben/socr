@@ -190,3 +190,25 @@ between UNKNOWN reasons. Calibration copy: see report-r3.
 Shipped: the two one-token fixes move **0** pages of run 23319732 against round 3; the
 FAIL set is unchanged. Correction: the round-3 PR table printed 591 / 100 for two UNKNOWN
 rows, from an intermediate variant; the shipped round-3 code gives 590 / 101.
+
+## Round 6 (2026-10-20): the socr bot's reviews on PR #1219
+
+The bot's five reviews (as r-uben) had not reached the lead before; each item reproduced.
+
+- **Quote openers** (blocker, and the decision comment on the PR): `> **` and `> [` dropped a
+  model's own quote, including a `> **Table 3 …**` quoted table shipping `-8`. Now only
+  socr's exact openers are skipped (`> [page `, `> [table unverified: `, `> [table
+  disputed: `, `> **Chart region`, `> **Chart grids on page`, `> **Unresolved chart
+  placement on page`, `> *Figure description`), each found in the code's emitters. Exposure
+  on the 3,931-page extract: 0 pages carry such a model quote, so no outcome moves.
+- **`\%` in a cell** (a round-3 regression): `$\pi^* = 9\%$` was dropped as a formula; the
+  assignment rule now reads `\%`, `\,%`, `~%` as a percent.
+- **`_12.5_`**: a bare `_` is a subscript only after a letter, `}` or `)`.
+- **The tool's guards**: wrong file (checksum), wrong page count, a rerun after an
+  interruption past the `.md` write, and the table recount are each pinned by a test
+  (four mutants that survived every test now fail one).
+- **`tables_trust.json`** stays event-scoped (stated in the PR body), not the gate.
+- The round-5 prior-OCR test now uses a disagreeing reading, so deleting this clause's
+  prior-OCR early return fails it.
+
+`$\rho = 9{,}75$` and `$\hat b = 9.42\ (0.10)$` (silent at every head) go to #1220.

@@ -35,6 +35,7 @@ import pytest
 
 TEALBOOK_LAYER = "Korea\n4.0\n2.6\n5.7\n-.8\n4.0\n3.3"
 TEALBOOK_READING = "| Korea | 4.0 | 2.6 | 5.7 | -8 | 4.0 | 3.3 |"
+TEALBOOK_READING_OK = "| Korea | 4.0 | 2.6 | 5.7 | -.8 | 4.0 | 3.3 |"
 
 
 def test_loaded_source_is_this_checkout() -> None:
@@ -385,6 +386,59 @@ def test_only_a_short_integer_after_a_short_name_is_a_label() -> None:
     assert [written for _value, written, label in tokens if label] == ["1"]
 
 
+@pytest.mark.parametrize(
+    "reading",
+    [
+        "Korea -.8 2.8\n\n> **Note:** The rate was 9.31 in 2019.",
+        "Korea -.8 2.8\n\n> [1] The rate was 9.31 in 2019.",
+        "> **Table 3 Growth**\n>\n> | Korea | -8 | 2.8 |\n> | Rate | 9.31 | |",
+    ],
+)
+def test_a_model_quote_with_a_bold_or_bracket_opener_is_checked(reading: str) -> None:
+    """socr bot, PR #1219 decision: the openers ``> **`` and ``> [`` dropped a model's own
+    quote whole, including a quoted table under a bold title shipping a wrong number. Only
+    socr's exact openers are skipped now; the layer prints ``[1]`` and ``Table 3`` so only
+    the wrong numbers are disputed."""
+    layer = "Table 3 Growth Korea -.8 2.8 [1] Note: The rate was 0.31 in 2019. Rate 0.31"
+    p = _page(layer)
+    clause = text_layer_numbers_clause(_qwen(reading), p)
+    assert clause is not None and clause.result is CheckResult.FAIL, clause
+    assert "9.31" in clause.reason
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "> **Chart region on page 1:** values 9.9 7.7",
+        "> **Chart grids on page 1:** 9.9",
+        "> **Unresolved chart placement on page 1:** 9.9",
+        "> *Figure description (page 1): 9.9 percent*",
+        "> [table unverified: socr could not check this table against the page; 9.9]",
+        "> [table disputed: a second reading of the page (Tesseract) read 9.9; check]",
+    ],
+)
+def test_socrs_own_quote_openers_are_still_skipped(note: str) -> None:
+    """The other face: every opener socr itself emits stays out of the reading."""
+    assert text_layer_numbers_clause(_qwen(f"{note}\n\n{TEALBOOK_READING_OK}"), _page()) is None
+
+
+def test_a_percent_written_in_latex_is_one_number_in_a_cell() -> None:
+    r"""socr bot, round-3 review (a round-3 regression): ``$\pi^* = 9\%$`` was dropped whole
+    as a formula, so a wrong target was silent; ``2\,\%`` must still agree."""
+    layer = "Target 2 % 1.5"
+    assert ("2", "9%") in _disputes(layer, r"| target | $\pi^* = 9\%$ | 1.5 |")
+    assert _disputes(layer, r"| target | $\pi^* = 2\,\%$ | 1.5 |") == ()
+
+
+def test_a_number_in_markdown_italics_is_the_number() -> None:
+    """socr bot, round-1 review: ``_12.5_`` lost its integer part as a subscript, a false
+    dispute on a right number and a wrong ``_13.5_`` passing on a page that prints ``.5``."""
+    assert _disputes("growth 12.5", "growth _12.5_") == ()
+    assert [read for _ref, read in _disputes("0.5 12.5 -.8 2.8", "| _13.5_ | -.8 | 2.8 |")] == [
+        "13.5"
+    ]
+
+
 def test_unknown_provenance_is_rejected() -> None:
     """compare_numbers refuses a provenance it does not know."""
     with pytest.raises(ValueError):
@@ -543,16 +597,18 @@ def test_unchecked_is_permanent_across_resume() -> None:
 @pytest.mark.parametrize("engine", ["qwen", "native"])
 def test_a_prior_ocr_page_is_never_checked_by_either_clause(engine: str) -> None:
     """#1185 x #1156 (round 5, after #1217 merged): on a page whose layer is an earlier OCR
-    run, this clause stands aside and #1156's marks the page, so even a reading that agrees
-    with that layer number for number is not CHECKED. Difference: the same page without the
-    prior-OCR flag is CHECKED (for the model reading) and carries neither clause."""
-    agreeing = "| Korea | 4.0 | 2.6 | 5.7 | -.8 | 4.0 | 3.3 |"
-    output = PageOutput(page_num=1, text=agreeing, status=PageStatus.SUCCESS, engine=engine)
+    run, this clause stands aside and #1156's marks the page. Difference: the same reading on
+    a page WITHOUT the flag is FAILed by this clause (a model reading) or raises nothing (a
+    native one); with the flag, only #1156's clause is there and the page is not CHECKED."""
+    # A DISAGREEING reading (socr bot, round-5 note): with an agreeing one this clause
+    # raises nothing anyway, so the test could not show that it stands aside.
+    output = PageOutput(page_num=1, text=TEALBOOK_READING, status=PageStatus.SUCCESS, engine=engine)
     flagged = _page()
     flagged.prior_ocr_layer_suspect = True
     shipped, verdict = _apply_verdict_marks(output, flagged, 1)
     checks = [c.check for c in verdict.clauses]
     assert checks == [Check.PRIOR_OCR_LAYER], checks
     assert shipped.status is not PageStatus.SUCCESS
-    clean_shipped, clean_verdict = _apply_verdict_marks(output, _page(), 1)
-    assert clean_verdict.clauses == () and clean_shipped.status is PageStatus.SUCCESS
+    _clean_shipped, clean_verdict = _apply_verdict_marks(output, _page(), 1)
+    expected = [Check.TEXT_LAYER_NUMBERS] if engine == "qwen" else []
+    assert [c.check for c in clean_verdict.clauses] == expected

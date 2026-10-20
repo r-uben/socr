@@ -8,6 +8,8 @@ crash-recovery copy.
 from __future__ import annotations
 
 import json
+
+import pytest
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -241,3 +243,104 @@ def test_the_recorded_result_is_this_clauses_on_a_page_with_another_clause(
     assert change.result == "FAIL"
     log = json.loads((doc / tool.LOG_NAME).read_text())
     assert log["pages"]["1"]["after"]["text_layer_numbers"] == "FAIL"
+
+
+_TABLE = "| Country | a | b |\n| --- | --- | --- |\n| Korea | 4.0 | -8 |\n| China | 6.9 | 7.0 |\n"
+_TABLE_LAYER = "Country a b Korea 4.0 -.8 China 6.9 7.0"
+
+
+def _pdf(path: Path, pages: int = 1, text: str = _TABLE_LAYER) -> Path:
+    import fitz
+
+    doc = fitz.open()
+    for _ in range(pages):
+        doc.new_page().insert_text((72, 72), text, fontsize=9)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _doc_for_pdf(tmp_path: Path, pdf: Path, *, pages: int | None = None) -> Path:
+    """A finished one-page document whose metadata names *pdf* (its checksum, its pages)."""
+    from ocr_output_contract import safe_checksum
+
+    old_out, old_v = _old_run(_success(_TABLE), SimpleNamespace())
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    meta = json.loads((doc / "metadata.json").read_text())
+    meta.update(key=pdf.name, checksum=safe_checksum(pdf), pages=pages or 1)
+    (doc / "metadata.json").write_text(json.dumps(meta))
+    return doc
+
+
+def test_a_pdf_that_is_not_the_runs_input_changes_nothing(tmp_path: Path) -> None:
+    """socr bot, round-2 review: the checksum and page-count guards were unpinned. A wrong
+    file under --pdf-dir would demote faithful pages or let a wrong one stand. Difference on
+    one document: its own PDF re-finalizes the page; another file of the same name, or the
+    run's file with another page count on record, leaves every byte and counts the reason."""
+    pdfs = tmp_path / "pdfs"
+    pdfs.mkdir()
+    own = _pdf(tmp_path / "own.pdf")
+    other = _pdf(tmp_path / "other.pdf", text="Country a b Korea 4.0 -8 China 6.9 7.0 x")
+    cases = {
+        "own": (_doc_for_pdf(tmp_path / "a", own), own),
+        "checksum": (_doc_for_pdf(tmp_path / "b", own), other),
+        "page count": (_doc_for_pdf(tmp_path / "c", own, pages=2), own),
+    }
+    for name, (doc, served) in cases.items():
+        target = pdfs / name.replace(" ", "_")
+        target.mkdir()
+        meta = json.loads((doc / "metadata.json").read_text())
+        (target / meta["key"]).write_bytes(served.read_bytes())
+        before = {p: p.read_bytes() for p in doc.rglob("*") if p.is_file()}
+        skipped: Counter = Counter()
+        changes = tool.refinalize_document(doc, target, skipped=skipped)
+        if name == "own":
+            assert [c.page_num for c in changes] == [1], changes  # the run's file is used
+            continue
+        assert changes == [] and any(name in reason for reason in skipped), (name, skipped)
+        assert {p: p.read_bytes() for p in doc.rglob("*") if p.is_file()} == before, name
+
+
+def test_a_rerun_after_an_interrupted_run_marks_the_page_once(tmp_path: Path, monkeypatch) -> None:
+    """socr bot, round-2 review (Argon's interrupt case): interrupted after the document .md
+    was written, a rerun must find the page's section already done, not add the mark again."""
+    old_out, old_v = _old_run(_success(), SimpleNamespace())
+    _with_analysis(monkeypatch, tmp_path)
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    (doc / "manifest.json").write_text(json.dumps({"entries": {"1": {}}}))
+    real = tool._write_json
+
+    def crash_on_manifest(path: Path, data) -> None:
+        if path.name == "manifest.json":
+            raise OSError("interrupted")
+        real(path, data)
+
+    with monkeypatch.context() as m:
+        m.setattr(tool, "_write_json", crash_on_manifest)
+        with pytest.raises(OSError):
+            tool.refinalize_document(doc, tmp_path)
+    assert "text_layer_numbers=FAIL" in (doc / "doc.md").read_text(), "premise: .md written"
+    tool.refinalize_document(doc, tmp_path)
+    assert (doc / "doc.md").read_text().count("text_layer_numbers=FAIL") == 1
+    assert (doc / "pages" / "00001.md").read_text().count("text_layer_numbers=FAIL") == 1
+
+
+def test_the_table_counts_follow_the_demoted_page(tmp_path: Path, monkeypatch) -> None:
+    """socr bot, round-2 review: ``_recount_tables`` was unpinned. A table on a page the clause
+    demotes is no longer ``verified_text``; the document's block must say so."""
+    from socr.core.born_digital import DocumentAssessment
+    from socr.core.table_counts import count_from_sidecars
+
+    old_out, old_v = _old_run(_success(_TABLE), SimpleNamespace())
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    before = count_from_sidecars(doc).to_dict()
+    meta = json.loads((doc / "metadata.json").read_text())
+    (doc / "metadata.json").write_text(json.dumps({**meta, "tables": before}))
+    assert before["verified_text"] == 1, "premise: the old run counted the table verified"
+    page = _analysis(prior_ocr=False, layer=_TABLE_LAYER)
+    assessment = DocumentAssessment(path=tmp_path / "doc.pdf", pages=[page])
+    monkeypatch.setattr(tool, "_analyse_pdf", lambda pdf_dir, meta: (assessment, None))
+    [change] = tool.refinalize_document(doc, tmp_path)
+    assert change.result == "FAIL"
+    after = json.loads((doc / "metadata.json").read_text())["tables"]
+    assert after["verified_text"] == 0 and after == count_from_sidecars(doc).to_dict()

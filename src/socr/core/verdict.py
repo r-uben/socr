@@ -887,10 +887,20 @@ def _layer_is_damaged(p: Any) -> bool:
     return not _flag(p, "is_born_digital") or any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
 
 
-#: How socr's own quoted notes open: a mark (``> [page``, ``> [table``), a bold note
-#: (``> **Unresolved chart placement``, ``> **Chart grids``), a figure description
-#: (``> *Figure description``). Their other lines continue the same quote block.
-_SOCR_QUOTE_OPENINGS = ("> [", "> **", "> *Figure description")
+#: How socr's OWN quoted notes open, exactly: every quote opener socr emits (marks.py,
+#: manifest.py and the chart and figure lanes). Their other lines continue the same quote
+#: block. Any other quote is the model's transcription and is checked: the earlier prefixes
+#: ``> **`` and ``> [`` also dropped a model's ``> **Note:** The rate was 9.31`` and a whole
+#: ``> **Table 3 …**`` quoted table shipping a wrong ``-8`` (socr bot, PR #1219 decision).
+_SOCR_QUOTE_OPENINGS = (
+    "> [page ",
+    "> [table unverified: ",
+    "> [table disputed: ",
+    "> **Chart region",
+    "> **Chart grids on page",
+    "> **Unresolved chart placement on page",
+    "> *Figure description",
+)
 _PAGE_HEADER_RE = re.compile(r"#{1,6}\s*Page\s+\d+\s*", re.IGNORECASE)
 
 

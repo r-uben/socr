@@ -126,7 +126,9 @@ _TABULAR_RE = re.compile(
 #: last digit (a unit test caught the ``4`` being eaten as a power base).
 #: in a table row, an integer with a numeric superscript (``$143^1$``, ``143^{1}``) is a
 #: cell with a footnote callout: the base is the cell's number and is kept (Argon, PR #1219
-#: review: dropping it as a power left a wrong ``143`` unchecked). A power of ten, or any
+#: review: dropping it as a power left a wrong ``143`` unchecked).
+#: A bare ``_`` is a subscript only after a letter, ``}`` or ``)`` (``r_t``, ``\\hat{b}_1``):
+#: ``_12.5_`` is Markdown italics, and taking ``_12`` as a subscript left ``.5`` (socr bot). A power of ten, or any
 #: base after a times sign (``2 \\times 10^6``, ``9.60 \\times 10^4``), stays a power:
 #: measured on run 23319732, those cells against a layer's ``2×106`` were false disputes.
 _CELL_NUMERIC_CALLOUT_RE = re.compile(
@@ -136,7 +138,7 @@ _CELL_NUMERIC_CALLOUT_RE = re.compile(
 _REFERENCE_MARK_RE = re.compile(
     r"\\tag\*?\{[^{}]*\}|\\textsuperscript\{[^{}]*\}"
     r"|(?<![\d.])\d+\^\{\s*-?\d+\s*\}|(?<![\d.])\d+\^-?\d+"
-    r"|\^\{[^{}]*\}|\^\w+|_\{[^{}]*\}|_\w+"
+    r"|\^\{[^{}]*\}|\^\w+|_\{[^{}]*\}|(?<=[A-Za-z})])_\w+"
 )
 #: Reference side only: control characters (a damaged layer's undecodable glyphs) and the
 #: places a layer runs a word into a number (``Sect.3.1``, ``a10%increase``, ``(×200)``).
@@ -266,7 +268,9 @@ def _number_or_nothing(match: re.Match) -> str:
     span = match.group(0)
     if "=" not in span:
         return span
-    right = span.rsplit("=", 1)[1].strip("$\\()[] \t")
+    # A percent as LaTeX writes it (``9\\%``, ``2\\,\\%``, ``2~\\%``) is still one number
+    # (socr bot, round-3 review: round 3 dropped ``$\\pi^* = 9\\%$`` whole).
+    right = re.sub(r"\\[,;:! ]|~|\\(?=%)", "", span.rsplit("=", 1)[1]).strip("$\\()[] \t")
     return span if _LONE_NUMBER_RE.fullmatch(right) else " "
 
 
