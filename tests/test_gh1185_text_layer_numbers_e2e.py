@@ -244,3 +244,81 @@ def test_refinalize_then_resume_equals_a_run_of_this_code(
     assert after[1] == before[1], "the restored body changed"
     assert after[0] == before[0], f"the restored sidecar changed; differing keys: {differ}"
     assert doc_md(old) == doc_md(fresh)
+
+
+def _levels(out: Path, result) -> dict:
+    """The disagreement at every level a reader of the run looks at."""
+    from socr.core.result import contract_status_for
+
+    sidecar = _page(out)[0]
+    doc = json.loads((_doc_dir(out) / "metadata.json").read_text())
+    root = json.loads((out / "metadata.json").read_text())
+    [entry] = root["files"].values()
+    return {
+        "page": (sidecar["status"], sidecar["failure_mode"]),
+        "document": result.status.value,
+        "metadata": doc["status"],
+        "root index": entry["status"],
+        "cli": contract_status_for(result).value,
+        "error note": "page(s) 1, 2" in (result.error or ""),
+        "audit log": json.loads((_doc_dir(out) / "audit_log.json").read_text())["counts"].get(
+            "numbers_disagree_with_text_layer", 0
+        ),
+    }
+
+
+def test_a_disagreement_reaches_the_document_the_root_index_and_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failures surface at every level (Fable, PR #1219 review P1-A): the one character of
+    difference must change the page, the document, its metadata, the run's root index and
+    the CLI's verdict -- and nothing else between the arms."""
+    levels = {}
+    for q4 in ("-.8", "-8"):
+        out = tmp_path / f"out{q4}"
+        pdf = _rotated_pdf(tmp_path / f"p{q4}.pdf")
+        levels[q4] = _levels(out, _run(out, pdf, monkeypatch, korea_q4=q4, pages_read=[]))
+    faithful, dropped = levels["-.8"], levels["-8"]
+    assert {k for k in faithful if faithful[k] != dropped[k]} == set(faithful), (faithful, dropped)
+    assert dropped["page"] == ("warning", "numbers_disagree_with_text_layer")
+    assert (faithful["document"], dropped["document"]) == ("success", "audit_failed")
+    for level in ("metadata", "root index", "cli"):
+        assert (faithful[level], dropped[level]) == ("completed", "partial"), level
+    assert (faithful["error note"], dropped["error note"]) == (False, True)
+    assert (faithful["audit log"], dropped["audit log"]) == (0, 2)
+
+
+def test_refinalize_carries_a_disagreement_to_the_document_and_the_root_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool's half of P1-A: a re-finalized FAIL turns the document's recorded status and
+    the root index's into what a run of this code records, with no OCR."""
+    from socr.pipeline.refinalize_own_text import refinalize_document
+
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    fresh, old = tmp_path / "fresh", tmp_path / "old"
+    _run(fresh, pdf, monkeypatch, korea_q4="-8", pages_read=[])
+    with monkeypatch.context() as m:
+        m.setattr(verdict_module, "text_layer_numbers_clause", lambda output, p: None)
+        _run(old, pdf, monkeypatch, korea_q4="-8", pages_read=[])
+
+    def recorded(out: Path) -> tuple[dict, dict]:
+        doc = json.loads((_doc_dir(out) / "metadata.json").read_text())
+        [entry] = json.loads((out / "metadata.json").read_text())["files"].values()
+        return doc, entry
+
+    assert recorded(old)[0]["status"] == "completed", "fixture premise: old run was clean"
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    shutil.copy(pdf, pdf_dir / pdf.name)
+    refinalize_document(_doc_dir(old), pdf_dir)
+    keys = ("status", "error")
+    for got, want in zip(recorded(old), recorded(fresh)):
+        assert {k: got.get(k) for k in keys} == {k: want.get(k) for k in keys}
+    audit = lambda out: json.loads((_doc_dir(out) / "audit_log.json").read_text())  # noqa: E731
+    assert audit(old)["counts"] == audit(fresh)["counts"]
+    assert audit(old)["counts"].get("numbers_disagree_with_text_layer") == 2
+    # A second pass adds nothing anywhere.
+    snapshot = {p: p.read_bytes() for p in old.rglob("*") if p.is_file()}
+    refinalize_document(_doc_dir(old), pdf_dir)
+    assert {p: p.read_bytes() for p in old.rglob("*") if p.is_file()} == snapshot

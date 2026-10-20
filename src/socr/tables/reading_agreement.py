@@ -101,7 +101,20 @@ _FRACTION_RE = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
 _LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
 _LATEX_PUNCT_RE = re.compile(r"\\[,;:! ]|[${}]")
 _MATH_RE = re.compile(
-    r"\$\$.+?\$\$|\$[^$\n]+?\$|\\\(.+?\\\)|\\\[.+?\\\]|\\begin\{(\w+\*?)\}.+?\\end\{\1\}", re.S
+    r"\$\$.+?\$\$|\$[^$\n]+?\$|\\\(.+?\\\)|\\\[.+?\\\]"
+    r"|\\begin\{(\w+\*?)\}.+?\\end\{\1\}",
+    re.S,
+)
+#: A LaTeX table, written as pipe rows so its cells are table cells: an ``\begin{tabular}``
+#: block was dropped whole as "mathematics" (Argon, PR #1219 review).
+#: a tabular's rule and span commands, whose arguments are column numbers (``\\cline{3-4}``,
+#: ``\\multicolumn{1}{c}{SE}`` keeps ``SE``): never a cell's number.
+_TABULAR_COMMAND_RE = re.compile(
+    r"\\(?:cline|cmidrule)\s*(?:\([^)]*\))?\s*\{[^{}]*\}"
+    r"|\\(?:multicolumn|multirow)\s*\{[^{}]*\}\s*\{[^{}]*\}"
+)
+_TABULAR_RE = re.compile(
+    r"\\begin\{(tabular\*?|tabularx|longtable)\}(?:\{[^{}]*\})*(.*?)\\end\{\1\}", re.S
 )
 #: what marks a number as a REFERENCE to something rather than a value: an equation tag,
 #: a superscript (a footnote callout ``${}^{21}$``, an exponent). Reading side only.
@@ -109,6 +122,15 @@ _MATH_RE = re.compile(
 #: (``\gamma_4``) is a name: both go whole. The base is a WHOLE integer -- not preceded
 #: by a digit or a point -- so a starred cell ``-0.04^{***}`` loses its stars, never its
 #: last digit (a unit test caught the ``4`` being eaten as a power base).
+#: in a table row, an integer with a numeric superscript (``$143^1$``, ``143^{1}``) is a
+#: cell with a footnote callout: the base is the cell's number and is kept (Argon, PR #1219
+#: review: dropping it as a power left a wrong ``143`` unchecked). A power of ten, or any
+#: base after a times sign (``2 \\times 10^6``, ``9.60 \\times 10^4``), stays a power:
+#: measured on run 23319732, those cells against a layer's ``2×106`` were false disputes.
+_CELL_NUMERIC_CALLOUT_RE = re.compile(
+    r"(?<![\d.^])(?<!\\times )(?<!\\times)(?<!\u00d7)(?<!\\cdot )(?!10\^)"
+    r"(-?\d+)\^(?:\{\s*\d+\s*\}|\d+)"
+)
 _REFERENCE_MARK_RE = re.compile(
     r"\\tag\*?\{[^{}]*\}|\\textsuperscript\{[^{}]*\}"
     r"|(?<![\d.])\d+\^\{\s*-?\d+\s*\}|(?<![\d.])\d+\^-?\d+"
@@ -131,6 +153,12 @@ _WORD_DIGIT_RE = re.compile(
     r"|,(?=[^\W\d_])|(?<=[)\]])(?=\d)|(?<=%)\.(?=\d)"
     r"|[\u00d7=<>\u2243\u2248\u2264\u2265]"
 )
+#: Reading side: where a label runs into its digit (``Q1``, ``A-8``, ``t-1``, ``c1``). The
+#: split-off digit is marked a LABEL digit (``_LABEL``): it claims a layer number first, so
+#: the layer's own ``Q1`` cannot stand in for a dropped point, and an unclaimed one is never
+#: a dispute -- a reading may name columns the page leaves unnamed (``| c1 | c2 |``).
+_LABEL_DIGIT_RE = re.compile(r"(?<=[A-Za-z])(?=\d)|(?<=[A-Za-z][-\u2212])(?=\d)")
+_LABEL = "\u2063"
 #: A dollar sign in front of an amount (``-$8 billion``, ``$1.4trn``) is currency, and must
 #: not open a maths span that swallows the next one (Argon, diff review).
 _CURRENCY_RE = re.compile(r"(?<![\\$])\$(?=[-\u2212]?\d[\d,.]*(?:[A-Za-z%]|\s+[A-Za-z]))")
@@ -189,6 +217,17 @@ def _is_table_row(line: str) -> bool:
     return stripped.startswith("|") or "<td" in stripped or "<th" in stripped
 
 
+def _tabular_as_rows(text: str) -> str:
+    """Each ``\\begin{tabular}`` row as a pipe row (``&`` a cell break, ``\\\\`` a row end)."""
+
+    def rows(match: re.Match) -> str:
+        body = _TABULAR_COMMAND_RE.sub(" ", match.group(2))
+        lines = [row.replace("&", " | ") for row in re.split(r"\\\\", body)]
+        return "\n" + "\n".join(f"| {row.strip()} |" for row in lines if row.strip()) + "\n"
+
+    return _TABULAR_RE.sub(rows, text)
+
+
 def _drop_mathematics_outside_tables(text: str) -> str:
     """Drop mathematics from each run of non-table lines, as a whole: a display block
     (``$$ ... $$``) spans lines, so a line-by-line pass would never see both delimiters."""
@@ -213,9 +252,19 @@ def numeric_tokens(text: str, *, reading: bool = False) -> tuple[tuple[str, str]
     ``reading=True`` applies the reading-side rules (mathematics outside tables and
     reference marks dropped); otherwise the reference-side splitting applies.
     """
+    return tuple((value, written) for value, written, _ in _numeric_tokens(text, reading))
+
+
+def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ...]:
+    """:func:`numeric_tokens`, each also tagged "a label digit" (reading side only)."""
     if not text:
         return ()
     if reading:
+        text = _tabular_as_rows(text)
+        text = "\n".join(
+            _CELL_NUMERIC_CALLOUT_RE.sub(r"\1", line) if _is_table_row(line) else line
+            for line in text.split("\n")
+        )
         text = _REFERENCE_MARK_RE.sub(" ", text)
     else:
         text = _WORD_DIGIT_RE.sub(" ", _CONTROL_RE.sub(" ", text))
@@ -225,7 +274,8 @@ def numeric_tokens(text: str, *, reading: bool = False) -> tuple[tuple[str, str]
     text = _COMMENT_RE.sub(" ", text)
     text = _IMAGE_RE.sub(" ", text)
     text = _LINK_RE.sub(r"\1", text)
-    text = _TAG_RE.sub(" ", text)
+    if not reading:
+        text = _TAG_RE.sub(" ", text)
     text = _BRACKET_SPACE_RE.sub(lambda m: m.group(1) or m.group(2), text)
     text = _FRACTION_RE.sub(lambda m: f" {m.group(1)} {m.group(2)} ", text)
     if reading:
@@ -233,10 +283,23 @@ def numeric_tokens(text: str, *, reading: bool = False) -> tuple[tuple[str, str]
         # A table row keeps its mathematics: a cell is a number however it is typeset
         # (``$-0.04^{***}$``), and table cells are where a wrong number is cited.
         text = _drop_mathematics_outside_tables(text)
+        # After the maths step, which needs ``<td>`` to know an HTML cell is a table cell
+        # (Argon, PR #1219 review: stripped first, every maths cell of an HTML table went).
+        text = _TAG_RE.sub(" ", text)
+        # The same splits as the layer's: a label run into its number (``Q1``, ``A-8``,
+        # ``t-1``) is split on BOTH sides, so the reading's own label claims the digit the
+        # layer's split freed. Layer-only, those digits were free for a dropped point to
+        # match: ``.8`` read as ``8`` passed under a ``Q1..Q4`` header (Argon, PR #1219).
+        # Only the label split: the layer's other splits (``2018:II``, ``5.¹¹``, ``<0.01``)
+        # exposed reading tokens whose layer writing is not split the same way, and every
+        # one measured on run 23319732 was a false dispute.
+        text = _LABEL_DIGIT_RE.sub(" " + _LABEL, text)
     text = _STARS_RE.sub("", text)
     text = _CALLOUT_RE.sub(r"\1 ", _strip_latex(text))
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, bool]] = []
     for raw in _SPLIT_RE.split(text):
+        label = raw.startswith(_LABEL)
+        raw = raw.replace(_LABEL, "")
         if not raw:
             continue
         core, pair = _clean(raw)
@@ -246,9 +309,9 @@ def numeric_tokens(text: str, *, reading: bool = False) -> tuple[tuple[str, str]
         if not value:
             continue
         if pair:
-            out.append((f"{pair[0]}{value}{pair[1]}", f"{pair[0]}{core}{pair[1]}"))
+            out.append((f"{pair[0]}{value}{pair[1]}", f"{pair[0]}{core}{pair[1]}", label))
         else:
-            out.append((value, core))
+            out.append((value, core, label))
     return tuple(out)
 
 
@@ -281,17 +344,18 @@ class AgreementRecord:
         }
 
 
-def _reading_tokens(reading: str) -> list[tuple[str, str, bool]]:
-    """The reading's numbers in order, each tagged "written in a table row"."""
-    out: list[tuple[str, str, bool]] = []
+def _reading_tokens(reading: str) -> list[tuple[str, str, bool, bool]]:
+    """The reading's numbers in order, each tagged "written in a table row" and "a label
+    digit"."""
+    out: list[tuple[str, str, bool, bool]] = []
     block: list[str] = []
     in_table = False
-    for line in (reading or "").split("\n") + [None]:
+    for line in _tabular_as_rows(reading or "").split("\n") + [None]:
         row = line is not None and _is_table_row(line)
         if line is None or row != in_table:
             if block:
-                tokens = numeric_tokens("\n".join(block), reading=True)
-                out.extend((value, written, in_table) for value, written in tokens)
+                tokens = _numeric_tokens("\n".join(block), True)
+                out.extend((v, written, in_table, label) for v, written, label in tokens)
             block, in_table = [], row
         if line is not None:
             block.append(line)
@@ -301,10 +365,15 @@ def _reading_tokens(reading: str) -> list[tuple[str, str, bool]]:
 #: A year in running text with its footnote callout run on by the layer: ``2009.9`` for
 #: ``2009.`` + callout ``9`` (Nakamura-Steinsson p15). Callouts are one or two digits.
 _YEAR_RE = re.compile(r"19\d\d|20[0-3]\d")
-_CALLOUT_SUFFIX_RE = re.compile(r"\.?\d{1,2}")
+_CALLOUT_SUFFIX_RE = re.compile(r"\.?[1-9]\d?")
 
 
-def _same_number_in_prose(reading: str, layer: str) -> bool:
+def _same_number_in_prose(
+    reading: str,
+    layer: str,
+    reading_written: str = "",
+    layer_writings: frozenset[str] = frozenset(),
+) -> bool:
     """Do these two tokens print the same number, as running text (never a table cell)?
 
     Two relations, both measured on run 23319732's disputed pages and both about how a
@@ -315,6 +384,10 @@ def _same_number_in_prose(reading: str, layer: str) -> bool:
       drew as ``ð``/``Þ``. In a table a bracket separates a standard error from a
       coefficient, so table cells never take this relation;
     * a year with its footnote callout run on: ``2009`` against ``2009.9`` or ``20055``.
+      Only between numbers WRITTEN bare on both sides: the values are normalised, so
+      ``$2,000`` against ``$20,000`` compared as ``2000`` and ``20000`` and passed as a year
+      and a callout (Argon, PR #1219 review). A year is never written with a thousands
+      comma, a currency sign or a percent.
     """
     bare = reading.strip("()[]")
     # Integers only: on a decimal a bracket is a standard error, never punctuation.
@@ -322,6 +395,8 @@ def _same_number_in_prose(reading: str, layer: str) -> bool:
         return True
     return (
         bool(_YEAR_RE.fullmatch(bare))
+        and reading_written == reading
+        and layer in layer_writings
         and layer.startswith(bare)
         and bool(_CALLOUT_SUFFIX_RE.fullmatch(layer[len(bare) :]))
     )
@@ -337,9 +412,15 @@ def compare_numbers(reference: str, reading: str, *, provenance: str) -> Agreeme
         raise ValueError(f"unknown provenance: {provenance!r}")
     order = numeric_tokens(reference)
     tagged = _reading_tokens(reading)
-    reading_tokens = [(value, written) for value, written, _ in tagged]
+    reading_tokens = [(value, written) for value, written, _, _ in tagged]
+    # Label digits claim first, and are neither compared nor disputed: see ``_LABEL_DIGIT_RE``.
+    labels = Counter(value for value, _, _, label in tagged if label)
     held = Counter(value for value, _ in order)
-    shipped = Counter(value for value, _ in reading_tokens)
+    held = held - labels
+    writings: dict[str, set[str]] = {}
+    for value, written in order:
+        writings.setdefault(value, set()).add(written)
+    shipped = Counter(value for value, _, _, label in tagged if not label)
     surplus = shipped - held
     unused = held - shipped  # layer numbers no shipped number claimed
 
@@ -358,14 +439,20 @@ def compare_numbers(reference: str, reading: str, *, provenance: str) -> Agreeme
     named: list[tuple[int, str | None, str]] = []
     for j in sorted(range(len(reading_tokens)), key=lambda j: (j in matched, j)):
         value, written = reading_tokens[j]
-        if left[value] <= 0:
+        if tagged[j][3] or left[value] <= 0:
             continue
         left[value] -= 1
         if not tagged[j][2]:
             # Running text: the number may be printed in the layer in another writing.
             # Only an UNUSED layer number can stand for it, so nothing is counted twice.
             twin = next(
-                (u for u in unused if unused[u] > 0 and _same_number_in_prose(value, u)), None
+                (
+                    u
+                    for u in unused
+                    if unused[u] > 0
+                    and _same_number_in_prose(value, u, written, frozenset(writings[u]))
+                ),
+                None,
             )
             if twin is not None:
                 unused[twin] -= 1
@@ -374,7 +461,7 @@ def compare_numbers(reference: str, reading: str, *, provenance: str) -> Agreeme
         named.append((j, order[i][1] if i is not None else None, written))
     return AgreementRecord(
         provenance=provenance,
-        compared=len(reading_tokens),
+        compared=sum(shipped.values()),
         disputed=tuple((ref, read) for _, ref, read in sorted(named)),
         reference_only=sum(unused.values()),
     )

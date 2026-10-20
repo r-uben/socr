@@ -102,6 +102,9 @@ def _seed_and_flush(
     ps.table_ladder_disposition = disposition
     ps.table_ladder_incomplete = incomplete
     ps.own_layer_text = own_layer
+    # #1185 round 2 (approved fixture change, Argon finding 8): a control given a layer is
+    # given a born-digital one; agreement with a refused layer is no longer a CHECK
+    ps.is_born_digital = bool(own_layer)
 
     # The fragment must be written from the FINALIZED record, as production does. Every
     # production call site of ``_flush_page_fragment`` passes finalized text --

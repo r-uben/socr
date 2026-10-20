@@ -112,6 +112,16 @@ def _bd_assessment(
     return DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=pages)
 
 
+def _born_digital_layer(assessment: DocumentAssessment) -> DocumentAssessment:
+    """#1185 round 2 (approved fixture change, Argon finding 8): the control's own layer is
+    born-digital -- agreement with a refused layer is no longer a CHECK. Its native text
+    stays empty, so the page still routes to the model reading under test."""
+    for page in assessment.pages:
+        if page.own_layer_text:
+            page.is_born_digital = True
+    return assessment
+
+
 def _real_pdf(tmp_path: Path, page_count: int = 3) -> Path:
     fitz = pytest.importorskip("fitz")
     path = tmp_path / "doc.pdf"
@@ -564,7 +574,9 @@ class TestNonTerminalNotSkipped:
         pdf_path = _real_pdf(tmp_path, page_count=2)
         pipeline = _make_pipeline(_make_config())
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _bd_assessment(2, own_layers=layers)
+        pipeline.bd_detector.detect.return_value = _born_digital_layer(
+            _bd_assessment(2, own_layers=layers)
+        )
 
         run1_calls: list[int] = []
         _run(pipeline, pdf_path, tmp_path, run1_calls, texts=texts)
@@ -583,7 +595,9 @@ class TestNonTerminalNotSkipped:
 
         pipeline2 = _make_pipeline(_make_config(reprocess=True))
         pipeline2.bd_detector = MagicMock()
-        pipeline2.bd_detector.detect.return_value = _bd_assessment(2, own_layers=layers)
+        pipeline2.bd_detector.detect.return_value = _born_digital_layer(
+            _bd_assessment(2, own_layers=layers)
+        )
         run2_calls: list[int] = []
         _run(pipeline2, pdf_path, tmp_path, run2_calls, texts=texts)
 

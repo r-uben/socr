@@ -77,3 +77,69 @@ the tool does not change (as #1217's tool; the run fingerprint is what resume re
 - The equation/chart permanent modes are kept on resume on the mode alone, whatever the
   status; #1185 closed that only for its own two modes.
 - A number in a caption ("Table 2") counts as a reading number.
+
+## Round 2 (2026-10-20): Fable and Argon reviews of PR #1219
+
+Every finding was reproduced before any fix; commands and outputs are in the lead's
+report-r2.md. Deferred items are #1220.
+
+- **A FAIL reaches every level** (Fable P1-A, Argon 1). Reproduced: the `-8` arm was
+  `success`/`completed` at document, metadata, root index and CLI. Now a page whose verdict
+  carries `text_layer_numbers=FAIL` is in the document rule (`numbers_disagree_pages` in
+  `pages_ok`: AUDIT_FAILED, `partial`, "completed with warnings"), gets one
+  `numbers_disagree_with_text_layer` audit event and a line in the document's `error` note.
+  The tool writes the same status, note and events (document, root index, sidecar copy),
+  derived from the sidecars as written so an interrupted run is completed by the next.
+  **UNKNOWN stays at the page**: it says the check could not run, not that a number is
+  contradicted, which is the #1145 rule for the equation / chart / unjudged clauses.
+- **Analysis-only earlier-OCR pages are UNKNOWN, not skipped** (Fable P1-B). In a run,
+  #1156's clause marks such a page in the same pass; this tool applies only #1185's, so
+  abstaining left 22 of the calibration copy's 43 "stay CHECKED" pages unmarked. Chosen
+  over counting them in `skipped`: a skipped page still ships unmarked until someone runs
+  `socr-refinalize-prior-ocr`, and the rule is that no such page comes out unmarked. The
+  clause's no-own-text UNKNOWN is true of it, with a reason naming #1156's tool.
+- **Agreement with a refused or damaged layer is not a CHECK** (Argon 4, overruling the
+  round-1 asymmetry and Fable P2-4 by the orchestrator's ruling). Every early return of the
+  page analysis sets `is_born_digital=False`, so this also covers #961 pages that return
+  before the invisible-OCR test runs. The cosmetic flag (#136: lost spaces, fused words) is
+  NOT damage: the detector routes digit damage to OCR before it sets that flag, so an
+  agreement counts and a dispute is UNKNOWN. Cost: 589 of run 23319732's 3,071 pages
+  move from CHECKED to UNKNOWN. A layer refused only for being short ("insufficient text
+  layer") is refused all the same.
+- **Comparator** (Argon 2, 3, 6): the year-callout relation needs numbers written bare on
+  both sides and a callout that does not start with 0; labels run into digits (`Q1`, `A-8`,
+  `c1`) are split on the reading too, claim first, and are neither compared nor disputed
+  (a reading may name columns the page leaves unnamed); a `tabular` is converted to table
+  rows (its `\cline`/`\multicolumn` arguments dropped); HTML tags are stripped after the
+  maths step; a numeric callout on a table cell keeps the cell's number, except a power of
+  ten or a base after a times sign. Measured on run 23319732 by reading every new FAIL:
+  a first, wider version (the layer's full word/digit split on the reading, every non-maths
+  environment kept) added 16 FAILs, 13 of them false (`2018:II`, `5.¹¹`, `\cline{3-4}`,
+  `2 \times 10^6`, `\includegraphics[width=0.9...]`); the narrowed version adds 3: two real
+  (Hansen-McMahon p17, layer `0.29`, reading `0.28`, inside a `tabular` round 1 dropped)
+  and one false (Kuttner p11, a layer writing the minus as `@`, in #1220).
+- **The tool places the clause where a fresh run does** (Argon 7.1). Reproduced on a WARNING
+  page with a figure clause: page bytes were already identical, the sidecar's clause order
+  was not. The position is the count of silent-success clauses the RUN derived, from its
+  own prior-OCR flag and its `audit_log.json` event kinds; a document without an audit log
+  is counted in `skipped`.
+- **Nothing is passed over silently** (Fable P2-6, Argon 7.3): unfinished pages and
+  documents without `metadata.json` or `audit_log.json` are counted in `skipped`.
+- Argon 7.2, partly real: a manifest missing the page raised after the fragments and before
+  the sidecars, and every rerun raised at the same place. The manifest is now checked before
+  the first write. The rest of the claim does not hold: on any other interruption the
+  order is deliberate and the rerun completes it: `_swap_once` accepts an already-written
+  section, the fragment check accepts either text, and `refinalize_page` re-derives from the
+  untouched sidecar.
+
+The round-1 control spy proved only that the comparison agreed, which stays true on a
+refused layer; it now also asserts the clause decision was "none" (the page is CHECKED).
+Five controls were given a born-digital layer (Argon 8, approved): gh161 ×2, ladder,
+canon, pp5. The p3 fixture PDF now prints the "Table 2" caption its reading quotes, and
+its round-1 expectation edits are reverted.
+gh993's end-to-end tests get their own PDF (`_ruled_pdf_as_read`): the shared grid's 48
+characters fall under the analysis's 50-character floor, and a caption alone tripped the
+native table trust check because the grid's header (`00..03`) is not the reading's
+(`c0..c3`); it prints the reading's table and a caption without digits. No gh993
+assertion depended on the short layer, no expectation changed, the shared builder is
+untouched (approved by the orchestrator, 2026-10-20).

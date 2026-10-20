@@ -253,6 +253,8 @@ class TestCanonicalBodyAndReplay:
         # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
         for i in (1, 2, 3):
             state.pages[i].own_layer_text = f"text {i} measured 4.2{i}"
+            # #1185 round 2 (approved fixture change): the layer is born-digital
+            state.pages[i].is_born_digital = True
             state.pages[i].best_output = PageOutput(
                 page_num=i,
                 text=f"text {i} measured 4.2{i}",

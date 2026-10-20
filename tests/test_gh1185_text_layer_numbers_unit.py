@@ -17,6 +17,7 @@ from socr.core.manifest import _apply_verdict_marks
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.core.verdict import (
+    DAMAGED_LAYER_AGREES_REASON,
     DAMAGED_LAYER_PREFIX,
     NO_NUMBER_REASON,
     NO_OWN_TEXT_REASON,
@@ -220,6 +221,72 @@ def test_interval_is_not_a_number() -> None:
     assert numeric_tokens("on (0,1) and [0,1]") == ()
 
 
+def _disputes(layer: str, reading: str) -> tuple:
+    return compare_numbers(layer, reading, provenance=PROVENANCE_OWN_CHARACTERS).disputed
+
+
+@pytest.mark.parametrize(
+    ("layer", "reading"),
+    [
+        ("Cost was $20,000 in total.", "Cost was $2,000 in total."),
+        ("Cost was $200,000 in total.", "Cost was $2,000 in total."),
+        ("Output 19,500 units.", "Output 1,950 units."),
+        ("Price 1,950.75 here.", "Price 1,950 here."),
+        ("Rate 2015.8% here.", "Rate 2015% here."),
+        ("In 20000 cases", "In 2000 cases"),
+    ],
+)
+def test_the_year_callout_relation_needs_bare_numbers_on_both_sides(layer, reading) -> None:
+    """Argon P0-2: the relation compared NORMALISED values, so a 10x or 100x error or a lost
+    decimal passed as "a year with its callout". The same shape written bare still matches
+    (``test_running_text_year_with_run_on_callout_matches``)."""
+    assert _disputes(layer, reading)
+
+
+def test_a_label_run_into_its_digit_is_split_on_both_sides() -> None:
+    """Argon P0-3, its exact example: ``Q1..Q4`` and ``A-8`` split on the layer side only
+    left free ``1..4`` and ``8`` for a dropped point (``.8`` read ``8``) to match."""
+    layer = "Table A-8\nQ1 Q2 Q3 Q4\nKorea .8 .4"
+    reading = "Table A-8\n| | Q1 | Q2 | Q3 | Q4 |\n| Korea | 8 | 4 |"
+    assert _disputes(layer, reading) == ((".8", "8"), (".4", "4"))
+    faithful = "Table A-8\n| | Q1 | Q2 | Q3 | Q4 |\n| Korea | .8 | .4 |"
+    assert _disputes(layer, faithful) == ()
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [
+        "<table><tr><td>Korea</td><td>$1.4 \\times 10$</td><td>142</td></tr></table>",
+        "\\begin{tabular}{lll} Korea & $1.4 \\times 10$ & 142 \\end{tabular}",
+        "| Korea | $1.4^1$ | 142 |",
+        "| Korea | 1.4^{1} | 142 |",
+    ],
+)
+def test_a_table_cell_is_compared_however_the_table_is_written(reading: str) -> None:
+    """Argon P1-6: an HTML table's maths cells (tags stripped before the maths step), a
+    ``tabular`` environment (dropped as maths) and a cell with a numeric callout (dropped as
+    a power) were never compared. Layer ``1.3``, reading ``1.4``: named in each writing."""
+    assert (("1.3", "1.4") in _disputes("Korea 1.3 10 142", reading)) or (
+        _disputes("Korea 1.3 142", reading) == (("1.3", "1.4"),)
+    )
+
+
+@pytest.mark.parametrize("cell", ["$143^1$", "143^{1}", "143^1"])
+def test_an_integer_cell_with_a_numeric_callout_keeps_its_number(cell: str) -> None:
+    """Argon P1-6.3, its own case: an INTEGER cell with a numeric footnote was dropped
+    whole as a power, so a wrong ``143`` for a printed ``142`` was never compared. (A
+    decimal base keeps its number by another path, which is why the decimal rows above
+    could not show it -- found by the mutant that removed this rule and survived them.)"""
+    assert _disputes("Korea 142 7", f"| Korea | {cell} | 7 |") == (("142", "143"),)
+
+
+@pytest.mark.parametrize("cell", ["$2 \\times 10^6$", "$9.60 \\times 10^4$"])
+def test_a_power_of_ten_in_a_cell_stays_a_power(cell: str) -> None:
+    """The narrowing measured on run 23319732: a layer prints ``2×106``; keeping the base
+    ``10`` of ``10^6`` as the cell's number disputed it falsely."""
+    assert _disputes("Obs. 2×106 9.60×104", f"| Obs. | {cell} |") == ()
+
+
 def test_unknown_provenance_is_rejected() -> None:
     """compare_numbers refuses a provenance it does not know."""
     with pytest.raises(ValueError):
@@ -260,6 +327,34 @@ def test_minus_as_digit_hits_turns_the_disagreement_into_unknown() -> None:
     clause = text_layer_numbers_clause(_qwen(TEALBOOK_READING), p)
     assert clause is not None
     assert clause.result is CheckResult.UNKNOWN
+
+
+@pytest.mark.parametrize("flag", ["refused", "minus_as_digit_hits", "control_byte_scan_failed"])
+def test_agreement_with_a_refused_or_damaged_layer_is_not_a_check(flag: str) -> None:
+    """Round 2 (Argon P0-4, overruling the round-1 asymmetry): the same agreeing reading is
+    CHECKED on a clean born-digital layer and UNKNOWN on one the detector refused or found
+    damaged -- the layer may be an earlier OCR run's that the analysis could not name."""
+    agreeing = "| Korea | 4.0 | 2.6 | 5.7 | -.8 | 4.0 | 3.3 |"
+    clean = _page()
+    suspect = _page(born_digital=flag != "refused")
+    if flag != "refused":
+        setattr(suspect, flag, 1 if flag.endswith("hits") else True)
+    assert text_layer_numbers_clause(_qwen(agreeing), clean) is None
+    clause = text_layer_numbers_clause(_qwen(agreeing), suspect)
+    assert (clause.result, clause.reason) == (CheckResult.UNKNOWN, DAMAGED_LAYER_AGREES_REASON)
+
+
+def test_a_cosmetic_layer_checks_an_agreement_and_softens_a_dispute() -> None:
+    """#136's cosmetic class (lost spaces, fused words) carries the page's own digits, so an
+    agreement is a CHECK; a dispute may be a fused pair hiding the number, so UNKNOWN."""
+    agreeing = "| Korea | 4.0 | 2.6 | 5.7 | -.8 | 4.0 | 3.3 |"
+    cosmetic = _page()
+    cosmetic.has_encoding_hygiene_suspect = True
+    assert text_layer_numbers_clause(_qwen(agreeing), cosmetic) is None
+    clean = text_layer_numbers_clause(_qwen(TEALBOOK_READING), _page())
+    soft = text_layer_numbers_clause(_qwen(TEALBOOK_READING), cosmetic)
+    assert (clean.result, soft.result) == (CheckResult.FAIL, CheckResult.UNKNOWN)
+    assert soft.reason == DAMAGED_LAYER_PREFIX + clean.reason
 
 
 def test_no_own_text_layer_is_unknown() -> None:

@@ -23,7 +23,6 @@ from test_gh359_ladder_terminals import (
     _pass,
     _process,
     _QueueRung,
-    _ruled_pdf,
 )
 from test_gh359_ladder_terminals import _TABLE_MD
 
@@ -31,8 +30,35 @@ from socr.core.table_counts import TableCounts, count_from_sidecars, count_page_
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 
+def _ruled_pdf_as_read(tmp_path: Path, name: str = "doc.pdf") -> Path:
+    """#1185 round 2 (approved fixture change): ``_ruled_pdf``'s grid printing the table the
+    stub reading ships (header ``c0..c3``), plus a caption without digits, so the page is a
+    born-digital layer that agrees with its reading; the shared builder (48 characters,
+    refused as too short) is untouched."""
+    import fitz
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page()
+    cols = [100, 220, 300, 380]
+    rows = [100 + i * 22 for i in range(4)]
+    cells = [["c0", "c1", "c2", "c3"], *[[f"{r}{c}" for c in range(4)] for r in (1, 2, 3)]]
+    for r, y in enumerate(rows):
+        for c, x in enumerate(cols):
+            page.insert_text((x + 4, y + 12), cells[r][c], fontsize=9)
+    for yy in rows:
+        page.draw_line((100, yy), (460, yy))
+    for xx in cols + [460]:
+        page.draw_line((xx, rows[0]), (xx, rows[-1]))
+    page.insert_text((100, 70), "Grid of reported values for the four columns below.", fontsize=9)
+    pdf_path = tmp_path / name
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
 def _run(tmp_path: Path, result, *, quiet: bool = True):
-    pdf = _ruled_pdf(tmp_path, "doc.pdf")
+    pdf = _ruled_pdf_as_read(tmp_path, "doc.pdf")
     pipeline = UnifiedPipeline(_make_config(quiet=quiet))
     # The native scoring diagnostic (``table_not_scorable``) is a property of the ruled
     # fixture's geometry, not of the ladder verdict under test; left on, it would flag
@@ -97,6 +123,19 @@ def test_cli_line_is_printed_once_per_document(
     assert [ln.strip() for ln in lines] == [
         "tables: 1 as text (1 verified, 0 unverified), 0 withheld"
     ], lines
+
+
+def test_the_verified_table_page_is_checked_by_its_own_text_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1185 round 2 (approved fixture change): prove the control page's reading was compared
+    with its own layer, compared numbers, agreed and raised no clause -- so "verified" above
+    is a CHECKED page, not a skipped check."""
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
+    calls = spy_agreement(monkeypatch)
+    _run(tmp_path, _pass("high"))
+    assert_agreed_on(calls, "| 10 | 11 | 12 | 13 |")
 
 
 def _assemble_with_final_body(tmp_path: Path, final_page: str) -> dict:

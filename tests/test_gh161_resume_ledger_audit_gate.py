@@ -89,7 +89,9 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
 
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
     ps = state.pages[1]
-    ps.is_born_digital = False
+    # #1185 round 2 (approved fixture change, Argon finding 8): the control's layer is born-digital;
+    # agreement with a refused layer is no longer a CHECK
+    ps.is_born_digital = True
     ps.native_text = ""
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = "Goldman Sachs 2.3 1.9 judge-rejected body text"
@@ -219,7 +221,9 @@ def test_audit_passed_success_page_is_still_resume_skippable(
 
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
     ps = state.pages[1]
-    ps.is_born_digital = False
+    # #1185 round 2 (approved fixture change, Argon finding 8): the control's layer is born-digital;
+    # agreement with a refused layer is no longer a CHECK
+    ps.is_born_digital = True
     ps.native_text = ""
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = "Goldman Sachs 2.3 1.9 accepted body text"

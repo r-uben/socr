@@ -103,6 +103,10 @@ def _build_fixture_pdf(tmp_path: Path) -> Path:
         tokens.append((170.0, x, value))
     for y, x, word in tokens:
         page.insert_text((x, y), word, fontsize=9)
+    # #1185 round 2 (approved fixture change, Argon finding 8): the page prints the caption
+    # the candidate reads ("Table 2 ..."), so the reading's numbers are the page's own and
+    # the page is CHECKED -- the judged-bytes property this file pins, unmarked.
+    page.insert_text((80.0, 40.0), "Table 2 reports estimated treatment effects", fontsize=9)
     pdf_path = tmp_path / "doc.pdf"
     doc.save(str(pdf_path))
     doc.close()
@@ -221,26 +225,16 @@ class TestJudgedBytesShip:
         p1_flushes = [body for page_num, body in flushed if page_num == 1]
         assert p1_flushes, "page 1 was never flushed"
         for body in p1_flushes:
-            # #1185: the reading names "2" (the caption) which the fixture text layer
-            # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
-            assert (
-                _without_native_cell_marks(body)
-                == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
-                + captured["text"]
-            ), "every provisional in-loop flush body must equal the judge-accepted text exactly"
+            assert _without_native_cell_marks(body) == captured["text"], (
+                "every provisional in-loop flush body must equal the judge-accepted text exactly"
+            )
 
     def test_page_fragment_on_disk_matches_accepted_text(self, tmp_path: Path) -> None:
         _result, out_dir, captured, _flushed = _run_pipeline(tmp_path)
         fragment_candidates = list(out_dir.rglob("pages/00001.md"))
         assert fragment_candidates, f"no pages/00001.md found under {out_dir}"
         fragment_text = fragment_candidates[0].read_text(encoding="utf-8")
-        # #1185: the reading names "2" (the caption) which the fixture text layer
-        # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
-        assert (
-            _without_native_cell_marks(fragment_text)
-            == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
-            + captured["text"]
-        ), (
+        assert _without_native_cell_marks(fragment_text) == captured["text"], (
             "the pages/00001.md fragment after authoritative rewrite must equal "
             "the judge-accepted text exactly"
         )
@@ -255,13 +249,7 @@ class TestJudgedBytesShip:
 
         pages = split_native_pages(final_markdown)
         assert len(pages) >= 1
-        # #1185: the reading names "2" (the caption) which the fixture text layer
-        # lacks, so the page carries the text_layer_numbers FAIL mark above the bytes.
-        assert (
-            _without_native_cell_marks(pages[0])
-            == "> [page 1 unchecked: text_layer_numbers=FAIL; scope=page; reason=reading says 2, not in the text layer]\n\n"
-            + captured["text"]
-        ), (
+        assert _without_native_cell_marks(pages[0]) == captured["text"], (
             "page 1 of the final stitched document must be BYTE-IDENTICAL to "
             "the text the judge accepted -- not merely contain it"
         )
@@ -284,3 +272,16 @@ class TestJudgedBytesShip:
             e for e in events if e.get("data", {}).get("site") == "post_route_recheck"
         ]
         assert post_route_sites == []
+
+
+def test_the_fixture_page_is_checked_by_its_own_text_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1185 round 2 (approved fixture change): the caption added to the fixture PDF makes
+    the reading's numbers the page's own; prove the check ran, compared, agreed and raised
+    no clause, so the unmarked bytes above are a CHECKED page and not a skipped check."""
+    from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+
+    calls = spy_agreement(monkeypatch)
+    _run_pipeline(tmp_path)
+    assert_agreed_on(calls, "Table 2 reports")
