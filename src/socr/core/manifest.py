@@ -1186,6 +1186,166 @@ def floor_page_image_ref(p) -> str:
     return ""
 
 
+#: The tail of the verdict mark every page carrying an earlier OCR layer ships with
+#: (``verdict._prior_ocr_layer_clause``): ``> [page N unchecked: prior_ocr_layer=UNKNOWN;
+#: scope=page; reason=earlier OCR, not re-read]``.
+PRIOR_OCR_MARK_REASON = "reason=earlier OCR, not re-read"
+
+
+def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
+    """Whether figure extraction must skip this page: it already ships an image of itself.
+
+    #1030's scanned-figure image always ships (its guard appends it). A floor image ships
+    only when the page's body carries it: the ref is rendered before selection, so a page
+    that ends up shipping a model reading carries the ref too, and skipping on the ref
+    alone dropped that page's figures (Argon, Part B diff review).
+    """
+    if getattr(p, "scanned_figure_png_ref", ""):
+        return True
+    ref = floor_page_image_ref(p)
+    if ref and ref in (shipped_body or ""):
+        return True
+    # #1156 Part B round 3 (Argon P1-4): a masked layer whose page image failed to render
+    # ships no image, and the extractor would then take the page's raster as a "figure"
+    # and caption it -- text added after the mask, which may carry the numbers the mask
+    # withheld. The page is a scan; it has no figure of its own to extract.
+    # Keyed on the ending's own mark, not on a by-product of the mask: a masked layer with
+    # no number carries no withheld token (Fable, round 3 P2-2). A scan has no figure of
+    # its own to extract whichever way it ended.
+    from socr.tables.prior_ocr_mask import NUMBER_WITHHELD, NUMBER_WITHHELD_NO_IMAGE
+
+    body = shipped_body or ""
+    return prior_ocr_layer_found(p) and (
+        PRIOR_OCR_MARK_REASON in body or NUMBER_WITHHELD in body or NUMBER_WITHHELD_NO_IMAGE in body
+    )
+
+
+def retained_prior_ocr_layer(p) -> str:
+    """#1156: the earlier OCR layer exactly as the sidecar retains it (``native_text``
+    first, else the copy an early born-digital rejection kept). ONE definition, read by
+    the sidecar writer and by the masked ending, so the re-finalisation of a finished run
+    starts from the same bytes a fresh run masked."""
+    return getattr(p, "native_text", "") or getattr(p, "prior_ocr_layer_text", "") or ""
+
+
+#: Audit-event kinds that say the run saw a table on the page. Matched by PREFIX, so a
+#: new table event keeps a page on its floor by default: a missed kind costs the page its
+#: prose, never ships a table as loose text.
+_TABLE_EVENT_PREFIXES = ("table_", "source_evidence_table_", "possible_table_")
+
+
+def page_saw_an_unplaced_table(state, page_num: int) -> bool:
+    """#1156 Part B: did the run see a table on this page, by any signal it has?
+
+    Answered ONCE per page and remembered on it (Argon, diff review): ``_phase_assemble``
+    appends events of its own between the first finalisation and the last, some of them
+    table events derived from the shipped body, and a second answer would flip the page to
+    its floor while the saved masked body overrode the floor's text -- a record that
+    contradicts its own bytes. Persisted in the sidecar, so a re-finalisation reads the
+    live run's answer.
+
+    Round 2 (Argon P0-2, reproduced): events alone missed a rejected reading that held an
+    HTML table, so the question is asked of every signal the run has, and the masked
+    ending requires all of them to say "no table" -- positive evidence, not a list of
+    event kinds that grows each round:
+
+    * any audit event of the page whose kind names a table (the prefixes below);
+    * any table flag of the page's own assessment;
+    * any model reading of the page that holds a table, markdown or HTML.
+
+    The layer's own shape is the masker's question (``prior_ocr_mask.masked_layer_text``
+    refuses a layer with a stacked column), because the re-finalisation of a finished run
+    can ask it too.
+    """
+    p = state.pages.get(page_num)
+    seen = getattr(p, "prior_ocr_table_seen", None) if p is not None else None
+    if seen is None:
+        # ``--retry-failed-pages`` moves a first attempt's events out of the run's stream
+        # and keeps them in ``page_retry``; a table that attempt saw is still a table
+        # (Fable P2-7).
+        first_attempt = (getattr(p, "page_retry", None) or {}).get("first_attempt") or {}
+        seen = (
+            any(
+                getattr(ev, "page_num", None) == page_num
+                and str(getattr(ev, "kind", "") or "").startswith(_TABLE_EVENT_PREFIXES)
+                for ev in getattr(state, "events", None) or ()
+            )
+            or any(
+                str(ev.get("kind", "") or "").startswith(_TABLE_EVENT_PREFIXES)
+                for ev in first_attempt.get("audit_events") or ()
+                if isinstance(ev, dict)
+            )
+            # The first attempt's readings are not kept, only whether one held a table
+            # (Argon, round 2 re-review).
+            or first_attempt.get("reading_held_a_table") is True
+            # A first attempt refused as an invalid table emission emitted a table, and
+            # says so only in its failure mode (Argon, round 3 P1-1).
+            or first_attempt.get("failure_mode") == FailureMode.TABLE_EMISSION_INVALID.value
+            # A page rebuilt from its sidecar has no readings either; the sidecar's attempt
+            # record says whether each held one (round 3, Fable P1-2).
+            or any(
+                isinstance(row, dict) and row.get("held_a_table") is True
+                for row in (getattr(p, "attempts_summary_restored", None) or ())
+                if p is not None
+            )
+            or (p is not None and _page_flags_a_table(p))
+            or (p is not None and any(reading_holds_a_table(a) for a in p.attempts))
+        )
+        if p is not None:
+            p.prior_ocr_table_seen = seen
+    return seen
+
+
+def _page_flags_a_table(p) -> bool:
+    """Any table finding of the page's own assessment."""
+    return bool(
+        getattr(p, "has_tables", False)
+        or getattr(p, "possible_table_structure_not_reconstructed", False)
+        or getattr(p, "table_not_reconstructed", False)
+        or (getattr(p, "detected_table_count", 0) or 0) > 0
+        # A table ladder ran on the page, so something on it was read as a table.
+        or getattr(p, "table_ladder_disposition", None) is not None
+    )
+
+
+def reading_holds_a_table(attempt) -> bool:
+    """Whether a model reading of the page holds a table block, markdown or HTML."""
+    text = getattr(attempt, "text", "") or ""
+    if not text or str(getattr(attempt, "engine", "") or "").startswith(_NATIVE_TEXT_LANES):
+        return False
+    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.source_evidence import html_table_for_check
+
+    converted, html_unparsed = html_table_for_check(text)
+    return html_unparsed or bool(find_table_blocks(converted))
+
+
+def prior_ocr_masked_body(p) -> tuple[str, int]:
+    """#1156 Part B: the body the masked ending ships, and how many numbers it withheld.
+
+    A pure function of the retained layer, the independently confirmed positions (none
+    until #1208) and the page image reference -- never of finalised text -- so every
+    finalisation of the page computes the same bytes. ``("", 0)`` when no word of the
+    layer survives; the caller then ships its fail-closed marker.
+    """
+    from socr.tables.prior_ocr_mask import (
+        NUMBER_WITHHELD,
+        NUMBER_WITHHELD_NO_IMAGE,
+        independently_confirmed_positions,
+        masked_layer_text,
+    )
+
+    layer = retained_prior_ocr_layer(p)
+    png = floor_page_image_ref(p)
+    confirmed = independently_confirmed_positions(getattr(p, "reading_agreement", None), layer)
+    text, withheld, _shreds = masked_layer_text(
+        layer, confirmed, token=NUMBER_WITHHELD if png else NUMBER_WITHHELD_NO_IMAGE
+    )
+    if not text:
+        return "", 0
+    return (f"{text}\n\n{png}" if png else text), withheld
+
+
 def prior_ocr_layer_found(p) -> bool:
     """#1156: a POSITIVE finding that this page's text layer is an EARLIER OCR run.
 
@@ -3808,6 +3968,9 @@ class PagePrimaryReason(str, Enum):
     #: of the page to check it against: fail-closed marker plus page image. The layer
     #: itself is retained in the sidecar, unshipped.
     PRIOR_OCR_LAYER_UNREAD = "prior_ocr_layer_unread"
+    #: #1156 Part B: the same page kind, when the layer READS: its prose ships, every
+    #: number in it withheld, under its mark, with the page image.
+    PRIOR_OCR_LAYER_MASKED = "prior_ocr_layer_masked"
     NATIVE_TABLE_DISTRUST = "native_table_distrust"
     STRUCTURE_CLASS = "structure_class"
     DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
@@ -3897,6 +4060,12 @@ class SelectionProvenance(str, Enum):
     ROTATED_TEXT_SHREDDED = "rotated_text_shredded"
     #: #1027: invisible OCR layer over a raster scan, model ladder accepted nothing:
     #: fail-closed marker (neither the layer nor the rejected reading ships)
+    #: #1156 Part B (owner ruling 2026-10-17): an earlier OCR layer, no reading of the
+    #: page accepted, and the layer READS -- its prose ships with every number withheld,
+    #: the original retained off the page. Declared FIRST of the three because the enum
+    #: mirrors the cascade's return order and this branch is tried before #1027's floor
+    #: and Part A's: those two keep only the layers in which no word survives.
+    PRIOR_OCR_LAYER_MASKED = "prior_ocr_layer_masked"
     INVISIBLE_SCAN_UNREAD = "invisible_scan_unread"
     #: #1156: the page's text layer is an EARLIER OCR run and no reading of the page was
     #: accepted (rejected, or none ever ran): fail-closed marker plus the page image.
@@ -4009,6 +4178,11 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     #: have readable prose waiting in the sidecar for Part B to recover.
     SelectionProvenance.PRIOR_OCR_LAYER_UNREAD: PageDisposition(
         PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.PRIOR_OCR_LAYER_UNREAD
+    ),
+    #: #1156 Part B: the layer's own prose ships (so the ending is native, demoted), its
+    #: numbers withheld and the original retained in the sidecar.
+    SelectionProvenance.PRIOR_OCR_LAYER_MASKED: PageDisposition(
+        PageEnding.DEMOTED_NATIVE, PagePrimaryReason.PRIOR_OCR_LAYER_MASKED
     ),
     SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
@@ -4550,6 +4724,47 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
             ), SelectionProvenance.ROTATED_TEXT_SHREDDED
+
+        # #1156 Part B, the owner's ruling (2026-10-17, until a second reader can confirm
+        # these pages): a page whose text layer is an EARLIER OCR run, and for which no
+        # reading was accepted (rejected, or none ever ran), keeps that layer's PROSE --
+        # under its mark, every number withheld, the page image beside it, the original
+        # retained in the sidecar. It replaces both floors below for every such page
+        # whose layer reads; what decides is whether the layer READS, not which detector
+        # found the page (orchestrator, 2026-10-19: #1027's delete is replaced too).
+        #
+        # * Same gate as Part A's floor: a POSITIVE finding by either route, never a
+        #   failed scan alone (suspicion grants no subtraction), and a structure-class
+        #   page stays S1's -- tables never ship as loose text.
+        # * Built ONCE from the retained original (``prior_ocr_masked_body``), never from
+        #   text socr has finalised, so a re-finalisation and a resume compute the same
+        #   bytes and the same count.
+        # * A layer in which no word survives the shred rule falls through to the floors
+        #   below unchanged: that is #1027's own case.
+        # * A page on which the run SAW a table it could not place (a refused scanned
+        #   table, a caption with no detected grid) keeps its floor: nothing locates the
+        #   table inside the layer, so its rows would ship as loose text, which the
+        #   withhold rules (#1144/#1155) never allow. 17 of the 239 #1027 pages in the
+        #   Fed calibration run carry such an event.
+        # * The lookahead declines on a structure-class page whose model table was kept
+        #   flagged, or on which no model ran; the table gate below reads ``has_tables``
+        #   itself, so such a page keeps its floor (Argon, diff review).
+        if (
+            prior_ocr_layer_found(p)
+            and not _reaches_structure_class_branch(p)
+            and not page_saw_an_unplaced_table(state, page_num)
+        ):
+            masked_body, withheld = prior_ocr_masked_body(p)
+            if masked_body:
+                return PageOutput(
+                    page_num=page_num,
+                    text=masked_body,
+                    status=PageStatus.WARNING,
+                    engine="native",
+                    audit_passed=False,
+                    failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+                    numbers_withheld=withheld,
+                ), SelectionProvenance.PRIOR_OCR_LAYER_MASKED
 
         # #1027: invisible-OCR-layer floor. A scan whose native text is an invisible
         # baked-in OCR layer (render mode 3 over a page-sized raster) is known garbage:
@@ -6304,7 +6519,11 @@ def _select_and_finalize_page(
         output = _apply_chart_region_guard(output, p)
         output = _apply_halt_unprocessed_guard(output, p)
         output = _apply_scanned_figure_guard(output, p)
-        output = _apply_native_paragraphs(output, p, state.native_vocabulary)
+        # #1156 Part B: the masked layer ships exactly as built from the retained original.
+        # The reflow rebuilds lines from the page's native geometry, which carries the
+        # UNMASKED layer, and a re-finalisation of a finished run has no geometry at all.
+        if provenance is not SelectionProvenance.PRIOR_OCR_LAYER_MASKED:
+            output = _apply_native_paragraphs(output, p, state.native_vocabulary)
         output = _apply_unverified_table_mark(output, p)
     output = _apply_unaccepted_output_mark(output, provenance, p)
     # #1145 step 9f. A resumed page takes the verdict its original run PUBLISHED: two

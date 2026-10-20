@@ -319,7 +319,14 @@ def test_the_floors_marker_only_promises_an_image_the_floor_ships(tmp_path: Path
         "the marker promised an image the floor does not ship -- the reader is pointed at "
         "a picture that is not there"
     )
-    assert "not transcribed" in d3_only
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
+    assert "earlier OCR, not re-read" in d3_only
+    layer_lines = [
+        ln for ln in d3_only.splitlines() if ln.strip() and not ln.startswith((">", "!["))
+    ]
+    assert not any(ch in "0123456789" for ln in layer_lines for ch in ln), (
+        "a number of the earlier OCR layer reached the page"
+    )
 
     own = floored(prior_ocr_page_png_ref="![Scanned page 1](figures/prior_ocr_layer_page_p1.png)")
     assert "prior_ocr_layer_page_p1" in own, "control: the floor's OWN image must still ship"

@@ -499,6 +499,10 @@ class PageOutput:
     #: and future formatter is not a credential. Nothing but this module sets
     #: this field, and free text cannot reach it.
     scanned_prose_recovered: bool = False
+    #: #1156 Part B: how many numbers of an earlier OCR layer this body withheld. Set
+    #: only by the masked-layer ending, from the retained original, so a re-finalisation
+    #: or a resume recomputes the same count rather than re-masking finalised text.
+    numbers_withheld: int = 0
     escalated_from: str = ""  # engine that failed, triggering escalation
     cost_usd: float | None = 0.0  # estimated USD cost; None when the direct call is unmetered
     # Agentic routing provenance (B3) — empty for non-agentic runs
@@ -647,6 +651,9 @@ class PageOutput:
         # Its absence and ``False`` mean the same thing to ``from_dict``.
         if self.scanned_prose_recovered:
             d["scanned_prose_recovered"] = True
+        # #1156 Part B: omit-when-unset, the same convention and reason as above.
+        if self.numbers_withheld:
+            d["numbers_withheld"] = self.numbers_withheld
         # #659: same omit-when-empty convention as ``table_corroboration``
         # just above, and for the same reason -- this field postdates every
         # already-terminal page's sidecar, and emitting it unconditionally
@@ -699,6 +706,9 @@ class PageOutput:
                 d.get("scanned_prose_recovered")
                 if type(d.get("scanned_prose_recovered")) is bool
                 else False
+            ),
+            numbers_withheld=(
+                d.get("numbers_withheld") if type(d.get("numbers_withheld")) is int else 0
             ),
             escalated_from=d.get("escalated_from", ""),
             cost_usd=d.get("cost_usd", 0.0),

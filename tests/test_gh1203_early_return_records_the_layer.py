@@ -319,8 +319,9 @@ def test_no_page_image_is_rendered_where_nothing_can_reference_it(
     assert list((tmp_path / "out-png-born").rglob("*prior_ocr_layer_page*")), (
         "the born-digital flagged page lost the image its floor marker points at"
     )
+    # #1156 Part B (owner ruling 2026-10-17; orchestrator 2026-10-19): a readable earlier-OCR layer ships its prose, numbers withheld, instead of the floor.
     body = [ln for ln in born["text"].splitlines() if ln.strip() and not ln.startswith(">")]
-    assert is_page_failed_marker(body[0]) and "see image" in born["text"]
+    assert not is_page_failed_marker(body[0]) and "[number withheld, see image]" in born["text"]
 
 
 def _run_born_digital_floor(tmp_path: Path, monkeypatch, tag: str) -> dict:
