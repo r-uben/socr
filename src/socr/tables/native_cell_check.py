@@ -41,6 +41,7 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
+_YEAR_AXIS_LABEL_RE = re.compile(r"ann[eé]e\s+de\s+base", re.IGNORECASE)
 _FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d{1,2}\)$")
 _LABEL_FOOTNOTE_MARK_RE = re.compile(r"\(\d{1,2}\)\s*$")
 _STUB_HEADER_LABELS = frozenset({"libellé", "libelle", "label", "poste"})
@@ -466,8 +467,9 @@ def _bbox_outside_region(
 
 
 def _native_row_is_year_column_header(result: BindingResult, row_path: tuple[str, ...]) -> bool:
+    """Year tokens only in a row — column header band, not a dropped data row."""
     leaf = row_path[-1].strip() if row_path else ""
-    if leaf and not _YEAR_HEADER_RE.match(_prepare_numeric_cell(leaf)):
+    if leaf and _YEAR_AXIS_LABEL_RE.search(leaf):
         return False
     for nr in result.native_rows:
         if nr.row_path != row_path:
@@ -476,7 +478,13 @@ def _native_row_is_year_column_header(result: BindingResult, row_path: tuple[str
         if not multiset:
             continue
         elems = [str(v).replace(".0", "") for v in multiset.elements()]
-        return bool(elems) and all(_YEAR_HEADER_RE.match(e) for e in elems)
+        if not elems or not all(_YEAR_HEADER_RE.match(e) for e in elems):
+            continue
+        if leaf and normalize_label(leaf) in _STUB_HEADER_LABELS:
+            return True
+        if not leaf or _YEAR_HEADER_RE.match(_prepare_numeric_cell(leaf)):
+            return True
+        return True
     return False
 
 
