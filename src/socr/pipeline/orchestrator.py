@@ -395,6 +395,9 @@ _UNSHIPPED_FIGURE_FIELDS = (
     "unshipped_figure_captions",
     "unshipped_figure_unlocated",
 )
+#: #1187 round 2: the outcome kind, persisted beside them so a resumed page's mark says what
+#: happened to its figure rather than a default. A string, not a list, hence its own name.
+_UNSHIPPED_FIGURE_KIND_FIELD = "unshipped_figure_kind"
 
 _RESUME_REPLAYED: dict[str, str] = {
     PROVIDER_EMPTY_RESPONSE_KIND: (
@@ -12175,16 +12178,6 @@ class UnifiedPipeline:
                             _agentic_doc_dir,
                         )
 
-                # #1187: a figure this page's own shipped body NAMES and does not show.
-                # AFTER the scanned-figure lane, so a page that lane already gave an image of
-                # itself is skipped rather than given a second one -- and AFTER the GH-86
-                # strip, because a VLM sentinel ``![...]`` that is about to be removed is not a
-                # picture this page ships. Reading the body before the strip made the lane
-                # abstain on exactly the pages the strip then left with a bare caption (Argon,
-                # diff review).
-                with clock.span("figures"):
-                    self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
-
                 with clock.span("tables"):
                     # GH-97: truncate degenerate repeated table rows. Runs after table
                     # assembly (unlike OutputNormalizer) and before the flush, so the
@@ -12272,6 +12265,18 @@ class UnifiedPipeline:
                 # because the floor demotes the winner in place.
                 if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
                     bo = ps.best_output or bo
+
+                # #1187: a figure this page's own shipped body NAMES and does not show.
+                # Decided HERE, after BOTH table-withholding gates and immediately before the
+                # flush, so the body it reads is the body that is about to ship. In round 1 it
+                # ran earlier in this loop, before ``_withhold_contradicted_unverified_tables``
+                # and ``_withhold_unconfirmed_table`` could replace that body with a
+                # withheld-table floor -- leaving a crop and an event recorded for a page that
+                # shipped something else (Argon P1-1). One gate on the bytes that are about to
+                # ship cannot be bypassed by a step that produces different bytes (#1203's
+                # lesson, same loop).
+                with clock.span("figures"):
+                    self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
 
                 try:
                     from ocr_output_contract import PAGE_MARKER_RE
@@ -12909,7 +12914,12 @@ class UnifiedPipeline:
         # Already answered for this page: a resumed page restores all three fields, and the
         # abstaining outcome writes only ``captions`` -- which is why the gate reads all three
         # and not just the two that carry an answer (Argon, diff review).
-        if any(getattr(ps, name, None) for name in _UNSHIPPED_FIGURE_FIELDS):
+        # Already answered for this page. The KIND alone, because round 2 sets it on EVERY
+        # outcome including the abstention -- so the three-list scan that stood here as well
+        # could never fire on its own, and the mutation check found it unkillable (CLAUDE.md:
+        # a guard that has never been seen to fail has not been shown to guard anything). The
+        # three lists are still persisted and restored; they are just not the gate.
+        if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
             return
         if page_ships_its_own_page_image(ps, body):
             return
@@ -16107,6 +16117,9 @@ class UnifiedPipeline:
                 if ps
                 else []
             ),
+            _UNSHIPPED_FIGURE_KIND_FIELD: (
+                str(getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "") or "") if ps else ""
+            ),
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
@@ -17663,6 +17676,8 @@ class UnifiedPipeline:
             for _name in _UNSHIPPED_FIGURE_FIELDS:
                 _value = meta.get(_name)
                 setattr(ps, _name, [str(v) for v in _value] if isinstance(_value, list) else [])
+            _kind = meta.get(_UNSHIPPED_FIGURE_KIND_FIELD)
+            ps.unshipped_figure_kind = _kind if isinstance(_kind, str) else ""
             _summary = meta.get("attempts_summary")
             ps.attempts_summary_restored = _summary if isinstance(_summary, list) else None
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
@@ -19014,6 +19029,18 @@ class UnifiedPipeline:
                 math_font_unresolved_details[r.output.page_num] = _mf_detail
         math_font_unresolved_pages = sorted(math_font_unresolved_details)
 
+        # #1187: the pages this lane MARKED -- a figure the page names that it does not show
+        # whole. Round 1 marked the page and stopped there, so a document whose only defect was
+        # a lost figure finished DocumentStatus.SUCCESS with a populated ``error``, which also
+        # breaks the GH-177 contract (Argon P0-2, reproduced through process()).
+        unshipped_figure_marked_pages = sorted(
+            {
+                int(ev.page_num)
+                for ev in state.events
+                if getattr(ev, "kind", "") in UNSHIPPED_FIGURE_MARKED_KINDS
+                and getattr(ev, "page_num", None) is not None
+            }
+        )
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not judge_timeout_native_pages
@@ -19159,6 +19186,9 @@ class UnifiedPipeline:
             and not table_rejected_pages
             and not table_unverified_pages
             and not table_withheld_pages
+            # #1187: a figure this document names and does not show whole is not a clean
+            # document, for the same reason a withheld table is not.
+            and not unshipped_figure_marked_pages
         )
 
         if has_text and pages_ok:
@@ -19365,6 +19395,9 @@ class UnifiedPipeline:
             or ditto_unresolved_pages
             or scanned_prose_recovered_pages
             or blank_shipped_pages
+            # #1187: without this the lane's two CLI lines below are unreachable whenever a
+            # lost figure is the document's ONLY defect (Argon P0-2, reproduced).
+            or unshipped_figure_marked_pages
         ):
             from socr.core.audit_log import AuditEvent
 

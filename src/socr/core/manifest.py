@@ -6050,7 +6050,18 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
     }
+    #: #1187: the one place two silent-success classes share a CHECK and must not share a
+    #: mode. The chart lane's clause is page-scoped and means "a picture shipped without its
+    #: values"; this lane's names a region (``figure:N``) and means "the page does not show
+    #: this figure whole". Keyed on the scope's kind, which the clause already carries, so no
+    #: new field is invented to tell them apart. Round 1 shared the chart row, which recorded
+    #: something false about the page and dragged in ``PERMANENTLY_UNRESOLVABLE_MODES``
+    #: (Argon P0-3, reproduced).
+    by_scope_kind = {("figure", Check.FIGURE_TEXT): FailureMode.FIGURE_NOT_SHOWN}
     for clause in clauses:
+        scoped = by_scope_kind.get((str(clause.scope).split(":", 1)[0], clause.check))
+        if scoped is not None:
+            return scoped
         mode = by_check.get(clause.check)
         if mode is not None:
             return mode
@@ -6315,6 +6326,16 @@ def _apply_unshipped_figure_guard(output: PageOutput, p) -> PageOutput:
     # broad gate is what makes a second application a no-op, and a second guard that can
     # never fire is not a guard (CLAUDE.md).
     if body_shows_a_picture(text):
+        return output
+    # #1187 round 2 (Fable P1-1, reproduced): a page whose body is a whole-page failure
+    # marker keeps it. ``is_page_failed_marker`` admits "a marker plus at most one image"
+    # (GH-371), so appending two or three crops made the page stop reading as a marker to the
+    # disposition classifier, to selection and to the resume gate -- a fail-closed floor
+    # silently becoming content, which is the ruling inverted. The figure is still owed a
+    # statement, and still gets one: the page's verdict clause is derived from
+    # ``unshipped_figure_unlocated``, which this lane now sets on every outcome it acts on,
+    # so abstaining here loses the picture and keeps the mark.
+    if is_page_failed_marker(text):
         return output
 
     raw_caps = getattr(p, "unshipped_figure_captions", None)
@@ -6830,6 +6851,17 @@ def _base_engine_name(engine: str) -> str:
     if engine.startswith("consensus(") and engine.endswith(")"):
         return engine[len("consensus(") : -1]
     return engine
+
+
+def page_asset_refs(text: str, doc_dir: Path) -> list[AssetRef]:
+    """The asset records ``build_manifest`` would write for a page with this text.
+
+    #1187 round 2 (Argon P1-3a): the public name, because a re-finalize tool in ``pipeline``
+    attaches an image to a page and must record it the same way a live run would, and
+    ``pipeline`` may not import ``core``'s private names (``test_package_layering``). One
+    implementation, so a tool-written asset and a run-written asset cannot disagree.
+    """
+    return _local_page_asset_refs(text, doc_dir)
 
 
 def _local_page_asset_refs(text: str, doc_dir: Path) -> list[AssetRef]:

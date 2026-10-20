@@ -24,7 +24,6 @@ EXPECTED_RESUME_KINDS = frozenset(
         # fields, so losing the event would lose only the REPORT -- the document note and
         # the CLI line read these, which is the #252 shape this allowlist exists for.
         "unshipped_figure_rendered",
-        "unshipped_figure_partially_shipped",
         "unshipped_figure_render_failed",
         "unshipped_figure_unlocated",
         "unshipped_figure_not_found",
@@ -138,5 +137,8 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 55 with #1181's native_table_verifier_exact_pass;
     # 59 with default-on native per-cell binding's four terminal kinds;
     # 60 with #1205's table_crop_repair_unverifiable;
-    # 65 with #1187's five unshipped-figure kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 65
+    # 65 with #1187's five unshipped-figure kinds;
+    # 64 after #1187 round 2 dropped ``unshipped_figure_partially_shipped``: the outcome it
+    # named -- a page naming more figures than it shipped crops -- stopped being a distinct
+    # behaviour when every page the lane acts on became MARKED (Argon P0-1).
+    assert len(EXPECTED_RESUME_KINDS) == 64

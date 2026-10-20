@@ -86,7 +86,12 @@ from dataclasses import dataclass, field
 _LABEL = (
     r"^[ \t]*(?:[*_]{1,3}|#{1,6}[ \t]*)?"
     r"(?P<label>(?:FIGURE|Figure|FIG\.?|Fig\.?|CHART|Chart|EXHIBIT|Exhibit)[ \t]*"
-    r"(?>[0-9]+(?:\.[0-9A-Za-z]+)*|[IVXLC]+|[A-Z][0-9]+(?:\.[0-9A-Za-z]+)*))"
+    r"(?>"
+    r"[0-9]+(?:[.\-][0-9A-Za-z]+)*[a-zA-Z]?"
+    r"|[A-Z](?:[.\-][0-9A-Za-z]+)+"
+    r"|[A-Z][0-9]+(?:[.\-][0-9A-Za-z]+)*"
+    r"|[IVXLC]+(?:[.\-][0-9A-Za-z]+)*"
+    r"))"
     r"[*_]{0,3}"
 )
 #: A terminator, or the end of the line. No lookahead guards the ``.`` here, deliberately: the
@@ -111,20 +116,31 @@ _WHITESPACE_RE = re.compile(r"\s+")
 #: carries a chart-region crop cannot have one lane's asset overwritten by the other's.
 CROP_STEM = "unshipped_figure"
 
-#: The four outcomes this lane records, as audit-event kinds. ``PARTIAL`` is its own kind rather
-#: than a flag on ``RENDERED`` because the document note and the CLI line have to say two
-#: different things about a page that shipped SOME of what it names.
+#: The outcomes this lane records, as audit-event kinds.
+#:
+#: ``PARTIAL`` was a fifth kind in round 1, for a page naming more figures than it shipped
+#: crops. It is gone, because round 2 showed the distinction it drew was not the one that
+#: matters: on Fed calibration p3 the page names ONE figure ("Exhibit 1") and carries SIX
+#: numbered panels, two of which the locator found. ``len(refs) >= len(captions)`` therefore
+#: read as "all of them are shown" while three charts were shipped by nothing (Argon P0-1,
+#: reproduced). **A caption count can never establish how many figures a page carries**, so
+#: no outcome of this lane claims it does.
 RENDERED_KIND = "unshipped_figure_rendered"
-PARTIAL_KIND = "unshipped_figure_partially_shipped"
 RENDER_FAILED_KIND = "unshipped_figure_render_failed"
 UNLOCATED_KIND = "unshipped_figure_unlocated"
 NOT_FOUND_KIND = "unshipped_figure_not_found"
 EVENT_KINDS: frozenset[str] = frozenset(
-    {RENDERED_KIND, PARTIAL_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, NOT_FOUND_KIND}
+    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, NOT_FOUND_KIND}
 )
-#: The kinds that mean a figure this page names is preserved NOWHERE. The document note, the CLI
-#: line and the tool's report all split on this set, so they cannot disagree about a page.
-MARKED_KINDS: frozenset[str] = frozenset({PARTIAL_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND})
+#: The kinds that MARK the page. Everything this lane acts on is in here except the
+#: abstention: a crop is a picture, not a reading, and this lane cannot say its crops cover
+#: every figure the page carries. The page-level chart lane already marks exactly this case
+#: (``verdict._chart_values_clause``), and shipping a crop is strictly weaker evidence than
+#: shipping the whole page image, so claiming CHECKED on it was the stronger claim from the
+#: weaker evidence.
+MARKED_KINDS: frozenset[str] = frozenset({RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND})
+#: The subset that ships a picture. The document note and the CLI need the two apart.
+SHIPPED_KINDS: frozenset[str] = frozenset({RENDERED_KIND})
 
 
 def crop_filename(page_num: int, index: int) -> str:
@@ -237,6 +253,7 @@ class FigureDecision:
             "unshipped_figure_refs": list(self.refs),
             "unshipped_figure_captions": list(self.captions),
             "unshipped_figure_unlocated": list(self.unlocated),
+            "unshipped_figure_kind": self.kind,
         }
 
     def event_data(self) -> dict:
@@ -255,17 +272,24 @@ def decide(body: str, locate, render) -> FigureDecision | None:
     one ref per crop it managed to save, and may return ``[]`` without writing anything (the
     ``--dry-run`` path renders nothing and the caller supplies the names it WOULD write).
 
+    **Every page this lane acts on is MARKED.** Round 1 marked only the pages it could give no
+    picture, on the reasoning that a shipped crop discharges the debt. Fed calibration p3
+    disproved it: the page names "Exhibit 1", carries six numbered panels, and the locator finds
+    two regions — both in the left column — so three charts shipped nowhere while the page
+    counted CHECKED (Argon P0-1). A caption count cannot establish how many figures a page has,
+    and nothing else here can either, so the lane states what it actually knows: a region was
+    located and cropped, its values were not transcribed, and socr cannot say the crops cover
+    every figure the page carries.
+
     The branches, and what makes each of them positive evidence:
 
     * **No caption at all** -> ``None``. Nothing is dangling.
-    * **No region located** -> the page may be MARKED only on the strict matcher, because the
-      only evidence here is the caption's own shape, and the loose one also fires on a
+    * **No region located** -> the page may be marked only on the STRICT matcher, because the
+      only evidence here is the caption's own shape and the loose one also fires on a
       cross-reference that opens a line. On the loose matcher alone the lane records that it
       looked and says nothing (``NOT_FOUND_KIND``).
     * **A region located** -> geometry is now the positive evidence that a figure is on this
-      page, so the loose matcher is enough to name it. Every crop that saved is shipped; if
-      fewer crops shipped than the page names figures, the page is MARKED naming all of them,
-      because this lane has no caption-to-region binding and so cannot say WHICH did not ship.
+      page, so the loose matcher is enough to name it.
     """
     captions = figure_captions(body)
     if not captions:
@@ -310,26 +334,17 @@ def decide(body: str, locate, render) -> FigureDecision | None:
             f"this page names a figure, {regions} region(s) were located, and NO crop could "
             "be saved: the figure is preserved nowhere",
         )
-    if len(refs) < len(named):
-        return FigureDecision(
-            captions,
-            strict,
-            regions,
-            refs,
-            named,
-            PARTIAL_KIND,
-            f"this page names {len(named)} figure(s) and {len(refs)} crop(s) shipped; socr "
-            "cannot say which of them did not, so the page is marked naming all of them",
-        )
     return FigureDecision(
         captions,
         strict,
         regions,
         refs,
-        (),
+        named,
         RENDERED_KIND,
-        f"this page names a figure and shipped none; {len(refs)} crop(s) of the located "
-        "figure region(s) were rendered and are referenced from the page",
+        f"this page names {len(named)} figure(s) and ships {len(refs)} crop(s) of the "
+        f"{regions} figure region(s) located on it; the crops are pictures, not readings, so "
+        "their values are not transcribed, and socr cannot say they cover every figure the "
+        "page carries",
     )
 
 
@@ -355,8 +370,28 @@ def figure_block(page_num: int, refs: list[str], captions: tuple[str, ...]) -> s
     return "\n\n".join(lines)
 
 
-def unlocated_clause_records(page_num: int, captions: tuple[str, ...]) -> tuple[dict, ...]:
-    """One machine-readable clause per figure this page names and does not show.
+#: What the page's MARK says, per outcome. One sentence each, and each is the truth about that
+#: branch: round 1 hard-coded the "could not locate" wording and used it on every branch,
+#: including the one where crops DID ship.
+_CLAUSE_REASON: dict[str, str] = {
+    UNLOCATED_KIND: (
+        "this page names it and shows no picture of it; socr could not locate a figure "
+        "region on the page; read it from the page image"
+    ),
+    RENDER_FAILED_KIND: (
+        "this page names it, a figure region was located, and no crop of it could be saved; "
+        "it is preserved nowhere; read it from the page image"
+    ),
+    RENDERED_KIND: (
+        "this page names it and ships a crop of the figure region(s) located on the page; a "
+        "crop is a picture, not a reading, so its values are not transcribed, and socr cannot "
+        "say the crops cover every figure this page carries; read it from the page image"
+    ),
+}
+
+
+def clause_records(page_num: int, captions: tuple[str, ...], kind: str) -> tuple[dict, ...]:
+    """One machine-readable clause per figure this page names and does not show whole.
 
     Records first, line second (#1155's lesson: "a rendered mark string is not the
     machine-readable evidence"). ``core.verdict`` reads these back and ``_apply_verdict_marks``
@@ -364,26 +399,25 @@ def unlocated_clause_records(page_num: int, captions: tuple[str, ...]) -> tuple[
     consumer parses cannot disagree.
 
     ``UNKNOWN`` rather than ``FAIL``: the check could not run. socr did not establish that the
-    page has no figure -- it failed to show one the page names.
+    page has no figure -- it failed to show one the page names, or shipped a crop it cannot
+    prove complete.
     """
     from socr.core.marks import Check, CheckResult, region_scope
 
+    reason = _CLAUSE_REASON.get(kind, _CLAUSE_REASON[UNLOCATED_KIND])
     return tuple(
         {
             "check": Check.FIGURE_TEXT.value,
             "result": CheckResult.UNKNOWN.value,
             "scope": region_scope("figure", index),
-            "reason": (
-                f"this page names {caption_alt(caption)} and shows no picture of it; "
-                "read it from the page image"
-            ),
+            "reason": f"{caption_alt(caption)}: {reason}",
         }
         for index, caption in enumerate(captions, start=1)
     )
 
 
 #: Opens every note :func:`document_note` builds, so a re-finalize run can find and replace the
-#: note it wrote last time rather than concatenating a second copy (Argon, diff review).
+#: note it wrote last time rather than concatenating a second copy (Argon, round-1 diff review).
 NOTE_PREFIX = "unshipped figures: "
 
 

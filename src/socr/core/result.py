@@ -221,6 +221,13 @@ class FailureMode(str, Enum):
     #: lane has no transcriber to run. ``core/verdict._MODE_CLAUSES`` maps it back
     #: to the same ``figure_text=UNKNOWN`` clause the event produces.
     VISUAL_VALUES_UNTRANSCRIBED = "visual_values_untranscribed"
+    #: #1187: this page NAMES a figure that it does not show whole. Distinct from
+    #: ``VISUAL_VALUES_UNTRANSCRIBED`` above, which says a picture of the chart DID ship and
+    #: only its values are missing: on this lane's unlocated branch nothing shipped at all, so
+    #: that mode was simply false about the page, and -- because it is in
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES`` -- it also made a TRANSIENT render failure
+    #: unretryable on resume (Argon P0-3, reproduced).
+    FIGURE_NOT_SHOWN = "figure_not_shown"
     #: #1156: the page ships an EARLIER OCR run's text layer, which nothing independent
     #: has read the page to check. Like the two modes above, it exists so the demotion
     #: carries its reason in the status as well as in the page's mark.

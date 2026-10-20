@@ -41,7 +41,6 @@ from socr.figures.unshipped_figures import (
     MARKED_KINDS,
     NOT_FOUND_KIND,
     NOTE_PREFIX,
-    PARTIAL_KIND,
     RENDER_FAILED_KIND,
     UNLOCATED_KIND,
     crop_filename,
@@ -58,6 +57,7 @@ _LANE_KEYS = (
     "unshipped_figure_refs",
     "unshipped_figure_captions",
     "unshipped_figure_unlocated",
+    "unshipped_figure_kind",
 )
 
 #: ``PageState`` fields the two production functions read on this path, restored from the
@@ -89,10 +89,9 @@ class PageChange:
         """What this page got. Per KIND, because "marked" covers three different things and a
         partially-shipped page both ships a crop AND is marked."""
         return {
-            PARTIAL_KIND: "crop shipped AND marked: more figures named than crops shipped",
             RENDER_FAILED_KIND: "marked: a region was located and no crop could be saved",
             UNLOCATED_KIND: "marked: no figure region could be located",
-        }.get(self.kind, "crop shipped")
+        }.get(self.kind, "crop shipped AND marked: the crops are not proven complete")
 
     @property
     def marked(self) -> bool:
@@ -138,9 +137,19 @@ def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:
 def _merge_fragment(old_fragment: str, old_text: str, new_text: str, where: Path) -> str:
     """The page fragment with its body replaced, repeatably.
 
-    Same ordering trap as :func:`_swap_once`, and the same fix: ``new_text`` starts with
-    ``old_text`` on the branch that appends a crop, so testing ``old_text`` first re-appended an
-    interrupted run's block to itself.
+    Same ordering trap as :func:`_swap_once`, and the same fix: in round 1 ``new_text`` started
+    with ``old_text`` on the branch that appends a crop, so testing ``old_text`` first
+    re-appended an interrupted run's block to itself.
+
+    Round 2 made that shape unreachable rather than merely guarded: every page this lane acts
+    on is now MARKED, and writing the mark rewrites the page's leading banner block, so the new
+    body no longer begins with the old one (probed on a page another lane had already marked:
+    ``new.startswith(old)`` and ``old.startswith(new)`` are both False). The order is kept
+    anyway, because it is the safe one and a future change that stopped marking would restore
+    the ambiguity -- but the mutation that swapped it is retired from the harness rather than
+    pinned by a test that could not fail. ``_swap_once`` below is NOT in that position: the
+    document ``.md`` holds the page's text inside a larger file, so its own ordering guard is
+    still live and still mutated.
     """
     if old_fragment.startswith(new_text):
         return old_fragment  # an interrupted run already wrote it
@@ -239,7 +248,7 @@ def refinalize_page(
     )
     from socr.core.result import PageOutput
     from socr.figures.chart_regions import render_chart_region_crops
-    from socr.figures.unshipped_figures import body_shows_a_picture, unlocated_clause_records
+    from socr.figures.unshipped_figures import body_shows_a_picture, clause_records
 
     if _already_answered(sidecar):
         return None
@@ -279,7 +288,7 @@ def refinalize_page(
         p,
         page_num,
         published=_published_verdict(
-            sidecar, page_num, unlocated_clause_records(page_num, decision.unlocated)
+            sidecar, page_num, clause_records(page_num, decision.unlocated, decision.kind)
         ),
     )
     return output, verdict, decision
@@ -315,8 +324,14 @@ def _updated_sidecar(sidecar: dict, output, verdict, decision) -> dict:
 
 
 def _event_for(page_num: int, decision) -> dict:
+    """One audit event, in the shape ``_flush_page_sidecar`` writes.
+
+    No ``page_num`` key: the live writer omits it from a page's own ``audit_events`` (it is
+    implied by the file), and adding one made a resume rewrite the sidecar -- byte drift the
+    re-finalize contract forbids (Argon P1-3c, reproduced). The DOCUMENT audit log does carry
+    ``page_num``, and gets it added where the events are merged there.
+    """
     return {
-        "page_num": page_num,
         "kind": decision.kind,
         "engine": "",
         "detail": decision.detail,
@@ -431,13 +446,25 @@ def refinalize_document(
         from socr.core.cache import BlobStore
         from socr.core.result import PageOutput
 
+        from socr.core.manifest import page_asset_refs
+
         manifest = _read_json(manifest_path)
         store = BlobStore(doc_dir / "cache")
         for _path, data in sidecars:
             entry = (manifest.get("entries") or {}).get(str(data["page_num"]))
             if entry is None:
                 continue
-            entry["blob_ref"] = store.put_page(PageOutput.from_dict(data["winning_output"]))
+            page = PageOutput.from_dict(data["winning_output"])
+            entry["blob_ref"] = store.put_page(page)
+            # #1187 round 2 (Argon P1-3a): a page this tool gave a PNG had no asset record,
+            # while pages another lane gave one did. ``manifest.stale_assets`` therefore never
+            # checked the new crops, and the next resume would add them -- drift the tool
+            # introduced. Recorded with the SAME function ``build_manifest`` uses.
+            refs = page_asset_refs(page.text or "", doc_dir)
+            if refs:
+                entry["assets"] = [
+                    {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
+                ]
         _write_json(manifest_path, manifest)
     note = document_note(*_lane_pages(answered))
     error = _NOTE_RE.sub("", str(meta.get("error") or "")).strip().strip(";").strip()
@@ -460,7 +487,13 @@ def refinalize_document(
         audit = _read_json(audit_path)
         kept = [e for e in audit.get("events") or () if e.get("kind") not in EVENT_KINDS]
         for data in answered:
-            kept.extend(e for e in data.get("audit_events") or () if e.get("kind") in EVENT_KINDS)
+            # The document log keys every event by page; the per-page sidecar does not (see
+            # ``_event_for``). The key is added HERE, where the two shapes meet.
+            kept.extend(
+                {"page_num": int(data["page_num"]), **e}
+                for e in data.get("audit_events") or ()
+                if e.get("kind") in EVENT_KINDS
+            )
         audit["events"] = kept
         audit["event_count"] = len(kept)
         audit["counts"] = dict(Counter(e.get("kind") for e in kept))

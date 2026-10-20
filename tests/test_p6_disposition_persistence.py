@@ -294,6 +294,10 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "unshipped_figure_refs",
         "unshipped_figure_captions",
         "unshipped_figure_unlocated",
+        # #1187 round 2: WHICH outcome the lane reached, so a resumed page's mark says what
+        # happened to its figure rather than one hard-coded sentence. A string, beside the
+        # three lists above.
+        "unshipped_figure_kind",
         "native_table_structure_defective",
         "native_table_emission_defect",
         "native_table_content_defect",

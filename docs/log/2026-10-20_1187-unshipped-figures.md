@@ -188,3 +188,69 @@ attribute is truthy and `or []` kept it.
 Not taken: Argon proposed widening the lane to the 541 uncaptioned pages with a located region
 (see "What I did NOT do"), and in the design round proposed a prose-continuation guard that I
 measured at 90 of 141 real captions lost.
+
+---
+
+# Round 2 — the reviews of PR #1224
+
+Argon **BLOCK**, Fable **MERGE-AFTER-FIX**. Every P0 and P1 was reproduced against the real
+tree before anything was changed; the command-and-output record is
+`scratch/routing-baseline/leads/1187/report-r2.md`. All eight findings were REAL in substance
+and all are fixed.
+
+**Argon's quotes were of a codebase that does not exist.** Nine of the ten identifiers it cites
+as "exact lines" are absent from the tree (`UnshippedFigureDecision`, `inspect_and_render`,
+`exclude_tables`, `body_has_markdown_table`, `_refinalize_page`, `blob_updates`,
+`apply_persisted_events`, `render_located_regions`, `table_is_the_figure`). Its answer to one
+review prompt — that `du_li` p4 does not false-mark, because of a table suppression it quotes —
+is an answer about code nobody wrote; my own round-1 report records that page as a false mark.
+**Nothing was dismissed on the strength of that**: each finding was tested against the real
+code, and the substance held in every case.
+
+## What the reviews were right about
+
+1. **A caption count cannot establish how many figures a page carries** (Argon P0-1). Fed
+   calibration p3 heads itself "Exhibit 1" and carries six numbered panels; the locator finds
+   two regions, both in the left column; three charts shipped nowhere and the page counted
+   CHECKED. So no outcome of this lane claims completeness any more: **every page it acts on is
+   marked**, and the mark says the crops are not proven complete. That is also what the
+   page-level chart lane already does with a whole-page image, which is strictly stronger
+   evidence than a crop.
+2. **A mark that does not reach the document is half a mark** (Argon P0-2). `pages_ok` had no
+   term for this lane, so a document whose only defect was a lost figure finished SUCCESS with a
+   populated `error`; and the CLI lines sat inside a block gated on 27 other page buckets.
+3. **The borrowed failure mode said something false** (Argon P0-3).
+   `VISUAL_VALUES_UNTRANSCRIBED` means a picture shipped without its values; on the unlocated
+   branch nothing shipped. It also put a TRANSIENT render failure in
+   `PERMANENTLY_UNRESOLVABLE_MODES`, so a resume would never retry it. New mode
+   `FIGURE_NOT_SHOWN`, selected by the clause's scope kind, absent from `_MODE_CLAUSES` (this
+   lane's state survives a resume, so the real clause is re-derived and a row would duplicate
+   it), with `_status_is_explained` taught about it.
+4. **A fail-closed floor must stay a floor** (Fable P1-1). `is_page_failed_marker` admits "a
+   marker plus at most one image"; appending two crops made the page stop reading as a marker to
+   the disposition classifier, to selection and to the resume gate. The guard now abstains —
+   which only loses the picture and keeps the mark because of (1).
+5. **One gate on the bytes about to ship** (Argon P1-1). The lane decided on `bo` before both
+   table-withholding gates could replace that body with a floor. Moved after both, immediately
+   before the flush — #1203's lesson, in the same loop.
+6. **The label regex** (Argon P1-2, Fable P1-2). Four prose cross-references matched as strict
+   captions and would have marked a prose page; six real caption forms matched nothing,
+   including `Figure E.2:` — `herbst_johannsen` p57 and p58, **two of the twelve pages this
+   issue adjudicates**. Round 1's "the locator found a region on all 12" was true of the locator
+   and false of the lane, which never reached it on those two.
+7. **The tool's own drift** (Argon P1-3). Pages it gave a PNG had no `assets` record, so
+   `stale_assets` never checked them and the next resume would add them; and its sidecar events
+   carried a `page_num` key the live writer omits, so a resume would rewrite the sidecar.
+
+## Restated
+
+154 corpus pages acted on (was 142) — 112 ship a crop and are marked, 42 are marked — **5.0%**
+of the 3,082 model-read CHECKED pages, almost exactly the issue's 5.1% estimate. The 12 extra
+are the appendix captions. Fed calibration METER **0 of 2,476 before and after**; CHECKED-qwen
+53 → 49; a second tool run changes 0 files. **28/28 mutations killed.**
+
+One mutation was **retired rather than pinned**: `_merge_fragment`'s ordering guard. Probed on
+a page another lane had already marked, `new.startswith(old)` and `old.startswith(new)` are both
+False, because marking rewrites the leading banner block — the two orders are no longer
+distinguishable, so a test for it could not fail. The order is kept as the safe one with the
+reason at the line. `_swap_once` is not in that position and is still mutated.

@@ -192,6 +192,14 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         "this page's chart ships as an image and the labels and values drawn in it were "
         "never transcribed -- read them off the image before citing",
     ),
+    #: #1187 is deliberately ABSENT from this map, and that is the fix rather than an
+    #: omission. These rows exist for a lane whose per-page state does not survive a resume,
+    #: so the clause must be rebuilt from the mode. This lane's state DOES survive
+    #: (``unshipped_figure_unlocated`` is a persisted sidecar key, restored by the resume
+    #: path), so ``_unshipped_figure_clauses`` re-derives the real clause on every pass. A row
+    #: here would be a SECOND, page-scoped clause about the same fact -- which is what the
+    #: shared ``VISUAL_VALUES_UNTRANSCRIBED`` row produced on the second pass, saying the
+    #: page's chart ships as an image on a page that shipped none (Argon P0-3, reproduced).
     #: #1181. Same purpose as the two rows above: the clause comes from the EXACT_PASS
     #: audit event on the first pass and from here on every later one, so a re-finalized
     #: page publishes the verdict it already had. The wording must not imply the table was
@@ -455,11 +463,14 @@ def _unshipped_figure_clauses(p: Any) -> list[VerdictClause]:
     captions = getattr(p, "unshipped_figure_unlocated", None)
     if not isinstance(captions, (list, tuple)) or not captions:
         return []
-    from socr.figures.unshipped_figures import unlocated_clause_records
+    from socr.figures.unshipped_figures import clause_records
 
     page_num = int(getattr(p, "page_num", 0) or 0)
+    kind = getattr(p, "unshipped_figure_kind", "")
     clauses: list[VerdictClause] = []
-    for record in unlocated_clause_records(page_num, tuple(str(c) for c in captions)):
+    for record in clause_records(
+        page_num, tuple(str(c) for c in captions), str(kind) if isinstance(kind, str) else ""
+    ):
         try:
             clauses.append(VerdictClause.from_dict(record))
         except Exception:
@@ -1002,6 +1013,16 @@ def _status_is_explained(
     """
     if _MODE_CLAUSES.get(output.failure_mode) is not None:
         return True
+    # #1187: the one demotion whose mode deliberately has no ``_MODE_CLAUSES`` row, because
+    # its lane's state survives a resume and so the real clause is re-derived every pass (see
+    # the note where the row would be). The status is explained when that clause is present --
+    # asked here rather than given a row, because a row would publish a SECOND, page-scoped
+    # clause about the same fact. Without this the fail-closed fallback fired on a page whose
+    # reason WAS named, which is the hole this helper exists to close, not to open.
+    if output.failure_mode is FailureMode.FIGURE_NOT_SHOWN:
+        return any(
+            c.check is Check.FIGURE_TEXT and str(c.scope).startswith("figure:") for c in clauses
+        )
     status_free = set(silent_success_clauses(output, p, event_kinds))
     return bool([c for c in clauses if c not in status_free])
 

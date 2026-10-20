@@ -122,6 +122,7 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
         "unshipped_figure_refs",
         "unshipped_figure_captions",
         "unshipped_figure_unlocated",
+        "unshipped_figure_kind",
         # Additive sidecar keys, None on every page of this corpus: the superseded table
         # verdict of a marker page (tests/test_marker_page_record_drops_stale_table_verdict.py)
         # and the --retry-failed-pages record (tests/test_retry_failed_pages.py).
