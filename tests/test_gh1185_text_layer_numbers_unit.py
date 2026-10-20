@@ -287,6 +287,74 @@ def test_a_power_of_ten_in_a_cell_stays_a_power(cell: str) -> None:
     assert _disputes("Obs. 2×106 9.60×104", f"| Obs. | {cell} |") == ()
 
 
+@pytest.mark.parametrize(
+    ("layer", "reading"),
+    [
+        ("β1 β2\nKorea .8 .1", "| | β1 | β2 |\n| Korea | .8 | 1 |"),
+        ("σ2 σ3\nKorea .2 .3", "| | σ2 | σ3 |\n| Korea | 2 | .3 |"),
+        ("1Q 2Q\nKorea .1 .2", "| | 1Q | 2Q |\n| Korea | 1 | 2 |"),
+        ("1st 2nd\nKorea .1 .2", "| | 1st | 2nd |\n| Korea | 1 | 2 |"),
+        ("Col.1 Col.2\nKorea .1 .2", "| | Col.1 | Col.2 |\n| Korea | 1 | 2 |"),
+        ("Q1 Q2\nKorea .1 .2", "| | $Q_1$ | $Q_2$ |\n| Korea | 1 | 2 |"),
+    ],
+)
+def test_every_label_writing_claims_the_digit_its_layer_frees(layer: str, reading: str) -> None:
+    """Round-2 reviews (Fable P1-1, Argon P1-1b): the label rule knew only ASCII letters
+    before a digit, so ``β1``, ``1Q``, ``1st``, ``Col.1`` and ``$Q_1$`` headers left the
+    layer's digit free for a dropped point to match."""
+    assert _disputes(layer, reading)
+
+
+@pytest.mark.parametrize(
+    ("layer", "cell"),
+    [
+        ("Korea 4.0 -.8", r"$\approx-8$"),
+        ("Korea 4.0 .8", r"$\sim8$"),
+        ("Korea 4.0 0.9", r"$\pm0.8$"),
+        ("Korea 4.0 0.01", r"$\le0.05$"),
+        ("Korea 4.0 .8", r"{\bf8}"),
+    ],
+)
+def test_a_value_after_a_latex_command_is_never_a_label(layer: str, cell: str) -> None:
+    """Argon P1-1a (round 2): the command's last letter made the value a label digit, which
+    is never disputed -- a wrong number became undisputable."""
+    assert _disputes(layer, f"| Korea | 4.0 | {cell} |")
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [
+        "\\begin{tabular}{lll}\n\\hline\nKorea & $1.4 \\times 10$ & 142 \\\\\n\\hline\n\\end{tabular}",
+        "\\begin{tabular}{lll}\n\\toprule\nKorea & $1.4$ & $142^1$ \\\\\n\\bottomrule\n\\end{tabular}",
+        "\\begin{tabular}{@{}lcc@{}}\nKorea &\n$1.4$ & 142 \\\\\n\\end{tabular}",
+    ],
+)
+def test_a_multi_line_tabular_row_stays_a_table_row(reading: str) -> None:
+    """Argon P1-2 (round 2): a row after ``\\hline`` on its own line lost its leading ``|``,
+    so its maths cells were dropped as prose. Layer ``1.3``, reading ``1.4``: disputed."""
+    assert "1.4" in [read for _ref, read in _disputes("Korea 1.3 10 142", reading)]
+
+
+def test_a_formula_in_a_table_cell_is_not_the_cells_number() -> None:
+    """Round 3, measured: 2018 Tealbook p111 tabulates policy rules; the layer prints their
+    maths as glyphs it cannot read, so the formula's coefficient ``0.5`` was a false dispute
+    once its rows were read as table rows. An assignment of one number is still a value."""
+    rule = r"| Taylor (1993) rule | $R_t = r^{LR} + \pi_t + 0.5 (\pi_t - \pi^{LR}) + 0.5 ygap_t$ |"
+    assert _disputes("Taylor (1993) rule [math]", rule) == ()
+    value = r"| Base | $\rho^{m} = 0.75$ |"
+    assert _disputes("Base ρm = 0.70", value) == (("0.70", "0.75"),)
+
+
+def test_only_a_short_integer_after_a_short_name_is_a_label() -> None:
+    """Argon P1-1a (round 2): a label is never disputed, so the tag must never fall on a
+    value -- a comma, decimal or percent number run into letters (``USD2,000``, ``ab2.5``,
+    ``x15%``) or one after a long word (``Korea-8``) is not a label."""
+    from socr.tables.reading_agreement import _numeric_tokens
+
+    tokens = _numeric_tokens("| USD2,000 | ab2.5 | x15% | Korea-8 | Q1 |", True)
+    assert [written for _value, written, label in tokens if label] == ["1"]
+
+
 def test_unknown_provenance_is_rejected() -> None:
     """compare_numbers refuses a provenance it does not know."""
     with pytest.raises(ValueError):

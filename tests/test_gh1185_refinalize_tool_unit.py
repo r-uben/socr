@@ -125,8 +125,9 @@ def _doc(tmp_path: Path, sidecars: list[dict], *, metadata: bool = True, audit: 
 
 
 def test_pages_the_tool_cannot_check_are_counted_not_dropped(tmp_path: Path) -> None:
-    """Fable P2-6 / Argon 7.3: an unfinished page, a document without metadata.json and one
-    without audit_log.json are each counted in ``skipped``; the analysis is never reached."""
+    """Fable P2-6 / Argon 7.3: an unfinished page and a document without metadata.json are
+    each counted in ``skipped``; the analysis is never reached. (Round 3: a document without
+    audit_log.json is NOT skipped -- a run writes none when it has no events; see below.)"""
     old_out, old_v = _old_run(_success(), SimpleNamespace())
     done = _sidecar(old_out, old_v)
     unfinished = {**_sidecar(old_out, old_v), "page_num": 2, "terminal": False}
@@ -139,7 +140,6 @@ def test_pages_the_tool_cannot_check_are_counted_not_dropped(tmp_path: Path) -> 
     cases = {
         "page not finished": _doc(tmp_path / "a", [done, unfinished, native]),
         "no metadata.json": _doc(tmp_path / "b", [done], metadata=False),
-        "no audit_log.json": _doc(tmp_path / "c", [done], audit=False),
     }
     with mock.patch.object(tool, "_analyse_pdf", return_value=(None, "no PDF here")):
         for name, doc in cases.items():
@@ -174,3 +174,70 @@ def test_a_manifest_without_the_page_leaves_the_document_untouched(
     # Premise: with the entry present, the same document IS rewritten.
     (doc / "manifest.json").write_text(json.dumps({"entries": {"1": {}}}))
     assert tool.refinalize_document(doc, tmp_path)
+
+
+def _finished_doc(tmp_path: Path, output: PageOutput, verdict, *, audit: bool) -> Path:
+    """A finished one-page document as a run of the old code leaves it."""
+    doc = _doc(tmp_path, [_sidecar(output, verdict)], audit=audit)
+    (doc / "metadata.json").write_text(
+        json.dumps({"key": "dir/doc.pdf", "pages": 1, "status": "completed"})
+    )
+    (doc / "pages" / "00001.md").write_text(output.text)
+    (doc / "doc.md").write_text(f"## Page 1\n\n{output.text}")
+    return doc
+
+
+def _with_analysis(monkeypatch, tmp_path: Path) -> None:
+    from socr.core.born_digital import DocumentAssessment
+
+    assessment = DocumentAssessment(path=tmp_path / "doc.pdf", pages=[_analysis(prior_ocr=False)])
+    monkeypatch.setattr(tool, "_analyse_pdf", lambda pdf_dir, meta: (assessment, None))
+
+
+def test_a_finished_document_without_an_audit_log_is_checked_and_given_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon, round-2 review: a run writes ``audit_log.json`` only when the document has
+    events, so skipping documents without one left their disputed pages unmarked SUCCESS.
+    Difference on one document state: with or without the (empty) log, the page comes out
+    the same, and the log is created holding the one event."""
+    old_out, old_v = _old_run(_success(), SimpleNamespace())
+    _with_analysis(monkeypatch, tmp_path)
+    results = {}
+    for audit in (True, False):
+        doc = _finished_doc(tmp_path / f"audit{audit}", old_out, old_v, audit=audit)
+        [change] = tool.refinalize_document(doc, tmp_path)
+        results[audit] = (
+            change.after,
+            change.result,
+            json.loads((doc / "metadata.json").read_text())["status"],
+        )
+        log = json.loads((doc / "audit_log.json").read_text())
+        assert log["counts"] == {"numbers_disagree_with_text_layer": 1}, log
+        if not audit:
+            assert log["pdf_filename"] == "doc.pdf" and log["event_count"] == 1
+    assert results[True] == results[False] == ("warning", "FAIL", "partial")
+
+
+def test_the_recorded_result_is_this_clauses_on_a_page_with_another_clause(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Argon, round-2 review: once the clause is placed before a status clause, the LAST
+    clause is not this one; the change, the tool's log and its summary must read this one."""
+    warned = PageOutput(
+        page_num=1,
+        text=_READING,
+        status=PageStatus.WARNING,
+        engine="qwen",
+        failure_mode=FailureMode.FIGURE_WORDS_UNREAD,
+    )
+    p = SimpleNamespace(page_num=1, own_layer_text=_LAYER, is_born_digital=True)
+    old_out, old_v = _old_run(warned, p)
+    _with_analysis(monkeypatch, tmp_path)
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    [change] = tool.refinalize_document(doc, tmp_path)
+    after = json.loads((doc / "pages" / "00001.json").read_text())["verdict"]["clauses"]
+    assert [c["check"] for c in after][-1] != "text_layer_numbers", "fixture premise"
+    assert change.result == "FAIL"
+    log = json.loads((doc / tool.LOG_NAME).read_text())
+    assert log["pages"]["1"]["after"]["text_layer_numbers"] == "FAIL"

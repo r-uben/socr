@@ -184,11 +184,14 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
 
-def _page_event_kinds(doc_dir: Path) -> dict[int, frozenset[str]] | None:
-    """Each page's event kinds from the run's ``audit_log.json``; ``None`` when absent."""
+def _page_event_kinds(doc_dir: Path) -> dict[int, frozenset[str]]:
+    """Each page's event kinds from the run's ``audit_log.json``. A run writes that file only
+    when the document has events (``_write_audit_log``), so a finished document without one
+    had none: every page's kinds are empty, not unknown (Argon, round-2 review: skipping such
+    documents left their pages unchecked, a regression on round 1)."""
     path = doc_dir / "audit_log.json"
     if not path.is_file():
-        return None
+        return {}
     kinds: dict[int, set[str]] = {}
     for event in _read_json(path).get("events") or []:
         if isinstance(event.get("page_num"), int):
@@ -316,7 +319,18 @@ def _record_disagreement(
         if isinstance(entry, dict) and recorded(entry):
             _write_json(root_path, root)
     audit_path = doc_dir / "audit_log.json"
-    audit = _read_json(audit_path)
+    # A run with no events wrote no audit log; this document now has events, so it gets the
+    # log a run of this code writes (``RunAudit.to_dict``'s shape, named after the PDF).
+    audit = (
+        _read_json(audit_path)
+        if audit_path.is_file()
+        else {
+            "pdf_filename": Path(str(meta.get("key") or "")).name,
+            "event_count": 0,
+            "counts": {},
+            "events": [],
+        }
+    )
     events = audit.get("events") or []
     have = {e.get("page_num") for e in events if e.get("kind") == NUMBERS_DISAGREE_KIND}
     added = False
@@ -347,6 +361,7 @@ def refinalize_document(
 ) -> list[PageChange]:
     """Re-finalize one document's model-read pages. Nothing is written until every page of
     the document has been decided, so an inconsistency leaves the document untouched."""
+    from socr.core.marks import Check
     from socr.core.verdict import model_reading_engines
 
     skipped = Counter() if skipped is None else skipped
@@ -377,11 +392,6 @@ def refinalize_document(
         skipped["document has no single .md"] += len(candidates)
         return []
     event_kinds = _page_event_kinds(doc_dir)
-    if event_kinds is None:
-        skipped["document has no audit_log.json (the clause's place is not derivable)"] += len(
-            candidates
-        )
-        return []
     assessment, why_not = _analyse_pdf(pdf_dir, meta)
     if assessment is None:
         skipped[why_not] += len(candidates)
@@ -412,7 +422,9 @@ def refinalize_document(
                 page_num=page_num,
                 before=str(sidecar.get("status")),
                 after=new_sidecar["status"],
-                result=verdict.clauses[-1].result.value,
+                result=next(
+                    c.result.value for c in verdict.clauses if c.check is Check.TEXT_LAYER_NUMBERS
+                ),
             )
         )
     manifest_path = doc_dir / "manifest.json"

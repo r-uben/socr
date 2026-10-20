@@ -114,7 +114,9 @@ _TABULAR_COMMAND_RE = re.compile(
     r"|\\(?:multicolumn|multirow)\s*\{[^{}]*\}\s*\{[^{}]*\}"
 )
 _TABULAR_RE = re.compile(
-    r"\\begin\{(tabular\*?|tabularx|longtable)\}(?:\{[^{}]*\})*(.*?)\\end\{\1\}", re.S
+    r"\\begin\{(tabular\*?|tabularx|longtable)\}(?:\[[^\]]*\])?(?:\{(?:[^{}]|\{[^{}]*\})*\})*"
+    r"(.*?)\\end\{\1\}",
+    re.S,
 )
 #: what marks a number as a REFERENCE to something rather than a value: an equation tag,
 #: a superscript (a footnote callout ``${}^{21}$``, an exponent). Reading side only.
@@ -157,7 +159,19 @@ _WORD_DIGIT_RE = re.compile(
 #: split-off digit is marked a LABEL digit (``_LABEL``): it claims a layer number first, so
 #: the layer's own ``Q1`` cannot stand in for a dropped point, and an unclaimed one is never
 #: a dispute -- a reading may name columns the page leaves unnamed (``| c1 | c2 |``).
-_LABEL_DIGIT_RE = re.compile(r"(?<=[A-Za-z])(?=\d)|(?<=[A-Za-z][-\u2212])(?=\d)")
+#:
+#: A label is NARROW, so the tag can never hide a value (Argon, round-2 review): a name of
+#: one to three letters, any script (``β1``, ``σ2``: Fable, round-2 review), starting a word
+#: and not a LaTeX command (``\\approx-8``, ``{\\bf8}`` are values), then an optional ``.`` or
+#: hyphen, then a one- or two-digit INTEGER that no digit, comma, percent or decimal follows
+#: (``USD2,000``, ``Korea-8`` are not labels). Also ``1Q``..``4Q``, ``1H``, ``1st``..``4th``.
+_LABEL_DIGIT_RE = re.compile(
+    r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})(\.|[-\u2212])?(\d{1,2})(?![\d,%]|\.\d)"
+)
+_ORDINAL_LABEL_RE = re.compile(r"(?<![\w.,\\])([1-4])(Q|H|st|nd|rd|th)(?![^\W\d_])")
+#: a one-letter-name subscript written in maths (``$Q_1$``, ``$M_2$``): a PDF layer prints it
+#: flat (``Q1``), so it is joined into the same label before subscripts are dropped as names.
+_SUBSCRIPT_LABEL_RE = re.compile(r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})_\{?(\d{1,2})\}?(?![\d.])")
 _LABEL = "\u2063"
 #: A dollar sign in front of an amount (``-$8 billion``, ``$1.4trn``) is currency, and must
 #: not open a maths span that swallows the next one (Argon, diff review).
@@ -222,10 +236,31 @@ def _tabular_as_rows(text: str) -> str:
 
     def rows(match: re.Match) -> str:
         body = _TABULAR_COMMAND_RE.sub(" ", match.group(2))
-        lines = [row.replace("&", " | ") for row in re.split(r"\\\\", body)]
-        return "\n" + "\n".join(f"| {row.strip()} |" for row in lines if row.strip()) + "\n"
+        # One line per row, whatever the source wrapped: a row after ``\\hline`` on its own
+        # line, or a row wrapped mid-cell, would otherwise lose its leading ``|`` and be read
+        # as prose (Argon, round-2 review).
+        lines = [" ".join(row.replace("&", " | ").split()) for row in re.split(r"\\\\", body)]
+        return "\n" + "\n".join(f"| {row} |" for row in lines if row) + "\n"
 
     return _TABULAR_RE.sub(rows, text)
+
+
+def _number_or_nothing(match: re.Match) -> str:
+    """A table cell's maths: kept, unless it is an EQUATION (``$R_t = ... + 0.5(\\pi_t ...)$``).
+    An equation's coefficients are not the cell's numbers, and a layer prints its maths as
+    glyphs the analysis cannot read, so keeping them made a false dispute (2018 Tealbook
+    p111's Taylor-rule table, round 3). Narrower than "any letter": a letter footnote
+    (``$142^a$``) is a cell number, and dropping those lost three real FAILs. And an
+    assignment of one number (``$\\rho^{m} = 0.75$``) states a value, so it is kept: only
+    an equation whose right side is not a lone number is a formula."""
+    span = match.group(0)
+    if "=" not in span:
+        return span
+    right = span.rsplit("=", 1)[1].strip("$\\()[] \t")
+    return span if _LONE_NUMBER_RE.fullmatch(right) else " "
+
+
+_LONE_NUMBER_RE = re.compile(r"[-\u2212]?[\d.,]*\d%?")
 
 
 def _drop_mathematics_outside_tables(text: str) -> str:
@@ -238,7 +273,7 @@ def _drop_mathematics_outside_tables(text: str) -> str:
             if prose:
                 out.append(_MATH_RE.sub(_lone_number_or_nothing, "\n".join(prose)))
                 prose = []
-            out.append(line)
+            out.append(_MATH_RE.sub(_number_or_nothing, line))
         else:
             prose.append(line)
     if prose:
@@ -265,6 +300,7 @@ def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ..
             _CELL_NUMERIC_CALLOUT_RE.sub(r"\1", line) if _is_table_row(line) else line
             for line in text.split("\n")
         )
+        text = _SUBSCRIPT_LABEL_RE.sub(r"\1\2", text)
         text = _REFERENCE_MARK_RE.sub(" ", text)
     else:
         text = _WORD_DIGIT_RE.sub(" ", _CONTROL_RE.sub(" ", text))
@@ -293,7 +329,8 @@ def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ..
         # Only the label split: the layer's other splits (``2018:II``, ``5.¹¹``, ``<0.01``)
         # exposed reading tokens whose layer writing is not split the same way, and every
         # one measured on run 23319732 was a false dispute.
-        text = _LABEL_DIGIT_RE.sub(" " + _LABEL, text)
+        text = _LABEL_DIGIT_RE.sub(lambda m: f"{m[1]}{m[2] or ''} {_LABEL}{m[3]}", text)
+        text = _ORDINAL_LABEL_RE.sub(lambda m: f" {_LABEL}{m[1]} {m[2]}", text)
     text = _STARS_RE.sub("", text)
     text = _CALLOUT_RE.sub(r"\1 ", _strip_latex(text))
     out: list[tuple[str, str, bool]] = []

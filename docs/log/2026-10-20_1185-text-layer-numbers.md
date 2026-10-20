@@ -143,3 +143,30 @@ native table trust check because the grid's header (`00..03`) is not the reading
 (`c0..c3`); it prints the reading's table and a caption without digits. No gh993
 assertion depended on the short layer, no expectation changed, the shared builder is
 untouched (approved by the orchestrator, 2026-10-20).
+
+## Round 3 (2026-10-20): round-2 reviews of 9e90eb39
+
+- **Label digits, narrow and in any script** (Fable P1-1, Argon P1-1). The rule was ASCII
+  only (`β1`, `σ2` still freed a digit: 252 born-digital pages of run 23319732 run a Greek
+  letter into a digit), and it tagged values: the last letter of `\approx`, `\sim`, `\pm`,
+  `\le`, `\bf` made the following number a label, never disputed. A label is now a name of
+  one to three letters of any script, starting a word and not a LaTeX command, an optional
+  `.` or hyphen, and a one- or two-digit integer with no digit, comma, percent or decimal
+  after it; plus `1Q`..`4Q`, `1H`, `1st`..`4th`, and a one-name subscript `$Q_1$` joined
+  to `Q1`. `USD2,000` and `Korea-8` are not tagged; they are writings the comparator does
+  not read, listed in #1220.
+- **A multi-line `tabular` row stays one row** (Argon P1-2): `\hline` / `\toprule` on its own
+  line left the row without its leading `|`. Rows are now whitespace-collapsed; an optional
+  `[t]` and nested-brace column specs are matched.
+- **An equation in a table cell is not the cell's number**: read as table rows, 2018
+  Tealbook p111's Taylor-rule table made a false FAIL on a formula's `0.5` (the layer prints
+  that maths as glyphs the analysis cannot read). Dropping any lettered maths lost three
+  real FAILs (`$142^a$` cells); dropping every `=` lost `$\rho^{m} = 0.75$`. Kept: an
+  equation whose right side is one number; dropped: any other equation.
+- **The tool** (Argon P1-3): a finished document without `audit_log.json` had no events (a
+  run writes the file only then), so it is checked with empty event kinds, and the log is
+  created when the tool adds the first event. `PageChange.result` reads this clause, not
+  the verdict's last one.
+
+Measured on run 23319732 against round 2: the FAIL set is identical (32); one page moves
+between UNKNOWN reasons. Calibration copy: see report-r3.

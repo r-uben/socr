@@ -1046,7 +1046,12 @@ def with_text_layer_numbers_clause(
     COUNT, not by check: a status clause about the same check replaces a silent one in
     place (``_merge_clause``), so the slot is the silent clause's whatever its wording.
     *p* and *event_kinds* are what the writing run saw (Argon, PR #1219 review: appending
-    put the mark below Tealbook p125's chart mark, unlike a fresh run)."""
+    put the mark below Tealbook p125's chart mark, unlike a fresh run).
+
+    It assumes the run derived the silent-success clauses this code derives. A run older
+    than one of them (run 23319732 predates #1181's ``page_judge`` clause) published fewer,
+    so on a page that also carries a status clause the slot is one late; at most the 5
+    EXACT_PASS pages of that run (Fable, round-2 review P2-3)."""
     ahead = len(_clauses_ahead_of_text_layer_numbers(output, p, event_kinds))
     clauses = published.clauses
     return replace(published, clauses=(*clauses[:ahead], clause, *clauses[ahead:]))
