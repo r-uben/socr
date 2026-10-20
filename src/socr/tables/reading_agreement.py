@@ -163,12 +163,22 @@ _WORD_DIGIT_RE = re.compile(
 #: A label is NARROW, so the tag can never hide a value (Argon, round-2 review): a name of
 #: one to three letters, any script (``β1``, ``σ2``: Fable, round-2 review), starting a word
 #: and not a LaTeX command (``\\approx-8``, ``{\\bf8}`` are values), then an optional ``.`` or
-#: hyphen, then a one- or two-digit INTEGER that no digit, comma, percent or decimal follows
-#: (``USD2,000``, ``Korea-8`` are not labels). Also ``1Q``..``4Q``, ``1H``, ``1st``..``4th``.
+#: hyphen, then a one- or two-digit INTEGER that no digit, percent, decimal or THOUSANDS
+#: comma follows (``USD2,000``, ``Korea-8`` are not labels; ``Q1,`` in a sentence is: round
+#: 3 rejected every comma and un-claimed 54 lane readings' ``Q4,``/``n-1,``, Fable round-3
+#: P1-2). Also ordinals: ``1Q``, ``4H``, ``1st`` and the Fed's percentile bands ``5th``,
+#: ``16th``, ``95th`` (Fable round-3 P1-3: round 3 stopped at ``4th``).
+#:
+#: NOT labels yet: a label the reading writes in maths with a command or a superscript
+#: (``$\\beta_1$``, ``$\\sigma^2$``, ``$x_{t-1}$``), which the layer prints flat (#1220).
+#: Round 4 measured both ways of claiming them on run 23319732 and each made false
+#: disputes: claiming any layer number stole a layer VALUE (6 pages), and keeping labels
+#: apart on both sides failed wherever the two sides write a label differently (``p60`` /
+#: ``$p 60$``, ``8th`` / ``8$^{th}$``, a font bracket ``ð14Þ`` read as a letter: 5 pages).
 _LABEL_DIGIT_RE = re.compile(
-    r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})(\.|[-\u2212])?(\d{1,2})(?![\d,%]|\.\d)"
+    r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})(\.|[-\u2212])?(\d{1,2})(?![\d%]|,\d|\.\d)"
 )
-_ORDINAL_LABEL_RE = re.compile(r"(?<![\w.,\\])([1-4])(Q|H|st|nd|rd|th)(?![^\W\d_])")
+_ORDINAL_LABEL_RE = re.compile(r"(?<![\w.,\\])(\d{1,2})(Q|H|st|nd|rd|th)(?![^\W\d_])")
 #: a one-letter-name subscript written in maths (``$Q_1$``, ``$M_2$``): a PDF layer prints it
 #: flat (``Q1``), so it is joined into the same label before subscripts are dropped as names.
 _SUBSCRIPT_LABEL_RE = re.compile(r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})_\{?(\d{1,2})\}?(?![\d.])")

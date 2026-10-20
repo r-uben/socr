@@ -170,3 +170,23 @@ untouched (approved by the orchestrator, 2026-10-20).
 
 Measured on run 23319732 against round 2: the FAIL set is identical (32); one page moves
 between UNKNOWN reasons. Calibration copy: see report-r3.
+
+## Round 4 (2026-10-20): Fable's round-3 review of 299fe649
+
+- **A label followed by a sentence comma is a label** (P1-2, a round-3 regression): the
+  lookahead now rejects a thousands comma (`,\d`), not every comma. `In Q1, growth` and
+  `| Q4, Q1 |` claim their digit again.
+- **Ordinals of any one or two digits** (P1-3): `5th`, `25th`, `95th`, the Fed's percentile
+  bands; round 3 stopped at `4th`.
+- **Not fixed, by the task's rule (P1-1): labels a reading writes in maths** (`$\beta_1$`,
+  `$\sigma^2$`, `$x_{t-1}$`, `$R^2$`). Both designs were measured on run 23319732 and read
+  by hand. Turning them into label digits that claim any layer number first stole layer
+  VALUES on 6 pages: the layer prints `Γt−1` with a minus the old split never freed, so
+  the reading's own `1` became a false dispute. Keeping labels apart on both sides made 5
+  others, wherever the two sides write one label differently (`p60` / `$p 60$`,
+  `8th` / `8$^{th}$`, a font bracket `ð14Þ` read as a letter). Listed in #1220 with the
+  probes; pinned as strict xfail arms.
+
+Shipped: the two one-token fixes move **0** pages of run 23319732 against round 3; the
+FAIL set is unchanged. Correction: the round-3 PR table printed 591 / 100 for two UNKNOWN
+rows, from an intermediate variant; the shipped round-3 code gives 590 / 101.

@@ -287,6 +287,13 @@ def test_a_power_of_ten_in_a_cell_stays_a_power(cell: str) -> None:
     assert _disputes("Obs. 2×106 9.60×104", f"| Obs. | {cell} |") == ()
 
 
+#: A label a reading writes in maths with a command or a superscript is not claimed yet:
+#: round 4 measured both claim designs on run 23319732 and each made false disputes (#1220).
+_LATEX_LABEL_OPEN = pytest.mark.xfail(
+    strict=True, reason="#1220: labels written in maths ($\\beta_1$, $R^2$) are not claimed"
+)
+
+
 @pytest.mark.parametrize(
     ("layer", "reading"),
     [
@@ -296,6 +303,27 @@ def test_a_power_of_ten_in_a_cell_stays_a_power(cell: str) -> None:
         ("1st 2nd\nKorea .1 .2", "| | 1st | 2nd |\n| Korea | 1 | 2 |"),
         ("Col.1 Col.2\nKorea .1 .2", "| | Col.1 | Col.2 |\n| Korea | 1 | 2 |"),
         ("Q1 Q2\nKorea .1 .2", "| | $Q_1$ | $Q_2$ |\n| Korea | 1 | 2 |"),
+        # Round 4 (Fable, round-3 review): the writings readings actually use. The maths
+        # writings stay open (#1220): both ways of claiming them measured false disputes.
+        pytest.param(
+            *("β1 β2\nKorea .8 .1", "| | $\\beta_1$ | $\\beta_2$ |\n| Korea | .8 | 1 |"),
+            marks=_LATEX_LABEL_OPEN,
+        ),
+        pytest.param(
+            *("σ2 σ3\nKorea .2 .3", "| | $\\sigma^2$ | $\\sigma^3$ |\n| Korea | 2 | .3 |"),
+            marks=_LATEX_LABEL_OPEN,
+        ),
+        pytest.param(
+            *("𝜔1\nKorea .1", "| | $\\omega_{1}$ |\n| Korea | 1 |"), marks=_LATEX_LABEL_OPEN
+        ),
+        pytest.param(
+            *("xt-1\nKorea .1", "| | $x_{t-1}$ |\n| Korea | 1 |"), marks=_LATEX_LABEL_OPEN
+        ),
+        pytest.param(*("R2\nKorea .2", "| | $R^2$ |\n| Korea | 2 |"), marks=_LATEX_LABEL_OPEN),
+        ("In Q1, growth was .1 percent.", "In Q1, growth was 1 percent."),
+        ("Q4, Q1\nKorea .4 .1", "| | Q4, Q1 |\n| Korea | 4 | .1 |"),
+        ("25th 75th\nRate 2.5 2.75", "| | 25th | 75th |\n| Rate | 25 | 2.75 |"),
+        ("5th 95th\nRate .5 .95", "| | 5th | 95th |\n| Rate | 5 | .95 |"),
     ],
 )
 def test_every_label_writing_claims_the_digit_its_layer_frees(layer: str, reading: str) -> None:
@@ -351,7 +379,9 @@ def test_only_a_short_integer_after_a_short_name_is_a_label() -> None:
     ``x15%``) or one after a long word (``Korea-8``) is not a label."""
     from socr.tables.reading_agreement import _numeric_tokens
 
-    tokens = _numeric_tokens("| USD2,000 | ab2.5 | x15% | Korea-8 | Q1 |", True)
+    tokens = _numeric_tokens(
+        "| USD2,000 | ab2.5 | x15% | Korea-8 | Q1 | $2 \\times 10^{6}$ |", True
+    )
     assert [written for _value, written, label in tokens if label] == ["1"]
 
 
