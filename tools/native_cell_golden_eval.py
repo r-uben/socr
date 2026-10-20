@@ -3,14 +3,13 @@
 
 Usage:
   ~/venvs/socr/bin/python tools/native_cell_golden_eval.py
-  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py --compare-base 005ee1aa31a6768941d8bd6e7131c421df76d3d4
+  ~/venvs/socr/bin/python tools/native_cell_golden_eval.py --compare-ref origin/main
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
-import importlib
 import json
 import subprocess
 import sys
@@ -21,7 +20,6 @@ import fitz
 
 ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "tests" / "fixtures" / "resf_native_cell"
-UP = Path("/home/ubuntu/.cursor/projects/workspace/uploads")
 
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -42,6 +40,8 @@ class GoldenCase:
     page_index: int = 0
     peer_md: Path | None = None
     peer_table_index: int = 0
+    """When set, use this ``locate_tables`` index instead of ``pair_regions`` alone."""
+    locator_table_index: int | None = None
 
 
 GOLDENS: list[GoldenCase] = [
@@ -56,7 +56,42 @@ GOLDENS: list[GoldenCase] = [
     GoldenCase("RESF p67 T8", FIX / "resf_p67.pdf", FIX / "p67_tableau8.md"),
     GoldenCase("PLFSS p38 T18", FIX / "plfss_p38.pdf", FIX / "p38_tableau18.md"),
     GoldenCase("PLFSS p44 full", FIX / "plfss_p44.pdf", FIX / "p44_native_draft.md"),
-    GoldenCase("PLFSS p65 slice", FIX / "plfss_p65.pdf", FIX / "p65_pharma_slice.md"),
+    GoldenCase("PLFSS p65 full", FIX / "plfss_p65.pdf", FIX / "p65_full.md"),
+    GoldenCase(
+        "RESF p60 T2bis",
+        FIX / "resf_p60.pdf",
+        FIX / "p60_tableau2bis.md",
+        locator_table_index=1,
+    ),
+    GoldenCase(
+        "RESF p60 T3",
+        FIX / "resf_p60.pdf",
+        FIX / "p60_tableau3.md",
+        locator_table_index=2,
+    ),
+    GoldenCase("RESF p63 T7", FIX / "resf_p63.pdf", FIX / "p63_tableau7.md"),
+    GoldenCase(
+        "RESF p42 T1",
+        FIX / "resf_p42.pdf",
+        FIX / "p42_tableau1_native.md",
+        locator_table_index=0,
+    ),
+    GoldenCase(
+        "RESF p42 T2",
+        FIX / "resf_p42.pdf",
+        FIX / "p42_tableau2_native.md",
+        locator_table_index=1,
+    ),
+    GoldenCase("RESF p61 T1", FIX / "resf_p61.pdf", FIX / "p61_tableau_native.md"),
+    GoldenCase(
+        "PLFSS p39 T2",
+        FIX / "plfss_p39.pdf",
+        FIX / "p39_tableau2_native.md",
+        locator_table_index=1,
+    ),
+    GoldenCase("PLFSS p40 T1", FIX / "plfss_p40.pdf", FIX / "p40_tableau_native.md"),
+    GoldenCase("PLFSS p41 T1", FIX / "plfss_p41.pdf", FIX / "p41_tableau_native.md"),
+    GoldenCase("PLFSS p42 T1", FIX / "plfss_p42.pdf", FIX / "p42_plfss_native.md"),
 ]
 
 
@@ -121,22 +156,29 @@ def _mutants(header: list[str], rows: list[list[str]]) -> dict[str, str]:
     return variants
 
 
-def _run_case(case: GoldenCase, md: str) -> dict:
-    doc = fitz.open(case.pdf)
-    page = doc[case.page_index]
-    raw = [tuple(b.bbox) for b in locate_tables(page)]
+def _resolve_region(case: GoldenCase, page, md: str, raw: list[tuple]) -> tuple:
+    if case.locator_table_index is not None and case.locator_table_index < len(raw):
+        return raw[case.locator_table_index]
     mds = [md]
     if case.peer_md is not None:
         mds.insert(case.peer_table_index, case.peer_md.read_text(encoding="utf-8"))
     pr = pair_regions(page, mds, raw)
     if case.peer_md is None:
-        pick = pr[0]
-        peers = None
-    elif "tableau2" in case.md.name:
-        pick = pr[-1]
-        peers = [pr[0]] if pr[0] is not None else None
-    else:
-        pick = pr[1] if len(pr) > 1 else pr[0]
+        return pr[0]
+    if "tableau2" in case.md.name:
+        return pr[-1]
+    return pr[1] if len(pr) > 1 else pr[0]
+
+
+def _run_case(case: GoldenCase, md: str) -> dict:
+    doc = fitz.open(case.pdf)
+    page = doc[case.page_index]
+    raw = [tuple(b.bbox) for b in locate_tables(page)]
+    pick = _resolve_region(case, page, md, raw)
+    peers = None
+    if case.peer_md is not None:
+        mds = [case.peer_md.read_text(encoding="utf-8"), md]
+        pr = pair_regions(page, mds, raw)
         peers = [pr[0]] if pr[0] is not None else None
     res = check_table_cell_binding(
         table_id=case.tag,
@@ -157,32 +199,9 @@ def _run_case(case: GoldenCase, md: str) -> dict:
     }
 
 
-def _load_check_module(base_sha: str | None):
-    if not base_sha:
-        return check_table_cell_binding, NativeCellOutcome
-    tmp = ROOT / ".golden_eval_base"
-    subprocess.run(
-        ["git", "show", f"{base_sha}:src/socr/tables/native_cell_check.py"],
-        check=True,
-        capture_output=True,
-        cwd=ROOT,
-    )
-    return check_table_cell_binding, NativeCellOutcome
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--compare-base", metavar="SHA", default=None)
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args()
-
+def _eval_all() -> tuple[list[dict], dict[str, int]]:
     rows_out: list[dict] = []
-    counts = {
-        NativeCellOutcome.VERIFIED.value: 0,
-        NativeCellOutcome.AMBIGUOUS.value: 0,
-        NativeCellOutcome.CONTRADICTED.value: 0,
-    }
-
+    counts: dict[str, int] = {}
     for case in GOLDENS:
         md = case.md.read_text(encoding="utf-8")
         header, body = _parse_md_rows(md)
@@ -197,6 +216,95 @@ def main() -> int:
                 "mutants": mut_results,
             }
         )
+    return rows_out, counts
+
+
+def _run_eval_subprocess() -> tuple[list[dict], dict[str, int]]:
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "native_cell_golden_eval.py"), "--json"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or proc.stdout)
+    start = proc.stdout.find("{")
+    data = json.loads(proc.stdout[start:])
+    return data["goldens"], data["aggregate_correct"]
+
+
+def _eval_at_git_ref(ref: str) -> tuple[list[dict], dict[str, int]]:
+    """Check out table modules at *ref* in a subprocess, then restore."""
+    rel_paths = [
+        ROOT / "src/socr/tables/native_cell_check.py",
+        ROOT / "src/socr/tables/binding.py",
+    ]
+    backups = {p: p.read_bytes() for p in rel_paths}
+    try:
+        for p in rel_paths:
+            rel = p.relative_to(ROOT).as_posix()
+            p.write_bytes(
+                subprocess.run(
+                    ["git", "show", f"{ref}:{rel}"],
+                    check=True,
+                    capture_output=True,
+                    cwd=ROOT,
+                ).stdout
+            )
+        return _run_eval_subprocess()
+    finally:
+        for p, data in backups.items():
+            p.write_bytes(data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--compare-ref",
+        metavar="GIT_REF",
+        default=None,
+        help="Compare baseline results at GIT_REF (e.g. origin/main)",
+    )
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    if args.compare_ref:
+        before_rows, before_counts = _eval_at_git_ref(args.compare_ref)
+        # Restore current modules
+        for mod in ("socr.tables.binding", "socr.tables.native_cell_check"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+        sys.path[:] = [p for p in sys.path if "golden_ref_" not in p]
+        after_rows, after_counts = _eval_all()
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ref": args.compare_ref,
+                        "before": {"goldens": before_rows, "aggregate": before_counts},
+                        "after": {"goldens": after_rows, "aggregate": after_counts},
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        print(f"Compare ref {args.compare_ref} -> working tree")
+        print(f"{'Page':<22} {'Before':<22} {'After':<22}")
+        print("-" * 70)
+        for b, a in zip(before_rows, after_rows, strict=True):
+            bc = b["correct"]
+            ac = a["correct"]
+            mark = " *" if bc != ac else ""
+            print(
+                f"{b['page']:<22} {bc['outcome']}/{bc['matched']:<16} "
+                f"{ac['outcome']}/{ac['matched']:<16}{mark}"
+            )
+        print("-" * 70)
+        print("Before:", before_counts, "After:", after_counts)
+        return 0
+
+    rows_out, counts = _eval_all()
 
     if args.json:
         print(json.dumps({"goldens": rows_out, "aggregate_correct": counts}, indent=2))
@@ -222,10 +330,6 @@ def main() -> int:
         f"A={counts.get('ambiguous', 0)}",
         f"C={counts.get('contradicted', 0)}",
     )
-    if args.compare_base:
-        print(
-            "(Base comparison requires a separate checkout; re-run with PYTHONPATH pointing at base src.)"
-        )
     return 0
 
 
