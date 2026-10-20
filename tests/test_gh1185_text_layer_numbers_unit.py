@@ -538,3 +538,21 @@ def test_unchecked_is_permanent_across_resume() -> None:
     """The UNKNOWN demotion is equally permanent across resume."""
     out, verdict = _apply_verdict_marks(_qwen(TEALBOOK_READING), _page(layer=""), 1)
     assert _resume_verdict_is_permanently_unverifiable(verdict.to_dict(), out.failure_mode.value)
+
+
+@pytest.mark.parametrize("engine", ["qwen", "native"])
+def test_a_prior_ocr_page_is_never_checked_by_either_clause(engine: str) -> None:
+    """#1185 x #1156 (round 5, after #1217 merged): on a page whose layer is an earlier OCR
+    run, this clause stands aside and #1156's marks the page, so even a reading that agrees
+    with that layer number for number is not CHECKED. Difference: the same page without the
+    prior-OCR flag is CHECKED (for the model reading) and carries neither clause."""
+    agreeing = "| Korea | 4.0 | 2.6 | 5.7 | -.8 | 4.0 | 3.3 |"
+    output = PageOutput(page_num=1, text=agreeing, status=PageStatus.SUCCESS, engine=engine)
+    flagged = _page()
+    flagged.prior_ocr_layer_suspect = True
+    shipped, verdict = _apply_verdict_marks(output, flagged, 1)
+    checks = [c.check for c in verdict.clauses]
+    assert checks == [Check.PRIOR_OCR_LAYER], checks
+    assert shipped.status is not PageStatus.SUCCESS
+    clean_shipped, clean_verdict = _apply_verdict_marks(output, _page(), 1)
+    assert clean_verdict.clauses == () and clean_shipped.status is PageStatus.SUCCESS
