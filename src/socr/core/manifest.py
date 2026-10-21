@@ -6022,6 +6022,32 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
 )
 
 
+def _a_floor_set_this_mode(output: PageOutput) -> bool:
+    """Did a #1027/#1156 FLOOR write this page's mode, rather than the clause chooser?
+
+    Round 5 (the bot's P2, Fable P1-2, Argon P1-2c, measured by all three).
+    ``PRIOR_OCR_LAYER_UNVERIFIED`` has two writers: ``_verdict_demotion_mode``, from a
+    ``prior_ocr_layer`` clause on an ACCEPTED model reading of a scan, and the prior-OCR
+    floors above (``PRIOR_OCR_LAYER_MASKED`` and ``PRIOR_OCR_LAYER_UNREAD``), which set it
+    directly on a page whose reading was NOT accepted. The recompute must restate the
+    chooser's own answer and never overwrite the floor's, and the ``elif``'s comment already
+    claimed as much while the set did not: measured, a floor page that also carried the
+    chart lane's page-scoped ``figure_text`` clause came out of
+    ``_apply_verdict_marks`` as ``VISUAL_VALUES_UNTRANSCRIBED`` instead -- which IS in
+    ``PERMANENTLY_UNRESOLVABLE_MODES``, so an UNACCEPTED floor page became one a resume
+    restores for ever, under a reason the floor did not give. 4 of the 2,476 calibration
+    pages carry that clause pair.
+
+    The two writers are told apart by what the floor sets beside the mode and the chooser
+    cannot: a floor ships the page's own native text (``engine="native"``) and is
+    ``audit_passed=False`` BY CONSTRUCTION, while the chooser's route to this mode needs a
+    model winner whose reading was accepted. Provenance would say it more directly and is
+    not available here: a re-finalize pass rebuilds the output from the sidecar, which does
+    not carry it.
+    """
+    return output.audit_passed is False and engine_ships_native_text(output.engine)
+
+
 def _warn_success_status_for_verdict(output: PageOutput, clauses=(), kind: str = "") -> PageOutput:
     """SUCCESS becomes WARNING for a page with an unresolved check. Nothing else moves.
 
@@ -6190,14 +6216,19 @@ def _apply_verdict_marks(
         output = _warn_success_status_for_verdict(
             output, verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
         )
-    elif verdict.clauses and output.failure_mode in _VERDICT_DERIVED_MODES:
+    elif (
+        verdict.clauses
+        and output.failure_mode in _VERDICT_DERIVED_MODES
+        and not _a_floor_set_this_mode(output)
+    ):
         # #1187 round 4 (Argon P0-A): the page is ALREADY demoted, and by a mode this chooser
         # owns -- which means an earlier pass over the same page recorded it from a SMALLER
         # clause set. Re-finalizing with the full set must give the mode a fresh run gives,
         # or the recorded mode depends on which re-finalize tool ran first, and with it
         # whether a resume restores the page or re-reads it (the two lanes' modes differ in
         # ``PERMANENTLY_UNRESOLVABLE_MODES``). Only modes this function produces are
-        # recomputed: a mode a GUARD set is more specific and is never overwritten.
+        # recomputed: a mode a GUARD set is more specific and is never overwritten -- which
+        # is what ``_a_floor_set_this_mode`` is for (round 5).
         _recomputed = _verdict_demotion_mode(
             verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
         )

@@ -35,6 +35,7 @@ from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.core.verdict import build_page_verdict
 from socr.figures.unshipped_figures import (
+    MARKED_KINDS,
     RENDER_FAILED_KIND,
     RENDERED_KIND,
     UNLOCATED_KIND,
@@ -567,7 +568,15 @@ class _Judge:
         return AcceptDecision(accept=True, reason="")
 
 
-def _process(tmp_path: Path, monkeypatch, tag: str, *, draw_figure: bool, quiet: bool = True):
+def _process(
+    tmp_path: Path,
+    monkeypatch,
+    tag: str,
+    *,
+    draw_figure: bool = True,
+    quiet: bool = True,
+    pdf: Path | None = None,
+):
     """Drive the real ``process()`` on a one-page PDF a model reads.
 
     Hermetic: the engine, the judge and the engine LADDER are all stubbed, and
@@ -586,7 +595,9 @@ def _process(tmp_path: Path, monkeypatch, tag: str, *, draw_figure: bool, quiet:
     from socr.core.providers import PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
 
-    pdf = _pdf_with_a_figure(tmp_path / f"{tag}.pdf", draw_figure=draw_figure)
+    # *pdf* lets a caller bring a fixture of its own; the default is this module's one-figure
+    # page. Both go through the same real ``process()`` below.
+    pdf = pdf or _pdf_with_a_figure(tmp_path / f"{tag}.pdf", draw_figure=draw_figure)
     with monkeypatch.context() as m:
         m.setattr(orch, "get_engine", lambda engine_type: _Engine())
         m.setattr(UnifiedPipeline, "_is_chart_asset_page", lambda self, *a, **k: False)
@@ -902,7 +913,7 @@ def test_a_page_the_lane_acts_on_is_never_checked(tmp_path: Path) -> None:
     count can never establish. So no outcome of this lane claims it: every page it acts on is
     marked, and the mark says the crops are not proven complete.
     """
-    from socr.figures.unshipped_figures import MARKED_KINDS, decide
+    from socr.figures.unshipped_figures import decide
 
     one_caption_many_panels = "Exhibit 1\n\n(1) Equity Prices\n\n(2) Corporate Debt Spreads"
     d = decide(one_caption_many_panels, lambda: [object(), object()], lambda b: ["a.png", "b.png"])
@@ -953,15 +964,22 @@ def test_the_failure_mode_is_this_lanes_own_and_splits_by_whether_a_rerun_can_fi
         assert marked.failure_mode is expected, kind
 
 
-def test_re_deriving_a_marked_page_adds_no_second_contradictory_clause() -> None:
-    """Argon P0-3, first half.
+@pytest.mark.parametrize("kind", sorted(MARKED_KINDS))
+def test_re_deriving_a_marked_page_adds_no_second_contradictory_clause(kind: str) -> None:
+    """Argon P0-3, first half; parametrised over every acted-on kind in round 5.
 
     The shared mode row made a second derivation append a page-scoped clause saying the page's
     chart ships as an image -- on a page that shipped none -- and the body stopped being
     idempotent. The seam runs again over every page at assemble, so both matter.
+
+    Round 5 (Argon P1-2b): pinning ONE kind hid the same failure on another. The round-4 split
+    gave the render failure its own mode so it could stay retryable, and
+    ``_status_is_explained`` named only ``FIGURE_NOT_SHOWN``, so a RENDER_FAILED page gained
+    the fail-closed ``unknown`` clause on pass 2 -- bytes unchanged, record changed, which is
+    the mark and the record disagreeing about one page.
     """
     out = _out("Figure 7: X.\n\nprose")
-    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
+    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=kind)
     first, v1 = manifest._apply_verdict_marks(out, p, 1)
     second, v2 = manifest._apply_verdict_marks(first, p, 1)
     third, v3 = manifest._apply_verdict_marks(second, p, 1)
@@ -1378,8 +1396,29 @@ def test_a_native_page_is_out_of_this_lanes_scope(tmp_path: Path, monkeypatch) -
     assert figure_captions(wrapped, strict=True) == ("Figure 4",), "the raw layer does match"
     assert figure_captions(reflowed, strict=True) == (), "the body that ships does not"
 
-    for engine in ("native", "native+equations", ""):
-        assert not page_was_read_by_a_model(engine), engine
+    # The PROPERTY, not a list of strings (round 5: the bot, Fable P1-1, Argon P1-1 all
+    # measured the same hole, because the first version pinned the set). The lane must judge
+    # exactly the text that ships, so its predicate is the REFLOW's: every engine
+    # ``_apply_native_paragraphs`` reflows is out of scope, whatever it is called. The two
+    # sets had already drifted -- ``native+math`` (37 of 2,476 calibration pages),
+    # ``chart_asset``, ``native_fallback`` and ``native+tables`` all ship the page's own
+    # line-wrapped layer and were still being judged on it.
+    from socr.core.manifest import engine_ships_native_text
+
+    for engine in (
+        "native",
+        "native+equations",
+        "native+math",
+        "chart_asset",
+        "native_fallback",
+        "native+tables",
+        "qwen",
+        "gemini",
+    ):
+        assert page_was_read_by_a_model(engine) is not engine_ships_native_text(engine), (
+            f"the lane's scope and the reflow's must be ONE question: {engine}"
+        )
+    assert not page_was_read_by_a_model(""), "an absent engine names no reader"
     assert page_was_read_by_a_model("qwen")
 
     # Through the real page loop: the same body, the same PDF, only the engine differs.
@@ -1391,7 +1430,7 @@ def test_a_native_page_is_out_of_this_lanes_scope(tmp_path: Path, monkeypatch) -
     from socr.core.config import PipelineConfig
 
     pipe.config = PipelineConfig(quiet=True)
-    for engine, should_fire in (("qwen", True), ("native", False)):
+    for engine, should_fire in (("qwen", True), ("native", False), ("native+math", False)):
         state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
         ps = PageState(page_num=1)
         state.pages[1] = ps
@@ -1430,12 +1469,134 @@ def test_a_page_this_lane_marks_is_kept_on_a_partial_resume(tmp_path: Path, monk
     assert (next(iter(out.rglob("pages/00001.md")))).read_text() == before
 
 
-def test_a_failed_crop_is_retried_on_resume(tmp_path: Path) -> None:
-    """The other half of the split: a render failure is transient and must NOT be permanent."""
+def test_a_failed_crop_is_retried_on_resume(tmp_path: Path, monkeypatch) -> None:
+    """The other half of the split, through the production ledger (round 5, Fable P2-4).
+
+    Round 4 asserted set membership, which could not fail on the behaviour it names -- and
+    Argon P1-2c found the behaviour broken underneath it. The transience lives in the MODE,
+    and another lane's clause takes the mode over: measured, a render-failed page that also
+    carries a disputed number records ``numbers_disagree_with_text_layer``, which IS in
+    ``PERMANENTLY_UNRESOLVABLE_MODES``, so the failed crop was skipped for ever. The lane's
+    own record of what happened is now what the ledger reads.
+
+    Pinned as a DIFFERENCE between two runs that differ in ONE field, because the first
+    version of this test asserted "page 1 is re-read" and passed with the guard deleted --
+    the page was reaching the engine for another of the ledger's reasons, so the assertion
+    was true either way. Here the same sidecar is resumed twice, once with the kind the lane
+    writes for a FAILED crop and once with the kind it writes for a crop it SHIPPED. The
+    first must be re-read and the second must not; a guard that cannot tell them apart fails
+    one of the two.
+    """
     from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES
+    from socr.pipeline.orchestrator import _resume_verdict_is_permanently_unverifiable
 
     assert FailureMode.FIGURE_NOT_SHOWN in PERMANENTLY_UNRESOLVABLE_MODES
     assert FailureMode.FIGURE_RENDER_FAILED not in PERMANENTLY_UNRESOLVABLE_MODES
+
+    pdf = _two_page_pdf_with_a_named_figure(tmp_path / "doc.pdf", draw_figure=True)
+    out = tmp_path / "out"
+    first: list[int] = []
+    with monkeypatch.context() as m:
+        # The renderer is down: regions are located, no crop is written.
+        import socr.figures.chart_regions as _cr
+
+        m.setattr(_cr, "render_chart_region_crops", lambda *a, **k: [])
+        _run_two_page(out, pdf, monkeypatch, pages_read=first)
+    side_path = next(iter(out.rglob("pages/00001.json")))
+    baseline = json.loads(side_path.read_text())
+    assert baseline["unshipped_figure_kind"] == RENDER_FAILED_KIND, "fixture premise"
+
+    # The shape Argon measured: another lane's clause supplies a PERMANENT mode, so the mode
+    # can no longer say this page's own outcome was transient.
+    # BOTH records, because the ledger reads the mode off ``winning_output`` and the first
+    # version of this fixture edited only the sidecar's top-level copy -- so the mode under
+    # test was never the one the gate saw, and both arms were re-read for the same unrelated
+    # reason while the assertion read as a pass.
+    baseline["failure_mode"] = FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER.value
+    baseline["winning_output"]["failure_mode"] = FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER.value
+    baseline["verdict"]["clauses"].append(
+        {
+            "check": Check.TEXT_LAYER_NUMBERS.value,
+            "result": CheckResult.FAIL.value,
+            "scope": "page",
+            "reason": "a number the reading ships is not in the page's text layer",
+        }
+    )
+    assert _resume_verdict_is_permanently_unverifiable(
+        baseline["verdict"], baseline["winning_output"]["failure_mode"]
+    ), "fixture premise: the mode alone would skip this page"
+
+    read_by_kind: dict[str, list[int]] = {}
+    for kind in (RENDER_FAILED_KIND, RENDERED_KIND):
+        side = dict(baseline)
+        side["unshipped_figure_kind"] = kind
+        side_path.write_text(json.dumps(side, indent=2), encoding="utf-8")
+        # The document must be INCOMPLETE, or the whole-document fast path answers and the
+        # per-page ledger -- the thing under test -- is never consulted. Both arms run in the
+        # same output directory, each from the sidecar written just above, so the ONE thing
+        # that differs between them is the kind.
+        _crash_after_page_one_r4(out)
+        resume: list[int] = []
+        _run_two_page(out, pdf, monkeypatch, pages_read=resume)
+        read_by_kind[kind] = resume
+
+    for kind, resume in read_by_kind.items():
+        assert 2 in resume, f"{kind}: the resume never reached the page loop"
+    assert 1 in read_by_kind[RENDER_FAILED_KIND], (
+        f"the failed crop was never retried: {read_by_kind[RENDER_FAILED_KIND]}"
+    )
+    assert 1 not in read_by_kind[RENDERED_KIND], (
+        "and a crop that DID ship is still restored, so the retry is about the kind and not "
+        f"about the page: {read_by_kind[RENDERED_KIND]}"
+    )
+
+
+def test_a_prior_ocr_floor_keeps_the_mode_the_floor_set(tmp_path: Path) -> None:
+    """Round 5: the bot's P2, Fable P1-2, Argon P1-2c -- all three measured it.
+
+    ``PRIOR_OCR_LAYER_UNVERIFIED`` has two writers: this chooser, from an ACCEPTED model
+    reading of a scan, and the #1027/#1156 floors, which set it directly on a page whose
+    reading was NOT accepted. Round 4's recompute claimed in its comment to leave a
+    guard-set mode alone while the set it keyed on included the floor's. Measured: a floor
+    page carrying the chart lane's page-scoped ``figure_text`` clause came out
+    ``VISUAL_VALUES_UNTRANSCRIBED``, which IS permanent -- so an UNACCEPTED floor page
+    became one a resume restores for ever, under a reason the floor did not give. 4 of the
+    2,476 calibration pages carry that clause pair.
+
+    Pinned as a DIFFERENCE: the same clauses on the floor's page and on the chooser's page.
+    """
+    from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES
+
+    p = PageState(page_num=1)
+    p.prior_ocr_layer_suspect = True
+    kinds = frozenset({"visual_values_not_transcribed"})
+    floor = PageOutput(
+        page_num=1,
+        text="> [page 1 failed: the text layer is an earlier OCR run]\n\nx",
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=False,
+        failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+    )
+    chooser = PageOutput(
+        page_num=1,
+        text="x",
+        status=PageStatus.WARNING,
+        engine="qwen",
+        audit_passed=True,
+        failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+    )
+    after_floor = manifest._apply_verdict_marks(floor, p, 1, event_kinds=kinds)[0]
+    after_chooser = manifest._apply_verdict_marks(chooser, p, 1, event_kinds=kinds)[0]
+    assert after_floor.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED, (
+        "the floor's mode is the floor's; recomputing it rewrites another lane's resume "
+        f"contract (got {after_floor.failure_mode})"
+    )
+    assert after_chooser.failure_mode is not FailureMode.PRIOR_OCR_LAYER_UNVERIFIED, (
+        "and the page this chooser DID demote still converges on the fresh-run mode"
+    )
+    assert after_floor.failure_mode not in PERMANENTLY_UNRESOLVABLE_MODES
+    assert after_chooser.failure_mode in PERMANENTLY_UNRESOLVABLE_MODES
 
 
 def test_a_numbers_FAIL_is_never_shadowed_by_this_lanes_UNKNOWN() -> None:
@@ -1686,23 +1847,95 @@ def test_the_live_note_reports_a_rendered_page_as_shipped(tmp_path: Path, monkey
     assert "could not locate" in error, error
 
 
+def _pdf_chart_and_table(path: Path) -> Path:
+    """A page the GH-189 pass is a CANDIDATE for: a drawn chart AND real table structure.
+
+    ``_preserve_chart_regions`` takes every page the born-digital detector says has tables
+    and then needs ``chart_region_bboxes`` to be non-empty, so a fixture with only the drawn
+    chart is never a candidate and a test on it cannot see the skip at all (round 5: the
+    mutation deleting the skip survived exactly that test). The aligned numeric rows are what
+    make ``has_tables`` true -- measured on this fixture: False without them, True with.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 60), _CAPTION, fontname="helv", fontsize=11)
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(100, 120, 500, 420))
+    shape.finish(color=(0, 0, 0), width=1.5)
+    for i in range(8):
+        x = 120 + i * 45
+        shape.draw_rect(fitz.Rect(x, 400 - (i + 1) * 30, x + 30, 410))
+        shape.finish(color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1), width=1.5)
+    shape.commit()
+    rows = (
+        ("Year", "Output", "Prices", "Hours"),
+        ("1973", "38,356", "4.21", "1,987"),
+        ("1974", "38,956", "4.88", "1,912"),
+        ("1975", "39,765", "5.02", "1,874"),
+        ("1976", "37,605", "5.44", "1,901"),
+        ("1977", "42,595", "5.91", "1,955"),
+    )
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            page.insert_text((80 + c * 110, 470 + r * 18), cell, fontname="helv", fontsize=9)
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def test_the_chart_region_pass_skips_a_page_this_lane_cropped(tmp_path: Path) -> None:
-    """Argon P1-D. That pass's candidate set is every page WITH TABLES, which is exactly the
-    chart+table class this lane serves, so without the skip it crops the same graphic a second
-    time and adds a contradicting ``chart_region`` mark."""
-    src = Path(__file__).resolve().parents[1] / "src/socr/pipeline/orchestrator.py"
-    text = src.read_text()
-    chart_floor = text.index('if getattr(ps, "chart_floor_body", False):')
-    ours = text.index('if getattr(ps, "unshipped_figure_refs", None):')
-    candidates = text.index("if 1 <= pn <= len(page_texts) and self._page_has_tables(")
-    assert candidates < chart_floor < ours, "the skip must sit beside #1155's, in that pass"
+    """Argon P1-D, driven through the production pass on a real page (round 5, Fable P2-4).
 
-    from socr.core.state import PageState as _PS
+    That pass's candidate set is every page WITH TABLES, which is exactly the chart+table
+    class this lane serves, so without the skip it crops the same graphic a second time and
+    adds a contradicting ``chart_region`` reference.
 
-    cropped = _PS(page_num=1)
-    cropped.unshipped_figure_refs = ["figures/unshipped_figure_p1_1.png"]
-    assert getattr(cropped, "unshipped_figure_refs", None), "the flag the skip reads"
-    assert not getattr(_PS(page_num=1), "unshipped_figure_refs", None)
+    Two earlier versions of this test could not fail on that. Round 4 asserted the ORDER of
+    three lines of source. Round 5's first replacement drove ``process()`` -- but on a fixture
+    the pass is not a candidate for, so deleting the skip changed nothing; and on one it IS a
+    candidate for, the table reconstruction wins the page and this lane is correctly out of
+    scope, so the two never meet end to end. A behavioural test can be as inert as a
+    source-order one.
+
+    So the pass itself is driven, on a real chart+table page, with the ONE field that differs
+    being the one the skip reads.
+    """
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.config import PipelineConfig
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    pdf = _pdf_chart_and_table(tmp_path / "charttable.pdf")
+    with fitz.open(pdf) as doc:
+        assert chart_region_bboxes(doc[0]), "fixture: the pass needs a chart region"
+    assessment = BornDigitalDetector().detect(pdf)
+    assert assessment.pages[0].has_tables, "fixture: the candidate set is pages WITH TABLES"
+
+    body = f"{_CAPTION}\n\n{_PROSE}\n\n| Year | Output |\n| --- | --- |\n| 1973 | 38,356 |\n"
+
+    def run(*, already_cropped: bool) -> str:
+        pipe = UnifiedPipeline.__new__(UnifiedPipeline)
+        pipe.config = PipelineConfig(quiet=True)
+        pipe._last_assessment = assessment
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        ps = PageState(page_num=1)
+        ps.has_tables = True
+        if already_cropped:
+            ps.unshipped_figure_refs = [f"figures/{crop_filename(1, 1)}"]
+        state.pages[1] = ps
+        out = tmp_path / f"out-{already_cropped}"
+        out.mkdir()
+        return pipe._preserve_chart_regions(state, [body], out)[0]
+
+    untouched = run(already_cropped=False)
+    cropped = run(already_cropped=True)
+    assert "](figures/chart_region_p1_" in untouched, (
+        "fixture: on this page the pass DOES insert a crop, which is what the skip prevents"
+    )
+    assert cropped == body, (
+        f"the pass cropped and referenced a graphic this lane had already answered for:\n{cropped}"
+    )
 
 
 def test_a_resumed_page_rebuilds_its_mark_through_the_restore_path(tmp_path: Path) -> None:

@@ -1291,6 +1291,14 @@ def _covered_checks(
     return covered, pairs
 
 
+#: #1187's two modes. Both are recorded for a figure a page names and does not show, and
+#: both are explained by the same ``figure_text`` clause; they differ only in whether the
+#: outcome can change on a later run (see ``PERMANENTLY_UNRESOLVABLE_MODES``).
+_FIGURE_LANE_MODES: frozenset[FailureMode] = frozenset(
+    {FailureMode.FIGURE_NOT_SHOWN, FailureMode.FIGURE_RENDER_FAILED}
+)
+
+
 def _status_is_explained(
     output: PageOutput,
     p: Any,
@@ -1325,7 +1333,14 @@ def _status_is_explained(
     # asked here rather than given a row, because a row would publish a SECOND, page-scoped
     # clause about the same fact. Without this the fail-closed fallback fired on a page whose
     # reason WAS named, which is the hole this helper exists to close, not to open.
-    if output.failure_mode is FailureMode.FIGURE_NOT_SHOWN:
+    # BOTH of this lane's modes, not just the first (round 5, Argon P1-2b). The two were
+    # split apart so a deterministic outcome could be permanent while a transient crop
+    # failure is retried; they are explained by the SAME clause, and naming one of them here
+    # made the other's page gain the fail-closed ``unknown`` clause on the second pass --
+    # measured: pass 1 ``[figure_text, text_layer_numbers]``, pass 2 the same plus
+    # ``unknown``, with the page's bytes unchanged. The record and the marks disagreeing
+    # about one page is the exact conflation ``build_page_verdict`` exists to prevent.
+    if output.failure_mode in _FIGURE_LANE_MODES:
         return any(
             c.check is Check.FIGURE_TEXT and str(c.scope).startswith("figure:") for c in clauses
         )

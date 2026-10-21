@@ -186,7 +186,6 @@ def caption_alt(caption: str) -> str:
 
 #: Engines whose body is the PDF's own text layer rather than a reading of the page.
 #: ``""`` is a page with no engine recorded, which is the same case.
-_NATIVE_ENGINES = frozenset({"", "native", "native+equations"})
 
 
 def page_was_read_by_a_model(engine: str) -> bool:
@@ -206,9 +205,22 @@ def page_was_read_by_a_model(engine: str) -> bool:
 
     Judging the reflowed text instead would be the other way to close it, and it is NOT taken
     here: the lane would then be deciding on a body no measurement covers. Native pages are
-    out of scope until they are measured -- see the follow-up issue.
+    out of scope until they are measured -- #1228.
+
+    THE PREDICATE IS THE REFLOW'S, not a set of its own (round 5: the bot, Fable P1-1,
+    Argon P1-1, all three measuring the same hole). The first version listed three engine
+    strings, and ``_apply_native_paragraphs`` decides by ``startswith(("native",
+    "chart_asset"))``: ``native+math`` (37 of the 2,476 calibration pages, 1,118 of run
+    23319732), ``chart_asset``, ``native_fallback`` and ``native+tables`` all ship the
+    page's own line-wrapped layer, were reflowed at finalisation, and were still being
+    judged here before it. Two predicates for one question drift apart silently, and this
+    pair had already drifted by the time the set was written -- so there is one, and it is
+    ``engine_ships_native_text``. An ABSENT engine stays out too: it names no reader.
     """
-    return str(engine or "").strip().lower() not in _NATIVE_ENGINES
+    from socr.core.manifest import engine_ships_native_text
+
+    name = str(engine or "").strip().lower()
+    return bool(name) and not engine_ships_native_text(name)
 
 
 def body_shows_a_picture(body: str) -> bool:

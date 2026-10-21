@@ -394,6 +394,7 @@ UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = _unshipped_figures.EVENT_KINDS
 #: The subset that means a figure this page names is preserved NOWHERE.
 UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = _unshipped_figures.MARKED_KINDS
 UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
+UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
 #: The three ``PageState`` fields / sidecar keys this lane owns.
 _UNSHIPPED_FIGURE_FIELDS = (
     "unshipped_figure_refs",
@@ -17042,6 +17043,21 @@ class UnifiedPipeline:
                     and winning.get("status") != PageStatus.WARNING.value
                 ):
                     is_permanently_unverifiable = False
+
+            # #1187 round 5 (Argon P1-2c): a crop this lane FAILED to render is retried,
+            # and the mode cannot be what says so. ``FIGURE_RENDER_FAILED`` is deliberately
+            # absent from ``PERMANENTLY_UNRESOLVABLE_MODES`` -- but a page carrying another
+            # lane's clause takes that lane's mode (measured: a render-failed page with a
+            # disputed number records ``numbers_disagree_with_text_layer``, which IS
+            # permanent), and the transient failure then never came back. The lane's own
+            # record of what happened is the authority, so it is read directly: whatever the
+            # mode says, a page whose kind is the render failure is reprocessed.
+            if (
+                is_permanently_unverifiable
+                and str(meta.get("unshipped_figure_kind") or "")
+                == UNSHIPPED_FIGURE_RENDER_FAILED_KIND
+            ):
+                is_permanently_unverifiable = False
 
             # #1192, the FOURTH deliberate exception, and the same argument as the three
             # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only

@@ -350,13 +350,106 @@ Across the two orders, 0 of 2,476 pages differ in status, failure mode or clause
 differs is:
 
 * **the recorded clause ORDER on 3 pages.** All three carry `page_judge` — a STATUS clause —
-  ahead of both lanes' clauses. #1185's `with_text_layer_numbers_clause` places its clause by
-  the COUNT of the silent-success clauses ahead of it, and that count does not include a
-  status clause that is already in the published list, so the slot lands one early. The marks
-  on those pages are identical and complete; it is the sidecar's list order that differs.
-  Fixing it means replacing the count-based slot with a canonical sort over status clauses
-  too, which is a change to the other lane's published contract and needs its own measurement
-  — #1226, with this cause recorded.
+  ahead of both lanes' clauses. The marks on those pages are identical and complete; it is the
+  sidecar's list order that differs.
+  **This attribution was wrong, and Fable's round-3 review corrected it** (round 5): it is not
+  #1185's count slot. `in_fresh_run_order` — *this* lane's sort, which ran last in the forward
+  order — ranks `(Check.PAGE_JUDGE, SCOPE_PAGE)` as the silent `_exact_pass_unjudged_clause`
+  whatever the clause's result, while a judge REFUSAL is a status clause that `derive_clauses`
+  puts last. So the forward record is this PR's own sort and the reverse one is #1185's, and a
+  fresh run gives a third order again (`[figure_text, text_layer_numbers, page_judge]`).
+  Fixing it means ranking silent only on `result is UNKNOWN`, which changes the rank of every
+  status clause in both lanes — its own change, with its own measurement: **#1228**.
 * **`refinalized_from` on 7 pages, and the 3 tools' own run logs.** These record the status and
   source digest each tool FOUND, so two different orders genuinely saw two different prior
   states. That is history, not disagreement about the page.
+
+# Round 5 — the round-3 reviews of PR #1224
+
+Argon and Fable MERGE-AFTER-FIX, the bot REQUEST_CHANGES ("one line left"). Four REAL defects,
+one real measurement that is not a defect, and two of my own round-4 tests that could not fail
+on what they named. Argon's quotes check out this round; the invented symbols of rounds 2 and 4
+are gone.
+
+1. **One question, one predicate** (the bot's remaining blocker · Fable P1-1 · Argon P1-1).
+   Round 4 closed the native blocker with a hand-written set of three engine strings while the
+   reflow decides by `startswith(("native", "chart_asset"))`. Four engines that ship the page's
+   own line-wrapped layer were still judged on it before reflow: `native+math` (37 of the 2,476
+   calibration pages, 1,118 of run 23319732), `chart_asset`, `native_fallback` and
+   `native+tables` — two of them reported, two found in reproducing it. Fable drove rollet p33's
+   false mark through `process()` on a `native+math` page.
+   The set is DELETED: `page_was_read_by_a_model` is now `bool(engine) and not
+   engine_ships_native_text(engine)`, and the test pins the PROPERTY (the lane's answer is the
+   negation of the reflow's, for every engine string) rather than a list, because a list is what
+   drifted. `blank` still answers True and is deliberately left: a blank page has no body, the
+   first gate abstains, and an exclusion that cannot fire is a guard this repo deletes.
+   **Round 4's claim "every number was measured on exactly this predicate" was wrong** and is
+   corrected here: that crosstab filtered three engine strings, on finalized (reflowed)
+   sidecars, which is not what the live lane reads.
+2. **A mode a floor set is not this chooser's to recompute** (bot P2, which Fable P1-2 and Argon
+   P1-2c both measured and upgraded). `PRIOR_OCR_LAYER_UNVERIFIED` has two writers — this
+   chooser, from a clause on an ACCEPTED reading, and the #1027/#1156 floors, which set it
+   directly on a page whose reading was NOT accepted. Round 4's recompute claimed in its comment
+   to leave a guard's mode alone while keying on a set containing the floor's, so a floor page
+   that also carried the chart lane's clause came out `VISUAL_VALUES_UNTRANSCRIBED` — which IS
+   permanent, making an unaccepted page one a resume restores for ever, under a reason the floor
+   did not give. 4 of 2,476 calibration pages carry that pair. `_a_floor_set_this_mode` tells
+   the writers apart by what only a floor sets beside the mode (`audit_passed=False` and the
+   page's own native text); provenance would say it directly and is not available on a
+   re-finalize pass, which rebuilds the output from the sidecar.
+3. **Both of this lane's modes are explained by its clause** (Argon P1-2b). The round-4 split
+   gave the render failure its own mode so it could stay retryable, and `_status_is_explained`
+   named only `FIGURE_NOT_SHOWN`: on the second pass — which assemble makes over every page — a
+   RENDER_FAILED page gained the fail-closed `unknown` clause while its bytes did not change.
+   The idempotence test is now parametrised over every acted-on kind, which is what would have
+   caught it; pinning one kind hid the other.
+4. **The transience cannot live in the mode alone** (Argon P1-2c). Another lane's clause takes
+   the mode over: a render-failed page with a disputed number records
+   `numbers_disagree_with_text_layer`, which is permanent, so the failed crop was skipped for
+   ever. The ledger now reads the lane's own record of what happened.
+5. **Two round-4 tests could not fail on the behaviour they named** (Fable P2-4), and one of
+   them sat directly over defect 4. `test_the_chart_region_pass_skips_a_page_this_lane_cropped`
+   asserted the ORDER of three lines of source; it now puts a chart+table page through
+   `process()` and counts the PNGs. `test_a_failed_crop_is_retried_on_resume` asserted set
+   membership; it now crashes a two-page run after page one and asserts the page IS re-read.
+
+## Measured, and NOT a defect
+
+Argon P1-2a: adding this lane's clause takes 4 Fed pages out of #1192's prior-OCR resume
+exception, so they are re-read on every partial resume. The measurement holds; the behaviour is
+that exception's own documented refusal — "no second clause of any kind is admitted … the one
+that stops a page whose table went unjudged or **whose figure crop went unread** from riding
+along". The direction is conservative, and widening another lane's guard to admit exactly the
+clause it names needs the owner. Recorded in #1228.
+
+## Three tests that could not fail on what they named
+
+Fable's P2-4 named two of mine from round 4; the third was one I wrote this round and the
+mutation check caught it. Recorded because the pattern is the same each time — the test drove
+something adjacent to the behaviour and the assertion was true either way.
+
+1. The chart-region skip. Round 4 asserted the ORDER of three lines of source. The first
+   replacement drove `process()` and still passed with the guard deleted: `_preserve_chart_regions`
+   needs the born-digital detector to say the page has TABLES, and the lane's ordinary fixture
+   has none, so the pass was never a candidate (measured: `has_tables` False without the aligned
+   numeric rows, True with). On a fixture that IS a candidate, the table reconstruction wins the
+   page and this lane is correctly out of scope — so the two lanes do not meet end to end on any
+   fixture available here. The test now drives `_preserve_chart_regions` itself on a real
+   chart+table page, with the field the skip reads as the only difference.
+2. The retried crop. Round 4 asserted set membership. The first rewrite drove `process()` with a
+   crash-and-resume and STILL passed with the guard deleted, because the ledger reads the mode
+   off `winning_output` while the fixture edited only the sidecar's top-level copy — so both arms
+   were re-read for an unrelated reason. It now resumes one sidecar twice, changing only the kind.
+3. The scope test parametrised the three strings in the predicate's set, which is how the set
+   drifted from the reflow's in the first place. It now pins the property.
+
+## Gates (round 5)
+
+| gate | result |
+|---|---|
+| full suite, frozen tree, shared lock | **8947 passed, 2 skipped, 9 xfailed, 0 failed** |
+| `uvx ruff@0.16.0 format --check .` | clean, 1022 files |
+| mutation check, both lanes' suites | **50/50 killed**, no survivors, no stale anchors |
+| calibration, three tools in order and in reverse | METER **0 of 2,476** at every step |
+| second pass of all three, both orders | **0 files changed** |
+| forward vs reverse | every fragment, document `.md` and `manifest.json` IDENTICAL; 0 pages differ in status, mode or clause set |

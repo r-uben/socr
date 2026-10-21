@@ -222,13 +222,14 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
     # ``socr-refinalize-own-text`` and the other way round when it runs before -- and neither
     # would match a fresh run on a page both lanes touch.
     recorded_all = (sidecar.get("verdict") or {}).get("clauses") or []
-    # The slot is the END OF THE LEADING RUN OF SILENT-SUCCESS CLAUSES, which is where a fresh
-    # run puts this lane's (``verdict._clauses_ahead_of_text_layer_numbers``). Round 3
-    # partitioned by check instead -- "not numbers" ahead, "numbers" behind -- which on a page
-    # that ALSO carries a status-dependent clause (a judge refusal, a table label) lifted that
-    # status clause ABOVE this lane's, giving [status, figure, numbers] where a fresh run
-    # gives [figure, numbers, status]. Partitioning cannot express "after the silent ones";
-    # finding the slot can (owner item 4, Fable P2).
+    # The published list is SORTED into fresh-run order (``in_fresh_run_order``, at the end of
+    # this function), not inserted at a slot. Round 3 partitioned by check instead -- "not
+    # numbers" ahead, "numbers" behind -- which on a page that ALSO carries a
+    # status-dependent clause (a judge refusal, a table label) lifted that status clause
+    # ABOVE this lane's. Round 4 replaced the partition with the sort, because a slot is a
+    # position and the thing being pinned is an ORDER: two tools each inserting at their own
+    # slot record two orders for one clause set (owner item 4, Fable P2). What the sort does
+    # NOT yet get right is a status clause's rank -- #1228.
     clauses: list = []
     seen: set[tuple[str, str, str, str]] = set()
     for record in [*recorded_all, *new_records]:
