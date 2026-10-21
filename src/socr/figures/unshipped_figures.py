@@ -88,9 +88,11 @@ _LABEL = (
     r"(?P<label>(?:FIGURE|Figure|FIG\.?|Fig\.?|CHART|Chart|EXHIBIT|Exhibit)[ \t]*"
     r"(?>"
     r"[0-9]+(?:[.\-][0-9A-Za-z]+)*[a-zA-Z]?"
-    r"|[A-Z](?:[.\-][0-9A-Za-z]+)+"
-    r"|[A-Z][0-9]+(?:[.\-][0-9A-Za-z]+)*"
-    r"|[IVXLC]+(?:[.\-][0-9A-Za-z]+)*"
+    r"|[A-Z]{1,2}(?:[.\-][0-9A-Za-z]+)+"
+    r"|[A-Z]{1,2}[0-9]+(?:[.\-][0-9A-Za-z]+)*"
+    # No tail of its own: the two-letter alternative above consumes ``II-3`` and ``I.2``
+    # first, so a tail here could never fail and the mutation check found it unkillable.
+    r"|[IVXLC]+"
     r"))"
     r"[*_]{0,3}"
 )
@@ -99,12 +101,17 @@ _LABEL = (
 #: alternative with a decimal point still in front of it. A ``(?![0-9])`` was written here first
 #: and the mutation check found it unkillable -- a guard that has never been seen to fail has not
 #: been shown to guard anything (CLAUDE.md).
-_TERMINATOR = r"(?:[.:—–\-]|$)"
+#: A dash of any width followed by a DIGIT is a RANGE, not a terminator: ``Figure 1-3 show
+#: …``, ``Figure 1–3 present …``, ``Figure 2—4 show …`` are cross-references, and the
+#: label alternatives only consume the ASCII form, so the wider dashes reached this and
+#: marked prose pages (owner item 3, both rounds). ``Fig. 1—Probability of sample
+#: inclusion.`` must keep matching, so the rule is what FOLLOWS the dash, not the dash.
+_TERMINATOR = r"(?:[.:]|[—–\-](?![0-9])|$)"
 
 STRICT_CAPTION_RE = re.compile(_LABEL + _TERMINATOR)
 #: Also a label followed by whitespace and a non-lowercase character, which is how a caption with
 #: no terminator opens. The module docstring says which branch may use which.
-LOOSE_CAPTION_RE = re.compile(_LABEL + r"(?:[.:—–\-]|[ \t]+(?=[^a-z])|$)")
+LOOSE_CAPTION_RE = re.compile(_LABEL + r"(?:[.:]|[—–\-](?![0-9])|[ \t]+(?=[^a-z])|$)")
 
 #: Characters a Markdown image's alt text may not carry: ``]`` closes it early, and a newline
 #: ends the line. Same guarantee ``marks.clean_reason`` gives the canonical mark grammar -- a
@@ -175,6 +182,33 @@ def caption_alt(caption: str) -> str:
     """One caption label, safe to place inside a Markdown image's alt text."""
     flattened = _WHITESPACE_RE.sub(" ", _ALT_UNSAFE_RE.sub(" ", caption or "")).strip()
     return flattened or "figure"
+
+
+#: Engines whose body is the PDF's own text layer rather than a reading of the page.
+#: ``""`` is a page with no engine recorded, which is the same case.
+_NATIVE_ENGINES = frozenset({"", "native", "native+equations"})
+
+
+def page_was_read_by_a_model(engine: str) -> bool:
+    """Whether this page's shipped body is a MODEL's reading of it.
+
+    This lane fires only on those, and that is the scope every number it has was measured on:
+    the 154/3,082 came from a crosstab filtered to exactly this predicate, and the Fed tool run
+    read finalized sidecars.
+
+    A native body is the PDF's text layer, and the page loop sees it BEFORE
+    ``_apply_native_paragraphs`` reflows it at finalisation -- so a sentence that wraps with
+    ``Figure 4.`` at the start of a raw line reads as a strict caption on a page where the
+    shipped text has it mid-paragraph. The owner reproduced that on four real prose pages
+    (correia_luck_verner p14, rollet p23, rollet p33, cengiz p80) and measured ~7 such
+    cross-reference fires in 70 pages of raw layer across 70 econ papers; since round 2 the
+    false mark also takes the whole document from ``completed`` to ``partial``.
+
+    Judging the reflowed text instead would be the other way to close it, and it is NOT taken
+    here: the lane would then be deciding on a body no measurement covers. Native pages are
+    out of scope until they are measured -- see the follow-up issue.
+    """
+    return str(engine or "").strip().lower() not in _NATIVE_ENGINES
 
 
 def body_shows_a_picture(body: str) -> bool:

@@ -59,6 +59,7 @@ from socr.core.marks import (
     Check,
     CheckResult,
     is_canonical_mark,
+    parse_canonical_mark,
 )
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
@@ -6004,7 +6005,24 @@ def _apply_unaccepted_output_mark(
     return replace(output, text=text)
 
 
-def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutput:
+#: #1187 round 4: every mode ``_verdict_demotion_mode`` can return. A page already WARNING
+#: with one of these was demoted by THIS chooser on an earlier pass, so recomputing it from
+#: the final clause set is restating its own answer, not overruling another writer's.
+_VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        FailureMode.MODEL_OUTPUT_UNJUDGED,
+        FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+        FailureMode.FIGURE_NOT_SHOWN,
+        FailureMode.FIGURE_RENDER_FAILED,
+        FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
+        FailureMode.NUMBERS_UNCHECKED,
+    }
+)
+
+
+def _warn_success_status_for_verdict(output: PageOutput, clauses=(), kind: str = "") -> PageOutput:
     """SUCCESS becomes WARNING for a page with an unresolved check. Nothing else moves.
 
     ``audit_passed`` is deliberately left alone. It is not a spare "is this page fine"
@@ -6023,14 +6041,21 @@ def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutp
     Fable found. An existing, more specific mode is never overwritten: it says more.
     """
     mode = (
-        _verdict_demotion_mode(clauses)
+        _verdict_demotion_mode(clauses, kind)
         if output.failure_mode is FailureMode.NONE
         else output.failure_mode
     )
     return replace(output, status=PageStatus.WARNING, failure_mode=mode)
 
 
-def _verdict_demotion_mode(clauses) -> FailureMode:
+#: #1187 round 4: the lane's one TRANSIENT outcome, named here so the mode chooser can tell
+#: it from the deterministic ones. A literal rather than an import, like the ladder terminals
+#: in ``tables_trust``: this is sidecar DATA from finished runs, and a rename must not
+#: silently stop matching what is already on disk.
+_FIGURE_RENDER_FAILED_KIND = "unshipped_figure_render_failed"
+
+
+def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
     """The mode that records WHY a silent-success clause demoted this page.
 
     One row per silent-success class, keyed on the clause so the mode and the clause cannot
@@ -6064,17 +6089,37 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
         (Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL): FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         (Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN): FailureMode.NUMBERS_UNCHECKED,
     }
-    # Three lookups over disjoint checks (#1187's FIGURE_TEXT by scope, #1185's
-    # TEXT_LAYER_NUMBERS by result, the shared one by check), so a page carrying BOTH lanes'
-    # clauses gets the mode of whichever comes first in its own clause order and keeps the
-    # other lane's clause and mark untouched. Neither lane undoes the other.
-    for clause in clauses:
+
+    def _mode_of(clause) -> FailureMode | None:
         scoped = by_scope_kind.get((str(clause.scope).split(":", 1)[0], clause.check))
         if scoped is not None:
+            # #1187 round 4: which of the lane's two modes depends on WHY the figure is not
+            # shown, which the clause cannot say and the page state can. A located region
+            # whose crop failed to save is transient and must be retried on resume; the other
+            # outcomes are deterministic and must not be.
+            if scoped is FailureMode.FIGURE_NOT_SHOWN and kind == _FIGURE_RENDER_FAILED_KIND:
+                return FailureMode.FIGURE_RENDER_FAILED
             return scoped
-        mode = by_check.get(clause.check) or by_result.get((clause.check, clause.result))
-        if mode is not None:
-            return mode
+        return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
+
+    # A FAIL outranks an UNKNOWN, whatever the clause order (Argon P0-A). A FAIL means a check
+    # RAN and the page did not pass it -- "numbers a new reading may fix" -- and an UNKNOWN
+    # means it could not run. Taking the first clause let this lane's UNKNOWN shadow #1185's
+    # FAIL on a page carrying both, and made the recorded mode depend on which re-finalize
+    # tool ran first, which in turn decided whether a resume restored the page or re-read it.
+    # Canonical order first, so the answer is a function of the clause SET and not of the
+    # order a particular writer happened to leave them in. Two clauses of the same result
+    # would otherwise be a tie broken by list position, which is the whole of Argon P0-A.
+    from socr.core.verdict import in_fresh_run_order
+
+    clauses = tuple(in_fresh_run_order(tuple(clauses)))
+    for wanted in (CheckResult.FAIL, CheckResult.UNKNOWN):
+        for clause in clauses:
+            if clause.result is not wanted:
+                continue
+            mode = _mode_of(clause)
+            if mode is not None:
+                return mode
     return FailureMode.NONE
 
 
@@ -6142,7 +6187,22 @@ def _apply_verdict_marks(
     # was admitted to the resume exception under a reason that was not the one that demoted
     # it. An existing, more specific mode is never overwritten.
     if verdict.clauses and output.status is PageStatus.SUCCESS:
-        output = _warn_success_status_for_verdict(output, verdict.clauses)
+        output = _warn_success_status_for_verdict(
+            output, verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
+        )
+    elif verdict.clauses and output.failure_mode in _VERDICT_DERIVED_MODES:
+        # #1187 round 4 (Argon P0-A): the page is ALREADY demoted, and by a mode this chooser
+        # owns -- which means an earlier pass over the same page recorded it from a SMALLER
+        # clause set. Re-finalizing with the full set must give the mode a fresh run gives,
+        # or the recorded mode depends on which re-finalize tool ran first, and with it
+        # whether a resume restores the page or re-reads it (the two lanes' modes differ in
+        # ``PERMANENTLY_UNRESOLVABLE_MODES``). Only modes this function produces are
+        # recomputed: a mode a GUARD set is more specific and is never overwritten.
+        _recomputed = _verdict_demotion_mode(
+            verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
+        )
+        if _recomputed is not FailureMode.NONE and _recomputed is not output.failure_mode:
+            output = replace(output, failure_mode=_recomputed)
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
     # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
     # whole page or only for the table it stands in place of.
@@ -6170,7 +6230,51 @@ def _apply_verdict_marks(
     # canonical clause line is the general form and must not displace it. Both land in the
     # same leading block, so the page is MARKED either way -- the meter asks that the first
     # rendered BLOCK be all marks, not that one particular line be first.
-    return replace(output, text=_with_page_top_banners(body, [*banners, *marks])), verdict
+    #
+    # The canonical lines among them are then put in ONE order (``_ordered_page_marks``),
+    # so a page re-finalized by two tools reads the same whichever ran first.
+    return (
+        replace(
+            output, text=_with_page_top_banners(body, _ordered_page_marks(banners, marks, page_num))
+        ),
+        verdict,
+    )
+
+
+def _ordered_page_marks(banners: Sequence[str], marks: Sequence[str], page_num: int) -> list[str]:
+    """#1187 round 4 (Argon P0-A): one order for a page's marks, whichever pass wrote them.
+
+    ``marks_to_write`` sorts the lines it emits by ``(check, scope)``, so a FRESH run --
+    which sees all of a page's clauses in one pass -- writes them in that order. A
+    re-finalize tool writes only the clause the earlier pass had no evidence for, and
+    appending it left the block in the order the PASSES ran: the same two facts rendered
+    ``figure_text`` then ``text_layer_numbers`` when the figures tool ran last, and the
+    reverse when it ran first, on 7 of 2,476 calibration pages. That is a diff against a
+    fresh run, and a diff between two runs that are both correct -- which makes a
+    byte-identity check across the paths impossible to state, let alone pin.
+
+    So the canonical lines already in the block are re-sorted together with the new ones,
+    by the key ``marks_to_write`` itself uses. Lines that are not canonical clause marks
+    keep their position AHEAD of them: #1129's ``> [page unaccepted: …]`` headline has its
+    own contract that it is the page's first line. If such a line sits BELOW a canonical
+    one -- which socr never writes, but an old output could carry -- nothing is reordered,
+    because moving it is a change to a contract this function does not own.
+
+    Reached only when there is a new line to write (the caller returns early otherwise), so
+    an already-complete page is still byte-identical.
+    """
+    parsed = [(line, parse_canonical_mark(line, page_num)) for line in banners]
+    head = [line for line, pair in parsed if pair is None]
+    existing = [(line, pair) for line, pair in parsed if pair is not None]
+    if existing and head and banners.index(existing[0][0]) < banners.index(head[-1]):
+        return [*banners, *marks]
+
+    def key(item: tuple[str, tuple[Check, str] | None]) -> tuple[str, str]:
+        pair = item[1] or parse_canonical_mark(item[0], page_num)
+        return ("", "") if pair is None else (pair[0].value, pair[1])
+
+    fresh: list[tuple[str, tuple[Check, str] | None]] = [(m, None) for m in marks]
+    return [*head, *(line for line, _ in sorted([*existing, *fresh], key=key))]
 
 
 def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:

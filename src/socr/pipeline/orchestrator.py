@@ -5897,6 +5897,13 @@ class UnifiedPipeline:
             # own canonical mark from the floor.
             if getattr(ps, "chart_floor_body", False):
                 continue
+            # #1187 round 4 (Argon P1-D): this lane already cropped this page's figure and
+            # marked it. This pass's candidate set is every page WITH TABLES, which is exactly
+            # the chart+table class the lane serves, so without this it crops the same graphic
+            # a second time under ``chart_region_pN_M.png`` and adds a contradicting
+            # ``chart_region`` mark -- the same shape as the #1155 skip above.
+            if getattr(ps, "unshipped_figure_refs", None):
+                continue
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
                     _page = _doc[pn - 1]
@@ -7067,10 +7074,16 @@ class UnifiedPipeline:
             page = getattr(event, "page_num", None)
             if page is None or kind not in UNSHIPPED_FIGURE_EVENT_KINDS:
                 continue
+            # Two independent questions, not one branch: a RENDERED page BOTH ships a crop
+            # and is marked, so it belongs in both lists. Round 2 put ``RENDERED_KIND`` into
+            # ``MARKED_KINDS`` and left this as an if/elif, which made the second arm
+            # unreachable -- a live run then never reported a shipped crop while the tool,
+            # whose ``_lane_pages`` asks the two questions separately, reported the same page
+            # twice (Argon P1-A, reproduced).
+            if kind == UNSHIPPED_FIGURE_RENDERED_KIND:
+                shipped.append(int(page))
             if kind in UNSHIPPED_FIGURE_MARKED_KINDS:
                 marked.append(int(page))
-            elif kind == UNSHIPPED_FIGURE_RENDERED_KIND:
-                shipped.append(int(page))
         return _unshipped_figures.document_note(shipped, marked) or None
 
     @staticmethod
@@ -12911,10 +12924,18 @@ class UnifiedPipeline:
             crop_filename,
             decide,
             locate_figure_regions,
+            page_was_read_by_a_model,
         )
 
         body = (getattr(page_out, "text", "") or "") if page_out is not None else ""
         if not body.strip() or body_shows_a_picture(body):
+            return
+        # The lane's SCOPE, and the whole of the owner's standing blocker: a native body is
+        # the PDF's text layer, which this loop sees BEFORE ``_apply_native_paragraphs``
+        # reflows it at finalisation. A wrapped cross-reference then reads as a strict
+        # caption on a page whose shipped text has it mid-paragraph. Every number this lane
+        # has is model-read pages; native ones are out of scope until measured.
+        if not page_was_read_by_a_model(getattr(page_out, "engine", "")):
             return
         # Already answered for this page: a resumed page restores all three fields, and the
         # abstaining outcome writes only ``captions`` -- which is why the gate reads all three

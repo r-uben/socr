@@ -686,6 +686,14 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
     {
         FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        # #1187 round 4: a figure the page names and socr could not SHOW is deterministic
+        # under the same input and fingerprint -- the same locator on the same PDF gives the
+        # same answer -- so re-reading the page cannot resolve it and the per-page ledger
+        # should restore it. Round 2 left this out and every page the lane marked was re-OCR'd
+        # on every partial-document resume, for ever (Fable P1-1 / Argon P1-C, reproduced).
+        # ``FIGURE_RENDER_FAILED`` is deliberately NOT here: that one is a render failure a
+        # re-run may fix, which is what Argon's round-2 P0-3 asked for.
+        FailureMode.FIGURE_NOT_SHOWN,
         # #1185: no own text layer, or no number in the reading. The check that could
         # resolve it is a second, independent reader (#1208), which does not exist yet;
         # when it does, the source digest in the run fingerprint re-OCRs the page anyway.
@@ -1053,6 +1061,45 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
             Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)
         )
     return None
+
+
+#: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
+#: Named here, beside the function that defines it, so the two cannot drift.
+#:
+#: ``FIGURE_TEXT`` appears TWICE and the pair is what tells the two apart: the chart lane's
+#: clause is page-scoped and comes early, this lane's names a region and comes last before
+#: the numbers clause.
+_SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
+    (Check.EQUATION_FIDELITY, SCOPE_PAGE),
+    (Check.FIGURE_TEXT, SCOPE_PAGE),
+    (Check.PAGE_JUDGE, SCOPE_PAGE),
+    (Check.PRIOR_OCR_LAYER, SCOPE_PAGE),
+    (Check.FIGURE_TEXT, "figure"),
+    (Check.TEXT_LAYER_NUMBERS, SCOPE_PAGE),
+)
+
+
+def in_fresh_run_order(clauses):
+    """*clauses* reordered as a fresh run would emit them.
+
+    The silent-success clauses first, in :data:`_SILENT_SUCCESS_ORDER`, then every
+    status-dependent clause in the order it already had. Stable, so two clauses that rank the
+    same keep their relative positions.
+
+    For a re-finalize tool, which merges a clause into a verdict some earlier run or tool
+    wrote. Inserting at a computed SLOT cannot do this: the recorded list may itself not be
+    in fresh-run order (it came from another tool), and then no single insertion point gives
+    the order a fresh run would (owner item 4, Fable P2). Sorting does not care how the list
+    got into the state it is in.
+    """
+    rank = {pair: i for i, pair in enumerate(_SILENT_SUCCESS_ORDER)}
+
+    def key(item):
+        index, clause = item
+        kind = str(clause.scope).split(":", 1)[0]
+        return (rank.get((clause.check, kind), len(rank)), index)
+
+    return [clause for _i, clause in sorted(enumerate(clauses), key=key)]
 
 
 def silent_success_clauses(

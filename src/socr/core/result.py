@@ -228,6 +228,12 @@ class FailureMode(str, Enum):
     #: ``PERMANENTLY_UNRESOLVABLE_MODES`` -- it also made a TRANSIENT render failure
     #: unretryable on resume (Argon P0-3, reproduced).
     FIGURE_NOT_SHOWN = "figure_not_shown"
+    #: #1187 round 4: the TRANSIENT half of the row above. A figure region WAS located and no
+    #: crop of it could be saved -- a render or disk failure, which a re-run may fix. Split
+    #: from ``FIGURE_NOT_SHOWN`` because that one is deterministic (same locator, same PDF,
+    #: same answer) and therefore belongs in ``PERMANENTLY_UNRESOLVABLE_MODES``, while this
+    #: one must stay out of it so a resume retries the page (Fable P1-1 / Argon P1-C).
+    FIGURE_RENDER_FAILED = "figure_render_failed"
     #: #1156: the page ships an EARLIER OCR run's text layer, which nothing independent
     #: has read the page to check. Like the two modes above, it exists so the demotion
     #: carries its reason in the status as well as in the page's mark.

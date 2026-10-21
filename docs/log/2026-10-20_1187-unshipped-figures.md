@@ -254,3 +254,109 @@ a page another lane had already marked, `new.startswith(old)` and `old.startswit
 False, because marking rewrites the leading banner block — the two orders are no longer
 distinguishable, so a test for it could not fail. The order is kept as the safe one with the
 reason at the line. `_swap_once` is not in that position and is still mutated.
+
+# Round 3 — merging #1185 into this branch
+
+`ed53a8ba` (#1219, the `text_layer_numbers` lane) landed on `main` first. Merged in, no rebase,
+no force-push; merge commit `f357f564`. Two conflicts, both resolved by keeping **both**
+behaviours — a figure a page does not show and numbers its text layer disputes are different
+facts, and neither lane may undo the other:
+
+* `verdict.silent_success_clauses`: #1187's clauses go **inside** #1185's
+  `_clauses_ahead_of_text_layer_numbers` tuple, so that tuple stays the single ordering
+  authority and #1185's slot arithmetic can see this lane's clause.
+* `verdict._status_is_explained`: two independent early returns, one per lane.
+* `manifest._verdict_demotion_mode`: this lane keys on the clause's **scope kind**, #1185's on
+  its **result**; both lookups stand, then the shared by-check map.
+
+Two cross-lane gaps the merge exposed were fixed rather than left: `refinalize_own_text` could
+not count this lane's clauses when building its slot-reference state (extracted as a named
+`slot_reference_state`, because a source-text assertion let the mutation that emptied it
+survive); and this lane's tool appended **below** a numbers clause instead of ahead of one.
+
+Measured and **not** fixed: on the 7 calibration pages carrying both clauses, the rendered mark
+ORDER follows tool order, because `_apply_verdict_marks` appends the marks not already present
+and never reorders an existing banner block. Both marks are present either way and the meter is
+0; carried to #1226, because reordering a written block is a behaviour change for every lane.
+
+# Round 4 — the second round of reviews of PR #1224
+
+Argon BLOCK, Fable MERGE-AFTER-FIX, bot REQUEST_CHANGES. **Ten findings, all REAL**; the
+reproduction record is in the PR. As in round 2, 15 of the 16 symbols Argon quotes do not exist
+in this tree — and as in round 2, nothing was dismissed on that basis, because the substance
+held every time.
+
+1. **This lane had no business on a native page at all** (bot blocker 1 · Fable P1-2 · Argon
+   P0-B, standing three rounds). The lane decides in the page loop, on `bo`; the paragraph
+   reflow runs later, at finalisation. On a born-digital page a wrapped cross-reference —
+   `… see` / `Figure 4. However, …` — is a strict caption on the raw layer and nothing at all
+   on the text that ships. The owner measured ~7 such false fires in 70 pages of raw layer, and
+   since round 2 one of them takes the whole document from `completed` to `partial`.
+   The fix is not a better regex: **every number this PR has is of model-read pages** (the
+   crosstab filtered `engine not in ("", "native", "native+equations")`; the Fed tool reads
+   finalized, already-reflowed sidecars), so the mark branch on native pages was never measured
+   at all. New predicate `page_was_read_by_a_model(engine)` gates both the live call site and
+   the tool. A native page keeps whatever the native lanes say about it.
+2. **A retryable mode made every acted-on page re-OCR forever** (Fable P1-1 · Argon P1-C).
+   Round 1 was safe by accident: a shipped page was SUCCESS (ordinary skip) and an unlocated one
+   borrowed a permanent mode. Round 2 made every acted-on page WARNING with `FIGURE_NOT_SHOWN`
+   deliberately retryable, so the per-page ledger gate ("status MUST be SUCCESS") fell through
+   and re-read the page on every partial resume. Split the mode in two: `FIGURE_NOT_SHOWN` is a
+   determination about the page and is **permanent**; `FIGURE_RENDER_FAILED` is a transient
+   crop failure and stays retryable. The owner's round-1 "second run made 0 engine calls"
+   measured the whole-document RootIndex fast path, not the ledger — pinned now with a test that
+   crashes after page one and resumes through the real `_restore_terminal_page_state`.
+3. **The failure mode must be a function of the clause SET, not of arrival order** (Argon P0-A).
+   `_verdict_demotion_mode` returned the first matching clause's mode and
+   `_warn_success_status_for_verdict` fires only on a SUCCESS page, so whichever tool demoted
+   the page first owned the mode: `own-text → figures` recorded `numbers_disagree_with_text_layer`,
+   `figures → own-text` recorded `figure_not_shown`. Two harms — a numbers **FAIL**, the stronger
+   finding, was shadowed by this lane's UNKNOWN; and because the numbers modes are permanent and
+   the figure mode was not, the same page was restored or re-OCR'd depending on tool order.
+   Now the clauses are sorted into fresh-run order (`in_fresh_run_order`, over the one
+   `_SILENT_SUCCESS_ORDER` tuple) and FAIL is scanned before UNKNOWN, and an already-WARNING page
+   recomputes a verdict-derived mode. All four paths — live, resume, and the tools in either
+   order — converge on the same mode.
+4. **The live run and the tool told the document two different stories** (Argon P1-A, P1-B).
+   `RENDERED_KIND` is in `MARKED_KINDS`, so `_unshipped_figure_note`'s `elif` for a shipped crop
+   was unreachable and a live run never reported one; the tool's two independent `if`s reported
+   the page as both shipped and marked. Made the live note two independent `if`s too. The tool
+   also wrote a non-empty `error` while leaving the document `status` as it found it, and never
+   recounted `tables.verified_text` although it demotes pages from `success` — both fixed, the
+   recount re-using `refinalize_own_text._recount_tables`.
+5. **Two lanes cropping the same page** (Argon P1-D). GH-189's chart-region pass takes **every**
+   page with tables as a candidate and knew nothing about this lane; a chart+table page is
+   exactly round 1's mechanism 1. It now skips a page this lane has cropped.
+6. **The regex, again** (bot 2 residual, bot 3). `[—–\-]` accepted a dash **range** as a caption
+   terminator, so `Figure 3-5 show …` marked prose; and `IA.1` / `OA.3` appendix labels matched
+   nothing. Both fixed, both pinned. The roman alternative's own tail was **deleted** rather
+   than tested: the two-letter alternative consumes `II-3` and `I.2` first, so the mutation check
+   could not kill it.
+7. **One order for the marks, so byte identity can be STATED** (Argon P0-A, the half round 3
+   measured and deferred to #1226). `_apply_verdict_marks` appended the lines not already
+   present and never reordered an existing block, so the two re-finalize tools left the page
+   reading in the order they RAN. New `_ordered_page_marks` re-sorts the canonical lines
+   already in the leading block together with the new ones, by the key `marks_to_write`
+   itself uses, and only on a page that is gaining a line (so a complete page stays
+   byte-identical). Lines that are not canonical clause marks keep their place ahead of them:
+   #1129's `> [page unaccepted: …]` headline has its own contract. Measured on the
+   calibration copy with the three tools forwards and backwards: **every page fragment, every
+   document `.md` and every `manifest.json` is now byte-identical across the two orders**
+   (before: 7 fragments and 4 documents differed).
+
+## What is still order-dependent, measured and NOT fixed
+
+Across the two orders, 0 of 2,476 pages differ in status, failure mode or clause SET. What
+differs is:
+
+* **the recorded clause ORDER on 3 pages.** All three carry `page_judge` — a STATUS clause —
+  ahead of both lanes' clauses. #1185's `with_text_layer_numbers_clause` places its clause by
+  the COUNT of the silent-success clauses ahead of it, and that count does not include a
+  status clause that is already in the published list, so the slot lands one early. The marks
+  on those pages are identical and complete; it is the sidecar's list order that differs.
+  Fixing it means replacing the count-based slot with a canonical sort over status clauses
+  too, which is a change to the other lane's published contract and needs its own measurement
+  — #1226, with this cause recorded.
+* **`refinalized_from` on 7 pages, and the 3 tools' own run logs.** These record the status and
+  source digest each tool FOUND, so two different orders genuinely saw two different prior
+  states. That is history, not disagreement about the page.

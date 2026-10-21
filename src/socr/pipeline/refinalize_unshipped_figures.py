@@ -36,6 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.verdict import in_fresh_run_order
 from socr.figures.unshipped_figures import (
     EVENT_KINDS,
     MARKED_KINDS,
@@ -220,16 +221,17 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
     # fresh run. Appending them would order the two marks one way when this tool runs after
     # ``socr-refinalize-own-text`` and the other way round when it runs before -- and neither
     # would match a fresh run on a page both lanes touch.
-    from socr.core.marks import Check as _Check
-
     recorded_all = (sidecar.get("verdict") or {}).get("clauses") or []
-    _numbers = _Check.TEXT_LAYER_NUMBERS.value
-    ahead = [r for r in recorded_all if r.get("check") != _numbers]
-    behind = [r for r in recorded_all if r.get("check") == _numbers]
-    recorded = ahead
+    # The slot is the END OF THE LEADING RUN OF SILENT-SUCCESS CLAUSES, which is where a fresh
+    # run puts this lane's (``verdict._clauses_ahead_of_text_layer_numbers``). Round 3
+    # partitioned by check instead -- "not numbers" ahead, "numbers" behind -- which on a page
+    # that ALSO carries a status-dependent clause (a judge refusal, a table label) lifted that
+    # status clause ABOVE this lane's, giving [status, figure, numbers] where a fresh run
+    # gives [figure, numbers, status]. Partitioning cannot express "after the silent ones";
+    # finding the slot can (owner item 4, Fable P2).
     clauses: list = []
     seen: set[tuple[str, str, str, str]] = set()
-    for record in [*recorded, *new_records, *behind]:
+    for record in [*recorded_all, *new_records]:
         try:
             clause = VerdictClause.from_dict(record)
         except Exception:  # noqa: BLE001 -- an unreadable record states nothing
@@ -239,7 +241,7 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
             continue
         seen.add(key)
         clauses.append(clause)
-    return PageVerdict(page_num=page_num, clauses=tuple(clauses))
+    return PageVerdict(page_num=page_num, clauses=tuple(in_fresh_run_order(clauses)))
 
 
 def refinalize_page(
@@ -259,7 +261,11 @@ def refinalize_page(
     )
     from socr.core.result import PageOutput
     from socr.figures.chart_regions import render_chart_region_crops
-    from socr.figures.unshipped_figures import body_shows_a_picture, clause_records
+    from socr.figures.unshipped_figures import (
+        body_shows_a_picture,
+        clause_records,
+        page_was_read_by_a_model,
+    )
 
     if _already_answered(sidecar):
         return None
@@ -269,6 +275,11 @@ def refinalize_page(
     output = PageOutput.from_dict(winning)
     body = output.text or ""
     if not body.strip() or body_shows_a_picture(body):
+        return None
+    # Same scope as the live lane: model-read pages only (see
+    # ``unshipped_figures.page_was_read_by_a_model``). A finished run's sidecar records the
+    # engine that won the page.
+    if not page_was_read_by_a_model(str((winning or {}).get("engine") or "")):
         return None
     page_num = int(sidecar["page_num"])
     p = _page_state(sidecar)
@@ -348,6 +359,17 @@ def _event_for(page_num: int, decision) -> dict:
         "detail": decision.detail,
         "data": {**decision.event_data(), "refinalized": True},
     }
+
+
+def _recount_tables(doc_dir: Path, meta_path: Path, meta: dict) -> None:
+    """``metadata.json``'s ``tables`` block, recomputed from the sidecars as they now are.
+
+    A pure re-export of ``socr-refinalize-own-text``'s helper so the two tools cannot drift
+    about what a demoted page does to ``verified_text``.
+    """
+    from socr.pipeline.refinalize_own_text import _recount_tables as _shared
+
+    _shared(doc_dir, meta_path, meta)
 
 
 def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
@@ -477,21 +499,41 @@ def refinalize_document(
                     {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
                 ]
         _write_json(manifest_path, manifest)
-    note = document_note(*_lane_pages(answered))
-    error = _NOTE_RE.sub("", str(meta.get("error") or "")).strip().strip(";").strip()
-    meta["error"] = f"{error}; {note}" if error and note else (note or error) or None
-    if meta["error"] is None:
-        meta.pop("error", None)
+    shipped_pages, marked_pages = _lane_pages(answered)
+    note = document_note(shipped_pages, marked_pages)
+
+    def _record(record: dict) -> None:
+        """The note, and -- when this lane MARKED a page -- the demotion a live run makes.
+
+        #1187 round 4 (Argon P1-B): the tool wrote a non-empty ``error`` and left ``status``
+        as it found it, so a previously clean document came out of the tool claiming
+        ``completed`` with an error on it, which is the GH-177 contract inverted and differs
+        from what ``process()`` writes for the same pages. ``socr-refinalize-own-text`` does
+        both; so does this now.
+        """
+        from socr.core.result import DocumentStatus
+
+        error = _NOTE_RE.sub("", str(record.get("error") or "")).strip().strip(";").strip()
+        merged = f"{error}; {note}" if error and note else (note or error) or None
+        if merged is None:
+            record.pop("error", None)
+        else:
+            record["error"] = merged
+        if marked_pages and record.get("status") == DocumentStatus.SUCCESS.value:
+            record["status"] = DocumentStatus.AUDIT_FAILED.value
+
+    _record(meta)
     _write_json(meta_path, meta)
+    # #1187 round 4 (Argon P1-B): a page demoted from success no longer counts as a verified
+    # table, so the document's table block is stale until something recomputes it. Same
+    # helper ``socr-refinalize-own-text`` uses, from the sidecars as they now are.
+    _recount_tables(doc_dir, meta_path, meta)
     root_path = doc_dir.parent / "metadata.json"
     if root_path.is_file():
         root = _read_json(root_path)
         entry = (root.get("files") or {}).get(meta.get("key"))
         if entry is not None:
-            if meta.get("error") is None:
-                entry.pop("error", None)
-            else:
-                entry["error"] = meta["error"]
+            _record(entry)
             _write_json(root_path, root)
     audit_path = doc_dir / "audit_log.json"
     if audit_path.is_file():

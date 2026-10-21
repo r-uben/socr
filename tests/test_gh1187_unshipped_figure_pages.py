@@ -23,7 +23,14 @@ import fitz
 import pytest
 
 from socr.core import manifest
-from socr.core.marks import Check, CheckResult, leading_marks, line_is_mark
+from socr.core.marks import (
+    Check,
+    CheckResult,
+    leading_mark_blocks,
+    leading_marks,
+    line_is_mark,
+    page_unchecked_clause_mark,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import PageState
 from socr.core.verdict import build_page_verdict
@@ -915,20 +922,35 @@ def test_the_document_is_not_clean_when_a_figure_it_names_is_not_shown(
     )
 
 
-def test_the_failure_mode_is_this_lanes_own_and_stays_retryable() -> None:
-    """Argon P0-3, both halves.
+def test_the_failure_mode_is_this_lanes_own_and_splits_by_whether_a_rerun_can_fix_it() -> None:
+    """Argon round-2 P0-3, then round-4 Fable P1-1 / Argon P1-C.
 
-    Sharing ``VISUAL_VALUES_UNTRANSCRIBED`` recorded something FALSE about a page that shipped
-    no image, and -- because that mode is permanently unresolvable -- made a TRANSIENT render
-    failure unretryable on resume, unlike #1030's ``scanned_figure_render_failed``.
+    Round 2 took this lane off #1030's ``VISUAL_VALUES_UNTRANSCRIBED``, which recorded
+    something FALSE about a page that shipped no image. It then left the new mode out of
+    ``PERMANENTLY_UNRESOLVABLE_MODES`` so a transient render failure would be retried -- and
+    that re-OCR'd EVERY page the lane marks on every partial resume, for ever.
+
+    The two facts needed different modes, not one compromise. A figure socr could not locate
+    is deterministic (same locator, same PDF, same answer), so re-reading cannot resolve it
+    and the page is restored. A crop that failed to save is transient, so it is retried.
     """
     from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES
 
-    assert FailureMode.FIGURE_NOT_SHOWN not in PERMANENTLY_UNRESOLVABLE_MODES
+    assert FailureMode.FIGURE_NOT_SHOWN in PERMANENTLY_UNRESOLVABLE_MODES, (
+        "deterministic: re-reading the page cannot change the answer"
+    )
+    assert FailureMode.FIGURE_RENDER_FAILED not in PERMANENTLY_UNRESOLVABLE_MODES, (
+        "transient: a re-run may save the crop"
+    )
     out = _out("Figure 7: X.\n\nprose")
-    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
-    marked, _ = manifest._apply_verdict_marks(out, p, 1)
-    assert marked.failure_mode is FailureMode.FIGURE_NOT_SHOWN
+    for kind, expected in (
+        (UNLOCATED_KIND, FailureMode.FIGURE_NOT_SHOWN),
+        (RENDERED_KIND, FailureMode.FIGURE_NOT_SHOWN),
+        (RENDER_FAILED_KIND, FailureMode.FIGURE_RENDER_FAILED),
+    ):
+        p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=kind)
+        marked, _ = manifest._apply_verdict_marks(out, p, 1)
+        assert marked.failure_mode is expected, kind
 
 
 def test_re_deriving_a_marked_page_adds_no_second_contradictory_clause() -> None:
@@ -1144,7 +1166,10 @@ def test_an_interrupted_run_on_an_ALREADY_marked_page_is_repaired_not_doubled(
     assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
     once = _tree(out)
     fragment = (doc_dir / "pages" / "00001.md").read_text(encoding="utf-8")
-    assert fragment.startswith(prior), "the other lane's mark is still first"
+    # The other lane's mark is still there -- but NOT necessarily first: since round 4 the
+    # leading canonical lines are put in the one order a fresh run writes them in
+    # (``_ordered_page_marks``), and ``figure_text`` sorts ahead of ``page_judge``.
+    assert prior in leading_mark_blocks(fragment, 1), "the other lane's mark survives"
     ref = "figures/" + crop_filename(1, 1)
     assert fragment.count("](" + ref + ")") == 1
 
@@ -1244,3 +1269,536 @@ def test_this_lanes_tool_keeps_a_numbers_clause_behind_its_own(tmp_path: Path) -
     checks = [c.check for c in verdict.clauses]
     assert checks.index(Check.FIGURE_TEXT) < checks.index(Check.TEXT_LAYER_NUMBERS)
     assert len(checks) == 2, "neither clause is dropped"
+
+
+# --- round-4 resume harness: a two-page document, crashed between the flushes -------------
+
+
+def _two_page_pdf_with_a_named_figure(path: Path, *, draw_figure: bool) -> Path:
+    """Page 1 carries the figure this lane acts on; page 2 is ordinary prose.
+
+    Two pages because the ledger is only consulted when the RootIndex fast path does not
+    answer: with the document incomplete, page 2 is re-read and page 1 goes to the per-page
+    gate, which is the thing under test.
+    """
+    doc = fitz.open()
+    one = doc.new_page(width=612, height=792)
+    one.insert_text((72, 72), _CAPTION, fontname="helv", fontsize=11)
+    one.insert_text((72, 700), _PROSE, fontname="helv", fontsize=10)
+    if draw_figure:
+        shape = one.new_shape()
+        shape.draw_rect(fitz.Rect(100, 120, 500, 420))
+        shape.finish(color=(0, 0, 0), width=1.5)
+        for i in range(8):
+            x = 120 + i * 45
+            shape.draw_rect(fitz.Rect(x, 400 - (i + 1) * 30, x + 30, 410))
+            shape.finish(color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1), width=1.5)
+        shape.commit()
+    two = doc.new_page(width=612, height=792)
+    two.insert_text((72, 72), _PROSE, fontname="helv", fontsize=10)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _crash_after_page_one_r4(out_dir: Path) -> None:
+    """What a crash between page 1's flush and page 2's leaves (the #1185 e2e's shape)."""
+    for page_two in out_dir.rglob("pages/00002.*"):
+        page_two.unlink()
+    for md in out_dir.rglob("*.md"):
+        if "pages" not in md.parts:
+            md.unlink()
+
+
+def _run_two_page(out: Path, pdf: Path, monkeypatch, *, pages_read: list[int]) -> None:
+    """``process()`` on *pdf* into *out*, recording which pages reached the engine."""
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+
+    class _Recording(_Engine):
+        def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **kw):
+            pages_read.extend(int(n) for n in page_nums)
+            return super().process_pages(pdf_path, page_nums, config, dpi, subprocess_timeout)
+
+    with monkeypatch.context() as m:
+        m.setattr(orch, "get_engine", lambda engine_type: _Recording())
+        m.setattr(UnifiedPipeline, "_is_chart_asset_page", lambda self, *a, **k: False)
+        m.setattr(UnifiedPipeline, "_is_agentic_trusted_native", lambda self, *a, **k: False)
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=False,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._build_page_judge = lambda state: _Judge()
+        pipe._resolve_crop_vlm_model = lambda: None
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        pipe.process(pdf, output_dir=out)
+
+
+# =========================================================================================
+# Round 4: one test per reproduced review finding.
+# Reproductions, with command and output, are in
+# scratch/routing-baseline/leads/1187/report-r4.md.
+# =========================================================================================
+
+
+def test_a_native_page_is_out_of_this_lanes_scope(tmp_path: Path, monkeypatch) -> None:
+    """The owner's blocker, standing three rounds (also Fable P1-2, Argon P0-B).
+
+    A native body is the PDF's text layer, and the page loop sees it BEFORE
+    ``_apply_native_paragraphs`` reflows it at finalisation. A sentence that wraps with
+    ``Figure 4.`` at the start of a raw line is a strict caption on that layer and
+    mid-paragraph in the body that ships, so the lane marked prose pages -- and since round 2
+    took the whole document from ``completed`` to ``partial``. The owner reproduced it on four
+    real pages and measured ~7 such fires in 70 pages of raw layer.
+
+    Every number this lane has is model-read pages. Native ones are out of scope until
+    measured, which is what this pins.
+    """
+    from socr.figures.unshipped_figures import page_was_read_by_a_model
+
+    wrapped = (
+        "the two series diverge once we control for marginal costs.29 see\n"
+        "Figure 4. However, these price differentials were relatively small\n"
+        "and did not persist beyond the first two quarters."
+    )
+    reflowed = " ".join(line.strip() for line in wrapped.split("\n"))
+    assert figure_captions(wrapped, strict=True) == ("Figure 4",), "the raw layer does match"
+    assert figure_captions(reflowed, strict=True) == (), "the body that ships does not"
+
+    for engine in ("native", "native+equations", ""):
+        assert not page_was_read_by_a_model(engine), engine
+    assert page_was_read_by_a_model("qwen")
+
+    # Through the real page loop: the same body, the same PDF, only the engine differs.
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    pipe = UnifiedPipeline.__new__(UnifiedPipeline)
+    from socr.core.config import PipelineConfig
+
+    pipe.config = PipelineConfig(quiet=True)
+    for engine, should_fire in (("qwen", True), ("native", False)):
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        ps = PageState(page_num=1)
+        state.pages[1] = ps
+        out = PageOutput(
+            page_num=1, text=wrapped, status=PageStatus.SUCCESS, engine=engine, audit_passed=True
+        )
+        pipe._agentic_unshipped_figure_page(state, 1, ps, out, tmp_path / "figures")
+        assert bool(ps.unshipped_figure_kind) is should_fire, engine
+        assert bool(state.events) is should_fire, engine
+
+
+def test_a_page_this_lane_marks_is_kept_on_a_partial_resume(tmp_path: Path, monkeypatch) -> None:
+    """Fable P1-1 / Argon P1-C, through the production resume path.
+
+    Round 2 demoted every acted-on page to WARNING with a mode left out of
+    ``PERMANENTLY_UNRESOLVABLE_MODES``, so the per-page ledger gate fell through to "status
+    MUST be SUCCESS" and re-read the page -- on every partial resume, for ever, and the next
+    run demoted it again. The PR's "second run made 0 engine calls" measured a WHOLE-document
+    re-run, which is the RootIndex fast path, not the ledger; and this lane's own resume test
+    called the guard directly and never reached it. This one drives the ledger.
+    """
+    pdf = _two_page_pdf_with_a_named_figure(tmp_path / "doc.pdf", draw_figure=True)
+    out = tmp_path / "out"
+    first: list[int] = []
+    _run_two_page(out, pdf, monkeypatch, pages_read=first)
+    side = json.loads((next(iter(out.rglob("pages/00001.json")))).read_text())
+    assert side["unshipped_figure_kind"] == RENDERED_KIND, "fixture premise"
+    assert side["failure_mode"] == FailureMode.FIGURE_NOT_SHOWN.value
+    before = (next(iter(out.rglob("pages/00001.md")))).read_text()
+
+    _crash_after_page_one_r4(out)
+    resume: list[int] = []
+    _run_two_page(out, pdf, monkeypatch, pages_read=resume)
+    assert 2 in resume, "the resume did not reach the page loop, so the ledger was not tested"
+    assert 1 not in resume, f"a page this lane marked was re-read on resume: {resume}"
+    assert (next(iter(out.rglob("pages/00001.md")))).read_text() == before
+
+
+def test_a_failed_crop_is_retried_on_resume(tmp_path: Path) -> None:
+    """The other half of the split: a render failure is transient and must NOT be permanent."""
+    from socr.core.verdict import PERMANENTLY_UNRESOLVABLE_MODES
+
+    assert FailureMode.FIGURE_NOT_SHOWN in PERMANENTLY_UNRESOLVABLE_MODES
+    assert FailureMode.FIGURE_RENDER_FAILED not in PERMANENTLY_UNRESOLVABLE_MODES
+
+
+def test_a_numbers_FAIL_is_never_shadowed_by_this_lanes_UNKNOWN() -> None:
+    """Argon P0-A. A FAIL means a check RAN and the page did not pass it; an UNKNOWN means it
+    could not run. Taking the first clause let clause ORDER decide the recorded mode, and with
+    it -- because the two lanes' modes differ in ``PERMANENTLY_UNRESOLVABLE_MODES`` -- whether
+    a resume restored the page or re-read it."""
+    from socr.core.verdict import VerdictClause
+
+    fig = VerdictClause(Check.FIGURE_TEXT, CheckResult.UNKNOWN, "figure:1", "x")
+    fail = VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, "page", "y")
+    unk = VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, "page", "y")
+    for order in ((fig, fail), (fail, fig)):
+        assert (
+            manifest._verdict_demotion_mode(order) is FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER
+        ), "a FAIL outranks an UNKNOWN whatever the clause order"
+    for order in ((fig, unk), (unk, fig)):
+        assert manifest._verdict_demotion_mode(order) is FailureMode.FIGURE_NOT_SHOWN
+
+
+def test_the_mode_converges_whichever_pass_demoted_the_page_first() -> None:
+    """Argon P0-A, the half tool order controls.
+
+    ``_warn_success_status_for_verdict`` only fires on a SUCCESS page, so the FIRST tool to
+    demote owned the mode and the second left it alone -- the same page recording
+    ``numbers_unchecked`` one way round and ``figure_not_shown`` the other.
+    """
+    out_text = "Figure 7: X.\n\nprose"
+    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
+    fresh = manifest._apply_verdict_marks(_out(out_text), p, 1)[0]
+    already = manifest._apply_verdict_marks(
+        PageOutput(
+            page_num=1,
+            text=out_text,
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=True,
+            failure_mode=FailureMode.NUMBERS_UNCHECKED,
+        ),
+        p,
+        1,
+    )[0]
+    assert already.failure_mode is fresh.failure_mode, (
+        "a page another pass already demoted must record the mode a fresh run records"
+    )
+
+
+def test_a_rendered_page_is_reported_as_both_shipped_and_marked() -> None:
+    """Argon P1-A. ``RENDERED_KIND`` is in ``MARKED_KINDS``, so an if/elif made the second arm
+    unreachable: a live run never reported a shipped crop, while the tool -- which asks the
+    two questions separately -- reported the same page twice. Same document, two notes."""
+    from socr.figures.unshipped_figures import MARKED_KINDS, SHIPPED_KINDS, document_note
+
+    assert RENDERED_KIND in MARKED_KINDS and RENDERED_KIND in SHIPPED_KINDS
+    note = document_note([3], [3])
+    assert "ship a crop" in note and "could not locate" in note, note
+
+
+def test_the_tool_demotes_the_document_and_recounts_its_tables(tmp_path: Path) -> None:
+    """Argon P1-B. The tool wrote a non-empty ``error`` and left ``status`` as it found it, so
+    a clean document came out claiming ``completed`` with an error on it -- the GH-177
+    contract inverted, and different from what ``process()`` writes for the same pages."""
+    from socr.core.result import DocumentStatus
+
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    _out_dir, doc_dir = _run_dir(tmp_path, pdf, f"{_CAPTION}\n\n{_PROSE}")
+    meta_path = doc_dir / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["status"] = DocumentStatus.SUCCESS.value
+    meta["tables"] = {"shipped_text": 0, "verified_text": 0, "unverified_text": 0, "withheld": 0}
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
+    after = json.loads(meta_path.read_text())
+    assert after["status"] == DocumentStatus.AUDIT_FAILED.value, after["status"]
+    assert after.get("error")
+
+
+def test_the_tool_publishes_clauses_in_fresh_run_order(tmp_path: Path) -> None:
+    """Owner item 4 / Fable P2, and the case round 3's partition could not express.
+
+    A fresh run orders the silent-success clauses first, this lane's before the numbers
+    clause, then the status-dependent ones. Partitioning by check lifted a status clause
+    ABOVE this lane's; sorting into canonical order does not care what order the recorded
+    list arrived in.
+    """
+    numbers = {"check": "text_layer_numbers", "result": "UNKNOWN", "scope": "page", "reason": "n"}
+    judge = {"check": "page_judge", "result": "UNKNOWN", "scope": "page", "reason": "s"}
+    label = {"check": "table_label", "result": "UNKNOWN", "scope": "page", "reason": "t"}
+    new = clause_records(1, ("Figure 7",), UNLOCATED_KIND)
+    for recorded, expected in (
+        ([numbers], ["figure_text", "text_layer_numbers"]),
+        ([numbers, judge], ["page_judge", "figure_text", "text_layer_numbers"]),
+        ([judge, numbers], ["page_judge", "figure_text", "text_layer_numbers"]),
+        ([numbers, label], ["figure_text", "text_layer_numbers", "table_label"]),
+    ):
+        v = tool._published_verdict({"verdict": {"clauses": recorded}}, 1, new)
+        assert [c.check.value for c in v.clauses] == expected, recorded
+
+
+@pytest.mark.parametrize(
+    ("line", "matches"),
+    [
+        ("Figure 1–3 present the impulse responses.", False),
+        ("Figure 2—4 show the paths.", False),
+        ("Figure 2-3 compare the impulse responses.", False),
+        ("Fig. 1—Probability of sample inclusion.", True),
+        ("Figure IA.1: Robustness", True),
+        ("Figure OA.3: Extra results", True),
+        ("Figure IA1: Robustness", True),
+        ("Figure OA-2: Extra", True),
+    ],
+    ids=["en-range", "em-range", "hyphen-range", "heckman", "IA.1", "OA.3", "IA1", "OA-2"],
+)
+def test_dash_ranges_and_two_letter_appendix_labels(line: str, matches: bool) -> None:
+    """Owner items 2 and 3. A dash followed by a DIGIT is a range, not a terminator -- the
+    label alternatives only consume the ASCII form, so the wider dashes reached the terminator
+    and marked prose. Internet and Online Appendix labels matched nothing at all."""
+    assert bool(figure_captions(line, strict=True)) is matches
+
+
+def test_with_save_figures_the_extractor_does_not_ship_the_figure_twice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Owner item 5, survivor 1: the ``skip_pages`` suppression had no ``--save-figures`` arm.
+
+    With the figure phase ON, ordinary extraction localises the SAME region this lane already
+    cropped (it is the same locator), so without the suppression the page ships the figure
+    twice under two filenames.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=True)
+    out = tmp_path / "out"
+    with monkeypatch.context() as m:
+        m.setattr(orch, "get_engine", lambda engine_type: _Engine())
+        m.setattr(UnifiedPipeline, "_is_chart_asset_page", lambda self, *a, **k: False)
+        m.setattr(UnifiedPipeline, "_is_agentic_trusted_native", lambda self, *a, **k: False)
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=True,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._build_page_judge = lambda state: _Judge()
+        pipe._resolve_crop_vlm_model = lambda: None
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        pipe.process(pdf, output_dir=out)
+
+    text = next(iter(out.rglob("pages/00001.md"))).read_text()
+    refs = [ln for ln in text.split("\n") if ln.lstrip().startswith("![")]
+    assert len(refs) == 1, f"the figure shipped more than once: {refs}"
+    assert "unshipped_figure_p1_1.png" in refs[0]
+
+
+def test_a_resumed_page_keeps_its_mark_from_the_restored_sidecar_lists(tmp_path: Path) -> None:
+    """Owner item 5, survivor 2: restoring ``[]`` instead of the sidecar lists was unpinned.
+
+    Since the already-answered gate reads only the KIND, the three lists matter to exactly one
+    thing -- ``_unshipped_figure_clauses`` on a resumed page. Without them the page comes back
+    from a resume with its kind but no clause, so it is demoted with nothing naming why.
+    """
+    from socr.core.verdict import _unshipped_figure_clauses
+
+    restored = PageState(page_num=1)
+    restored.unshipped_figure_kind = UNLOCATED_KIND
+    assert _unshipped_figure_clauses(restored) == [], "no list, no clause"
+    restored.unshipped_figure_unlocated = ["Figure 7"]
+    clauses = _unshipped_figure_clauses(restored)
+    assert [c.check for c in clauses] == [Check.FIGURE_TEXT]
+    assert "Figure 7" in clauses[0].reason
+
+
+def test_the_guard_closes_an_open_code_fence_before_appending(tmp_path: Path) -> None:
+    """Owner item 5, survivor 4: no test handed the guard a body with an open fence.
+
+    A fence the page left open runs to the end of the document in CommonMark, so an image
+    appended after it renders as literal code while the report says it shipped -- #1030's
+    lesson, which the guard's comment cites and nothing pinned.
+    """
+    body = "Figure 7: X.\n\n```text\nsome unreadable scan text that never closes"
+    got = manifest._apply_unshipped_figure_guard(_out(body), _p(REFS))
+    lines = got.text.split("\n")
+    opens = [i for i, ln in enumerate(lines) if ln.strip().startswith("```")]
+    assert len(opens) % 2 == 0, f"the fence is left open: {lines}"
+    first_ref = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith("!["))
+    assert first_ref > opens[-1], "the image must come after the fence closes"
+
+
+def test_the_mark_names_only_caption_shaped_labels_when_it_can() -> None:
+    """Owner item 5, survivor 3: ``named = strict or captions`` decides which labels the mark
+    names, and since round 2 made RENDERED mark, that is a visible statement about the page.
+
+    A loose-only line (a cross-reference opening a line) beside a real caption must not get a
+    clause of its own: the strict set is preferred whenever it is non-empty.
+    """
+    from socr.figures.unshipped_figures import decide
+
+    body = "Figure 1 (panel a) shows the composition\n\nFigure 2: Real output\n\nprose"
+    assert figure_captions(body) == ("Figure 1", "Figure 2"), "both match loosely"
+    assert figure_captions(body, strict=True) == ("Figure 2",), "only one is caption-shaped"
+    d = decide(body, lambda: [object()], lambda b: ["figures/a.png"])
+    assert d.unlocated == ("Figure 2",), "the mark names the caption, not the cross-reference"
+
+
+def test_the_tool_leaves_a_native_page_alone(tmp_path: Path) -> None:
+    """The lane's scope, through the TOOL as well as the live loop.
+
+    A finished run's sidecar records the engine that won the page, and the tool must read it:
+    otherwise re-finalizing a finished run would mark exactly the native prose pages the live
+    lane now declines (the owner's standing blocker).
+    """
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    body = f"{_CAPTION}\n\n{_PROSE}"
+    out, doc_dir = _run_dir(tmp_path, pdf, body)
+    sidecar_path = doc_dir / "pages" / "00001.json"
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar["engine"] = "native"
+    sidecar["winning_output"]["engine"] = "native"
+    sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    before = _tree(out)
+    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path) == []
+    assert _tree(out) == before
+
+
+def test_the_live_note_reports_a_rendered_page_as_shipped(tmp_path: Path, monkeypatch) -> None:
+    """Argon P1-A, through the live note rather than its builder.
+
+    ``_unshipped_figure_note`` reads the run's audit events. With ``RENDERED_KIND`` inside
+    ``MARKED_KINDS`` an if/elif made the shipped arm unreachable, so a live run's
+    ``metadata.json`` never said a crop had shipped while the tool's did.
+    """
+    _side, _text, meta, _out = _process(tmp_path, monkeypatch, "note", draw_figure=True)
+    error = meta.get("error") or ""
+    assert "ship a crop" in error, error
+    assert "could not locate" in error, error
+
+
+def test_the_chart_region_pass_skips_a_page_this_lane_cropped(tmp_path: Path) -> None:
+    """Argon P1-D. That pass's candidate set is every page WITH TABLES, which is exactly the
+    chart+table class this lane serves, so without the skip it crops the same graphic a second
+    time and adds a contradicting ``chart_region`` mark."""
+    src = Path(__file__).resolve().parents[1] / "src/socr/pipeline/orchestrator.py"
+    text = src.read_text()
+    chart_floor = text.index('if getattr(ps, "chart_floor_body", False):')
+    ours = text.index('if getattr(ps, "unshipped_figure_refs", None):')
+    candidates = text.index("if 1 <= pn <= len(page_texts) and self._page_has_tables(")
+    assert candidates < chart_floor < ours, "the skip must sit beside #1155's, in that pass"
+
+    from socr.core.state import PageState as _PS
+
+    cropped = _PS(page_num=1)
+    cropped.unshipped_figure_refs = ["figures/unshipped_figure_p1_1.png"]
+    assert getattr(cropped, "unshipped_figure_refs", None), "the flag the skip reads"
+    assert not getattr(_PS(page_num=1), "unshipped_figure_refs", None)
+
+
+def test_a_resumed_page_rebuilds_its_mark_through_the_restore_path(tmp_path: Path) -> None:
+    """Owner item 5, survivor 2, driven through the orchestrator's own restore.
+
+    Building the ``PageState`` by hand does not test the restore. This writes the sidecar a
+    finished run leaves and asks the restore to rebuild the page state from it.
+    """
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    out, doc_dir = _run_dir(tmp_path, pdf, f"{_CAPTION}\n\n{_PROSE}")
+    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path), "fixture: the lane marked it"
+    sidecar = json.loads((doc_dir / "pages" / "00001.json").read_text())
+    assert sidecar["unshipped_figure_unlocated"] == ["Figure 7"]
+
+    # The production restore, not a copy of it.
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pipe = UnifiedPipeline.__new__(UnifiedPipeline)
+    pipe._scan_root = pdf.parent  # the restore reads the sidecar off disk through this
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    ps = PageState(page_num=1)
+    state.pages[1] = ps
+    shipped = PageOutput.from_dict(sidecar["winning_output"])
+    pipe._restore_terminal_page_state(state, 1, shipped, out)
+    assert state.pages[1].unshipped_figure_kind == UNLOCATED_KIND, (
+        "the restore did not read the sidecar, so the lists below prove nothing"
+    )
+
+    from socr.core.verdict import _unshipped_figure_clauses
+
+    clauses = _unshipped_figure_clauses(state.pages[1])
+    assert [c.check for c in clauses] == [Check.FIGURE_TEXT], (
+        "a resumed page must rebuild the clause that names its figure"
+    )
+    assert "Figure 7" in clauses[0].reason
+
+
+def test_the_marks_read_in_one_order_whichever_pass_wrote_them() -> None:
+    """Argon P0-A, the half round 3 measured and deferred: BYTE identity across the paths.
+
+    Each re-finalize pass writes only the clause the earlier pass had no evidence for, and
+    appending it left the leading block in the order the passes RAN. Measured on 7 of 2,476
+    calibration pages: ``figure_text`` then ``text_layer_numbers`` with the figures tool
+    last, and the reverse with it first. The verdict was the same either way, so the page
+    was correct both times -- which is exactly why it could not be pinned as a value.
+
+    Pinned as a DIFFERENCE: the two possible pass orders over one pair of clauses must give
+    one text, and ``_ordered_page_marks`` is the only thing that decides which.
+    """
+    numbers_mark = page_unchecked_clause_mark(
+        1, Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, "page", "a number is not in the layer"
+    )
+    figure_mark = page_unchecked_clause_mark(
+        1, Check.FIGURE_TEXT, CheckResult.UNKNOWN, "figure:1", "no figure region was located"
+    )
+    # (a) the other lane marked the page first; this lane's line is the one being added.
+    numbers_first = manifest._ordered_page_marks([numbers_mark], [figure_mark], 1)
+    # (b) this lane marked it first; the other lane's line is the one being added.
+    figure_first = manifest._ordered_page_marks([figure_mark], [numbers_mark], 1)
+    assert numbers_first == figure_first, (
+        f"one pair of clauses, two pass orders, two texts:\n{numbers_first}\n{figure_first}"
+    )
+    # And that one order is the order a FRESH run writes: ``marks_to_write`` sorts its lines
+    # by ``(check, scope)``, so the reference is that sort, not whichever came first here.
+    assert numbers_first == [figure_mark, numbers_mark], numbers_first
+
+
+def test_this_lanes_mark_lands_in_fresh_run_order_on_an_already_marked_page() -> None:
+    """The same thing through the real writer, in the direction a tool run takes: this lane
+    adds its line to a page the numbers lane has already marked. Before round 4 the line was
+    APPENDED, so the page read in the opposite order from the one a fresh run gives."""
+    numbers_mark = page_unchecked_clause_mark(
+        1, Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, "page", "a number is not in the layer"
+    )
+    body = "Figure 7: X.\n\nprose"
+    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
+    marks = leading_mark_blocks(
+        manifest._apply_verdict_marks(_out(f"{numbers_mark}\n\n{body}"), p, 1)[0].text, 1
+    )
+    assert len(marks) == 2 and numbers_mark in marks, marks
+    assert "figure_text=UNKNOWN" in marks[0], (
+        f"this lane's line belongs ahead of the numbers line, as a fresh run writes it: {marks}"
+    )
+
+
+def test_a_headline_banner_keeps_the_first_line_when_the_marks_are_reordered() -> None:
+    """The constraint the reorder must not break: #1129's ``> [page unaccepted: …]`` is the
+    page's FIRST line by its own contract, so it is not sorted in among the clause lines."""
+    body = "Figure 7: X.\n\nprose"
+    p = _p([], unshipped_figure_unlocated=["Figure 7"], unshipped_figure_kind=UNLOCATED_KIND)
+    headline = "> [page unaccepted: the judge refused this reading]"
+    numbers_mark = page_unchecked_clause_mark(
+        1, Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, "page", "a number is not in the layer"
+    )
+    text = manifest._apply_verdict_marks(_out(f"{headline}\n\n{numbers_mark}\n\n{body}"), p, 1)[
+        0
+    ].text
+    assert text.splitlines()[0] == headline, text
