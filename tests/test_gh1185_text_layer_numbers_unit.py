@@ -472,6 +472,18 @@ def test_a_spaced_latex_percent_cell_is_counted(row: str, cell: str) -> None:
         ("x 9 1.5", r"| x | $(9~\%)$ | 1.5 |", r"| x | $(9\%)$ | 1.5 |"),
         ("x 9 1.5", r"| x | $\pi^* = (9 \%)$ | 1.5 |", r"| x | $\pi^* = (9\%)$ | 1.5 |"),
         ("in 1995.5 the", r"in 1995 \% the", r"in 1995\% the"),
+        # a LaTeX control space is spacing too (Argon, round 2: its blank alone was eaten)
+        ("x 2 1.5", r"| x | $\pi^* = 9\ \%$ | 1.5 |", r"| x | $\pi^* = 9\%$ | 1.5 |"),
+        ("x 9 1.5", r"| x | (9\ \%) | 1.5 |", r"| x | (9\%) | 1.5 |"),
+        (
+            "x 9 1.5",
+            r"\begin{tabular}{ccc} x & (9\ \%) & 1.5 \end{tabular}",
+            r"\begin{tabular}{ccc} x & (9\%) & 1.5 \end{tabular}",
+        ),
+        # a percent after a bracket is not the number's: it stays apart, as on main
+        # (Argon, round 2: fused into ``(9)%`` the wrong cell dropped and the page passed)
+        ("x 2 1.5", r"| x | (9) \% | 1.5 |", r"| x | (9) | 1.5 |"),
+        ("x 2 1.5", r"| x | $(9)$ \% | 1.5 |", r"| x | $(9)$ | 1.5 |"),
     ],
 )
 def test_a_spaced_latex_percent_reads_as_the_unspaced_one(
@@ -479,8 +491,9 @@ def test_a_spaced_latex_percent_reads_as_the_unspaced_one(
 ) -> None:
     r"""Argon, PR #1229 review: spacing removed only inside the equation check left ``9 %``
     to split later, so a bracket was lost (``(9 \%)`` agreed with a bare 9) and a year's
-    percent passed the callout guard. The spaced writing must compare exactly as ``9\%``
-    does, and here that is a dispute."""
+    percent passed the callout guard. The spaced writing must compare exactly as its
+    unspaced control does (``9\%``; a percent after a bracket, ``(9)``), and here that is a
+    dispute."""
     record = compare_numbers(layer, spaced, provenance=PROVENANCE_OWN_CHARACTERS)
     assert record == compare_numbers(layer, unspaced, provenance=PROVENANCE_OWN_CHARACTERS)
     assert record.disputed

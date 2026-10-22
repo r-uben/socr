@@ -99,3 +99,52 @@ Keeping the backslash avoids changing any downstream path.
 | remove the accent lookbehind | 1 |
 | remove `\\[,;:! ]` from the equation check | 1 |
 | remove the normalisation line | 11 |
+
+## Round 3 — Argon re-review of 42c6371f (MERGE-AFTER-FIX)
+
+Both P1s were probed through `compare_numbers` and the clause, against a layer that prints 2.
+Main disputed each of these wrong values; at 42c6371f they dropped and the page passed, so
+both were regressions in what the check catches:
+
+| finding | probe | main | 42c6371f |
+| --- | --- | --- | --- |
+| P1-1 control space | `$\pi^* = 9\ \%$` in a table equation | dispute | dropped |
+| P1-1 control space | `(9\ \%)` in a `tabular` | `(9%)` | bracket lost |
+| P1-2 percent after a bracket | `(9) \%`, `$(9)$ \%` | dispute `(9)` | dropped |
+
+A plain cell `9\ \%` still disputed at 42c6371f. `(9)~\%` drops on main and on the branch.
+
+**Fix.** `(?<=\d)` anchors the match to a digit: a blank after `\` or after `)` is no
+longer touched. Argon also suggested adding `\\[,;:! ]`. I measured it and dropped it: with
+the anchor, `9\ \%` is left whole and main's equation check reads it. A mutant removing that
+alternative killed nothing, so it was unproven code. The anchor also covers the accent
+`3\~\%`, so `(?<!\\)` went.
+
+**Sweep.** I ran main and the branch on every combination of these:
+- 8 numbers;
+- 12 gaps: blank, tie, `\ `, `\,`, `\~`, mixes;
+- 7 wrappers: maths, equation, brackets in and out of maths;
+- 3 contexts: cell, prose, `tabular`;
+- `\%` inside or outside the wrapper.
+
+Results:
+- 3672 wrong-value inputs: no input with fewer disputes or fewer compared numbers than main;
+  310 more disputes.
+- 2268 right-value inputs: 62 new disputes, all `2.0` against a layer `2`. Main disputes the
+  unspaced `2.0\%` identically: that is the existing precision rule, not this change.
+
+**Tests.** Five rows in the spaced-vs-unspaced test:
+- control space in an equation, a cell bracket, and a `tabular` bracket;
+- `(9) \%` and `$(9)$ \%`, each against the bare `(9)`.
+
+**Mutants** (external copy, `socr.__file__` inside it, `count(anchor)==1`):
+
+| mutant | failing tests |
+| --- | --- |
+| remove the digit anchor | 6 |
+| remove the blank alternative | 6 |
+| remove the tie alternative | 5 |
+| remove the normalisation line | 11 |
+
+The issue's item 3 still holds: removing `\\[,;:! ]` from the equation check fails 2 tests,
+the `\,` row and the new control-space equation row.
