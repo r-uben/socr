@@ -176,12 +176,37 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         clause = text_layer_numbers_clause(output, p)
     if clause is None:
         return None
-    as_run = PageState(page_num=output.page_num)
-    as_run.prior_ocr_layer_suspect = bool(sidecar.get("prior_ocr_layer_suspect"))
+    as_run = slot_reference_state(sidecar, output.page_num)
     extended = with_text_layer_numbers_clause(
         replace(published, page_num=output.page_num), clause, output, as_run, event_kinds
     )
     return apply_verdict_marks(output, p, output.page_num, published=extended)
+
+
+def slot_reference_state(sidecar: dict, page_num: int):
+    """The stand-in ``PageState`` ``with_text_layer_numbers_clause`` counts clauses on.
+
+    It must carry every field a silent-success clause AHEAD of this one reads, because the
+    slot is a COUNT: a field left out makes the count short and puts this clause above a mark
+    the writing run had put above it.
+
+    A named function rather than four lines inline, so the invariant can be tested instead of
+    grepped for (#1187 merge: the mutation that emptied the restore survived a source-text
+    assertion).
+    """
+    from socr.core.state import PageState
+
+    p = PageState(page_num=page_num)
+    p.prior_ocr_layer_suspect = bool(sidecar.get("prior_ocr_layer_suspect"))
+    # #1187: a figure the page names and does not show is a silent-success clause ahead of
+    # this one. Both keys are persisted by the live run.
+    unlocated = sidecar.get("unshipped_figure_unlocated")
+    p.unshipped_figure_unlocated = (
+        [str(c) for c in unlocated] if isinstance(unlocated, list) else []
+    )
+    kind = sidecar.get("unshipped_figure_kind")
+    p.unshipped_figure_kind = kind if isinstance(kind, str) else ""
+    return p
 
 
 def _page_event_kinds(doc_dir: Path) -> dict[int, frozenset[str]]:

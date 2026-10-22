@@ -402,6 +402,23 @@ class PageState:
     #: (a failed page is WARNING and is re-processed on resume).
     scanned_figure_png_ref: str = ""
     scanned_figure_render_failed: bool = False
+    #: #1187: the crops of figures this page NAMES in its shipped body and does not show.
+    #: One ref per region ``FigureExtractor`` located. Persisted to the sidecar, like
+    #: ``scanned_figure_png_ref``, so a resumed page ships the same picture the first run did
+    #: instead of silently degrading to a bare caption.
+    unshipped_figure_refs: list[str] = field(default_factory=list)
+    #: #1187: the caption lines that named them, for the alt text and (when nothing was
+    #: located) for the verdict clause. Persisted for the same reason.
+    unshipped_figure_captions: list[str] = field(default_factory=list)
+    #: #1187: the figures this page NAMES and does not show whole. A page with these ships a
+    #: mark, never a silent short caption. Persisted: the clause is the page's published
+    #: verdict. Round 2: this is set on EVERY outcome the lane acts on, including the one that
+    #: ships crops -- a crop is a picture, not a reading, and a caption count cannot establish
+    #: how many figures a page carries (Argon P0-1).
+    unshipped_figure_unlocated: list[str] = field(default_factory=list)
+    #: #1187 round 2: WHICH outcome, so the page's mark says what actually happened to its
+    #: figure rather than one hard-coded sentence. Persisted alongside the three lists.
+    unshipped_figure_kind: str = ""
     #: #1027: the per-rung summary a skipped (resumed) page's sidecar carried. A skipped page
     #: ran no rung this run, so re-flushing must keep the original record instead of
     #: replacing it with the single restored winner.

@@ -194,6 +194,14 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         "this page's chart ships as an image and the labels and values drawn in it were "
         "never transcribed -- read them off the image before citing",
     ),
+    #: #1187 is deliberately ABSENT from this map, and that is the fix rather than an
+    #: omission. These rows exist for a lane whose per-page state does not survive a resume,
+    #: so the clause must be rebuilt from the mode. This lane's state DOES survive
+    #: (``unshipped_figure_unlocated`` is a persisted sidecar key, restored by the resume
+    #: path), so ``_unshipped_figure_clauses`` re-derives the real clause on every pass. A row
+    #: here would be a SECOND, page-scoped clause about the same fact -- which is what the
+    #: shared ``VISUAL_VALUES_UNTRANSCRIBED`` row produced on the second pass, saying the
+    #: page's chart ships as an image on a page that shipped none (Argon P0-3, reproduced).
     #: #1181. Same purpose as the two rows above: the clause comes from the EXACT_PASS
     #: audit event on the first pass and from here on every later one, so a re-finalized
     #: page publishes the verdict it already had. The wording must not imply the table was
@@ -437,6 +445,41 @@ def _scanned_figure_clause(p: Any) -> VerdictClause | None:
     )
 
 
+def _unshipped_figure_clauses(p: Any) -> list[VerdictClause]:
+    """#1187: one clause per figure this page NAMES and socr could neither show nor locate.
+
+    Status-INDEPENDENT (it lives in ``silent_success_clauses``) because the pages it is for
+    ship SUCCESS: on run 23319732 all 3,082 model-read pages count CHECKED while 142 of them
+    name a figure they do not show, 39 of which this lane cannot give a picture. A clause that
+    only fired on an already-demoted page would be blind to exactly that population.
+
+    Records in, clauses out. The orchestrator writes the captions; the lane's own module
+    renders them into clause records, and ``_apply_verdict_marks`` renders the page's lines
+    from those -- one source, so the line and the record cannot disagree (#1155's lesson).
+
+    ``isinstance`` rather than truthiness: ``p`` is a stand-in object in much of the suite,
+    and a bare ``Mock`` hands back another ``Mock`` for any attribute, which would iterate
+    as a non-empty sequence of ``Mock``s here -- while a ``MagicMock`` iterates as EMPTY and
+    reads as "no clauses", the vacuous shape this repo keeps finding.
+    """
+    captions = getattr(p, "unshipped_figure_unlocated", None)
+    if not isinstance(captions, (list, tuple)) or not captions:
+        return []
+    from socr.figures.unshipped_figures import clause_records
+
+    page_num = int(getattr(p, "page_num", 0) or 0)
+    kind = getattr(p, "unshipped_figure_kind", "")
+    clauses: list[VerdictClause] = []
+    for record in clause_records(
+        page_num, tuple(str(c) for c in captions), str(kind) if isinstance(kind, str) else ""
+    ):
+        try:
+            clauses.append(VerdictClause.from_dict(record))
+        except Exception:
+            logger.warning("#1187: unreadable unshipped-figure record %r", record)
+    return clauses
+
+
 def _native_glyph_clause(
     p: Any, output: PageOutput, provenance: Any = None
 ) -> VerdictClause | None:
@@ -643,6 +686,14 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
     {
         FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        # #1187 round 4: a figure the page names and socr could not SHOW is deterministic
+        # under the same input and fingerprint -- the same locator on the same PDF gives the
+        # same answer -- so re-reading the page cannot resolve it and the per-page ledger
+        # should restore it. Round 2 left this out and every page the lane marked was re-OCR'd
+        # on every partial-document resume, for ever (Fable P1-1 / Argon P1-C, reproduced).
+        # ``FIGURE_RENDER_FAILED`` is deliberately NOT here: that one is a render failure a
+        # re-run may fix, which is what Argon's round-2 P0-3 asked for.
+        FailureMode.FIGURE_NOT_SHOWN,
         # #1185: no own text layer, or no number in the reading. The check that could
         # resolve it is a second, independent reader (#1208), which does not exist yet;
         # when it does, the source digest in the run fingerprint re-OCRs the page anyway.
@@ -1012,6 +1063,45 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     return None
 
 
+#: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
+#: Named here, beside the function that defines it, so the two cannot drift.
+#:
+#: ``FIGURE_TEXT`` appears TWICE and the pair is what tells the two apart: the chart lane's
+#: clause is page-scoped and comes early, this lane's names a region and comes last before
+#: the numbers clause.
+_SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
+    (Check.EQUATION_FIDELITY, SCOPE_PAGE),
+    (Check.FIGURE_TEXT, SCOPE_PAGE),
+    (Check.PAGE_JUDGE, SCOPE_PAGE),
+    (Check.PRIOR_OCR_LAYER, SCOPE_PAGE),
+    (Check.FIGURE_TEXT, "figure"),
+    (Check.TEXT_LAYER_NUMBERS, SCOPE_PAGE),
+)
+
+
+def in_fresh_run_order(clauses):
+    """*clauses* reordered as a fresh run would emit them.
+
+    The silent-success clauses first, in :data:`_SILENT_SUCCESS_ORDER`, then every
+    status-dependent clause in the order it already had. Stable, so two clauses that rank the
+    same keep their relative positions.
+
+    For a re-finalize tool, which merges a clause into a verdict some earlier run or tool
+    wrote. Inserting at a computed SLOT cannot do this: the recorded list may itself not be
+    in fresh-run order (it came from another tool), and then no single insertion point gives
+    the order a fresh run would (owner item 4, Fable P2). Sorting does not care how the list
+    got into the state it is in.
+    """
+    rank = {pair: i for i, pair in enumerate(_SILENT_SUCCESS_ORDER)}
+
+    def key(item):
+        index, clause = item
+        kind = str(clause.scope).split(":", 1)[0]
+        return (rank.get((clause.check, kind), len(rank)), index)
+
+    return [clause for _i, clause in sorted(enumerate(clauses), key=key)]
+
+
 def silent_success_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
 ) -> tuple[VerdictClause, ...]:
@@ -1039,6 +1129,14 @@ def _clauses_ahead_of_text_layer_numbers(
         _chart_values_clause(event_kinds),
         _exact_pass_unjudged_clause(output, event_kinds),
         _prior_ocr_layer_clause(output, p),
+        # #1187 (merge with #1185): INSIDE the ahead tuple, not after the numbers clause.
+        # This tuple is the single ordering authority -- ``with_text_layer_numbers_clause``
+        # slots #1185's clause by the COUNT of what precedes it -- so a lane that derived its
+        # clauses anywhere else would make a re-finalized page's marks sit in a different
+        # order from a fresh run's. The two lanes are independent and BOTH may mark one page:
+        # a figure this page names and does not show, and numbers its text layer disputes,
+        # are different facts and neither undoes the other.
+        *_unshipped_figure_clauses(p),
     )
     return tuple(clause for clause in clauses if clause is not None)
 
@@ -1193,6 +1291,14 @@ def _covered_checks(
     return covered, pairs
 
 
+#: #1187's two modes. Both are recorded for a figure a page names and does not show, and
+#: both are explained by the same ``figure_text`` clause; they differ only in whether the
+#: outcome can change on a later run (see ``PERMANENTLY_UNRESOLVABLE_MODES``).
+_FIGURE_LANE_MODES: frozenset[FailureMode] = frozenset(
+    {FailureMode.FIGURE_NOT_SHOWN, FailureMode.FIGURE_RENDER_FAILED}
+)
+
+
 def _status_is_explained(
     output: PageOutput,
     p: Any,
@@ -1221,9 +1327,30 @@ def _status_is_explained(
     """
     if _MODE_CLAUSES.get(output.failure_mode) is not None:
         return True
+    # #1187: the one demotion whose mode deliberately has no ``_MODE_CLAUSES`` row, because
+    # its lane's state survives a resume and so the real clause is re-derived every pass (see
+    # the note where the row would be). The status is explained when that clause is present --
+    # asked here rather than given a row, because a row would publish a SECOND, page-scoped
+    # clause about the same fact. Without this the fail-closed fallback fired on a page whose
+    # reason WAS named, which is the hole this helper exists to close, not to open.
+    # BOTH of this lane's modes, not just the first (round 5, Argon P1-2b). The two were
+    # split apart so a deterministic outcome could be permanent while a transient crop
+    # failure is retried; they are explained by the SAME clause, and naming one of them here
+    # made the other's page gain the fail-closed ``unknown`` clause on the second pass --
+    # measured: pass 1 ``[figure_text, text_layer_numbers]``, pass 2 the same plus
+    # ``unknown``, with the page's bytes unchanged. The record and the marks disagreeing
+    # about one page is the exact conflation ``build_page_verdict`` exists to prevent.
+    if output.failure_mode in _FIGURE_LANE_MODES:
+        return any(
+            c.check is Check.FIGURE_TEXT and str(c.scope).startswith("figure:") for c in clauses
+        )
     # #1185: a mode whose clause wording names the page's own numbers cannot sit in
     # ``_MODE_CLAUSES`` (a fixed reason there would REPLACE the named one in
     # ``_merge_clause``). It is explained when the clause it records is present.
+    #
+    # Two independent early returns, deliberately: a page can carry BOTH a figure it does not
+    # show and numbers its layer disputes, and the mode records only the one that demoted it
+    # first. Each asks about its own clause, so neither lane's answer depends on the other's.
     check = TEXT_LAYER_NUMBERS_MODES.get(output.failure_mode)
     if check is not None and any(c.check is check for c in clauses):
         return True

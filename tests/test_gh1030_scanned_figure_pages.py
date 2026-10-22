@@ -446,6 +446,29 @@ def test_e2e_caption_page_gets_the_image_and_prose_page_does_not(
         stripped_body = stripped.replace(pointer, _NOpointer)
     else:
         stripped_body = stripped
+    # #1187: and now a THIRD difference, which is this fixture's whole point stated from the
+    # other side. With the lane off, the page names FIGURE 5 and shows nothing -- which is the
+    # defect #1187 removes -- so #1187's own lane marks it. Asserted explicitly rather than
+    # ignored, in the shape of the pointer assertion above: it says WHICH page carries the mark
+    # and which does not.
+    unshipped = next(
+        (
+            ln
+            for ln in off_text.split("\n")
+            if "unchecked: figure_text=UNKNOWN; scope=figure:" in ln
+        ),
+        "",
+    )
+    if unshipped:
+        # The no-provider arms, where the page ships its own LAYER and the layer names the
+        # figure. With a provider the shipped text is the stub reading, which names no figure,
+        # so the lane correctly says nothing: it reads the body a reader sees, not the layer.
+        assert unshipped not in stripped_body, "the page that ships the image must not be marked"
+        off_text = (
+            off_text.replace(f"{unshipped}\n\n", "", 1).replace(unshipped, "", 1).lstrip("\n")
+        )
+    else:
+        assert "figure_text=UNKNOWN" not in off_text and "figure_text=UNKNOWN" not in stripped_body
     assert stripped_body == off_text
     assert not [i for i in _images(off[2]) if "scanned_figure_page" in i]
     assert not [i for i in _images(fig_text) if "/figure_" in i], "the raster is not shipped twice"

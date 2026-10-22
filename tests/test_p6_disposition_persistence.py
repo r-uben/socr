@@ -287,6 +287,17 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "native_rotated_text_shredded",
         "rotated_shred_png_ref",
         "scanned_figure_png_ref",
+        # #1187: the crops of a figure the page names and does not show, the captions
+        # that named them, and the captions nothing was shown for. Persisted for the same
+        # reason as ``scanned_figure_png_ref`` above: a resumed page must ship the same
+        # picture and the same mark the first run did, not degrade to a bare caption.
+        "unshipped_figure_refs",
+        "unshipped_figure_captions",
+        "unshipped_figure_unlocated",
+        # #1187 round 2: WHICH outcome the lane reached, so a resumed page's mark says what
+        # happened to its figure rather than one hard-coded sentence. A string, beside the
+        # three lists above.
+        "unshipped_figure_kind",
         "native_table_structure_defective",
         "native_table_emission_defect",
         "native_table_content_defect",

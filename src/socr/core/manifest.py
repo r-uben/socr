@@ -59,6 +59,7 @@ from socr.core.marks import (
     Check,
     CheckResult,
     is_canonical_mark,
+    parse_canonical_mark,
 )
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
@@ -6004,7 +6005,50 @@ def _apply_unaccepted_output_mark(
     return replace(output, text=text)
 
 
-def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutput:
+#: #1187 round 4: every mode ``_verdict_demotion_mode`` can return. A page already WARNING
+#: with one of these was demoted by THIS chooser on an earlier pass, so recomputing it from
+#: the final clause set is restating its own answer, not overruling another writer's.
+_VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.EQUATION_FIDELITY_UNVERIFIED,
+        FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
+        FailureMode.MODEL_OUTPUT_UNJUDGED,
+        FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+        FailureMode.FIGURE_NOT_SHOWN,
+        FailureMode.FIGURE_RENDER_FAILED,
+        FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
+        FailureMode.NUMBERS_UNCHECKED,
+    }
+)
+
+
+def _a_floor_set_this_mode(output: PageOutput) -> bool:
+    """Did a #1027/#1156 FLOOR write this page's mode, rather than the clause chooser?
+
+    Round 5 (the bot's P2, Fable P1-2, Argon P1-2c, measured by all three).
+    ``PRIOR_OCR_LAYER_UNVERIFIED`` has two writers: ``_verdict_demotion_mode``, from a
+    ``prior_ocr_layer`` clause on an ACCEPTED model reading of a scan, and the prior-OCR
+    floors above (``PRIOR_OCR_LAYER_MASKED`` and ``PRIOR_OCR_LAYER_UNREAD``), which set it
+    directly on a page whose reading was NOT accepted. The recompute must restate the
+    chooser's own answer and never overwrite the floor's, and the ``elif``'s comment already
+    claimed as much while the set did not: measured, a floor page that also carried the
+    chart lane's page-scoped ``figure_text`` clause came out of
+    ``_apply_verdict_marks`` as ``VISUAL_VALUES_UNTRANSCRIBED`` instead -- which IS in
+    ``PERMANENTLY_UNRESOLVABLE_MODES``, so an UNACCEPTED floor page became one a resume
+    restores for ever, under a reason the floor did not give. 4 of the 2,476 calibration
+    pages carry that clause pair.
+
+    The two writers are told apart by what the floor sets beside the mode and the chooser
+    cannot: a floor ships the page's own native text (``engine="native"``) and is
+    ``audit_passed=False`` BY CONSTRUCTION, while the chooser's route to this mode needs a
+    model winner whose reading was accepted. Provenance would say it more directly and is
+    not available here: a re-finalize pass rebuilds the output from the sidecar, which does
+    not carry it.
+    """
+    return output.audit_passed is False and engine_ships_native_text(output.engine)
+
+
+def _warn_success_status_for_verdict(output: PageOutput, clauses=(), kind: str = "") -> PageOutput:
     """SUCCESS becomes WARNING for a page with an unresolved check. Nothing else moves.
 
     ``audit_passed`` is deliberately left alone. It is not a spare "is this page fine"
@@ -6023,14 +6067,21 @@ def _warn_success_status_for_verdict(output: PageOutput, clauses=()) -> PageOutp
     Fable found. An existing, more specific mode is never overwritten: it says more.
     """
     mode = (
-        _verdict_demotion_mode(clauses)
+        _verdict_demotion_mode(clauses, kind)
         if output.failure_mode is FailureMode.NONE
         else output.failure_mode
     )
     return replace(output, status=PageStatus.WARNING, failure_mode=mode)
 
 
-def _verdict_demotion_mode(clauses) -> FailureMode:
+#: #1187 round 4: the lane's one TRANSIENT outcome, named here so the mode chooser can tell
+#: it from the deterministic ones. A literal rather than an import, like the ladder terminals
+#: in ``tables_trust``: this is sidecar DATA from finished runs, and a rename must not
+#: silently stop matching what is already on disk.
+_FIGURE_RENDER_FAILED_KIND = "unshipped_figure_render_failed"
+
+
+def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
     """The mode that records WHY a silent-success clause demoted this page.
 
     One row per silent-success class, keyed on the clause so the mode and the clause cannot
@@ -6050,16 +6101,51 @@ def _verdict_demotion_mode(clauses) -> FailureMode:
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
     }
+    #: #1187: the one place two silent-success classes share a CHECK and must not share a
+    #: mode. The chart lane's clause is page-scoped and means "a picture shipped without its
+    #: values"; this lane's names a region (``figure:N``) and means "the page does not show
+    #: this figure whole". Keyed on the scope's kind, which the clause already carries, so no
+    #: new field is invented to tell them apart. Round 1 shared the chart row, which recorded
+    #: something false about the page and dragged in ``PERMANENTLY_UNRESOLVABLE_MODES``
+    #: (Argon P0-3, reproduced).
+    by_scope_kind = {("figure", Check.FIGURE_TEXT): FailureMode.FIGURE_NOT_SHOWN}
     # #1185: one check, two modes -- a FAIL names numbers a new reading may fix; an
     # UNKNOWN has nothing to compare against until #1208.
     by_result = {
         (Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL): FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         (Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN): FailureMode.NUMBERS_UNCHECKED,
     }
-    for clause in clauses:
-        mode = by_check.get(clause.check) or by_result.get((clause.check, clause.result))
-        if mode is not None:
-            return mode
+
+    def _mode_of(clause) -> FailureMode | None:
+        scoped = by_scope_kind.get((str(clause.scope).split(":", 1)[0], clause.check))
+        if scoped is not None:
+            # #1187 round 4: which of the lane's two modes depends on WHY the figure is not
+            # shown, which the clause cannot say and the page state can. A located region
+            # whose crop failed to save is transient and must be retried on resume; the other
+            # outcomes are deterministic and must not be.
+            if scoped is FailureMode.FIGURE_NOT_SHOWN and kind == _FIGURE_RENDER_FAILED_KIND:
+                return FailureMode.FIGURE_RENDER_FAILED
+            return scoped
+        return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
+
+    # A FAIL outranks an UNKNOWN, whatever the clause order (Argon P0-A). A FAIL means a check
+    # RAN and the page did not pass it -- "numbers a new reading may fix" -- and an UNKNOWN
+    # means it could not run. Taking the first clause let this lane's UNKNOWN shadow #1185's
+    # FAIL on a page carrying both, and made the recorded mode depend on which re-finalize
+    # tool ran first, which in turn decided whether a resume restored the page or re-read it.
+    # Canonical order first, so the answer is a function of the clause SET and not of the
+    # order a particular writer happened to leave them in. Two clauses of the same result
+    # would otherwise be a tie broken by list position, which is the whole of Argon P0-A.
+    from socr.core.verdict import in_fresh_run_order
+
+    clauses = tuple(in_fresh_run_order(tuple(clauses)))
+    for wanted in (CheckResult.FAIL, CheckResult.UNKNOWN):
+        for clause in clauses:
+            if clause.result is not wanted:
+                continue
+            mode = _mode_of(clause)
+            if mode is not None:
+                return mode
     return FailureMode.NONE
 
 
@@ -6127,7 +6213,27 @@ def _apply_verdict_marks(
     # was admitted to the resume exception under a reason that was not the one that demoted
     # it. An existing, more specific mode is never overwritten.
     if verdict.clauses and output.status is PageStatus.SUCCESS:
-        output = _warn_success_status_for_verdict(output, verdict.clauses)
+        output = _warn_success_status_for_verdict(
+            output, verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
+        )
+    elif (
+        verdict.clauses
+        and output.failure_mode in _VERDICT_DERIVED_MODES
+        and not _a_floor_set_this_mode(output)
+    ):
+        # #1187 round 4 (Argon P0-A): the page is ALREADY demoted, and by a mode this chooser
+        # owns -- which means an earlier pass over the same page recorded it from a SMALLER
+        # clause set. Re-finalizing with the full set must give the mode a fresh run gives,
+        # or the recorded mode depends on which re-finalize tool ran first, and with it
+        # whether a resume restores the page or re-reads it (the two lanes' modes differ in
+        # ``PERMANENTLY_UNRESOLVABLE_MODES``). Only modes this function produces are
+        # recomputed: a mode a GUARD set is more specific and is never overwritten -- which
+        # is what ``_a_floor_set_this_mode`` is for (round 5).
+        _recomputed = _verdict_demotion_mode(
+            verdict.clauses, str(getattr(p, "unshipped_figure_kind", "") or "")
+        )
+        if _recomputed is not FailureMode.NONE and _recomputed is not output.failure_mode:
+            output = replace(output, failure_mode=_recomputed)
     # ``is_page_failed_marker`` is exactly "the body is a marker plus at most one image"
     # (GH-371), which is what decides whether a ``[page N failed: …]`` line speaks for the
     # whole page or only for the table it stands in place of.
@@ -6155,7 +6261,51 @@ def _apply_verdict_marks(
     # canonical clause line is the general form and must not displace it. Both land in the
     # same leading block, so the page is MARKED either way -- the meter asks that the first
     # rendered BLOCK be all marks, not that one particular line be first.
-    return replace(output, text=_with_page_top_banners(body, [*banners, *marks])), verdict
+    #
+    # The canonical lines among them are then put in ONE order (``_ordered_page_marks``),
+    # so a page re-finalized by two tools reads the same whichever ran first.
+    return (
+        replace(
+            output, text=_with_page_top_banners(body, _ordered_page_marks(banners, marks, page_num))
+        ),
+        verdict,
+    )
+
+
+def _ordered_page_marks(banners: Sequence[str], marks: Sequence[str], page_num: int) -> list[str]:
+    """#1187 round 4 (Argon P0-A): one order for a page's marks, whichever pass wrote them.
+
+    ``marks_to_write`` sorts the lines it emits by ``(check, scope)``, so a FRESH run --
+    which sees all of a page's clauses in one pass -- writes them in that order. A
+    re-finalize tool writes only the clause the earlier pass had no evidence for, and
+    appending it left the block in the order the PASSES ran: the same two facts rendered
+    ``figure_text`` then ``text_layer_numbers`` when the figures tool ran last, and the
+    reverse when it ran first, on 7 of 2,476 calibration pages. That is a diff against a
+    fresh run, and a diff between two runs that are both correct -- which makes a
+    byte-identity check across the paths impossible to state, let alone pin.
+
+    So the canonical lines already in the block are re-sorted together with the new ones,
+    by the key ``marks_to_write`` itself uses. Lines that are not canonical clause marks
+    keep their position AHEAD of them: #1129's ``> [page unaccepted: …]`` headline has its
+    own contract that it is the page's first line. If such a line sits BELOW a canonical
+    one -- which socr never writes, but an old output could carry -- nothing is reordered,
+    because moving it is a change to a contract this function does not own.
+
+    Reached only when there is a new line to write (the caller returns early otherwise), so
+    an already-complete page is still byte-identical.
+    """
+    parsed = [(line, parse_canonical_mark(line, page_num)) for line in banners]
+    head = [line for line, pair in parsed if pair is None]
+    existing = [(line, pair) for line, pair in parsed if pair is not None]
+    if existing and head and banners.index(existing[0][0]) < banners.index(head[-1]):
+        return [*banners, *marks]
+
+    def key(item: tuple[str, tuple[Check, str] | None]) -> tuple[str, str]:
+        pair = item[1] or parse_canonical_mark(item[0], page_num)
+        return ("", "") if pair is None else (pair[0].value, pair[1])
+
+    fresh: list[tuple[str, tuple[Check, str] | None]] = [(m, None) for m in marks]
+    return [*head, *(line for line, _ in sorted([*existing, *fresh], key=key))]
 
 
 def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
@@ -6297,6 +6447,72 @@ def _apply_scanned_figure_guard(output: PageOutput, p) -> PageOutput:
     # as literal code while the report says it shipped.
     text = close_open_code_fence(text)
     return replace(output, text=f"{text.rstrip()}\n\n{ref}")
+
+
+def _apply_unshipped_figure_guard(output: PageOutput, p) -> PageOutput:
+    """#1187: append the crops of a figure the page NAMES and does not show.
+
+    The decision is the orchestrator's (``_agentic_unshipped_figure_page``); this applies it
+    to the FINALIZED copy, so the flush, the stitch and a resume replay all see one body --
+    the shape ``_apply_scanned_figure_guard`` already has.
+
+    Abstains when the body, as it now stands, already carries an image: a guard above may
+    have replaced the text with a floor marker that ships its own page image, and two
+    pictures of one page is the defect this lane exists to avoid, inverted. Idempotent on its
+    own refs, which is what lets the re-finalize tool run twice and change nothing.
+
+    Status is untouched. A picture shipping is not a failure, and the page that could NOT be
+    given one is marked by its verdict clause (``verdict._unshipped_figure_clauses``), not
+    here -- one writer per statement.
+    """
+    # ``isinstance`` rather than truthiness: ``p`` is a stand-in object in much of the suite,
+    # and a bare ``Mock`` hands back another ``Mock`` for any attribute -- which is truthy, so
+    # ``or []`` keeps it and iterating it raises inside the finalisation seam for every page in
+    # those tests. The same shape ``verdict._chart_floor_clauses`` uses, for the same reason.
+    raw_refs = getattr(p, "unshipped_figure_refs", None)
+    refs = [str(ref) for ref in raw_refs if ref] if isinstance(raw_refs, (list, tuple)) else []
+    if not refs:
+        return output
+    text = output.text or ""
+    if not text.strip():
+        return output
+    from socr.figures.scanned_figures import close_open_code_fence
+    from socr.figures.unshipped_figures import body_shows_a_picture, figure_block
+
+    # ONE gate, and it is the broad one: a body that already shows a picture. A narrower
+    # "is this exact ref already here" test was written above it first, and the mutation
+    # check found it unkillable -- this lane's own block opens a line with ``![``, so the
+    # broad gate is what makes a second application a no-op, and a second guard that can
+    # never fire is not a guard (CLAUDE.md).
+    if body_shows_a_picture(text):
+        return output
+    # #1187 round 2 (Fable P1-1, reproduced): a page whose body is a whole-page failure
+    # marker keeps it. ``is_page_failed_marker`` admits "a marker plus at most one image"
+    # (GH-371), so appending two or three crops made the page stop reading as a marker to the
+    # disposition classifier, to selection and to the resume gate -- a fail-closed floor
+    # silently becoming content, which is the ruling inverted. The figure is still owed a
+    # statement, and still gets one: the page's verdict clause is derived from
+    # ``unshipped_figure_unlocated``, which this lane now sets on every outcome it acts on,
+    # so abstaining here loses the picture and keeps the mark.
+    if is_page_failed_marker(text):
+        return output
+
+    raw_caps = getattr(p, "unshipped_figure_captions", None)
+    captions = tuple(str(c) for c in raw_caps) if isinstance(raw_caps, (list, tuple)) else ()
+    block = figure_block(_page_num_of(output), refs, captions)
+    if not block:
+        return output
+    # A fence the page left open runs to the end of the document: close it, or the image
+    # renders as literal code while the report says it shipped (#1030's lesson, same seam).
+    return replace(output, text=f"{close_open_code_fence(text).rstrip()}\n\n{block}")
+
+
+def _page_num_of(output: PageOutput) -> int:
+    """The page number of *output*, 0 when it carries none (only reachable from a stub)."""
+    try:
+        return int(getattr(output, "page_num", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _apply_halt_unprocessed_guard(output: PageOutput, p) -> PageOutput:
@@ -6506,6 +6722,7 @@ def _select_and_finalize_page(
       8. _apply_ditto_guard
       9. _apply_chart_region_guard
       9b. _apply_scanned_figure_guard (#1030)
+      9b2. _apply_unshipped_figure_guard (#1187)
       9c. _apply_native_paragraphs (#1074)
       9d. _apply_unverified_table_mark (#1048)
       9e. _apply_unaccepted_output_mark (#1129)
@@ -6539,6 +6756,7 @@ def _select_and_finalize_page(
         output = _apply_chart_region_guard(output, p)
         output = _apply_halt_unprocessed_guard(output, p)
         output = _apply_scanned_figure_guard(output, p)
+        output = _apply_unshipped_figure_guard(output, p)
         # #1156 Part B: the masked layer ships exactly as built from the retained original.
         # The reflow rebuilds lines from the page's native geometry, which carries the
         # UNMASKED layer, and a re-finalisation of a finished run has no geometry at all.
@@ -6669,6 +6887,23 @@ def _select_and_finalize_page(
     )
 
 
+def refinalize_unshipped_figure_page(output: PageOutput, p, page_num: int, published=None):
+    """#1187: apply this lane's two finalisation steps to an ALREADY-SELECTED page.
+
+    The public seam ``socr-refinalize-unshipped-figures`` uses, because ``pipeline`` may not
+    import ``core``'s private names (``test_package_layering``) -- and because the ORDER of the
+    two steps is part of the contract: the guard appends the crop, then the verdict seam reads
+    the final bytes and puts any mark above them. ``_select_and_finalize_page`` applies the same
+    two in the same order, which is what makes a re-finalized page byte-identical to a page a
+    live run produced.
+
+    No selection runs here: the page's winner was decided by the run that shipped it, and this
+    lane never changes it.
+    """
+    output = _apply_unshipped_figure_guard(output, p)
+    return _apply_verdict_marks(output, p, page_num, published=published)
+
+
 def finalized_page_record(
     state: DocumentState,
     page_num: int,
@@ -6785,6 +7020,17 @@ def _base_engine_name(engine: str) -> str:
     if engine.startswith("consensus(") and engine.endswith(")"):
         return engine[len("consensus(") : -1]
     return engine
+
+
+def page_asset_refs(text: str, doc_dir: Path) -> list[AssetRef]:
+    """The asset records ``build_manifest`` would write for a page with this text.
+
+    #1187 round 2 (Argon P1-3a): the public name, because a re-finalize tool in ``pipeline``
+    attaches an image to a page and must record it the same way a live run would, and
+    ``pipeline`` may not import ``core``'s private names (``test_package_layering``). One
+    implementation, so a tool-written asset and a run-written asset cannot disagree.
+    """
+    return _local_page_asset_refs(text, doc_dir)
 
 
 def _local_page_asset_refs(text: str, doc_dir: Path) -> list[AssetRef]:

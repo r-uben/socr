@@ -90,6 +90,7 @@ from socr.core.state import (
 )
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
+from socr.figures import unshipped_figures as _unshipped_figures
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
     MATH_FONT_UNRECOVERED_KIND,
@@ -387,6 +388,23 @@ def _sidecar_layer_caused_records(meta: dict) -> list[str]:
     return found
 
 
+#: #1187: re-exported from the lane's own module so the orchestrator, the replay allowlist,
+#: the document note and the CLI line all read one definition.
+UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = _unshipped_figures.EVENT_KINDS
+#: The subset that means a figure this page names is preserved NOWHERE.
+UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = _unshipped_figures.MARKED_KINDS
+UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
+UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
+#: The three ``PageState`` fields / sidecar keys this lane owns.
+_UNSHIPPED_FIGURE_FIELDS = (
+    "unshipped_figure_refs",
+    "unshipped_figure_captions",
+    "unshipped_figure_unlocated",
+)
+#: #1187 round 2: the outcome kind, persisted beside them so a resumed page's mark says what
+#: happened to its figure rather than a default. A string, not a list, hence its own name.
+_UNSHIPPED_FIGURE_KIND_FIELD = "unshipped_figure_kind"
+
 _RESUME_REPLAYED: dict[str, str] = {
     PROVIDER_EMPTY_RESPONSE_KIND: (
         "a provider answered this page with no text; emitted by the engine call, which a "
@@ -400,6 +418,16 @@ _RESUME_REPLAYED: dict[str, str] = {
         "#1030: emitted by the page loop's scanned-figure step, which a terminal resumed page "
         "skips; the document note and CLI line read this event"
     ),
+    **{
+        kind: (
+            "#1187: emitted by the page loop's unshipped-figure step, which a terminal "
+            "resumed page skips; the document note and the CLI line read these events, and "
+            "the page's own picture or mark is restored from the sidecar fields, not from "
+            "the event -- so losing the event would lose only the report, which is the "
+            "#252 shape this allowlist exists for"
+        )
+        for kind in UNSHIPPED_FIGURE_EVENT_KINDS
+    },
     TABLE_FURNITURE_REMOVED_KIND: (
         "#988: the table gate removed page furniture (a site menu) from the shipped text; the "
         "removed runs live only on this event, and a terminal resumed page skips the gate"
@@ -5870,6 +5898,13 @@ class UnifiedPipeline:
             # own canonical mark from the floor.
             if getattr(ps, "chart_floor_body", False):
                 continue
+            # #1187 round 4 (Argon P1-D): this lane already cropped this page's figure and
+            # marked it. This pass's candidate set is every page WITH TABLES, which is exactly
+            # the chart+table class the lane serves, so without this it crops the same graphic
+            # a second time under ``chart_region_pN_M.png`` and adds a contradicting
+            # ``chart_region`` mark -- the same shape as the #1155 skip above.
+            if getattr(ps, "unshipped_figure_refs", None):
+                continue
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
                     _page = _doc[pn - 1]
@@ -7018,6 +7053,39 @@ class UnifiedPipeline:
                 "figures is preserved nowhere"
             )
         return "; ".join(parts)
+
+    @staticmethod
+    def _unshipped_figure_note(state) -> str | None:
+        """#1187: name the pages that named a figure they did not show, and what socr did.
+
+        Same shape and the same reason as ``_visual_values_not_transcribed_note``: a consumer
+        gating on ``metadata.json`` must see the debt without opening ``audit_log.json``. Read
+        from the audit events, which ``resume_restore_kinds`` replays, so a resumed document
+        reports what the first run did; built by ``unshipped_figures.document_note``, which the
+        re-finalize tool also calls, so a re-finalized document says what a fresh one would.
+
+        The abstaining kind is deliberately NOT reported: it records that a figure LABEL opened
+        a line, no region was located, and the label was not caption-shaped. Nothing was
+        withheld and nothing is owed.
+        """
+        shipped: list[int] = []
+        marked: list[int] = []
+        for event in state.events:
+            kind = getattr(event, "kind", "")
+            page = getattr(event, "page_num", None)
+            if page is None or kind not in UNSHIPPED_FIGURE_EVENT_KINDS:
+                continue
+            # Two independent questions, not one branch: a RENDERED page BOTH ships a crop
+            # and is marked, so it belongs in both lists. Round 2 put ``RENDERED_KIND`` into
+            # ``MARKED_KINDS`` and left this as an if/elif, which made the second arm
+            # unreachable -- a live run then never reported a shipped crop while the tool,
+            # whose ``_lane_pages`` asks the two questions separately, reported the same page
+            # twice (Argon P1-A, reproduced).
+            if kind == UNSHIPPED_FIGURE_RENDERED_KIND:
+                shipped.append(int(page))
+            if kind in UNSHIPPED_FIGURE_MARKED_KINDS:
+                marked.append(int(page))
+        return _unshipped_figures.document_note(shipped, marked) or None
 
     @staticmethod
     def _scanned_figure_split(state, records) -> tuple[list[int], list[int], list[int]]:
@@ -12217,6 +12285,18 @@ class UnifiedPipeline:
                 if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
                     bo = ps.best_output or bo
 
+                # #1187: a figure this page's own shipped body NAMES and does not show.
+                # Decided HERE, after BOTH table-withholding gates and immediately before the
+                # flush, so the body it reads is the body that is about to ship. In round 1 it
+                # ran earlier in this loop, before ``_withhold_contradicted_unverified_tables``
+                # and ``_withhold_unconfirmed_table`` could replace that body with a
+                # withheld-table floor -- leaving a crop and an event recorded for a page that
+                # shipped something else (Argon P1-1). One gate on the bytes that are about to
+                # ship cannot be bypassed by a step that produces different bytes (#1203's
+                # lesson, same loop).
+                with clock.span("figures"):
+                    self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
+
                 try:
                     from ocr_output_contract import PAGE_MARKER_RE
 
@@ -12807,6 +12887,103 @@ class UnifiedPipeline:
                     "the markdown, no model read it, and the page image failed to save"
                 ),
                 data={"png_saved": not chart_render_failed, "png_path": chart_png_ref},
+            )
+        )
+
+    def _agentic_unshipped_figure_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        page_out,
+        figures_dir: Path | None,
+    ) -> None:
+        """#1187: the page's shipped body names a figure and shows none. Ship it, or mark it.
+
+        Fires on the SHIPPED body, which is what makes it the defect's own predicate: the harm
+        is a caption a reader can see with nothing under it, so a figure the shipped text never
+        names leaves nothing dangling, whatever the page's layer says.
+
+        Model-free and deterministic. The RULE is not here -- ``unshipped_figures.decide`` holds
+        it and the re-finalize tool calls the same function, so the two cannot drift. Crops are
+        forced without ``--save-figures``, exactly as the chart lanes force theirs: once a
+        model's text has won the page, the crop is the figure's only representation, and on run
+        23319732 the figure phase never ran at all because that flag was off.
+
+        Abstains on a page that already shows a picture, under the SAME predicate the figure
+        extractor uses (``page_ships_its_own_page_image``) plus the body's own image refs, so no
+        page is ever given two pictures of one thing.
+
+        Never edits the page text here: ``manifest._apply_unshipped_figure_guard`` appends the
+        block at finalisation, so the flush, the stitch and a resume replay see one body -- the
+        #1030 shape. A figure that could not be shown is recorded for ``core.verdict``, which
+        marks the page.
+        """
+        from socr.core.manifest import page_ships_its_own_page_image
+        from socr.figures.unshipped_figures import (
+            body_shows_a_picture,
+            crop_filename,
+            decide,
+            locate_figure_regions,
+            page_was_read_by_a_model,
+        )
+
+        body = (getattr(page_out, "text", "") or "") if page_out is not None else ""
+        if not body.strip() or body_shows_a_picture(body):
+            return
+        # The lane's SCOPE, and the whole of the owner's standing blocker: a native body is
+        # the PDF's text layer, which this loop sees BEFORE ``_apply_native_paragraphs``
+        # reflows it at finalisation. A wrapped cross-reference then reads as a strict
+        # caption on a page whose shipped text has it mid-paragraph. Every number this lane
+        # has is model-read pages; native ones are out of scope until measured.
+        if not page_was_read_by_a_model(getattr(page_out, "engine", "")):
+            return
+        # Already answered for this page: a resumed page restores all three fields, and the
+        # abstaining outcome writes only ``captions`` -- which is why the gate reads all three
+        # and not just the two that carry an answer (Argon, diff review).
+        # Already answered for this page. The KIND alone, because round 2 sets it on EVERY
+        # outcome including the abstention -- so the three-list scan that stood here as well
+        # could never fire on its own, and the mutation check found it unkillable (CLAUDE.md:
+        # a guard that has never been seen to fail has not been shown to guard anything). The
+        # three lists are still persisted and restored; they are just not the gate.
+        if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
+            return
+        if page_ships_its_own_page_image(ps, body):
+            return
+
+        per_page = int(self.config.figures_max_per_page)
+
+        def _render(bboxes) -> list[str]:
+            if figures_dir is None:
+                return []
+            from socr.figures.chart_regions import render_chart_region_crops
+
+            return [
+                asset.rel_path
+                for asset in render_chart_region_crops(
+                    state.handle.path, page_num, bboxes, figures_dir, filename=crop_filename
+                )
+                if asset.rendered and asset.rel_path
+            ]
+
+        decision = decide(
+            body,
+            lambda: locate_figure_regions(state.handle.path, page_num, per_page),
+            _render,
+        )
+        if decision is None:
+            return
+        from socr.core.audit_log import AuditEvent
+
+        for name, value in decision.state_fields.items():
+            setattr(ps, name, value)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=decision.kind,
+                engine="",
+                detail=decision.detail,
+                data=decision.event_data(),
             )
         )
 
@@ -15950,6 +16127,26 @@ class UnifiedPipeline:
             "scanned_figure_png_ref": (
                 str(getattr(ps, "scanned_figure_png_ref", "")) if ps else ""
             ),
+            # #1187: the crops of a figure the page names and does not show, the captions
+            # that named them, and the captions nothing was located for. All three are
+            # restored on resume so a resumed page ships the same picture and the same mark
+            # the first run did instead of silently degrading to a bare caption.
+            "unshipped_figure_refs": (
+                [str(r) for r in (getattr(ps, "unshipped_figure_refs", None) or [])] if ps else []
+            ),
+            "unshipped_figure_captions": (
+                [str(c) for c in (getattr(ps, "unshipped_figure_captions", None) or [])]
+                if ps
+                else []
+            ),
+            "unshipped_figure_unlocated": (
+                [str(c) for c in (getattr(ps, "unshipped_figure_unlocated", None) or [])]
+                if ps
+                else []
+            ),
+            _UNSHIPPED_FIGURE_KIND_FIELD: (
+                str(getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "") or "") if ps else ""
+            ),
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
@@ -16847,6 +17044,21 @@ class UnifiedPipeline:
                 ):
                     is_permanently_unverifiable = False
 
+            # #1187 round 5 (Argon P1-2c): a crop this lane FAILED to render is retried,
+            # and the mode cannot be what says so. ``FIGURE_RENDER_FAILED`` is deliberately
+            # absent from ``PERMANENTLY_UNRESOLVABLE_MODES`` -- but a page carrying another
+            # lane's clause takes that lane's mode (measured: a render-failed page with a
+            # disputed number records ``numbers_disagree_with_text_layer``, which IS
+            # permanent), and the transient failure then never came back. The lane's own
+            # record of what happened is the authority, so it is read directly: whatever the
+            # mode says, a page whose kind is the render failure is reprocessed.
+            if (
+                is_permanently_unverifiable
+                and str(meta.get("unshipped_figure_kind") or "")
+                == UNSHIPPED_FIGURE_RENDER_FAILED_KIND
+            ):
+                is_permanently_unverifiable = False
+
             # #1192, the FOURTH deliberate exception, and the same argument as the three
             # above: an earlier-OCR page whose model reading was ACCEPTED is demoted only
             # because one reading of a scan must be MARKED rather than CHECKED, never
@@ -17517,6 +17729,15 @@ class UnifiedPipeline:
             # silently degrading to a bare marker.
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.scanned_figure_png_ref = str(meta.get("scanned_figure_png_ref", ""))
+            # #1187: lists only, positively. A sidecar is parsed JSON, so a key written
+            # by an older run is absent and a malformed one is not a list; either way the
+            # page restores as "this lane said nothing", and the live lane abstains on a
+            # resumed page only when it DID say something.
+            for _name in _UNSHIPPED_FIGURE_FIELDS:
+                _value = meta.get(_name)
+                setattr(ps, _name, [str(v) for v in _value] if isinstance(_value, list) else [])
+            _kind = meta.get(_UNSHIPPED_FIGURE_KIND_FIELD)
+            ps.unshipped_figure_kind = _kind if isinstance(_kind, str) else ""
             _summary = meta.get("attempts_summary")
             ps.attempts_summary_restored = _summary if isinstance(_summary, list) else None
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
@@ -18885,6 +19106,18 @@ class UnifiedPipeline:
                 math_font_unresolved_details[r.output.page_num] = _mf_detail
         math_font_unresolved_pages = sorted(math_font_unresolved_details)
 
+        # #1187: the pages this lane MARKED -- a figure the page names that it does not show
+        # whole. Round 1 marked the page and stopped there, so a document whose only defect was
+        # a lost figure finished DocumentStatus.SUCCESS with a populated ``error``, which also
+        # breaks the GH-177 contract (Argon P0-2, reproduced through process()).
+        unshipped_figure_marked_pages = sorted(
+            {
+                int(ev.page_num)
+                for ev in state.events
+                if getattr(ev, "kind", "") in UNSHIPPED_FIGURE_MARKED_KINDS
+                and getattr(ev, "page_num", None) is not None
+            }
+        )
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not judge_timeout_native_pages
@@ -19031,6 +19264,9 @@ class UnifiedPipeline:
             and not table_rejected_pages
             and not table_unverified_pages
             and not table_withheld_pages
+            # #1187: a figure this document names and does not show whole is not a clean
+            # document, for the same reason a withheld table is not.
+            and not unshipped_figure_marked_pages
         )
 
         if has_text and pages_ok:
@@ -19238,6 +19474,9 @@ class UnifiedPipeline:
             or ditto_unresolved_pages
             or scanned_prose_recovered_pages
             or blank_shipped_pages
+            # #1187: without this the lane's two CLI lines below are unreachable whenever a
+            # lost figure is the document's ONLY defect (Argon P0-2, reproduced).
+            or unshipped_figure_marked_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -19984,6 +20223,37 @@ class UnifiedPipeline:
                         f"  [red]{len(_sf_lost)} scanned figure page(s): the page image was "
                         f"not saved; the figure is preserved nowhere: {_sf_lost}[/red]"
                     )
+                # #1187: the figures a page named and did not show. Same two colours and
+                # the same reason: a crop that ships is a note, a figure preserved nowhere
+                # is a loss.
+                _uf_shipped = sorted(
+                    {
+                        int(e.page_num)
+                        for e in state.events
+                        if getattr(e, "kind", "") == UNSHIPPED_FIGURE_RENDERED_KIND
+                        and getattr(e, "page_num", None) is not None
+                    }
+                )
+                _uf_marked = sorted(
+                    {
+                        int(e.page_num)
+                        for e in state.events
+                        if getattr(e, "kind", "") in UNSHIPPED_FIGURE_MARKED_KINDS
+                        and getattr(e, "page_num", None) is not None
+                    }
+                )
+                if _uf_shipped:
+                    console.print(
+                        f"  [cyan]{len(_uf_shipped)} page(s) named a figure they did not "
+                        f"show: a crop of the located region now ships, its values "
+                        f"untranscribed: {_uf_shipped}[/cyan]"
+                    )
+                if _uf_marked:
+                    console.print(
+                        f"  [red]{len(_uf_marked)} page(s) named a figure socr could not "
+                        f"locate, could not save, or could not tell apart from the others the "
+                        f"page names; the page is marked: {_uf_marked}[/red]"
+                    )
                 if _visual_lost:
                     # GH-566: and the render-failure pages are NOT that. Nothing
                     # holds their figure, so this line is a loss, not a note.
@@ -20299,6 +20569,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_visual_note}"
             else:
                 final_result.error = _visual_note
+        # #1187: and the figures a page named and did not show, for the same reason.
+        _unshipped_fig_note = self._unshipped_figure_note(state)
+        if _unshipped_fig_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_unshipped_fig_note}"
+            else:
+                final_result.error = _unshipped_fig_note
         # #1030: and the scanned figure pages, for the same reason.
         _scanned_fig_note = self._scanned_figure_note(state, pre_records)
         if _scanned_fig_note:
@@ -21371,6 +21648,16 @@ class UnifiedPipeline:
         }
         if _own_image:
             skip_pages = (skip_pages or set()) | _own_image
+        # #1187: a page this lane already gave a crop of has had the SAME locator run on it
+        # (``FigureExtractor.extract_page``), so ordinary extraction would localise the same
+        # region again and emit a second asset for it under a different filename -- the same
+        # figure twice. Suppressed here, beside the chart-region suppression below, so only
+        # one PNG is ever written.
+        _unshipped = {
+            n for n, _p in state.pages.items() if getattr(_p, "unshipped_figure_refs", None)
+        }
+        if _unshipped:
+            skip_pages = (skip_pages or set()) | _unshipped
         extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)
         # GH-189: a chart region registered for mandatory preservation already
         # has its own crop referenced from the page body, at the position the

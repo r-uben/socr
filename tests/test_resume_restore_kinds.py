@@ -19,6 +19,14 @@ EXPECTED_RESUME_KINDS = frozenset(
         # absent from tables_trust.json with its credential restored. #1210 made that
         # reachable by admitting accepted prior-OCR pages to the ledger.
         "table_crop_repair_unverifiable",
+        # #1187: emitted by the page loop's unshipped-figure step, which a terminal
+        # resumed page skips. The page's own picture or mark is restored from the sidecar
+        # fields, so losing the event would lose only the REPORT -- the document note and
+        # the CLI line read these, which is the #252 shape this allowlist exists for.
+        "unshipped_figure_rendered",
+        "unshipped_figure_render_failed",
+        "unshipped_figure_unlocated",
+        "unshipped_figure_not_found",
         "chart_counts_derived",
         "chart_counts_not_derived",
         "chart_grid_contradicted",
@@ -128,5 +136,9 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # their lines above;
     # 55 with #1181's native_table_verifier_exact_pass;
     # 59 with default-on native per-cell binding's four terminal kinds;
-    # 60 with #1205's table_crop_repair_unverifiable.
-    assert len(EXPECTED_RESUME_KINDS) == 60
+    # 60 with #1205's table_crop_repair_unverifiable;
+    # 65 with #1187's five unshipped-figure kinds;
+    # 64 after #1187 round 2 dropped ``unshipped_figure_partially_shipped``: the outcome it
+    # named -- a page naming more figures than it shipped crops -- stopped being a distinct
+    # behaviour when every page the lane acts on became MARKED (Argon P0-1).
+    assert len(EXPECTED_RESUME_KINDS) == 64
