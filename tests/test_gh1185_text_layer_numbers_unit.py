@@ -430,30 +430,71 @@ def test_a_percent_written_in_latex_is_one_number_in_a_cell() -> None:
     assert _disputes(layer, r"| target | $\pi^* = 2\,\%$ | 1.5 |") == ()
 
 
+_CELL_ROW = "| target | {} | 1.5 |"
+#: prose keeps only a lone number from its mathematics, so no equation rows here
+_PROSE_ROW = "Target {} and 1.5"
+
+
 @pytest.mark.parametrize(
-    ("cell", "read"),
+    ("row", "cell"),
     [
-        (r"$\pi^* = {v}\,\%$", "9%"),
-        (r"$\pi^* = {v} \%$", "9"),
-        (r"$\pi^* = {v}~\%$", "9%"),
-        (r"{v}~\%", "9%"),
+        (_CELL_ROW, r"$\pi^* = {v}\,\%$"),
+        (_CELL_ROW, r"$\pi^* = {v} \%$"),
+        (_CELL_ROW, r"$\pi^* = {v}~\%$"),
+        (_CELL_ROW, r"{v}~\%"),
+        (_CELL_ROW, r"${v} \%$"),
+        (_PROSE_ROW, r"${v} \%$"),
+        (_PROSE_ROW, r"${v}~\%$"),
+        (_PROSE_ROW, r"{v}~\%"),
     ],
 )
-def test_a_spaced_latex_percent_cell_is_counted(cell: str, read: str) -> None:
+def test_a_spaced_latex_percent_cell_is_counted(row: str, cell: str) -> None:
     r"""#1227: a percent spaced from its number (``\,``, a plain space, a tie ``~``) is the
-    number. Agreement alone cannot tell a counted cell from a dropped one, so the right
-    value must add one compared number and a planted wrong one must be caught."""
+    number, in a table cell and in prose. Agreement alone cannot tell a counted cell from a
+    dropped one, so the right value must add one compared number and a planted wrong one
+    must be caught."""
     layer = "Target 2 % 1.5"
-    row = "| target | {} | 1.5 |"
     baseline = compare_numbers(layer, row.format(""), provenance=PROVENANCE_OWN_CHARACTERS)
     right = row.format(cell.format(v=2))
     record = compare_numbers(layer, right, provenance=PROVENANCE_OWN_CHARACTERS)
     assert record.compared == baseline.compared + 1
     assert text_layer_numbers_clause(_qwen(right), _page(layer)) is None
     wrong = row.format(cell.format(v=9))
-    assert [read for _ref, read in _disputes(layer, wrong)] == [read]
+    assert [read for _ref, read in _disputes(layer, wrong)] == ["9%"]
     clause = text_layer_numbers_clause(_qwen(wrong), _page(layer))
     assert clause is not None and clause.result is CheckResult.FAIL, clause
+
+
+@pytest.mark.parametrize(
+    ("layer", "spaced", "unspaced"),
+    [
+        ("x 9 1.5", r"| x | (9 \%) | 1.5 |", r"| x | (9\%) | 1.5 |"),
+        ("x 9 1.5", r"| x | $(9~\%)$ | 1.5 |", r"| x | $(9\%)$ | 1.5 |"),
+        ("x 9 1.5", r"| x | $\pi^* = (9 \%)$ | 1.5 |", r"| x | $\pi^* = (9\%)$ | 1.5 |"),
+        ("in 1995.5 the", r"in 1995 \% the", r"in 1995\% the"),
+    ],
+)
+def test_a_spaced_latex_percent_reads_as_the_unspaced_one(
+    layer: str, spaced: str, unspaced: str
+) -> None:
+    r"""Argon, PR #1229 review: spacing removed only inside the equation check left ``9 %``
+    to split later, so a bracket was lost (``(9 \%)`` agreed with a bare 9) and a year's
+    percent passed the callout guard. The spaced writing must compare exactly as ``9\%``
+    does, and here that is a dispute."""
+    record = compare_numbers(layer, spaced, provenance=PROVENANCE_OWN_CHARACTERS)
+    assert record == compare_numbers(layer, unspaced, provenance=PROVENANCE_OWN_CHARACTERS)
+    assert record.disputed
+    clause = text_layer_numbers_clause(_qwen(spaced), _page(layer))
+    assert clause is not None and clause.result is CheckResult.FAIL, clause
+
+
+def test_an_escaped_tilde_before_a_percent_stays_unparsed() -> None:
+    r"""Argon, PR #1229 review: ``\~`` is an accent, not a tie; ``3\~\%`` must drop out (fail
+    closed), not read as 3."""
+    layer = "x 3 1.5"
+    baseline = compare_numbers(layer, "| x |  | 1.5 |", provenance=PROVENANCE_OWN_CHARACTERS)
+    record = compare_numbers(layer, r"| x | 3\~\% | 1.5 |", provenance=PROVENANCE_OWN_CHARACTERS)
+    assert record.compared == baseline.compared
 
 
 def test_a_number_in_markdown_italics_is_the_number() -> None:

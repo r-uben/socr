@@ -51,3 +51,51 @@ inside the copy and `count(anchor) == 1` asserted:
 ## Not measured
 
 No corpus is on this machine, so how many real pages the fix touches is unknown.
+
+## Round 2 — Argon review of PR #1229 (MERGE-AFTER-FIX)
+
+Each finding was probed through `compare_numbers` and `text_layer_numbers_clause`, on this
+branch and on origin/main (6e7d04de):
+
+| finding | probe | main | round 1 | verdict |
+| --- | --- | --- | --- | --- |
+| P1 bracket | `$\pi^* = (9 \%)$` vs layer `9` | dropped | **agrees (false)** | real, new in round 1 |
+| P1 bracket | `(9 \%)`, `$(9 \%)$` vs layer `9` | agrees (false) | agrees (false) | real, pre-existing |
+| P1 year guard | `1995 \%` vs layer `1995.5` | agrees (false) | agrees (false) | real, pre-existing |
+| P1 prose | `$9 \%$` in prose | dropped | dropped | fail-closed, not a false agreement |
+| P2 `\~\%` | `3\~\%` vs layer `3` | dropped | **counted as 3** | real, new in round 1 |
+| P2 label | `A-8~\%` | dropped | label digit | matches main's `A-8\%`; a label cannot cause agreement; left as is |
+
+Every one has the same cause: round 1 removed the spacing only inside the equation check,
+so later steps still saw `9 %`.
+
+**Change.** Round 1's two edits are reverted to main. In their place,
+`_PERCENT_SPACING_RE` deletes the blanks and ties before a `\%` as the first step of
+`_numeric_tokens`, on both sides. Every spaced writing then reads exactly as `9\%`
+already does: the equation check, prose maths, brackets, the label lookahead and the year
+guard. `(?<!\\)~` keeps the accent `\~` unparsed.
+
+The owner suggested `[ \t]*~?\\%` → `%` in `_strip_latex`. It would close the bracket,
+prose and year cases, but `_strip_latex` runs after the label step, so `A-8~\%` would differ
+from `A-8\%`. The other early option, rewriting to `%` (not `\%`) at the top, would feed `9%`
+to the currency lookahead in `$9 \%$`, where it used to see `9\%`.
+
+Keeping the backslash avoids changing any downstream path.
+
+**Tests.**
+- The counted test now has 8 rows: 5 in a table cell and 3 in prose, the prose ones lone
+  numbers only, since equations in prose are dropped by design. The plain-space row now
+  reads `9%`.
+- New: the spaced writing compares equal to the unspaced one (whole record), and that
+  record is a dispute. Covers the bracket cases (plain, maths, equation) and the year guard.
+- New: `3\~\%` is not counted.
+
+**Mutants** (external copy, `socr.__file__` inside it, `count(anchor)==1`):
+
+| mutant | failing tests |
+| --- | --- |
+| remove the blank alternative | 6 |
+| remove the tie alternative | 5 |
+| remove the accent lookbehind | 1 |
+| remove `\\[,;:! ]` from the equation check | 1 |
+| remove the normalisation line | 11 |

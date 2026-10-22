@@ -197,6 +197,11 @@ _BRACKET_SPACE_RE = re.compile(r"([(\[])\s+(?=[-\u2212.\d])|(?<=[\d%])\s+([)\]])
 _SPLIT_RE = re.compile(r"[\s|]+")
 _CALLOUT_RE = re.compile(r"(?<=[)\]])([.,;:])(?=\d)")
 _BAD_COMMA_RE = re.compile(r"\d,(?!\d{3}(?:\D|$))")
+#: blanks and ties (``~``) between a number and its ``\\%`` (``9 \\%``, ``2~\\%``): removed first,
+#: so the percent reads as ``9\\%`` does on every path -- the equation check, prose maths, a
+#: bracket, the label lookahead, the year guard (#1227; Argon, PR #1229 review). Not a tie the
+#: LaTeX escapes as an accent (``\\~``): that stays unparsed.
+_PERCENT_SPACING_RE = re.compile(r"(?:[ \t]|(?<!\\)~)+(?=\\%)")
 _EDGE = "*_`\"'\u201c\u201d\u2018\u2019,;:!?"
 _OPEN = {"(": ")", "[": "]"}
 _CLOSE = {")": "(", "]": "["}
@@ -221,8 +226,7 @@ def _clean(raw: str) -> tuple[str, str]:
 
 
 def _strip_latex(text: str) -> str:
-    # A tie before a percent (``2~\\%``) is spacing, as ``\\,`` is (#1227).
-    text = re.sub(r"~?\\%", "%", text).replace("\\$", " ")
+    text = text.replace("\\%", "%").replace("\\$", " ")
     return _LATEX_PUNCT_RE.sub("", _LATEX_COMMAND_RE.sub(" ", text))
 
 
@@ -269,9 +273,9 @@ def _number_or_nothing(match: re.Match) -> str:
     span = match.group(0)
     if "=" not in span:
         return span
-    # A percent as LaTeX writes it (``9\\%``, ``2\\,\\%``, ``2~\\%``, ``9 \\%``) is still one number
+    # A percent as LaTeX writes it (``9\\%``, ``2\\,\\%``, ``2~\\%``) is still one number
     # (socr bot, round-3 review: round 3 dropped ``$\\pi^* = 9\\%$`` whole).
-    right = re.sub(r"\\[,;:! ]|~|[ \t]*\\(?=%)", "", span.rsplit("=", 1)[1]).strip("$\\()[] \t")
+    right = re.sub(r"\\[,;:! ]|~|\\(?=%)", "", span.rsplit("=", 1)[1]).strip("$\\()[] \t")
     return span if _LONE_NUMBER_RE.fullmatch(right) else " "
 
 
@@ -309,6 +313,7 @@ def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ..
     """:func:`numeric_tokens`, each also tagged "a label digit" (reading side only)."""
     if not text:
         return ()
+    text = _PERCENT_SPACING_RE.sub("", text)
     if reading:
         text = _tabular_as_rows(text)
         text = "\n".join(
