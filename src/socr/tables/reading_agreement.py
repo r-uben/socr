@@ -221,7 +221,8 @@ def _clean(raw: str) -> tuple[str, str]:
 
 
 def _strip_latex(text: str) -> str:
-    text = text.replace("\\%", "%").replace("\\$", " ")
+    # A tie before a percent (``2~\\%``) is spacing, as ``\\,`` is (#1227).
+    text = re.sub(r"~?\\%", "%", text).replace("\\$", " ")
     return _LATEX_PUNCT_RE.sub("", _LATEX_COMMAND_RE.sub(" ", text))
 
 
@@ -268,9 +269,9 @@ def _number_or_nothing(match: re.Match) -> str:
     span = match.group(0)
     if "=" not in span:
         return span
-    # A percent as LaTeX writes it (``9\\%``, ``2\\,\\%``, ``2~\\%``) is still one number
+    # A percent as LaTeX writes it (``9\\%``, ``2\\,\\%``, ``2~\\%``, ``9 \\%``) is still one number
     # (socr bot, round-3 review: round 3 dropped ``$\\pi^* = 9\\%$`` whole).
-    right = re.sub(r"\\[,;:! ]|~|\\(?=%)", "", span.rsplit("=", 1)[1]).strip("$\\()[] \t")
+    right = re.sub(r"\\[,;:! ]|~|[ \t]*\\(?=%)", "", span.rsplit("=", 1)[1]).strip("$\\()[] \t")
     return span if _LONE_NUMBER_RE.fullmatch(right) else " "
 
 

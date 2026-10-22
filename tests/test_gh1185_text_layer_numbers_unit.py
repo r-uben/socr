@@ -430,6 +430,32 @@ def test_a_percent_written_in_latex_is_one_number_in_a_cell() -> None:
     assert _disputes(layer, r"| target | $\pi^* = 2\,\%$ | 1.5 |") == ()
 
 
+@pytest.mark.parametrize(
+    ("cell", "read"),
+    [
+        (r"$\pi^* = {v}\,\%$", "9%"),
+        (r"$\pi^* = {v} \%$", "9"),
+        (r"$\pi^* = {v}~\%$", "9%"),
+        (r"{v}~\%", "9%"),
+    ],
+)
+def test_a_spaced_latex_percent_cell_is_counted(cell: str, read: str) -> None:
+    r"""#1227: a percent spaced from its number (``\,``, a plain space, a tie ``~``) is the
+    number. Agreement alone cannot tell a counted cell from a dropped one, so the right
+    value must add one compared number and a planted wrong one must be caught."""
+    layer = "Target 2 % 1.5"
+    row = "| target | {} | 1.5 |"
+    baseline = compare_numbers(layer, row.format(""), provenance=PROVENANCE_OWN_CHARACTERS)
+    right = row.format(cell.format(v=2))
+    record = compare_numbers(layer, right, provenance=PROVENANCE_OWN_CHARACTERS)
+    assert record.compared == baseline.compared + 1
+    assert text_layer_numbers_clause(_qwen(right), _page(layer)) is None
+    wrong = row.format(cell.format(v=9))
+    assert [read for _ref, read in _disputes(layer, wrong)] == [read]
+    clause = text_layer_numbers_clause(_qwen(wrong), _page(layer))
+    assert clause is not None and clause.result is CheckResult.FAIL, clause
+
+
 def test_a_number_in_markdown_italics_is_the_number() -> None:
     """socr bot, round-1 review: ``_12.5_`` lost its integer part as a subscript, a false
     dispute on a right number and a wrong ``_13.5_`` passing on a page that prints ``.5``."""
