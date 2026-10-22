@@ -21313,9 +21313,10 @@ class UnifiedPipeline:
                 audit.events,
                 label_unverified_pages=label_pages,
                 ditto_unresolved_pages=ditto_pages,
+                native_cell_advisory=not self.config.native_cell_gating,
             )
             trust_path = doc_dir / "tables_trust.json"
-            if not trust.pages:
+            if not trust.pages and not trust.advisory_native_cell_pages:
                 # #659 round 4 (Astra P2): every table trusted on THIS run.
                 # A prior run's ``tables_trust.json`` in the same directory
                 # (e.g. an earlier attempt whose label doubt has since
@@ -21423,8 +21424,7 @@ class UnifiedPipeline:
             logger.warning("structure-class floor note derivation failed (non-fatal): %s", exc)
             return None
 
-    @staticmethod
-    def _tables_trust_note(state: DocumentState, records: list | None = None) -> str | None:
+    def _tables_trust_note(self, state: DocumentState, records: list | None = None) -> str | None:
         """GH-95: document-level table-distrust pointer, or None when clean.
 
         Derived from ``state.events`` rather than ``build_run_audit`` because
@@ -21460,6 +21460,7 @@ class UnifiedPipeline:
                     events,
                     label_unverified_pages=label_pages,
                     ditto_unresolved_pages=ditto_pages,
+                    native_cell_advisory=not self.config.native_cell_gating,
                 )
             )
         except Exception as exc:
@@ -21483,6 +21484,7 @@ class UnifiedPipeline:
                 list(getattr(state, "events", [])),
                 label_unverified_pages=frozenset(self._label_unverified_pages(records)),
                 ditto_unresolved_pages=frozenset(self._ditto_unresolved_pages(records)),
+                native_cell_advisory=not self.config.native_cell_gating,
             )
             counts = count_document_tables(
                 [r.output for r in records],

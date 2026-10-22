@@ -418,26 +418,6 @@ def _unverified_fallback_detail(data: dict) -> str:
     return f"judge ladder could not verify this table ({phrase}{retry_clause})"
 
 
-class _PagesDict(dict):
-    """Distrust pages mapping that reads truthy when advisory-only content exists.
-
-    ``UnifiedPipeline._write_tables_trust`` persists the sidecar when ``trust.pages``
-    is truthy. Advisory native-cell outcomes live in a separate bucket, but the
-    sidecar must still be written when they are the only table-trust signal.
-    Iteration and ``.items()`` remain distrust-only so verified-table counts and
-    document notes stay quiet.
-    """
-
-    __slots__ = ("_advisory",)
-
-    def __init__(self, *args, advisory=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._advisory = advisory if advisory is not None else {}
-
-    def __bool__(self) -> bool:
-        return bool(len(self)) or bool(self._advisory)
-
-
 @dataclass
 class PageTrust:
     """Trust record for one page's tables."""
@@ -689,8 +669,6 @@ def build_tables_trust(
         if data.get("note") == PATCH_ELIGIBLE_NOTE and not advisory_only:
             page.patch_eligible = True
 
-    pages_view = _PagesDict(trust.pages, advisory=trust.advisory_native_cell_pages)
-    trust.pages = pages_view
     return trust
 
 
