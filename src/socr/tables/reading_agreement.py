@@ -197,6 +197,13 @@ _BRACKET_SPACE_RE = re.compile(r"([(\[])\s+(?=[-\u2212.\d])|(?<=[\d%])\s+([)\]])
 _SPLIT_RE = re.compile(r"[\s|]+")
 _CALLOUT_RE = re.compile(r"(?<=[)\]])([.,;:])(?=\d)")
 _BAD_COMMA_RE = re.compile(r"\d,(?!\d{3}(?:\D|$))")
+#: blanks and ties between a DIGIT and its ``\\%`` (``9 \\%``, ``2~\\%``): removed first, so
+#: the percent reads as ``9\\%`` does on every path -- the equation check, prose maths, a
+#: bracket, the label lookahead, the year guard (#1227; Argon, PR #1229 review). Only after a
+#: digit: a percent after a bracket (``(9) \\%``) stays a separate token, as on main, and
+#: neither an accent (``3\\~\\%``) nor a LaTeX space (``9\\ \\%``, which the equation check
+#: reads) loses its backslash (Argon, round 2).
+_PERCENT_SPACING_RE = re.compile(r"(?<=\d)(?:[ \t]|~)+(?=\\%)")
 _EDGE = "*_`\"'\u201c\u201d\u2018\u2019,;:!?"
 _OPEN = {"(": ")", "[": "]"}
 _CLOSE = {")": "(", "]": "["}
@@ -308,6 +315,7 @@ def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ..
     """:func:`numeric_tokens`, each also tagged "a label digit" (reading side only)."""
     if not text:
         return ()
+    text = _PERCENT_SPACING_RE.sub("", text)
     if reading:
         text = _tabular_as_rows(text)
         text = "\n".join(
