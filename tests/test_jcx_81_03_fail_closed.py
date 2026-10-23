@@ -18,7 +18,7 @@ import pytest
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
 from socr.tables.native_verifier import (
-    COMPLETENESS_ROW_GAP_HARD_FAIL,
+    COMPLETENESS_MISSING_TABLE_SHAPED_ROWS,
     verify_native_table,
 )
 from socr.tables.row_subtotal_check import advise_five_year_subtotals
@@ -59,8 +59,13 @@ class TestJCX81NativeVerifier:
         assert vr.hard_fail is True, vr.reason
         assert "value_guard_completeness" in vr.reason
         assert vr.row_count_warn is True
-        gap = vr.drifted_rows[0].get("row_gap", 0)
-        assert gap >= COMPLETENESS_ROW_GAP_HARD_FAIL
+        missing_rows = [
+            r for r in vr.drifted_rows if r.get("predicate") == "missing_table_shaped_row"
+        ]
+        assert len(missing_rows) >= COMPLETENESS_MISSING_TABLE_SHAPED_ROWS
+        absent = {t for r in missing_rows for t in (r.get("absent_tokens") or [])}
+        # Senate-side row loss (B.3/B.4a/B.4b), not only header totals.
+        assert "-16" in absent or "-34" in absent
 
     @pytest.mark.parametrize("token", SENATE_ROW_VALUES)
     def test_native_pdf_contains_senate_tokens(self, jcx_page, token: str) -> None:

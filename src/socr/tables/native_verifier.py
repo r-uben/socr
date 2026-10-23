@@ -123,10 +123,21 @@ _MD_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 CANDIDATE_TABLE_MIN_NUMERIC_ROWS_FOR_GRID_GATE_BYPASS = 8
 CANDIDATE_TABLE_MIN_COLS_FOR_GRID_GATE_BYPASS = 3
 
-# Row-count gaps smaller than this stay a soft warning (chart/prose numerals can
-# inflate the native side). Gaps at or above this are treated as missing table
-# rows — silent content loss on born-digital citation tables.
-COMPLETENESS_ROW_GAP_HARD_FAIL = 3
+# A native row with at least this many numeric tokens is treated as table-shaped
+# (not a footnote marker, page number, or axis tick).
+TABLE_SHAPED_MIN_NUMERIC_TOKENS = 3
+
+# Hard-fail completeness when this many scoped, table-shaped native rows have
+# one or more numeric tokens (excluding header-year duplicates) absent from the
+# reading's table multiset.  Partial row loss (JCX Senate panel) not raw row-gap.
+COMPLETENESS_MISSING_TABLE_SHAPED_ROWS = 3
+
+# Minimum horizontal gap between lane centres to treat native columns as two panels.
+_PANEL_SPLIT_MIN_GAP_PT = 40.0
+
+# Two-panel completeness uses lane splits only when this many y-rows show disjoint
+# table-shaped numeric slices (House | Senate), not a single wide grid (RESF).
+DUAL_PANEL_DISJOINT_ROWS_MIN = 3
 
 
 class VerifierState:
@@ -1528,10 +1539,214 @@ def _effective_native_rows_for_output(
     return effective_native_rows
 
 
+def _output_table_numeric_multiset(output_text: str) -> Counter:
+    """Merged N2-normalized numeric multiset from all markdown table data rows."""
+    output_ms: Counter = Counter()
+    numeric_output_rows, _ = _parse_all_data_rows(output_text)
+    for _row_idx, _label, row_ms in numeric_output_rows:
+        output_ms.update(row_ms)
+    return output_ms
+
+
+def _table_locator_words(page, words: list) -> tuple[list, float, float] | None:
+    """Clip *words* to the table bbox with the most numeric tokens (``locate_tables``)."""
+    try:
+        import fitz
+
+        from socr.tables.locate import locate_tables
+
+        boxes = locate_tables(page)
+    except Exception:
+        return None
+    if not boxes:
+        return None
+
+    def _numeric_in_box(bbox) -> int:
+        region = fitz.Rect(bbox)
+        return sum(
+            1
+            for w in words
+            if region.contains(fitz.Rect(w[:4]))
+            and _NUM_TOKEN_RE.match(w[4])
+            and _NUMERIC_RE.search(w[4])
+        )
+
+    counts = [_numeric_in_box(b.bbox) for b in boxes]
+    best_numeric = max(counts)
+    if best_numeric < TABLE_SHAPED_MIN_NUMERIC_TOKENS:
+        return None
+    # When several boxes qualify (JCT: revenue grid vs whole-page footer), prefer the
+    # shortest box among those within 70% of the best numeric count — the tight
+    # revenue panel, not the page-tall merge region.
+    threshold = best_numeric * 0.7
+    candidates = [b for b in boxes if _numeric_in_box(b.bbox) >= threshold]
+    chosen = min(
+        candidates,
+        key=lambda b: ((b.bbox[3] - b.bbox[1]), -_numeric_in_box(b.bbox)),
+    )
+    region = fitz.Rect(chosen.bbox)
+    clipped = [w for w in words if region.contains(fitz.Rect(w[:4]))]
+    if not clipped:
+        return None
+    ys = [round(w[1]) for w in clipped]
+    return clipped, float(min(ys)), float(max(ys))
+
+
+def _lane_index_panels(words: list) -> list[frozenset[int]]:
+    """Split numeric lanes into panel groups at the widest centre-to-centre x-gap."""
+    lane_count, lane_of = _lane_count_from_words(words)
+    if lane_count < 2:
+        return [frozenset({0})] if lane_count == 1 else []
+    lane_xs: dict[int, list[float]] = {}
+    for w in words:
+        x0, _y0, _x1, _y1, token, *_rest = w
+        li = lane_of.get(x0)
+        if li is None:
+            continue
+        if _NUM_TOKEN_RE.match(token) and _NUMERIC_RE.search(token):
+            lane_xs.setdefault(li, []).append(x0)
+    if not lane_xs:
+        return []
+    centers = {li: sum(xs) / len(xs) for li, xs in lane_xs.items()}
+    sorted_lanes = sorted(centers, key=lambda li: centers[li])
+    if len(sorted_lanes) < 2:
+        return [frozenset(sorted_lanes)]
+    split = 1
+    best_gap = 0.0
+    # Prefer the rightmost wide gap that leaves >= 4 lanes on each side (two-panel
+    # fiscal tables: a large leading gap often separates year headers from data).
+    for i in range(len(sorted_lanes) - 1):
+        gap = centers[sorted_lanes[i + 1]] - centers[sorted_lanes[i]]
+        left_size = i + 1
+        right_size = len(sorted_lanes) - left_size
+        if (
+            gap >= _PANEL_SPLIT_MIN_GAP_PT
+            and left_size >= 4
+            and right_size >= 4
+        ):
+            split = i + 1
+            best_gap = gap
+    if best_gap < _PANEL_SPLIT_MIN_GAP_PT:
+        return [frozenset(sorted_lanes)]
+    return [frozenset(sorted_lanes[:split]), frozenset(sorted_lanes[split:])]
+
+
+def _numeric_token_present_in_output(tok: str, output_ms: Counter) -> bool:
+    """True if *tok* appears in the reading table multiset (locale/binding aware)."""
+    if output_ms.get(tok, 0) > 0:
+        return True
+    for out_tok, count in output_ms.items():
+        if count <= 0:
+            continue
+        equiv = binding_numeric_tokens_equivalent(tok, out_tok)
+        if equiv is True:
+            return True
+    return False
+
+
+def _dual_panel_disjoint_row_count(
+    panel_words: list,
+    band_y0: float,
+    band_y1: float,
+    panels: list[frozenset[int]],
+) -> int:
+    """Rows where both lane panels are table-shaped and share no numeric token."""
+    if len(panels) != 2:
+        return 0
+    _lane_count, lane_of = _lane_count_from_words(panel_words)
+    by_y = _rows_by_y_from_words(panel_words)
+    dual = 0
+    for y, row_tokens in by_y.items():
+        if y < band_y0 or y > band_y1:
+            continue
+        panel_sets: list[set[str]] = []
+        for panel_lanes in panels:
+            panel_tokens = [word for x, word in row_tokens if lane_of.get(x) in panel_lanes]
+            panel_sets.append(set(_numeric_multiset_from_tokens(panel_tokens)))
+        if not all(len(s) >= TABLE_SHAPED_MIN_NUMERIC_TOKENS for s in panel_sets):
+            continue
+        if panel_sets[0].isdisjoint(panel_sets[1]):
+            dual += 1
+    return dual
+
+
+def _missing_table_shaped_native_rows(
+    words: list,
+    output_text: str,
+    effective_native_rows: list[tuple[float, list[tuple[float, str]]]],
+    *,
+    page=None,
+) -> list[dict]:
+    """Table-shaped native panel-rows whose numeric values are entirely absent from the reading.
+
+    Uses per-y native geometry within the value-guard y-band. On two-panel tables,
+    each horizontal panel (House vs Senate) is checked separately so a dropped Senate
+    row is not masked by House values on the same baseline.
+    """
+    if not effective_native_rows:
+        return []
+    band_y0 = min(y for y, _ in effective_native_rows)
+    band_y1 = max(y for y, _ in effective_native_rows)
+    panel_words = words
+    if page is not None:
+        located = _table_locator_words(page, words)
+        if located is not None:
+            # Clip horizontally to the table bbox; y-band stays pairing-scoped so
+            # footnotes, page chrome, and sibling tableaux on the page are excluded.
+            panel_words, _, _ = located
+    output_ms = _output_table_numeric_multiset(output_text)
+    header_tokens = _output_header_numeric_tokens(output_text)
+    lane_count, lane_of = _lane_count_from_words(panel_words)
+    panels = _lane_index_panels(panel_words)
+    if (
+        _dual_panel_disjoint_row_count(panel_words, band_y0, band_y1, panels)
+        < DUAL_PANEL_DISJOINT_ROWS_MIN
+    ):
+        panels = [frozenset(range(lane_count))]
+    by_y = _rows_by_y_from_words(panel_words)
+    missing: list[dict] = []
+    for y, row_tokens in sorted(by_y.items()):
+        if y < band_y0 or y > band_y1:
+            continue
+        for panel_idx, panel_lanes in enumerate(panels):
+            panel_tokens = [word for x, word in row_tokens if lane_of.get(x) in panel_lanes]
+            nat_ms = _numeric_multiset_from_tokens(panel_tokens)
+            if sum(nat_ms.values()) < TABLE_SHAPED_MIN_NUMERIC_TOKENS:
+                continue
+            if nat_ms and all(tok in header_tokens for tok in nat_ms):
+                continue
+            absent_tokens = [
+                token
+                for token in nat_ms
+                if token not in header_tokens
+                and not _numeric_token_present_in_output(token, output_ms)
+            ]
+            if not absent_tokens:
+                continue
+            missing.append(
+                {
+                    "y": y,
+                    "panel": panel_idx,
+                    "predicate": "missing_table_shaped_row",
+                    "native_multiset": dict(nat_ms),
+                    "absent_tokens": absent_tokens,
+                    "absent_token_count": len(absent_tokens),
+                    "detail": (
+                        f"table-shaped native panel-row at y={y:.0f} panel={panel_idx} "
+                        f"has numeric value(s) absent from reading table multiset "
+                        f"({', '.join(absent_tokens[:8])})"
+                    ),
+                }
+            )
+    return missing
+
+
 def _value_guard(
     words: list,
     output_text: str,
     scope_label: str = "page",
+    *,
+    page=None,
 ) -> tuple[bool, str, list[dict], dict | None]:
     """TR-4 value-guard: row-count soft-flag + row-aware multiset + label-binding.
 
@@ -1615,41 +1830,34 @@ def _value_guard(
             scope_label,
             row_count_warn_reason,
         )
-        # Born-digital completeness: when the native side has materially MORE numeric
-        # rows than the candidate, treat as silent row loss (JCT two-panel tables),
-        # not the chart-tick inflation case that stays a soft warning.
-        if output_numeric_count < native_numeric_count:
-            row_gap = native_numeric_count - output_numeric_count
-            candidate_proves_table = (
-                output_numeric_count >= CANDIDATE_TABLE_MIN_NUMERIC_ROWS_FOR_GRID_GATE_BYPASS
-                and _parse_output_col_count(output_text)
-                >= CANDIDATE_TABLE_MIN_COLS_FOR_GRID_GATE_BYPASS
-            )
-            if row_gap >= COMPLETENESS_ROW_GAP_HARD_FAIL and candidate_proves_table:
-                reason = (
-                    f"value_guard_completeness: output has {output_numeric_count} "
-                    f"numeric row(s) but native has {native_numeric_count} "
-                    f"effective numeric row(s) (gap={row_gap}) — "
-                    f"table rows or values are missing from the reading"
-                )
-                drifted.append(
-                    {
-                        "row_idx": -1,
-                        "predicate": "completeness_row_gap",
-                        "detail": reason,
-                        "native_numeric_rows": native_numeric_count,
-                        "output_numeric_rows": output_numeric_count,
-                        "row_gap": row_gap,
-                    }
-                )
-                logger.debug(
-                    "native_verifier [%s] value-guard completeness hard-fail: %s",
-                    scope_label,
-                    reason,
-                )
-                return True, reason, drifted, row_count_warn_info
         # Continue to check label-binding and multiset — a count gap does not
         # suppress hard-fail for genuinely corrupted tables.
+
+    missing_table_rows = _missing_table_shaped_native_rows(
+        words, output_text, effective_native_rows, page=page
+    )
+    if len(missing_table_rows) >= COMPLETENESS_MISSING_TABLE_SHAPED_ROWS:
+        sample = ", ".join(
+            sorted(
+                {
+                    tok
+                    for row in missing_table_rows[:5]
+                    for tok in (row.get("native_multiset") or {})
+                }
+            )[:12]
+        )
+        reason = (
+            f"value_guard_completeness: {len(missing_table_rows)} table-shaped "
+            f"native row(s) have numeric values absent from the reading "
+            f"(sample tokens: {sample or 'n/a'})"
+        )
+        drifted.extend(missing_table_rows)
+        logger.debug(
+            "native_verifier [%s] value-guard completeness hard-fail: %s",
+            scope_label,
+            reason,
+        )
+        return True, reason, drifted, row_count_warn_info
 
     # --- Label-binding check (adjacency-dominance interleaved-pattern detection) ---
     # HARD-FAIL → CERTAIN_FAIL: fires only when the SYSTEMATIC offset pattern dominates.
@@ -1812,6 +2020,8 @@ def _verify_from_words(
     words: list,
     output_text: str,
     scope_label: str = "page",
+    *,
+    page=None,
 ) -> VerifierResult:
     """Core verifier logic on a pre-fetched / pre-clipped word list.
 
@@ -1917,7 +2127,7 @@ def _verify_from_words(
     #       differ (dropped/invented/shifted values within a matched row).
     # ------------------------------------------------------------------
     vg_hard_fail, vg_reason, vg_drifted, vg_row_count_warn = _value_guard(
-        words, output_text, scope_label
+        words, output_text, scope_label, page=page
     )
 
     # Propagate soft row-count warning regardless of hard-fail outcome.
@@ -1986,7 +2196,7 @@ def verify_native_table(page, output_text: str) -> VerifierResult:
         logger.debug("native_verifier: no native words (scan page), bypassing")
         return result
 
-    return _verify_from_words(words, output_text, scope_label="page")
+    return _verify_from_words(words, output_text, scope_label="page", page=page)
 
 
 def verify_native_table_region(
