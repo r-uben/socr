@@ -116,6 +116,19 @@ _MD_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 # --------------------------------------------------------------------------
 
 
+# When the GH-249 grid gate abstains (native rows do not form a chart-like
+# non-grid), a candidate whose markdown already proves a dense multi-column
+# fiscal table is still graded by the value guard. Chart tick pages stay
+# abstained because their transcripts carry too few numeric data rows.
+CANDIDATE_TABLE_MIN_NUMERIC_ROWS_FOR_GRID_GATE_BYPASS = 8
+CANDIDATE_TABLE_MIN_COLS_FOR_GRID_GATE_BYPASS = 3
+
+# Row-count gaps smaller than this stay a soft warning (chart/prose numerals can
+# inflate the native side). Gaps at or above this are treated as missing table
+# rows — silent content loss on born-digital citation tables.
+COMPLETENESS_ROW_GAP_HARD_FAIL = 3
+
+
 class VerifierState:
     """Tri-state verdict constants (TR-6).
 
@@ -1602,6 +1615,39 @@ def _value_guard(
             scope_label,
             row_count_warn_reason,
         )
+        # Born-digital completeness: when the native side has materially MORE numeric
+        # rows than the candidate, treat as silent row loss (JCT two-panel tables),
+        # not the chart-tick inflation case that stays a soft warning.
+        if output_numeric_count < native_numeric_count:
+            row_gap = native_numeric_count - output_numeric_count
+            candidate_proves_table = (
+                output_numeric_count >= CANDIDATE_TABLE_MIN_NUMERIC_ROWS_FOR_GRID_GATE_BYPASS
+                and _parse_output_col_count(output_text)
+                >= CANDIDATE_TABLE_MIN_COLS_FOR_GRID_GATE_BYPASS
+            )
+            if row_gap >= COMPLETENESS_ROW_GAP_HARD_FAIL and candidate_proves_table:
+                reason = (
+                    f"value_guard_completeness: output has {output_numeric_count} "
+                    f"numeric row(s) but native has {native_numeric_count} "
+                    f"effective numeric row(s) (gap={row_gap}) — "
+                    f"table rows or values are missing from the reading"
+                )
+                drifted.append(
+                    {
+                        "row_idx": -1,
+                        "predicate": "completeness_row_gap",
+                        "detail": reason,
+                        "native_numeric_rows": native_numeric_count,
+                        "output_numeric_rows": output_numeric_count,
+                        "row_gap": row_gap,
+                    }
+                )
+                logger.debug(
+                    "native_verifier [%s] value-guard completeness hard-fail: %s",
+                    scope_label,
+                    reason,
+                )
+                return True, reason, drifted, row_count_warn_info
         # Continue to check label-binding and multiset — a count gap does not
         # suppress hard-fail for genuinely corrupted tables.
 
@@ -1832,15 +1878,28 @@ def _verify_from_words(
     if lane_count >= 2:
         grid_rows = _header_excluded_native_rows(words, output_text)
         if len(grid_rows) >= 2 and not _native_rows_establish_any_grid(grid_rows):
-            result.reason = (
-                f"native_grid_gate: {len(grid_rows)} native row(s) in [{scope_label}] "
-                f"(across every contiguous y-block) do not establish a table grid "
-                f"(need >= 2 value columns shared by >= 2 rows) — likely chart axis "
-                f"ticks or prose, not a native table; abstaining rather than grading "
-                f"candidates against it"
+            numeric_output_rows, _ = _parse_all_data_rows(output_text)
+            candidate_proves_table = (
+                len(numeric_output_rows) >= CANDIDATE_TABLE_MIN_NUMERIC_ROWS_FOR_GRID_GATE_BYPASS
+                and output_col_count >= CANDIDATE_TABLE_MIN_COLS_FOR_GRID_GATE_BYPASS
             )
-            logger.debug("native_verifier [%s] grid gate: %s", scope_label, result.reason)
-            return result
+            if not candidate_proves_table:
+                result.reason = (
+                    f"native_grid_gate: {len(grid_rows)} native row(s) in [{scope_label}] "
+                    f"(across every contiguous y-block) do not establish a table grid "
+                    f"(need >= 2 value columns shared by >= 2 rows) — likely chart axis "
+                    f"ticks or prose, not a native table; abstaining rather than grading "
+                    f"candidates against it"
+                )
+                logger.debug("native_verifier [%s] grid gate: %s", scope_label, result.reason)
+                return result
+            logger.debug(
+                "native_verifier [%s] grid gate bypassed: candidate has %d numeric row(s), "
+                "%d column(s) — grading with value guard despite non-grid native clustering",
+                scope_label,
+                len(numeric_output_rows),
+                output_col_count,
+            )
 
     # ------------------------------------------------------------------
     # Tier 1: Hard-fail — value-guard (TR-4 row-count + multiset + label-binding)
