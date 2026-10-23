@@ -4,13 +4,17 @@ Some VLMs answer with a short English lead-in (often mentioning "transcription"
 and "Markdown") repeated with ``---`` separators and no page text. Those readings
 must fail audit and escalate; a reading that only prefixes real content with the
 same lead-in should ship with the prefix removed.
+
+Legitimate document lines such as "The following is a transcription of the
+hearing held…" are never matched: a removable line must describe transcribing
+**the image** into **Markdown**, not a real-world hearing or remarks.
 """
 
 from __future__ import annotations
 
 import re
 
-#: Standalone horizontal-rule lines (model filler, not GFM setext headings).
+#: Standalone horizontal-rule lines (model filler between repeated preambles).
 _SEPARATOR_LINE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 
 
@@ -18,18 +22,24 @@ def _normalize_block(text: str) -> str:
     return " ".join(text.split())
 
 
-def _is_preamble_line(line: str) -> bool:
-    """True for model lead-in lines at the start of OCR output."""
+def _is_vlm_image_transcription_boilerplate_line(line: str) -> bool:
+    """True only for the model's image→Markdown lead-in, not document transcriptions."""
     stripped = line.strip()
     if not stripped:
-        return True
-    if _SEPARATOR_LINE_RE.match(stripped):
-        return True
+        return False
     lower = stripped.lower()
+    refers_to_image_markdown = (
+        "text in the image" in lower
+        or "image into clean markdown" in lower
+        or ("in the image" in lower and "markdown" in lower)
+        or ("rendered in clean markdown" in lower)
+        or ("preserving the document structure" in lower and "markdown" in lower)
+    )
+    if not refers_to_image_markdown:
+        return False
     if lower.startswith(("the following", "here is", "here's", "here are", "below is")):
-        if "transcription" in lower or "transcribed" in lower:
-            return True
-    if lower.startswith("transcription") and ("markdown" in lower or "image" in lower):
+        return "transcription" in lower or "transcribed" in lower
+    if lower.startswith("transcription"):
         return True
     return False
 
@@ -38,7 +48,9 @@ def _is_preamble_block(block: str) -> bool:
     lines = [ln for ln in block.splitlines() if ln.strip()]
     if not lines:
         return True
-    return all(_is_preamble_line(ln) for ln in lines)
+    if len(lines) == 1 and _SEPARATOR_LINE_RE.match(lines[0].strip()):
+        return True
+    return all(_is_vlm_image_transcription_boilerplate_line(ln) for ln in lines)
 
 
 def _split_blocks(text: str) -> list[str]:
@@ -50,17 +62,24 @@ def _split_blocks(text: str) -> list[str]:
 
 
 def strip_leading_ocr_boilerplate(text: str) -> str:
-    """Remove exact preamble-shaped lines and leading separators at the start only."""
+    """Remove VLM image-transcription lead-ins (and following ``---``) at the start only."""
     if not text:
         return text
     lines = text.splitlines()
     i = 0
+    removed_any = False
     while i < len(lines):
         stripped = lines[i].strip()
         if not stripped:
+            if removed_any:
+                i += 1
+                continue
+            break
+        if _is_vlm_image_transcription_boilerplate_line(stripped):
+            removed_any = True
             i += 1
             continue
-        if _is_preamble_line(stripped):
+        if removed_any and _SEPARATOR_LINE_RE.match(stripped):
             i += 1
             continue
         break
@@ -107,7 +126,7 @@ def is_boilerplate_only_output(text: str) -> bool:
 
 
 def leading_preamble_to_strip(text: str) -> bool:
-    """True when the raw text begins with removable preamble (but may have body)."""
+    """True when the raw text begins with removable VLM preamble (but may have body)."""
     if not text:
         return False
     stripped = strip_leading_ocr_boilerplate(text)

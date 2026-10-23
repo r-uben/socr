@@ -945,8 +945,6 @@ class HeuristicPageJudge:
         from socr.audit.boilerplate import strip_leading_ocr_boilerplate
 
         candidate_text = strip_leading_ocr_boilerplate(output.text)
-        if candidate_text != output.text:
-            output.text = candidate_text
         if not candidate_text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
         check = self._checker.check(candidate_text, sparse_ok=self._sparse_ok(output.page_num))
@@ -954,8 +952,11 @@ class HeuristicPageJudge:
             reason = "heuristics passed"
         else:
             reason = "; ".join(check.errors or ["heuristics failed"])
+        accepted = bool(check.passed)
+        if accepted and candidate_text != output.text:
+            output.text = candidate_text
         return AcceptDecision(
-            accept=bool(check.passed),
+            accept=accepted,
             reason=reason,
             confidence=output.confidence,
         )

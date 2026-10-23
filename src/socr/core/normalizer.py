@@ -139,7 +139,7 @@ class OutputNormalizer:
             text = self._clean_marker(text)
 
         # Generic normalization
-        text = self._normalize_generic(text)
+        text = self._normalize_generic(text, engine=engine_lower)
         return text
 
     # --- engine-specific cleaners ---
@@ -299,7 +299,7 @@ class OutputNormalizer:
             out.append(unicodedata.normalize("NFKC", "".join(segment)))
         return "".join(out)
 
-    def _normalize_generic(self, text: str) -> str:
+    def _normalize_generic(self, text: str, engine: str = "") -> str:
         """Apply generic markdown normalization."""
         # CRLF -> LF
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -334,8 +334,10 @@ class OutputNormalizer:
         text = self._RE_EXCESS_BLANK.sub("\n\n", text)
 
         from socr.audit.boilerplate import strip_leading_ocr_boilerplate
+        from socr.core.verdict import model_reading_engines
 
-        text = strip_leading_ocr_boilerplate(text)
+        if engine in model_reading_engines():
+            text = strip_leading_ocr_boilerplate(text)
 
         return text.strip()
 
