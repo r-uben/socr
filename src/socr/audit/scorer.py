@@ -43,6 +43,10 @@ class ScoringResult:
 # Mapping from HeuristicsChecker metric names to (FailureMode, detail template).
 _METRIC_MAP: dict[str, tuple[FailureMode, str]] = {
     "Empty output": (FailureMode.EMPTY_OUTPUT, "No text extracted from document"),
+    "Boilerplate-only output": (
+        FailureMode.EMPTY_OUTPUT,
+        "OCR output is only repeated model preamble with no page content",
+    ),
     "LLM refusal": (FailureMode.REFUSAL, "Model refused to process the input"),
     "CID artifacts": (FailureMode.GARBAGE, "PDF font mapping failures (CID references)"),
     "Hallucination loops": (

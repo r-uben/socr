@@ -942,13 +942,21 @@ class HeuristicPageJudge:
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         if output.status != PageStatus.SUCCESS or not output.text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
-        check = self._checker.check(output.text, sparse_ok=self._sparse_ok(output.page_num))
+        from socr.audit.boilerplate import strip_leading_ocr_boilerplate
+
+        candidate_text = strip_leading_ocr_boilerplate(output.text)
+        if not candidate_text.strip():
+            return AcceptDecision(accept=False, reason="empty/error output")
+        check = self._checker.check(candidate_text, sparse_ok=self._sparse_ok(output.page_num))
         if check.passed:
             reason = "heuristics passed"
         else:
             reason = "; ".join(check.errors or ["heuristics failed"])
+        accepted = bool(check.passed)
+        if accepted and candidate_text != output.text:
+            output.text = candidate_text
         return AcceptDecision(
-            accept=bool(check.passed),
+            accept=accepted,
             reason=reason,
             confidence=output.confidence,
         )
