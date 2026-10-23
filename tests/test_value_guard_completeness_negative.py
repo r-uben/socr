@@ -18,7 +18,10 @@ _make_fitz_page_with_words = ntv._make_fitz_page_with_words
 _md_table = ntv._md_table
 
 FIXTURE_PDF = (
-    pytest.importorskip("pathlib").Path(__file__).parent / "fixtures" / "table_repair" / "ce_like_p4.pdf"
+    pytest.importorskip("pathlib").Path(__file__).parent
+    / "fixtures"
+    / "table_repair"
+    / "ce_like_p4.pdf"
 )
 
 

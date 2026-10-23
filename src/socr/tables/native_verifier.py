@@ -1619,11 +1619,7 @@ def _lane_index_panels(words: list) -> list[frozenset[int]]:
         gap = centers[sorted_lanes[i + 1]] - centers[sorted_lanes[i]]
         left_size = i + 1
         right_size = len(sorted_lanes) - left_size
-        if (
-            gap >= _PANEL_SPLIT_MIN_GAP_PT
-            and left_size >= 4
-            and right_size >= 4
-        ):
+        if gap >= _PANEL_SPLIT_MIN_GAP_PT and left_size >= 4 and right_size >= 4:
             split = i + 1
             best_gap = gap
     if best_gap < _PANEL_SPLIT_MIN_GAP_PT:
