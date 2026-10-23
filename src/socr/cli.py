@@ -163,9 +163,10 @@ def common_options(f):
         help=(
             "Fail-closed gating for the default-on native per-cell table binding check. "
             "Without this flag the check still runs and records native_cell_binding, "
-            "audit events, and tables_trust entries, but never demotes a page (no "
-            "TABLE_UNVERIFIED status, mark, or failure_mode change). With this flag, "
-            "CONTRADICTED, AMBIGUOUS, and skip outcomes demote the page as before."
+            "audit events, and tables_trust advisory entries, but never demotes a page. "
+            "With this flag, CONTRADICTED, AMBIGUOUS, and skip outcomes demote the page. "
+            "Not recommended for French budget documents (RESF / PLFSS style) until the "
+            "native-cell binding redesign lands — expect header-label ambiguity there."
         ),
     )(f)
     f = click.option(

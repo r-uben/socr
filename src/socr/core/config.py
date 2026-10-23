@@ -218,6 +218,8 @@ class PipelineConfig:
     # only**: it never demotes a page, adds marks, or blocks credentials.
     # ``--native-cell-gating`` restores fail-closed demotion (WARNING /
     # ``TABLE_UNVERIFIED`` / visible mark) on CONTRADICTED, AMBIGUOUS, or skip.
+    # Not recommended for French budget PDFs (RESF / PLFSS) until the binding
+    # redesign lands; advisory mode is the intended default there.
     native_cell_gating: bool = False
 
     # --- Math recovery (font-corrupted equations, default ON) ---

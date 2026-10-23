@@ -192,10 +192,16 @@ def test_doc_level_note_reports_counts_and_points_at_the_sidecar():
     assert "tables_trust.json" in note
 
 
+def _trust_note_pipe() -> UnifiedPipeline:
+    pipe = object.__new__(UnifiedPipeline)
+    pipe.config = PipelineConfig()
+    return pipe
+
+
 def test_orchestrator_note_helper_derives_from_state_events():
     state = SimpleNamespace(handle=SimpleNamespace(filename="doc.pdf"), events=[_flagged(13)])
 
-    note = UnifiedPipeline._tables_trust_note(state)
+    note = _trust_note_pipe()._tables_trust_note(state)
 
     assert note is not None
     assert "1 page(s)" in note
@@ -204,7 +210,7 @@ def test_orchestrator_note_helper_derives_from_state_events():
 def test_orchestrator_note_helper_is_none_on_a_clean_state():
     state = SimpleNamespace(handle=SimpleNamespace(filename="doc.pdf"), events=[])
 
-    assert UnifiedPipeline._tables_trust_note(state) is None
+    assert _trust_note_pipe()._tables_trust_note(state) is None
 
 
 def test_orchestrator_note_helper_survives_a_malformed_state():
@@ -215,7 +221,7 @@ def test_orchestrator_note_helper_survives_a_malformed_state():
         def events(self):
             raise RuntimeError("boom")
 
-    assert UnifiedPipeline._tables_trust_note(_Broken()) is None
+    assert _trust_note_pipe()._tables_trust_note(_Broken()) is None
 
 
 # ----------------------------------------------------------------------
@@ -601,8 +607,10 @@ def test_native_cell_distrust_survives_table_escalation_accepted():
         AuditEvent(page_num=3, kind="table_escalation_accepted"),
     ]
     trust = build_tables_trust("doc.pdf", events)
-    assert trust.untrusted_pages == [3]
-    assert "native_cell_check_ambiguous" in trust.to_dict()["pages"]["3"]["reasons"]
+    assert trust.untrusted_pages == []
+    assert 3 in trust.advisory_native_cell_pages
+    detail = trust.to_dict()["native_cell_advisory"]["pages_detail"]["3"]
+    assert "native_cell_check_ambiguous" in detail["reasons"]
 
 
 def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():

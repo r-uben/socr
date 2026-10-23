@@ -180,7 +180,9 @@ def test_p67_strict_labels_ambiguous_advisory_no_demotion(tmp_path: Path) -> Non
     assert any(k.startswith(_NATIVE_CELL_AUDIT_PREFIX) for k in kinds)
     _assert_advisory_no_demotion(sidecar, ps)
     trust = _tables_trust(out_dir)
-    assert "1" in trust.get("pages", {})
+    assert "1" not in trust.get("pages", {})
+    adv = trust.get("native_cell_advisory") or {}
+    assert 1 in adv.get("pages", [])
 
 
 def test_mutated_table_contradicted_advisory_no_demotion(tmp_path: Path) -> None:
@@ -195,8 +197,9 @@ def test_mutated_table_contradicted_advisory_no_demotion(tmp_path: Path) -> None
     kinds = [e["kind"] for e in _audit_events(out_dir) if e.get("page_num") == 1]
     assert "native_cell_check_contradicted" in kinds
     trust = _tables_trust(out_dir)
-    assert "1" in trust.get("pages", {})
-    assert "native_cell_check_contradicted" in trust["pages"]["1"].get("reasons", [])
+    assert "1" not in trust.get("pages", {})
+    adv = trust["native_cell_advisory"]
+    assert "native_cell_check_contradicted" in adv["counts_by_kind"]
     _assert_advisory_no_demotion(sidecar, ps)
 
 
@@ -223,6 +226,31 @@ def test_mutated_table_contradicted_with_gating_demotes(tmp_path: Path) -> None:
     assert win["status"] == PageStatus.WARNING.value
     assert win["failure_mode"] == "table_unverified"
     assert UNVERIFIED_TABLE_MARK in win["text"]
+
+
+def test_gating_on_native_cell_distrust_in_main_trust_index(tmp_path: Path) -> None:
+    """With gating, native-cell distrust must not be filed under native_cell_advisory."""
+    md = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
+    bad = md.replace("Solde public | -5,5 | -6,1", "Solde public | -6,1 | -5,5")
+    _run_page(tmp_path, "resf_p59.pdf", bad, native_cell_gating=True)
+    trust = _tables_trust(tmp_path / "resf_p59_out")
+    assert 1 in trust["untrusted_pages"]
+    assert trust["counts_by_kind"]["native_cell_check_contradicted"] == 1
+    assert "native_cell_check_contradicted" in trust["pages"]["1"]["reasons"]
+    assert not trust.get("native_cell_advisory")
+
+
+def test_gating_off_native_cell_distrust_stays_advisory_only(tmp_path: Path) -> None:
+    """Default advisory: sidecar records native-cell under native_cell_advisory only."""
+    md = (FIXTURES / "p59_tableau1.md").read_text(encoding="utf-8")
+    bad = md.replace("Solde public | -5,5 | -6,1", "Solde public | -6,1 | -5,5")
+    _run_page(tmp_path, "resf_p59.pdf", bad, native_cell_gating=False)
+    trust = _tables_trust(tmp_path / "resf_p59_out")
+    assert trust.get("untrusted_pages") == []
+    assert "1" not in trust.get("pages", {})
+    adv = trust["native_cell_advisory"]
+    assert 1 in adv["pages"]
+    assert adv["counts_by_kind"]["native_cell_check_contradicted"] == 1
 
 
 def test_no_geometry_skips_with_gating_demotes(tmp_path: Path) -> None:
