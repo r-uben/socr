@@ -3,6 +3,8 @@
 import re
 from dataclasses import dataclass, field
 
+from socr.audit.boilerplate import is_boilerplate_only_output
+
 
 @dataclass
 class AuditMetric:
@@ -130,6 +132,17 @@ class HeuristicsChecker:
                 AuditMetric(
                     name="Empty output",
                     value="No text extracted",
+                    passed=False,
+                    severity="error",
+                )
+            )
+            return result
+
+        if is_boilerplate_only_output(text):
+            result.add_metric(
+                AuditMetric(
+                    name="Boilerplate-only output",
+                    value="Model preamble repeated with no document content",
                     passed=False,
                     severity="error",
                 )

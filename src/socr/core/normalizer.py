@@ -333,6 +333,10 @@ class OutputNormalizer:
         # Collapse 3+ blank lines -> 2
         text = self._RE_EXCESS_BLANK.sub("\n\n", text)
 
+        from socr.audit.boilerplate import strip_leading_ocr_boilerplate
+
+        text = strip_leading_ocr_boilerplate(text)
+
         return text.strip()
 
 

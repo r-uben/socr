@@ -97,6 +97,7 @@ socr-acceptance = "socr.benchmark.acceptance:main"
 socr-refinalize-own-text = "socr.pipeline.refinalize_own_text:main"
 socr-refinalize-prior-ocr = "socr.pipeline.refinalize_prior_ocr:main"
 socr-refinalize-unshipped-figures = "socr.pipeline.refinalize_unshipped_figures:main"
+socr-refinalize-boilerplate = "socr.pipeline.refinalize_boilerplate:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]
