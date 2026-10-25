@@ -395,6 +395,8 @@ UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = _unshipped_figures.EVENT_KINDS
 UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = _unshipped_figures.MARKED_KINDS
 UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
 UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
+#: #1225: marked like the others, but it names no figure, so the note and the CLI word it apart.
+UNSHIPPED_FIGURE_CHART_SKELETON_KIND = _unshipped_figures.CHART_SKELETON_KIND
 #: The three ``PageState`` fields / sidecar keys this lane owns.
 _UNSHIPPED_FIGURE_FIELDS = (
     "unshipped_figure_refs",
@@ -7070,6 +7072,7 @@ class UnifiedPipeline:
         """
         shipped: list[int] = []
         marked: list[int] = []
+        skeleton: list[int] = []
         for event in state.events:
             kind = getattr(event, "kind", "")
             page = getattr(event, "page_num", None)
@@ -7085,7 +7088,9 @@ class UnifiedPipeline:
                 shipped.append(int(page))
             if kind in UNSHIPPED_FIGURE_MARKED_KINDS:
                 marked.append(int(page))
-        return _unshipped_figures.document_note(shipped, marked) or None
+            if kind == UNSHIPPED_FIGURE_CHART_SKELETON_KIND:
+                skeleton.append(int(page))
+        return _unshipped_figures.document_note(shipped, marked, skeleton) or None
 
     @staticmethod
     def _scanned_figure_split(state, records) -> tuple[list[int], list[int], list[int]]:
@@ -20234,6 +20239,15 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                 )
+                # #1225: a chart-skeleton page names no figure, so it gets its own line.
+                _uf_skeleton = sorted(
+                    {
+                        int(e.page_num)
+                        for e in state.events
+                        if getattr(e, "kind", "") == UNSHIPPED_FIGURE_CHART_SKELETON_KIND
+                        and getattr(e, "page_num", None) is not None
+                    }
+                )
                 _uf_marked = sorted(
                     {
                         int(e.page_num)
@@ -20241,6 +20255,7 @@ class UnifiedPipeline:
                         if getattr(e, "kind", "") in UNSHIPPED_FIGURE_MARKED_KINDS
                         and getattr(e, "page_num", None) is not None
                     }
+                    - set(_uf_skeleton)
                 )
                 if _uf_shipped:
                     console.print(
@@ -20253,6 +20268,12 @@ class UnifiedPipeline:
                         f"  [red]{len(_uf_marked)} page(s) named a figure socr could not "
                         f"locate, could not save, or could not tell apart from the others the "
                         f"page names; the page is marked: {_uf_marked}[/red]"
+                    )
+                if _uf_skeleton:
+                    console.print(
+                        f"  [red]{len(_uf_skeleton)} page(s) carry a chart's axis ticks, "
+                        f"with no picture of it; the page is marked: "
+                        f"{_uf_skeleton}[/red]"
                     )
                 if _visual_lost:
                     # GH-566: and the render-failure pages are NOT that. Nothing

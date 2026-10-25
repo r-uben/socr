@@ -38,6 +38,7 @@ from pathlib import Path
 
 from socr.core.verdict import in_fresh_run_order
 from socr.figures.unshipped_figures import (
+    CHART_SKELETON_KIND,
     EVENT_KINDS,
     MARKED_KINDS,
     NOT_FOUND_KIND,
@@ -92,6 +93,7 @@ class PageChange:
         return {
             RENDER_FAILED_KIND: "marked: a region was located and no crop could be saved",
             UNLOCATED_KIND: "marked: no figure region could be located",
+            CHART_SKELETON_KIND: "marked: a chart's axis ticks ship with no picture of it",
         }.get(self.kind, "crop shipped AND marked: the crops are not proven complete")
 
     @property
@@ -394,11 +396,17 @@ def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
     return out
 
 
-def _lane_pages(answered: list[dict]) -> tuple[list[int], list[int]]:
-    """``(pages that shipped a crop, pages that are marked)``."""
+def _lane_pages(answered: list[dict]) -> tuple[list[int], list[int], list[int]]:
+    """``(pages that shipped a crop, pages that are marked, chart-skeleton pages)``. The third
+    is a subset of the second, kept apart because the note words it apart (#1225)."""
     shipped = [int(d["page_num"]) for d in answered if d.get("unshipped_figure_refs")]
     marked = [int(d["page_num"]) for d in answered if d.get("unshipped_figure_unlocated")]
-    return shipped, marked
+    skeleton = [
+        int(d["page_num"])
+        for d in answered
+        if d.get("unshipped_figure_kind") == CHART_SKELETON_KIND
+    ]
+    return shipped, marked, skeleton
 
 
 def refinalize_document(
@@ -500,8 +508,8 @@ def refinalize_document(
                     {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
                 ]
         _write_json(manifest_path, manifest)
-    shipped_pages, marked_pages = _lane_pages(answered)
-    note = document_note(shipped_pages, marked_pages)
+    shipped_pages, marked_pages, skeleton_pages = _lane_pages(answered)
+    note = document_note(shipped_pages, marked_pages, skeleton_pages)
 
     def _record(record: dict) -> None:
         """The note, and -- when this lane MARKED a page -- the demotion a live run makes.
