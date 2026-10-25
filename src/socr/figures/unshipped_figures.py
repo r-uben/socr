@@ -136,8 +136,11 @@ RENDERED_KIND = "unshipped_figure_rendered"
 RENDER_FAILED_KIND = "unshipped_figure_render_failed"
 UNLOCATED_KIND = "unshipped_figure_unlocated"
 NOT_FOUND_KIND = "unshipped_figure_not_found"
+#: #1225: the body names no figure, but carries a chart's axis ticks with nothing plotted
+#: between them. Mark only -- see :func:`decide`.
+CHART_SKELETON_KIND = "unshipped_figure_chart_skeleton"
 EVENT_KINDS: frozenset[str] = frozenset(
-    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, NOT_FOUND_KIND}
+    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, NOT_FOUND_KIND, CHART_SKELETON_KIND}
 )
 #: The kinds that MARK the page. Everything this lane acts on is in here except the
 #: abstention: a crop is a picture, not a reading, and this lane cannot say its crops cover
@@ -145,9 +148,115 @@ EVENT_KINDS: frozenset[str] = frozenset(
 #: (``verdict._chart_values_clause``), and shipping a crop is strictly weaker evidence than
 #: shipping the whole page image, so claiming CHECKED on it was the stronger claim from the
 #: weaker evidence.
-MARKED_KINDS: frozenset[str] = frozenset({RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND})
+MARKED_KINDS: frozenset[str] = frozenset(
+    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, CHART_SKELETON_KIND}
+)
 #: The subset that ships a picture. The document note and the CLI need the two apart.
 SHIPPED_KINDS: frozenset[str] = frozenset({RENDERED_KIND})
+
+
+#: #1225: the label a chart-skeleton mark names. Such a page names no figure, so there is no
+#: caption to quote; this says what was not shipped.
+CHART_SKELETON_LABEL = "uncaptioned chart"
+
+#: #1225: the fewest evenly spaced numbers that count as an axis. Derived from the definition,
+#: not fitted: ANY two numbers are evenly spaced, so evenness first constrains at the third.
+#: Measured on run 23319732 and the Fed calibration copy, no model-read page scores 2 or 3,
+#: so 3 and 4 fire on the same pages; 3 is the one with a reason.
+MIN_TICK_RUN = 3
+
+_TICK_NUMBER_RE = re.compile(r"^[-−–]?\d+(?:[.,]\d+)?%?$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_PRE_OPEN_RE = re.compile(r"^<pre\b", re.IGNORECASE)
+
+
+def _tick_value(token: str) -> float | None:
+    cleaned = token.replace("−", "-").replace("–", "-").rstrip("%").replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _longest_even_run(values: list[float]) -> int:
+    """The longest contiguous run with one nonzero step, counted in terms."""
+    best = current = min(len(values), 1)
+    for i in range(1, len(values)):
+        step = values[i] - values[i - 1]
+        if i >= 2 and step != 0 and abs(step - (values[i - 1] - values[i - 2])) < 1e-9:
+            current += 1
+        else:
+            current = 2 if step != 0 else 1
+        best = max(best, current)
+    return best
+
+
+def tick_run(body: str) -> int:
+    """#1225: the longest run of evenly spaced numbers in *body* that reads as an axis.
+
+    A chart a reading dropped leaves its axes behind: ``1996 1998 2000 2002 2004`` on one line,
+    or ``18``, ``16``, ``14`` ... one per line. Plotted VALUES almost never form an arithmetic
+    progression, so the run is positive evidence of a scale with nothing drawn against it.
+
+    Counted only on a line EVERY token of which is a number, or down consecutive such lines of
+    one number each. That rule is what keeps out a Markdown, GFM or LaTeX table row and a list
+    item: their delimiters (``|``, ``&``, ``\\\\``, ``-``, ``1.``) are tokens and are not
+    numbers. An explicit exclusion for each was written first and could never change an
+    answer, so it is not here. A fenced or ``<pre>`` code block IS excluded, because its lines
+    can be bare numbers. An indented (four-space) code block is not: a VLM's page transcription
+    does not write one, and excluding it would also drop an indented tick column.
+
+    What this cannot tell apart: a table emitted with no delimiters at all and a header row of
+    consecutive years. Two such pages fired among 32 sampled firings on NATIVE text layers
+    (out of this lane's scope); none among the 38 firings on model-read pages. See the log.
+    """
+    best = 0
+    column: list[float] = []
+    #: Two states, not one flag (Argon, PR #1239): inside a fence a ``<pre>`` tag is code, and
+    #: only a fence of the SAME character closes it; inside a ``<pre>`` a fence is code.
+    fence = ""
+    in_pre = False
+
+    def close_column() -> None:
+        nonlocal best
+        if len(column) >= 2:
+            best = max(best, _longest_even_run(column))
+        column.clear()
+
+    for line in (body or "").split("\n"):
+        stripped = line.strip()
+        marker = _FENCE_RE.match(line)
+        if fence:
+            if marker and marker.group(1)[0] == fence:
+                fence = ""
+            continue
+        if in_pre:
+            in_pre = "</pre" not in stripped.lower()
+            continue
+        if marker:
+            close_column()
+            fence = marker.group(1)[0]
+            continue
+        if _PRE_OPEN_RE.match(stripped):
+            close_column()
+            # A one-line ``<pre>…</pre>`` opens nothing: it must not blind the rest of the page.
+            in_pre = "</pre" not in stripped.lower()
+            continue
+        tokens = stripped.split()
+        # A blank line does not end a column: a VLM often writes one tick per paragraph.
+        if not tokens:
+            continue
+        values = [_tick_value(t) for t in tokens if _TICK_NUMBER_RE.match(t)]
+        if len(values) != len(tokens):
+            close_column()
+            continue
+        if len(values) == 1:
+            column.append(values[0])
+            continue
+        close_column()
+        best = max(best, _longest_even_run(values))
+    close_column()
+    return best
 
 
 def crop_filename(page_num: int, index: int) -> str:
@@ -311,6 +420,26 @@ class FigureDecision:
         }
 
 
+def _chart_skeleton_decision(
+    body: str, captions: tuple[str, ...], strict: tuple[str, ...]
+) -> FigureDecision | None:
+    """#1225: the MARK for a chart whose axis ticks the body carries and whose picture no
+    branch can give. ``None`` when the body carries no axis."""
+    ticks = tick_run(body)
+    if ticks < MIN_TICK_RUN:
+        return None
+    return FigureDecision(
+        captions,
+        strict,
+        0,
+        (),
+        (CHART_SKELETON_LABEL,),
+        CHART_SKELETON_KIND,
+        f"this page names no figure it can show, but its text carries a run of {ticks} evenly "
+        "spaced axis ticks and no picture of the chart ships, so the page is marked",
+    )
+
+
 def decide(body: str, locate, render) -> FigureDecision | None:
     """The whole rule, in one place. ``None`` when this page is not this lane's.
 
@@ -329,7 +458,14 @@ def decide(body: str, locate, render) -> FigureDecision | None:
 
     The branches, and what makes each of them positive evidence:
 
-    * **No caption at all** -> ``None``. Nothing is dangling.
+    * **No caption at all** -> ``None``, unless the body carries a chart's axis ticks
+      (:func:`tick_run` >= :data:`MIN_TICK_RUN`): then the MARK branch, ``CHART_SKELETON_KIND``
+      (#1225). A VLM that drops a plot keeps its panel titles and tick labels, so the ticks are
+      positive evidence of a chart the page shows and the body does not. Marked, never
+      cropped, and the locator is not called: on the Fed calibration copy one such page has no
+      region the locator finds (greenbook-part2 2004-09 p12), and the crop would be the
+      weaker of two answers to the same page anyway. Measured in
+      ``docs/log/2026-10-24_1225-uncaptioned-charts.md``.
     * **No region located** -> the page may be marked only on the STRICT matcher, because the
       only evidence here is the caption's own shape and the loose one also fires on a
       cross-reference that opens a line. On the loose matcher alone the lane records that it
@@ -339,7 +475,7 @@ def decide(body: str, locate, render) -> FigureDecision | None:
     """
     captions = figure_captions(body)
     if not captions:
-        return None
+        return _chart_skeleton_decision(body, (), ())
     strict = figure_captions(body, strict=True)
     bboxes = locate()
     regions = len(bboxes)
@@ -347,6 +483,12 @@ def decide(body: str, locate, render) -> FigureDecision | None:
 
     if not regions:
         if not strict:
+            # #1225: a cross-reference-shaped label ("Chart 3 Selected yields") with no region
+            # owes nothing on its caption alone, but the ticks are evidence of their own, and
+            # the same evidence on a page with no label at all marks it (advisor, diff review).
+            skeleton = _chart_skeleton_decision(body, captions, strict)
+            if skeleton is not None:
+                return skeleton
             return FigureDecision(
                 captions,
                 strict,
@@ -433,6 +575,13 @@ _CLAUSE_REASON: dict[str, str] = {
         "crop is a picture, not a reading, so its values are not transcribed, and socr cannot "
         "say the crops cover every figure this page carries; read it from the page image"
     ),
+    # Says what was CHECKED and no more: a run of evenly spaced ticks, and no picture. Whether
+    # the plotted values are transcribed is not checked, so the mark does not claim they are
+    # absent (advisor, diff review).
+    CHART_SKELETON_KIND: (
+        "this page's text carries a chart's axis ticks and no picture of the chart ships; "
+        "read it from the page image"
+    ),
 }
 
 
@@ -467,14 +616,20 @@ def clause_records(page_num: int, captions: tuple[str, ...], kind: str) -> tuple
 NOTE_PREFIX = "unshipped figures: "
 
 
-def document_note(shipped: list[int], marked: list[int]) -> str:
+def document_note(shipped: list[int], marked: list[int], skeleton: list[int] | None = None) -> str:
     """The lane's ``metadata.json`` note, built from the pages in each class.
 
     One builder, used by the live run's ``_unshipped_figure_note`` and by the re-finalize tool,
     so a re-finalized document says exactly what a fresh one would. The leading
     :data:`NOTE_PREFIX` is what lets the tool REPLACE its own earlier note instead of appending
     a second copy when a run is interrupted and redone.
+
+    *skeleton* (#1225) is the chart-skeleton pages. They are MARKED too, but the ``marked``
+    sentence says they "name a figure", which they do not, so they are taken out of it and get
+    their own.
     """
+    skeleton = sorted(set(skeleton or ()))
+    marked = [n for n in marked if n not in skeleton]
     parts = []
     if shipped:
         parts.append(
@@ -487,6 +642,11 @@ def document_note(shipped: list[int], marked: list[int]) -> str:
             f"page(s) {', '.join(str(n) for n in sorted(set(marked)))} name a figure socr "
             "could not locate, could not save, or could not tell apart from the others the "
             "page names, and are marked"
+        )
+    if skeleton:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in skeleton)} carry a chart's axis ticks, "
+            "show no picture of it, and are marked"
         )
     # No ``;`` ANYWHERE inside, including between the two clauses: ``;`` is what separates one
     # lane's note from another's in ``metadata.json``'s ``error``, so a note carrying one

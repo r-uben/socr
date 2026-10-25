@@ -27,6 +27,9 @@ EXPECTED_RESUME_KINDS = frozenset(
         "unshipped_figure_render_failed",
         "unshipped_figure_unlocated",
         "unshipped_figure_not_found",
+        # #1225: the uncaptioned chart-skeleton mark. Emitted at the same step, so it is
+        # lost on resume for the same reason as the four above, and replayed for it.
+        "unshipped_figure_chart_skeleton",
         "chart_counts_derived",
         "chart_counts_not_derived",
         "chart_grid_contradicted",
@@ -141,4 +144,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 64 after #1187 round 2 dropped ``unshipped_figure_partially_shipped``: the outcome it
     # named -- a page naming more figures than it shipped crops -- stopped being a distinct
     # behaviour when every page the lane acts on became MARKED (Argon P0-1).
-    assert len(EXPECTED_RESUME_KINDS) == 64
+    # 65 with #1225's unshipped_figure_chart_skeleton.
+    assert len(EXPECTED_RESUME_KINDS) == 65
