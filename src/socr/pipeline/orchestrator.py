@@ -12951,7 +12951,12 @@ class UnifiedPipeline:
         # could never fire on its own, and the mutation check found it unkillable (CLAUDE.md:
         # a guard that has never been seen to fail has not been shown to guard anything). The
         # three lists are still persisted and restored; they are just not the gate.
-        if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
+        # #1225 (PR #1239 review): except ``NOT_FOUND``, which shipped and marked nothing, so
+        # deciding the page again can only add a statement. It is re-decided, and acted on only
+        # if the answer CHANGED -- the same answer twice appends nothing, which is what the
+        # abstention's answered-once test pins.
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded and recorded != _unshipped_figures.NOT_FOUND_KIND:
             return
         if page_ships_its_own_page_image(ps, body):
             return
@@ -12976,10 +12981,17 @@ class UnifiedPipeline:
             lambda: locate_figure_regions(state.handle.path, page_num, per_page),
             _render,
         )
-        if decision is None:
+        if decision is None or decision.kind == recorded:
             return
         from socr.core.audit_log import AuditEvent
 
+        if recorded:
+            # The superseded NOT_FOUND event goes: one page, one answer, as the tool records it.
+            state.events[:] = [
+                e
+                for e in state.events
+                if not (getattr(e, "page_num", None) == page_num and e.kind == recorded)
+            ]
         for name, value in decision.state_fields.items():
             setattr(ps, name, value)
         state.events.append(

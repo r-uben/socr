@@ -166,7 +166,7 @@ CHART_SKELETON_LABEL = "uncaptioned chart"
 MIN_TICK_RUN = 3
 
 _TICK_NUMBER_RE = re.compile(r"^[-−–]?\d+(?:[.,]\d+)?%?$")
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _PRE_OPEN_RE = re.compile(r"^<pre\b", re.IGNORECASE)
 
 
@@ -212,7 +212,10 @@ def tick_run(body: str) -> int:
     """
     best = 0
     column: list[float] = []
-    in_block = False
+    #: Two states, not one flag (Argon, PR #1239): inside a fence a ``<pre>`` tag is code, and
+    #: only a fence of the SAME character closes it; inside a ``<pre>`` a fence is code.
+    fence = ""
+    in_pre = False
 
     def close_column() -> None:
         nonlocal best
@@ -222,17 +225,26 @@ def tick_run(body: str) -> int:
 
     for line in (body or "").split("\n"):
         stripped = line.strip()
-        fence = bool(_FENCE_RE.match(line))
-        opens_pre = bool(_PRE_OPEN_RE.match(stripped))
-        closes_pre = "</pre" in stripped.lower()
-        if fence or opens_pre or closes_pre:
+        marker = _FENCE_RE.match(line)
+        if fence:
+            if marker and marker.group(1)[0] == fence:
+                fence = ""
+            continue
+        if in_pre:
+            in_pre = "</pre" not in stripped.lower()
+            continue
+        if marker:
+            close_column()
+            fence = marker.group(1)[0]
+            continue
+        if _PRE_OPEN_RE.match(stripped):
             close_column()
             # A one-line ``<pre>…</pre>`` opens nothing: it must not blind the rest of the page.
-            in_block = (not in_block) if fence else (opens_pre and not closes_pre)
+            in_pre = "</pre" not in stripped.lower()
             continue
         tokens = stripped.split()
         # A blank line does not end a column: a VLM often writes one tick per paragraph.
-        if in_block or not tokens:
+        if not tokens:
             continue
         values = [_tick_value(t) for t in tokens if _TICK_NUMBER_RE.match(t)]
         if len(values) != len(tokens):
@@ -567,8 +579,8 @@ _CLAUSE_REASON: dict[str, str] = {
     # the plotted values are transcribed is not checked, so the mark does not claim they are
     # absent (advisor, diff review).
     CHART_SKELETON_KIND: (
-        "this page's text carries a chart's axis ticks and no picture of the chart ships, so "
-        "its plotted values are not shown; read it from the page image"
+        "this page's text carries a chart's axis ticks and no picture of the chart ships; "
+        "read it from the page image"
     ),
 }
 

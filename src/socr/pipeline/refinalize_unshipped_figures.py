@@ -165,6 +165,19 @@ def _already_answered(sidecar: dict) -> bool:
     return any(sidecar.get(key) for key in _LANE_KEYS)
 
 
+def _settled(sidecar: dict) -> bool:
+    """Answered, and by an outcome a re-decision may not revisit.
+
+    #1225 (PR #1239 review): ``NOT_FOUND`` shipped and marked nothing, so deciding such a page
+    again can only ADD a statement -- and a run finished under #1187 records it on every
+    cross-reference-shaped label, which the chart-skeleton branch now answers. Every other
+    kind changed the page and stays final. Still "answered" for the document's note and audit
+    log (:func:`_answered_sidecars`), so a page that re-decides to ``NOT_FOUND`` again keeps
+    its event and changes nothing.
+    """
+    return _already_answered(sidecar) and sidecar.get("unshipped_figure_kind") != NOT_FOUND_KIND
+
+
 def _page_state(sidecar: dict):
     """The page state the two production functions read, as far as the sidecar records it."""
     from socr.core.state import PageState
@@ -270,7 +283,7 @@ def refinalize_page(
         page_was_read_by_a_model,
     )
 
-    if _already_answered(sidecar):
+    if _settled(sidecar):
         return None
     winning = sidecar.get("winning_output")
     if not isinstance(winning, dict):

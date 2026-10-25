@@ -81,8 +81,22 @@ def test_the_fixture_differs_only_in_its_ticks() -> None:
         ("4\n\n3\n\n2\n\n1\n\n0", 5),  # a VLM's blank lines do not break an axis
         ("-0.4 -0.2 0.0 0.2 0.4", 5),
         ("1,500 1,600 1,700", 3),
+        # Argon, PR #1239: the three spellings a VLM uses on an axis, each pinned.
+        ("−0.4 −0.2 0.0 0.2 0.4", 5),  # U+2212 MINUS SIGN
+        ("–2 –1 0 1 2", 5),  # U+2013 EN DASH as a minus
+        ("10% 20% 30% 40%", 4),
     ],
-    ids=["years-2", "years-1", "column", "blank-separated", "signed", "thousands"],
+    ids=[
+        "years-2",
+        "years-1",
+        "column",
+        "blank-separated",
+        "signed",
+        "thousands",
+        "unicode-minus",
+        "en-dash-minus",
+        "percent",
+    ],
 )
 def test_an_axis_is_a_run_of_evenly_spaced_numbers(body: str, run: int) -> None:
     assert tick_run(body) == run
@@ -104,6 +118,7 @@ def test_an_axis_is_a_run_of_evenly_spaced_numbers(body: str, run: int) -> None:
         "0 0 0 0",
         "5\n5\n5\n5",
         "10\n20\n```\nx = 1\n```\n30",
+        "10\n20\n<pre>\nx = 1\n</pre>\n30",
     ],
     ids=[
         "pipe-table",
@@ -119,6 +134,7 @@ def test_an_axis_is_a_run_of_evenly_spaced_numbers(body: str, run: int) -> None:
         "repeated-row",
         "repeated-column",
         "column-broken-by-code-block",
+        "column-broken-by-pre-block",
     ],
 )
 def test_content_that_ships_its_numbers_is_not_an_axis(body: str) -> None:
@@ -141,6 +157,29 @@ def test_a_line_that_opens_no_block_does_not_blind_the_rest(opener: str) -> None
     """A one-line ``<pre>…</pre>`` and a tag that merely starts with ``pre`` open no block, so
     the axis after them still counts (advisor, diff review: both used to hide the page)."""
     assert tick_run(f"{opener}\n10\n20\n30") == 3
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "```\n<pre>\n</pre>\n10\n20\n30\n```",
+        "```\n<pre>\n10\n20\n30\n```",
+        "```\n10\n20\n~~~\n30\n```",
+        "<pre>\n```\n10\n20\n30\n</pre>",
+    ],
+    ids=[
+        "pre-inside-fence",
+        "unclosed-pre-inside-fence",
+        "other-fence-inside-fence",
+        "fence-inside-pre",
+    ],
+)
+def test_a_block_ends_only_at_its_own_close(block: str) -> None:
+    """Argon, PR #1239: one ``in_block`` flag let a ``</pre>`` inside a fence close it, and the
+    fence's own close then reopened a block for the rest of the page. Inside the block nothing
+    counts, and after the block's OWN close an axis counts again."""
+    assert tick_run(block) < MIN_TICK_RUN
+    assert tick_run(f"{block}\n\n40\n50\n60") == 3
 
 
 def test_min_tick_run_is_the_first_term_evenness_constrains() -> None:
@@ -284,6 +323,122 @@ def test_the_tool_marks_a_skeleton_page_and_a_second_run_changes_nothing(
     assert _tree(out) == after, "a second run changes 0 bytes"
 
 
+_XREF = "Chart 3 Selected Treasury yields"
+
+
+def _record_not_found(doc_dir: Path) -> None:
+    """Give the page the record a run finished under #1187 writes for a cross-reference-shaped
+    label with no region: ``state_fields`` of a ``NOT_FOUND`` decision, and its event in the
+    sidecar and the document audit log (``_agentic_unshipped_figure_page`` +
+    ``_flush_page_sidecar``)."""
+    event = {
+        "kind": "unshipped_figure_not_found",
+        "engine": "",
+        "detail": "...",
+        "data": {"captions": ["Chart 3"], "regions": 0, "rendered": 0, "unlocated": []},
+    }
+    side_path = doc_dir / "pages" / "00001.json"
+    side = json.loads(side_path.read_text())
+    side.update(
+        unshipped_figure_refs=[],
+        unshipped_figure_captions=["Chart 3"],
+        unshipped_figure_unlocated=[],
+        unshipped_figure_kind="unshipped_figure_not_found",
+        audit_events=[event],
+    )
+    side_path.write_text(json.dumps(side, indent=2), encoding="utf-8")
+    audit_path = doc_dir / "audit_log.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "events": [{"page_num": 1, **event}],
+                "event_count": 1,
+                "counts": {event["kind"]: 1},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("ticks", [True, False], ids=["skeleton", "no-ticks"])
+def test_the_tool_re_decides_a_page_a_finished_run_answered_not_found(
+    tmp_path: Path, ticks: bool
+) -> None:
+    """Bot, PR #1239: a run finished under #1187 records ``NOT_FOUND`` on a
+    cross-reference-shaped label, and the tool skipped every answered page -- so the label +
+    ticks branch never reached the finished Fed run. ``NOT_FOUND`` shipped and marked nothing,
+    so the tool now decides it again: with ticks the page is marked, without them nothing at
+    all changes, its event included."""
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    body = f"{_XREF}\n\n{SKELETON if ticks else NO_TICKS}"
+    out, doc_dir = _run_dir(tmp_path, pdf, body)
+    _record_not_found(doc_dir)
+    before = _tree(out)
+
+    changes = tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
+    if not ticks:
+        assert changes == [] and _tree(out) == before, "the same answer changes 0 bytes"
+        return
+    assert [c.kind for c in changes] == [CHART_SKELETON_KIND]
+    sidecar = json.loads((doc_dir / "pages" / "00001.json").read_text())
+    assert sidecar["unshipped_figure_kind"] == CHART_SKELETON_KIND
+    assert sidecar["unshipped_figure_captions"] == ["Chart 3"]
+    assert sidecar["status"] == "warning"
+    assert [e["kind"] for e in sidecar["audit_events"]] == [CHART_SKELETON_KIND]
+    audit = json.loads((doc_dir / "audit_log.json").read_text())
+    assert [e["kind"] for e in audit["events"]] == [CHART_SKELETON_KIND], (
+        "one page, one answer: the superseded NOT_FOUND event is gone"
+    )
+    assert leading_marks((doc_dir / "pages" / "00001.md").read_text(encoding="utf-8"), 1)
+    after = _tree(out)
+    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path) == []
+    assert _tree(out) == after, "a second run changes 0 bytes"
+
+
+def test_the_live_gate_re_decides_not_found_and_acts_only_on_a_new_answer(
+    tmp_path: Path,
+) -> None:
+    """The live lane's half of the same fix. A page state carrying ``NOT_FOUND`` -- what this
+    lane itself writes -- is decided again; the same answer appends nothing (#1187's
+    answered-once rule), a new one replaces the old event."""
+    from socr.core.config import PipelineConfig
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
+    pipe = UnifiedPipeline.__new__(UnifiedPipeline)
+    pipe.config = PipelineConfig(quiet=True)
+
+    def run(body: str) -> tuple[PageState, list, list]:
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        p = PageState(page_num=1)
+        state.pages[1] = p
+        pipe._agentic_unshipped_figure_page(state, 1, p, _out(body), tmp_path / "figures")
+        assert p.unshipped_figure_kind == "unshipped_figure_not_found", "fixture premise"
+        first = list(state.events)
+        pipe._agentic_unshipped_figure_page(state, 1, p, _out(body), tmp_path / "figures")
+        return p, first, list(state.events)
+
+    _p_plain, first, again = run(f"{_XREF}\n\n{NO_TICKS}")
+    assert len(again) == len(first) == 1
+    # IDENTITY, not equality: deleting the event and appending an equal one also compares
+    # equal, and that was how the mutation check found this assertion vacuous.
+    assert again[0] is first[0], "the same answer twice touches nothing"
+
+    # A page answered NOT_FOUND, then passed over again with a different body -- what a
+    # ``--retry-failed-pages`` re-read hands this lane in the same process.
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    p = PageState(page_num=1)
+    state.pages[1] = p
+    pipe._agentic_unshipped_figure_page(state, 1, p, _out(f"{_XREF}\n\n{NO_TICKS}"), None)
+    assert [e.kind for e in state.events] == ["unshipped_figure_not_found"]
+    pipe._agentic_unshipped_figure_page(state, 1, p, _out(f"{_XREF}\n\n{SKELETON}"), None)
+    assert p.unshipped_figure_kind == CHART_SKELETON_KIND
+    assert p.unshipped_figure_unlocated == [CHART_SKELETON_LABEL]
+    assert [e.kind for e in state.events] == [CHART_SKELETON_KIND], "one page, one answer"
+
+
 def test_refinalize_then_resume_is_byte_identical(tmp_path: Path) -> None:
     """A resumed page is restored from its sidecar and re-finalized; nothing may move."""
     from socr.core.verdict import PageVerdict
@@ -357,6 +512,9 @@ def test_process_marks_a_skeleton_page_and_the_same_page_without_ticks_is_clean(
     assert SKELETON in skel_text
     assert skel["status"] == "warning"
     assert "carry a chart's axis ticks" in (skel_meta.get("error") or "")
+    # Bot, PR #1239: the live note goes through ``_unshipped_figure_note``, not the tool's
+    # ``_lane_pages``; a skeleton page must never be told it names a figure there either.
+    assert "name a figure" not in (skel_meta.get("error") or "")
     assert "text layer" not in (skel_meta.get("error") or ""), (
         "the fixture's premise: no #1185 mark, so the status below turns on this lane alone"
     )

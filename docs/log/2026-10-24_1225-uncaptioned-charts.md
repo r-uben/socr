@@ -161,3 +161,66 @@ No P0. Dispositions, each verified against the code:
 - Recall beyond the 6 known uncaptioned losses: no census of all chart pages exists.
 - `socr-refinalize-boilerplate` is not in the order check: its dry run flags 0 pages on the
   calibration copy.
+
+# Round 2 — the reviews of PR #1239
+
+Argon (MERGE, three P2) and the review bot (MERGE, two should-fixes). Each item was probed
+before it was fixed.
+
+- **Bot should-fix 1, a page a finished run answered `NOT_FOUND` was unreachable.** Real. #1187
+  persists `unshipped_figure_kind` on every outcome, `NOT_FOUND` included, and both the tool
+  (`_already_answered`) and the live gate skipped any answered page -- so the loose-label + ticks
+  branch could not land on a run finished under #1187. `NOT_FOUND` shipped and marked nothing,
+  so deciding it again can only add a statement:
+  - the tool skips only `_settled` pages (answered, and not `NOT_FOUND`); a page that re-decides
+    to `NOT_FOUND` returns early and writes nothing, and it stays "answered" for the note and
+    audit-log rebuild, so its event survives;
+  - the live gate re-decides a recorded `NOT_FOUND`, acts only when the answer CHANGED (the same
+    answer twice touches nothing -- #1187's answered-once test still pins it), and removes the
+    superseded event, so a page carries one answer as the tool records it. In one process this
+    is reached by a retry that re-reads the page; on a resume after a code change the run
+    fingerprint already re-reads every page.
+  Tests: the tool on a sidecar that carries `NOT_FOUND` (marked with ticks, 0 bytes changed
+  without), and the live gate (same answer: the SAME event object; new answer: one event).
+- **Bot should-fix 2, "the orchestrator half is unguarded".** Probed, and not so: the bot's two
+  exact reverts (`document_note(shipped, marked)` in `_unshipped_figure_note`, and dropping
+  `- set(_uf_skeleton)`) were run as mutants against round 1's tests and BOTH were killed, by the
+  `process()` test (which drives `_unshipped_figure_note`) and the CLI test. The round-1 mutant
+  set already covered the orchestrator lines. Added anyway: the live note must not say a
+  skeleton page "name[s] a figure", which makes that failure message say what broke.
+- **Bot nit, the mark still claimed more than was checked.** Fixed: "…carries a chart's axis
+  ticks and no picture of the chart ships; read it from the page image".
+- **Bot nit, blank lines never end a column**, so sparse single numbers can chain. Known and
+  kept: a VLM writes one tick per paragraph, and 38/38 model-read firings are charts. A fixture
+  is owed if a table-of-contents-like model-read page ever fires.
+- **Argon P2-1, the unicode minus, en dash and `%` were unpinned.** Real: each mutated out
+  survived. Pinned (`−0.4 … 0.4`, `–2 … 2`, `10% … 40%`), six mutants killed.
+- **Argon P2-2, one `in_block` flag for fences and `<pre>`.** Real: a `</pre>` inside a fence
+  closed it, and the fence's own close then blinded the rest of the page. Now two states: inside
+  a fence a `<pre>` tag is code and only a fence of the SAME character closes it; inside a
+  `<pre>` a fence is code. Pinned on four nestings; the production function still agrees with the
+  measured prototype on all 19,567 pages.
+- **Argon P2-3, pipe-less year headers and split index columns can fire.** Known, measured in
+  round 1 (2 native false fires, 0 model-read), kept.
+- Argon's note that the resume test re-runs the finalisation seam rather than the ledger: the
+  ledger treats a page by its failure mode, and this kind's mode is #1187's
+  `FIGURE_NOT_SHOWN`, which `test_a_page_this_lane_marks_is_kept_on_a_partial_resume` drives
+  through the production ledger.
+
+## Gates (round 2)
+
+- Full suite under the lock: **8,991 passed, 48 skipped, 9 xfailed, 0 failed** (458 s).
+- `uvx ruff@0.16.0 format --check .`: clean.
+- Mutants: **39/39 killed** (`mutants-r2.txt`), now including the tool's `_settled` gate, the
+  live gate's three new lines, the tick spellings, the fence/`<pre>` states, and the bot's two
+  exact orchestrator reverts. Two survived the first run and each exposed a vacuous test: the
+  nested-`<pre>` case was balanced, so it nests harmlessly either way (an unclosed one is now
+  pinned), and "the same answer twice appends nothing" compared lists by equality, which a
+  delete-and-re-append also passes (it now asserts the same event OBJECT).
+- Production `tick_run` vs the measured prototype: 0 disagreements on 19,567 pages.
+- Calibration copy, both orders: **meter 0 of 2,476 after every step**; model-read CHECKED
+  53 → 14; this lane 11 chart-skeleton, 3 crops, 8 unlocated; **second pass changes 0 files**;
+  0 `.md` differences between the orders (the same 39 provenance/clause-order files as round 1,
+  #1228); re-finalize-then-resume: 0 byte differences, both copies. The copy was never processed
+  by #1187, so it carries no `NOT_FOUND` record and round 2's re-decision changes nothing on it;
+  that path is shown by the two new tests.
