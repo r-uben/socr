@@ -972,9 +972,7 @@ def _normalize_cell(raw: str) -> str:
     and must never be removed here -- only presentation (``62.5--``), never
     value, is this function's job.
     """
-    decoded = html.unescape(raw)
-    decoded = _THOUSANDS_SPACE_RE.sub("", decoded)
-    return decoded.rstrip(_TRAILING_DASH_CHARS)
+    return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
 
 
 # A whole-token markdown link: `[anchor](uri)` with no internal whitespace,
@@ -985,6 +983,9 @@ def _normalize_cell(raw: str) -> str:
 # (not `search`) so a token that merely CONTAINS brackets elsewhere is left
 # alone rather than partially unwrapped.
 _MD_LINK_RE = re.compile(r"^\[(.*)\]\([^()\s]*\)$")
+
+# Thin space, NBSP, narrow NBSP, figure space, word joiner — digit-group separators.
+_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f\u2009\u2007\u2060 ](?=\d)")
 
 
 def _unwrap_markdown_link(tok: str) -> str:
@@ -1024,7 +1025,8 @@ def _decoded_numeric_candidate(tok: str) -> str:
     the check failing loudly. Every caller of this function (``is_numeric_token``,
     ``_numeric_tokens_from_text``) gets the fix from this single point.
     """
-    return strip_presentation(html.unescape(_unwrap_markdown_link(tok)))
+    tok = strip_presentation(html.unescape(_unwrap_markdown_link(tok)))
+    return _THOUSANDS_SPACE_RE.sub("", tok)
 
 
 def is_numeric_token(tok: str) -> bool:
@@ -1033,8 +1035,6 @@ def is_numeric_token(tok: str) -> bool:
     return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
 
 
-# Thin space, NBSP, narrow NBSP, figure space, word joiner — digit-group separators.
-_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f\u2009\u2007\u2060 ](?=\d)")
 # Decimal comma: exactly one comma, 1–2 fractional digits, end of numeric body.
 _DECIMAL_COMMA_RE = re.compile(r"^(?P<body>-?\d[\d.,]*),(?P<frac>\d{1,2})$")
 # Single comma + exactly three fractional digits: English thousands vs mis-read decimal.
