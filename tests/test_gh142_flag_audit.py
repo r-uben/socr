@@ -165,6 +165,14 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),
     "qwen_vllm_model": (AGENTIC, "resolved model for the vLLM qwen rung"),
     "gemini_model": (AGENTIC, "model for the gemini cloud rung and its fingerprint"),
+    "enable_gemma_cloud": (
+        AGENTIC,
+        "enable_gemma_cloud; gates Gemma ladder probe and GemmaCloudEngine.process_pages",
+    ),
+    "gemma_cloud_model": (
+        AGENTIC,
+        "gemma_cloud_model tag for the Gemma rung; sets gemma_cloud_model_pinned when given",
+    ),
     "math_model": (AGENTIC, "equation phases"),
     "clean_equation_model": (AGENTIC, "equation phases"),
     "recover_corrupt_math": (AGENTIC, "corrupt-math recovery routing"),
