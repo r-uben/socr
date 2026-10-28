@@ -143,9 +143,7 @@ class GemmaCloudEngine(BaseEngine):
         subprocess_timeout: float | None = None,
     ) -> list[PageOutput]:
         """OCR each page from layout-aware crops; one failed crop fails the page."""
-        if not getattr(config, "enable_gemma_cloud", False) and not getattr(
-            config, "gemma_cloud_model_pinned", False
-        ):
+        if not config.enable_gemma_cloud and not config.gemma_cloud_model_pinned:
             return [
                 PageOutput(
                     page_num=n,
