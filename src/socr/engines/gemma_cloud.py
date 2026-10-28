@@ -30,7 +30,10 @@ from socr.tables.extract import resolve_ollama_host
 def gemma_cloud_model_available(model: str) -> tuple[bool, str]:
     """Probe the configured Gemma cloud tag with a bounded generation."""
     if not is_cloud_model(model):
-        return False, f"{model}: not a cloud model tag"
+        return (
+            False,
+            f"{model}: not a cloud model tag (use a :cloud tag or --gemma-cloud-model)",
+        )
     ok, reason = probe_model_generation(
         resolve_ollama_host().rstrip("/"),
         model,

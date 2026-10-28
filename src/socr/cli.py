@@ -255,7 +255,7 @@ def common_options(f):
         "--gemma-cloud-model",
         type=str,
         default=None,
-        help="Gemma cloud model tag for the Gemma rung (default gemma3:27b).",
+        help="Gemma cloud model tag for the Gemma rung (default gemma4:31b-cloud).",
     )(f)
     f = click.option(
         "--qwen-model",
@@ -377,10 +377,10 @@ def common_options(f):
     f = click.option(
         "--max-paid-pages",
         type=int,
-        default=0,
+        default=None,
         help=(
             "Hard cap on Gemini OCR pages per run (single file or whole batch). "
-            "0=unlimited. Stops sending pages to Gemini once N have been processed."
+            "Omit for unlimited; 0 means no Gemini pages."
         ),
     )(f)
     f = click.option(
@@ -495,7 +495,7 @@ def build_config(
     judge_vllm_model: str = "",
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
-    max_paid_pages: int = 0,
+    max_paid_pages: int | None = None,
     write_manifest: bool = False,
     retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
@@ -729,7 +729,7 @@ def build_config(
     if _explicitly_given("cost_budget"):
         config.cost_budget = cost_budget
     if _explicitly_given("max_paid_pages"):
-        config.max_paid_pages = max(0, int(max_paid_pages))
+        config.max_paid_pages = int(max_paid_pages) if max_paid_pages is not None else 0
         config.max_paid_pages_pinned = True
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
@@ -1474,11 +1474,32 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
     show_default=True,
     help="Max pages in --stratified-out",
 )
+@click.option(
+    "--pdf-root",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Source PDF directory for stratified comparison lists",
+)
+@click.option(
+    "--stratified-seed",
+    default=0,
+    show_default=True,
+    help="RNG seed for stratified page selection",
+)
+@click.option(
+    "--max-pages-per-doc",
+    default=4,
+    show_default=True,
+    help="Cap stratified picks per manifest",
+)
 def cascade_replay(
     paths: tuple[Path, ...],
     audit_min_words: int,
     stratified_out: Path | None,
     comparison_limit: int,
+    pdf_root: Path | None,
+    stratified_seed: int,
+    max_pages_per_doc: int,
 ) -> None:
     """Project Gemini usage from recorded manifests under old vs new routing rules.
 
@@ -1504,12 +1525,20 @@ def cascade_replay(
     summary = replay_paths(manifest_paths, rules=rules)
     if stratified_out is not None:
         stratified = select_stratified_comparison_pages(
-            manifest_paths, rules=rules, limit=comparison_limit
+            manifest_paths,
+            rules=rules,
+            limit=comparison_limit,
+            pdf_root=pdf_root,
+            seed=stratified_seed,
+            max_pages_per_doc=max_pages_per_doc,
         )
         summary["stratified_comparison"] = {
             "comparison_limit": stratified["comparison_limit"],
+            "max_pages_per_doc": stratified["max_pages_per_doc"],
+            "selection_seed": stratified["selection_seed"],
             "pool_size": stratified["pool_size"],
             "selected_count": stratified["selected_count"],
+            "selected_manifest_count": stratified["selected_manifest_count"],
             "stratum_counts_in_pool": stratified["stratum_counts_in_pool"],
             "gemini_block_reasons": stratified["gemini_block_reasons"],
         }

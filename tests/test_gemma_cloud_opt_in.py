@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from socr.core.config import EngineType, PipelineConfig
-from socr.engines.gemma_cloud import GemmaCloudEngine
+from socr.core.providers import is_cloud_model
+from socr.engines.gemma_cloud import GemmaCloudEngine, gemma_cloud_model_available
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 
@@ -34,6 +35,17 @@ def test_gemma_cloud_model_pin_without_enable_rejects_process_pages() -> None:
     outputs = engine.process_pages(Path("/dev/null"), [1], config)
     assert len(outputs) == 1
     assert "disabled" in (outputs[0].error or "").lower()
+
+
+def test_default_gemma_cloud_model_is_cloud_tag() -> None:
+    config = PipelineConfig()
+    assert is_cloud_model(config.gemma_cloud_model)
+
+
+def test_local_gemma_tag_rejected_when_cloud_enabled() -> None:
+    ok, reason = gemma_cloud_model_available("gemma3:27b")
+    assert ok is False
+    assert "cloud" in reason.lower()
 
 
 def test_is_available_for_config_requires_enable_gemma_cloud() -> None:

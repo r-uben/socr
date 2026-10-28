@@ -125,7 +125,7 @@ PROFILE_GEMMA_CLOUD = ProviderProfile(
     cost_per_page_usd=0.0,
     id="gemma-cloud",
     backend="ollama-cloud",
-    model="gemma3:27b",
+    model="gemma4:31b-cloud",
 )
 
 PROFILE_GLM = ProviderProfile(

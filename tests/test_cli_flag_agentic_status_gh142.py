@@ -168,7 +168,7 @@ _UNEXERCISED = {
     # falsification.
     "max_cost_per_page_pinned",
     # Same shape as max_cost_per_page_pinned: only read when --max-paid-pages is
-    # explicitly given; this fixture leaves max_paid_pages at 0 (unlimited).
+    # explicitly given; this fixture leaves max_paid_pages at None (unlimited).
     "max_paid_pages_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
     # Read only inside the table-extractor block, which is gated on

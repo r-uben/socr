@@ -2261,7 +2261,7 @@ class UnifiedPipeline:
             # would route (or refuse) differently.
             "max_cost_per_page_pinned": getattr(cfg, "max_cost_per_page_pinned", False),
             "cost_budget": cfg.cost_budget,
-            "max_paid_pages": getattr(cfg, "max_paid_pages", 0),
+            "max_paid_pages": getattr(cfg, "max_paid_pages", None),
             "max_paid_pages_pinned": getattr(cfg, "max_paid_pages_pinned", False),
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
@@ -8338,9 +8338,10 @@ class UnifiedPipeline:
         self._paid_gemini_pages_used = 0
 
     def _max_paid_pages_limit(self) -> int | None:
-        if self.config.max_paid_pages <= 0:
+        limit = self.config.max_paid_pages
+        if limit is None:
             return None
-        return self.config.max_paid_pages
+        return max(0, int(limit))
 
     def _gemini_paid_budget_remaining(self) -> int | None:
         limit = self._max_paid_pages_limit()

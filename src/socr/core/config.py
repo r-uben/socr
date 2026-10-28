@@ -401,9 +401,9 @@ class PipelineConfig:
     max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     # Hard cap on Gemini OCR pages per public run (``process`` or one ``process_batch``).
-    # 0 = unlimited. Counts each page image sent to the Gemini engine rung, across
-    # every document in a batch.
-    max_paid_pages: int = 0
+    # ``None`` = unlimited (default). ``0`` = no Gemini pages. Counts each page image
+    # sent to the Gemini engine rung, across every document in a batch.
+    max_paid_pages: int | None = None
     max_paid_pages_pinned: bool = False
     write_manifest: bool = False  # write reproducibility manifest + blob cache
     # Agentic loop: after every page has run once, run each page that FAILED (its
@@ -554,7 +554,7 @@ class PipelineConfig:
     marker_force_ocr: bool = True
     #: Ollama Cloud Gemma vision model for the dedicated ``gemma`` ladder rung.
     #: Override with ``--gemma-cloud-model``; must be reachable via Ollama (``:cloud`` tag).
-    gemma_cloud_model: str = "gemma3:27b"
+    gemma_cloud_model: str = "gemma4:31b-cloud"
     #: Opt-in: send page images to Ollama Cloud on the Gemma ladder rung.
     enable_gemma_cloud: bool = False
     gemma_cloud_model_pinned: bool = False

@@ -72,6 +72,27 @@ def test_max_paid_pages_stops_after_n_gemini_calls(
     assert engine.process_pages.call_count == 2
 
 
+def test_max_paid_pages_zero_blocks_all_gemini(
+    tmp_path: Path,
+) -> None:
+    cfg = PipelineConfig(max_paid_pages=0, max_paid_pages_pinned=True)
+    pipe = UnifiedPipeline(cfg)
+    state = _minimal_state(tmp_path)
+    engine = MagicMock()
+    engine.name = "gemini"
+    engine.is_available.return_value = True
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("socr.pipeline.orchestrator.get_engine", lambda _et: engine)
+        out = pipe._run_engine_on_pages(
+            state, [1, 2], [], EngineType.GEMINI, "agentic", profile=None
+        )
+
+    assert len(out) == 2
+    assert all(o.status == PageStatus.ERROR for o in out)
+    assert engine.process_pages.call_count == 0
+
+
 def test_paid_counter_resets_each_run(pipeline: UnifiedPipeline, tmp_path: Path) -> None:
     state = _minimal_state(tmp_path)
     engine = MagicMock()

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
+import random
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,26 +58,111 @@ def _last_reason_before_engine(journal: list[dict], engine: str) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class ResolvedManifestPdf:
+    """PDF path resolution for replay / comparison lists."""
+
+    path: Path | None
+    resolved: bool
+    lookup: str = "unresolved"
+
+
+@dataclass
+class PdfRootIndex:
+    """Stem and basename lookup under a corpus PDF root."""
+
+    by_name: dict[str, Path] = field(default_factory=dict)
+    by_stem: dict[str, Path] = field(default_factory=dict)
+    by_hash_name: dict[str, Path] = field(default_factory=dict)
+
+    @classmethod
+    def build(cls, pdf_root: Path) -> PdfRootIndex:
+        idx = cls()
+        if not pdf_root.is_dir():
+            return idx
+        for path in pdf_root.rglob("*.pdf"):
+            if not path.is_file():
+                continue
+            idx.by_name.setdefault(path.name, path)
+            idx.by_stem.setdefault(path.stem, path)
+            if len(path.stem) == 64 and all(c in "0123456789abcdef" for c in path.stem.lower()):
+                idx.by_hash_name[path.stem.lower()] = path
+        return idx
+
+
 def resolve_manifest_pdf_path(
-    manifest_path: Path, manifest_data: dict | None = None
-) -> Path | None:
-    """Best-effort PDF path for a manifest (for comparison re-run lists)."""
+    manifest_path: Path,
+    manifest_data: dict | None = None,
+    *,
+    pdf_root: Path | None = None,
+    pdf_index: PdfRootIndex | None = None,
+) -> ResolvedManifestPdf:
+    """Resolve a manifest's PDF for comparison re-runs."""
     data = manifest_data
     if data is None:
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
         except OSError:
-            return None
+            return ResolvedManifestPdf(path=None, resolved=False, lookup="unresolved")
     name = str(data.get("pdf_filename") or "").strip()
+    pdf_hash = str(data.get("pdf_file_hash") or "").strip().lower()
     if not name:
-        return None
-    for candidate in (
-        manifest_path.parent / name,
-        manifest_path.parent.parent / name,
-    ):
+        return ResolvedManifestPdf(path=None, resolved=False, lookup="unresolved")
+
+    candidates: list[tuple[str, Path]] = [
+        ("manifest_sibling", manifest_path.parent / name),
+        ("manifest_parent", manifest_path.parent.parent / name),
+    ]
+    index = pdf_index
+    if pdf_root is not None and index is None:
+        index = PdfRootIndex.build(pdf_root)
+    if index is not None:
+        if name in index.by_name:
+            candidates.append(("pdf_root_name", index.by_name[name]))
+        stem = Path(name).stem
+        if stem in index.by_stem:
+            candidates.append(("pdf_root_stem", index.by_stem[stem]))
+        if pdf_hash and pdf_hash in index.by_hash_name:
+            candidates.append(("pdf_root_hash", index.by_hash_name[pdf_hash]))
+    elif pdf_root is not None:
+        candidates.append(("pdf_root_name", pdf_root / name))
+
+    for lookup, candidate in candidates:
         if candidate.is_file():
-            return candidate
-    return manifest_path.parent / name
+            return ResolvedManifestPdf(path=candidate, resolved=True, lookup=lookup)
+
+    fallback = candidates[0][1] if candidates else None
+    return ResolvedManifestPdf(path=fallback, resolved=False, lookup="unresolved")
+
+
+_GEMINI_NON_READ_FAILURE_MODES = frozenset({"cli_error", "model_unavailable"})
+
+
+def sum_gemini_journal_stats(manifest_paths: list[Path]) -> dict[str, int]:
+    """Split recorded Gemini journal rows from real reads vs infra failures."""
+    stats: Counter = Counter()
+    for path in manifest_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for entry in (data.get("entries") or {}).values():
+            for row in entry.get("journal") or []:
+                if row.get("engine") != "gemini":
+                    continue
+                stats["gemini_journal_rows"] += 1
+                failure_mode = str(row.get("failure_mode") or "").lower()
+                if failure_mode == "cli_error":
+                    stats["gemini_cli_error_rows"] += 1
+                elif failure_mode == "model_unavailable":
+                    stats["gemini_model_unavailable_rows"] += 1
+                elif row.get("accepted"):
+                    stats["gemini_accepted_rows"] += 1
+                else:
+                    stats["gemini_other_failure_rows"] += 1
+    non_read = stats["gemini_cli_error_rows"] + stats["gemini_model_unavailable_rows"]
+    stats["gemini_real_read_rows"] = stats["gemini_journal_rows"] - non_read
+    return dict(stats)
 
 
 def sum_journal_tokens(manifest_paths: list[Path]) -> dict:
@@ -169,11 +255,13 @@ def replay_paths(paths: list[Path], rules: ReplayRules | None = None) -> dict:
         engines.update(rep.engine_final)
         blocks.update(rep.block_reasons)
     token_totals = sum_journal_tokens(paths)
+    gemini_journal = sum_gemini_journal_stats(paths)
     return {
         "totals": dict(totals),
         "final_engines": dict(engines),
         "gemini_blocks": dict(blocks),
         "recorded_tokens": token_totals,
+        "recorded_gemini_journal": gemini_journal,
         "replay_honesty": {
             "recorded_gemini_pages_old_rules": totals["old_gemini_pages"],
             "blocked_from_gemini_new_rules": totals["blocked_gemini_under_new_rules"],
@@ -192,11 +280,63 @@ def replay_paths(paths: list[Path], rules: ReplayRules | None = None) -> dict:
     }
 
 
+def _round_robin_stratified_pick(
+    by_stratum: dict[str, list[tuple[Path, PageReplayRow, dict]]],
+    *,
+    limit: int,
+    seed: int,
+    max_pages_per_doc: int,
+) -> list[tuple[Path, PageReplayRow, dict]]:
+    """Spread picks across manifests (round-robin), with a per-doc cap."""
+    rng = random.Random(seed)
+    stratum_doc_queues: dict[str, dict[Path, deque]] = {}
+    doc_order: dict[str, list[Path]] = {}
+    for stratum, items in by_stratum.items():
+        by_doc: dict[Path, list] = defaultdict(list)
+        for item in items:
+            by_doc[item[0]].append(item)
+        for doc_items in by_doc.values():
+            rng.shuffle(doc_items)
+        stratum_doc_queues[stratum] = {doc: deque(items) for doc, items in by_doc.items()}
+        doc_order[stratum] = sorted(by_doc.keys(), key=str)
+
+    per_doc_selected: Counter = Counter()
+    selected: list[tuple[Path, PageReplayRow, dict]] = []
+    strata = sorted(stratum_doc_queues.keys())
+    while len(selected) < limit and strata:
+        progressed = False
+        for stratum in list(strata):
+            queues = stratum_doc_queues[stratum]
+            if not queues:
+                continue
+            for doc in list(doc_order[stratum]):
+                if len(selected) >= limit:
+                    break
+                if per_doc_selected[doc] >= max_pages_per_doc:
+                    continue
+                queue = queues.get(doc)
+                if not queue:
+                    continue
+                selected.append(queue.popleft())
+                per_doc_selected[doc] += 1
+                progressed = True
+                if not queue:
+                    del queues[doc]
+            if not queues:
+                strata.remove(stratum)
+        if not progressed:
+            break
+    return selected
+
+
 def select_stratified_comparison_pages(
     manifest_paths: list[Path],
     *,
     rules: ReplayRules | None = None,
     limit: int = 200,
+    pdf_root: Path | None = None,
+    seed: int = 0,
+    max_pages_per_doc: int = 4,
 ) -> dict:
     """Pick up to ``limit`` pages that still project to Gemini under NEW rules.
 
@@ -208,9 +348,10 @@ def select_stratified_comparison_pages(
     stratum_counts: Counter = Counter()
     blocked_strata: Counter = Counter()
 
+    pdf_index = PdfRootIndex.build(pdf_root) if pdf_root is not None else None
+
     for path in manifest_paths:
         data = json.loads(path.read_text(encoding="utf-8"))
-        pdf_path = resolve_manifest_pdf_path(path, data)
         rep = replay_manifest(path, rules=rules)
         for row in rep.rows:
             if not row.recorded_gemini:
@@ -225,32 +366,38 @@ def select_stratified_comparison_pages(
     for item in pool:
         by_stratum[item[1].escalation_stratum or "other"].append(item)
 
+    picked = _round_robin_stratified_pick(
+        by_stratum,
+        limit=limit,
+        seed=seed,
+        max_pages_per_doc=max_pages_per_doc,
+    )
     selected: list[dict] = []
-    queues = {k: list(v) for k, v in sorted(by_stratum.items())}
-    while len(selected) < limit and any(queues.values()):
-        for stratum in list(queues.keys()):
-            if len(selected) >= limit:
-                break
-            queue = queues[stratum]
-            if not queue:
-                continue
-            manifest_path, row, data = queue.pop(0)
-            pdf = resolve_manifest_pdf_path(manifest_path, data)
-            selected.append(
-                {
-                    "manifest": str(manifest_path.resolve()),
-                    "pdf_path": str(pdf.resolve()) if pdf else "",
-                    "pdf_filename": str(data.get("pdf_filename") or ""),
-                    "page_num": row.page_num,
-                    "stratum": row.escalation_stratum or "other",
-                    "last_qwen_reason": row.last_qwen_reason,
-                }
-            )
+    for manifest_path, row, data in picked:
+        resolved = resolve_manifest_pdf_path(
+            manifest_path, data, pdf_root=pdf_root, pdf_index=pdf_index
+        )
+        selected.append(
+            {
+                "manifest": str(manifest_path.resolve()),
+                "pdf_path": str(resolved.path.resolve()) if resolved.path else "",
+                "pdf_path_resolved": resolved.resolved,
+                "pdf_path_lookup": resolved.lookup,
+                "pdf_filename": str(data.get("pdf_filename") or ""),
+                "page_num": row.page_num,
+                "stratum": row.escalation_stratum or "other",
+                "last_qwen_reason": row.last_qwen_reason,
+            }
+        )
 
+    docs_in_selection = len({item["manifest"] for item in selected})
     return {
         "comparison_limit": limit,
+        "max_pages_per_doc": max_pages_per_doc,
+        "selection_seed": seed,
         "pool_size": len(pool),
         "selected_count": len(selected),
+        "selected_manifest_count": docs_in_selection,
         "stratum_counts_in_pool": dict(stratum_counts),
         "gemini_block_reasons": dict(blocked_strata),
         "selected_pages": selected,
@@ -277,6 +424,24 @@ def main(argv: list[str] | None = None) -> int:
         default=200,
         help="Max pages in --stratified-out (default 200)",
     )
+    parser.add_argument(
+        "--pdf-root",
+        type=Path,
+        default=None,
+        help="Directory of source PDFs (stem/filename/hash lookup for stratified lists)",
+    )
+    parser.add_argument(
+        "--stratified-seed",
+        type=int,
+        default=0,
+        help="RNG seed for stratified page selection (default 0)",
+    )
+    parser.add_argument(
+        "--max-pages-per-doc",
+        type=int,
+        default=4,
+        help="Cap stratified picks per manifest (default 4)",
+    )
     args = parser.parse_args(argv)
 
     manifest_paths: list[Path] = []
@@ -290,12 +455,20 @@ def main(argv: list[str] | None = None) -> int:
     summary = replay_paths(manifest_paths, rules=rules)
     if args.stratified_out is not None:
         stratified = select_stratified_comparison_pages(
-            manifest_paths, rules=rules, limit=args.comparison_limit
+            manifest_paths,
+            rules=rules,
+            limit=args.comparison_limit,
+            pdf_root=args.pdf_root,
+            seed=args.stratified_seed,
+            max_pages_per_doc=args.max_pages_per_doc,
         )
         summary["stratified_comparison"] = {
             "comparison_limit": stratified["comparison_limit"],
+            "max_pages_per_doc": stratified["max_pages_per_doc"],
+            "selection_seed": stratified["selection_seed"],
             "pool_size": stratified["pool_size"],
             "selected_count": stratified["selected_count"],
+            "selected_manifest_count": stratified["selected_manifest_count"],
             "stratum_counts_in_pool": stratified["stratum_counts_in_pool"],
             "gemini_block_reasons": stratified["gemini_block_reasons"],
         }
