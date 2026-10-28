@@ -14566,7 +14566,7 @@ class UnifiedPipeline:
                     pass
                 continue
             if engine_type is EngineType.GEMMA:
-                if not (self.config.enable_gemma_cloud or self.config.gemma_cloud_model_pinned):
+                if not self.config.enable_gemma_cloud:
                     continue
                 from socr.engines.gemma_cloud import GemmaCloudEngine
 

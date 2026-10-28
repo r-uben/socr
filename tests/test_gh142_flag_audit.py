@@ -171,7 +171,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     ),
     "gemma_cloud_model": (
         AGENTIC,
-        "gemma_cloud_model tag for the Gemma rung; sets gemma_cloud_model_pinned when given",
+        "gemma_cloud_model tag when enable_gemma_cloud; sets gemma_cloud_model_pinned when given",
     ),
     "math_model": (AGENTIC, "equation phases"),
     "clean_equation_model": (AGENTIC, "equation phases"),

@@ -12,12 +12,16 @@ from socr.core.config import PipelineConfig
 from socr.core.result import FailureMode, PageStatus
 from socr.engines.gemma_cloud import GemmaCloudEngine
 from socr.routing.cascade_policy import parse_token_usage
+from socr.routing.gemma_crops import plan_gemma_page_crops
 from socr.routing.gemma_guards import (
     apply_gemma_output_guards,
     has_image_url_loop,
     has_repeated_text_loop,
+    merge_crop_texts,
     truncate_to_token_budget,
 )
+from socr.tables import reconstruct
+from socr.tables.column_gutter import detect_column_gutter
 
 
 def test_truncate_to_token_budget() -> None:
@@ -58,6 +62,29 @@ def test_equations_flagged_unverified() -> None:
     assert out.status is PageStatus.SUCCESS
     assert "gemma equations unverified" in out.text
     assert out.audit_notes
+
+
+def test_merge_crop_texts_dedupes_vertical_seam_line() -> None:
+    top = "Upper paragraph\nDuplicated seam line\n"
+    bottom = "Duplicated seam line\nLower paragraph\n"
+    merged = merge_crop_texts([top, bottom])
+    assert merged.count("Duplicated seam line") == 1
+    assert "Upper paragraph" in merged
+    assert "Lower paragraph" in merged
+
+
+def test_gemma_crop_gutter_matches_reconstruct_detector() -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for y in (100, 130, 160):
+        page.insert_text((72, y), f"LeftCol {y}", fontsize=10)
+        page.insert_text((340, y), f"RightCol {y}", fontsize=10)
+    words = page.get_text("words")
+    assert detect_column_gutter(words) == reconstruct._detect_column_gutter(words)
+    plan = plan_gemma_page_crops(page)
+    doc.close()
+    assert len(plan.clips) == 2
+    assert plan.full_page_unverified is False
 
 
 def test_parse_token_usage_ignores_total_tokens() -> None:

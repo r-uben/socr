@@ -23,7 +23,7 @@ from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.engines.base import BaseEngine
 from socr.routing.cascade_policy import extract_cli_actionable_error, parse_token_usage
 from socr.routing.gemma_crops import render_gemma_crops
-from socr.routing.gemma_guards import apply_gemma_output_guards
+from socr.routing.gemma_guards import apply_gemma_output_guards, merge_crop_texts
 from socr.tables.extract import resolve_ollama_host
 
 
@@ -68,6 +68,8 @@ class GemmaCloudEngine(BaseEngine):
 
     def is_available_for_config(self, config: PipelineConfig) -> tuple[bool, str]:
         """Probe ``config.gemma_cloud_model`` when the rung is explicitly enabled."""
+        if not config.enable_gemma_cloud:
+            return False, "gemma cloud rung disabled (use --enable-gemma-cloud)"
         if not self.is_available():
             return False, "qwen-ocr CLI not available"
         model = self.resolved_model_version(config)
@@ -143,7 +145,7 @@ class GemmaCloudEngine(BaseEngine):
         subprocess_timeout: float | None = None,
     ) -> list[PageOutput]:
         """OCR each page from layout-aware crops; one failed crop fails the page."""
-        if not config.enable_gemma_cloud and not config.gemma_cloud_model_pinned:
+        if not config.enable_gemma_cloud:
             return [
                 PageOutput(
                     page_num=n,
@@ -227,7 +229,7 @@ class GemmaCloudEngine(BaseEngine):
                     )
                     continue
 
-                merged = "\n\n".join(half_texts)
+                merged = merge_crop_texts(half_texts)
                 guarded = apply_gemma_output_guards(
                     merged,
                     page_num=page_num,

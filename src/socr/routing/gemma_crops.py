@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from socr.core.born_digital import upright_rotation_for
+from socr.tables.column_gutter import detect_column_gutter
 
 
 @dataclass(frozen=True)
@@ -14,45 +15,6 @@ class GemmaCropPlan:
 
     clips: tuple[tuple[str, object], ...]  # (label, fitz.Rect)
     full_page_unverified: bool = False
-
-
-def _median_word_gap(words: list) -> float | None:
-    gaps = sorted(
-        words[i + 1][0] - words[i][2]
-        for i in range(len(words) - 1)
-        if words[i + 1][0] - words[i][2] > 0
-    )
-    if not gaps:
-        return None
-    return gaps[len(gaps) // 2]
-
-
-def _detect_page_column_gutter(words: list) -> float | None:
-    """Single vertical gutter between two x-bands (GH-152 yardstick, local copy)."""
-    from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
-
-    if len(words) < 2:
-        return None
-    word_gap = _median_word_gap(words)
-    if word_gap is None:
-        return None
-    min_gutter_pt = ALIGNED_RUN_GAP_MAX_WORD_SPACES * word_gap
-    intervals = sorted((w[0], w[2]) for w in words)
-    merged: list[list[float]] = []
-    for x0, x1 in intervals:
-        if merged and x0 <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], x1)
-        else:
-            merged.append([x0, x1])
-    gutters = [
-        (merged[i][1], merged[i + 1][0])
-        for i in range(len(merged) - 1)
-        if merged[i + 1][0] - merged[i][1] >= min_gutter_pt
-    ]
-    if len(gutters) != 1:
-        return None
-    gap_start, gap_end = gutters[0]
-    return (gap_start + gap_end) / 2.0
 
 
 def _forbidden_rects(page) -> list:
@@ -158,7 +120,7 @@ def plan_gemma_page_crops(page) -> GemmaCropPlan:
     clips: tuple[tuple[str, object], ...] | None = None
     try:
         words = page.get_text("words")
-        gutter = _detect_page_column_gutter(words) if words else None
+        gutter = detect_column_gutter(words) if words else None
         if gutter is not None:
             clips = _two_column_clips(page, gutter, forbidden)
     except Exception:

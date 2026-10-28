@@ -220,6 +220,15 @@ _GEMINI_QUOTA_RE = re.compile(
     r"\b429\b|RESOURCE_EXHAUSTED|rate[\s_-]*limit|quota|too many requests",
     re.IGNORECASE,
 )
+# Stdout may carry page OCR; only match provider-shaped error lines there.
+_GEMINI_QUOTA_STDOUT_ANCHORED_RE = re.compile(
+    r"(?m)^(?:"
+    r"google\.api_core\.exceptions\.ResourceExhausted\b|"
+    r"RESOURCE_EXHAUSTED\b|"
+    r"Error:\s*(?:429\b|.*\bquota\b)"
+    r")",
+    re.IGNORECASE,
+)
 _GEMINI_SAFETY_RE = re.compile(
     r"\bSAFETY\b|finish_reason\s*[=:]\s*SAFETY|harm_category|candidate was blocked",
     re.IGNORECASE,
@@ -247,6 +256,8 @@ def extract_cli_actionable_error(
         prefix = "safety-block"
     elif _GEMINI_TIMEOUT_RE.search(err_text):
         prefix = "timeout"
+    elif _GEMINI_QUOTA_STDOUT_ANCHORED_RE.search(stdout or ""):
+        prefix = "quota/rate-limit"
     else:
         m = _GEMINI_HTTP_STATUS_RE.search(err_text)
         if m:

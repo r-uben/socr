@@ -64,6 +64,30 @@ def flag_equations_unverified(text: str) -> tuple[str, list[str]]:
     return f"{text.rstrip()}\n\n> [{note}]\n", [note]
 
 
+def merge_crop_texts(parts: list[str]) -> str:
+    """Join crop OCR fragments, deduping lines duplicated at vertical overlap seams."""
+    if not parts:
+        return ""
+    merged = parts[0]
+    for nxt in parts[1:]:
+        merged = _merge_crop_pair_dedupe_seam(merged, nxt)
+    return merged
+
+
+def _merge_crop_pair_dedupe_seam(top: str, bottom: str) -> str:
+    top_lines = top.splitlines()
+    bot_lines = bottom.splitlines()
+    if not top_lines:
+        return bottom
+    if not bot_lines:
+        return top
+    max_overlap = min(len(top_lines), len(bot_lines), 24)
+    for k in range(max_overlap, 0, -1):
+        if top_lines[-k:] == bot_lines[:k]:
+            return "\n".join(top_lines + bot_lines[k:])
+    return top.rstrip() + "\n\n" + bottom.lstrip()
+
+
 def apply_gemma_output_guards(
     text: str,
     *,

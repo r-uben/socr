@@ -7,6 +7,12 @@ from socr.pipeline.agentic import REASON_PROVIDER_TIMEOUT
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.routing.cascade_policy import extract_cli_actionable_error
 
+# Contract sample: agentic journal classification expects API 429 on stderr.
+_GEMINI_429_STDERR_SAMPLE = (
+    "google.api_core.exceptions.ResourceExhausted: 429 Quota exceeded for "
+    "generativelanguage.googleapis.com"
+)
+
 
 def _journal_reason(stderr: str, *, returncode: int = 1) -> dict:
     detail = extract_cli_actionable_error(stderr, returncode=returncode)
@@ -35,15 +41,19 @@ def _journal_reason(stderr: str, *, returncode: int = 1) -> dict:
 
 
 def test_mocked_429_journal_row() -> None:
-    stderr = (
-        "google.api_core.exceptions.ResourceExhausted: 429 Quota exceeded for "
-        "generativelanguage.googleapis.com"
-    )
-    row = _journal_reason(stderr)
+    row = _journal_reason(_GEMINI_429_STDERR_SAMPLE)
     assert "quota/rate-limit" in row["reason"]
     assert "429" in row["reason"]
     assert row["llm_input_tokens"] == 1200
+
+
+def test_gemini_cli_429_stream_contract() -> None:
+    """429 is classified from stderr; stdout uses anchored provider error lines only."""
+    assert "quota/rate-limit" in extract_cli_actionable_error(_GEMINI_429_STDERR_SAMPLE, "")
     assert "quota/rate-limit" not in extract_cli_actionable_error("", "429 Quota exceeded")
+    assert "quota/rate-limit" in extract_cli_actionable_error(
+        "", "RESOURCE_EXHAUSTED: quota exceeded for project\n"
+    )
 
 
 def test_mocked_safety_block_journal_row() -> None:
