@@ -1855,6 +1855,8 @@ class UnifiedPipeline:
         #: the mapping, so the object that produced a refusal is not called
         #: again this run whether or not it advertises its kind.
         self._table_rung_refused_callables: list = []
+        #: Gemini OCR pages consumed this run (``--max-paid-pages``).
+        self._paid_gemini_pages_used: int = 0
         #: The rung callables this run has already CALLED without a refusal.
         #: Cold review round 5: identity is authoritative for a callable we
         #: have observed; the kind-level breaker applies only to callables we
@@ -2258,6 +2260,8 @@ class UnifiedPipeline:
             # would route (or refuse) differently.
             "max_cost_per_page_pinned": getattr(cfg, "max_cost_per_page_pinned", False),
             "cost_budget": cfg.cost_budget,
+            "max_paid_pages": getattr(cfg, "max_paid_pages", 0),
+            "max_paid_pages_pinned": getattr(cfg, "max_paid_pages_pinned", False),
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
             # would silently ship a mix of escalated and non-escalated pages.
@@ -3405,6 +3409,8 @@ class UnifiedPipeline:
         else:
             available = engine.is_available()
 
+        gemini_blocked: list[int] = []
+
         if not available:
             logger.warning(f"{engine.name} not available for {label} OCR")
             if not self.config.quiet:
@@ -3434,6 +3440,27 @@ class UnifiedPipeline:
                         )
                     )
             return outputs
+
+        if engine_type == EngineType.GEMINI and self._max_paid_pages_limit() is not None:
+            remaining = self._gemini_paid_budget_remaining() or 0
+            gemini_blocked = page_nums[remaining:]
+            page_nums = page_nums[:remaining]
+            if gemini_blocked:
+                logger.warning(
+                    "%s: skipping %s page(s) — max_paid_pages budget exhausted",
+                    engine.name,
+                    len(gemini_blocked),
+                )
+                if not self.config.quiet:
+                    console.print(
+                        f"  [yellow]{engine.name}: max_paid_pages cap reached — "
+                        f"skipping {len(gemini_blocked)} page(s)[/yellow]"
+                    )
+            if not page_nums:
+                return [
+                    self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                ]
+            self._record_gemini_paid_pages(len(page_nums))
 
         if not self.config.quiet:
             console.print(
@@ -3480,6 +3507,11 @@ class UnifiedPipeline:
         if not self.config.quiet:
             ok = sum(1 for p in final if p.status == PageStatus.SUCCESS)
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
+
+        if gemini_blocked:
+            final.extend(
+                self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+            )
 
         return final
 
@@ -8302,6 +8334,46 @@ class UnifiedPipeline:
         self._table_rung_refused_this_run = set()
         self._table_rung_refused_callables = []
         self._table_rung_seen_callables = []
+        self._paid_gemini_pages_used = 0
+
+    def _max_paid_pages_limit(self) -> int | None:
+        if self.config.max_paid_pages <= 0:
+            return None
+        return self.config.max_paid_pages
+
+    def _gemini_paid_budget_remaining(self) -> int | None:
+        limit = self._max_paid_pages_limit()
+        if limit is None:
+            return None
+        return max(0, limit - self._paid_gemini_pages_used)
+
+    def _record_gemini_paid_pages(self, count: int) -> None:
+        if count <= 0:
+            return
+        self._paid_gemini_pages_used += count
+        limit = self._max_paid_pages_limit()
+        if limit is not None and not self.config.quiet:
+            logger.info(
+                "Gemini paid-page budget: %s/%s used this run",
+                self._paid_gemini_pages_used,
+                limit,
+            )
+
+    def _gemini_budget_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
+        limit = self._max_paid_pages_limit() or 0
+        msg = (
+            f"max_paid_pages exhausted ({self._paid_gemini_pages_used}/{limit} "
+            f"Gemini pages this run)"
+        )
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=msg,
+            audit_passed=False,
+        )
 
     def _executing_identity(self, rr, executed_rungs: list, index: int) -> str:
         """Who actually ran this rung result. Identity first, position last.

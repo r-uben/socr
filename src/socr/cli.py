@@ -361,6 +361,15 @@ def common_options(f):
         help="Stop escalating once doc spend hits this $ (0=unlimited)",
     )(f)
     f = click.option(
+        "--max-paid-pages",
+        type=int,
+        default=0,
+        help=(
+            "Hard cap on Gemini OCR pages per run (single file or whole batch). "
+            "0=unlimited. Stops sending pages to Gemini once N have been processed."
+        ),
+    )(f)
+    f = click.option(
         "--write-manifest",
         is_flag=True,
         help="Write a replayable manifest + blob cache",
@@ -470,6 +479,7 @@ def build_config(
     judge_vllm_model: str = "",
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
+    max_paid_pages: int = 0,
     write_manifest: bool = False,
     retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
@@ -697,6 +707,9 @@ def build_config(
         config.max_cost_per_page_pinned = True
     if _explicitly_given("cost_budget"):
         config.cost_budget = cost_budget
+    if _explicitly_given("max_paid_pages"):
+        config.max_paid_pages = max(0, int(max_paid_pages))
+        config.max_paid_pages_pinned = True
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
     if _explicitly_given("retry_failed_pages"):
@@ -1428,14 +1441,35 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
     show_default=True,
     help="Word-count threshold used for sparse-page exemption in NEW rules",
 )
-def cascade_replay(paths: tuple[Path, ...], audit_min_words: int) -> None:
+@click.option(
+    "--stratified-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write stratified page list (JSON) for capped paid Gemini comparison",
+)
+@click.option(
+    "--comparison-limit",
+    default=200,
+    show_default=True,
+    help="Max pages in --stratified-out",
+)
+def cascade_replay(
+    paths: tuple[Path, ...],
+    audit_min_words: int,
+    stratified_out: Path | None,
+    comparison_limit: int,
+) -> None:
     """Project Gemini usage from recorded manifests under old vs new routing rules.
 
     Reads ``manifest.json`` files only — no OCR engine calls.
     """
     import json
 
-    from socr.routing.cascade_replay import ReplayRules, replay_paths
+    from socr.routing.cascade_replay import (
+        ReplayRules,
+        replay_paths,
+        select_stratified_comparison_pages,
+    )
 
     manifest_paths: list[Path] = []
     for p in paths:
@@ -1445,7 +1479,21 @@ def cascade_replay(paths: tuple[Path, ...], audit_min_words: int) -> None:
             manifest_paths.extend(sorted(p.rglob("manifest.json")))
     if not manifest_paths:
         raise click.ClickException("no manifest.json files found in the given paths")
-    summary = replay_paths(manifest_paths, rules=ReplayRules(audit_min_words=audit_min_words))
+    rules = ReplayRules(audit_min_words=audit_min_words)
+    summary = replay_paths(manifest_paths, rules=rules)
+    if stratified_out is not None:
+        stratified = select_stratified_comparison_pages(
+            manifest_paths, rules=rules, limit=comparison_limit
+        )
+        summary["stratified_comparison"] = {
+            "comparison_limit": stratified["comparison_limit"],
+            "pool_size": stratified["pool_size"],
+            "selected_count": stratified["selected_count"],
+            "stratum_counts_in_pool": stratified["stratum_counts_in_pool"],
+            "gemini_block_reasons": stratified["gemini_block_reasons"],
+        }
+        stratified_out.parent.mkdir(parents=True, exist_ok=True)
+        stratified_out.write_text(json.dumps(stratified, indent=2), encoding="utf-8")
     click.echo(json.dumps(summary, indent=2))
 
 

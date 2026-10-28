@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.routing.cascade_policy import (
     SOURCE_EVIDENCE_MARKER,
     SparsePageSignals,
+    classify_escalation_reason,
     is_word_count_rejection,
     sparse_page_ok,
 )
@@ -32,6 +33,7 @@ class PageReplayRow:
     would_gemini_new: bool
     block_reason: str = ""
     last_qwen_reason: str = ""
+    escalation_stratum: str = ""
 
 
 @dataclass
@@ -61,6 +63,26 @@ def _infer_sparse(entry: dict, journal: list[dict]) -> bool:
     if str(fp.get("engine") or "") == "chart_asset":
         return True
     return any(is_word_count_rejection(str(j.get("reason") or "")) for j in journal)
+
+
+def resolve_manifest_pdf_path(manifest_path: Path, manifest_data: dict | None = None) -> Path | None:
+    """Best-effort PDF path for a manifest (for comparison re-run lists)."""
+    data = manifest_data
+    if data is None:
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except OSError:
+            return None
+    name = str(data.get("pdf_filename") or "").strip()
+    if not name:
+        return None
+    for candidate in (
+        manifest_path.parent / name,
+        manifest_path.parent.parent / name,
+    ):
+        if candidate.is_file():
+            return candidate
+    return manifest_path.parent / name
 
 
 def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestReplayReport:
@@ -103,6 +125,8 @@ def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestRep
         if block_reason:
             report.block_reasons[block_reason] += 1
 
+        stratum = classify_escalation_reason(qwen_reason) if gemini_attempted else ""
+
         report.rows.append(
             PageReplayRow(
                 page_num=page_num,
@@ -111,6 +135,7 @@ def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestRep
                 would_gemini_new=would_new,
                 block_reason=block_reason,
                 last_qwen_reason=qwen_reason,
+                escalation_stratum=stratum,
             )
         )
     return report
@@ -136,6 +161,71 @@ def replay_paths(paths: list[Path], rules: ReplayRules | None = None) -> dict:
     }
 
 
+def select_stratified_comparison_pages(
+    manifest_paths: list[Path],
+    *,
+    rules: ReplayRules | None = None,
+    limit: int = 200,
+) -> dict:
+    """Pick up to ``limit`` pages that still project to Gemini under NEW rules.
+
+    Stratifies by ``classify_escalation_reason`` on the last free-rung reject
+    before Gemini (``table_structure``, ``garbage_chars``, ``min_words``, etc.).
+    """
+    rules = rules or ReplayRules()
+    pool: list[tuple[Path, PageReplayRow, dict]] = []
+    stratum_counts: Counter = Counter()
+    blocked_strata: Counter = Counter()
+
+    for path in manifest_paths:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        pdf_path = resolve_manifest_pdf_path(path, data)
+        rep = replay_manifest(path, rules=rules)
+        for row in rep.rows:
+            if not row.recorded_gemini:
+                continue
+            if row.would_gemini_new:
+                stratum_counts[row.escalation_stratum or "other"] += 1
+                pool.append((path, row, data))
+            elif row.block_reason:
+                blocked_strata[row.block_reason] += 1
+
+    by_stratum: dict[str, list[tuple[Path, PageReplayRow, dict]]] = defaultdict(list)
+    for item in pool:
+        by_stratum[item[1].escalation_stratum or "other"].append(item)
+
+    selected: list[dict] = []
+    queues = {k: list(v) for k, v in sorted(by_stratum.items())}
+    while len(selected) < limit and any(queues.values()):
+        for stratum in list(queues.keys()):
+            if len(selected) >= limit:
+                break
+            queue = queues[stratum]
+            if not queue:
+                continue
+            manifest_path, row, data = queue.pop(0)
+            pdf = resolve_manifest_pdf_path(manifest_path, data)
+            selected.append(
+                {
+                    "manifest": str(manifest_path.resolve()),
+                    "pdf_path": str(pdf.resolve()) if pdf else "",
+                    "pdf_filename": str(data.get("pdf_filename") or ""),
+                    "page_num": row.page_num,
+                    "stratum": row.escalation_stratum or "other",
+                    "last_qwen_reason": row.last_qwen_reason,
+                }
+            )
+
+    return {
+        "comparison_limit": limit,
+        "pool_size": len(pool),
+        "selected_count": len(selected),
+        "stratum_counts_in_pool": dict(stratum_counts),
+        "gemini_block_reasons": dict(blocked_strata),
+        "selected_pages": selected,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -144,6 +234,18 @@ def main(argv: list[str] | None = None) -> int:
         "paths", nargs="+", help="manifest.json files or directories containing them"
     )
     parser.add_argument("--audit-min-words", type=int, default=40)
+    parser.add_argument(
+        "--stratified-out",
+        type=Path,
+        default=None,
+        help="Write stratified Gemini comparison page list (JSON) for capped paid re-runs",
+    )
+    parser.add_argument(
+        "--comparison-limit",
+        type=int,
+        default=200,
+        help="Max pages in --stratified-out (default 200)",
+    )
     args = parser.parse_args(argv)
 
     manifest_paths: list[Path] = []
@@ -155,6 +257,19 @@ def main(argv: list[str] | None = None) -> int:
             manifest_paths.extend(sorted(p.rglob("manifest.json")))
     rules = ReplayRules(audit_min_words=args.audit_min_words)
     summary = replay_paths(manifest_paths, rules=rules)
+    if args.stratified_out is not None:
+        stratified = select_stratified_comparison_pages(
+            manifest_paths, rules=rules, limit=args.comparison_limit
+        )
+        summary["stratified_comparison"] = {
+            "comparison_limit": stratified["comparison_limit"],
+            "pool_size": stratified["pool_size"],
+            "selected_count": stratified["selected_count"],
+            "stratum_counts_in_pool": stratified["stratum_counts_in_pool"],
+            "gemini_block_reasons": stratified["gemini_block_reasons"],
+        }
+        args.stratified_out.parent.mkdir(parents=True, exist_ok=True)
+        args.stratified_out.write_text(json.dumps(stratified, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0
 

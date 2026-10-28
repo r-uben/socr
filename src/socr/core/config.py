@@ -400,6 +400,11 @@ class PipelineConfig:
     # touching the "0 = no cap" default every other caller relies on.
     max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
+    # Hard cap on Gemini OCR pages per public run (``process`` or one ``process_batch``).
+    # 0 = unlimited. Counts each page image sent to the Gemini engine rung, across
+    # every document in a batch.
+    max_paid_pages: int = 0
+    max_paid_pages_pinned: bool = False
     write_manifest: bool = False  # write reproducibility manifest + blob cache
     # Agentic loop: after every page has run once, run each page that FAILED (its
     # output is an ERROR page: no usable reading, or the fail-closed marker) once

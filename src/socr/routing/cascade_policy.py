@@ -66,6 +66,31 @@ def is_word_count_rejection(judge_reason: str) -> bool:
     return bool(_WORD_COUNT_RE.match((judge_reason or "").strip()))
 
 
+def classify_escalation_reason(judge_reason: str) -> str:
+    """Bucket the last free-rung reject that preceded Gemini (for replay sampling).
+
+    Returns one of: ``table_structure``, ``garbage_chars``, ``source_evidence_table``,
+    ``min_words``, or ``other``.
+    """
+    reason = (judge_reason or "").strip()
+    if SOURCE_EVIDENCE_MARKER in reason:
+        return "source_evidence_table"
+    if is_word_count_rejection(reason):
+        return "min_words"
+    lower = reason.lower()
+    if "table_structure" in lower or "table emission" in lower:
+        return "table_structure"
+    if (
+        "garbage" in lower
+        or "gibberish" in lower
+        or "hallucin" in lower
+        or "encoding" in lower
+        or "private-use" in lower
+    ):
+        return "garbage_chars"
+    return "other"
+
+
 @dataclass(frozen=True)
 class SparsePageSignals:
     """Optional page metadata for replay / sparse heuristics."""
