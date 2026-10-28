@@ -69,7 +69,9 @@ FIXTURES: list[tuple[str, _FixturePage, str, str]] = [
 ]
 
 
-@pytest.mark.parametrize("name, page, judge_reason, expected_tag", FIXTURES, ids=[f[0] for f in FIXTURES])
+@pytest.mark.parametrize(
+    "name, page, judge_reason, expected_tag", FIXTURES, ids=[f[0] for f in FIXTURES]
+)
 def test_live_and_replay_share_block_tag(
     name: str,
     page: _FixturePage,
@@ -78,9 +80,7 @@ def test_live_and_replay_share_block_tag(
 ) -> None:
     audit_min_words = 40
     live_signals = sparse_signals_from_page_assessment(page)
-    live_tag = paid_gemini_block_tag(
-        judge_reason, live_signals, audit_min_words=audit_min_words
-    )
+    live_tag = paid_gemini_block_tag(judge_reason, live_signals, audit_min_words=audit_min_words)
     assert live_tag == expected_tag, name
 
     entry = {

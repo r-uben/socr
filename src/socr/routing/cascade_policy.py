@@ -141,9 +141,7 @@ def sparse_signals_from_page_assessment(page_assessment) -> SparsePageSignals:
     )
     invisible = bool(getattr(page_assessment, "invisible_text_over_raster", False))
     prior_ocr = bool(getattr(page_assessment, "prior_ocr_layer", False))
-    image_dominant = invisible or (
-        not is_bd and has_figures and word_count < 50
-    )
+    image_dominant = invisible or (not is_bd and has_figures and word_count < 50)
     return SparsePageSignals(
         is_born_digital=is_bd,
         native_word_count=word_count,
@@ -203,9 +201,7 @@ def sparse_signals_from_manifest_entry(entry: dict, journal: list[dict]) -> Spar
     has_figures = bool(meta.get("has_figures") or meta.get("has_images") or has_chart)
     invisible = bool(meta.get("invisible_text_over_raster"))
     prior_ocr = bool(meta.get("prior_ocr_layer"))
-    image_dominant = invisible or (
-        not is_bd and has_figures and word_count < 50
-    )
+    image_dominant = invisible or (not is_bd and has_figures and word_count < 50)
     return SparsePageSignals(
         is_born_digital=is_bd,
         native_word_count=word_count,

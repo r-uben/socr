@@ -146,9 +146,7 @@ class GemmaCloudEngine(BaseEngine):
             with tempfile.TemporaryDirectory() as tmpdir:
                 crop_dir = Path(tmpdir) / "crops"
                 try:
-                    stems = render_page_half_crops(
-                        pdf_path, page_num, crop_dir, dpi=crop_dpi
-                    )
+                    stems = render_page_half_crops(pdf_path, page_num, crop_dir, dpi=crop_dpi)
                 except Exception as exc:
                     outputs.append(
                         PageOutput(
