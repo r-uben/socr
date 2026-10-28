@@ -27,7 +27,7 @@ from socr.core.manifest import (
     UNVERIFIED_TABLE_MARK_RE,
     disputed_table_mark,
 )
-from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
+from socr.core.providers import PROFILE_MARKER, PROFILE_QWEN_LOCAL
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_SOURCE_EVIDENCE,
@@ -537,7 +537,9 @@ def test_crop_rejudge_clears_or_keeps_the_unchecked_claims(tmp_path, passes) -> 
 # ---------------------------------------------------------------------------
 
 _DISPUTED_TABLE = "| Item | Value |\n| --- | --- |\n| alpha | 99.9 |\n| beta | 88.8 |\n"
-_TWO_RUNGS = [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
+# Paid Gemini is not escalated after a witness-backed source-evidence reject (#1255);
+# marker is the free second rung these pins use instead.
+_TWO_RUNGS = [PROFILE_QWEN_LOCAL, PROFILE_MARKER]
 
 
 def test_a_later_rung_that_verifies_ships_unmarked_and_is_called(tmp_path, monkeypatch) -> None:
@@ -545,7 +547,7 @@ def test_a_later_rung_that_verifies_ships_unmarked_and_is_called(tmp_path, monke
     Only the second rung exists or not."""
     texts = {
         EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}",
-        EngineType.GEMINI: _MODEL_TEXT,
+        EngineType.MARKER: _MODEL_TEXT,
     }
     one_calls: list = []
     two_calls: list = []
@@ -563,7 +565,7 @@ def test_a_later_rung_that_verifies_ships_unmarked_and_is_called(tmp_path, monke
     )
 
     assert one_calls == [EngineType.QWEN]
-    assert EngineType.GEMINI in two_calls, "rung 2 must be called when rung 1 is disputed"
+    assert EngineType.MARKER in two_calls, "rung 2 must be called when rung 1 is disputed"
     # One rung: ships rung 1's table, marked disputed. Two rungs: rung 2's verified text, no mark.
     assert len(DISPUTED_TABLE_MARK_RE.findall(one_frag)) == 1 and "99.9" in one_frag
     assert not DISPUTED_TABLE_MARK_RE.search(two_frag)
@@ -579,7 +581,7 @@ def test_both_rungs_disputed_ships_the_last_candidate_marked(tmp_path, monkeypat
     other = "| Item | Value |\n| --- | --- |\n| alpha | 77.7 |\n| beta | 66.6 |\n"
     texts = {
         EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}",
-        EngineType.GEMINI: f"{_PROSE}\n\n{other}",
+        EngineType.MARKER: f"{_PROSE}\n\n{other}",
     }
     calls: list = []
     _, side, frag, final, _ = _run(
@@ -591,7 +593,7 @@ def test_both_rungs_disputed_ships_the_last_candidate_marked(tmp_path, monkeypat
         texts=texts,
         calls=calls,
     )
-    assert calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert calls == [EngineType.QWEN, EngineType.MARKER]
     # The documented choice: the LAST (most escalated) rung that produced a table.
     assert "77.7" in frag and "99.9" not in frag and "77.7" in final
     assert len(DISPUTED_TABLE_MARK_RE.findall(frag)) == 1
@@ -612,11 +614,11 @@ def test_later_rung_without_a_table_promotes_the_marked_earlier(tmp_path, monkey
     first = f"{_PROSE}\n\n{_DISPUTED_TABLE}"
     later_verified = {
         EngineType.QWEN: first,
-        EngineType.GEMINI: _MODEL_TEXT,
+        EngineType.MARKER: _MODEL_TEXT,
     }
     later_prose = {
         EngineType.QWEN: first,
-        EngineType.GEMINI: _PROSE,
+        EngineType.MARKER: _PROSE,
     }
     ver_calls: list = []
     _, ver_side, ver_frag, ver_final, _ = _run(
@@ -638,8 +640,8 @@ def test_later_rung_without_a_table_promotes_the_marked_earlier(tmp_path, monkey
         texts=later_prose,
         calls=prose_calls,
     )
-    assert ver_calls == [EngineType.QWEN, EngineType.GEMINI]
-    assert prose_calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert ver_calls == [EngineType.QWEN, EngineType.MARKER]
+    assert prose_calls == [EngineType.QWEN, EngineType.MARKER]
     # Later rung verified: unmarked table, SUCCESS. Later prose: marked earlier table.
     assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
     assert _TABLE.rstrip() in ver_frag and "99.9" not in ver_frag
@@ -707,7 +709,7 @@ def test_maths_only_later_rung_does_not_lift_the_floor(tmp_path, monkeypatch) ->
         "maths-ver",
         witness=SUPPORTS,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: first, EngineType.GEMINI: _MODEL_TEXT},
+        texts={EngineType.QWEN: first, EngineType.MARKER: _MODEL_TEXT},
         calls=ver_calls,
     )
     maths_calls: list = []
@@ -717,11 +719,11 @@ def test_maths_only_later_rung_does_not_lift_the_floor(tmp_path, monkeypatch) ->
         "maths-only",
         witness=SUPPORTS,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: first, EngineType.GEMINI: _MATHS_ONLY},
+        texts={EngineType.QWEN: first, EngineType.MARKER: _MATHS_ONLY},
         calls=maths_calls,
     )
-    assert ver_calls == [EngineType.QWEN, EngineType.GEMINI]
-    assert maths_calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert ver_calls == [EngineType.QWEN, EngineType.MARKER]
+    assert maths_calls == [EngineType.QWEN, EngineType.MARKER]
     assert not DISPUTED_TABLE_MARK_RE.search(ver_frag)
     # #1185: the verified model reading has no own text layer (scanned fixture), so it is MARKED.
     assert ver_side["status"] == PageStatus.WARNING.value
@@ -759,10 +761,10 @@ def test_flaky_witness_unverifiable_first_rung_does_not_veto_verified_later(
         witness=SILENT,
         witness_fn=_flaky,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: mis, EngineType.GEMINI: _MODEL_TEXT},
+        texts={EngineType.QWEN: mis, EngineType.MARKER: _MODEL_TEXT},
         calls=calls,
     )
-    assert calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert calls == [EngineType.QWEN, EngineType.MARKER]
     assert len(ocr_calls) >= 2
     assert "41.5" in frag and "17.2" in frag
     assert "41.6" not in frag and "41.6" not in final
@@ -783,17 +785,17 @@ def test_later_rung_dropping_witness_supported_rows_promotes_marked(tmp_path, mo
         "drop-rows",
         witness=_WITNESS_FOUR_ROW,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: abcd, EngineType.GEMINI: one},
+        texts={EngineType.QWEN: abcd, EngineType.MARKER: one},
         calls=drop_calls,
     )
-    assert drop_calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert drop_calls == [EngineType.QWEN, EngineType.MARKER]
     _, keep_side, keep_frag, _, _ = _run(
         tmp_path,
         monkeypatch,
         "keep-one",
         witness=_WITNESS_FOUR_ROW,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: one, EngineType.GEMINI: one},
+        texts={EngineType.QWEN: one, EngineType.MARKER: one},
     )
     assert "17.2" in drop_frag and "12.3" in drop_frag
     assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
@@ -817,17 +819,17 @@ def test_later_rung_dropping_a_table_promotes_the_marked(tmp_path, monkeypatch) 
         "drop-a",
         witness=_WITNESS_B,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: ab, EngineType.GEMINI: b_only},
+        texts={EngineType.QWEN: ab, EngineType.MARKER: b_only},
         calls=drop_calls,
     )
-    assert drop_calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert drop_calls == [EngineType.QWEN, EngineType.MARKER]
     _, keep_side, keep_frag, _, _ = _run(
         tmp_path,
         monkeypatch,
         "b-only",
         witness=_WITNESS_B,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: b_only, EngineType.GEMINI: b_only},
+        texts={EngineType.QWEN: b_only, EngineType.MARKER: b_only},
     )
     assert "99.9" in drop_frag and "99.9" in drop_final
     assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
@@ -1128,7 +1130,7 @@ def test_unselected_disputed_attempt_does_not_claim_page_judge(tmp_path, monkeyp
     one_texts = {EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}"}
     two_texts = {
         EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}",
-        EngineType.GEMINI: f"{_PROSE}\n\n| Item | Value |\n| --- | --- |\n| alpha | 77.7 |\n| beta | 66.6 |\n",
+        EngineType.MARKER: f"{_PROSE}\n\n| Item | Value |\n| --- | --- |\n| alpha | 77.7 |\n| beta | 66.6 |\n",
     }
     _, one_side, _, _, _ = _run(tmp_path, monkeypatch, "j-one", witness=SUPPORTS, texts=one_texts)
     _, two_side, _, _, _ = _run(
@@ -1250,7 +1252,7 @@ _HTML_FOUR_ROW = (
 def _html_retry(tmp_path, monkeypatch, tag, html_table):
     texts = {
         EngineType.QWEN: f"{_PROSE}\n\n{_DISPUTED_TABLE}",
-        EngineType.GEMINI: f"{_PROSE}\n\n{html_table}\n",
+        EngineType.MARKER: f"{_PROSE}\n\n{html_table}\n",
     }
     calls: list = []
     out = _run(
@@ -1276,10 +1278,10 @@ def test_html_marked_four_row_later_one_row_does_not_ship_unmarked(tmp_path, mon
         "html-drop",
         witness=_WITNESS_FOUR_ROW,
         profiles=_TWO_RUNGS,
-        texts={EngineType.QWEN: html_first, EngineType.GEMINI: one},
+        texts={EngineType.QWEN: html_first, EngineType.MARKER: one},
         calls=calls,
     )
-    assert calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert calls == [EngineType.QWEN, EngineType.MARKER]
     assert "17.2" in drop_frag and "12.3" in drop_frag
     assert DISPUTED_TABLE_MARK_RE.search(drop_frag)
     assert drop_side["unchecked_table_kind"] == "disputed"
@@ -1294,7 +1296,7 @@ def test_html_retry_is_checked_not_waved_through(tmp_path, monkeypatch) -> None:
     wrong = _HTML_OK.replace("41.5", "99.9")
     dis_calls, (_, dis_side, dis_frag, _, _) = _html_retry(tmp_path, monkeypatch, "hdis", wrong)
 
-    assert EngineType.GEMINI in ok_calls
+    assert EngineType.MARKER in ok_calls
     # Verified HTML: accepted by the check, unmarked, shipped as emitted.
     assert "<table>" in ok_frag and "alpha" in ok_frag
     assert "[table " not in ok_frag and "[page unchecked" not in ok_frag
@@ -1310,7 +1312,7 @@ def test_html_retry_is_checked_not_waved_through(tmp_path, monkeypatch) -> None:
     assert bad_frag.index(UNVERIFIED_TABLE_MARK) < bad_frag.index("<table>")
     assert bad_side["unchecked_table_kind"] == "unverified"
     assert "> [page unchecked:" in bad_frag
-    assert bad_calls == [EngineType.QWEN, EngineType.GEMINI]
+    assert bad_calls == [EngineType.QWEN, EngineType.MARKER]
 
 
 def _mk(path):

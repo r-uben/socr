@@ -128,6 +128,9 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
         # and the --retry-failed-pages record (tests/test_retry_failed_pages.py).
         "table_ladder_superseded",
         "page_retry",
+        # Manifest journal: additive token accounting on engine attempts (PR #1255).
+        "llm_input_tokens",
+        "llm_output_tokens",
     }
 )
 

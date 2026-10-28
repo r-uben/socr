@@ -56,10 +56,7 @@ _LIVE = {
     "escalate_ambiguous_tables",
     "figures_max_per_page",
     "figures_max_total",
-    "gemma_cloud_model",
-    "marker_force_ocr",
     "max_cost_per_page",
-    "max_paid_pages",
     "math_model",
     "native_first",
     "native_only",
@@ -150,6 +147,12 @@ _UNEXERCISED = {
     "escalation_timeout_sec",  # escalation lane needs a 2nd ladder rung
     "hpc",
     "marker_device",
+    # Read when the marker engine runs; ``get_engine`` is stubbed here.
+    "marker_force_ocr",
+    # Read when the gemma-cloud engine is probed on the ladder; not in this fixture's ladder.
+    "gemma_cloud_model",
+    # Only enforced when > 0; this fixture leaves the default (unlimited).
+    "max_paid_pages",
     "deepseek_vllm_url",
     "qwen_vllm_model",
     "qwen_model_pinned",

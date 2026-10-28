@@ -15972,42 +15972,17 @@ class UnifiedPipeline:
         NOT qualify — a dense page that merely contains an image must keep
         the full gate, and scanned pages (whose text-layer word counts are
         junk) never earn leniency from this.
-        """
-        from socr.routing.cascade_policy import SparsePageSignals, sparse_page_ok
 
+        Offline cascade replay uses the wider ``sparse_page_ok`` helper in
+        ``cascade_policy``; this hook feeds only the heuristic page judge.
+        """
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        if pa is None:
+        if pa is None or not pa.is_born_digital:
             return False
-        ps = self.state.pages.get(page_num) if getattr(self, "state", None) else None
-        chart_asset = bool(getattr(ps, "is_chart_asset_page", False)) if ps else False
-        image_dominant = bool(
-            getattr(pa, "invisible_text_over_raster", False)
-            or getattr(pa, "prior_ocr_layer", False)
-        )
-        if not image_dominant and getattr(pa, "has_figures", False):
-            try:
-                from socr.core.born_digital import BornDigitalDetector
-
-                handle = getattr(self.state, "handle", None)
-                if handle is not None:
-                    page = handle.doc[page_num - 1]
-                    cov = BornDigitalDetector._raster_coverage(page)
-                    image_dominant = cov >= BornDigitalDetector.RASTER_DOMINANCE_RATIO * 0.85
-            except Exception:
-                pass
-        signals = SparsePageSignals(
-            is_born_digital=pa.is_born_digital,
-            native_word_count=pa.word_count or 0,
-            has_figures=bool(getattr(pa, "has_figures", False)),
-            has_chart_asset=chart_asset,
-            image_dominant=image_dominant,
-            prior_ocr_layer=bool(getattr(pa, "prior_ocr_layer", False)),
-            invisible_text_over_raster=bool(getattr(pa, "invisible_text_over_raster", False)),
-        )
-        return sparse_page_ok(signals, audit_min_words=self.config.audit_min_words)
+        return (pa.word_count or 0) < self.config.audit_min_words
 
     # ------------------------------------------------------------------
     # Assembly persistence helpers (PP-1)
