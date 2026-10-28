@@ -3099,7 +3099,6 @@ class BornDigitalDetector:
 
     # Below ``MAX_GARBAGE_RATIO``: still too noisy to treat the layer as a citation
     # witness for table source-evidence (corporate PDFs with baked-in OCR).
-    TEXT_LAYER_WITNESS_MAX_GARBAGE = 0.02
 
     # Maximum ratio of characters that are just spaces. Baked-in OCR on scanned
     # pages often produces text with excessive spacing (one char per glyph with
@@ -3644,6 +3643,7 @@ class BornDigitalDetector:
                     has_figures=has_figures,
                     has_equations=has_equations,
                     has_math_font_typesetting=has_math_font_typesetting,
+                    text_layer_witness_unusable=True,
                     notes=notes,
                 )
 
@@ -3724,6 +3724,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 
@@ -3743,6 +3744,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 
@@ -3762,6 +3764,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 
@@ -3780,6 +3783,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 
@@ -3818,6 +3822,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
         if encoding_corruption > self.MAX_ENCODING_CORRUPTION:
@@ -3827,30 +3832,6 @@ class BornDigitalDetector:
                 is_born_digital=False,
                 native_text="",
                 confidence=0.75,
-                char_count=char_count,
-                word_count=word_count,
-                font_count=font_count,
-                has_images=has_images,
-                has_tables=has_tables,
-                has_figures=has_figures,
-                has_equations=has_equations,
-                has_math_font_typesetting=has_math_font_typesetting,
-                text_layer_witness_unusable=True,
-                notes=notes,
-            )
-
-        if encoding_corruption > self.ENCODING_CORRUPTION_FLAG or (
-            garbage_ratio > self.TEXT_LAYER_WITNESS_MAX_GARBAGE
-        ):
-            notes.append(
-                "text layer unusable as table number witness "
-                f"(encoding {encoding_corruption:.1%}, garbage {garbage_ratio:.1%}) -> OCR"
-            )
-            return PageAssessment(
-                page_num=page_num,
-                is_born_digital=False,
-                native_text="",
-                confidence=0.78,
                 char_count=char_count,
                 word_count=word_count,
                 font_count=font_count,

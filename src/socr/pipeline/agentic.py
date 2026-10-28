@@ -1655,10 +1655,13 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                     "verifier_state": vr.state,
                 },
             )
+            from socr.core.result import JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER
+
             return AcceptDecision(
                 accept=False,
                 reason=f"native_table_verifier: {vr.reason}",
                 confidence=0.0,
+                judge_outcome=JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER,
             )
 
         if vr.warn:

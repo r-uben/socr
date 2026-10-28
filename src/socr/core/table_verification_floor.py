@@ -1,114 +1,120 @@
-"""Table-verification-only fail-closed floors: keep verified prose, withhold tables."""
+"""Table verification metadata: typed judge outcomes and withheld-table records."""
 
 from __future__ import annotations
 
-from socr.core.result import FailureMode, PageOutput
-
-#: Prefixes on ``PageOutput.judge_reason`` / attempt reasons that mean ONLY the table
-#: chain refused the reading — not a prose or page-level check.
-TABLE_VERIFICATION_REASON_PREFIXES: tuple[str, ...] = (
-    "native_table_verifier:",
-    "source_evidence_table:",
+from socr.core.result import (
+    JUDGE_OUTCOME_COMPLETED,
+    JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER,
+    JUDGE_OUTCOME_SOURCE_EVIDENCE,
+    JUDGE_OUTCOME_TIMEOUT,
+    JUDGE_OUTCOME_VERIFIER_ERROR,
+    PageOutput,
+    TABLE_VERIFICATION_JUDGE_OUTCOMES,
 )
 
-#: Audit kind written when a page ships prose recovered under this ruling.
 TABLE_VERIFICATION_PROSE_RECOVERY_KIND = "table_verification_prose_recovery"
 
+#: Outcomes that mean the judge never completed a prose-level verdict.
+_NON_PROSE_JUDGE_OUTCOMES = frozenset(
+    {
+        JUDGE_OUTCOME_TIMEOUT,
+        JUDGE_OUTCOME_VERIFIER_ERROR,
+    }
+)
 
-def _attempt_refusal_reason(att) -> str:
-    if isinstance(att, PageOutput):
-        return (
-            getattr(att, "judge_reason", None) or getattr(att, "skip_reason", None) or ""
-        ).strip()
-    return (getattr(att, "judge_reason", None) or getattr(att, "reason", None) or "").strip()
 
-
-def page_has_table_verifier_refusal(p) -> bool:
-    """True when any attempt was refused by the native table verifier chain."""
+def page_has_table_verification_refusal(p) -> bool:
+    """True when any attempt carries a table-verification typed outcome."""
     for att in getattr(p, "attempts", None) or []:
-        if isinstance(att, PageOutput) and att.audit_passed:
+        if not isinstance(att, PageOutput):
             continue
-        reason = _attempt_refusal_reason(att)
-        if any(reason.startswith(prefix) for prefix in TABLE_VERIFICATION_REASON_PREFIXES):
+        if att.audit_passed:
+            continue
+        if getattr(att, "judge_outcome", "") in TABLE_VERIFICATION_JUDGE_OUTCOMES:
             return True
     return False
 
 
-def page_has_non_table_judge_refusal(p) -> bool:
-    """True when a judge refused for a reason other than table verification."""
-    for att in getattr(p, "attempts", None) or []:
-        if isinstance(att, PageOutput) and att.audit_passed:
+def page_failed_only_table_verification(p) -> bool:
+    """True when every completed refusal was table verification (typed outcomes)."""
+    attempts = list(getattr(p, "attempts", None) or [])
+    if not attempts:
+        return False
+    saw_table = False
+    for att in attempts:
+        if not isinstance(att, PageOutput):
             continue
-        reason = _attempt_refusal_reason(att)
-        if reason and not any(
-            reason.startswith(prefix) for prefix in TABLE_VERIFICATION_REASON_PREFIXES
-        ):
-            return True
-    return False
+        if att.audit_passed:
+            continue
+        outcome = getattr(att, "judge_outcome", "") or ""
+        if outcome in _NON_PROSE_JUDGE_OUTCOMES:
+            return False
+        if outcome in TABLE_VERIFICATION_JUDGE_OUTCOMES:
+            saw_table = True
+            continue
+        if outcome == JUDGE_OUTCOME_COMPLETED and not att.audit_passed:
+            return False
+        if outcome and outcome not in TABLE_VERIFICATION_JUDGE_OUTCOMES:
+            return False
+    return saw_table
 
 
-def maybe_attach_withheld_table_manifest(p) -> None:
-    """Record withheld tables when prose ships under a table-only verification failure."""
-    if not page_failed_only_table_verification(p):
-        return
-    records = withheld_table_records_from_attempts(p)
+def withheld_table_manifest_from_page(p) -> list[dict]:
+    """Tables actually withheld on this page (detection geometry), not attempt reasons."""
+    count = getattr(p, "detected_table_count", 0)
+    boxes = list(getattr(p, "detected_table_bboxes", None) or [])
+    if not isinstance(count, int) or count <= 0:
+        return []
+    out: list[dict] = []
+    for idx, box in enumerate(boxes[:count]):
+        if isinstance(box, (list, tuple)) and len(box) >= 4:
+            region = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+        else:
+            region = list(box) if box is not None else []
+        out.append(
+            {
+                "table_index": idx,
+                "detected_table_count": count,
+                "bbox": region,
+                "reason": "withheld_unverified_table",
+            }
+        )
+    if len(boxes) != count:
+        out.append(
+            {
+                "table_index": None,
+                "detected_table_count": count,
+                "bbox_count": len(boxes),
+                "reason": "withheld_inventory_incomplete",
+            }
+        )
+    return out
+
+
+def attach_withheld_table_manifest(p) -> list[dict]:
+    records = withheld_table_manifest_from_page(p)
     if not records:
-        return
+        return []
     try:
         p.withheld_table_manifest = records
     except Exception:  # pragma: no cover - read-only test stand-ins
         pass
+    return records
 
 
-def page_failed_only_table_verification(p) -> bool:
-    """True when every refused attempt was refused for table verification alone.
+def record_table_prose_recovery_audit(state, page_num: int, p, *, engine: str = "") -> None:
+    """Append recovery audit to ``state.events`` and set the withheld-table manifest."""
+    records = attach_withheld_table_manifest(p)
+    if not records:
+        return
+    from socr.core.audit_log import AuditEvent
 
-    Prose-level refusals (page judge, coverage, reading agreement) must not
-    trigger prose recovery — the table rule is fail-closed, not a prose rescue.
-    """
-    attempts = list(getattr(p, "attempts", None) or [])
-    if not attempts:
-        return False
-    saw_table_refusal = False
-    for att in attempts:
-        if isinstance(att, PageOutput) and att.audit_passed:
-            continue
-        reason = _attempt_refusal_reason(att)
-        combined = reason
-        if combined and not any(
-            combined.startswith(prefix) for prefix in TABLE_VERIFICATION_REASON_PREFIXES
-        ):
-            # A non-table refusal with a stated reason blocks recovery.
-            if reason:
-                return False
-            fm = getattr(att, "failure_mode", None)
-            if fm not in (
-                FailureMode.NONE,
-                FailureMode.HALLUCINATION,
-                FailureMode.NO_WITNESS_BACKEND,
-                None,
-            ):
-                return False
-            continue
-        if any(combined.startswith(prefix) for prefix in TABLE_VERIFICATION_REASON_PREFIXES):
-            saw_table_refusal = True
-    return saw_table_refusal
-
-
-def withheld_table_records_from_attempts(p) -> list[dict[str, str]]:
-    """One record per table-verification refusal on this page's attempts."""
-    out: list[dict[str, str]] = []
-    for att in getattr(p, "attempts", None) or []:
-        reason = _attempt_refusal_reason(att)
-        if not any(reason.startswith(pfx) for pfx in TABLE_VERIFICATION_REASON_PREFIXES):
-            continue
-        engine = getattr(att, "engine", "") or ""
-        out.append(
-            {
-                "engine": engine,
-                "reason": reason,
-                "table_disputed": getattr(att, "table_disputed", "") or "",
-                "table_unverifiable": getattr(att, "table_unverifiable", "") or "",
-            }
+    state.events.append(
+        AuditEvent(
+            page_num=page_num,
+            kind=TABLE_VERIFICATION_PROSE_RECOVERY_KIND,
+            engine=engine,
+            detail="prose kept; tables withheld at regional markers",
+            data={"tables": list(records)},
         )
-    return out
+    )
