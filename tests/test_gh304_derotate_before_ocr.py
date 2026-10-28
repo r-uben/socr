@@ -194,7 +194,7 @@ _ASSIGNMENT_SITES = {
     # nobody ships. It is a deliberate second copy of that site's form, and
     # tests/test_gh635_chart_reader.py asserts the two produce the same bytes.
     ("figures/chart_reader.py", "crop_digest"),
-    ("routing/gemma_crops.py", "render_page_half_crops"),
+    ("routing/gemma_crops.py", "render_gemma_crops"),
 }
 
 

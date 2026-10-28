@@ -1,9 +1,11 @@
 """Gemma vision OCR via Ollama Cloud — a dedicated agentic ladder rung.
 
-Uses ``qwen-ocr`` with half-page 300-dpi crops and output guards (token cap,
+Uses ``qwen-ocr`` with layout-aware 300-dpi crops and output guards (token cap,
 repeated-text / image-URL rejection, equation-unverified flag). Judging is
 unchanged: the orchestrator still runs every candidate through the same page
 judge as other ladder rungs.
+
+Cloud egress is opt-in (``enable_gemma_cloud`` / ``--enable-gemma-cloud``).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from socr.core.providers import PROFILE_GEMMA_CLOUD, is_cloud_model
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.engines.base import BaseEngine
 from socr.routing.cascade_policy import extract_cli_actionable_error, parse_token_usage
-from socr.routing.gemma_crops import render_page_half_crops
+from socr.routing.gemma_crops import render_gemma_crops
 from socr.routing.gemma_guards import apply_gemma_output_guards
 from socr.tables.extract import resolve_ollama_host
 
@@ -38,7 +40,7 @@ def gemma_cloud_model_available(model: str) -> tuple[bool, str]:
 
 
 class GemmaCloudEngine(BaseEngine):
-    """Adapter: ``qwen-ocr process`` on 300-dpi half-page crops."""
+    """Adapter: ``qwen-ocr process`` on layout-aware 300-dpi crops."""
 
     @property
     def name(self) -> str:
@@ -52,6 +54,7 @@ class GemmaCloudEngine(BaseEngine):
         return (config.gemma_cloud_model or PROFILE_GEMMA_CLOUD.model).strip()
 
     def is_available(self) -> bool:
+        """CLI presence only — cloud model probing is gated in agentic setup."""
         try:
             result = subprocess.run(
                 [self.cli_command, "--version"],
@@ -59,13 +62,16 @@ class GemmaCloudEngine(BaseEngine):
                 text=True,
                 timeout=10,
             )
-            if result.returncode != 0:
-                return False
+            return result.returncode == 0
         except (subprocess.SubprocessError, FileNotFoundError):
             return False
-        model = PROFILE_GEMMA_CLOUD.model
-        ok, _ = gemma_cloud_model_available(model)
-        return ok
+
+    def is_available_for_config(self, config: PipelineConfig) -> tuple[bool, str]:
+        """Probe ``config.gemma_cloud_model`` when the rung is explicitly enabled."""
+        if not self.is_available():
+            return False, "qwen-ocr CLI not available"
+        model = self.resolved_model_version(config)
+        return gemma_cloud_model_available(model)
 
     def _build_command(
         self,
@@ -136,17 +142,34 @@ class GemmaCloudEngine(BaseEngine):
         dpi: int = 200,
         subprocess_timeout: float | None = None,
     ) -> list[PageOutput]:
-        """OCR each page from left/right 300-dpi crops with output guards."""
-        start = time.time()
+        """OCR each page from layout-aware crops; one failed crop fails the page."""
+        if not getattr(config, "enable_gemma_cloud", False) and not getattr(
+            config, "gemma_cloud_model_pinned", False
+        ):
+            return [
+                PageOutput(
+                    page_num=n,
+                    status=PageStatus.ERROR,
+                    engine=self.name,
+                    failure_mode=FailureMode.CLI_ERROR,
+                    error="gemma cloud rung disabled (use --enable-gemma-cloud)",
+                    audit_passed=False,
+                )
+                for n in page_nums
+            ]
+
         crop_dpi = getattr(config, "gemma_crop_dpi", 300) or 300
         max_tokens = getattr(config, "gemma_max_output_tokens", 4096) or 4096
         outputs: list[PageOutput] = []
 
         for page_num in page_nums:
+            page_start = time.time()
             with tempfile.TemporaryDirectory() as tmpdir:
                 crop_dir = Path(tmpdir) / "crops"
                 try:
-                    stems = render_page_half_crops(pdf_path, page_num, crop_dir, dpi=crop_dpi)
+                    stems, full_page_unverified = render_gemma_crops(
+                        pdf_path, page_num, crop_dir, dpi=crop_dpi
+                    )
                 except Exception as exc:
                     outputs.append(
                         PageOutput(
@@ -160,13 +183,15 @@ class GemmaCloudEngine(BaseEngine):
                     )
                     continue
 
+                expected = len(stems)
                 half_texts: list[str] = []
                 inp_sum = out_sum = None
-                cli_err = ""
                 per_half_timeout = None
-                if subprocess_timeout is not None:
-                    per_half_timeout = max(30.0, subprocess_timeout / max(len(stems), 1))
+                if subprocess_timeout is not None and expected:
+                    per_half_timeout = max(30.0, subprocess_timeout / expected)
 
+                page_failed = False
+                fail_err = ""
                 for _stem, crop_path in stems:
                     half_dir = Path(tmpdir) / f"half_{_stem}"
                     half_dir.mkdir(parents=True, exist_ok=True)
@@ -179,21 +204,27 @@ class GemmaCloudEngine(BaseEngine):
                     if out is not None:
                         out_sum = (out_sum or 0) + out
                     if err:
-                        cli_err = err
-                    elif text.strip():
-                        half_texts.append(text.strip())
+                        page_failed = True
+                        fail_err = err
+                        break
+                    if not text.strip():
+                        page_failed = True
+                        fail_err = f"gemma crop {_stem}: empty OCR output"
+                        break
+                    half_texts.append(text.strip())
 
-                if cli_err and not half_texts:
+                if page_failed or len(half_texts) != expected:
                     outputs.append(
                         PageOutput(
                             page_num=page_num,
                             status=PageStatus.ERROR,
                             engine=self.name,
                             failure_mode=FailureMode.CLI_ERROR,
-                            error=cli_err,
+                            error=fail_err or "gemma crop OCR incomplete",
                             audit_passed=False,
                             llm_input_tokens=inp_sum,
                             llm_output_tokens=out_sum,
+                            processing_time=time.time() - page_start,
                         )
                     )
                     continue
@@ -203,8 +234,9 @@ class GemmaCloudEngine(BaseEngine):
                     merged,
                     page_num=page_num,
                     max_output_tokens=max_tokens,
+                    full_page_unverified=full_page_unverified,
                 )
-                guarded.processing_time = (time.time() - start) / max(len(page_nums), 1)
+                guarded.processing_time = time.time() - page_start
                 guarded.llm_input_tokens = inp_sum
                 guarded.llm_output_tokens = out_sum
                 outputs.append(guarded)

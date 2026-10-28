@@ -43,6 +43,7 @@ def test_mocked_429_journal_row() -> None:
     assert "quota/rate-limit" in row["reason"]
     assert "429" in row["reason"]
     assert row["llm_input_tokens"] == 1200
+    assert "quota/rate-limit" not in extract_cli_actionable_error("", "429 Quota exceeded")
 
 
 def test_mocked_safety_block_journal_row() -> None:
@@ -53,6 +54,7 @@ def test_mocked_safety_block_journal_row() -> None:
     row = _journal_reason(stderr)
     assert "safety-block" in row["reason"]
     assert "SAFETY" in row["reason"] or "blocked" in row["reason"].lower()
+    assert "safety-block" not in extract_cli_actionable_error("", "SAFETY in stdout only")
 
 
 def test_provider_timeout_reason_not_duplicated() -> None:

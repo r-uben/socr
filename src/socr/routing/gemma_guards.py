@@ -14,17 +14,19 @@ _EQUATION_RE = re.compile(
     r"\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\(|\\\[|```(?:math|latex)",
     re.IGNORECASE,
 )
+_TRUNCATION_MARKER = "[truncated: gemma output token cap]"
 
 
 def max_output_chars(max_tokens: int) -> int:
     return max(256, int(max_tokens) * _CHARS_PER_TOKEN)
 
 
-def truncate_to_token_budget(text: str, max_tokens: int) -> str:
+def truncate_to_token_budget(text: str, max_tokens: int) -> tuple[str, bool]:
+    """Return ``(text, was_truncated)``."""
     limit = max_output_chars(max_tokens)
     if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n\n[truncated: gemma output token cap]"
+        return text, False
+    return text[:limit].rstrip() + f"\n\n{_TRUNCATION_MARKER}\n", True
 
 
 def has_repeated_text_loop(text: str, *, min_repeats: int = 3) -> bool:
@@ -67,9 +69,20 @@ def apply_gemma_output_guards(
     *,
     page_num: int,
     max_output_tokens: int,
+    full_page_unverified: bool = False,
 ) -> PageOutput:
     """Validate Gemma OCR text; return SUCCESS or ERROR ``PageOutput``."""
-    cleaned = truncate_to_token_budget(text, max_output_tokens)
+    cleaned, truncated = truncate_to_token_budget(text, max_output_tokens)
+    if truncated:
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine="gemma",
+            failure_mode=FailureMode.TRUNCATED,
+            error="gemma output rejected: exceeded output token cap",
+            audit_passed=False,
+        )
     if has_image_url_loop(cleaned):
         return PageOutput(
             page_num=page_num,
@@ -91,11 +104,18 @@ def apply_gemma_output_guards(
             audit_passed=False,
         )
     flagged_text, notes = flag_equations_unverified(cleaned)
+    audit_notes = list(notes)
+    audit_passed = not full_page_unverified
+    if full_page_unverified:
+        note = "gemma full-page read unverified — layout-safe crop not found"
+        audit_notes.append(note)
+        if note not in flagged_text:
+            flagged_text = f"{flagged_text.rstrip()}\n\n> [{note}]\n"
     return PageOutput(
         page_num=page_num,
         text=flagged_text,
         status=PageStatus.SUCCESS,
         engine="gemma",
-        audit_passed=True,
-        audit_notes=notes,
+        audit_passed=audit_passed,
+        audit_notes=audit_notes,
     )

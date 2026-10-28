@@ -37,6 +37,10 @@ class MarkerEngine(BaseEngine):
     def cli_command(self) -> str:
         return "marker-ocr"
 
+    def fingerprint_determinants(self, config: PipelineConfig) -> tuple[str, str | None]:
+        task = "force_ocr" if config.marker_force_ocr else "native_layer"
+        return config.marker_device, task
+
     def is_available(self) -> bool:
         ok = super().is_available()
         if not ok and not MarkerEngine._warned_missing_cli:

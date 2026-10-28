@@ -26,6 +26,9 @@ DEFAULT_AGENTIC_ENGINE_ORDER: tuple[EngineType, ...] = (
 )
 
 SOURCE_EVIDENCE_MARKER = "source_evidence_table"
+REJECT_REASON_SOURCE_EVIDENCE_PREFIX = f"{SOURCE_EVIDENCE_MARKER}:"
+PAID_BLOCK_REASON_SOURCE_EVIDENCE = SOURCE_EVIDENCE_MARKER
+PAID_BLOCK_REASON_SPARSE_WORD_COUNT = "sparse_word_count"
 # Load-bearing prefix in ``SourceEvidenceTableJudge`` reject reasons (#658).
 _NO_WITNESS_CAUSE = "no_witness_backend"
 _WORD_COUNT_RE = re.compile(r"^Word count\b", re.IGNORECASE)
@@ -109,22 +112,30 @@ class SparsePageSignals:
     native_word_count: int = 0
     has_figures: bool = False
     has_chart_asset: bool = False
-    image_dominant: bool = False
-    prior_ocr_layer: bool = False
-    invisible_text_over_raster: bool = False
 
 
-def sparse_page_ok(signals: SparsePageSignals, *, audit_min_words: int) -> bool:
-    """Whether low word count is expected (do not escalate on Word count alone)."""
+def heuristic_sparse_page_ok(page_assessment, *, audit_min_words: int) -> bool:
+    """Born-digital-only sparse hook for the heuristic page judge (issue #39).
+
+    Scanned pages never earn leniency here — a short read of a scan must stay a
+    failure. Deliberately narrow: ``has_figures`` alone does NOT qualify.
+    """
+    if page_assessment is None:
+        return False
+    if not getattr(page_assessment, "is_born_digital", False):
+        return False
+    return int(getattr(page_assessment, "word_count", 0) or 0) < audit_min_words
+
+
+def sparse_paid_escalation_ok(signals: SparsePageSignals, *, audit_min_words: int) -> bool:
+    """Whether a word-count reject may block paid Gemini (not heuristic acceptance).
+
+    Born-digital sparse captions and explicit chart-asset pages only. Scanned pages
+    do not qualify on raster / invisible-text / figure heuristics alone.
+    """
     if signals.has_chart_asset:
         return True
-    if signals.image_dominant or signals.invisible_text_over_raster:
-        return True
     if signals.is_born_digital and (signals.native_word_count or 0) < audit_min_words:
-        return True
-    if signals.has_figures and signals.image_dominant:
-        return True
-    if signals.prior_ocr_layer and (signals.native_word_count or 0) < audit_min_words:
         return True
     return False
 
@@ -139,16 +150,10 @@ def sparse_signals_from_page_assessment(page_assessment) -> SparsePageSignals:
         getattr(page_assessment, "has_figures", False)
         or getattr(page_assessment, "has_images", False)
     )
-    invisible = bool(getattr(page_assessment, "invisible_text_over_raster", False))
-    prior_ocr = bool(getattr(page_assessment, "prior_ocr_layer", False))
-    image_dominant = invisible or (not is_bd and has_figures and word_count < 50)
     return SparsePageSignals(
         is_born_digital=is_bd,
         native_word_count=word_count,
         has_figures=has_figures,
-        image_dominant=image_dominant,
-        prior_ocr_layer=prior_ocr,
-        invisible_text_over_raster=invisible,
     )
 
 
@@ -165,10 +170,10 @@ def paid_gemini_block_after_reject(
     Shared by the live router (``route_page``) and offline ``cascade_replay``.
     """
     if block_paid_on_source_evidence and blocks_paid_escalation(judge_reason):
-        return "source_evidence_table"
+        return PAID_BLOCK_REASON_SOURCE_EVIDENCE
     if sparse_word_count_exempt and is_word_count_rejection(judge_reason):
-        if sparse_page_ok(signals, audit_min_words=audit_min_words):
-            return "sparse_word_count"
+        if sparse_paid_escalation_ok(signals, audit_min_words=audit_min_words):
+            return PAID_BLOCK_REASON_SPARSE_WORD_COUNT
     return ""
 
 
@@ -199,35 +204,11 @@ def sparse_signals_from_manifest_entry(entry: dict, journal: list[dict]) -> Spar
     if not meta and engine == "native" and 0 < word_count < 40:
         is_bd = True
     has_figures = bool(meta.get("has_figures") or meta.get("has_images") or has_chart)
-    invisible = bool(meta.get("invisible_text_over_raster"))
-    prior_ocr = bool(meta.get("prior_ocr_layer"))
-    image_dominant = invisible or (not is_bd and has_figures and word_count < 50)
     return SparsePageSignals(
         is_born_digital=is_bd,
         native_word_count=word_count,
         has_figures=has_figures,
         has_chart_asset=has_chart,
-        image_dominant=image_dominant or has_chart,
-        prior_ocr_layer=prior_ocr,
-        invisible_text_over_raster=invisible,
-    )
-
-
-def paid_gemini_block_tag(
-    judge_reason: str,
-    signals: SparsePageSignals,
-    *,
-    audit_min_words: int,
-    block_paid_on_source_evidence: bool = True,
-    sparse_word_count_exempt: bool = True,
-) -> str:
-    """Shared block tag for live routing and offline replay (single predicate)."""
-    return paid_gemini_block_after_reject(
-        judge_reason,
-        signals,
-        audit_min_words=audit_min_words,
-        block_paid_on_source_evidence=block_paid_on_source_evidence,
-        sparse_word_count_exempt=sparse_word_count_exempt,
     )
 
 
@@ -236,11 +217,11 @@ _GEMINI_HTTP_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 _GEMINI_QUOTA_RE = re.compile(
-    r"429|RESOURCE_EXHAUSTED|rate[\s_-]*limit|quota|too many requests",
+    r"\b429\b|RESOURCE_EXHAUSTED|rate[\s_-]*limit|quota|too many requests",
     re.IGNORECASE,
 )
 _GEMINI_SAFETY_RE = re.compile(
-    r"SAFETY|BLOCK(?:ED|ING)?|harm_category|candidate was blocked|finish_reason.*SAFETY",
+    r"\bSAFETY\b|finish_reason\s*[=:]\s*SAFETY|harm_category|candidate was blocked",
     re.IGNORECASE,
 )
 _GEMINI_TIMEOUT_RE = re.compile(r"timed?\s*out|deadline exceeded|DEADLINE_EXCEEDED", re.IGNORECASE)
@@ -255,19 +236,19 @@ def extract_cli_actionable_error(
     """Preserve provider failure semantics (HTTP 429, safety block, timeout) for journals.
 
     Strips ONNX/thread noise via :func:`sanitize_cli_stderr`, then prefixes a short
-    classification when the combined log matches known Gemini/API failure shapes.
+    classification when stderr matches known Gemini/API failure shapes.
     """
     body = sanitize_cli_stderr(stderr, stdout)
-    combined = f"{stderr or ''}\n{stdout or ''}"
+    err_text = stderr or ""
     prefix = ""
-    if _GEMINI_QUOTA_RE.search(combined):
+    if _GEMINI_QUOTA_RE.search(err_text):
         prefix = "quota/rate-limit"
-    elif _GEMINI_SAFETY_RE.search(combined):
+    elif _GEMINI_SAFETY_RE.search(err_text):
         prefix = "safety-block"
-    elif _GEMINI_TIMEOUT_RE.search(combined):
+    elif _GEMINI_TIMEOUT_RE.search(err_text):
         prefix = "timeout"
     else:
-        m = _GEMINI_HTTP_STATUS_RE.search(combined)
+        m = _GEMINI_HTTP_STATUS_RE.search(err_text)
         if m:
             prefix = f"HTTP {m.group(1)}"
     if returncode not in (None, 0) and not prefix:
@@ -305,21 +286,23 @@ _TOKEN_USAGE_RE = re.compile(
     re.IGNORECASE,
 )
 _OUTPUT_TOKEN_RE = re.compile(
-    r"(?:(?:completion|output|candidates)[_\s-]*token(?:s)?|total[_\s-]*token(?:s)?)"
+    r"(?:(?:completion|output|candidates)[_\s-]*token(?:s)?)"
     r"[\s:=]+(\d+)",
     re.IGNORECASE,
 )
 
 
 def parse_token_usage(stderr: str, stdout: str = "") -> tuple[int | None, int | None]:
-    """Best-effort input/output token counts from CLI logs (Gemini / generic)."""
+    """Best-effort input/output token counts from CLI logs (Gemini / generic).
+
+    ``total_tokens`` is never treated as output — only explicit completion/output
+    token fields count toward ``llm_output_tokens``.
+    """
     blob = f"{stderr or ''}\n{stdout or ''}"
     inp = out = None
-    for pat in (_TOKEN_USAGE_RE,):
-        m = pat.search(blob)
-        if m:
-            inp = int(m.group(1))
-            break
+    m = _TOKEN_USAGE_RE.search(blob)
+    if m:
+        inp = int(m.group(1))
     m = _OUTPUT_TOKEN_RE.search(blob)
     if m:
         out = int(m.group(1))

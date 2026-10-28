@@ -1308,10 +1308,12 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             # prefix for the no-witness ending silently stopped the floor from
             # applying to exactly these pages, which is the fail-OPEN direction.
             # The distinguishing token is ADDED inside the same prefix instead.
+            from socr.routing.cascade_policy import REJECT_REASON_SOURCE_EVIDENCE_PREFIX
+
             marker = f"[{CAUSE_NO_WITNESS_BACKEND}] " if no_witness else ""
             return AcceptDecision(
                 accept=False,
-                reason=f"source_evidence_table: {marker}{result.reason}",
+                reason=f"{REJECT_REASON_SOURCE_EVIDENCE_PREFIX} {marker}{result.reason}",
                 confidence=0.0,
                 # #1125-r2: source-evidence reject is not page_judge_completed
                 judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,

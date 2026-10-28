@@ -555,6 +555,9 @@ class PipelineConfig:
     #: Ollama Cloud Gemma vision model for the dedicated ``gemma`` ladder rung.
     #: Override with ``--gemma-cloud-model``; must be reachable via Ollama (``:cloud`` tag).
     gemma_cloud_model: str = "gemma3:27b"
+    #: Opt-in: send page images to Ollama Cloud on the Gemma ladder rung.
+    enable_gemma_cloud: bool = False
+    gemma_cloud_model_pinned: bool = False
     gemma_crop_dpi: int = 300
     gemma_max_output_tokens: int = 4096
     gemini_model: str = DEFAULT_GEMINI_MODEL

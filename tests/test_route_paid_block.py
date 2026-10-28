@@ -28,6 +28,34 @@ def test_no_witness_source_evidence_does_not_block_paid() -> None:
     )
 
 
+def test_no_witness_reject_reaches_gemini() -> None:
+    ladder = [PROFILE_QWEN_LOCAL, PROFILE_MARKER, PROFILE_GEMINI]
+
+    def run_provider(prof, page_num: int) -> PageOutput:
+        return PageOutput(
+            page_num=page_num,
+            text="| a | b |\n|---|---|\n| 1 | 2 |",
+            status=PageStatus.SUCCESS,
+            engine=prof.engine.value,
+        )
+
+    judge = MagicMock()
+    judge.assess.side_effect = [
+        AcceptDecision(
+            accept=False,
+            reason=(
+                "source_evidence_table: [no_witness_backend] no classical OCR witness"
+            ),
+        ),
+        AcceptDecision(accept=False, reason="empty/error output"),
+        AcceptDecision(accept=True, reason="gemini ran"),
+    ]
+
+    decision = route_page(1, ladder, run_provider, judge)
+    assert judge.assess.call_count == 3
+    assert any(a.engine is EngineType.GEMINI for a in decision.attempts)
+
+
 def test_source_evidence_reject_skips_gemini() -> None:
     ladder = [PROFILE_QWEN_LOCAL, PROFILE_MARKER, PROFILE_GEMINI]
 

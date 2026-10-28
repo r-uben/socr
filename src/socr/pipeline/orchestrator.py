@@ -14566,12 +14566,17 @@ class UnifiedPipeline:
                     pass
                 continue
             if engine_type is EngineType.GEMMA:
-                from socr.engines.gemma_cloud import gemma_cloud_model_available
+                if not (
+                    getattr(self.config, "enable_gemma_cloud", False)
+                    or getattr(self.config, "gemma_cloud_model_pinned", False)
+                ):
+                    continue
+                from socr.engines.gemma_cloud import GemmaCloudEngine
 
-                model = self.config.gemma_cloud_model or prof.model
                 try:
-                    ok, reason = gemma_cloud_model_available(model)
+                    ok, reason = GemmaCloudEngine().is_available_for_config(self.config)
                     if ok:
+                        model = self.config.gemma_cloud_model or prof.model
                         available.append(
                             ProviderProfile(
                                 engine=prof.engine,
@@ -15972,22 +15977,29 @@ class UnifiedPipeline:
             logger.warning("manifest write failed (non-fatal): %s", exc)
 
     def _sparse_page_ok(self, page_num: int) -> bool:
-        """Whether low word count is expected on this page (heuristic judge hook).
+        """Whether low word count is expected on this page.
 
-        Uses the same :func:`sparse_page_ok` predicate as paid-Gemini blocking
-        and offline replay (via :func:`sparse_signals_from_page_assessment`).
+        Derived from the page itself, not an absolute threshold: a
+        BORN-DIGITAL page whose own text layer carries fewer words than the
+        audit minimum is legitimately sparse — demanding 50 words of OCR
+        from a 24-word source page is how good sparse pages used to escalate
+        straight to paid engines.
+
+        Deliberately narrow (issue #39 review): ``has_figures`` alone does
+        NOT qualify — a dense page that merely contains an image must keep
+        the full gate, and scanned pages (whose text-layer word counts are
+        junk) never earn leniency from this.
+
+        Offline cascade replay uses the wider ``sparse_paid_escalation_ok`` helper in
+        ``cascade_policy``; this hook feeds only the heuristic page judge.
         """
-        from socr.routing.cascade_policy import (
-            sparse_page_ok,
-            sparse_signals_from_page_assessment,
-        )
+        from socr.routing.cascade_policy import heuristic_sparse_page_ok
 
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        signals = sparse_signals_from_page_assessment(pa)
-        return sparse_page_ok(signals, audit_min_words=self.config.audit_min_words)
+        return heuristic_sparse_page_ok(pa, audit_min_words=self.config.audit_min_words)
 
     # ------------------------------------------------------------------
     # Assembly persistence helpers (PP-1)
