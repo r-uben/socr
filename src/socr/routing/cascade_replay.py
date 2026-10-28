@@ -10,6 +10,7 @@ from pathlib import Path
 from socr.routing.cascade_policy import (
     SOURCE_EVIDENCE_MARKER,
     SparsePageSignals,
+    blocks_paid_escalation,
     classify_escalation_reason,
     is_word_count_rejection,
     sparse_page_ok,
@@ -131,7 +132,7 @@ def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestRep
         would_new = gemini_attempted
         block_reason = ""
         if gemini_attempted:
-            if rules.block_paid_on_source_evidence and SOURCE_EVIDENCE_MARKER in qwen_reason:
+            if rules.block_paid_on_source_evidence and blocks_paid_escalation(qwen_reason):
                 would_new = False
                 block_reason = "source_evidence_table"
             elif rules.sparse_word_count_exempt and is_word_count_rejection(qwen_reason):

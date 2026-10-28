@@ -26,6 +26,8 @@ DEFAULT_AGENTIC_ENGINE_ORDER: tuple[EngineType, ...] = (
 )
 
 SOURCE_EVIDENCE_MARKER = "source_evidence_table"
+# Load-bearing prefix in ``SourceEvidenceTableJudge`` reject reasons (#658).
+_NO_WITNESS_CAUSE = "no_witness_backend"
 _WORD_COUNT_RE = re.compile(r"^Word count\b", re.IGNORECASE)
 
 # ONNX / thread-pool noise that prefixes real Gemini CLI errors in batch logs.
@@ -55,11 +57,21 @@ def is_paid_profile(profile: ProviderProfile) -> bool:
 
 
 def blocks_paid_escalation(judge_reason: str) -> bool:
-    """True when the next paid rung must not run (fail-closed flag instead)."""
+    """True when the next paid rung must not run (fail-closed flag instead).
+
+    Only witness-backed disputes block: the pixels were read and the model's table
+    tokens were contradicted. Unwitnessed pages, unparsed HTML, and other
+    could-not-check endings may still escalate to paid OCR.
+    """
     reason = judge_reason or ""
-    if SOURCE_EVIDENCE_MARKER in reason:
-        return True
-    return False
+    if SOURCE_EVIDENCE_MARKER not in reason:
+        return False
+    if _NO_WITNESS_CAUSE in reason:
+        return False
+    lower = reason.lower()
+    return (
+        "numeric tokens unsupported" in lower or "content labels unsupported" in lower
+    )
 
 
 def is_word_count_rejection(judge_reason: str) -> bool:
