@@ -132,6 +132,7 @@ from socr.judge.table_verdict import (
     TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
 )
+from socr.routing.cascade_policy import sparse_signals_from_page_assessment
 from socr.pipeline.agentic import (
     REASON_PROVIDER_TIMEOUT,
     REJUDGE_ACCEPTED,
@@ -11637,16 +11638,13 @@ class UnifiedPipeline:
                             state, page_num, output_dir, ladder, judge
                         )
                         if decision is None:
-                            from socr.routing.cascade_policy import (
-                                sparse_signals_from_page_assessment,
-                            )
-
+                            _assessment_pages = (
+                                self._last_assessment.pages
+                                if self._last_assessment is not None
+                                else None
+                            ) or []
                             _pa = next(
-                                (
-                                    p
-                                    for p in (self._last_assessment.pages or [])
-                                    if p.page_num == page_num
-                                ),
+                                (p for p in _assessment_pages if p.page_num == page_num),
                                 None,
                             )
                             decision = route_page(
