@@ -3472,9 +3472,7 @@ class UnifiedPipeline:
             self._gemini_circuit_skips += len(page_nums)
             if state.paid_disabled is not None:
                 state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
-            skipped = [
-                self._gemini_circuit_blocked_output(pn, engine.name) for pn in page_nums
-            ]
+            skipped = [self._gemini_circuit_blocked_output(pn, engine.name) for pn in page_nums]
             if gemini_blocked:
                 skipped.extend(
                     self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
@@ -3560,9 +3558,7 @@ class UnifiedPipeline:
                     )
                     if retry_out:
                         po = retry_out[0]
-                        detail = " ".join(
-                            x for x in (po.error or "", po.skip_reason or "") if x
-                        )
+                        detail = " ".join(x for x in (po.error or "", po.skip_reason or "") if x)
                         if gemini_quota_failure_class(detail) == "exhausted":
                             self._trip_gemini_quota_circuit(state, detail)
                 adjusted.append(po)
