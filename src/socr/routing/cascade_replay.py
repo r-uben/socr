@@ -8,12 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.routing.cascade_policy import (
-    SOURCE_EVIDENCE_MARKER,
-    SparsePageSignals,
-    blocks_paid_escalation,
     classify_escalation_reason,
     is_word_count_rejection,
-    sparse_page_ok,
+    paid_gemini_block_after_reject,
+    sparse_signals_from_manifest_entry,
 )
 
 
@@ -57,13 +55,6 @@ def _last_reason_before_engine(journal: list[dict], engine: str) -> str:
         if not entry.get("accepted"):
             return str(entry.get("reason") or "")
     return ""
-
-
-def _infer_sparse(entry: dict, journal: list[dict]) -> bool:
-    fp = entry.get("fingerprint") or {}
-    if str(fp.get("engine") or "") == "chart_asset":
-        return True
-    return any(is_word_count_rejection(str(j.get("reason") or "")) for j in journal)
 
 
 def resolve_manifest_pdf_path(
@@ -132,19 +123,16 @@ def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestRep
         would_new = gemini_attempted
         block_reason = ""
         if gemini_attempted:
-            if rules.block_paid_on_source_evidence and blocks_paid_escalation(qwen_reason):
+            signals = sparse_signals_from_manifest_entry(entry, journal)
+            block_reason = paid_gemini_block_after_reject(
+                qwen_reason,
+                signals,
+                audit_min_words=rules.audit_min_words,
+                block_paid_on_source_evidence=rules.block_paid_on_source_evidence,
+                sparse_word_count_exempt=rules.sparse_word_count_exempt,
+            )
+            if block_reason:
                 would_new = False
-                block_reason = "source_evidence_table"
-            elif rules.sparse_word_count_exempt and is_word_count_rejection(qwen_reason):
-                # Manifests rarely carry raster metadata; a Word-count reject is
-                # the recorded signal that the page was cover/chart/sparse-shaped.
-                would_new = False
-                block_reason = "sparse_word_count"
-            elif rules.sparse_word_count_exempt and _infer_sparse(entry, journal):
-                signals = SparsePageSignals(has_chart_asset=True)
-                if sparse_page_ok(signals, audit_min_words=rules.audit_min_words):
-                    would_new = False
-                    block_reason = "sparse_chart_asset"
         if would_new:
             report.new_gemini_pages += 1
         if block_reason:

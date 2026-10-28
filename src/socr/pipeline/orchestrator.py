@@ -11637,6 +11637,18 @@ class UnifiedPipeline:
                             state, page_num, output_dir, ladder, judge
                         )
                         if decision is None:
+                            from socr.routing.cascade_policy import (
+                                sparse_signals_from_page_assessment,
+                            )
+
+                            _pa = next(
+                                (
+                                    p
+                                    for p in (self._last_assessment.pages or [])
+                                    if p.page_num == page_num
+                                ),
+                                None,
+                            )
                             decision = route_page(
                                 page_num,
                                 ladder,
@@ -11645,6 +11657,8 @@ class UnifiedPipeline:
                                 remaining_budget=remaining,
                                 provider_timeout=provider_timeout,
                                 on_candidate=_ingest_candidate,
+                                sparse_signals=sparse_signals_from_page_assessment(_pa),
+                                audit_min_words=self.config.audit_min_words,
                             )
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
@@ -15960,29 +15974,22 @@ class UnifiedPipeline:
             logger.warning("manifest write failed (non-fatal): %s", exc)
 
     def _sparse_page_ok(self, page_num: int) -> bool:
-        """Whether low word count is expected on this page.
+        """Whether low word count is expected on this page (heuristic judge hook).
 
-        Derived from the page itself, not an absolute threshold: a
-        BORN-DIGITAL page whose own text layer carries fewer words than the
-        audit minimum is legitimately sparse — demanding 50 words of OCR
-        from a 24-word source page is how good sparse pages used to escalate
-        straight to paid engines.
-
-        Deliberately narrow (issue #39 review): ``has_figures`` alone does
-        NOT qualify — a dense page that merely contains an image must keep
-        the full gate, and scanned pages (whose text-layer word counts are
-        junk) never earn leniency from this.
-
-        Offline cascade replay uses the wider ``sparse_page_ok`` helper in
-        ``cascade_policy``; this hook feeds only the heuristic page judge.
+        Uses the same :func:`sparse_page_ok` predicate as paid-Gemini blocking
+        and offline replay (via :func:`sparse_signals_from_page_assessment`).
         """
+        from socr.routing.cascade_policy import (
+            sparse_page_ok,
+            sparse_signals_from_page_assessment,
+        )
+
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        if pa is None or not pa.is_born_digital:
-            return False
-        return (pa.word_count or 0) < self.config.audit_min_words
+        signals = sparse_signals_from_page_assessment(pa)
+        return sparse_page_ok(signals, audit_min_words=self.config.audit_min_words)
 
     # ------------------------------------------------------------------
     # Assembly persistence helpers (PP-1)

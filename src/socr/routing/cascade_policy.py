@@ -124,7 +124,115 @@ def sparse_page_ok(signals: SparsePageSignals, *, audit_min_words: int) -> bool:
         return True
     if signals.has_figures and signals.image_dominant:
         return True
+    if signals.prior_ocr_layer and (signals.native_word_count or 0) < audit_min_words:
+        return True
     return False
+
+
+def sparse_signals_from_page_assessment(page_assessment) -> SparsePageSignals:
+    """Build :class:`SparsePageSignals` from a live ``PageAssessment`` (or ``None``)."""
+    if page_assessment is None:
+        return SparsePageSignals()
+    word_count = int(getattr(page_assessment, "word_count", 0) or 0)
+    is_bd = bool(getattr(page_assessment, "is_born_digital", False))
+    has_figures = bool(
+        getattr(page_assessment, "has_figures", False)
+        or getattr(page_assessment, "has_images", False)
+    )
+    invisible = bool(getattr(page_assessment, "invisible_text_over_raster", False))
+    prior_ocr = bool(getattr(page_assessment, "prior_ocr_layer", False))
+    image_dominant = invisible or (
+        not is_bd and has_figures and word_count < 50
+    )
+    return SparsePageSignals(
+        is_born_digital=is_bd,
+        native_word_count=word_count,
+        has_figures=has_figures,
+        image_dominant=image_dominant,
+        prior_ocr_layer=prior_ocr,
+        invisible_text_over_raster=invisible,
+    )
+
+
+def paid_gemini_block_after_reject(
+    judge_reason: str,
+    signals: SparsePageSignals,
+    *,
+    audit_min_words: int,
+    block_paid_on_source_evidence: bool = True,
+    sparse_word_count_exempt: bool = True,
+) -> str:
+    """Return a block-reason tag when Gemini must not run, else ``""``.
+
+    Shared by the live router (``route_page``) and offline ``cascade_replay``.
+    """
+    if block_paid_on_source_evidence and blocks_paid_escalation(judge_reason):
+        return "source_evidence_table"
+    if sparse_word_count_exempt and is_word_count_rejection(judge_reason):
+        if sparse_page_ok(signals, audit_min_words=audit_min_words):
+            return "sparse_word_count"
+    return ""
+
+
+def _word_count_from_journal(journal: list[dict]) -> int:
+    for row in journal:
+        reason = str(row.get("reason") or "")
+        m = re.search(r"Word count\s+(\d+)", reason, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def sparse_signals_from_manifest_entry(entry: dict, journal: list[dict]) -> SparsePageSignals:
+    """Best-effort sparse signals from a recorded manifest page entry.
+
+    Mirrors :func:`sparse_signals_from_page_assessment` when ``entry["routing_meta"]``
+    is present (tests / future manifests); otherwise infers word count and chart
+    routing from the journal and final engine fingerprint only.
+    """
+    fp = entry.get("fingerprint") or {}
+    meta = entry.get("routing_meta") or {}
+    engine = str(fp.get("engine") or "")
+    has_chart = engine == "chart_asset" or bool(meta.get("has_chart_asset"))
+    word_count = int(meta.get("word_count") or meta.get("native_word_count") or 0)
+    if word_count <= 0:
+        word_count = _word_count_from_journal(journal)
+    is_bd = bool(meta.get("is_born_digital"))
+    if not meta and engine == "native" and 0 < word_count < 40:
+        is_bd = True
+    has_figures = bool(meta.get("has_figures") or meta.get("has_images") or has_chart)
+    invisible = bool(meta.get("invisible_text_over_raster"))
+    prior_ocr = bool(meta.get("prior_ocr_layer"))
+    image_dominant = invisible or (
+        not is_bd and has_figures and word_count < 50
+    )
+    return SparsePageSignals(
+        is_born_digital=is_bd,
+        native_word_count=word_count,
+        has_figures=has_figures,
+        has_chart_asset=has_chart,
+        image_dominant=image_dominant or has_chart,
+        prior_ocr_layer=prior_ocr,
+        invisible_text_over_raster=invisible,
+    )
+
+
+def paid_gemini_block_tag(
+    judge_reason: str,
+    signals: SparsePageSignals,
+    *,
+    audit_min_words: int,
+    block_paid_on_source_evidence: bool = True,
+    sparse_word_count_exempt: bool = True,
+) -> str:
+    """Shared block tag for live routing and offline replay (single predicate)."""
+    return paid_gemini_block_after_reject(
+        judge_reason,
+        signals,
+        audit_min_words=audit_min_words,
+        block_paid_on_source_evidence=block_paid_on_source_evidence,
+        sparse_word_count_exempt=sparse_word_count_exempt,
+    )
 
 
 _GEMINI_HTTP_STATUS_RE = re.compile(

@@ -666,6 +666,10 @@ def route_page(
     remaining_budget: float | None = None,
     provider_timeout: dict[EngineType, float] | None = None,
     on_candidate: Callable[[int, PageOutput], None] | None = None,
+    sparse_signals: "SparsePageSignals | None" = None,
+    audit_min_words: int = 40,
+    block_paid_on_source_evidence: bool = True,
+    sparse_word_count_exempt: bool = True,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
 
@@ -701,21 +705,28 @@ def route_page(
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
-    from socr.routing.cascade_policy import blocks_paid_escalation, is_paid_profile
+    from socr.routing.cascade_policy import (
+        SparsePageSignals,
+        is_paid_profile,
+        paid_gemini_block_after_reject,
+    )
 
     limit = len(ladder) if max_attempts <= 0 else min(max_attempts, len(ladder))
     attempts: list[ProviderAttempt] = []
     tried = 0
     paid_escalation_blocked = False
+    paid_block_tag = ""
+    sig = sparse_signals or SparsePageSignals()
 
     for prof in ladder:
         if tried >= limit:
             break
         if paid_escalation_blocked and is_paid_profile(prof):
             logger.info(
-                "page %s: skipping paid rung %s (prior source-evidence_table reject)",
+                "page %s: skipping paid rung %s (prior %s)",
                 page_num,
                 prof.engine.value,
+                paid_block_tag or "paid escalation block",
             )
             attempts.append(
                 ProviderAttempt(
@@ -723,7 +734,7 @@ def route_page(
                     output=_error_output(page_num, "paid escalation blocked"),
                     cost_usd=0.0,
                     accepted=False,
-                    reason="paid escalation blocked (source_evidence_table)",
+                    reason=f"paid escalation blocked ({paid_block_tag or 'policy'})",
                     provider_id=prof.id,
                     model=prof.model,
                     backend=prof.backend,
@@ -935,8 +946,16 @@ def route_page(
         )
         if decision.accept:
             return PageDecision(page_num, output, attempts, accepted=True)
-        if blocks_paid_escalation(decision.reason):
+        tag = paid_gemini_block_after_reject(
+            decision.reason,
+            sig,
+            audit_min_words=audit_min_words,
+            block_paid_on_source_evidence=block_paid_on_source_evidence,
+            sparse_word_count_exempt=sparse_word_count_exempt,
+        )
+        if tag:
             paid_escalation_blocked = True
+            paid_block_tag = tag
 
     best = _best_effort(attempts, page_num)
     return PageDecision(page_num, best.output, attempts, accepted=False)

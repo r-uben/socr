@@ -151,6 +151,8 @@ _UNEXERCISED = {
     "marker_force_ocr",
     # Read when the gemma-cloud engine is probed on the ladder; not in this fixture's ladder.
     "gemma_cloud_model",
+    "gemma_crop_dpi",
+    "gemma_max_output_tokens",
     # Only enforced when > 0; this fixture leaves the default (unlimited).
     "max_paid_pages",
     "deepseek_vllm_url",

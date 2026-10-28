@@ -79,6 +79,7 @@ def test_stratified_comparison_respects_limit(tmp_path: Path) -> None:
                 {"engine": "qwen", "accepted": False, "reason": "table_structure_failed: x"},
                 {"engine": "gemini", "accepted": True, "reason": ""},
             ],
+            None,
         ),
         (
             "Word count 5 < 40",
@@ -86,21 +87,23 @@ def test_stratified_comparison_respects_limit(tmp_path: Path) -> None:
                 {"engine": "qwen", "accepted": False, "reason": "Word count 5 < 40"},
                 {"engine": "gemini", "accepted": True, "reason": ""},
             ],
+            {"is_born_digital": True, "word_count": 5},
         ),
     ]
     paths = []
-    for i, (_reason, journal) in enumerate(journals, start=1):
+    for i, (_reason, journal, routing_meta) in enumerate(journals, start=1):
+        entry = {
+            "page_num": 1,
+            "fingerprint": {"engine": "gemini"},
+            "journal": journal,
+        }
+        if routing_meta:
+            entry["routing_meta"] = routing_meta
         manifest = {
             "schema_version": "1",
             "pdf_filename": f"p{i}.pdf",
             "page_count": 1,
-            "entries": {
-                "1": {
-                    "page_num": 1,
-                    "fingerprint": {"engine": "gemini"},
-                    "journal": journal,
-                }
-            },
+            "entries": {"1": entry},
         }
         path = tmp_path / f"m{i}" / "manifest.json"
         path.parent.mkdir()
