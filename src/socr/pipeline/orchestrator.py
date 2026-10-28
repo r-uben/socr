@@ -1858,6 +1858,11 @@ class UnifiedPipeline:
         self._table_rung_refused_callables: list = []
         #: Gemini OCR pages consumed this run (``--max-paid-pages``).
         self._paid_gemini_pages_used: int = 0
+        #: True after a spending-cap / quota-exhausted Gemini response; blocks further calls.
+        self._gemini_quota_circuit_open: bool = False
+        self._gemini_paid_disabled_reason: str | None = None
+        self._gemini_circuit_skips: int = 0
+        self._gemini_transient_retried_pages: set[int] = set()
         #: The rung callables this run has already CALLED without a refusal.
         #: Cold review round 5: identity is authoritative for a callable we
         #: have observed; the kind-level breaker applies only to callables we
@@ -3463,6 +3468,19 @@ class UnifiedPipeline:
                 ]
             self._record_gemini_paid_pages(len(page_nums))
 
+        if engine_type == EngineType.GEMINI and self._gemini_quota_circuit_open:
+            self._gemini_circuit_skips += len(page_nums)
+            if state.paid_disabled is not None:
+                state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
+            skipped = [
+                self._gemini_circuit_blocked_output(pn, engine.name) for pn in page_nums
+            ]
+            if gemini_blocked:
+                skipped.extend(
+                    self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                )
+            return skipped
+
         if not self.config.quiet:
             console.print(
                 f"  Running {engine.name} on {len(page_nums)} {label} pages (per-page)..."
@@ -3504,6 +3522,51 @@ class UnifiedPipeline:
                     )
                     continue
             final.append(po)
+
+        if engine_type == EngineType.GEMINI:
+            import time as _time
+
+            from socr.routing.gemini_quota import (
+                GEMINI_TRANSIENT_BACKOFF_SEC,
+                gemini_quota_failure_class,
+            )
+
+            adjusted: list[PageOutput] = []
+            for po in final:
+                detail = " ".join(x for x in (po.error or "", po.skip_reason or "") if x)
+                kind = gemini_quota_failure_class(detail)
+                if kind == "exhausted":
+                    self._trip_gemini_quota_circuit(state, detail)
+                    adjusted.append(po)
+                    continue
+                if (
+                    kind == "transient"
+                    and len(page_nums) == 1
+                    and po.page_num not in self._gemini_transient_retried_pages
+                ):
+                    self._gemini_transient_retried_pages.add(po.page_num)
+                    if not self.config.quiet:
+                        console.print(
+                            f"  [yellow]{engine.name}: transient quota on p{po.page_num}; "
+                            f"backoff {GEMINI_TRANSIENT_BACKOFF_SEC:.0f}s, retry once[/yellow]"
+                        )
+                    _time.sleep(GEMINI_TRANSIENT_BACKOFF_SEC)
+                    retry_out = engine.process_pages(
+                        pdf_path=state.handle.path,
+                        page_nums=[po.page_num],
+                        config=run_config,
+                        dpi=run_config.render_dpi,
+                        subprocess_timeout=subprocess_timeout_sec,
+                    )
+                    if retry_out:
+                        po = retry_out[0]
+                        detail = " ".join(
+                            x for x in (po.error or "", po.skip_reason or "") if x
+                        )
+                        if gemini_quota_failure_class(detail) == "exhausted":
+                            self._trip_gemini_quota_circuit(state, detail)
+                adjusted.append(po)
+            final = adjusted
 
         if not self.config.quiet:
             ok = sum(1 for p in final if p.status == PageStatus.SUCCESS)
@@ -8336,6 +8399,10 @@ class UnifiedPipeline:
         self._table_rung_refused_callables = []
         self._table_rung_seen_callables = []
         self._paid_gemini_pages_used = 0
+        self._gemini_quota_circuit_open = False
+        self._gemini_paid_disabled_reason = None
+        self._gemini_circuit_skips = 0
+        self._gemini_transient_retried_pages = set()
 
     def _max_paid_pages_limit(self) -> int | None:
         limit = self.config.max_paid_pages
@@ -8360,6 +8427,48 @@ class UnifiedPipeline:
                 self._paid_gemini_pages_used,
                 limit,
             )
+
+    def _trip_gemini_quota_circuit(self, state: DocumentState, detail: str) -> None:
+        if self._gemini_quota_circuit_open:
+            return
+        from socr.core.audit_log import PAID_DISABLED_KIND, AuditEvent
+        from socr.routing.gemini_quota import PAID_DISABLED_QUOTA_EXHAUSTED
+
+        self._gemini_quota_circuit_open = True
+        self._gemini_paid_disabled_reason = PAID_DISABLED_QUOTA_EXHAUSTED
+        state.paid_disabled = {
+            "reason": PAID_DISABLED_QUOTA_EXHAUSTED,
+            "detail": (detail or "")[:500],
+            "pages_skipped": self._gemini_circuit_skips,
+        }
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind=PAID_DISABLED_KIND,
+                engine="gemini",
+                detail=(detail or PAID_DISABLED_QUOTA_EXHAUSTED)[:500],
+                data={"paid_disabled": PAID_DISABLED_QUOTA_EXHAUSTED},
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                "[red]Gemini paid OCR disabled for the rest of this run "
+                "(quota/spending cap exhausted)[/red]"
+            )
+
+    def _gemini_circuit_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
+        from socr.routing.gemini_quota import PAID_DISABLED_SKIP_REASON
+
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=PAID_DISABLED_SKIP_REASON,
+            skip_reason=PAID_DISABLED_SKIP_REASON,
+            audit_passed=False,
+        )
 
     def _gemini_budget_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
         limit = self._max_paid_pages_limit() or 0
@@ -12455,12 +12564,22 @@ class UnifiedPipeline:
             self._record_page_retries(state, _retried_pages)
 
         # -- Post-loop summary ---------------------------------------------------
+        from socr.routing.gemini_quota import format_gemini_run_summary, summarize_gemini_attempts
+
+        gemini_stats = summarize_gemini_attempts(state)
+        if gemini_stats:
+            state.gemini_run_stats = gemini_stats
+        if self._gemini_paid_disabled_reason and state.paid_disabled is not None:
+            state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
         if not self.config.quiet:
             total_cost = state.total_cost
             if total_cost is None:
                 console.print("  total cost: unknown (unmetered direct call)")
             else:
                 console.print(f"  total cost: ${total_cost:.4f}")
+            gemini_line = format_gemini_run_summary(gemini_stats)
+            if gemini_line:
+                console.print(f"  [dim]{gemini_line}[/dim]")
             if halt_reason:
                 console.print(f"  [red]Halted: {halt_reason}[/red]")
 
@@ -21318,6 +21437,10 @@ class UnifiedPipeline:
             doc_extras = dict(run_extras)
             if state.table_counts is not None:
                 doc_extras["tables"] = dict(state.table_counts)
+            if getattr(state, "gemini_run_stats", None):
+                doc_extras["gemini_run_stats"] = dict(state.gemini_run_stats)
+            if getattr(state, "paid_disabled", None):
+                doc_extras["paid_disabled"] = dict(state.paid_disabled)
             blank_meta = self._shipped_blank_pages(state)
             if blank_meta:
                 doc_extras["blank_pages"] = blank_meta

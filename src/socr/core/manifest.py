@@ -379,6 +379,10 @@ class Manifest:
     # when empty, like the fields above, so a run that missed nothing is
     # byte-identical to one written before this field existed.
     ran_without: list[str] = field(default_factory=list)
+    #: Gemini OCR rollup for the run (accepted vs call attempts and failure buckets).
+    gemini_run_stats: dict | None = None
+    #: Present once when paid Gemini OCR was disabled mid-run (quota/spending cap).
+    paid_disabled: dict | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -397,6 +401,10 @@ class Manifest:
             d["timings_s"] = self.timings_s
         if self.ran_without:
             d["ran_without"] = list(self.ran_without)
+        if self.gemini_run_stats:
+            d["gemini_run_stats"] = dict(self.gemini_run_stats)
+        if self.paid_disabled:
+            d["paid_disabled"] = dict(self.paid_disabled)
         return d
 
     @classmethod
@@ -414,6 +422,8 @@ class Manifest:
             agentic_judge_model=d.get("agentic_judge_model", ""),
             timings_s=timings_s,
             ran_without=list(d.get("ran_without") or []),
+            gemini_run_stats=d.get("gemini_run_stats"),
+            paid_disabled=d.get("paid_disabled"),
         )
 
     def save(self, path: Path | str) -> None:
@@ -7165,6 +7175,8 @@ def build_manifest(
         agentic_ladder=state.agentic_ladder if state.agentic_ladder else None,
         agentic_judge_model=getattr(state, "agentic_judge_model", ""),
         timings_s=rollup_page_timings(state) if has_page_timings else None,
+        gemini_run_stats=getattr(state, "gemini_run_stats", None),
+        paid_disabled=getattr(state, "paid_disabled", None),
     )
     # Recover/finalize every exact page body once so the manifest, cache and
     # replay cannot diverge from the saved Markdown or its failure status. The

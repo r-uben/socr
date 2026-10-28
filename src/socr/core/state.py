@@ -783,6 +783,10 @@ class DocumentState:
     # the finalized page outputs; ``None`` until then, and left ``None`` when they could
     # not be derived (metadata then omits the block: "not recorded", never zero).
     table_counts: dict | None = None
+    #: Agentic Gemini OCR rollup (``summarize_gemini_attempts``); omitted when unset.
+    gemini_run_stats: dict | None = None
+    #: Set once when the Gemini quota/spending-cap circuit opens mid-run.
+    paid_disabled: dict | None = None
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):
