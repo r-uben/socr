@@ -381,17 +381,28 @@ class BaseEngine(ABC):
             # RECITATION-blocked page used to nuke a whole 7-page batch, #40).
             # Instead, always read back per page below and fail only the pages
             # that produced nothing, carrying the CLI exit info into their error.
-            from socr.routing.cascade_policy import parse_token_usage, sanitize_cli_stderr
+            from socr.routing.cascade_policy import (
+                extract_cli_actionable_error,
+                parse_token_usage,
+            )
 
             cli_error_note = ""
             if result.returncode != 0:
-                stderr = sanitize_cli_stderr(result.stderr or "", result.stdout or "")
-                cli_error_note = f"CLI exited {result.returncode}: {stderr}"
+                detail = extract_cli_actionable_error(
+                    result.stderr or "",
+                    result.stdout or "",
+                    returncode=result.returncode,
+                )
+                cli_error_note = f"CLI exited {result.returncode}: {detail}"
                 logger.warning(f"[{self.name}] {cli_error_note} — attempting per-page salvage")
             else:
                 combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
                 if "no supported files found" in combined or "no supported files" in combined:
-                    tail = sanitize_cli_stderr(result.stderr or "", result.stdout or "")
+                    tail = extract_cli_actionable_error(
+                        result.stderr or "",
+                        result.stdout or "",
+                        returncode=result.returncode,
+                    )
                     cli_error_note = (
                         tail or "CLI exit 0 but input was not accepted (no output files)"
                     )

@@ -65,7 +65,9 @@ def _infer_sparse(entry: dict, journal: list[dict]) -> bool:
     return any(is_word_count_rejection(str(j.get("reason") or "")) for j in journal)
 
 
-def resolve_manifest_pdf_path(manifest_path: Path, manifest_data: dict | None = None) -> Path | None:
+def resolve_manifest_pdf_path(
+    manifest_path: Path, manifest_data: dict | None = None
+) -> Path | None:
     """Best-effort PDF path for a manifest (for comparison re-run lists)."""
     data = manifest_data
     if data is None:
@@ -83,6 +85,28 @@ def resolve_manifest_pdf_path(manifest_path: Path, manifest_data: dict | None = 
         if candidate.is_file():
             return candidate
     return manifest_path.parent / name
+
+
+def sum_journal_tokens(manifest_paths: list[Path]) -> dict:
+    """Sum ``llm_input_tokens`` / ``llm_output_tokens`` from recorded manifest journals."""
+    inp = out = 0
+    inp_known = out_known = 0
+    for path in manifest_paths:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for entry in (data.get("entries") or {}).values():
+            for row in entry.get("journal") or []:
+                if row.get("llm_input_tokens") is not None:
+                    inp += int(row["llm_input_tokens"])
+                    inp_known += 1
+                if row.get("llm_output_tokens") is not None:
+                    out += int(row["llm_output_tokens"])
+                    out_known += 1
+    return {
+        "llm_input_tokens": inp,
+        "llm_output_tokens": out,
+        "journal_rows_with_input_tokens": inp_known,
+        "journal_rows_with_output_tokens": out_known,
+    }
 
 
 def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestReplayReport:
@@ -152,12 +176,30 @@ def replay_paths(paths: list[Path], rules: ReplayRules | None = None) -> dict:
         totals["recorded_gemini_pages"] += rep.recorded_gemini_pages
         totals["old_gemini_pages"] += rep.old_gemini_pages
         totals["new_gemini_pages"] += rep.new_gemini_pages
+        totals["blocked_gemini_under_new_rules"] += rep.recorded_gemini_pages - rep.new_gemini_pages
         engines.update(rep.engine_final)
         blocks.update(rep.block_reasons)
+    token_totals = sum_journal_tokens(paths)
     return {
         "totals": dict(totals),
         "final_engines": dict(engines),
         "gemini_blocks": dict(blocks),
+        "recorded_tokens": token_totals,
+        "replay_honesty": {
+            "recorded_gemini_pages_old_rules": totals["old_gemini_pages"],
+            "blocked_from_gemini_new_rules": totals["blocked_gemini_under_new_rules"],
+            "projected_gemini_pool_new_rules": totals["new_gemini_pages"],
+            "marker_gemma_absorption": (
+                "not modeled offline — replay only applies NEW Gemini-suppression "
+                "rules; it cannot predict how many former Gemini pages marker or "
+                "Gemma would accept without re-running OCR"
+            ),
+            "blocked_pages_shipping": (
+                "not modeled offline — blocked pages are assumed not to call Gemini; "
+                "live disposition (FLAGGED / fail-closed floor / best-effort) depends "
+                "on table flags and ladder outcomes, not replay alone"
+            ),
+        },
     }
 
 

@@ -75,11 +75,17 @@ def test_stratified_comparison_respects_limit(tmp_path: Path) -> None:
     journals = [
         (
             "table_structure_failed: x",
-            [{"engine": "qwen", "accepted": False, "reason": "table_structure_failed: x"}, {"engine": "gemini", "accepted": True, "reason": ""}],
+            [
+                {"engine": "qwen", "accepted": False, "reason": "table_structure_failed: x"},
+                {"engine": "gemini", "accepted": True, "reason": ""},
+            ],
         ),
         (
             "Word count 5 < 40",
-            [{"engine": "qwen", "accepted": False, "reason": "Word count 5 < 40"}, {"engine": "gemini", "accepted": True, "reason": ""}],
+            [
+                {"engine": "qwen", "accepted": False, "reason": "Word count 5 < 40"},
+                {"engine": "gemini", "accepted": True, "reason": ""},
+            ],
         ),
     ]
     paths = []

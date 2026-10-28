@@ -117,6 +117,54 @@ def sparse_page_ok(signals: SparsePageSignals, *, audit_min_words: int) -> bool:
     return False
 
 
+_GEMINI_HTTP_STATUS_RE = re.compile(
+    r"(?:HTTP\s*(?:Error|/|\s)|status(?:\s*code)?\s*[=:]?\s*|code\s*[=:]?\s*)(\d{3})",
+    re.IGNORECASE,
+)
+_GEMINI_QUOTA_RE = re.compile(
+    r"429|RESOURCE_EXHAUSTED|rate[\s_-]*limit|quota|too many requests",
+    re.IGNORECASE,
+)
+_GEMINI_SAFETY_RE = re.compile(
+    r"SAFETY|BLOCK(?:ED|ING)?|harm_category|candidate was blocked|finish_reason.*SAFETY",
+    re.IGNORECASE,
+)
+_GEMINI_TIMEOUT_RE = re.compile(r"timed?\s*out|deadline exceeded|DEADLINE_EXCEEDED", re.IGNORECASE)
+
+
+def extract_cli_actionable_error(
+    stderr: str,
+    stdout: str = "",
+    *,
+    returncode: int | None = None,
+) -> str:
+    """Preserve provider failure semantics (HTTP 429, safety block, timeout) for journals.
+
+    Strips ONNX/thread noise via :func:`sanitize_cli_stderr`, then prefixes a short
+    classification when the combined log matches known Gemini/API failure shapes.
+    """
+    body = sanitize_cli_stderr(stderr, stdout)
+    combined = f"{stderr or ''}\n{stdout or ''}"
+    prefix = ""
+    if _GEMINI_QUOTA_RE.search(combined):
+        prefix = "quota/rate-limit"
+    elif _GEMINI_SAFETY_RE.search(combined):
+        prefix = "safety-block"
+    elif _GEMINI_TIMEOUT_RE.search(combined):
+        prefix = "timeout"
+    else:
+        m = _GEMINI_HTTP_STATUS_RE.search(combined)
+        if m:
+            prefix = f"HTTP {m.group(1)}"
+    if returncode not in (None, 0) and not prefix:
+        prefix = f"exit {returncode}"
+    if prefix and body:
+        return f"{prefix}: {body}"
+    if prefix:
+        return prefix
+    return body
+
+
 def sanitize_cli_stderr(stderr: str, stdout: str = "") -> str:
     """Drop known thread-pool noise; return the actionable tail for logs/manifest."""
     lines: list[str] = []

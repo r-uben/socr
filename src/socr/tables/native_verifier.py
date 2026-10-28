@@ -972,7 +972,9 @@ def _normalize_cell(raw: str) -> str:
     and must never be removed here -- only presentation (``62.5--``), never
     value, is this function's job.
     """
-    return html.unescape(raw).rstrip(_TRAILING_DASH_CHARS)
+    decoded = html.unescape(raw)
+    decoded = _THOUSANDS_SPACE_RE.sub("", decoded)
+    return decoded.rstrip(_TRAILING_DASH_CHARS)
 
 
 # A whole-token markdown link: `[anchor](uri)` with no internal whitespace,
@@ -1111,6 +1113,7 @@ def _normalize_numeric_token(tok: str) -> str:
     would), not the pre-decode literal.
     """
     tok = _decoded_numeric_candidate(tok)
+    tok = _THOUSANDS_SPACE_RE.sub("", tok)
     # Strip parenthesis wrappers (econ-table negative-sign: (X) means -X)
     if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
         tok = tok[1:-1]

@@ -33,7 +33,9 @@ def _minimal_state(tmp_path: Path) -> DocumentState:
     return state
 
 
-def test_max_paid_pages_stops_after_n_gemini_calls(pipeline: UnifiedPipeline, tmp_path: Path) -> None:
+def test_max_paid_pages_stops_after_n_gemini_calls(
+    pipeline: UnifiedPipeline, tmp_path: Path
+) -> None:
     state = _minimal_state(tmp_path)
     engine = MagicMock()
     engine.name = "gemini"

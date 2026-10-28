@@ -19,13 +19,15 @@ from pathlib import Path
 from socr.core.config import PipelineConfig
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.engines.base import BaseEngine, reports_empty_response
-from socr.routing.cascade_policy import sanitize_cli_stderr
+from socr.routing.cascade_policy import extract_cli_actionable_error
 
 logger = logging.getLogger(__name__)
 
 
 class MarkerEngine(BaseEngine):
     """Adapter for marker-ocr-cli."""
+
+    _warned_missing_cli = False
 
     @property
     def name(self) -> str:
@@ -34,6 +36,16 @@ class MarkerEngine(BaseEngine):
     @property
     def cli_command(self) -> str:
         return "marker-ocr"
+
+    def is_available(self) -> bool:
+        ok = super().is_available()
+        if not ok and not MarkerEngine._warned_missing_cli:
+            MarkerEngine._warned_missing_cli = True
+            logger.warning(
+                "marker-ocr CLI not found or not callable — marker rung will be skipped "
+                "(install marker-ocr-cli to enable the free layout OCR step)"
+            )
+        return ok
 
     def _build_command(
         self,
@@ -117,9 +129,9 @@ class MarkerEngine(BaseEngine):
                 stdout_text = result.stdout or ""
                 cli_note = ""
                 if result.returncode != 0:
-                    cli_note = sanitize_cli_stderr(stderr_text, stdout_text) or (
-                        f"CLI exited {result.returncode}"
-                    )
+                    cli_note = extract_cli_actionable_error(
+                        stderr_text, stdout_text, returncode=result.returncode
+                    ) or (f"CLI exited {result.returncode}")
                 stem = f"page_{page_num:04d}"
                 text = self._read_page_output(stem, cli_out, scan_root=one_pdf.parent)
                 if not text:
@@ -136,9 +148,9 @@ class MarkerEngine(BaseEngine):
                 )
                 if empty_answer or not text:
                     if not cli_note and result.returncode == 0:
-                        cli_note = sanitize_cli_stderr(stderr_text, stdout_text) or (
-                            "CLI exit 0 but no markdown output (marker accepts PDFs only)"
-                        )
+                        cli_note = extract_cli_actionable_error(
+                            stderr_text, stdout_text, returncode=result.returncode
+                        ) or ("CLI exit 0 but no markdown output (marker accepts PDFs only)")
                     outputs.append(
                         PageOutput(
                             page_num=page_num,

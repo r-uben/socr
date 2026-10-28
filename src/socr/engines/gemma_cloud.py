@@ -2,6 +2,12 @@
 
 Uses the same ``qwen-ocr`` CLI transport as Qwen, but always pins the Gemma
 cloud model so it is distinct from ``--qwen-model …:cloud`` (issue #1253/#1254).
+
+Guards (300 dpi column crops, output token cap, repetition / image-URL loop
+rejection, equation-unverified flags) are **not** duplicated here yet: they live
+in the shared agentic escalation / crop-repair path for Qwen today (#1254).
+This rung inherits the same per-provider timeout as Qwen in ``route_page`` and
+records token usage via ``BaseEngine.process_pages`` when the CLI logs counts.
 """
 
 from __future__ import annotations
