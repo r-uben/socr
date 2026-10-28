@@ -14,12 +14,18 @@ from socr.pipeline.agentic import AcceptDecision, route_page
 def test_no_witness_source_evidence_does_not_block_paid() -> None:
     from socr.routing.cascade_policy import blocks_paid_escalation
 
-    assert blocks_paid_escalation(
-        "source_evidence_table: [no_witness_backend] no classical OCR witness read this page"
-    ) is False
-    assert blocks_paid_escalation(
-        "source_evidence_table: numeric tokens unsupported by page evidence: ['1']"
-    ) is True
+    assert (
+        blocks_paid_escalation(
+            "source_evidence_table: [no_witness_backend] no classical OCR witness read this page"
+        )
+        is False
+    )
+    assert (
+        blocks_paid_escalation(
+            "source_evidence_table: numeric tokens unsupported by page evidence: ['1']"
+        )
+        is True
+    )
 
 
 def test_source_evidence_reject_skips_gemini() -> None:

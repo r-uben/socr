@@ -69,9 +69,7 @@ def blocks_paid_escalation(judge_reason: str) -> bool:
     if _NO_WITNESS_CAUSE in reason:
         return False
     lower = reason.lower()
-    return (
-        "numeric tokens unsupported" in lower or "content labels unsupported" in lower
-    )
+    return "numeric tokens unsupported" in lower or "content labels unsupported" in lower
 
 
 def is_word_count_rejection(judge_reason: str) -> bool:
