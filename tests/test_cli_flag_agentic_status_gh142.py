@@ -56,7 +56,10 @@ _LIVE = {
     "escalate_ambiguous_tables",
     "figures_max_per_page",
     "figures_max_total",
+    "gemma_cloud_model",
+    "marker_force_ocr",
     "max_cost_per_page",
+    "max_paid_pages",
     "math_model",
     "native_first",
     "native_only",
@@ -157,6 +160,9 @@ _UNEXERCISED = {
     # here; see tests/test_providers.py::test_gh154_zero_cap_pinned_* for the
     # falsification.
     "max_cost_per_page_pinned",
+    # Same shape as max_cost_per_page_pinned: only read when --max-paid-pages is
+    # explicitly given; this fixture leaves max_paid_pages at 0 (unlimited).
+    "max_paid_pages_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
     # Read only inside the table-extractor block, which is gated on
     # _resolve_crop_vlm_model() finding a live vision model. Pinned to None in

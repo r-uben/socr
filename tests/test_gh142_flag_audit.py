@@ -127,6 +127,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     # -- read on the agentic path or by a helper it calls
     "cost_budget": (AGENTIC, "read in _phase_agentic"),
     "max_cost_per_page": (AGENTIC, "read in _phase_agentic (see #154, #160)"),
+    "max_paid_pages": (
+        AGENTIC,
+        "hard cap on Gemini OCR pages per run; read in _run_engine_on_pages",
+    ),
     "strict_local": (AGENTIC, "read in _phase_agentic"),
     "native_only": (AGENTIC, "read in _phase_agentic"),
     "no_native_first": (AGENTIC, "native_first, read in _phase_agentic"),
