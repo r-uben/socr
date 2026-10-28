@@ -7274,6 +7274,8 @@ def build_manifest(
                     or a.failure_mode.value
                 ),
                 "judge_model": _judge_model,
+                "llm_input_tokens": getattr(a, "llm_input_tokens", None),
+                "llm_output_tokens": getattr(a, "llm_output_tokens", None),
             }
             for a in state.pages[page_num].attempts
         ]

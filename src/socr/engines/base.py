@@ -381,11 +381,22 @@ class BaseEngine(ABC):
             # RECITATION-blocked page used to nuke a whole 7-page batch, #40).
             # Instead, always read back per page below and fail only the pages
             # that produced nothing, carrying the CLI exit info into their error.
+            from socr.routing.cascade_policy import parse_token_usage, sanitize_cli_stderr
+
             cli_error_note = ""
             if result.returncode != 0:
-                stderr = (result.stderr or "").strip()[:500]
+                stderr = sanitize_cli_stderr(result.stderr or "", result.stdout or "")
                 cli_error_note = f"CLI exited {result.returncode}: {stderr}"
                 logger.warning(f"[{self.name}] {cli_error_note} — attempting per-page salvage")
+            else:
+                combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+                if "no supported files found" in combined or "no supported files" in combined:
+                    tail = sanitize_cli_stderr(result.stderr or "", result.stdout or "")
+                    cli_error_note = (
+                        tail or "CLI exit 0 but input was not accepted (no output files)"
+                    )
+                    logger.warning(f"[{self.name}] {cli_error_note}")
+            inp_tok, out_tok = parse_token_usage(result.stderr or "", result.stdout or "")
 
             # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
             elapsed = time.time() - start_time
@@ -505,6 +516,8 @@ class BaseEngine(ABC):
                             engine=self.name,
                             processing_time=elapsed / len(page_nums),
                             audit_passed=True,
+                            llm_input_tokens=inp_tok,
+                            llm_output_tokens=out_tok,
                         )
                     )
                 elif recitation_in_stderr and stem in stderr_text:
@@ -537,6 +550,8 @@ class BaseEngine(ABC):
                                 f"No output for page {page_num}"
                                 + (f" ({cli_error_note})" if cli_error_note else "")
                             ),
+                            llm_input_tokens=inp_tok,
+                            llm_output_tokens=out_tok,
                         )
                     )
 

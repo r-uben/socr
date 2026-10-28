@@ -701,13 +701,35 @@ def route_page(
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
+    from socr.routing.cascade_policy import blocks_paid_escalation, is_paid_profile
+
     limit = len(ladder) if max_attempts <= 0 else min(max_attempts, len(ladder))
     attempts: list[ProviderAttempt] = []
     tried = 0
+    paid_escalation_blocked = False
 
     for prof in ladder:
         if tried >= limit:
             break
+        if paid_escalation_blocked and is_paid_profile(prof):
+            logger.info(
+                "page %s: skipping paid rung %s (prior source-evidence_table reject)",
+                page_num,
+                prof.engine.value,
+            )
+            attempts.append(
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=_error_output(page_num, "paid escalation blocked"),
+                    cost_usd=0.0,
+                    accepted=False,
+                    reason="paid escalation blocked (source_evidence_table)",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            )
+            continue
         if remaining_budget is not None and prof.cost_per_page_usd > remaining_budget:
             logger.info(
                 "page %s: skipping %s ($%g/page exceeds remaining budget $%g)",
@@ -913,6 +935,8 @@ def route_page(
         )
         if decision.accept:
             return PageDecision(page_num, output, attempts, accepted=True)
+        if blocks_paid_escalation(decision.reason):
+            paid_escalation_blocked = True
 
     best = _best_effort(attempts, page_num)
     return PageDecision(page_num, best.output, attempts, accepted=False)

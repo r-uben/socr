@@ -5,6 +5,7 @@ import logging
 from socr.core.config import AUTO_ENGINE_ORDER, EngineType
 from socr.engines.base import BaseEngine
 from socr.engines.deepseek import DeepSeekEngine
+from socr.engines.gemma_cloud import GemmaCloudEngine
 from socr.engines.gemini import GeminiEngine
 from socr.engines.glm import GLMEngine
 from socr.engines.marker import MarkerEngine
@@ -21,6 +22,7 @@ _ENGINES: dict[EngineType, type[BaseEngine]] = {
     EngineType.MISTRAL: MistralEngine,
     EngineType.GEMINI: GeminiEngine,
     EngineType.MARKER: MarkerEngine,
+    EngineType.GEMMA: GemmaCloudEngine,
     EngineType.QWEN: QwenEngine,
 }
 
@@ -77,8 +79,8 @@ def resolve_auto_engine() -> EngineType:
 # core/providers.py); use --primary nougat to invoke it explicitly.
 _LOCAL_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # Qwen3-VL via Ollama; best open quality, ~slower
-    EngineType.GLM,  # 0.9B, fast, ~10s/page
     EngineType.MARKER,  # Layout-aware, CPU-friendly
+    EngineType.GLM,  # 0.9B, fast, ~10s/page
 ]
 
 

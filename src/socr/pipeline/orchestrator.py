@@ -14438,7 +14438,7 @@ class UnifiedPipeline:
 
         Touches no pipeline state; the caller decides what to record (GH-940).
         """
-        from socr.core.providers import DEFAULT_PROVIDERS
+        from socr.core.providers import DEFAULT_PROVIDERS, ProviderProfile
 
         from socr.engines.qwen import pinned_cloud_model_available, pinned_cloud_qwen_model
         from socr.engines.registry import has_cli_engine
@@ -14446,7 +14446,14 @@ class UnifiedPipeline:
         available = []
         unservable: list[EngineType] = []
         pin_reason = ""
-        for engine_type in self.config.enabled_engines:
+        from socr.routing.cascade_policy import ordered_enabled_engines
+
+        enabled = set(self.config.enabled_engines)
+        engine_order = ordered_enabled_engines(enabled)
+
+        for engine_type in engine_order:
+            if engine_type not in enabled:
+                continue
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
                 continue
@@ -14472,6 +14479,28 @@ class UnifiedPipeline:
                         else:
                             pin_reason = reason
                 except Exception:  # availability probe must never crash routing
+                    pass
+                continue
+            if engine_type is EngineType.GEMMA:
+                from socr.engines.gemma_cloud import gemma_cloud_model_available
+
+                model = self.config.gemma_cloud_model or prof.model
+                try:
+                    ok, reason = gemma_cloud_model_available(model)
+                    if ok:
+                        available.append(
+                            ProviderProfile(
+                                engine=prof.engine,
+                                tier=prof.tier,
+                                cost_per_page_usd=prof.cost_per_page_usd,
+                                id=prof.id,
+                                backend=prof.backend,
+                                model=model,
+                            )
+                        )
+                    else:
+                        pin_reason = pin_reason or reason
+                except Exception:
                     pass
                 continue
             try:
@@ -15872,13 +15901,41 @@ class UnifiedPipeline:
         the full gate, and scanned pages (whose text-layer word counts are
         junk) never earn leniency from this.
         """
+        from socr.routing.cascade_policy import SparsePageSignals, sparse_page_ok
+
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        if pa is None or not pa.is_born_digital:
+        if pa is None:
             return False
-        return (pa.word_count or 0) < self.config.audit_min_words
+        ps = self.state.pages.get(page_num) if getattr(self, "state", None) else None
+        chart_asset = bool(getattr(ps, "is_chart_asset_page", False)) if ps else False
+        image_dominant = bool(
+            getattr(pa, "invisible_text_over_raster", False)
+            or getattr(pa, "prior_ocr_layer", False)
+        )
+        if not image_dominant and getattr(pa, "has_figures", False):
+            try:
+                from socr.core.born_digital import BornDigitalDetector
+
+                handle = getattr(self.state, "handle", None)
+                if handle is not None:
+                    page = handle.doc[page_num - 1]
+                    cov = BornDigitalDetector._raster_coverage(page)
+                    image_dominant = cov >= BornDigitalDetector.RASTER_DOMINANCE_RATIO * 0.85
+            except Exception:
+                pass
+        signals = SparsePageSignals(
+            is_born_digital=pa.is_born_digital,
+            native_word_count=pa.word_count or 0,
+            has_figures=bool(getattr(pa, "has_figures", False)),
+            has_chart_asset=chart_asset,
+            image_dominant=image_dominant,
+            prior_ocr_layer=bool(getattr(pa, "prior_ocr_layer", False)),
+            invisible_text_over_raster=bool(getattr(pa, "invisible_text_over_raster", False)),
+        )
+        return sparse_page_ok(signals, audit_min_words=self.config.audit_min_words)
 
     # ------------------------------------------------------------------
     # Assembly persistence helpers (PP-1)

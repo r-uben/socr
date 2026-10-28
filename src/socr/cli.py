@@ -1420,6 +1420,35 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
         click.echo(markdown)
 
 
+@cli.command("cascade-replay")
+@click.argument("paths", nargs=-1, type=click.Path(path_type=Path, exists=True))
+@click.option(
+    "--audit-min-words",
+    default=40,
+    show_default=True,
+    help="Word-count threshold used for sparse-page exemption in NEW rules",
+)
+def cascade_replay(paths: tuple[Path, ...], audit_min_words: int) -> None:
+    """Project Gemini usage from recorded manifests under old vs new routing rules.
+
+    Reads ``manifest.json`` files only — no OCR engine calls.
+    """
+    import json
+
+    from socr.routing.cascade_replay import ReplayRules, replay_paths
+
+    manifest_paths: list[Path] = []
+    for p in paths:
+        if p.is_file() and p.name == "manifest.json":
+            manifest_paths.append(p)
+        elif p.is_dir():
+            manifest_paths.extend(sorted(p.rglob("manifest.json")))
+    if not manifest_paths:
+        raise click.ClickException("no manifest.json files found in the given paths")
+    summary = replay_paths(manifest_paths, rules=ReplayRules(audit_min_words=audit_min_words))
+    click.echo(json.dumps(summary, indent=2))
+
+
 @cli.command("judge-benchmark")
 @click.argument("dataset_dir", type=click.Path(exists=True, path_type=Path))
 @click.option("--model", default="qwen2-vl:7b", help="Ollama vision model for the judge")

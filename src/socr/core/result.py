@@ -530,6 +530,8 @@ class PageOutput:
     provider_id: str = ""  # ProviderProfile.id that produced this output
     provider_model: str = ""  # resolved model name (e.g. qwen3-vl:30b-a3b-instruct)
     provider_backend: str = ""  # backend (e.g. ollama, gemini-api)
+    llm_input_tokens: int | None = None
+    llm_output_tokens: int | None = None
     skip_reason: str = ""  # why the rung was not tried (e.g. budget exceeded)
     #: GH-169: what the JUDGE said about this attempt -- kept for EVERY attempt,
     #: accepted or rejected. Distinct from ``skip_reason``, which documents why a
