@@ -43,9 +43,7 @@ def test_no_witness_reject_reaches_gemini() -> None:
     judge.assess.side_effect = [
         AcceptDecision(
             accept=False,
-            reason=(
-                "source_evidence_table: [no_witness_backend] no classical OCR witness"
-            ),
+            reason=("source_evidence_table: [no_witness_backend] no classical OCR witness"),
         ),
         AcceptDecision(accept=False, reason="empty/error output"),
         AcceptDecision(accept=True, reason="gemini ran"),
