@@ -20,11 +20,32 @@ _GEMINI_TRANSIENT_QUOTA_RE = re.compile(
 
 GEMINI_TRANSIENT_BACKOFF_SEC = 3.0
 
+GEMINI_EMPTY_EXHAUSTED_SKIP = "gemini_empty_exhausted: no further calls"
+
+# HTTP 200 with no parts — gemini-ocr-cli logs this shape (cluster audit, job w/ 15 repeats).
+_GEMINI_EMPTY_RESPONSE_RE = re.compile(
+    r"empty\s+response.*finish_reason=(?:FinishReason\.)?STOP\b|"
+    r"finish_reason=(?:FinishReason\.)?STOP,\s*len\(parts\)=0",
+    re.IGNORECASE,
+)
+_GEMINI_SAFETY_RE = re.compile(
+    r"\bSAFETY\b|finish_reason\s*[=:]\s*SAFETY|harm_category|candidate was blocked",
+    re.IGNORECASE,
+)
+
+
+def gemini_empty_response_message(text: str) -> bool:
+    """True when stderr/error text is Gemini's empty STOP answer (HTTP 200, zero parts)."""
+    blob = (text or "").strip()
+    return bool(blob and _GEMINI_EMPTY_RESPONSE_RE.search(blob))
+
 
 def gemini_quota_failure_class(text: str) -> str:
     """Classify provider quota errors: ``exhausted``, ``transient``, or empty."""
     blob = (text or "").strip()
     if not blob:
+        return ""
+    if gemini_empty_response_message(blob):
         return ""
     lower = blob.lower()
     if _GEMINI_SPENDING_CAP_RE.search(blob):
@@ -40,6 +61,31 @@ def gemini_quota_failure_class(text: str) -> str:
     return ""
 
 
+def gemini_attempt_failure_kind(attempt) -> str:
+    """Bucket one Gemini journal attempt for run summaries (not page-level)."""
+    reason = str(getattr(attempt, "skip_reason", "") or "")
+    err = str(getattr(attempt, "error", "") or "")
+    blob = f"{reason} {err}".strip()
+    if reason.startswith("paid_disabled:"):
+        return "skipped_quota_circuit"
+    if getattr(attempt, "audit_passed", False):
+        return "accepted"
+    raw_fm = getattr(attempt, "failure_mode", None)
+    fm = getattr(raw_fm, "value", raw_fm) if raw_fm is not None else ""
+    fm = str(fm or "")
+    if fm in ("empty_response", "empty_output") or gemini_empty_response_message(blob):
+        return "empty_response"
+    if _GEMINI_SAFETY_RE.search(blob) or fm in ("recitation", "safety"):
+        return "safety"
+    if fm == "cli_error" and gemini_quota_failure_class(blob):
+        return "quota"
+    if fm == "cli_error" or fm == "model_unavailable":
+        return "cli_error"
+    if (attempt.text or "").strip():
+        return "judge_rejected"
+    return "other"
+
+
 def _is_gemini_attempt(output) -> bool:
     engine = str(getattr(output, "engine", "") or "")
     return engine == "gemini" or engine.startswith("gemini")
@@ -53,25 +99,20 @@ def summarize_gemini_attempts(state) -> dict[str, int]:
             if not _is_gemini_attempt(attempt):
                 continue
             stats["gemini_call_attempts"] += 1
-            reason = str(getattr(attempt, "skip_reason", "") or "")
-            err = str(getattr(attempt, "error", "") or "")
-            blob = f"{reason} {err}"
-            if reason.startswith("paid_disabled:"):
+            kind = gemini_attempt_failure_kind(attempt)
+            if kind == "skipped_quota_circuit":
                 stats["gemini_skipped_quota_circuit"] += 1
-                continue
-            if getattr(attempt, "audit_passed", False):
+            elif kind == "accepted":
                 stats["gemini_pages_accepted"] += 1
-                continue
-            raw_fm = getattr(attempt, "failure_mode", None)
-            fm = getattr(raw_fm, "value", raw_fm) if raw_fm is not None else ""
-            fm = str(fm or "")
-            if fm == "cli_error" and gemini_quota_failure_class(blob):
+            elif kind == "quota":
                 stats["gemini_failures_quota"] += 1
-            elif fm in ("empty_response", "empty_output") or "empty/error" in reason.lower():
-                stats["gemini_failures_empty"] += 1
-            elif fm == "cli_error" or fm == "model_unavailable":
+            elif kind == "empty_response":
+                stats["gemini_failures_empty_response"] += 1
+            elif kind == "safety":
+                stats["gemini_failures_safety"] += 1
+            elif kind == "cli_error":
                 stats["gemini_failures_cli_error"] += 1
-            elif (attempt.text or "").strip():
+            elif kind == "judge_rejected":
                 stats["gemini_failures_judge_rejected"] += 1
             else:
                 stats["gemini_failures_other"] += 1
@@ -90,7 +131,8 @@ def format_gemini_run_summary(stats: dict[str, int]) -> str:
     extras: list[str] = []
     for key, label in (
         ("gemini_failures_quota", "quota"),
-        ("gemini_failures_empty", "empty"),
+        ("gemini_failures_empty_response", "empty_response"),
+        ("gemini_failures_safety", "safety"),
         ("gemini_failures_cli_error", "cli_error"),
         ("gemini_failures_judge_rejected", "judge-rejected"),
         ("gemini_skipped_quota_circuit", "skipped-after-cap"),

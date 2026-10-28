@@ -1863,6 +1863,10 @@ class UnifiedPipeline:
         self._gemini_paid_disabled_reason: str | None = None
         self._gemini_circuit_skips: int = 0
         self._gemini_transient_retried_pages: set[int] = set()
+        #: Pages that already consumed Gemini's one empty-answer retry this run.
+        self._gemini_empty_retry_used: set[int] = set()
+        #: Pages still empty after that retry — no further Gemini calls this run.
+        self._gemini_empty_exhausted_pages: set[int] = set()
         #: The rung callables this run has already CALLED without a refusal.
         #: Cold review round 5: identity is authoritative for a callable we
         #: have observed; the kind-level breaker applies only to callables we
@@ -3479,6 +3483,28 @@ class UnifiedPipeline:
                 )
             return skipped
 
+        gemini_empty_blocked: list[int] = []
+        if engine_type == EngineType.GEMINI and self._gemini_empty_exhausted_pages:
+            gemini_empty_blocked = [
+                pn for pn in page_nums if pn in self._gemini_empty_exhausted_pages
+            ]
+            page_nums = [pn for pn in page_nums if pn not in self._gemini_empty_exhausted_pages]
+            if gemini_empty_blocked and not self.config.quiet:
+                console.print(
+                    f"  [yellow]{engine.name}: skipping {len(gemini_empty_blocked)} page(s) — "
+                    "empty response already retried once this run[/yellow]"
+                )
+            if not page_nums:
+                blocked = [
+                    self._gemini_empty_exhausted_output(pn, engine.name)
+                    for pn in gemini_empty_blocked
+                ]
+                if gemini_blocked:
+                    blocked.extend(
+                        self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                    )
+                return blocked
+
         if not self.config.quiet:
             console.print(
                 f"  Running {engine.name} on {len(page_nums)} {label} pages (per-page)..."
@@ -3531,7 +3557,12 @@ class UnifiedPipeline:
 
             adjusted: list[PageOutput] = []
             for po in final:
-                detail = " ".join(x for x in (po.error or "", po.skip_reason or "") if x)
+                detail_parts: list[str] = []
+                for attr in ("error", "skip_reason"):
+                    raw = getattr(po, attr, None)
+                    if isinstance(raw, str) and raw.strip():
+                        detail_parts.append(raw.strip())
+                detail = " ".join(detail_parts)
                 kind = gemini_quota_failure_class(detail)
                 if kind == "exhausted":
                     self._trip_gemini_quota_circuit(state, detail)
@@ -3558,7 +3589,12 @@ class UnifiedPipeline:
                     )
                     if retry_out:
                         po = retry_out[0]
-                        detail = " ".join(x for x in (po.error or "", po.skip_reason or "") if x)
+                        detail_parts = []
+                        for attr in ("error", "skip_reason"):
+                            raw = getattr(po, attr, None)
+                            if isinstance(raw, str) and raw.strip():
+                                detail_parts.append(raw.strip())
+                        detail = " ".join(detail_parts)
                         if gemini_quota_failure_class(detail) == "exhausted":
                             self._trip_gemini_quota_circuit(state, detail)
                 adjusted.append(po)
@@ -3567,6 +3603,11 @@ class UnifiedPipeline:
         if not self.config.quiet:
             ok = sum(1 for p in final if p.status == PageStatus.SUCCESS)
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
+
+        if gemini_empty_blocked:
+            final.extend(
+                self._gemini_empty_exhausted_output(pn, engine.name) for pn in gemini_empty_blocked
+            )
 
         if gemini_blocked:
             final.extend(
@@ -3597,22 +3638,36 @@ class UnifiedPipeline:
         ]
         if not empty:
             return page_outputs
+        is_gemini = engine.name == "gemini"
+        retry_pages = [
+            pn for pn in empty if not (is_gemini and pn in self._gemini_empty_retry_used)
+        ]
         can_retry = remaining_timeout_sec is None or remaining_timeout_sec > 0
         retried: dict[int, PageOutput] = {}
-        if can_retry:
+        if can_retry and retry_pages:
             logger.warning(
-                "%s returned an empty answer for page(s) %s; retrying once", engine.name, empty
+                "%s returned an empty answer for page(s) %s; retrying once",
+                engine.name,
+                retry_pages,
             )
+            if is_gemini:
+                self._gemini_empty_retry_used.update(retry_pages)
             retried = {
                 po.page_num: po
                 for po in engine.process_pages(
                     pdf_path=state.handle.path,
-                    page_nums=empty,
+                    page_nums=retry_pages,
                     config=run_config,
                     dpi=run_config.render_dpi,
                     subprocess_timeout=remaining_timeout_sec,
                 )
             }
+        if is_gemini:
+            for pn in empty:
+                if pn not in self._gemini_empty_retry_used and (
+                    pn not in retry_pages or not can_retry
+                ):
+                    self._gemini_empty_retry_used.add(pn)
         for page_num in empty:
             second = retried.get(page_num)
             state.events.append(
@@ -3650,7 +3705,12 @@ class UnifiedPipeline:
                 console.print(
                     f"  [yellow]p{page_num}: {engine.name} empty answer; {outcome}[/yellow]"
                 )
-        return [retried.get(po.page_num, po) for po in page_outputs]
+        merged = [retried.get(po.page_num, po) for po in page_outputs]
+        if is_gemini:
+            for po in merged:
+                if po.failure_mode is FailureMode.EMPTY_RESPONSE:
+                    self._gemini_empty_exhausted_pages.add(po.page_num)
+        return merged
 
     def _emit_native_table_structure_events(self, state, assessment) -> None:
         """Record one durable audit event per page with a native table defect.
@@ -8399,6 +8459,8 @@ class UnifiedPipeline:
         self._gemini_paid_disabled_reason = None
         self._gemini_circuit_skips = 0
         self._gemini_transient_retried_pages = set()
+        self._gemini_empty_retry_used = set()
+        self._gemini_empty_exhausted_pages = set()
 
     def _max_paid_pages_limit(self) -> int | None:
         limit = self.config.max_paid_pages
@@ -8451,6 +8513,20 @@ class UnifiedPipeline:
                 "[red]Gemini paid OCR disabled for the rest of this run "
                 "(quota/spending cap exhausted)[/red]"
             )
+
+    def _gemini_empty_exhausted_output(self, page_num: int, engine_name: str) -> PageOutput:
+        from socr.routing.gemini_quota import GEMINI_EMPTY_EXHAUSTED_SKIP
+
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.EMPTY_RESPONSE,
+            error=GEMINI_EMPTY_EXHAUSTED_SKIP,
+            skip_reason=GEMINI_EMPTY_EXHAUSTED_SKIP,
+            audit_passed=False,
+        )
 
     def _gemini_circuit_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
         from socr.routing.gemini_quota import PAID_DISABLED_SKIP_REASON

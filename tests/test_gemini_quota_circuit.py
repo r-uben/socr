@@ -8,12 +8,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from socr.core.config import EngineType, PipelineConfig
-from socr.core.result import FailureMode, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.routing.gemini_quota import (
     PAID_DISABLED_SKIP_REASON,
     format_gemini_run_summary,
+    gemini_attempt_failure_kind,
+    gemini_empty_response_message,
     gemini_quota_failure_class,
     summarize_gemini_attempts,
 )
@@ -29,6 +31,68 @@ def test_spending_cap_429_is_exhausted_not_transient_retry() -> None:
 
 def test_plain_rate_limit_is_transient() -> None:
     assert gemini_quota_failure_class("quota/rate-limit: 429 Too Many Requests") == "transient"
+
+
+def test_stop_empty_response_is_not_quota_or_safety() -> None:
+    msg = (
+        "Error processing /tmp/x/images/page_0001.png: Empty response: "
+        "finish_reason=STOP, len(parts)=0"
+    )
+    assert gemini_empty_response_message(msg)
+    assert gemini_quota_failure_class(msg) == ""
+    attempt = PageOutput(
+        page_num=1,
+        text="",
+        status=PageStatus.ERROR,
+        engine="gemini",
+        failure_mode=FailureMode.CLI_ERROR,
+        error=msg,
+        audit_passed=False,
+    )
+    assert gemini_attempt_failure_kind(attempt) == "empty_response"
+
+
+def test_gemini_empty_exhausted_skips_further_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = PipelineConfig(agentic=True, quiet=True)
+    pipe = UnifiedPipeline(cfg)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    from socr.core.document import DocumentHandle
+
+    handle = DocumentHandle(path=pdf, page_count=1, page_count_known=True)
+    state = DocumentState(handle=handle)
+    state.pages[1] = MagicMock(native_text="native text")
+
+    empty_err = "Empty response: finish_reason=STOP, len(parts)=0"
+    engine = MagicMock()
+    engine.name = "gemini"
+    engine.is_available.return_value = True
+    calls = {"n": 0}
+
+    def _process_pages(**_kwargs):
+        calls["n"] += 1
+        return [
+            MagicMock(
+                page_num=1,
+                status=PageStatus.ERROR,
+                failure_mode=FailureMode.EMPTY_RESPONSE,
+                error=empty_err,
+                text="",
+                skip_reason="",
+            )
+        ]
+
+    engine.process_pages.side_effect = _process_pages
+    monkeypatch.setattr("socr.pipeline.orchestrator.get_engine", lambda _et: engine)
+
+    pipe._run_engine_on_pages(state, [1], [], EngineType.GEMINI, "agentic")
+    pipe._run_engine_on_pages(state, [1], [], EngineType.GEMINI, "agentic")
+    pipe._run_engine_on_pages(state, [1], [], EngineType.GEMINI, "agentic")
+
+    assert calls["n"] == 2
+    assert 1 in pipe._gemini_empty_exhausted_pages
 
 
 def test_gemini_quota_circuit_stops_after_spending_cap(
@@ -129,8 +193,9 @@ def test_summarize_gemini_attempts_headline_and_buckets() -> None:
     assert stats["gemini_call_attempts"] == 4
     assert stats["gemini_pages"] == 4
     assert stats["gemini_failures_quota"] == 1
-    assert stats["gemini_failures_empty"] == 1
+    assert stats["gemini_failures_empty_response"] == 1
     assert stats["gemini_failures_judge_rejected"] == 1
     line = format_gemini_run_summary(stats)
     assert "1 accepted / 4 calls" in line
     assert "quota" in line
+    assert "empty_response" in line
