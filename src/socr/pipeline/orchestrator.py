@@ -16025,6 +16025,18 @@ class UnifiedPipeline:
             for ev in state.events
             if hasattr(ev, "page_num") and ev.page_num == page_num
         ]
+        _withheld_manifest = getattr(ps, "withheld_table_manifest", None) if ps else None
+        if _withheld_manifest:
+            from socr.core.table_verification_floor import TABLE_VERIFICATION_PROSE_RECOVERY_KIND
+
+            page_events.append(
+                {
+                    "kind": TABLE_VERIFICATION_PROSE_RECOVERY_KIND,
+                    "engine": (winning_out.engine if winning_out else "") or "",
+                    "detail": "prose kept; tables withheld after table-only verification failure",
+                    "data": {"tables": list(_withheld_manifest)},
+                }
+            )
 
         recorded_ladder_disposition, superseded_ladder_verdict = _recorded_table_ladder_verdicts(
             ps, disp, page_events
@@ -16332,6 +16344,11 @@ class UnifiedPipeline:
         # on every page that did not hit the rule, so their sidecar bytes are unchanged.
         if ps is not None and getattr(ps, "withheld_table_text", ""):
             payload["withheld_table_text"] = ps.withheld_table_text
+        _withheld_manifest = getattr(ps, "withheld_table_manifest", None) if ps else None
+        if _withheld_manifest:
+            payload["withheld_table_manifest"] = list(_withheld_manifest)
+        if ps is not None and getattr(ps, "text_layer_witness_unusable", False):
+            payload["text_layer_witness_unusable"] = True
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor

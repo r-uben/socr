@@ -2612,6 +2612,9 @@ class PageAssessment:
     #: shipped. Whether the layer is the document's own characters is decided by the
     #: caller from the #1156 flags, not here.
     own_layer_text: str = ""
+    #: The text layer must not corroborate or contradict model table numbers
+    #: (garbled OCR, CID maps, mild encoding damage). Routes the page to OCR.
+    text_layer_witness_unusable: bool = False
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3093,6 +3096,10 @@ class BornDigitalDetector:
     # clean; OCR layers on scanned PDFs often contain (cid:XX) references,
     # replacement chars, and control characters.
     MAX_GARBAGE_RATIO = 0.05
+
+    # Below ``MAX_GARBAGE_RATIO``: still too noisy to treat the layer as a citation
+    # witness for table source-evidence (corporate PDFs with baked-in OCR).
+    TEXT_LAYER_WITNESS_MAX_GARBAGE = 0.02
 
     # Maximum ratio of characters that are just spaces. Baked-in OCR on scanned
     # pages often produces text with excessive spacing (one char per glyph with
@@ -3697,6 +3704,7 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 
@@ -3827,6 +3835,31 @@ class BornDigitalDetector:
                 has_figures=has_figures,
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
+                notes=notes,
+            )
+
+        if encoding_corruption > self.ENCODING_CORRUPTION_FLAG or (
+            garbage_ratio > self.TEXT_LAYER_WITNESS_MAX_GARBAGE
+        ):
+            notes.append(
+                "text layer unusable as table number witness "
+                f"(encoding {encoding_corruption:.1%}, garbage {garbage_ratio:.1%}) -> OCR"
+            )
+            return PageAssessment(
+                page_num=page_num,
+                is_born_digital=False,
+                native_text="",
+                confidence=0.78,
+                char_count=char_count,
+                word_count=word_count,
+                font_count=font_count,
+                has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
+                has_math_font_typesetting=has_math_font_typesetting,
+                text_layer_witness_unusable=True,
                 notes=notes,
             )
 

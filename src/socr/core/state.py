@@ -88,7 +88,11 @@ def layer_is_admissible_evidence(ps) -> bool:
     guard that crashed the whole table ladder pass (round 4). The readers the log lists as
     NOT gated are tracked in GitHub issue #1205.
     """
-    return not bool(getattr(ps, "prior_ocr_layer_suspect", False))
+    if bool(getattr(ps, "prior_ocr_layer_suspect", False)):
+        return False
+    if bool(getattr(ps, "text_layer_witness_unusable", False)):
+        return False
+    return True
 
 
 @dataclass
@@ -155,6 +159,8 @@ class PageState:
     #: ``invisible_text_over_raster`` on purpose: that flag alone grants #1027 the right to
     #: DELETE the native text, and suspicion must never grant deletion rights.
     prior_ocr_layer_suspect: bool = False
+    #: Garbled or missing text layer: may ship native prose but must not witness numbers.
+    text_layer_witness_unusable: bool = False
     #: #1156: the drawing-order route's own verdict and whether it failed (unknown, which
     #: feeds suspicion). Kept beside #961's pair so each route stays separately visible.
     prior_ocr_layer: bool = False
@@ -180,6 +186,8 @@ class PageState:
     #: withheld reading was gone for good. Same shape as ``prior_ocr_layer_text``: written
     #: only where it exists, never read as evidence, never shipped.
     withheld_table_text: str = ""
+    #: Tables withheld during table-verification-only prose recovery (manifest).
+    withheld_table_manifest: list = field(default_factory=list)
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -908,6 +916,9 @@ class DocumentState:
                     or ps.invisible_text_scan_failed
                     or ps.prior_ocr_layer
                     or ps.prior_ocr_layer_scan_failed
+                )
+                ps.text_layer_witness_unusable = bool(
+                    getattr(pa, "text_layer_witness_unusable", False)
                 )
                 ps.garbled_math_signals = dict(getattr(pa, "garbled_math_signals", None) or {})
                 ps.garbled_math_scan_failed = getattr(pa, "garbled_math_scan_failed", False)

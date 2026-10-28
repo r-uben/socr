@@ -2970,6 +2970,21 @@ def structure_class_floor_text(
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """
+    from socr.core.table_verification_floor import (
+        maybe_attach_withheld_table_manifest,
+        page_failed_only_table_verification,
+        page_has_non_table_judge_refusal,
+        page_has_table_verifier_refusal,
+    )
+
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "") or ""
+    whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    if page_has_non_table_judge_refusal(p):
+        return whole_page
+    if page_has_table_verifier_refusal(p) and not page_failed_only_table_verification(p):
+        return whole_page
+
     # #1156 round 1 (r-uben 1b, the cell the Fed run hits): prose recovery ships the
     # page's own ``native_text`` around the table markers, and on a flagged page that text
     # is an EARLIER OCR run -- measured on gh520's own two-table fixture, the recovered
@@ -2991,16 +3006,22 @@ def structure_class_floor_text(
         # with it off). The whole-page marker plus the page image is what this helper
         # already ships whenever isolation is unprovable, so returning it here introduces
         # no new ending -- it withholds the prose and keeps the marker and the image.
-        d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
-        png_ref = getattr(p, "d3_floor_png_ref", "")
-        return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
-    return table_floor_text_for_source(
+        return whole_page
+    floor = table_floor_text_for_source(
         p,
         page_num,
         getattr(p, "native_text", "") or "",
         prose_recovery=True,
         chart_floor=chart_floor,
     )
+    if (
+        floor
+        and floor != whole_page
+        and not is_page_failed_marker(floor)
+        and page_failed_only_table_verification(p)
+    ):
+        maybe_attach_withheld_table_manifest(p)
+    return floor
 
 
 def _table_bbox_sane(p) -> bool:
@@ -3081,6 +3102,44 @@ def table_bbox_sanity_verdict(p) -> bool:
     return _table_bbox_sane(p)
 
 
+def _table_verification_only_prose_recovery(
+    p,
+    page_num: int,
+    d3_marker: str,
+    png_ref: str,
+    *,
+    prose_recovery: bool,
+) -> str | None:
+    """#1144 extension: when GH-520 refuses a splice but every refusal was table-only."""
+    if not prose_recovery:
+        return None
+    from socr.core.table_verification_floor import (
+        maybe_attach_withheld_table_manifest,
+        page_failed_only_table_verification,
+        page_has_non_table_judge_refusal,
+    )
+
+    if page_has_non_table_judge_refusal(p) or not page_failed_only_table_verification(p):
+        return None
+    _boxes = getattr(p, "detected_table_bboxes", None) or []
+    _count = getattr(p, "detected_table_count", 0)
+    if not (type(_count) is int and _count > 0 and len(_boxes) == _count):
+        return None
+    if getattr(p, "native_table_lane_refused_rotated", False) or getattr(
+        p, "native_rotated_text_shredded", False
+    ):
+        return None
+    if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
+        return None
+    recovered = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+    if not recovered or not _prose_follows_native_order(
+        recovered, getattr(p, "native_text", "") or ""
+    ):
+        return None
+    maybe_attach_withheld_table_manifest(p)
+    return recovered
+
+
 def table_floor_text_for_source(
     p,
     page_num: int,
@@ -3141,6 +3200,17 @@ def table_floor_text_for_source(
         floored page is the design the owner closed unmerged in PR #1047.
         """
         if not prose_recovery:
+            return whole_page
+        from socr.core.table_verification_floor import (
+            maybe_attach_withheld_table_manifest,
+            page_failed_only_table_verification,
+            page_has_non_table_judge_refusal,
+            page_has_table_verifier_refusal,
+        )
+
+        if page_has_non_table_judge_refusal(p):
+            return whole_page
+        if page_has_table_verifier_refusal(p) and not page_failed_only_table_verification(p):
             return whole_page
         # #1144: a page whose native table lane GH-147 refused for rotation has
         # a ``get_text()`` order that is not its reading order, so this lane's
@@ -3274,6 +3344,7 @@ def table_floor_text_for_source(
         # #1144 round 5: the last word belongs to the page's own reading order.
         if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
             return whole_page
+        maybe_attach_withheld_table_manifest(p)
         return recovered
 
     source_text = source_text or ""
@@ -3290,12 +3361,22 @@ def table_floor_text_for_source(
     # comes from the detector, not from the parser being audited (cubic P1 on
     # #571 -- block counting alone is satisfied by coincidence).
     if getattr(p, "native_table_region_count", 0) != detected_count:
+        recovered = _table_verification_only_prose_recovery(
+            p, page_num, d3_marker, png_ref, prose_recovery=prose_recovery
+        )
+        if recovered is not None:
+            return recovered
         return _refused()
 
     from socr.tables.reconcile import find_table_blocks
 
     blocks = find_table_blocks(source_text)
     if len(blocks) != detected_count:
+        recovered = _table_verification_only_prose_recovery(
+            p, page_num, d3_marker, png_ref, prose_recovery=prose_recovery
+        )
+        if recovered is not None:
+            return recovered
         return _refused()
 
     if not _table_bbox_sane(p):
