@@ -30,7 +30,9 @@ def test_marker_exit_zero_without_output_is_cli_error(tmp_path: Path) -> None:
     assert len(outs) == 1
     assert outs[0].status is PageStatus.ERROR
     assert outs[0].failure_mode is FailureMode.CLI_ERROR
-    assert "exit 0" in (outs[0].error or "").lower() or "no markdown" in (outs[0].error or "").lower()
+    assert (
+        "exit 0" in (outs[0].error or "").lower() or "no markdown" in (outs[0].error or "").lower()
+    )
 
 
 def test_marker_missing_cli_logs_and_is_unavailable(caplog: pytest.LogCaptureFixture) -> None:
