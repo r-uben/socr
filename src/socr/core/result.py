@@ -433,6 +433,16 @@ JUDGE_OUTCOME_VERIFIER_ERROR = "page_judge_verifier_error"
 #: page judge ran. A missing verdict in the same family as the three above:
 #: the boundary must not stamp ``JUDGE_OUTCOME_COMPLETED``.
 JUDGE_OUTCOME_SOURCE_EVIDENCE = "source_evidence_table"
+#: ``NativeTableVerifierJudge`` hard-rejected before the inner page judge ran.
+JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER = "native_table_verifier"
+
+#: Table-verification-only: every completed refusal on the page used one of these outcomes.
+TABLE_VERIFICATION_JUDGE_OUTCOMES: frozenset[str] = frozenset(
+    {
+        JUDGE_OUTCOME_SOURCE_EVIDENCE,
+        JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER,
+    }
+)
 
 
 @dataclass

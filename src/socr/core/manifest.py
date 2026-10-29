@@ -5153,6 +5153,10 @@ def _select_page_output_tagged(
             # ERROR from a bare-marker ERROR. Recorded the same way, from the
             # same evidence: whether what shipped carries the recovery banner.
             prose_recovered = _is_prose_recovery_body(floor_text, page_num)
+            if prose_recovered:
+                from socr.core.table_verification_floor import record_table_prose_recovery_audit
+
+                record_table_prose_recovery_audit(state, page_num, p, engine="native")
             return PageOutput(
                 page_num=page_num,
                 text=floor_text,

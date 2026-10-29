@@ -463,6 +463,9 @@ class TestNativeTableVerifierAuditEvents:
         # Should hard-fail: accept=False, VLM NOT called
         assert decision.accept is False
         assert "native_table_verifier" in decision.reason
+        from socr.core.result import JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER
+
+        assert decision.judge_outcome == JUDGE_OUTCOME_NATIVE_TABLE_VERIFIER
         inner.assess.assert_not_called()
 
         # Should emit exactly one audit event of the right kind

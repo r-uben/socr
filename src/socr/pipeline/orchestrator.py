@@ -16363,7 +16363,6 @@ class UnifiedPipeline:
             for ev in state.events
             if hasattr(ev, "page_num") and ev.page_num == page_num
         ]
-
         recorded_ladder_disposition, superseded_ladder_verdict = _recorded_table_ladder_verdicts(
             ps, disp, page_events
         )
@@ -16670,6 +16669,11 @@ class UnifiedPipeline:
         # on every page that did not hit the rule, so their sidecar bytes are unchanged.
         if ps is not None and getattr(ps, "withheld_table_text", ""):
             payload["withheld_table_text"] = ps.withheld_table_text
+        _withheld_manifest = getattr(ps, "withheld_table_manifest", None) if ps else None
+        if _withheld_manifest:
+            payload["withheld_table_manifest"] = list(_withheld_manifest)
+        if ps is not None and getattr(ps, "text_layer_witness_unusable", False):
+            payload["text_layer_witness_unusable"] = True
 
         # GH-520: the detection-level signal the structure-class floor reads. It
         # must survive a resume or a skipped page reaches a different floor
@@ -17966,6 +17970,11 @@ class UnifiedPipeline:
             _withheld_table = meta.get("withheld_table_text")
             if isinstance(_withheld_table, str) and _withheld_table:
                 ps.withheld_table_text = _withheld_table
+            _withheld_manifest = meta.get("withheld_table_manifest")
+            if isinstance(_withheld_manifest, list) and _withheld_manifest:
+                ps.withheld_table_manifest = list(_withheld_manifest)
+            if meta.get("text_layer_witness_unusable"):
+                ps.text_layer_witness_unusable = True
             # GH-371: restore failed-region identity for the regional splice.
             # Validate the complete list: one malformed entry invalidates the
             # identity rather than allowing a partial list to select a table.
