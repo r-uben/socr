@@ -552,8 +552,9 @@ class PipelineConfig:
     #: When True, marker-ocr runs with ``--force-ocr`` (required on scans with a
     #: stale text layer — see issue #1243).
     marker_force_ocr: bool = True
-    #: Ollama Cloud Gemma vision model for the dedicated ``gemma`` ladder rung.
-    #: Override with ``--gemma-cloud-model``; must be reachable via Ollama (``:cloud`` tag).
+    #: Ollama Cloud Gemma vision model for the dedicated ``gemma`` ladder rung
+    #: (on by default before paid Gemini). Override with ``--gemma-cloud-model``;
+    #: must be a reachable Ollama ``:cloud`` tag (local tags are rejected).
     gemma_cloud_model: str = "gemma4:31b-cloud"
     #: Send page images to Ollama Cloud on the Gemma ladder rung (disable with
     #: ``--no-gemma-cloud`` or ``enable_gemma_cloud: false`` in config).
