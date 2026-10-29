@@ -59,6 +59,7 @@ _FIELD_ALIASES = {
     "hpc_sequential": "hpc.enabled",
     "no_text_coverage": "check_text_coverage",
     "no_recover_uncovered_text": "recover_uncovered_text",
+    "no_gemma_cloud": "enable_gemma_cloud",
 }
 
 # Flags that gate BY CONSTRUCTION rather than through a config read, with the
@@ -127,6 +128,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     # -- read on the agentic path or by a helper it calls
     "cost_budget": (AGENTIC, "read in _phase_agentic"),
     "max_cost_per_page": (AGENTIC, "read in _phase_agentic (see #154, #160)"),
+    "max_paid_pages": (
+        AGENTIC,
+        "hard cap on Gemini OCR pages per run; read in _run_engine_on_pages",
+    ),
     "strict_local": (AGENTIC, "read in _phase_agentic"),
     "native_only": (AGENTIC, "read in _phase_agentic"),
     "no_native_first": (AGENTIC, "native_first, read in _phase_agentic"),
@@ -161,6 +166,14 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),
     "qwen_vllm_model": (AGENTIC, "resolved model for the vLLM qwen rung"),
     "gemini_model": (AGENTIC, "model for the gemini cloud rung and its fingerprint"),
+    "no_gemma_cloud": (
+        AGENTIC,
+        "enable_gemma_cloud (default True); gates Gemma ladder probe and GemmaCloudEngine.process_pages",
+    ),
+    "gemma_cloud_model": (
+        AGENTIC,
+        "gemma_cloud_model tag when enable_gemma_cloud; sets gemma_cloud_model_pinned when given",
+    ),
     "math_model": (AGENTIC, "equation phases"),
     "clean_equation_model": (AGENTIC, "equation phases"),
     "recover_corrupt_math": (AGENTIC, "corrupt-math recovery routing"),

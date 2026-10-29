@@ -147,6 +147,16 @@ _UNEXERCISED = {
     "escalation_timeout_sec",  # escalation lane needs a 2nd ladder rung
     "hpc",
     "marker_device",
+    # Read when the marker engine runs; ``get_engine`` is stubbed here.
+    "marker_force_ocr",
+    # Read when the gemma-cloud engine is probed on the ladder; not in this fixture's ladder.
+    "gemma_cloud_model",
+    "enable_gemma_cloud",
+    "gemma_cloud_model_pinned",
+    "gemma_crop_dpi",
+    "gemma_max_output_tokens",
+    # Only enforced when > 0; this fixture leaves the default (unlimited).
+    "max_paid_pages",
     "deepseek_vllm_url",
     "qwen_vllm_model",
     "qwen_model_pinned",
@@ -157,6 +167,9 @@ _UNEXERCISED = {
     # here; see tests/test_providers.py::test_gh154_zero_cap_pinned_* for the
     # falsification.
     "max_cost_per_page_pinned",
+    # Same shape as max_cost_per_page_pinned: only read when --max-paid-pages is
+    # explicitly given; this fixture leaves max_paid_pages at None (unlimited).
+    "max_paid_pages_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
     # Read only inside the table-extractor block, which is gated on
     # _resolve_crop_vlm_model() finding a live vision model. Pinned to None in

@@ -244,6 +244,20 @@ def common_options(f):
         help=f"Gemini model for the cloud rung (default {DEFAULT_GEMINI_MODEL}).",
     )(f)
     f = click.option(
+        "--no-gemma-cloud",
+        is_flag=True,
+        help=(
+            "Disable the Ollama Cloud Gemma vision rung on the agentic ladder "
+            "(default: Gemma cloud is on after qwen and marker, before paid Gemini)."
+        ),
+    )(f)
+    f = click.option(
+        "--gemma-cloud-model",
+        type=str,
+        default=None,
+        help="Gemma cloud model tag for the Gemma rung (default gemma4:31b-cloud).",
+    )(f)
+    f = click.option(
         "--qwen-model",
         type=str,
         default=None,
@@ -361,6 +375,15 @@ def common_options(f):
         help="Stop escalating once doc spend hits this $ (0=unlimited)",
     )(f)
     f = click.option(
+        "--max-paid-pages",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on Gemini OCR pages per run (single file or whole batch). "
+            "Omit for unlimited; 0 means no Gemini pages."
+        ),
+    )(f)
+    f = click.option(
         "--write-manifest",
         is_flag=True,
         help="Write a replayable manifest + blob cache",
@@ -451,6 +474,8 @@ def build_config(
     qwen_vllm_url: str | None = None,
     qwen_vllm_model: str | None = None,
     gemini_model: str | None = None,
+    no_gemma_cloud: bool = False,
+    gemma_cloud_model: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
     describe_figures: bool = False,
@@ -470,6 +495,7 @@ def build_config(
     judge_vllm_model: str = "",
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
+    max_paid_pages: int | None = None,
     write_manifest: bool = False,
     retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
@@ -648,6 +674,11 @@ def build_config(
         config.qwen_vllm_model = qwen_vllm_model
     if gemini_model is not None:
         config.gemini_model = gemini_model
+    if no_gemma_cloud:
+        config.enable_gemma_cloud = False
+    if gemma_cloud_model is not None:
+        config.gemma_cloud_model = gemma_cloud_model
+        config.gemma_cloud_model_pinned = True
     if qwen_model is not None:
         config.qwen_model = qwen_model
         config.qwen_model_pinned = True
@@ -697,6 +728,9 @@ def build_config(
         config.max_cost_per_page_pinned = True
     if _explicitly_given("cost_budget"):
         config.cost_budget = cost_budget
+    if _explicitly_given("max_paid_pages"):
+        config.max_paid_pages = int(max_paid_pages) if max_paid_pages is not None else 0
+        config.max_paid_pages_pinned = True
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
     if _explicitly_given("retry_failed_pages"):
@@ -1418,6 +1452,99 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
         )
     else:
         click.echo(markdown)
+
+
+@cli.command("cascade-replay")
+@click.argument("paths", nargs=-1, type=click.Path(path_type=Path, exists=True))
+@click.option(
+    "--audit-min-words",
+    default=40,
+    show_default=True,
+    help="Word-count threshold used for sparse-page exemption in NEW rules",
+)
+@click.option(
+    "--stratified-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write stratified page list (JSON) for capped paid Gemini comparison",
+)
+@click.option(
+    "--comparison-limit",
+    default=200,
+    show_default=True,
+    help="Max pages in --stratified-out",
+)
+@click.option(
+    "--pdf-root",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Source PDF directory for stratified comparison lists",
+)
+@click.option(
+    "--stratified-seed",
+    default=0,
+    show_default=True,
+    help="RNG seed for stratified page selection",
+)
+@click.option(
+    "--max-pages-per-doc",
+    default=4,
+    show_default=True,
+    help="Cap stratified picks per manifest",
+)
+def cascade_replay(
+    paths: tuple[Path, ...],
+    audit_min_words: int,
+    stratified_out: Path | None,
+    comparison_limit: int,
+    pdf_root: Path | None,
+    stratified_seed: int,
+    max_pages_per_doc: int,
+) -> None:
+    """Project Gemini usage from recorded manifests under old vs new routing rules.
+
+    Reads ``manifest.json`` files only — no OCR engine calls.
+    """
+    import json
+
+    from socr.routing.cascade_replay import (
+        ReplayRules,
+        replay_paths,
+        select_stratified_comparison_pages,
+    )
+
+    manifest_paths: list[Path] = []
+    for p in paths:
+        if p.is_file() and p.name == "manifest.json":
+            manifest_paths.append(p)
+        elif p.is_dir():
+            manifest_paths.extend(sorted(p.rglob("manifest.json")))
+    if not manifest_paths:
+        raise click.ClickException("no manifest.json files found in the given paths")
+    rules = ReplayRules(audit_min_words=audit_min_words)
+    summary = replay_paths(manifest_paths, rules=rules)
+    if stratified_out is not None:
+        stratified = select_stratified_comparison_pages(
+            manifest_paths,
+            rules=rules,
+            limit=comparison_limit,
+            pdf_root=pdf_root,
+            seed=stratified_seed,
+            max_pages_per_doc=max_pages_per_doc,
+        )
+        summary["stratified_comparison"] = {
+            "comparison_limit": stratified["comparison_limit"],
+            "max_pages_per_doc": stratified["max_pages_per_doc"],
+            "selection_seed": stratified["selection_seed"],
+            "pool_size": stratified["pool_size"],
+            "selected_count": stratified["selected_count"],
+            "selected_manifest_count": stratified["selected_manifest_count"],
+            "stratum_counts_in_pool": stratified["stratum_counts_in_pool"],
+            "gemini_block_reasons": stratified["gemini_block_reasons"],
+        }
+        stratified_out.parent.mkdir(parents=True, exist_ok=True)
+        stratified_out.write_text(json.dumps(stratified, indent=2), encoding="utf-8")
+    click.echo(json.dumps(summary, indent=2))
 
 
 @cli.command("judge-benchmark")

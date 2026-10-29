@@ -132,6 +132,7 @@ from socr.judge.table_verdict import (
     TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
 )
+from socr.routing.cascade_policy import sparse_signals_from_page_assessment
 from socr.pipeline.agentic import (
     REASON_PROVIDER_TIMEOUT,
     REJUDGE_ACCEPTED,
@@ -1809,6 +1810,7 @@ class UnifiedPipeline:
     #: generation probe ("" when it was not, or none is pinned); surfaced by
     #: ``_refuse_cloud_pinned_qwen_rung``.
     _qwen_cloud_pin_unavailable: str = ""
+    _gemma_cloud_pin_unavailable: str = ""
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -1855,6 +1857,17 @@ class UnifiedPipeline:
         #: the mapping, so the object that produced a refusal is not called
         #: again this run whether or not it advertises its kind.
         self._table_rung_refused_callables: list = []
+        #: Gemini OCR pages consumed this run (``--max-paid-pages``).
+        self._paid_gemini_pages_used: int = 0
+        #: True after a spending-cap / quota-exhausted Gemini response; blocks further calls.
+        self._gemini_quota_circuit_open: bool = False
+        self._gemini_paid_disabled_reason: str | None = None
+        self._gemini_circuit_skips: int = 0
+        self._gemini_transient_retried_pages: set[int] = set()
+        #: Pages that already consumed Gemini's one empty-answer retry this run.
+        self._gemini_empty_retry_used: set[int] = set()
+        #: Pages still empty after that retry — no further Gemini calls this run.
+        self._gemini_empty_exhausted_pages: set[int] = set()
         #: The rung callables this run has already CALLED without a refusal.
         #: Cold review round 5: identity is authoritative for a callable we
         #: have observed; the kind-level breaker applies only to callables we
@@ -2258,6 +2271,8 @@ class UnifiedPipeline:
             # would route (or refuse) differently.
             "max_cost_per_page_pinned": getattr(cfg, "max_cost_per_page_pinned", False),
             "cost_budget": cfg.cost_budget,
+            "max_paid_pages": getattr(cfg, "max_paid_pages", None),
+            "max_paid_pages_pinned": getattr(cfg, "max_paid_pages_pinned", False),
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
             # would silently ship a mix of escalated and non-escalated pages.
@@ -2583,6 +2598,8 @@ class UnifiedPipeline:
         # pre-gate and per-file answers must agree.
         if not self._in_batch_run:
             self._reset_table_judge_rung_probes()
+        else:
+            self._reset_gemini_per_document_empty_state()
         self._report_inert_config()
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
@@ -3405,6 +3422,8 @@ class UnifiedPipeline:
         else:
             available = engine.is_available()
 
+        gemini_blocked: list[int] = []
+
         if not available:
             logger.warning(f"{engine.name} not available for {label} OCR")
             if not self.config.quiet:
@@ -3434,6 +3453,60 @@ class UnifiedPipeline:
                         )
                     )
             return outputs
+
+        if engine_type == EngineType.GEMINI and self._max_paid_pages_limit() is not None:
+            remaining = self._gemini_paid_budget_remaining() or 0
+            gemini_blocked = page_nums[remaining:]
+            page_nums = page_nums[:remaining]
+            if gemini_blocked:
+                logger.warning(
+                    "%s: skipping %s page(s) — max_paid_pages budget exhausted",
+                    engine.name,
+                    len(gemini_blocked),
+                )
+                if not self.config.quiet:
+                    console.print(
+                        f"  [yellow]{engine.name}: max_paid_pages cap reached — "
+                        f"skipping {len(gemini_blocked)} page(s)[/yellow]"
+                    )
+            if not page_nums:
+                return [
+                    self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                ]
+            self._record_gemini_paid_pages(len(page_nums))
+
+        if engine_type == EngineType.GEMINI and self._gemini_quota_circuit_open:
+            self._gemini_circuit_skips += len(page_nums)
+            if state.paid_disabled is not None:
+                state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
+            skipped = [self._gemini_circuit_blocked_output(pn, engine.name) for pn in page_nums]
+            if gemini_blocked:
+                skipped.extend(
+                    self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                )
+            return skipped
+
+        gemini_empty_blocked: list[int] = []
+        if engine_type == EngineType.GEMINI and self._gemini_empty_exhausted_pages:
+            gemini_empty_blocked = [
+                pn for pn in page_nums if pn in self._gemini_empty_exhausted_pages
+            ]
+            page_nums = [pn for pn in page_nums if pn not in self._gemini_empty_exhausted_pages]
+            if gemini_empty_blocked and not self.config.quiet:
+                console.print(
+                    f"  [yellow]{engine.name}: skipping {len(gemini_empty_blocked)} page(s) — "
+                    "empty response already retried once this run[/yellow]"
+                )
+            if not page_nums:
+                blocked = [
+                    self._gemini_empty_exhausted_output(pn, engine.name)
+                    for pn in gemini_empty_blocked
+                ]
+                if gemini_blocked:
+                    blocked.extend(
+                        self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                    )
+                return blocked
 
         if not self.config.quiet:
             console.print(
@@ -3477,9 +3550,72 @@ class UnifiedPipeline:
                     continue
             final.append(po)
 
+        if engine_type == EngineType.GEMINI:
+            import time as _time
+
+            from socr.routing.gemini_quota import (
+                GEMINI_TRANSIENT_BACKOFF_SEC,
+                gemini_quota_failure_class,
+            )
+
+            adjusted: list[PageOutput] = []
+            for po in final:
+                detail_parts: list[str] = []
+                for attr in ("error", "skip_reason"):
+                    raw = getattr(po, attr, None)
+                    if isinstance(raw, str) and raw.strip():
+                        detail_parts.append(raw.strip())
+                detail = " ".join(detail_parts)
+                kind = gemini_quota_failure_class(detail)
+                if kind == "exhausted":
+                    self._trip_gemini_quota_circuit(state, detail)
+                    adjusted.append(po)
+                    continue
+                if (
+                    kind == "transient"
+                    and len(page_nums) == 1
+                    and po.page_num not in self._gemini_transient_retried_pages
+                ):
+                    self._gemini_transient_retried_pages.add(po.page_num)
+                    if not self.config.quiet:
+                        console.print(
+                            f"  [yellow]{engine.name}: transient quota on p{po.page_num}; "
+                            f"backoff {GEMINI_TRANSIENT_BACKOFF_SEC:.0f}s, retry once[/yellow]"
+                        )
+                    _time.sleep(GEMINI_TRANSIENT_BACKOFF_SEC)
+                    retry_out = engine.process_pages(
+                        pdf_path=state.handle.path,
+                        page_nums=[po.page_num],
+                        config=run_config,
+                        dpi=run_config.render_dpi,
+                        subprocess_timeout=subprocess_timeout_sec,
+                    )
+                    if retry_out:
+                        po = retry_out[0]
+                        detail_parts = []
+                        for attr in ("error", "skip_reason"):
+                            raw = getattr(po, attr, None)
+                            if isinstance(raw, str) and raw.strip():
+                                detail_parts.append(raw.strip())
+                        detail = " ".join(detail_parts)
+                        if gemini_quota_failure_class(detail) == "exhausted":
+                            self._trip_gemini_quota_circuit(state, detail)
+                adjusted.append(po)
+            final = adjusted
+
         if not self.config.quiet:
             ok = sum(1 for p in final if p.status == PageStatus.SUCCESS)
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
+
+        if gemini_empty_blocked:
+            final.extend(
+                self._gemini_empty_exhausted_output(pn, engine.name) for pn in gemini_empty_blocked
+            )
+
+        if gemini_blocked:
+            final.extend(
+                self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+            )
 
         return final
 
@@ -3505,22 +3641,36 @@ class UnifiedPipeline:
         ]
         if not empty:
             return page_outputs
+        is_gemini = engine.name == "gemini"
+        retry_pages = [
+            pn for pn in empty if not (is_gemini and pn in self._gemini_empty_retry_used)
+        ]
         can_retry = remaining_timeout_sec is None or remaining_timeout_sec > 0
         retried: dict[int, PageOutput] = {}
-        if can_retry:
+        if can_retry and retry_pages:
             logger.warning(
-                "%s returned an empty answer for page(s) %s; retrying once", engine.name, empty
+                "%s returned an empty answer for page(s) %s; retrying once",
+                engine.name,
+                retry_pages,
             )
+            if is_gemini:
+                self._gemini_empty_retry_used.update(retry_pages)
             retried = {
                 po.page_num: po
                 for po in engine.process_pages(
                     pdf_path=state.handle.path,
-                    page_nums=empty,
+                    page_nums=retry_pages,
                     config=run_config,
                     dpi=run_config.render_dpi,
                     subprocess_timeout=remaining_timeout_sec,
                 )
             }
+        if is_gemini:
+            for pn in empty:
+                if pn not in self._gemini_empty_retry_used and (
+                    pn not in retry_pages or not can_retry
+                ):
+                    self._gemini_empty_retry_used.add(pn)
         for page_num in empty:
             second = retried.get(page_num)
             state.events.append(
@@ -3558,7 +3708,12 @@ class UnifiedPipeline:
                 console.print(
                     f"  [yellow]p{page_num}: {engine.name} empty answer; {outcome}[/yellow]"
                 )
-        return [retried.get(po.page_num, po) for po in page_outputs]
+        merged = [retried.get(po.page_num, po) for po in page_outputs]
+        if is_gemini:
+            for po in merged:
+                if po.failure_mode is FailureMode.EMPTY_RESPONSE:
+                    self._gemini_empty_exhausted_pages.add(po.page_num)
+        return merged
 
     def _emit_native_table_structure_events(self, state, assessment) -> None:
         """Record one durable audit event per page with a native table defect.
@@ -8302,6 +8457,114 @@ class UnifiedPipeline:
         self._table_rung_refused_this_run = set()
         self._table_rung_refused_callables = []
         self._table_rung_seen_callables = []
+        self._paid_gemini_pages_used = 0
+        self._gemini_quota_circuit_open = False
+        self._gemini_paid_disabled_reason = None
+        self._gemini_circuit_skips = 0
+        self._gemini_transient_retried_pages = set()
+        self._gemini_empty_retry_used = set()
+        self._gemini_empty_exhausted_pages = set()
+
+    def _reset_gemini_per_document_empty_state(self) -> None:
+        """Batch: empty-retry state is per document, not shared across PDFs."""
+        self._gemini_empty_retry_used = set()
+        self._gemini_empty_exhausted_pages = set()
+
+    def _max_paid_pages_limit(self) -> int | None:
+        limit = self.config.max_paid_pages
+        if limit is None:
+            return None
+        return max(0, int(limit))
+
+    def _gemini_paid_budget_remaining(self) -> int | None:
+        limit = self._max_paid_pages_limit()
+        if limit is None:
+            return None
+        return max(0, limit - self._paid_gemini_pages_used)
+
+    def _record_gemini_paid_pages(self, count: int) -> None:
+        if count <= 0:
+            return
+        self._paid_gemini_pages_used += count
+        limit = self._max_paid_pages_limit()
+        if limit is not None and not self.config.quiet:
+            logger.info(
+                "Gemini paid-page budget: %s/%s used this run",
+                self._paid_gemini_pages_used,
+                limit,
+            )
+
+    def _trip_gemini_quota_circuit(self, state: DocumentState, detail: str) -> None:
+        if self._gemini_quota_circuit_open:
+            return
+        from socr.core.audit_log import PAID_DISABLED_KIND, AuditEvent
+        from socr.routing.gemini_quota import PAID_DISABLED_QUOTA_EXHAUSTED
+
+        self._gemini_quota_circuit_open = True
+        self._gemini_paid_disabled_reason = PAID_DISABLED_QUOTA_EXHAUSTED
+        state.paid_disabled = {
+            "reason": PAID_DISABLED_QUOTA_EXHAUSTED,
+            "detail": (detail or "")[:500],
+            "pages_skipped": self._gemini_circuit_skips,
+        }
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind=PAID_DISABLED_KIND,
+                engine="gemini",
+                detail=(detail or PAID_DISABLED_QUOTA_EXHAUSTED)[:500],
+                data={"paid_disabled": PAID_DISABLED_QUOTA_EXHAUSTED},
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                "[red]Gemini paid OCR disabled for the rest of this run "
+                "(quota/spending cap exhausted)[/red]"
+            )
+
+    def _gemini_empty_exhausted_output(self, page_num: int, engine_name: str) -> PageOutput:
+        from socr.routing.gemini_quota import GEMINI_EMPTY_EXHAUSTED_SKIP
+
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.EMPTY_RESPONSE,
+            error=GEMINI_EMPTY_EXHAUSTED_SKIP,
+            skip_reason=GEMINI_EMPTY_EXHAUSTED_SKIP,
+            audit_passed=False,
+        )
+
+    def _gemini_circuit_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
+        from socr.routing.gemini_quota import PAID_DISABLED_SKIP_REASON
+
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=PAID_DISABLED_SKIP_REASON,
+            skip_reason=PAID_DISABLED_SKIP_REASON,
+            audit_passed=False,
+        )
+
+    def _gemini_budget_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
+        limit = self._max_paid_pages_limit() or 0
+        msg = (
+            f"max_paid_pages exhausted ({self._paid_gemini_pages_used}/{limit} "
+            f"Gemini pages this run)"
+        )
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=msg,
+            audit_passed=False,
+        )
 
     def _executing_identity(self, rr, executed_rungs: list, index: int) -> str:
         """Who actually ran this rung result. Identity first, position last.
@@ -11116,6 +11379,7 @@ class UnifiedPipeline:
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
         available = self._refuse_cloud_pinned_qwen_rung(state, available)
+        self._surface_gemma_cloud_pin_unavailable(state)
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -11565,6 +11829,15 @@ class UnifiedPipeline:
                             state, page_num, output_dir, ladder, judge
                         )
                         if decision is None:
+                            _assessment_pages = (
+                                self._last_assessment.pages
+                                if self._last_assessment is not None
+                                else None
+                            ) or []
+                            _pa = next(
+                                (p for p in _assessment_pages if p.page_num == page_num),
+                                None,
+                            )
                             decision = route_page(
                                 page_num,
                                 ladder,
@@ -11573,6 +11846,8 @@ class UnifiedPipeline:
                                 remaining_budget=remaining,
                                 provider_timeout=provider_timeout,
                                 on_candidate=_ingest_candidate,
+                                sparse_signals=sparse_signals_from_page_assessment(_pa),
+                                audit_min_words=self.config.audit_min_words,
                             )
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
@@ -12370,12 +12645,22 @@ class UnifiedPipeline:
             self._record_page_retries(state, _retried_pages)
 
         # -- Post-loop summary ---------------------------------------------------
+        from socr.routing.gemini_quota import format_gemini_run_summary, summarize_gemini_attempts
+
+        gemini_stats = summarize_gemini_attempts(state)
+        if gemini_stats:
+            state.gemini_run_stats = gemini_stats
+        if self._gemini_paid_disabled_reason and state.paid_disabled is not None:
+            state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
         if not self.config.quiet:
             total_cost = state.total_cost
             if total_cost is None:
                 console.print("  total cost: unknown (unmetered direct call)")
             else:
                 console.print(f"  total cost: ${total_cost:.4f}")
+            gemini_line = format_gemini_run_summary(gemini_stats)
+            if gemini_line:
+                console.print(f"  [dim]{gemini_line}[/dim]")
             if halt_reason:
                 console.print(f"  [red]Halted: {halt_reason}[/red]")
 
@@ -14428,25 +14713,37 @@ class UnifiedPipeline:
         Applies the probe's side effects (pin-failure flag, unservable report).
         """
         probe = self._probe_engines_for_agentic()
-        available, unservable, pin_reason = probe
-        self._qwen_cloud_pin_unavailable = pin_reason
+        available, unservable, qwen_pin_reason, gemma_pin_reason = probe
+        self._qwen_cloud_pin_unavailable = qwen_pin_reason
+        self._gemma_cloud_pin_unavailable = gemma_pin_reason
         self._report_unservable_engines(unservable)
         return available
 
-    def _probe_engines_for_agentic(self) -> tuple[list, list, str]:
-        """Side-effect-free reachability probe: ``(available, unservable, pin_reason)``.
+    def _probe_engines_for_agentic(
+        self,
+    ) -> tuple[list, list, str, str]:
+        """Side-effect-free reachability probe.
 
+        Returns ``(available, unservable, qwen_pin_reason, gemma_pin_reason)``.
         Touches no pipeline state; the caller decides what to record (GH-940).
         """
-        from socr.core.providers import DEFAULT_PROVIDERS
+        from socr.core.providers import DEFAULT_PROVIDERS, ProviderProfile
 
         from socr.engines.qwen import pinned_cloud_model_available, pinned_cloud_qwen_model
         from socr.engines.registry import has_cli_engine
 
         available = []
         unservable: list[EngineType] = []
-        pin_reason = ""
-        for engine_type in self.config.enabled_engines:
+        qwen_pin_reason = ""
+        gemma_pin_reason = ""
+        from socr.routing.cascade_policy import ordered_enabled_engines
+
+        enabled = set(self.config.enabled_engines)
+        engine_order = ordered_enabled_engines(enabled)
+
+        for engine_type in engine_order:
+            if engine_type not in enabled:
+                continue
             prof = DEFAULT_PROVIDERS.get(engine_type)
             if prof is None:
                 continue
@@ -14470,8 +14767,32 @@ class UnifiedPipeline:
                         if ok:
                             available.append(prof)
                         else:
-                            pin_reason = reason
+                            qwen_pin_reason = reason
                 except Exception:  # availability probe must never crash routing
+                    pass
+                continue
+            if engine_type is EngineType.GEMMA:
+                if not self.config.enable_gemma_cloud:
+                    continue
+                from socr.engines.gemma_cloud import GemmaCloudEngine
+
+                try:
+                    ok, reason = GemmaCloudEngine().is_available_for_config(self.config)
+                    if ok:
+                        model = self.config.gemma_cloud_model or prof.model
+                        available.append(
+                            ProviderProfile(
+                                engine=prof.engine,
+                                tier=prof.tier,
+                                cost_per_page_usd=prof.cost_per_page_usd,
+                                id=prof.id,
+                                backend=prof.backend,
+                                model=model,
+                            )
+                        )
+                    else:
+                        gemma_pin_reason = reason
+                except Exception:
                     pass
                 continue
             try:
@@ -14479,7 +14800,7 @@ class UnifiedPipeline:
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
                 pass
-        return available, unservable, pin_reason
+        return available, unservable, qwen_pin_reason, gemma_pin_reason
 
     #: GH-905: cap on the provider error folded into a journaled ``skip_reason``.
     #: CLI stderr can be long and multi-line, and this string is copied into every
@@ -14509,6 +14830,20 @@ class UnifiedPipeline:
         if error in reason:
             return reason
         return f"{reason}: {error}"
+
+    def _surface_gemma_cloud_pin_unavailable(self, state) -> None:
+        """Doc-level audit when Gemma cloud was enabled but the probe failed."""
+        unavailable = self._gemma_cloud_pin_unavailable
+        if not unavailable:
+            return
+        self._gemma_cloud_pin_unavailable = ""
+        self._surface_doc_event(
+            state,
+            "gemma_cloud_unavailable",
+            unavailable,
+            log_label="gemma cloud rung unavailable",
+            console_label="gemma_cloud rung unavailable",
+        )
 
     def _refuse_cloud_pinned_qwen_rung(self, state, available: list) -> list:
         """Drop the qwen rung when its PINNED model is a cloud model the policy forbids.
@@ -15871,14 +16206,17 @@ class UnifiedPipeline:
         NOT qualify — a dense page that merely contains an image must keep
         the full gate, and scanned pages (whose text-layer word counts are
         junk) never earn leniency from this.
+
+        Offline cascade replay uses the wider ``sparse_paid_escalation_ok`` helper in
+        ``cascade_policy``; this hook feeds only the heuristic page judge.
         """
+        from socr.routing.cascade_policy import heuristic_sparse_page_ok
+
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        if pa is None or not pa.is_born_digital:
-            return False
-        return (pa.word_count or 0) < self.config.audit_min_words
+        return heuristic_sparse_page_ok(pa, audit_min_words=self.config.audit_min_words)
 
     # ------------------------------------------------------------------
     # Assembly persistence helpers (PP-1)
@@ -21199,6 +21537,10 @@ class UnifiedPipeline:
             doc_extras = dict(run_extras)
             if state.table_counts is not None:
                 doc_extras["tables"] = dict(state.table_counts)
+            if getattr(state, "gemini_run_stats", None):
+                doc_extras["gemini_run_stats"] = dict(state.gemini_run_stats)
+            if getattr(state, "paid_disabled", None):
+                doc_extras["paid_disabled"] = dict(state.paid_disabled)
             blank_meta = self._shipped_blank_pages(state)
             if blank_meta:
                 doc_extras["blank_pages"] = blank_meta

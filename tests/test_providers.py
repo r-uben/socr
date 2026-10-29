@@ -33,15 +33,15 @@ def test_ladder_is_cheapest_first():
 
 
 def test_free_engines_tie_broken_by_priority():
-    # All local/free -> order falls back to ENGINE_PRIORITY (GLM<DeepSeek<Marker)
+    # All local/free -> order falls back to ENGINE_PRIORITY (Marker before GLM)
     ladder = provider_ladder(
         {EngineType.MARKER, EngineType.DEEPSEEK, EngineType.GLM},
         include_ineligible=True,
     )
     assert [p.engine for p in ladder] == [
+        EngineType.MARKER,
         EngineType.GLM,
         EngineType.DEEPSEEK,
-        EngineType.MARKER,
     ]
 
 

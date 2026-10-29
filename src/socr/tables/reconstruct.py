@@ -46,6 +46,10 @@ from collections import defaultdict
 
 from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
 from socr.core.table_grid import NUM_TOKEN_RE as _NUM_TOKEN_RE
+from socr.tables.column_gutter import (
+    detect_column_gutter as _detect_column_gutter,
+    median_word_gap as _median_word_gap,
+)
 from socr.core.table_grid import NUMERIC_RE as _NUMERIC_RE
 
 # Private aliases so same-package callers (native_verifier, header_repair)
@@ -2034,78 +2038,6 @@ def _fold_marginal_bands(rows_by_y: dict) -> dict:
         # arity, so the extra element is inert everywhere else.
         folded[nearest].extend((*w, _FOLDED_MARGINAL) for w in rows_by_y[y])
     return folded
-
-
-def _median_word_gap(words: list) -> float | None:
-    """Median horizontal gap between horizontally-adjacent words on the same
-    PyMuPDF text line (``block_no``, ``line_no`` -- tuple indices 5 and 6).
-
-    The page's own yardstick for "a normal word space", reused (not
-    reinvented) as the unit for ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` when
-    ``_detect_column_gutter`` (GH-152) decides whether an x-gap is a genuine
-    column gutter rather than ordinary word spacing. Mirrors
-    ``socr.core.born_digital._median_word_space_width``, kept local because
-    that helper is private to its own module. Returns ``None`` with fewer
-    than one measurable gap.
-    """
-    by_line: dict[tuple, list] = defaultdict(list)
-    for w in words:
-        by_line[(w[5], w[6])].append(w)
-
-    gaps: list[float] = []
-    for line_words in by_line.values():
-        ordered = sorted(line_words, key=lambda w: w[0])
-        for a, b in zip(ordered, ordered[1:]):
-            gap = b[0] - a[2]
-            if gap > 0:
-                gaps.append(gap)
-
-    if not gaps:
-        return None
-    return statistics.median(gaps)
-
-
-def _detect_column_gutter(words: list) -> float | None:
-    """Find a single vertical gutter that splits ``words`` into two disjoint
-    x-bands (GH-152: two tables printed side by side are otherwise rowized as
-    one region, and their values get attributed to the wrong table's labels).
-
-    A candidate gutter is an x-interval crossed by NO word's bbox, anywhere on
-    the page, that is wider than ``ALIGNED_RUN_GAP_MAX_WORD_SPACES`` (reused
-    from ``born_digital``, not a new constant -- see that constant's docstring
-    for the measurement backing it) times this word list's own median word
-    gap. Any word spanning the interval -- a running header, a full-width
-    caption -- rules it out, so a two-column layout with a spanning line fails
-    closed to today's single-region behaviour.
-
-    Returns ``None`` (do not split) when zero or more than one such interval
-    is found. More than one means 3+ x-bands, which GH-152 leaves unhandled
-    rather than guessing a merge order for the middle band.
-    """
-    if len(words) < 2:
-        return None
-    word_gap = _median_word_gap(words)
-    if word_gap is None:
-        return None
-    min_gutter_pt = ALIGNED_RUN_GAP_MAX_WORD_SPACES * word_gap
-
-    intervals = sorted((w[0], w[2]) for w in words)
-    merged: list[list[float]] = []
-    for x0, x1 in intervals:
-        if merged and x0 <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], x1)
-        else:
-            merged.append([x0, x1])
-
-    gutters = [
-        (merged[i][1], merged[i + 1][0])
-        for i in range(len(merged) - 1)
-        if merged[i + 1][0] - merged[i][1] >= min_gutter_pt
-    ]
-    if len(gutters) != 1:
-        return None
-    gap_start, gap_end = gutters[0]
-    return (gap_start + gap_end) / 2.0
 
 
 def _has_row_labels(words: list) -> bool:

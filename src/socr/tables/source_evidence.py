@@ -61,6 +61,19 @@ TESSERACT_WITNESS_TIMEOUT_SEC: float = 4.0
 # Alphabetic runs in evidence text: at least _MIN_CONTENT_TOKEN_LEN chars.
 _CONTENT_TOKEN_RE = re.compile(rf"[A-Za-z][A-Za-z0-9\-]{{{_MIN_CONTENT_TOKEN_LEN - 1},}}")
 
+# LaTeX control words (``\ldots``, ``\frac``) are markup, not table labels (#1246).
+_LATEX_CMD_RE = re.compile(r"\\[A-Za-z]+(?:\{[^{}]*\})?")
+
+
+def _strip_latex_markup_for_labels(text: str) -> str:
+    """Remove LaTeX commands/delimiters before content-label tokenization."""
+    if not text:
+        return text
+    text = text.replace("$", " ")
+    text = _LATEX_CMD_RE.sub(" ", text)
+    text = re.sub(r"[{}]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def _content_token(raw: str) -> str | None:
     """Fold a raw ``_CONTENT_TOKEN_RE`` match to a comparable label token.
@@ -732,7 +745,8 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                 # evidence on scanned pages.
                 if row_idx == 0:
                     continue
-                for m in _CONTENT_TOKEN_RE.finditer(normalized):
+                label_text = _strip_latex_markup_for_labels(normalized)
+                for m in _CONTENT_TOKEN_RE.finditer(label_text):
                     token = _content_token(m.group(0))
                     if token is not None:
                         raw_content.add(token)

@@ -30,6 +30,7 @@ class EngineType(str, Enum):
     MISTRAL = "mistral"
     GEMINI = "gemini"
     MARKER = "marker"
+    GEMMA = "gemma"  # Gemma vision via Ollama Cloud (distinct ladder rung from Qwen)
     GLM = "glm"  # GLM-OCR via Ollama or transformers (local)
     QWEN = "qwen"  # Qwen-VL via ollama/vllm/cloud API (local-or-cloud, best open OCR)
     # HPC-only types (not backed by sibling CLIs — use vLLM HTTP API directly)
@@ -42,14 +43,15 @@ class EngineType(str, Enum):
 # DeepSeek 0.09, so it is the local model worth trying first.
 ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.QWEN: 0,
-    EngineType.GLM: 1,
-    EngineType.NOUGAT: 2,
-    EngineType.DEEPSEEK: 3,
-    EngineType.MARKER: 4,
-    EngineType.GEMINI: 5,
-    EngineType.MISTRAL: 6,
-    EngineType.DEEPSEEK_VLLM: 7,
-    EngineType.VLLM: 8,
+    EngineType.MARKER: 1,
+    EngineType.GEMMA: 2,
+    EngineType.GLM: 3,
+    EngineType.NOUGAT: 4,
+    EngineType.DEEPSEEK: 5,
+    EngineType.GEMINI: 6,
+    EngineType.MISTRAL: 7,
+    EngineType.DEEPSEEK_VLLM: 8,
+    EngineType.VLLM: 9,
 }
 
 # Auto-selection order: try CLI engines until one is available.
@@ -65,8 +67,9 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 # only via an explicit --primary. Empirics in [[reference-sococrbench]].
 AUTO_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # local qwen3-vl:30b-a3b-instruct — free; native PDF-free per-page
-    EngineType.GEMINI,  # Best quality, paid — escalation when Qwen is unavailable
     EngineType.MARKER,  # Local, layout-aware
+    EngineType.GEMMA,  # Ollama Cloud Gemma — free tier before paid Gemini
+    EngineType.GEMINI,  # Best quality, paid — last resort
     EngineType.GLM,  # Local, small model, fast
 ]
 
@@ -335,7 +338,7 @@ class PipelineConfig:
     # fingerprint. `--no-audit` (its CLI setter) is now rejected in cli.py, and a
     # config file naming it gets an explanation via ``_FROM_FILE_REMOVED_FIELDS``.
     # ``HPCConfig.audit_enabled`` is a DIFFERENT field and is still live.
-    audit_min_words: int = 50
+    audit_min_words: int = 40
     # VLM judge on HARD pages (tables/equations): a vision model checks the OCR
     # against the page image to catch SEMANTIC corruption the heuristics can't —
     # flipped signs, wrong digits (0.001->0.007), swapped columns. Rejected pages
@@ -397,6 +400,11 @@ class PipelineConfig:
     # touching the "0 = no cap" default every other caller relies on.
     max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
+    # Hard cap on Gemini OCR pages per public run (``process`` or one ``process_batch``).
+    # ``None`` = unlimited (default). ``0`` = no Gemini pages. Counts each page image
+    # sent to the Gemini engine rung, across every document in a batch.
+    max_paid_pages: int | None = None
+    max_paid_pages_pinned: bool = False
     write_manifest: bool = False  # write reproducibility manifest + blob cache
     # Agentic loop: after every page has run once, run each page that FAILED (its
     # output is an ERROR page: no usable reading, or the fail-closed marker) once
@@ -541,6 +549,19 @@ class PipelineConfig:
     qwen_model_pinned: bool = False
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
+    #: When True, marker-ocr runs with ``--force-ocr`` (required on scans with a
+    #: stale text layer — see issue #1243).
+    marker_force_ocr: bool = True
+    #: Ollama Cloud Gemma vision model for the dedicated ``gemma`` ladder rung
+    #: (on by default before paid Gemini). Override with ``--gemma-cloud-model``;
+    #: must be a reachable Ollama ``:cloud`` tag (local tags are rejected).
+    gemma_cloud_model: str = "gemma4:31b-cloud"
+    #: Send page images to Ollama Cloud on the Gemma ladder rung (disable with
+    #: ``--no-gemma-cloud`` or ``enable_gemma_cloud: false`` in config).
+    enable_gemma_cloud: bool = True
+    gemma_cloud_model_pinned: bool = False
+    gemma_crop_dpi: int = 300
+    gemma_max_output_tokens: int = 4096
     gemini_model: str = DEFAULT_GEMINI_MODEL
     gemini_task: str = "convert"  # "convert", "extract", "table", "describe_figure"
     mistral_model: str = "mistral-ocr-latest"

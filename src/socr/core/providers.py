@@ -119,6 +119,15 @@ PROFILE_MARKER = ProviderProfile(
     model="marker",
 )
 
+PROFILE_GEMMA_CLOUD = ProviderProfile(
+    engine=EngineType.GEMMA,
+    tier=TIER_CLOUD,
+    cost_per_page_usd=0.0,
+    id="gemma-cloud",
+    backend="ollama-cloud",
+    model="gemma4:31b-cloud",
+)
+
 PROFILE_GLM = ProviderProfile(
     engine=EngineType.GLM,
     tier=TIER_LOCAL,
@@ -197,6 +206,7 @@ DEFAULT_PROVIDERS: dict[EngineType, ProviderProfile] = {
     EngineType.NOUGAT: PROFILE_NOUGAT,
     EngineType.DEEPSEEK: PROFILE_DEEPSEEK,
     EngineType.MARKER: PROFILE_MARKER,
+    EngineType.GEMMA: PROFILE_GEMMA_CLOUD,
     EngineType.GEMINI: PROFILE_GEMINI,
     EngineType.MISTRAL: PROFILE_MISTRAL,
     EngineType.DEEPSEEK_VLLM: PROFILE_DEEPSEEK_VLLM,
@@ -211,6 +221,7 @@ _ALL_PROFILES: tuple[ProviderProfile, ...] = (
     PROFILE_QWEN_CLOUD,
     PROFILE_GEMINI,
     PROFILE_MARKER,
+    PROFILE_GEMMA_CLOUD,
     PROFILE_GLM,
     PROFILE_NOUGAT,
     PROFILE_MISTRAL,
@@ -414,6 +425,10 @@ def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
             "qwen_model": profile.model,
             "qwen_model_pinned": True,
         }
+    if profile.id == PROFILE_GEMMA_CLOUD.id:
+        return {
+            "gemma_cloud_model": profile.model,
+        }
     return {}
 
 
@@ -486,6 +501,8 @@ def resolved_provenance(profile: ProviderProfile, config: object) -> tuple[str, 
     """
     if is_cloud_qwen(profile):
         return "ollama", profile.model
+    if profile.engine is EngineType.GEMMA:
+        return profile.backend, getattr(config, "gemma_cloud_model", None) or profile.model
     if profile.engine is EngineType.QWEN:
         # Local import: ``core`` must not import ``engines`` at module scope.
         from socr.engines.qwen import resolve_qwen_intent

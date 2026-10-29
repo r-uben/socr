@@ -984,6 +984,9 @@ def _normalize_cell(raw: str) -> str:
 # alone rather than partially unwrapped.
 _MD_LINK_RE = re.compile(r"^\[(.*)\]\([^()\s]*\)$")
 
+# Thin space, NBSP, narrow NBSP, figure space, word joiner — digit-group separators.
+_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f\u2009\u2007\u2060 ](?=\d)")
+
 
 def _unwrap_markdown_link(tok: str) -> str:
     """Strip a whole-token markdown link wrapper down to its anchor text.
@@ -1022,7 +1025,8 @@ def _decoded_numeric_candidate(tok: str) -> str:
     the check failing loudly. Every caller of this function (``is_numeric_token``,
     ``_numeric_tokens_from_text``) gets the fix from this single point.
     """
-    return strip_presentation(html.unescape(_unwrap_markdown_link(tok)))
+    tok = strip_presentation(html.unescape(_unwrap_markdown_link(tok)))
+    return _THOUSANDS_SPACE_RE.sub("", tok)
 
 
 def is_numeric_token(tok: str) -> bool:
@@ -1031,8 +1035,6 @@ def is_numeric_token(tok: str) -> bool:
     return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
 
 
-# Thin space, NBSP, narrow NBSP, figure space, word joiner — digit-group separators.
-_THOUSANDS_SPACE_RE = re.compile(r"(?<=\d)[\u00a0\u202f\u2009\u2007\u2060 ](?=\d)")
 # Decimal comma: exactly one comma, 1–2 fractional digits, end of numeric body.
 _DECIMAL_COMMA_RE = re.compile(r"^(?P<body>-?\d[\d.,]*),(?P<frac>\d{1,2})$")
 # Single comma + exactly three fractional digits: English thousands vs mis-read decimal.
@@ -1111,6 +1113,7 @@ def _normalize_numeric_token(tok: str) -> str:
     would), not the pre-decode literal.
     """
     tok = _decoded_numeric_candidate(tok)
+    tok = _THOUSANDS_SPACE_RE.sub("", tok)
     # Strip parenthesis wrappers (econ-table negative-sign: (X) means -X)
     if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
         tok = tok[1:-1]
