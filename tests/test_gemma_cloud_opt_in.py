@@ -1,4 +1,4 @@
-"""Gemma cloud egress is opt-in; model pin alone must not probe or process."""
+"""Gemma cloud ladder default-on; opt-out and availability probes."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ from socr.engines.gemma_cloud import GemmaCloudEngine, gemma_cloud_model_availab
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 
-def test_gemma_cloud_model_pin_without_enable_skips_ladder_probe() -> None:
+def test_gemma_cloud_enabled_by_default_in_config() -> None:
+    assert PipelineConfig().enable_gemma_cloud is True
+
+
+def test_no_gemma_cloud_skips_ladder_probe() -> None:
     config = PipelineConfig(
         agentic=True,
         enable_gemma_cloud=False,
@@ -25,7 +29,7 @@ def test_gemma_cloud_model_pin_without_enable_skips_ladder_probe() -> None:
     assert EngineType.GEMMA not in {p.engine for p in available}
 
 
-def test_gemma_cloud_model_pin_without_enable_rejects_process_pages() -> None:
+def test_no_gemma_cloud_rejects_process_pages() -> None:
     engine = GemmaCloudEngine()
     config = PipelineConfig(
         enable_gemma_cloud=False,
@@ -48,7 +52,7 @@ def test_local_gemma_tag_rejected_when_cloud_enabled() -> None:
     assert "cloud" in reason.lower()
 
 
-def test_is_available_for_config_requires_enable_gemma_cloud() -> None:
+def test_is_available_for_config_honors_disable_flag() -> None:
     engine = GemmaCloudEngine()
     config = PipelineConfig(
         enable_gemma_cloud=False,
@@ -58,3 +62,16 @@ def test_is_available_for_config_requires_enable_gemma_cloud() -> None:
     ok, reason = engine.is_available_for_config(config)
     assert ok is False
     assert "disabled" in reason.lower()
+
+
+def test_gemma_probe_when_default_on_and_model_missing() -> None:
+    config = PipelineConfig(agentic=True, enable_gemma_cloud=True)
+    pipe = UnifiedPipeline(config)
+    with patch(
+        "socr.engines.gemma_cloud.GemmaCloudEngine.is_available_for_config",
+        return_value=(False, "gemma4:31b-cloud: model not found"),
+    ):
+        available, unservable, pin_reason = pipe._probe_engines_for_agentic()
+    assert EngineType.GEMMA not in {p.engine for p in available}
+    assert pin_reason is not None
+    assert "gemma" in pin_reason.lower() or "model" in pin_reason.lower()

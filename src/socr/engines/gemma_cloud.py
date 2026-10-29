@@ -5,7 +5,8 @@ repeated-text / image-URL rejection, equation-unverified flag). Judging is
 unchanged: the orchestrator still runs every candidate through the same page
 judge as other ladder rungs.
 
-Cloud egress is opt-in (``enable_gemma_cloud`` / ``--enable-gemma-cloud``).
+Cloud Gemma is on by default (``enable_gemma_cloud``); disable with
+``--no-gemma-cloud`` or ``enable_gemma_cloud: false`` in config.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ class GemmaCloudEngine(BaseEngine):
     def is_available_for_config(self, config: PipelineConfig) -> tuple[bool, str]:
         """Probe ``config.gemma_cloud_model`` when the rung is explicitly enabled."""
         if not config.enable_gemma_cloud:
-            return False, "gemma cloud rung disabled (use --enable-gemma-cloud)"
+            return False, "gemma cloud rung disabled (--no-gemma-cloud)"
         if not self.is_available():
             return False, "qwen-ocr CLI not available"
         model = self.resolved_model_version(config)
@@ -107,11 +108,18 @@ class GemmaCloudEngine(BaseEngine):
             cmd.append("--reprocess")
         return cmd
 
+    @staticmethod
+    def _page_map_for_images_dir(images_dir: Path) -> dict[int, str]:
+        """Map 1..N to rendered PNG stems (filename sort — matches canon engines)."""
+        stems = sorted(p.stem for p in images_dir.glob("*.png"))
+        return {idx + 1: stem for idx, stem in enumerate(stems)}
+
     def _run_cli_on_images(
         self,
         images_dir: Path,
         config: PipelineConfig,
         subprocess_timeout: float | None,
+        page_num_to_stem: dict[int, str] | None = None,
     ) -> tuple[str, int | None, int | None, str]:
         with tempfile.TemporaryDirectory() as tmp:
             cli_out = Path(tmp) / "out"
@@ -133,7 +141,8 @@ class GemmaCloudEngine(BaseEngine):
                     returncode=result.returncode,
                 )
                 return "", inp_tok, out_tok, f"CLI exited {result.returncode}: {detail}"
-            aggregate, err = self._read_aggregated_pages(cli_out, images_dir, {})
+            page_map = page_num_to_stem or self._page_map_for_images_dir(images_dir)
+            aggregate, err = self._read_aggregated_pages(cli_out, images_dir, page_map)
             if err:
                 return "", inp_tok, out_tok, err
             parts = [aggregate[k] for k in sorted(aggregate or {})]
@@ -155,7 +164,7 @@ class GemmaCloudEngine(BaseEngine):
                     status=PageStatus.ERROR,
                     engine=self.name,
                     failure_mode=FailureMode.CLI_ERROR,
-                    error="gemma cloud rung disabled (use --enable-gemma-cloud)",
+                    error="gemma cloud rung disabled (--no-gemma-cloud)",
                     audit_passed=False,
                 )
                 for n in page_nums

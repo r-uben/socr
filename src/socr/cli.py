@@ -244,11 +244,11 @@ def common_options(f):
         help=f"Gemini model for the cloud rung (default {DEFAULT_GEMINI_MODEL}).",
     )(f)
     f = click.option(
-        "--enable-gemma-cloud",
+        "--no-gemma-cloud",
         is_flag=True,
         help=(
-            "Opt in to the Ollama Cloud Gemma vision rung on the agentic ladder "
-            "(default off — no page images are sent to cloud without this flag)."
+            "Disable the Ollama Cloud Gemma vision rung on the agentic ladder "
+            "(default: Gemma cloud is on after qwen and marker, before paid Gemini)."
         ),
     )(f)
     f = click.option(
@@ -474,7 +474,7 @@ def build_config(
     qwen_vllm_url: str | None = None,
     qwen_vllm_model: str | None = None,
     gemini_model: str | None = None,
-    enable_gemma_cloud: bool = False,
+    no_gemma_cloud: bool = False,
     gemma_cloud_model: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
@@ -674,8 +674,8 @@ def build_config(
         config.qwen_vllm_model = qwen_vllm_model
     if gemini_model is not None:
         config.gemini_model = gemini_model
-    if enable_gemma_cloud:
-        config.enable_gemma_cloud = True
+    if no_gemma_cloud:
+        config.enable_gemma_cloud = False
     if gemma_cloud_model is not None:
         config.gemma_cloud_model = gemma_cloud_model
         config.gemma_cloud_model_pinned = True

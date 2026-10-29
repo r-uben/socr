@@ -59,6 +59,7 @@ _FIELD_ALIASES = {
     "hpc_sequential": "hpc.enabled",
     "no_text_coverage": "check_text_coverage",
     "no_recover_uncovered_text": "recover_uncovered_text",
+    "no_gemma_cloud": "enable_gemma_cloud",
 }
 
 # Flags that gate BY CONSTRUCTION rather than through a config read, with the
@@ -165,9 +166,9 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "qwen_model": (AGENTIC, "resolved model for the qwen rung"),
     "qwen_vllm_model": (AGENTIC, "resolved model for the vLLM qwen rung"),
     "gemini_model": (AGENTIC, "model for the gemini cloud rung and its fingerprint"),
-    "enable_gemma_cloud": (
+    "no_gemma_cloud": (
         AGENTIC,
-        "enable_gemma_cloud; gates Gemma ladder probe and GemmaCloudEngine.process_pages",
+        "enable_gemma_cloud (default True); gates Gemma ladder probe and GemmaCloudEngine.process_pages",
     ),
     "gemma_cloud_model": (
         AGENTIC,
