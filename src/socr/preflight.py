@@ -38,7 +38,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from socr.core.ollama_utils import DEFAULT_PROBE_TIMEOUT_SEC, probe_model_generation
+from socr.core.ollama_utils import (
+    DEFAULT_PROBE_TIMEOUT_SEC,
+    OLLAMA_CLOUD_ENDPOINT,
+    probe_model_generation,
+    route_ollama,
+    safe_host_label,
+)
 from socr.core.providers import is_cloud_model, zero_cap_pinned_forbids_cloud
 from socr.engines.registry import get_engine, has_cli_engine
 from socr.tables.extract import probe_openai_server_idle, resolve_ollama_host
@@ -297,6 +303,19 @@ def check_maths_readers(config, pipeline) -> Check:
     return Check(CHECK_MATHS_READERS, True, True, lanes)
 
 
+def table_judge_routes(config) -> str:
+    """Where each reader rung will go, so a run says it before any page (#1254)."""
+    host, model = route_ollama(
+        resolve_ollama_host(config.table_judge_rung1_host), config.table_judge_rung1_model
+    )
+    via = (
+        "the ollama cloud API (OLLAMA_API_KEY)"
+        if host == OLLAMA_CLOUD_ENDPOINT
+        else f"the ollama daemon at {safe_host_label(host)}"
+    )
+    return f"rung 1: {model} via {via}; rung 2: {config.table_judge_rung2_binary} CLI"
+
+
 def check_table_judge(config) -> Check:
     """A table-judge reader rung is reachable (folds the P1 startup notices).
 
@@ -320,14 +339,16 @@ def check_table_judge(config) -> Check:
     from socr.cli import any_table_judge_reader_reachable
 
     if any_table_judge_reader_reachable(config):
-        return Check(CHECK_TABLE_JUDGE, True, True, "a judge rung answers")
+        return Check(
+            CHECK_TABLE_JUDGE, True, True, f"a judge rung answers ({table_judge_routes(config)})"
+        )
     return Check(
         CHECK_TABLE_JUDGE,
         True,
         False,
         f"neither the ollama-cloud rung ({config.table_judge_rung1_model}) nor the CLI rung "
         f"({config.table_judge_rung2_binary}) answered; every table page will ship UNVERIFIED "
-        "(pass --no-table-judge-ladder to ship tables unjudged)",
+        f"(pass --no-table-judge-ladder to ship tables unjudged). Tried: {table_judge_routes(config)}",
     )
 
 

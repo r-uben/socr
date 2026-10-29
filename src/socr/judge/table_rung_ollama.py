@@ -36,6 +36,7 @@ from socr.core.ollama_utils import (
     ollama_endpoint,
     raise_for_status_redacted,
     redact_credentials,
+    route_ollama,
     safe_host_label,
 )
 from socr.judge.table_prompt import build_table_judge_prompt
@@ -88,8 +89,11 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
     ``qwen3-vl:30b-a3b-instruct`` satisfy a request for ``qwen3-vl:8b``.
 
     Cheap by construction -- one GET, no generation, no model load.
+
+    #1254: a cloud-tagged model with an API key set is probed on the direct cloud
+    API, under its cloud name, the same route :func:`_post_chat` will take.
     """
-    resolved = resolve_ollama_host(host)
+    resolved, model = route_ollama(resolve_ollama_host(host), model)
     url, extra = ollama_endpoint(resolved, "/api/tags", strip_slash=True)
     try:
         resp = call_with_total_deadline(
@@ -166,6 +170,12 @@ def _post_chat(host: str, payload: dict[str, Any], timeout: float) -> str:
     than being coerced into a string that would then fail to parse for a
     misleading reason.
     """
+    # #1254: every caller (rung 1, the adjudicator, the cell transcriber) posts
+    # through here, so this is where a cloud model leaves the daemon for the
+    # direct cloud API when a key is set.
+    host, model = route_ollama(host, str(payload.get("model", "")))
+    if model != payload.get("model"):
+        payload = {**payload, "model": model}
     # GH-968: ``timeout`` is httpx's per-read limit; a peer that trickles bytes
     # never trips it. The same value is also the TOTAL deadline.
     url, extra = ollama_endpoint(host, "/api/chat", strip_slash=True)
