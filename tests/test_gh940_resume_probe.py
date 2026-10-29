@@ -35,11 +35,11 @@ def _pipeline(**cfg_kw) -> UnifiedPipeline:
     return UnifiedPipeline(cfg)
 
 
-def _stub_probe(pipeline, available, *, unservable=(), pin=""):
+def _stub_probe(pipeline, available, *, unservable=(), pin="", gemma_pin=""):
     return patch.object(
         pipeline,
         "_probe_engines_for_agentic",
-        return_value=(list(available), list(unservable), pin),
+        return_value=(list(available), list(unservable), pin, gemma_pin),
     )
 
 

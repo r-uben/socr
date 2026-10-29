@@ -8,9 +8,10 @@ from collections import Counter
 PAID_DISABLED_QUOTA_EXHAUSTED = "quota_exhausted"
 PAID_DISABLED_SKIP_REASON = "paid_disabled: quota_exhausted"
 
-# Spending-cap / billing 429s must not retry; transient rate limits may backoff once.
+# Spending-cap 429s must not retry; transient rate limits may backoff once.
+# Do not match bare "billing" (e.g. "503 billing service timeout").
 _GEMINI_SPENDING_CAP_RE = re.compile(
-    r"spending\s+cap|monthly\s+spending|billing|budget\s+exhaust|payment\s+required",
+    r"spending\s+cap|monthly\s+spending|budget\s+exhaust|payment\s+required",
     re.IGNORECASE,
 )
 _GEMINI_TRANSIENT_QUOTA_RE = re.compile(
@@ -21,6 +22,7 @@ _GEMINI_TRANSIENT_QUOTA_RE = re.compile(
 GEMINI_TRANSIENT_BACKOFF_SEC = 3.0
 
 GEMINI_EMPTY_EXHAUSTED_SKIP = "gemini_empty_exhausted: no further calls"
+GEMINI_SKIP_MAX_PAID_PREFIX = "max_paid_pages exhausted"
 
 # HTTP 200 with no parts — gemini-ocr-cli logs this shape (cluster audit, job w/ 15 repeats).
 _GEMINI_EMPTY_RESPONSE_RE = re.compile(
@@ -45,20 +47,34 @@ def gemini_quota_failure_class(text: str) -> str:
     blob = (text or "").strip()
     if not blob:
         return ""
-    if gemini_empty_response_message(blob):
-        return ""
     lower = blob.lower()
     if _GEMINI_SPENDING_CAP_RE.search(blob):
         return "exhausted"
     if "quota exhausted" in lower and "rate" not in lower:
         return "exhausted"
     if "quota/rate-limit" in lower and any(
-        token in lower for token in ("spending", "budget", "billing", "cap")
+        token in lower for token in ("spending", "budget", "cap")
     ):
         return "exhausted"
     if _GEMINI_TRANSIENT_QUOTA_RE.search(blob):
         return "transient"
+    if gemini_empty_response_message(blob):
+        return ""
     return ""
+
+
+def gemini_attempt_skip_kind(attempt) -> str | None:
+    """Synthetic Gemini ladder entry that never invoked the API."""
+    reason = str(getattr(attempt, "skip_reason", "") or "")
+    err = str(getattr(attempt, "error", "") or "")
+    blob = f"{reason} {err}"
+    if reason.startswith("paid_disabled:"):
+        return "gemini_skipped_quota_circuit"
+    if GEMINI_EMPTY_EXHAUSTED_SKIP in reason or GEMINI_EMPTY_EXHAUSTED_SKIP in err:
+        return "gemini_skipped_empty_exhausted"
+    if GEMINI_SKIP_MAX_PAID_PREFIX in blob:
+        return "gemini_skipped_paid_budget"
+    return None
 
 
 def gemini_attempt_failure_kind(attempt) -> str:
@@ -66,8 +82,8 @@ def gemini_attempt_failure_kind(attempt) -> str:
     reason = str(getattr(attempt, "skip_reason", "") or "")
     err = str(getattr(attempt, "error", "") or "")
     blob = f"{reason} {err}".strip()
-    if reason.startswith("paid_disabled:"):
-        return "skipped_quota_circuit"
+    if gemini_attempt_skip_kind(attempt):
+        return "skipped_synthetic"
     if getattr(attempt, "audit_passed", False):
         return "accepted"
     raw_fm = getattr(attempt, "failure_mode", None)
@@ -98,11 +114,13 @@ def summarize_gemini_attempts(state) -> dict[str, int]:
         for attempt in page.attempts or []:
             if not _is_gemini_attempt(attempt):
                 continue
+            skip = gemini_attempt_skip_kind(attempt)
+            if skip:
+                stats[skip] += 1
+                continue
             stats["gemini_call_attempts"] += 1
             kind = gemini_attempt_failure_kind(attempt)
-            if kind == "skipped_quota_circuit":
-                stats["gemini_skipped_quota_circuit"] += 1
-            elif kind == "accepted":
+            if kind == "accepted":
                 stats["gemini_pages_accepted"] += 1
             elif kind == "quota":
                 stats["gemini_failures_quota"] += 1
@@ -123,7 +141,15 @@ def summarize_gemini_attempts(state) -> dict[str, int]:
 
 def format_gemini_run_summary(stats: dict[str, int]) -> str:
     """One-line headline: accepted calls vs total attempts, with failure buckets."""
-    if not stats.get("gemini_call_attempts") and not stats.get("gemini_skipped_quota_circuit"):
+    skip_total = sum(
+        stats.get(k, 0)
+        for k in (
+            "gemini_skipped_quota_circuit",
+            "gemini_skipped_empty_exhausted",
+            "gemini_skipped_paid_budget",
+        )
+    )
+    if not stats.get("gemini_call_attempts") and not skip_total:
         return ""
     accepted = stats.get("gemini_pages_accepted", 0)
     attempts = stats.get("gemini_call_attempts", 0)
@@ -136,6 +162,8 @@ def format_gemini_run_summary(stats: dict[str, int]) -> str:
         ("gemini_failures_cli_error", "cli_error"),
         ("gemini_failures_judge_rejected", "judge-rejected"),
         ("gemini_skipped_quota_circuit", "skipped-after-cap"),
+        ("gemini_skipped_empty_exhausted", "skipped-empty-exhausted"),
+        ("gemini_skipped_paid_budget", "skipped-paid-budget"),
     ):
         n = stats.get(key, 0)
         if n:

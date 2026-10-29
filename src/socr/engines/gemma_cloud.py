@@ -18,7 +18,10 @@ import time
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
-from socr.core.ollama_utils import DEFAULT_PROBE_TIMEOUT_SEC, probe_model_generation
+from socr.core.ollama_utils import probe_model_generation
+
+# Bounded per-document probe — full DEFAULT_PROBE_TIMEOUT_SEC (120s) is for qwen/judge.
+GEMMA_CLOUD_PROBE_TIMEOUT_SEC = 5.0
 from socr.core.providers import PROFILE_GEMMA_CLOUD, is_cloud_model
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.engines.base import BaseEngine
@@ -38,7 +41,7 @@ def gemma_cloud_model_available(model: str) -> tuple[bool, str]:
     ok, reason = probe_model_generation(
         resolve_ollama_host().rstrip("/"),
         model,
-        DEFAULT_PROBE_TIMEOUT_SEC,
+        GEMMA_CLOUD_PROBE_TIMEOUT_SEC,
     )
     return ok, "" if ok else f"{model}: {reason}"
 

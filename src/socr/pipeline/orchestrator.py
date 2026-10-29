@@ -1810,6 +1810,7 @@ class UnifiedPipeline:
     #: generation probe ("" when it was not, or none is pinned); surfaced by
     #: ``_refuse_cloud_pinned_qwen_rung``.
     _qwen_cloud_pin_unavailable: str = ""
+    _gemma_cloud_pin_unavailable: str = ""
 
     # Memoized caption-engine identity (#238), same shape and reasoning as
     # ``_judge_model_cache`` immediately above: ``_resolve_caption_engine_identity``
@@ -2597,6 +2598,8 @@ class UnifiedPipeline:
         # pre-gate and per-file answers must agree.
         if not self._in_batch_run:
             self._reset_table_judge_rung_probes()
+        else:
+            self._reset_gemini_per_document_empty_state()
         self._report_inert_config()
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
@@ -8462,6 +8465,11 @@ class UnifiedPipeline:
         self._gemini_empty_retry_used = set()
         self._gemini_empty_exhausted_pages = set()
 
+    def _reset_gemini_per_document_empty_state(self) -> None:
+        """Batch: empty-retry state is per document, not shared across PDFs."""
+        self._gemini_empty_retry_used = set()
+        self._gemini_empty_exhausted_pages = set()
+
     def _max_paid_pages_limit(self) -> int | None:
         limit = self.config.max_paid_pages
         if limit is None:
@@ -11371,6 +11379,7 @@ class UnifiedPipeline:
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
         available = self._refuse_cloud_pinned_qwen_rung(state, available)
+        self._surface_gemma_cloud_pin_unavailable(state)
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -14704,14 +14713,18 @@ class UnifiedPipeline:
         Applies the probe's side effects (pin-failure flag, unservable report).
         """
         probe = self._probe_engines_for_agentic()
-        available, unservable, pin_reason = probe
-        self._qwen_cloud_pin_unavailable = pin_reason
+        available, unservable, qwen_pin_reason, gemma_pin_reason = probe
+        self._qwen_cloud_pin_unavailable = qwen_pin_reason
+        self._gemma_cloud_pin_unavailable = gemma_pin_reason
         self._report_unservable_engines(unservable)
         return available
 
-    def _probe_engines_for_agentic(self) -> tuple[list, list, str]:
-        """Side-effect-free reachability probe: ``(available, unservable, pin_reason)``.
+    def _probe_engines_for_agentic(
+        self,
+    ) -> tuple[list, list, str, str]:
+        """Side-effect-free reachability probe.
 
+        Returns ``(available, unservable, qwen_pin_reason, gemma_pin_reason)``.
         Touches no pipeline state; the caller decides what to record (GH-940).
         """
         from socr.core.providers import DEFAULT_PROVIDERS, ProviderProfile
@@ -14721,7 +14734,8 @@ class UnifiedPipeline:
 
         available = []
         unservable: list[EngineType] = []
-        pin_reason = ""
+        qwen_pin_reason = ""
+        gemma_pin_reason = ""
         from socr.routing.cascade_policy import ordered_enabled_engines
 
         enabled = set(self.config.enabled_engines)
@@ -14753,7 +14767,7 @@ class UnifiedPipeline:
                         if ok:
                             available.append(prof)
                         else:
-                            pin_reason = reason
+                            qwen_pin_reason = reason
                 except Exception:  # availability probe must never crash routing
                     pass
                 continue
@@ -14777,7 +14791,7 @@ class UnifiedPipeline:
                             )
                         )
                     else:
-                        pin_reason = pin_reason or reason
+                        gemma_pin_reason = reason
                 except Exception:
                     pass
                 continue
@@ -14786,7 +14800,7 @@ class UnifiedPipeline:
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
                 pass
-        return available, unservable, pin_reason
+        return available, unservable, qwen_pin_reason, gemma_pin_reason
 
     #: GH-905: cap on the provider error folded into a journaled ``skip_reason``.
     #: CLI stderr can be long and multi-line, and this string is copied into every
@@ -14816,6 +14830,20 @@ class UnifiedPipeline:
         if error in reason:
             return reason
         return f"{reason}: {error}"
+
+    def _surface_gemma_cloud_pin_unavailable(self, state) -> None:
+        """Doc-level audit when Gemma cloud was enabled but the probe failed."""
+        unavailable = self._gemma_cloud_pin_unavailable
+        if not unavailable:
+            return
+        self._gemma_cloud_pin_unavailable = ""
+        self._surface_doc_event(
+            state,
+            "gemma_cloud_unavailable",
+            unavailable,
+            log_label="gemma cloud rung unavailable",
+            console_label="gemma_cloud rung unavailable",
+        )
 
     def _refuse_cloud_pinned_qwen_rung(self, state, available: list) -> list:
         """Drop the qwen rung when its PINNED model is a cloud model the policy forbids.

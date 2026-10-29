@@ -108,7 +108,7 @@ def _run(root: Path, *, mode: str):
             patch.object(
                 pipeline,
                 "_probe_engines_for_agentic",
-                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], ""),
+                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], "", ""),
             ),
             patch.object(UnifiedPipeline, "_page_has_tables", return_value=False),
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
@@ -215,7 +215,7 @@ def _run_with_native_cell_gating(root: Path, *, mode: str):
             patch.object(
                 pipeline,
                 "_probe_engines_for_agentic",
-                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], ""),
+                return_value=([PROFILE_QWEN_LOCAL, PROFILE_GEMINI], [], "", ""),
             ),
             patch.object(UnifiedPipeline, "_page_has_tables", return_value=False),
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),

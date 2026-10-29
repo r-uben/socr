@@ -24,7 +24,7 @@ def test_no_gemma_cloud_skips_ladder_probe() -> None:
     )
     pipe = UnifiedPipeline(config)
     with patch("socr.engines.gemma_cloud.GemmaCloudEngine.is_available_for_config") as probe:
-        available, _, _ = pipe._probe_engines_for_agentic()
+        available, _, _, _ = pipe._probe_engines_for_agentic()
         probe.assert_not_called()
     assert EngineType.GEMMA not in {p.engine for p in available}
 
@@ -71,7 +71,7 @@ def test_gemma_probe_when_default_on_and_model_missing() -> None:
         "socr.engines.gemma_cloud.GemmaCloudEngine.is_available_for_config",
         return_value=(False, "gemma4:31b-cloud: model not found"),
     ):
-        available, unservable, pin_reason = pipe._probe_engines_for_agentic()
+        available, unservable, _qwen_pin, gemma_pin = pipe._probe_engines_for_agentic()
     assert EngineType.GEMMA not in {p.engine for p in available}
-    assert pin_reason is not None
-    assert "gemma" in pin_reason.lower() or "model" in pin_reason.lower()
+    assert gemma_pin
+    assert "gemma" in gemma_pin.lower() or "model" in gemma_pin.lower()
