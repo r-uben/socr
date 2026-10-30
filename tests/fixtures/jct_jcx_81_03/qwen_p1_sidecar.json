@@ -1,0 +1,84 @@
+{
+  "page_num": 1,
+  "status": "success",
+  "terminal": true,
+  "engine": "qwen",
+  "provider": "qwen-local-instruct",
+  "cost_usd": 0.0,
+  "winning_output": {
+    "page_num": 1,
+    "text": "JOINT COMMITTEE ON TAXATION\nSeptember 22, 2003\nJCX-81-03\n\nCOMPARISON OF THE ESTIMATED BUDGET EFFECTS OF\nDIVISION D OF H.R. 6, THE \"ENERGY TAX POLICY ACT OF 2003,\" AS PASSED BY THE HOUSE OF REPRESENTATIVES AND\nS. 1149, THE \"ENERGY TAX INCENTIVES ACT OF 2003,\" AS REPORTED BY THE COMMITTEE ON FINANCE AND MODIFIED BY PROPOSED SENATE AMENDMENT NO. 1431\n\nFiscal Years 2004 - 2013\n[Millions of Dollars]\n\n| Provision | Effective | Division D of H.R. 6, as Passed by the House | S. 1149, Reported and Modified |\n| :--- | :--- | :--- | :--- |\n| | | **2004** | **2005** | **2006** | **2007** | **2008** | **2004-08** | **2004-13** | **2004** | **2005** | **2006** | **2007** | **2008** | **2004-08** | **2004-13** |\n| | | | | | | | | | | | | | | | | |\n| **Conservation Provisions** | | | | | | | | | | | | | | | | |\n| A. Residential and Business Property | | | | | | | | | | | | | | | | |\n| 1. {H} 15% credit for residential solar hot water (through 12/31/06) and photovoltaics (through 12/31/08); {S} credit for residential fuel cell, solar, and other energy efficient property | H = tyea 12/31/03 S = ppb DOE & before 12/31/07 | -3 | -14 | -19 | -23 | -23 | -83 | -105 | -24 | -54 | -62 | -70 | -62 | -272 | -272 |\n| 2. Credit for producing electricity from certain sources {H} extend property placed in service before 1/1/07; {S} extend and modify, property placed in service before 1/1/07 (1/1/05 in the case of open-loop) | esfqfa DOE | -157 | -270 | -294 | -391 | -384 | -1,496 | -3,084 | -111 | -205 | -298 | -387 | -384 | -1,381 | -2,928 |\n| 3. Fuel Cells - {H} credit for non-business and business installation of qualifying fuel cells (sunset 12/31/06); {S} business tax incentives for qualifying fuel cells and microturbine plants (sunset 12/31/06) | H = ppisa 12/31/03 S = ppisb DOE & 12/31/07 | -2 | -9 | -13 | -13 | -1 | -38 | -37 | -5 | -9 | -14 | -9 | -4 | -43 | -46 |\n| 4. Credit for energy efficient improvements to existing homes | H = pia 12/31/03 & pib 1/1/07 S = pia DOE & pib 1/1/07 | -20 | -110 | -144 | -136 | -47 | -457 | -470 | -55 | -78 | -70 | -56 | --- | -260 | -260 |\n| 5. Business credit for construction of new energy efficient homes | H = hpa 12/31/03 & hpb 1/1/07 S = hpa DOE & hpb 1/1/08 | -84 | -175 | -252 | -164 | -56 | -731 | -743 | -63 | -102 | -98 | -108 | -68 | -440 | -465 |\n| 6. Energy credit for combined heat and power system property | H = ppisa 12/31/03 & ppisb 1/1/07 S = ppisa DOE & ppisb 1/1/07 | -47 | -70 | -73 | -49 | -23 | -263 | -258 | -68 | -79 | -78 | -51 | -24 | -300 | -296 |\n| 7. Credit for energy efficient appliances | apb DOE & 12/31/07 | | | | | | | | -58 | -82 | -68 | -46 | -23 | -277 | -288 |\n| 8. Allowance of deduction for certain energy efficient commercial building property | tyba DOE & ccb 1/1/10 | | | | | | | | -28 | -51 | -74 | -101 | -130 | -385 | -537 |\n| 9. Three-year applicable recovery period for qualified energy management devices (excluding ancillary equipment): | | | | | | | | | | | | | | | | |\n| a. Electric devices (sunset for property placed in service after 12/31/07) | ppisa DOE | | | | | | | | -9 | -20 | -42 | -70 | -61 | -202 | -137 |\n| b. Water submetering devices (sunset for property placed in service after 12/31/07) | ppisa DOE | | | | | | | | -4 | -11 | -21 | -31 | -24 | -91 | -49 |\n| 10. Allow personal energy credits against the alternative minimum tax. | tyba 12/31/03 | -1 | -5 | -7 | -9 | -6 | -28 | -33 | | | | | | | |\n| | | | | | | | | | | | | | | | | |\n| B. Fuels and Alternative Motor Vehicles | | | | | | | | | | | | | | | | |\n| 1. Repeal of the 4.3 cent tax on rail and barge diesel [1] | 1/1/04 | -107 | -156 | -161 | -166 | -171 | -761 | -1,695 | -107 | -156 | -161 | -166 | -171 | -761 | -1,695 |\n| 2. Btu-based highway excise tax rate for diesel fuel blended with water | fra 9/30/03 | | | | | | | | | | | | | | | |\n| 3. Modifications to small ethanol producer credit. | tyba DOE | | | | | | | | | | | | | | | |\n| 4. Alcohol and biodiesel fuel excise tax provisions and extension of section 40 alcohol income tax credit: | | | | | | | | | | | | | | | | |\n| a. Extension of section 40 alcohol fuels income tax credit (sunset 12/31/10) | fsa 9/30/03 | | | | | | | | | | | | | | | |\n| b. Repeal reduced-rate sales of gasoline for blending with alcohol and reduced-rate sales of alcohol fuel blends | fsa 9/30/03 | | | | | | | | | | | | | | | |\n| | | | | | | | | | | | | | | | | |",
+    "status": "success",
+    "failure_mode": "none",
+    "engine": "qwen",
+    "processing_time": 48.638116121292114,
+    "error": "",
+    "confidence": 0.0,
+    "figures": [],
+    "audit_passed": true,
+    "audit_notes": [
+      "dual-pass crop-repair fallback declined p1: crop reading did not improve verification",
+      "dual-pass flagged: table 0: count mismatch (no safe patch target)",
+      "dual-pass flagged: table 1: count mismatch (no safe patch target)"
+    ],
+    "escalated_from": "",
+    "cost_usd": 0.0,
+    "provider_id": "qwen-local-instruct",
+    "provider_model": "qwen3-vl:30b-a3b-instruct",
+    "provider_backend": "ollama",
+    "skip_reason": ""
+  },
+  "run_fingerprint": "fp:5c778cab483dc3a5021fee5853e25833c98a4437741045ccb7c6cf686c7bcd24",
+  "input_checksum": "sha256:427c519b6b261e2fa9ddd2b4f2ec1ee6b7c1eaa85d336e1e7bd5d83db41ff3a9",
+  "page_fingerprint": "sha256:20281c1ad1db78c021c7dd8477dee9af962fb29064c74a1d25547246808af4ee",
+  "needs_ocr_enhancement": false,
+  "native_table_structure_failed": false,
+  "native_table_unverifiable": false,
+  "d3_floor_png_ref": "",
+  "chart_asset_render_failed": false,
+  "judge_rejected": false,
+  "audit_events": [
+    {
+      "kind": "value_guard_row_count_warning",
+      "engine": "qwen",
+      "detail": "output has 17 numeric row(s) but native has 26 effective numeric row(s) (scoped)",
+      "data": {
+        "native_lane_count": 35,
+        "output_col_count": 4,
+        "verifier_state": "AMBIGUOUS"
+      }
+    },
+    {
+      "kind": "native_table_verifier_warn",
+      "engine": "qwen",
+      "detail": "ambiguous_lane_count_mismatch: native_lanes=35, output_cols=4, gap=31 (paired/spanning headers possible — deferring to VLM)",
+      "data": {
+        "native_lane_count": 35,
+        "output_col_count": 4,
+        "drifted_rows": [],
+        "verifier_state": "AMBIGUOUS"
+      }
+    },
+    {
+      "kind": "dualpass_flagged",
+      "engine": "qwen",
+      "detail": "table 0: count mismatch (no safe patch target)",
+      "data": {
+        "source": "booktabs",
+        "note": "count mismatch (no safe patch target)",
+        "changed_cells": []
+      }
+    },
+    {
+      "kind": "dualpass_flagged",
+      "engine": "qwen",
+      "detail": "table 1: count mismatch (no safe patch target)",
+      "data": {
+        "source": "ruled",
+        "note": "count mismatch (no safe patch target)",
+        "changed_cells": []
+      }
+    }
+  ],
+  "figure_refs": []
+}
