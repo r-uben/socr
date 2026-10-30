@@ -131,7 +131,7 @@ def test_empty_answer_naming_another_page_does_not_mark_this_one(tmp_path, monke
 class _ScriptedEngine:
     """Answers each ``process_pages`` call with the next scripted failure mode."""
 
-    name = "gemini"
+    name = "qwen"
 
     def __init__(self, script: list[FailureMode]) -> None:
         self.script = list(script)
@@ -165,12 +165,27 @@ def _run_engine(tmp_path, monkeypatch, script, subprocess_timeout_sec=None):
         state,
         [1],
         set(),
-        EngineType.GEMINI,
+        EngineType.QWEN,
         "agentic",
         subprocess_timeout_sec=subprocess_timeout_sec,
     )
     counted = [e for e in state.events if e.kind == PROVIDER_EMPTY_RESPONSE_KIND]
     return engine, out[0], counted
+
+
+def test_gemini_empty_answer_is_not_retried(tmp_path, monkeypatch) -> None:
+    engine = _ScriptedEngine([FailureMode.EMPTY_RESPONSE, FailureMode.NONE])
+    engine.name = "gemini"
+    monkeypatch.setattr("socr.pipeline.orchestrator.get_engine", lambda _t: engine)
+    pdf = _pdf(tmp_path / "g.pdf")
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    state.pages[1] = PageState(page_num=1)
+    pipeline = UnifiedPipeline(PipelineConfig(quiet=True, timeout=30))
+    out = pipeline._run_engine_on_pages(
+        state, [1], set(), EngineType.GEMINI, "agentic"
+    )[0]
+    assert len(engine.calls) == 1
+    assert out.failure_mode is FailureMode.EMPTY_RESPONSE
 
 
 def test_empty_answer_is_retried_once_and_counted(tmp_path, monkeypatch) -> None:

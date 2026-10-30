@@ -1868,6 +1868,12 @@ class UnifiedPipeline:
         self._gemini_empty_retry_used: set[int] = set()
         #: Pages still empty after that retry — no further Gemini calls this run.
         self._gemini_empty_exhausted_pages: set[int] = set()
+        from socr.core.gemini_spend import GeminiSpendTracker
+
+        #: Token-metered Gemini spend for this process (``--max-paid-usd`` scope).
+        self._gemini_spend = GeminiSpendTracker()
+        #: Dedup key ``(document_key, page_num, model)`` — at-most-one paid send per run.
+        self._gemini_sent_keys: set[tuple[str, int, str]] = set()
         #: The rung callables this run has already CALLED without a refusal.
         #: Cold review round 5: identity is authoritative for a callable we
         #: have observed; the kind-level breaker applies only to callables we
@@ -2273,6 +2279,8 @@ class UnifiedPipeline:
             "cost_budget": cfg.cost_budget,
             "max_paid_pages": getattr(cfg, "max_paid_pages", None),
             "max_paid_pages_pinned": getattr(cfg, "max_paid_pages_pinned", False),
+            "max_paid_usd": getattr(cfg, "max_paid_usd", None),
+            "max_paid_usd_pinned": getattr(cfg, "max_paid_usd_pinned", False),
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
             # would silently ship a mix of escalated and non-escalated pages.
@@ -3423,6 +3431,8 @@ class UnifiedPipeline:
             available = engine.is_available()
 
         gemini_blocked: list[int] = []
+        gemini_usd_blocked: list[int] = []
+        gemini_dedup_blocked: list[int] = []
 
         if not available:
             logger.warning(f"{engine.name} not available for {label} OCR")
@@ -3475,6 +3485,40 @@ class UnifiedPipeline:
                 ]
             self._record_gemini_paid_pages(len(page_nums))
 
+        if engine_type == EngineType.GEMINI:
+            model = run_config.gemini_model
+            remaining_usd = self._gemini_paid_usd_remaining()
+            allowed: list[int] = []
+            for pn in page_nums:
+                dedup_key = self._gemini_dedup_key(state, pn, model)
+                if dedup_key in self._gemini_sent_keys:
+                    gemini_dedup_blocked.append(pn)
+                    continue
+                if remaining_usd is not None and remaining_usd <= 0:
+                    gemini_usd_blocked.append(pn)
+                    continue
+                allowed.append(pn)
+            page_nums = allowed
+            if not page_nums and (gemini_usd_blocked or gemini_dedup_blocked):
+                blocked_out: list[PageOutput] = []
+                blocked_out.extend(
+                    self._gemini_at_most_once_blocked_output(pn, engine.name)
+                    for pn in gemini_dedup_blocked
+                )
+                blocked_out.extend(
+                    self._gemini_max_paid_usd_blocked_output(
+                        pn,
+                        engine.name,
+                        detail="max_paid_usd exhausted (token-metered Gemini budget)",
+                    )
+                    for pn in gemini_usd_blocked
+                )
+                if gemini_blocked:
+                    blocked_out.extend(
+                        self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+                    )
+                return blocked_out
+
         if engine_type == EngineType.GEMINI and self._gemini_quota_circuit_open:
             self._gemini_circuit_skips += len(page_nums)
             if state.paid_disabled is not None:
@@ -3515,6 +3559,10 @@ class UnifiedPipeline:
 
         # Render pages to images → CLI processes images → per-page results
         call_started = time.monotonic()
+        if engine_type == EngineType.GEMINI and page_nums:
+            model = run_config.gemini_model
+            for pn in page_nums:
+                self._gemini_sent_keys.add(self._gemini_dedup_key(state, pn, model))
         page_outputs = engine.process_pages(
             pdf_path=state.handle.path,
             page_nums=page_nums,
@@ -3522,6 +3570,13 @@ class UnifiedPipeline:
             dpi=run_config.render_dpi,
             subprocess_timeout=subprocess_timeout_sec,
         )
+        if engine_type == EngineType.GEMINI and page_outputs:
+            self._record_gemini_call_outputs(
+                state,
+                page_outputs,
+                model=run_config.gemini_model,
+                transient_retry=False,
+            )
         page_outputs = self._retry_empty_answers(
             state,
             engine,
@@ -3591,6 +3646,12 @@ class UnifiedPipeline:
                         subprocess_timeout=subprocess_timeout_sec,
                     )
                     if retry_out:
+                        self._record_gemini_call_outputs(
+                            state,
+                            retry_out,
+                            model=run_config.gemini_model,
+                            transient_retry=True,
+                        )
                         po = retry_out[0]
                         detail_parts = []
                         for attr in ("error", "skip_reason"):
@@ -3615,6 +3676,20 @@ class UnifiedPipeline:
         if gemini_blocked:
             final.extend(
                 self._gemini_budget_blocked_output(pn, engine.name) for pn in gemini_blocked
+            )
+        if gemini_usd_blocked:
+            final.extend(
+                self._gemini_max_paid_usd_blocked_output(
+                    pn,
+                    engine.name,
+                    detail="max_paid_usd exhausted (token-metered Gemini budget)",
+                )
+                for pn in gemini_usd_blocked
+            )
+        if gemini_dedup_blocked:
+            final.extend(
+                self._gemini_at_most_once_blocked_output(pn, engine.name)
+                for pn in gemini_dedup_blocked
             )
 
         return final
@@ -3642,6 +3717,9 @@ class UnifiedPipeline:
         if not empty:
             return page_outputs
         is_gemini = engine.name == "gemini"
+        if is_gemini:
+            # At-most-once paid send per page/run: empty answers are not re-sent.
+            return page_outputs
         retry_pages = [
             pn for pn in empty if not (is_gemini and pn in self._gemini_empty_retry_used)
         ]
@@ -8464,11 +8542,142 @@ class UnifiedPipeline:
         self._gemini_transient_retried_pages = set()
         self._gemini_empty_retry_used = set()
         self._gemini_empty_exhausted_pages = set()
+        from socr.core.gemini_spend import GeminiSpendTracker
+
+        self._gemini_spend = GeminiSpendTracker()
+        self._gemini_sent_keys = set()
 
     def _reset_gemini_per_document_empty_state(self) -> None:
         """Batch: empty-retry state is per document, not shared across PDFs."""
         self._gemini_empty_retry_used = set()
         self._gemini_empty_exhausted_pages = set()
+
+    def _gemini_document_key(self, state: DocumentState) -> str:
+        return str(state.handle.path.resolve())
+
+    def _max_paid_usd_limit(self) -> float | None:
+        if not self.config.max_paid_usd_pinned:
+            return None
+        cap = self.config.max_paid_usd
+        if cap is None:
+            return None
+        return max(0.0, float(cap))
+
+    def _gemini_paid_usd_remaining(self) -> float | None:
+        limit = self._max_paid_usd_limit()
+        if limit is None:
+            return None
+        return max(0.0, limit - self._gemini_spend.run_usd_total)
+
+    def _gemini_dedup_key(
+        self, state: DocumentState, page_num: int, model: str
+    ) -> tuple[str, int, str]:
+        return (self._gemini_document_key(state), page_num, model)
+
+    def _gemini_max_paid_usd_blocked_output(
+        self, page_num: int, engine_name: str, *, detail: str
+    ) -> PageOutput:
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=detail,
+            skip_reason=detail,
+            audit_passed=False,
+        )
+
+    def _gemini_at_most_once_blocked_output(self, page_num: int, engine_name: str) -> PageOutput:
+        msg = "gemini_at_most_once: page already sent to paid Gemini this run"
+        return PageOutput(
+            page_num=page_num,
+            text="",
+            status=PageStatus.ERROR,
+            engine=engine_name,
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+            error=msg,
+            skip_reason=msg,
+            audit_passed=False,
+        )
+
+    def _record_gemini_call_outputs(
+        self,
+        state: DocumentState,
+        outputs: list[PageOutput],
+        *,
+        model: str,
+        transient_retry: bool,
+    ) -> None:
+        from socr.core.gemini_pricing import GeminiUsage
+        from socr.core.gemini_spend import (
+            apply_usage_to_page_output,
+            outcome_from_page_status,
+            usage_from_llm_fields,
+        )
+        from socr.core.result import FailureMode, PageStatus
+
+        doc_key = self._gemini_document_key(state)
+        for po in outputs:
+            usage = usage_from_llm_fields(
+                prompt=po.llm_input_tokens,
+                candidates=po.llm_output_tokens,
+                thoughts=po.llm_thoughts_tokens,
+                cached=po.llm_cached_tokens,
+                total=None,
+                metadata_present=bool(po.gemini_usage_metadata_present),
+            )
+            if not usage.usage_metadata_present:
+                usage = GeminiUsage(usage_metadata_present=False)
+            empty = po.failure_mode in (
+                FailureMode.EMPTY_RESPONSE,
+                FailureMode.EMPTY_OUTPUT,
+            )
+            success = po.status == PageStatus.SUCCESS and bool((po.text or "").strip())
+            outcome = outcome_from_page_status(
+                success=success, empty=empty, error=not success and not empty
+            )
+            call_id = self._gemini_spend.record_call(
+                document_key=doc_key,
+                page_num=po.page_num,
+                engine=po.engine or "gemini",
+                model=model,
+                usage=usage,
+                outcome=outcome,  # type: ignore[arg-type]
+                transient_retry=transient_retry,
+                detail=po.error or po.skip_reason or "",
+            )
+            po.gemini_spend_call_id = call_id
+            apply_usage_to_page_output(po, usage, model=model)
+
+    def _apply_gemini_judge_outcomes(self, decision) -> None:
+        from socr.core.result import PageStatus
+
+        for att in decision.attempts:
+            out = att.output
+            if (out.engine or "") != "gemini":
+                continue
+            call_id = getattr(out, "gemini_spend_call_id", None)
+            if call_id is None:
+                continue
+            if att.accepted:
+                continue
+            if out.status == PageStatus.SUCCESS and (out.text or "").strip():
+                self._gemini_spend.set_outcome(call_id, "rejected")
+
+    def _write_gemini_spend_artifacts(self, state: DocumentState, output_dir: Path) -> None:
+        import json
+
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        summary = self._gemini_spend.summarize(document_key=self._gemini_document_key(state))
+        state.gemini_spend_summary = summary
+        scan_root = self._scan_root or state.handle.path.parent
+        rel_key = relative_key(state.handle.path, scan_root)
+        doc_dir = doc_dir_for(output_dir, rel_key)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        spend_path = doc_dir / "gemini_spend.json"
+        spend_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     def _max_paid_pages_limit(self) -> int | None:
         limit = self.config.max_paid_pages
@@ -11849,6 +12058,7 @@ class UnifiedPipeline:
                                 sparse_signals=sparse_signals_from_page_assessment(_pa),
                                 audit_min_words=self.config.audit_min_words,
                             )
+                            self._apply_gemini_judge_outcomes(decision)
                         _route_table_signal = self._route_page_table_escalation_signal(
                             decision, ladder
                         )
@@ -12658,6 +12868,14 @@ class UnifiedPipeline:
                 console.print("  total cost: unknown (unmetered direct call)")
             else:
                 console.print(f"  total cost: ${total_cost:.4f}")
+            cap = self._max_paid_usd_limit()
+            if cap is not None and not self.config.quiet:
+                console.print(f"  Gemini USD budget cap: ${cap:.4f} (process scope)")
+            if self._gemini_spend.calls:
+                console.print(
+                    f"  Gemini spend (token-metered): ${self._gemini_spend.run_usd_total:.4f} "
+                    f"({len(self._gemini_spend.calls)} calls, process scope)"
+                )
             gemini_line = format_gemini_run_summary(gemini_stats)
             if gemini_line:
                 console.print(f"  [dim]{gemini_line}[/dim]")
@@ -20996,6 +21214,8 @@ class UnifiedPipeline:
             and self._crop_descriptions_enabled()
             and _crop_descriptions.has_crop_ref(final_text)
         )
+        if self._gemini_spend.calls:
+            self._write_gemini_spend_artifacts(state, output_dir)
         self._write_metadata(
             state,
             final_result,
@@ -21539,6 +21759,8 @@ class UnifiedPipeline:
                 doc_extras["tables"] = dict(state.table_counts)
             if getattr(state, "gemini_run_stats", None):
                 doc_extras["gemini_run_stats"] = dict(state.gemini_run_stats)
+            if getattr(state, "gemini_spend_summary", None):
+                doc_extras["gemini_spend"] = dict(state.gemini_spend_summary)
             if getattr(state, "paid_disabled", None):
                 doc_extras["paid_disabled"] = dict(state.paid_disabled)
             blank_meta = self._shipped_blank_pages(state)
