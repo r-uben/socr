@@ -181,9 +181,7 @@ def test_gemini_empty_answer_is_not_retried(tmp_path, monkeypatch) -> None:
     state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
     state.pages[1] = PageState(page_num=1)
     pipeline = UnifiedPipeline(PipelineConfig(quiet=True, timeout=30))
-    out = pipeline._run_engine_on_pages(
-        state, [1], set(), EngineType.GEMINI, "agentic"
-    )[0]
+    out = pipeline._run_engine_on_pages(state, [1], set(), EngineType.GEMINI, "agentic")[0]
     assert len(engine.calls) == 1
     assert out.failure_mode is FailureMode.EMPTY_RESPONSE
 
