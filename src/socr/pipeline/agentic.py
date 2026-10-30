@@ -705,6 +705,7 @@ def route_page(
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
+    from socr.core.gemini_spend import attempt_cost_usd_for_profile
     from socr.routing.cascade_policy import (
         SparsePageSignals,
         is_paid_profile,
@@ -824,8 +825,12 @@ def route_page(
             )
             continue
 
+        attempt_cost = attempt_cost_usd_for_profile(prof, output)
         if remaining_budget is not None:
-            remaining_budget -= prof.cost_per_page_usd
+            if attempt_cost is None:
+                remaining_budget = 0.0
+            else:
+                remaining_budget -= attempt_cost
 
         # #688 -- THE candidate boundary. This is where a provider's proposed
         # ``PageOutput.text`` becomes the candidate everything downstream
@@ -866,7 +871,9 @@ def route_page(
                 ProviderAttempt(
                     engine=prof.engine,
                     output=output,
-                    cost_usd=prof.cost_per_page_usd,
+                    cost_usd=attempt_cost_usd_for_profile(prof, output)
+                    if output is not None
+                    else prof.cost_per_page_usd,
                     accepted=False,
                     reason=f"judge raised: {exc}",
                     provider_id=prof.id,
@@ -935,7 +942,7 @@ def route_page(
             ProviderAttempt(
                 engine=prof.engine,
                 output=output,
-                cost_usd=prof.cost_per_page_usd,
+                cost_usd=attempt_cost if attempt_cost is not None else prof.cost_per_page_usd,
                 accepted=decision.accept,
                 reason=decision.reason,
                 raw_verdict=decision.raw_verdict,

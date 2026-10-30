@@ -89,13 +89,13 @@ def test_gemini_empty_exhausted_skips_further_calls(
     def _process_pages(**_kwargs):
         calls["n"] += 1
         return [
-            MagicMock(
+            PageOutput(
                 page_num=1,
                 status=PageStatus.ERROR,
                 failure_mode=FailureMode.EMPTY_RESPONSE,
                 error=empty_err,
                 text="",
-                skip_reason="",
+                engine="gemini",
             )
         ]
 
@@ -106,8 +106,8 @@ def test_gemini_empty_exhausted_skips_further_calls(
     pipe._run_engine_on_pages(state, [1], [], EngineType.GEMINI, "agentic")
     pipe._run_engine_on_pages(state, [1], [], EngineType.GEMINI, "agentic")
 
-    assert calls["n"] == 2
-    assert 1 in pipe._gemini_empty_exhausted_pages
+    assert calls["n"] == 1
+    assert pipe._gemini_dedup_key(state, 1, cfg.gemini_model) in pipe._gemini_sent_keys
 
 
 def test_gemini_quota_circuit_stops_after_spending_cap(
@@ -301,13 +301,13 @@ def test_batch_resets_gemini_empty_state_per_document(
         pdf = kwargs.get("pdf_path")
         calls.append(Path(pdf).name)
         return [
-            MagicMock(
+            PageOutput(
                 page_num=1,
                 status=PageStatus.ERROR,
                 failure_mode=FailureMode.EMPTY_RESPONSE,
                 error=empty_err,
                 text="",
-                skip_reason="",
+                engine="gemini",
             )
         ]
 
@@ -317,12 +317,10 @@ def test_batch_resets_gemini_empty_state_per_document(
     state_a = _state_for("doc_a")
     pipe._run_engine_on_pages(state_a, [1], [], EngineType.GEMINI, "agentic")
     pipe._run_engine_on_pages(state_a, [1], [], EngineType.GEMINI, "agentic")
-    assert 1 in pipe._gemini_empty_exhausted_pages
-    assert calls.count("doc_a.pdf") == 2
+    assert calls.count("doc_a.pdf") == 1
 
     pipe._reset_gemini_per_document_empty_state()
     state_b = _state_for("doc_b")
     pipe._run_engine_on_pages(state_b, [1], [], EngineType.GEMINI, "agentic")
 
-    assert 1 not in pipe._gemini_empty_exhausted_pages or calls.count("doc_b.pdf") >= 1
-    assert calls.count("doc_b.pdf") == 2
+    assert calls.count("doc_b.pdf") == 1

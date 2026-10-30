@@ -1,5 +1,6 @@
 """CLI for socr — Multi-Engine Document Processing."""
 
+import os
 from pathlib import Path
 
 import click
@@ -384,6 +385,15 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--max-paid-usd",
+        type=float,
+        default=None,
+        help=(
+            "Hard cap on cumulative token-metered Gemini spend (USD) for this "
+            "process/run. Omit for unlimited; 0 refuses further paid Gemini calls."
+        ),
+    )(f)
+    f = click.option(
         "--write-manifest",
         is_flag=True,
         help="Write a replayable manifest + blob cache",
@@ -496,6 +506,7 @@ def build_config(
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     max_paid_pages: int | None = None,
+    max_paid_usd: float | None = None,
     write_manifest: bool = False,
     retry_failed_pages: bool = False,
     table_judge_ladder: bool | None = None,
@@ -731,6 +742,13 @@ def build_config(
     if _explicitly_given("max_paid_pages"):
         config.max_paid_pages = int(max_paid_pages) if max_paid_pages is not None else 0
         config.max_paid_pages_pinned = True
+    if _explicitly_given("max_paid_usd"):
+        config.max_paid_usd = float(max_paid_usd) if max_paid_usd is not None else 0.0
+        config.max_paid_usd_pinned = True
+    _env_cap = os.environ.get("SOCR_MAX_PAID_USD")
+    if _env_cap is not None and _env_cap.strip() and not _explicitly_given("max_paid_usd"):
+        config.max_paid_usd = float(_env_cap)
+        config.max_paid_usd_pinned = True
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
     if _explicitly_given("retry_failed_pages"):

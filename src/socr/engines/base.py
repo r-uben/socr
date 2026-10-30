@@ -383,6 +383,7 @@ class BaseEngine(ABC):
             # that produced nothing, carrying the CLI exit info into their error.
             from socr.routing.cascade_policy import (
                 extract_cli_actionable_error,
+                parse_gemini_usage,
                 parse_token_usage,
             )
 
@@ -408,6 +409,12 @@ class BaseEngine(ABC):
                     )
                     logger.warning(f"[{self.name}] {cli_error_note}")
             inp_tok, out_tok = parse_token_usage(result.stderr or "", result.stdout or "")
+            gemini_usage = parse_gemini_usage(result.stderr or "", result.stdout or "")
+            gemini_model = (
+                config.gemini_model
+                if self.name == "gemini"
+                else self.resolved_model_version(config)
+            )
 
             # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
             elapsed = time.time() - start_time
@@ -565,6 +572,12 @@ class BaseEngine(ABC):
                             llm_output_tokens=out_tok,
                         )
                     )
+
+            if self.name == "gemini":
+                from socr.core.gemini_spend import apply_usage_to_page_output
+
+                for po in outputs:
+                    apply_usage_to_page_output(po, gemini_usage, model=gemini_model)
 
             return outputs
 

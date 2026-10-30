@@ -785,6 +785,8 @@ class DocumentState:
     table_counts: dict | None = None
     #: Agentic Gemini OCR rollup (``summarize_gemini_attempts``); omitted when unset.
     gemini_run_stats: dict | None = None
+    #: Token-metered Gemini spend summary (``gemini_spend.json`` payload).
+    gemini_spend_summary: dict | None = None
     #: Set once when the Gemini quota/spending-cap circuit opens mid-run.
     paid_disabled: dict | None = None
 
