@@ -87,6 +87,13 @@ EXACT_PASS_UNJUDGED_REASON = (
 
 #: Failure modes that name their own failed check. A mode absent from this map falls to
 #: ``_fallback_clause`` rather than being guessed at.
+#: #1156 / #1262: why a page whose text layer is an earlier OCR run is never CHECKED. The
+#: reason depends on what shipped. The prior layer itself has not been re-read at all; a
+#: model reading of the page image is ONE reading, and nothing independent agreed with it
+#: (Part B's escape). The status is the same either way, only the explanation differs.
+PRIOR_OCR_NATIVE_REASON = "earlier OCR, not re-read"
+PRIOR_OCR_MODEL_REASON = "read once from the image, no second reading agreed"
+
 _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
     FailureMode.NATIVE_GARBLED_MATH: (
         Check.NATIVE_GLYPHS,
@@ -257,7 +264,7 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
     FailureMode.PRIOR_OCR_LAYER_UNVERIFIED: (
         Check.PRIOR_OCR_LAYER,
         CheckResult.UNKNOWN,
-        "earlier OCR, not re-read",
+        PRIOR_OCR_NATIVE_REASON,
     ),
 }
 
@@ -599,8 +606,25 @@ def _corrupt_math_hybrid_clause(output: PageOutput) -> VerdictClause | None:
     )
 
 
-def _mode_clause(output: PageOutput) -> VerdictClause | None:
+def _mode_entry(output: PageOutput) -> tuple[Check, CheckResult, str] | None:
+    """``_MODE_CLAUSES``'s row for *output*, with #1262's reason for a model winner."""
     entry = _MODE_CLAUSES.get(output.failure_mode)
+    if (
+        entry is not None
+        and output.failure_mode is FailureMode.PRIOR_OCR_LAYER_UNVERIFIED
+        and _is_model_reading(output)
+    ):
+        return (entry[0], entry[1], PRIOR_OCR_MODEL_REASON)
+    return entry
+
+
+def _is_model_reading(output: PageOutput) -> bool:
+    """Whether *output* is a model's reading of the page image (#1185's engine set)."""
+    return (output.engine or "") in model_reading_engines()
+
+
+def _mode_clause(output: PageOutput) -> VerdictClause | None:
+    entry = _mode_entry(output)
     if entry is None:
         return None
     check, result, reason = entry
@@ -856,7 +880,7 @@ def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
         check=Check.PRIOR_OCR_LAYER,
         result=CheckResult.UNKNOWN,
         scope=SCOPE_PAGE,
-        reason="earlier OCR, not re-read",
+        reason=PRIOR_OCR_MODEL_REASON if _is_model_reading(output) else PRIOR_OCR_NATIVE_REASON,
     )
 
 
@@ -1240,7 +1264,7 @@ def _merge_clause(
     for index, existing in enumerate(clauses):
         if existing.check is not clause.check or existing.scope != clause.scope:
             continue
-        entry = _MODE_CLAUSES.get(output.failure_mode)
+        entry = _mode_entry(output)
         mode_reason = entry[2] if entry is not None else None
         if mode_reason is not None and clause.reason == mode_reason != existing.reason:
             # The page's own mode names the INCOMING clause's wording and not the one
