@@ -134,3 +134,32 @@ def test_the_mode_table_names_what_shipped(engine: str, reason: str) -> None:
         if c.check.value == "prior_ocr_layer"
     ]
     assert reasons == [reason]
+
+
+def test_a_consensus_winner_is_a_model_reading() -> None:
+    """cubic, PR #1263 review: ``consensus(qwen)`` is a model reading of the image."""
+    from socr.core.verdict import derive_clauses
+
+    out = PageOutput(
+        page_num=1,
+        text="a reading",
+        status=PageStatus.WARNING,
+        engine="consensus(qwen)",
+        audit_passed=True,
+        failure_mode=FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+    )
+    reasons = [
+        c.reason
+        for c in derive_clauses(out, PageState(page_num=1))
+        if c.check.value == "prior_ocr_layer"
+    ]
+    assert reasons == [PRIOR_OCR_MODEL_REASON]
+
+
+def test_the_audit_event_detail_quotes_neither_reason() -> None:
+    """r-uben review, PR #1263: the ``prior_ocr_layer_retained`` event covers native and model
+    winners alike, so its detail must not quote one page mark's wording."""
+    from socr.pipeline.orchestrator import PRIOR_OCR_RETAINED_EVENT_DETAIL
+
+    assert PRIOR_OCR_NATIVE_REASON not in PRIOR_OCR_RETAINED_EVENT_DETAIL
+    assert PRIOR_OCR_MODEL_REASON not in PRIOR_OCR_RETAINED_EVENT_DETAIL

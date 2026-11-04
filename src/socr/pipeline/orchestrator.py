@@ -906,8 +906,8 @@ NATIVE_FALLBACK_EVENT_DETAIL = (
 PRIOR_OCR_RETAINED_EVENT_DETAIL = (
     "this page's text layer is an EARLIER OCR run's reading, not "
     "the document's own characters (or the scan for that failed), and no "
-    "independent reading has agreed with it; the page is marked "
-    '"earlier OCR, not re-read" and is never counted CHECKED'
+    "independent reading has agreed with it; the page is marked unchecked "
+    "(the mark names which reading shipped, #1262) and is never counted CHECKED"
 )
 
 

@@ -619,8 +619,13 @@ def _mode_entry(output: PageOutput) -> tuple[Check, CheckResult, str] | None:
 
 
 def _is_model_reading(output: PageOutput) -> bool:
-    """Whether *output* is a model's reading of the page image (#1185's engine set)."""
-    return (output.engine or "") in model_reading_engines()
+    """Whether *output* is a model's reading of the page image (#1185's engine set).
+
+    The consensus producer labels its winner ``consensus(<engine>)``; that is still a model
+    reading, so the wrapper is stripped first (cubic, PR #1263 review)."""
+    from socr.core.manifest import _base_engine_name
+
+    return _base_engine_name(output.engine or "") in model_reading_engines()
 
 
 def _mode_clause(output: PageOutput) -> VerdictClause | None:
