@@ -517,7 +517,10 @@ def test_an_accepted_reading_is_demoted_with_its_own_reason_named() -> None:
     assert "unknown=UNKNOWN" not in record.output.text, (
         "the page carries the fail-closed banner beside the clause that names its reason"
     )
-    assert "earlier OCR, not re-read" in record.output.text
+    # #1262: a MODEL reading of the scan shipped, so the reason says it was read once from
+    # the image, not "not re-read". The demotion itself is unchanged (asserted above).
+    assert "read once from the image, no second reading agreed" in record.output.text
+    assert "earlier OCR, not re-read" not in record.output.text
     # Idempotence, the property the mode exists to protect: assemble re-runs this seam
     # over every page.
     again = _select_and_finalize_page(state, 1, saved_text=record.output.text)

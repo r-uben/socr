@@ -75,6 +75,7 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.native_paragraphs import NativeVocabulary, reflow_native_prose
+from socr.core.verdict import PRIOR_OCR_MODEL_REASON, PRIOR_OCR_NATIVE_REASON
 from socr.core.verdict import (
     ENGINE_NATIVE_MATH,
     PageVerdict,
@@ -1200,7 +1201,10 @@ def floor_page_image_ref(p) -> str:
 #: The tail of the verdict mark every page carrying an earlier OCR layer ships with
 #: (``verdict._prior_ocr_layer_clause``): ``> [page N unchecked: prior_ocr_layer=UNKNOWN;
 #: scope=page; reason=earlier OCR, not re-read]``.
-PRIOR_OCR_MARK_REASON = "reason=earlier OCR, not re-read"
+PRIOR_OCR_MARK_REASON = f"reason={PRIOR_OCR_NATIVE_REASON}"
+#: #1262: the same mark when a model reading of the scan shipped. Both say "a scan with an
+#: earlier OCR layer"; the figure-extraction skip below must recognise either.
+PRIOR_OCR_MODEL_MARK_REASON = f"reason={PRIOR_OCR_MODEL_REASON}"
 
 
 def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
@@ -1227,7 +1231,10 @@ def page_ships_its_own_page_image(p, shipped_body: str) -> bool:
 
     body = shipped_body or ""
     return prior_ocr_layer_found(p) and (
-        PRIOR_OCR_MARK_REASON in body or NUMBER_WITHHELD in body or NUMBER_WITHHELD_NO_IMAGE in body
+        PRIOR_OCR_MARK_REASON in body
+        or PRIOR_OCR_MODEL_MARK_REASON in body
+        or NUMBER_WITHHELD in body
+        or NUMBER_WITHHELD_NO_IMAGE in body
     )
 
 
