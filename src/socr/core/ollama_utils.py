@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 import socket
 import threading
@@ -21,6 +22,17 @@ logger = logging.getLogger(__name__)
 #: treated as before. It is a TOTAL deadline (see ``_get_tags``), not httpx's
 #: per-read timeout.
 TAGS_CHECK_TIMEOUT_SEC = 10.0
+
+#: #1254: Ollama's direct cloud API. It serves the same ``/api/*`` endpoints a local daemon
+#: does, authenticated by an API key sent as a Bearer token, so a machine with internet and
+#: the key needs no daemon (an HPC batch job, for one). The key is sent to THIS host only.
+OLLAMA_CLOUD_ENDPOINT = "https://ollama.com"
+#: The environment variable holding that key. Read at call time, never logged.
+OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY"
+#: How a local daemon names a model it relays to the cloud (``glm-5.3-flash:cloud``,
+#: ``gpt-oss:120b-cloud``). The direct cloud API lists the same model without it
+#: (``glm-5.3-flash``, ``gpt-oss:120b``), so the suffix is what marks a cloud model.
+_CLOUD_TAG_RE = re.compile(r"(?::cloud|-cloud)$")
 
 _UNREACHABLE_MSG = "Ollama is not running or not installed"
 _TIMEOUT_MSG = "Ollama did not respond (timeout)"
@@ -114,14 +126,51 @@ def split_userinfo(host: str) -> tuple[str, tuple[str, str] | None]:
     return f"{scheme}://{hostpart}{tail}", (user, password)
 
 
+def ollama_api_key() -> str | None:
+    """The Ollama cloud API key from the environment, or None (#1254)."""
+    return os.environ.get(OLLAMA_API_KEY_ENV, "").strip() or None
+
+
+def cloud_api_model(model: str) -> str | None:
+    """The name the direct cloud API knows a cloud-tagged *model* by, else None (#1254)."""
+    if not _CLOUD_TAG_RE.search(model):
+        return None
+    return _CLOUD_TAG_RE.sub("", model)
+
+
+def route_ollama(host: str, model: str) -> tuple[str, str]:
+    """``(host, model)`` a call for *model* should use (#1254).
+
+    A cloud-tagged model goes to :data:`OLLAMA_CLOUD_ENDPOINT` under its cloud API name
+    when an API key is set, so no daemon is needed; without a key, and for every local
+    model, the call stays on *host* exactly as before. Only cloud models move: pointing
+    ``OLLAMA_HOST`` itself at the cloud would also send local models there.
+    """
+    api_model = cloud_api_model(model)
+    if api_model is not None and ollama_api_key() is not None:
+        return OLLAMA_CLOUD_ENDPOINT, api_model
+    return host, model
+
+
+def _bearer_for(clean_host: str) -> dict[str, str]:
+    """``{"Authorization": "Bearer ..."}`` when *clean_host* is the cloud endpoint and a
+    key is set, else ``{}``. Any other host never receives the key."""
+    key = ollama_api_key()
+    if key is None or clean_host.rstrip("/") != OLLAMA_CLOUD_ENDPOINT:
+        return {}
+    return {"Authorization": f"Bearer {key}"}
+
+
 def ollama_endpoint(
     host: str, path: str, *, strip_slash: bool = False
-) -> tuple[str, dict[str, httpx.BasicAuth]]:
+) -> tuple[str, dict[str, Any]]:
     """``(url, extra_kwargs)`` for ``httpx``: *host* + *path* without userinfo.
 
-    ``extra_kwargs`` is ``{"auth": BasicAuth(...)}`` when *host* carried userinfo
-    and ``{}`` otherwise, so a call is ``httpx.get(url, **extra, timeout=...)`` and
-    a host without credentials makes exactly the call it always did.
+    ``extra_kwargs`` is ``{"auth": BasicAuth(...)}`` when *host* carried userinfo,
+    ``{"headers": {"Authorization": "Bearer ..."}}`` when *host* is the cloud endpoint
+    and an API key is set (#1254), and ``{}`` otherwise, so a call is
+    ``httpx.get(url, **extra, timeout=...)`` and a host without credentials makes
+    exactly the call it always did.
 
     ``strip_slash`` reproduces each call site's previous construction: sites that
     used ``host.rstrip('/') + path`` pass True, sites that used ``host + path``
@@ -129,14 +178,19 @@ def ollama_endpoint(
     """
     clean, creds = split_userinfo(host)
     base = clean.rstrip("/") if strip_slash else clean
-    return f"{base}{path}", ({"auth": httpx.BasicAuth(*creds)} if creds else {})
+    extra: dict[str, Any] = {"auth": httpx.BasicAuth(*creds)} if creds else {}
+    bearer = _bearer_for(clean)
+    if bearer:
+        extra["headers"] = bearer
+    return f"{base}{path}", extra
 
 
 def urllib_auth_headers(host: str) -> dict[str, str]:
-    """``{"Authorization": "Basic ..."}`` for *host*'s userinfo, else ``{}``."""
-    creds = split_userinfo(host)[1]
+    """``{"Authorization": "Basic ..."}`` for *host*'s userinfo, the Bearer header for
+    the cloud endpoint with a key set (#1254), else ``{}``."""
+    clean, creds = split_userinfo(host)
     if creds is None:
-        return {}
+        return _bearer_for(clean)
     token = base64.b64encode(f"{creds[0]}:{creds[1]}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 

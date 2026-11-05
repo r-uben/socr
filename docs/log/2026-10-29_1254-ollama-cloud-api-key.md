@@ -1,0 +1,109 @@
+# #1254: Ollama cloud models by API key, no daemon
+
+## Why
+
+On a cluster batch job, socr's table judge could not reach its rung 1 (`glm-5.3-flash:cloud`).
+socr talks to a local Ollama daemon, which relays to the cloud, and a compute node has no
+daemon. So the cluster recipe turned the ladder off, and failed native tables shipped as
+marks (#1253).
+
+Bocconi compute nodes do have internet: `ollama.com` answered in 0.14 s from `cnode04`, job
+723497, 2026-10-27.
+
+## Scope
+
+Narrowed on 2026-10-28 by owner decision:
+- (a) Ollama cloud by API key;
+- (c) preflight names each rung's route.
+
+The paid Gemini API backend (b) moved to the Mac mini repair cascade (follow-up to #1255),
+where the subscription CLIs (for example `agy`, `codex` and `claude -p`) and the cost order live.
+
+## Design
+
+- **Only cloud-tagged models move.** `route_ollama(host, model)` sends a model ending in
+  `:cloud` or `-cloud` to `https://ollama.com` under its cloud name, and only when
+  `OLLAMA_API_KEY` is set. Every local model, and every call without a key, stays on
+  `OLLAMA_HOST` exactly as before.
+  - The rejected alternative was setting `OLLAMA_HOST=https://ollama.com`. It would also send
+    local models (Qwen on a laptop) to the cloud, and break them.
+- **Cloud names.** On 2026-10-29, `GET https://ollama.com/api/tags` listed the judge's models
+  without a suffix: `glm-5.3-flash`, `kimi-k2.6`. So the suffix is stripped on the cloud
+  route, and the rung id keeps the configured name.
+- **One seam each.** Rung 1, the blind-cell adjudicator and the cell transcriber all post
+  through `table_rung_ollama._post_chat`, and probe through `ollama_rung_reachable`. Routing
+  lives in those two functions.
+  - The Bearer header lives in `ollama_endpoint` and `urllib_auth_headers`, the only places
+    socr builds Ollama requests, so any later caller that routes to the cloud is
+    authenticated the same way.
+- **The key goes to one host.** `_bearer_for` sends it to `https://ollama.com` and nothing
+  else. That excludes `http://ollama.com`, look-alike hosts, and hosts carrying GH-976
+  userinfo.
+  - The key is read from the environment at call time, never logged, and does not appear in
+    errors: httpx errors carry the URL, not headers. A test pins this.
+- **Preflight** reports `rung 1: <model> via the ollama cloud API (OLLAMA_API_KEY)` or
+  `rung 1: <model> via the ollama daemon at <host>`, plus `rung 2: <binary> CLI`, on success
+  and on failure.
+
+## Known limits
+
+- **Fixed in review:** the cloud's `/api/tags` catalog is public; it answers any key, or none.
+  On its own it would have made preflight green over a wrong or expired key. Reachability on
+  the cloud route now also posts an empty body (`{}`) to `/api/chat` and calls the judge
+  unreachable only on 401 or 403. The cloud checks the key before it reads the body
+  (measured 2026-11-04: `{}` gets `401 Unauthorized` with no key and with a fake key), and
+  the body names no model, so nothing runs and no tokens are spent.
+  - **First attempt, withdrawn:** `GET /api/ps`. It refuses a fake key, but it also refused
+    the owner's working key: the same live run then judged the Tealbook page through
+    `/api/chat` with that key. Because of that, only 401/403 count as "rejected"; any other
+    answer means the key got past authentication.
+  - Live with the owner's key (2026-11-04): the key check passed, reachability was True,
+    and the same run's judge call on the 2014-01 Tealbook p28 crop returned FAIL with the
+    missing rows named (14.3 s).
+- A call can still be refused at run time: a key revoked mid-run, or quota exhausted. That is
+  a 401/429 classified as a refusal (`unavailable` and `refusal`), so the per-run breaker
+  trips and does not loop.
+- Live-verified on 2026-11-04 (see below): the direct `/api/chat` accepts `"images"` and
+  `"format": "json"`.
+
+## Tests
+
+`tests/test_gh1254_ollama_cloud_api_key.py`, 27 tests. The key-dependent behaviours (routing,
+the Bearer header, reachability, preflight wording) are pinned as a difference between a run
+with the key and a run without it. The rest fix the key's scope (never sent to another host),
+the cloud-name mapping, and the refusal paths (a 401 on a call; 400 vs 401 vs 403 on the
+key check, where only the last two mean a rejected key). httpx is faked, and the suite's
+autouse no-daemon stub is lifted only by restoring the real `_post_chat`.
+
+## Mutants
+
+Each ran in an external copy of `src`, `tests` and `pyproject.toml`, with `socr.__file__`
+inside the copy and `count(anchor) == 1`:
+
+| mutant | failing tests |
+| --- | --- |
+| no routing in `_post_chat` | 1 |
+| no routing in the reachability probe | 1 |
+| no Bearer header | 2 |
+| key sent to any host | 6 |
+| `-cloud` suffix not recognised | 1 |
+| preflight blind to the cloud route | 1 |
+
+## Live check (2026-11-04)
+
+Two runs on the Mac mini, with the owner's key set in his own shell (the key never entered the session).
+- Run outside the repository (ad hoc, not committed): a short script that builds
+  `build_ollama_rung` for `glm-5.3-flash:cloud` from this branch's `src` and judges one crop.
+- Input, not committed either (Fed corpus output stays out of the repository): the 2014-01
+  Tealbook part A (`fed-meetings-2014-2014-01-2014-01-29-tealbook-parta`), page 28. That is the
+  page's `failed_table_p28.png` crop and its shipped markdown, from the `--no-native-first`
+  Bocconi test run (job 722459).
+
+Results:
+- **Route:** `('https://ollama.com', 'glm-5.3-flash')`. `reachable: True`, which confirms that the cloud `/api/tags` lists the model under its un-suffixed name.
+- **Both runs** returned `ok: True`, `unavailable: False`, `refusal: False`, in 20.4 s and 25.1 s.
+- **The direct `/api/chat` accepts `"images"` and `"format": "json"`.** The response parsed into a `TableJudgeVerdict`. This was the open question in "Known limits" above, and it is now answered.
+- **Verdict: `FAIL`, confidence `high`, with `MISSING_VALUE` findings.** The shipped markdown omits the "Output per hour, nonfarm business" and "PCE chain-weighted price index" rows, each with its Previous Tealbook row. That matches the owner's side-by-side review of the same page.
+- **Both runs agreed on the verdict.** The finding wording differed.
+
+Cost: two calls, drawn on the account's Ollama plan usage. Measure on a small batch before enabling the ladder corpus-wide.
