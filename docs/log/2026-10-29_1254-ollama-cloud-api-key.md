@@ -73,3 +73,18 @@ inside the copy and `count(anchor) == 1`:
 | key sent to any host | 6 |
 | `-cloud` suffix not recognised | 1 |
 | preflight blind to the cloud route | 1 |
+
+## Live check (2026-11-04)
+
+Two runs on the Mac mini, with the owner's key set in his own shell (the key never entered the session).
+- Script: `scratch/routing-baseline/leads/1227/watch/live1254.py`, loading this branch's `src`.
+- Input: the 2014-01 Tealbook part A, page 28: `failed_table_p28.png` plus its shipped markdown.
+
+Results:
+- **Route:** `('https://ollama.com', 'glm-5.3-flash')`. `reachable: True`, which confirms that the cloud `/api/tags` lists the model under its un-suffixed name.
+- **Both runs** returned `ok: True`, `unavailable: False`, `refusal: False`, in 20.4 s and 25.1 s.
+- **The direct `/api/chat` accepts `"images"` and `"format": "json"`.** The response parsed into a `TableJudgeVerdict`. This was the open question in "Known limits" above, and it is now answered.
+- **Verdict: `FAIL`, confidence `high`, with `MISSING_VALUE` findings.** The shipped markdown omits the "Output per hour, nonfarm business" and "PCE chain-weighted price index" rows, each with its Previous Tealbook row. That matches the owner's side-by-side review of the same page.
+- **Both runs agreed on the verdict.** The finding wording differed.
+
+Cost: two calls, drawn on the account's Ollama plan usage. Measure on a small batch before enabling the ladder corpus-wide.
