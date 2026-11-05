@@ -17,7 +17,7 @@ Narrowed on 2026-10-28 by owner decision:
 - (c) preflight names each rung's route.
 
 The paid Gemini API backend (b) moved to the Mac mini repair cascade (follow-up to #1255),
-where the subscription CLIs (`agy`, `codex`, `claude -p`, ...) and the cost order live.
+where the subscription CLIs (for example `agy`, `codex` and `claude -p`) and the cost order live.
 
 ## Design
 
@@ -42,22 +42,37 @@ where the subscription CLIs (`agy`, `codex`, `claude -p`, ...) and the cost orde
   - The key is read from the environment at call time, never logged, and does not appear in
     errors: httpx errors carry the URL, not headers. A test pins this.
 - **Preflight** reports `rung 1: <model> via the ollama cloud API (OLLAMA_API_KEY)` or
-  `... via the ollama daemon at <host>`, plus `rung 2: <binary> CLI`, on success and on
-  failure.
+  `rung 1: <model> via the ollama daemon at <host>`, plus `rung 2: <binary> CLI`, on success
+  and on failure.
 
 ## Known limits
 
-- The cloud's `/api/tags` catalog is public, so reachability is True with a key even when the
-  key is wrong. A bad key shows up at the first call, as a 401 classified as a refusal
-  (`unavailable` and `refusal`), so the run's per-run breaker trips. It does not loop.
-- Not verified live: whether the direct `/api/chat` accepts `"images"` and `"format": "json"`
-  the way a daemon does. Ollama's docs do not say. One live call with a real key on a crop
-  must confirm it before a production run.
+- **Fixed in review:** the cloud's `/api/tags` catalog is public; it answers any key, or none.
+  On its own it would have made preflight green over a wrong or expired key. Reachability on
+  the cloud route now also posts an empty body (`{}`) to `/api/chat` and calls the judge
+  unreachable only on 401 or 403. The cloud checks the key before it reads the body
+  (measured 2026-11-04: `{}` gets `401 Unauthorized` with no key and with a fake key), and
+  the body names no model, so nothing runs and no tokens are spent.
+  - **First attempt, withdrawn:** `GET /api/ps`. It refuses a fake key, but it also refused
+    the owner's working key: the same live run then judged the Tealbook page through
+    `/api/chat` with that key. Because of that, only 401/403 count as "rejected"; any other
+    answer means the key got past authentication.
+  - Live with the owner's key (2026-11-04): the key check passed, reachability was True,
+    and the same run's judge call on the 2014-01 Tealbook p28 crop returned FAIL with the
+    missing rows named (14.3 s).
+- A call can still be refused at run time: a key revoked mid-run, or quota exhausted. That is
+  a 401/429 classified as a refusal (`unavailable` and `refusal`), so the per-run breaker
+  trips and does not loop.
+- Live-verified on 2026-11-04 (see below): the direct `/api/chat` accepts `"images"` and
+  `"format": "json"`.
 
 ## Tests
 
-`tests/test_gh1254_ollama_cloud_api_key.py`, 24 tests. Each behaviour is pinned as a
-difference between a run with the key and a run without it. httpx is faked, and the suite's
+`tests/test_gh1254_ollama_cloud_api_key.py`, 25 tests. The key-dependent behaviours (routing,
+the Bearer header, reachability, preflight wording) are pinned as a difference between a run
+with the key and a run without it. The rest fix the key's scope (never sent to another host),
+the cloud-name mapping, and the refusal paths (a 401 on a call, a rejected key on the
+reachability check). httpx is faked, and the suite's
 autouse no-daemon stub is lifted only by restoring the real `_post_chat`.
 
 ## Mutants
@@ -77,8 +92,12 @@ inside the copy and `count(anchor) == 1`:
 ## Live check (2026-11-04)
 
 Two runs on the Mac mini, with the owner's key set in his own shell (the key never entered the session).
-- Script: `scratch/routing-baseline/leads/1227/watch/live1254.py`, loading this branch's `src`.
-- Input: the 2014-01 Tealbook part A, page 28: `failed_table_p28.png` plus its shipped markdown.
+- Run outside the repository (ad hoc, not committed): a short script that builds
+  `build_ollama_rung` for `glm-5.3-flash:cloud` from this branch's `src` and judges one crop.
+- Input, not committed either (Fed corpus output stays out of the repository): the 2014-01
+  Tealbook part A (`fed-meetings-2014-2014-01-2014-01-29-tealbook-parta`), page 28. That is the
+  page's `failed_table_p28.png` crop and its shipped markdown, from the `--no-native-first`
+  Bocconi test run (job 722459).
 
 Results:
 - **Route:** `('https://ollama.com', 'glm-5.3-flash')`. `reachable: True`, which confirms that the cloud `/api/tags` lists the model under its un-suffixed name.

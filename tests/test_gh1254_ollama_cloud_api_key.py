@@ -138,6 +138,17 @@ def test_post_chat_sends_a_cloud_model_to_the_cloud_api(
         assert "headers" not in call
 
 
+def _key_check_answer(status: int):
+    """A fake ``httpx.post`` for the cloud key check; records every body it is sent."""
+    posts: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        posts.append({"url": url, **kwargs})
+        return httpx.Response(status, json={"error": "x"}, request=httpx.Request("POST", url))
+
+    return fake_post, posts
+
+
 def test_reachability_probes_the_route_the_call_will_take(monkeypatch, key_set: bool) -> None:
     """The cloud lists ``glm-5.3-flash``, the daemon ``glm-5.3-flash:cloud``: each route
     must find the model under its own name."""
@@ -151,9 +162,19 @@ def test_reachability_probes_the_route_the_call_will_take(monkeypatch, key_set: 
         seen.append(url)
         return httpx.Response(200, json={"models": listed[url]}, request=httpx.Request("GET", url))
 
+    fake_post, posts = _key_check_answer(400)
     monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
     assert ollama_rung_reachable(CLOUD_MODEL, LOCAL) is True
-    assert seen == (["https://ollama.com/api/tags"] if key_set else [f"{LOCAL}/api/tags"])
+    if key_set:
+        assert seen == ["https://ollama.com/api/tags"]
+        (post,) = posts
+        assert post["url"] == "https://ollama.com/api/chat"
+        assert post["json"] == {}, "the key check must name no model, so nothing runs"
+        assert post["headers"] == {"Authorization": f"Bearer {KEY}"}
+    else:
+        assert seen == [f"{LOCAL}/api/tags"]
+        assert posts == []
 
 
 def test_a_rejected_key_is_a_refusal_and_never_appears_in_the_error(
@@ -186,3 +207,26 @@ def test_preflight_names_the_route(monkeypatch, key_set: bool) -> None:
     else:
         assert f"rung 1: {CLOUD_MODEL} via the ollama daemon at {LOCAL}" in routes
     assert KEY not in routes
+
+
+@pytest.mark.parametrize(("status", "reachable"), [(400, True), (401, False), (403, False)])
+def test_only_an_auth_refusal_makes_the_cloud_judge_unreachable(
+    monkeypatch, status: int, reachable: bool
+) -> None:
+    """#1254 review: the cloud's model list is public and answers any key, so reachability
+    must also ask an endpoint that needs the key. A 401/403 there is "not reachable", never
+    a green preflight over a judge whose every call will be refused. Any other answer to
+    the empty body (a valid key gets past auth and fails body validation) is reachable:
+    ``/api/ps`` rejected the owner's working key on 2026-11-04, so a check that read every
+    non-2xx as "rejected" would switch a working judge off."""
+    monkeypatch.setenv(OLLAMA_API_KEY_ENV, KEY)
+
+    def fake_get(url, **kwargs):
+        return httpx.Response(
+            200, json={"models": [{"name": "glm-5.3-flash"}]}, request=httpx.Request("GET", url)
+        )
+
+    fake_post, _ = _key_check_answer(status)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert ollama_rung_reachable(CLOUD_MODEL, LOCAL) is reachable

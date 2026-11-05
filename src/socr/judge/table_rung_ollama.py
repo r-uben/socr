@@ -32,6 +32,7 @@ from typing import Any
 import httpx
 
 from socr.core.ollama_utils import (
+    OLLAMA_CLOUD_ENDPOINT,
     call_with_total_deadline,
     ollama_endpoint,
     raise_for_status_redacted,
@@ -110,7 +111,48 @@ def ollama_rung_reachable(model: str, host: str | None, timeout: float = 5.0) ->
             redact_credentials(str(exc)),
         )
         return False
-    return _with_implicit_tag(model) in names
+    if _with_implicit_tag(model) not in names:
+        return False
+    if resolved == OLLAMA_CLOUD_ENDPOINT:
+        # #1254 review: the cloud's ``/api/tags`` is PUBLIC, so it answers a wrong or
+        # expired key too, and preflight would call the judge reachable while every call
+        # 401s. See :func:`_cloud_key_accepted` for the authenticated check.
+        return _cloud_key_accepted(timeout)
+    return True
+
+
+def _cloud_key_accepted(timeout: float) -> bool:
+    """Whether the Ollama cloud accepts this run's API key (#1254).
+
+    Posts an EMPTY body to ``/api/chat``. The cloud checks the key before it reads
+    the body (measured 2026-11-04: ``{}`` gets 401 with no key and with a fake key),
+    so a rejected key answers 401/403, and an accepted key reaches body validation
+    and is refused there. The body names no model, so nothing can run and no tokens
+    are spent. ``/api/ps`` was tried first and rejected the owner's working key, so
+    only the two auth statuses mean "rejected"; any other answer means the key got
+    past authentication.
+    """
+    url, extra = ollama_endpoint(OLLAMA_CLOUD_ENDPOINT, "/api/chat", strip_slash=True)
+    try:
+        resp = call_with_total_deadline(
+            lambda: httpx.post(url, **extra, json={}, timeout=timeout),
+            timeout,
+            label=f"table judge {OLLAMA_CLOUD_ENDPOINT}/api/chat (key check)",
+        )
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.debug(
+            "table judge rung 1: the ollama cloud key check failed: %s",
+            redact_credentials(str(exc)),
+        )
+        return False
+    if resp.status_code in _KEY_REJECTED_STATUSES:
+        logger.debug("table judge rung 1: the ollama cloud rejected the API key")
+        return False
+    return True
+
+
+#: HTTP statuses that mean the cloud refused the API key itself.
+_KEY_REJECTED_STATUSES = frozenset({401, 403})
 
 
 #: Rung identifier prefix (`RungResult.rung`, e.g. "ollama:glm-5.3-flash:cloud"),
