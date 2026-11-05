@@ -68,11 +68,11 @@ where the subscription CLIs (for example `agy`, `codex` and `claude -p`) and the
 
 ## Tests
 
-`tests/test_gh1254_ollama_cloud_api_key.py`, 25 tests. The key-dependent behaviours (routing,
+`tests/test_gh1254_ollama_cloud_api_key.py`, 27 tests. The key-dependent behaviours (routing,
 the Bearer header, reachability, preflight wording) are pinned as a difference between a run
 with the key and a run without it. The rest fix the key's scope (never sent to another host),
-the cloud-name mapping, and the refusal paths (a 401 on a call, a rejected key on the
-reachability check). httpx is faked, and the suite's
+the cloud-name mapping, and the refusal paths (a 401 on a call; 400 vs 401 vs 403 on the
+key check, where only the last two mean a rejected key). httpx is faked, and the suite's
 autouse no-daemon stub is lifted only by restoring the real `_post_chat`.
 
 ## Mutants
