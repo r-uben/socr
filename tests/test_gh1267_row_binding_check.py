@@ -153,7 +153,9 @@ def test_identical_value_rows_with_right_labels_are_bound(rotation):
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
-def test_wrapped_two_line_label_is_bound(rotation):
+def test_wrapped_two_line_label_is_never_convicted(rotation):
+    """Round 4: a label wrapped onto a band above its values is not printed before the values on their
+    line, so it is UNVERIFIABLE (marked), never BOUND, and never convicted."""
     native = [
         ("Cash operating balance,", []),
         ("end of period", ["13", "24", "30"]),
@@ -163,12 +165,15 @@ def test_wrapped_two_line_label_is_bound(rotation):
         ("Cash operating balance, end of period", ["13", "24", "30"]),
         ("Receipts", ["1775", "1825", "1853"]),
     ]
-    assert run(native, rows, rotation).outcome is TableOutcome.BOUND
+    res = run(native, rows, rotation)
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
-def test_split_label_band_previous_is_bound(rotation):
-    """'Previous' printed on its own baseline above its values (Greenbook p34 shape)."""
+def test_split_label_band_previous_is_never_convicted(rotation):
+    """'Previous' printed on its own baseline above its values (Greenbook p34 shape). Round 4: band
+    evidence never grants BOUND; the row is UNVERIFIABLE and the table is not convicted."""
     native = [
         ("CPI", ["1.7", "1.8", "1.9"]),
         ("Previous", []),
@@ -181,9 +186,10 @@ def test_split_label_band_previous_is_bound(rotation):
         ("Core CPI", ["2.0", "2.1", "2.2"]),
     ]
     res = run(native, rows, rotation)
-    assert res.outcome is TableOutcome.BOUND, [
+    assert res.outcome is TableOutcome.UNVERIFIABLE, [
         (r.shipped_label, r.verdict, r.reason) for r in res.rows
     ]
+    assert res.rows[1].verdict is RowVerdict.UNVERIFIABLE
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -395,7 +401,8 @@ def test_argon_d_one_value_row_emptied(rotation):
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_argon_e_numeric_row_labels_never_convict(rotation):
     """Years, quarters and `2018: Q2` as the first cell: a clean table is never CONTRADICTED.
-    Today the year rows come out UNVERIFIABLE (a whole-line and a values-only panel both match), not BOUND."""
+    The year rows and the one-digit row come out UNVERIFIABLE (a whole-line and a values-only panel both
+    match: two readings of the label), `2018: Q2` is printed exactly before its values: BOUND."""
     native = [
         ("2005", ["1.0", "2.0", "3.0"]),
         ("2006", ["4.0", "5.0", "6.0"]),
@@ -405,7 +412,7 @@ def test_argon_e_numeric_row_labels_never_convict(rotation):
     res = run(native, native, rotation)
     assert res.outcome is not TableOutcome.CONTRADICTED
     assert not CONVICT & set(verdicts(res))
-    assert [r.verdict for r in res.rows[2:]] == [RowVerdict.BOUND, RowVerdict.BOUND]
+    assert res.rows[2].verdict is RowVerdict.BOUND
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -445,7 +452,7 @@ def test_argon_h_dropped_printed_row(rotation):
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
-def test_wrapped_label_split_over_two_markdown_rows_is_bound(rotation):
+def test_wrapped_label_split_over_two_markdown_rows_is_never_convicted(rotation):
     """2004-12-14 greenbook p28: the markdown puts the wrapped label on an all-empty row and the values
     on the unlabelled row below.  The same shape with values on the row above is the canary's tail row."""
     native = [
@@ -460,7 +467,8 @@ def test_wrapped_label_split_over_two_markdown_rows_is_bound(rotation):
     ]
     res = run(native, split, rotation)
     assert RowVerdict.LABEL_LOST not in verdicts(res)
-    assert res.rows[1].verdict is RowVerdict.BOUND
+    assert not CONVICT & set(verdicts(res))
+    assert res.rows[1].verdict is RowVerdict.UNVERIFIABLE  # round 4: never BOUND by a wrap
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -934,3 +942,188 @@ def test_an_empty_row_is_not_emptied_by_a_line_differing_in_a_short_token(rotati
     res = run(native, rows, rotation)
     assert res.rows[0].verdict is not RowVerdict.EMPTIED
     assert res.outcome is not TableOutcome.CONTRADICTED
+
+
+# ---------------------------------------------------------------------------
+# Round 4: BOUND needs exact evidence. Every reviewer pair from rounds 1-4.
+# ---------------------------------------------------------------------------
+REVIEWER_PAIRS = [
+    # round 1
+    ("Government", "Federal government"),
+    ("", "US"),
+    # round 2
+    ("US government", "UK government"),
+    ("", "Business"),
+    ("Total", "Subtotal"),
+    # round 3
+    ("Previous¹", "Previous²"),
+    ("Q¹", "Q²"),
+    ("Q1", "Q²"),
+    ("CO²", "CO³"),
+    ("कुल", "काल"),
+    ("Model (1)", "Model (2)"),
+    ("Line 1", "Line 2"),
+    ("Exports less imports", "Imports less exports"),
+    ("Projected", "Projected Projected"),
+    # round 4
+    ("Rate (%)", "Rate ($)"),
+    ("2003", "2003:1"),
+    ("1", "10"),
+    ("2.00", "2000"),
+    ("Q1", "Q10"),
+    ("A1", "A10"),
+    ("M", "M1"),
+    ("CO", "CO₂"),
+    ("Phase", "Phase2"),
+    ("FY2019", "FY201"),
+    ("Total¹", "Total1"),
+    ("Exports less", "Exports less imports"),
+]
+
+
+@pytest.mark.parametrize("a, b", REVIEWER_PAIRS)
+def test_reviewer_pairs_are_never_the_same_label(a, b):
+    from socr.tables.row_binding_check import _labels_exact
+
+    assert not _labels_exact(a, b) and not _labels_exact(b, a)
+
+
+@pytest.mark.parametrize(
+    "shipped, printed",
+    [
+        ("**Real GDP**", "Real GDP"),
+        ("Receipts:", "Receipts"),
+        ("Receipts¹", "Receipts"),
+        ("United Kingdom (4)", "United Kingdom"),
+        ("Consumer prices$^{2}$", "Consumer prices"),
+        ("Equipment &amp; software", "Equipment & software"),
+        ("real  GDP", "Real GDP"),
+    ],
+)
+def test_minimal_normalisation_keeps_the_same_label(shipped, printed):
+    from socr.tables.row_binding_check import _labels_exact
+
+    assert _labels_exact(shipped, printed)
+
+
+SWAP_PAIRS = [
+    ("Rate (%)", "Rate ($)"),
+    ("Q1", "Q10"),
+    ("A1", "A10"),
+    ("M", "M1"),
+    ("Phase", "Phase2"),
+    ("FY2019", "FY201"),
+    ("Previous¹", "Previous²"),
+]
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("a, b", SWAP_PAIRS)
+def test_swapped_reviewer_labels_never_bind(rotation, a, b):
+    native = [(a, ["1.1", "1.2", "1.3"]), (b, ["2.1", "2.2", "2.3"])]
+    swapped = [(b, ["1.1", "1.2", "1.3"]), (a, ["2.1", "2.2", "2.3"])]
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_year_rows_swapped_never_bind(rotation):
+    native = [("2003", ["1.1", "1.2", "1.3"]), ("2004", ["2.1", "2.2", "2.3"])]
+    swapped = [("2004", ["1.1", "1.2", "1.3"]), ("2003", ["2.1", "2.2", "2.3"])]
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_label_wrapped_onto_a_band_never_binds(rotation):
+    """Round 4 (Astra P0): `Exports less` / `imports` printed over two lines, `Imports less exports`
+    on the next; both shipped rows labelled `Imports less exports`. Pools may not grant BOUND."""
+    native = [
+        ("Exports less", []),
+        ("imports", ["1.1", "1.2", "1.3"]),
+        ("Imports less exports", ["2.1", "2.2", "2.3"]),
+    ]
+    rows = [
+        ("Imports less exports", ["1.1", "1.2", "1.3"]),
+        ("Imports less exports", ["2.1", "2.2", "2.3"]),
+    ]
+    assert run(native, rows, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_four_digit_data_row_in_the_header_never_binds(rotation):
+    """Round 4 (Astra P0): header `Imports | 1011 | 1012 | 1013` carries the Exports values."""
+    native = [("Exports", ["1011", "1012", "1013"]), ("Imports", ["2021", "2022", "2023"])]
+    res, _ = check_page_row_binding(
+        build_page(native, rotation), _with_header(("Imports", native[0][1]), [native[1]])
+    )
+    assert res[0].outcome is not TableOutcome.BOUND
+
+
+def test_exact_label_rule_over_all_pairs_of_reviewer_labels():
+    """Round 4 property, ALL pairs (no bucketing) of every label the four review rounds used plus
+    their normalisation variants: two labels are the same only when they differ by case, whitespace,
+    markup, a footnote mark on one side, or one trailing period/colon (independent residue test)."""
+    import html as _html
+    import itertools
+    import re as _re
+    import unicodedata as _ud
+
+    from socr.tables.row_binding_check import _labels_exact
+
+    labels = sorted(
+        {x for pair in [*REVIEWER_PAIRS, *ADVERSARIAL_LABEL_PAIRS] for x in pair if x}
+        | {"**Real GDP**", "Real GDP", "Receipts:", "Receipts", "Receipts¹", "real  gdp"}
+        | {"United Kingdom (4)", "United Kingdom", "Consumer prices$^{2}$", "Consumer prices"}
+    )
+    foot = _re.compile(r"(\(\d\)|\$\^\{?\d\}?\$|[¹²³⁰⁴-⁹])$")
+
+    def base(s):
+        s = _html.unescape(_re.sub(r"<br\s*/?>", " ", s)).replace("*", "").replace("`", "")
+        return _re.sub(r"\s+", "", _ud.normalize("NFC", s).casefold())
+
+    def allowed(a, b):
+        x, y = base(a), base(b)
+        for xs in {x, x[:-1] if x[-1:] in ".:" else x}:
+            for ys in {y, y[:-1] if y[-1:] in ".:" else y}:
+                fx, fy = foot.search(xs), foot.search(ys)
+                if xs == ys:
+                    return True
+                if fx and not fy and xs[: fx.start()].rstrip(".:") == ys.rstrip(".:"):
+                    return True
+                if fy and not fx and ys[: fy.start()].rstrip(".:") == xs.rstrip(".:"):
+                    return True
+        return False
+
+    bad = [
+        (a, b)
+        for a, b in itertools.combinations(labels, 2)
+        if (_labels_exact(a, b) or _labels_exact(b, a)) and not allowed(a, b)
+    ]
+    assert bad == []
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_an_empty_group_row_binds_only_on_an_exact_valueless_line(rotation):
+    """Round 4: a valueless group row is BOUND only when a valueless native line prints exactly its
+    label; `Goods` over a `Goods and services` line is UNVERIFIABLE."""
+    native = [("Goods and services", []), ("Durables", ["1.1", "1.2", "1.3"])]
+    exact = run(native, native, rotation)
+    assert exact.rows[0].verdict is RowVerdict.BOUND
+    partial = run(native, [("Goods", []), native[1]], rotation)
+    assert partial.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    assert partial.outcome is TableOutcome.UNVERIFIABLE
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_header_row_binds_only_on_its_exact_printed_label(rotation):
+    """Round 4: a header-position data row whose label comes from a band above its line (pool
+    evidence) is UNVERIFIABLE, not BOUND."""
+    native = [
+        ("Real GDP", []),
+        ("growth", ["1.1", "1.2", "1.3"]),
+        ("Net exports", ["2.1", "2.2", "2.3"]),
+    ]
+    res, _ = check_page_row_binding(
+        build_page(native, rotation), _with_header(("Real GDP growth", native[1][1]), [native[2]])
+    )
+    assert res[0].outcome is TableOutcome.UNVERIFIABLE
+    assert res[0].rows[0].verdict is RowVerdict.UNVERIFIABLE

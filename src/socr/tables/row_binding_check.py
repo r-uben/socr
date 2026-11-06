@@ -23,6 +23,7 @@ lines whose verdicts differ is UNVERIFIABLE (identical rows, all-zero rows).
 
 from __future__ import annotations
 
+import html
 import re
 import statistics
 import unicodedata
@@ -487,6 +488,43 @@ def _same_label(a: list[str], b: list[str]) -> bool:
     return bool(a) and len(a) == len(b) and all(_token_eq(x, y) for x, y in zip(a, b))
 
 
+# ---------------------------------------------------------------------------
+# BOUND needs exact evidence (merge gate round 4, burden of proof inverted)
+# ---------------------------------------------------------------------------
+# Every rule above may convict (with positive geometry) or leave a row UNVERIFIABLE. None of them may
+# grant BOUND on its own: four review rounds each found a new pair of distinct labels that a tolerant
+# rule (token pools, adjacency bands, subsets, trailing digits, dropped symbols, header skips) declared
+# the same. A row is BOUND only when its shipped label IS the label printed before its values on the
+# same text-layer line, under the minimal normalisation of ``_exact_label``.
+_FOOTNOTE_TAIL = re.compile(rf"\s*(?:{_PAREN_FOOTNOTE.pattern})$")
+
+
+def _exact_label(text: str) -> str:
+    """Markup removed (``**``, ``*``, backticks, ``<br>``, HTML entities), NFC, casefold, whitespace
+    collapsed. Every letter, digit and symbol (%, $, &, (), -, /) is kept."""
+    s = html.unescape(re.sub(r"<br\s*/?>", " ", text)).replace("*", "").replace("`", "")
+    return " ".join(unicodedata.normalize("NFC", s).casefold().split())
+
+
+def _labels_exact(shipped: str, native: str) -> bool:
+    """The same label string. A trailing footnote mark is dropped only from the side that has one
+    when the other has none; then one trailing period or colon is dropped from each side."""
+    a, b = _exact_label(shipped), _exact_label(native)
+    fa, fb = _FOOTNOTE_TAIL.search(a), _FOOTNOTE_TAIL.search(b)
+    if fa and not fb:
+        a = a[: fa.start()]
+    elif fb and not fa:
+        b = b[: fb.start()]
+    a = a[:-1].rstrip() if a[-1:] in ".:" else a
+    b = b[:-1].rstrip() if b[-1:] in ".:" else b
+    return a == b
+
+
+def _printed_label(cand: _Cand, first_value_word: int) -> str:
+    """The words printed before the row's first value on its candidate line (panel)."""
+    return " ".join(w.text for w in cand.words[: first_value_word - cand.start])
+
+
 def _band_tokens(lines: list[_Line], line: _Line) -> list[str]:
     """Tokens of the label-only bands directly above and below *line* (wrapped-label continuations)."""
     toks: list[str] = []
@@ -652,6 +690,7 @@ def _judge_empty(
     order is the reading order, and repeated section labels ('Industrial Countries' in two blocks)
     are told apart by it."""
     header_like = valued = single = split = 0
+    exact_header = False
     for ln in lines:
         if not lo <= ln.index <= hi:
             continue
@@ -670,10 +709,19 @@ def _judge_empty(
             # neighbour whose label is a shorter piece of this one (`Exports` under `Net exports`) is
             # the shift defect, measured on frame 1, and stays EMPTIED.
             anchor == ln.index
-            and toks
-            and _tokens_in_pool(toks, line_pool)
-            and _tokens_in_pool(own_tokens, row.label_tokens + toks)
-            and (not _tokens_in_pool(toks, row.label_tokens) or _same_label(toks, row.label_tokens))
+            and (
+                # an UNLABELLED neighbour carries the line's values: the whole label went onto the
+                # empty row (2004-12-14 greenbook p28 shape; round 4 found it convicted)
+                not toks
+                or (
+                    _tokens_in_pool(toks, line_pool)
+                    and _tokens_in_pool(own_tokens, row.label_tokens + toks)
+                    and (
+                        not _tokens_in_pool(toks, row.label_tokens)
+                        or _same_label(toks, row.label_tokens)
+                    )
+                )
+            )
             for anchor, toks in neighbours
         ):
             split += 1
@@ -685,8 +733,21 @@ def _judge_empty(
             )
         else:
             header_like += 1
+            exact_header = exact_header or _labels_exact(
+                row.label, " ".join(w.text for w in ln.words)
+            )
     if header_like:
-        return RowVerdict.BOUND, "label is a native header line without a full set of values", None
+        if exact_header:
+            return (
+                RowVerdict.BOUND,
+                "label is printed exactly on a native line without values",
+                None,
+            )
+        return (
+            RowVerdict.UNVERIFIABLE,
+            "label matches a valueless native line, but not exactly",
+            None,
+        )
     if split:
         return (
             RowVerdict.UNVERIFIABLE,
@@ -799,31 +860,33 @@ def check_row_binding(
                 )
             )
             continue
+        if v is RowVerdict.BOUND and not all(
+            _labels_exact(r.label, _printed_label(c2, wi2)) for c2, wi2 in opts
+        ):
+            v, why = (
+                RowVerdict.UNVERIFIABLE,
+                "label not printed exactly before these values on their line",
+            )
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
-    # Header-position rows (adversarial pass F1; merge gate round 3, Astra). The markdown header row
-    # is usually column headings, but the model can put a data row there. It is judged EXACTLY like a
-    # body row (convictions included), on its own (outside the assignment, so a heading line cannot
-    # reorder the data rows), when it is a data row by its own content:
-    #   * it carries a decimal value (none of the 213 numeric header rows in the 333 shipped frame-1 +
-    #     held-out tables does), or
-    #   * its first cell has a letter and its values are not all year headings (four-digit whole
-    #     numbers: `Item | 2008 | 2009 | 2010` is a heading, `Imports | 11 | 12 | 13` is not),
-    # and in both cases every value cell holds numbers only.
-    # Gap (logged): a data row of four-digit whole numbers in the header position.
+    # Header-position rows (adversarial pass F1; rounds 3-4). The markdown header row is usually column
+    # headings, but the model can put a data row there. Every header row whose value cells hold numbers
+    # only is judged like a body row, outside the assignment (a heading line cannot reorder the data
+    # rows), and BOUND only on the exact rule above. It may CONVICT only when it is a data row by its own
+    # content: a decimal value, or a label word over values that are not all four-digit years (a year
+    # heading next to a labelled line cannot be told from a shifted row: frame-1 live boxes convicted a
+    # `(March 24 - April 24)` heading before the numbers-only condition). Otherwise a conviction is
+    # downgraded to UNVERIFIABLE. A value cell with words in it is a heading cell and is not judged.
     for h in shipped:
-        # A value cell with words in it (`(March 24 - April 24)`) is a heading, not a data cell
-        # (frame 1 live boxes: a date-range heading was convicted before this condition).
         if not h.is_header or not h.numbers or not h.values_only:
             continue
         has_decimal = any("." in n for n in h.numbers)
         all_years = all(re.fullmatch(r"\d{4}", n) for n in h.numbers)
-        if not (has_decimal or (_has_letter(h.label_tokens) and not all_years)):
-            continue
+        may_convict = has_decimal or (_has_letter(h.label_tokens) and not all_years)
         opts = _options(h, cands)
         if not opts:
             v, why, nat, line_no = (
                 RowVerdict.UNVERIFIABLE,
-                "header-position data row; no native line carries these values",
+                "header-position row; no native line carries these values",
                 "",
                 None,
             )
@@ -832,17 +895,24 @@ def check_row_binding(
             classes = {j[0] for j, _ in judged}
             (v, why, nat), c = judged[0]
             line_no = c.line.index
+            why = f"header-position row: {why}"
             if len(classes) > 1:
-                v, why, nat, line_no = (
+                v, why = (
                     RowVerdict.UNVERIFIABLE,
-                    f"header-position data row: ambiguous assignment ({len(opts)} lines)",
-                    "",
-                    None,
+                    f"header-position row: ambiguous ({len(opts)} lines)",
                 )
-            elif v in CONVICTING and len(h.numbers) < MIN_VALUES_TO_CONVICT:
-                v, why = RowVerdict.UNVERIFIABLE, "a single value does not identify its line"
-            else:
-                why = f"header-position data row: {why}"
+            elif v in CONVICTING and not (may_convict and len(h.numbers) >= MIN_VALUES_TO_CONVICT):
+                v, why = (
+                    RowVerdict.UNVERIFIABLE,
+                    "header-position row: a heading cannot be convicted",
+                )
+            elif v is RowVerdict.BOUND and not all(
+                _labels_exact(h.label, _printed_label(c2, wi2)) for c2, wi2 in opts
+            ):
+                v, why = (
+                    RowVerdict.UNVERIFIABLE,
+                    "header-position row: label not printed exactly before these values",
+                )
         evidence.insert(0, RowEvidence(h.line_index, v, why, h.label, nat, h.cell_texts, line_no))
     if any(e.verdict in CONVICTING for e in evidence):
         outcome = TableOutcome.CONTRADICTED
