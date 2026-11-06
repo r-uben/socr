@@ -181,6 +181,17 @@ def test_dropped_is_a_multiset():
     assert dropped_numbers("5 5", "one 5 only").dropped == ("5",)
 
 
+def test_one_space_thousands_group_never_satisfies_two_layer_numbers():
+    """Mutation M27b: a claimed group's parts are consumed. Here the plain ``234`` takes one
+    of the two ``234`` tokens, so two ``1,234`` cannot both be found in two groups."""
+    two_groups = "1 234 and 1 234"
+    assert dropped_numbers("234 1,234 1,234", two_groups).dropped == ("1,234",)
+    # a single group cannot hide two layer numbers either
+    assert dropped_numbers("1,234 1,234", "total 1 234").dropped == ("1,234",)
+    # the control: a group for each, and nothing else owed
+    assert dropped_numbers("1,234 1,234", two_groups).dropped == ()
+
+
 def test_number_only_inside_latex_counts_as_present():
     rec = dropped_numbers("0.75 12.5", "the rate is $\\rho = 0.75$ and $12.5\\%$")
     assert rec.dropped == ()

@@ -973,7 +973,7 @@ def _drops_events(out: Path) -> dict[int, list[dict]]:
 
 
 def _resume_page_one(
-    base: Path, dest: Path, pdf: Path, monkeypatch, *, failed_reassessment: bool
+    base: Path, dest: Path, pdf: Path, monkeypatch, *, failed_reassessment: bool, prepare=None
 ) -> tuple[list[int], list[int]]:
     """Copy a finished run, drop its document metadata and page 2 (a crash between pages),
     resume it, and return (pages restored by the page ledger, pages re-read)."""
@@ -983,6 +983,8 @@ def _resume_page_one(
     _crash_after_page_one(dest)
     for md in dest.rglob("metadata.json"):
         md.unlink()
+    if prepare is not None:
+        prepare(dest)
     restored: list[int] = []
     original = UnifiedPipeline._restore_terminal_page_state
 
@@ -1035,3 +1037,47 @@ def test_a_resumed_page_keeps_its_dropped_list_when_the_reassessment_fails(
             assert (_doc_dir(dest) / "pages" / name).read_bytes() == want, (arm, name)
     # the difference being pinned: the failed reassessment changes nothing about page 1
     assert _drops_events(arms["failed"])[1] == _drops_events(arms["normal"])[1]
+
+
+def test_a_list_that_cannot_be_confirmed_on_resume_is_recorded_as_unresolved_never_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Merge gate (mutation M19): no persisted list and a reassessment that finds nothing.
+    The event says so (``unresolved``, with the reason) and carries NO ``dropped`` key -- an
+    empty list would read as "nothing was dropped" under a FAIL clause."""
+    import logging
+
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    first = tmp_path / "first"
+    _run(first, pdf, monkeypatch, drop=True, pages_read=[])
+
+    def blank_the_persisted_list(dest: Path) -> None:
+        side = _doc_dir(dest) / "pages" / "00001.json"
+        data = json.loads(side.read_text())
+        data["audit_events"] = [e for e in data["audit_events"] if e["kind"] != _DROPPED_KIND]
+        side.write_text(json.dumps(data, indent=2))
+
+    dest = tmp_path / "resumed"
+    with caplog.at_level(logging.WARNING):
+        restored, _ = _resume_page_one(
+            first,
+            dest,
+            pdf,
+            monkeypatch,
+            failed_reassessment=True,
+            prepare=blank_the_persisted_list,
+        )
+    assert restored == [1], restored
+    assert any(
+        "no dropped-number list could be confirmed" in r.getMessage() for r in caplog.records
+    )
+    sidecar = json.loads((_doc_dir(dest) / "pages" / "00001.json").read_text())
+    assert _drop_clauses(sidecar), "premise: the restored verdict still carries the FAIL clause"
+    events = {
+        "sidecar": [e["data"] for e in sidecar["audit_events"] if e["kind"] == _DROPPED_KIND],
+        "audit log": _drops_events(dest).get(1, []),
+    }
+    for where, data in events.items():
+        assert len(data) == 1, (where, data)
+        assert "dropped" not in data[0], (where, data)
+        assert data[0]["page"] == 1 and data[0]["unresolved"], (where, data)
