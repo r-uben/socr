@@ -623,9 +623,15 @@ def _is_model_reading(output: PageOutput) -> bool:
 
     The consensus producer labels its winner ``consensus(<engine>)``; that is still a model
     reading, so the wrapper is stripped first (cubic, PR #1263 review)."""
+    return engine_is_model_reading(output.engine or "")
+
+
+def engine_is_model_reading(engine: str) -> bool:
+    """:func:`_is_model_reading` for a bare engine label (the refinalize tool has no
+    ``PageOutput`` yet and must gate a page exactly as a fresh run does)."""
     from socr.core.manifest import _base_engine_name
 
-    return _base_engine_name(output.engine or "") in model_reading_engines()
+    return _base_engine_name(engine) in model_reading_engines()
 
 
 def _mode_clause(output: PageOutput) -> VerdictClause | None:

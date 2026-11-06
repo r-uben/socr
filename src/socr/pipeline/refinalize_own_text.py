@@ -681,7 +681,7 @@ def refinalize_document(
     the document has been decided, so an inconsistency leaves the document untouched."""
     from socr.core.marks import Check
     from socr.core.result import PageOutput
-    from socr.core.verdict import model_reading_engines, page_dropped_numbers
+    from socr.core.verdict import engine_is_model_reading, page_dropped_numbers
 
     skipped = Counter() if skipped is None else skipped
     pages_dir = doc_dir / "pages"
@@ -693,7 +693,8 @@ def refinalize_document(
     for path in sidecar_paths:
         sidecar = _read_json(path)
         engine = (sidecar.get("winning_output") or {}).get("engine") or ""
-        if engine not in model_reading_engines():
+        if not engine_is_model_reading(engine):
+            skipped["page engine is not a model reading"] += 1
             continue
         if sidecar.get("terminal") is not True:
             # A crash-recovery copy, not a finished page: the run's next pass rewrites it.

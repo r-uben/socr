@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from test_gh1218_drops_clause import (
     _p,
     _pdf_dir,
     _rotated_pdf,
+    _Reader,
+    _artifacts,
     _run,
     _without_the_clause,
 )
@@ -40,7 +43,7 @@ def test_refinalize_merges_into_an_entry_an_earlier_pass_wrote(
         _run(old, pdf, monkeypatch, drop=True, pages_read=[])
     doc = _doc_dir(old)
     earlier = {
-        "before": {"status": "success"},
+        "before": {"status": "warning"},
         "after": {"status": "warning", "text_layer_numbers": "FAIL"},
         "socr_source_digest": "an earlier pass",
     }
@@ -159,3 +162,56 @@ def test_a_chart_box_is_not_grown_again_but_a_raw_image_box_is() -> None:
     # difference: a box touching the row claims it either way
     touching = [(40.0, 20.0, 400.0, 101.0)]
     assert _step_tail(excluded_boxes=touching) == []
+
+
+# --- 6. the tool gates a page like a fresh run: a consensus winner is a model reading -------
+
+
+class _ConsensusReader(_Reader):
+    """The stub reading, labelled the way the consensus producer labels its winner."""
+
+    def process_pages(self, *args, **kwargs):
+        outs = super().process_pages(*args, **kwargs)
+        for out in outs:
+            out.engine = "consensus(qwen)"
+        return outs
+
+
+def test_refinalize_checks_a_consensus_winner_exactly_as_a_fresh_run_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import test_gh1218_drops_clause as base
+    from socr.pipeline.refinalize_own_text import refinalize_document
+
+    monkeypatch.setattr(base, "_Reader", _ConsensusReader)
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    fresh = tmp_path / "fresh"
+    _run(fresh, pdf, monkeypatch, drop=True, pages_read=[])
+    old = tmp_path / "old"
+    with monkeypatch.context() as m:
+        _without_the_clause(m)
+        _run(old, pdf, monkeypatch, drop=True, pages_read=[])
+    want = _artifacts(fresh)
+    side = want["sidecars"]["00001.json"]
+    assert side["winning_output"]["engine"] == "consensus(qwen)"
+    assert any(c.get("kind") == "numbers_dropped_from_reading" for c in side["audit_events"])
+    assert "numbers_dropped_from_reading" not in json.dumps(_artifacts(old)["audit_log"])
+    skipped: Counter = Counter()
+    refinalize_document(_doc_dir(old), _pdf_dir(tmp_path, pdf), skipped=skipped)
+    got = _artifacts(old)
+    for key in want:
+        assert got[key] == want[key], key
+    assert not skipped
+
+
+def test_refinalize_counts_a_page_that_is_no_model_reading(tmp_path: Path) -> None:
+    from socr.pipeline.refinalize_own_text import refinalize_document
+
+    doc = tmp_path / "doc"
+    (doc / "pages").mkdir(parents=True)
+    (doc / "pages" / "001.json").write_text(
+        json.dumps({"page_num": 1, "terminal": True, "winning_output": {"engine": "native"}})
+    )
+    skipped: Counter = Counter()
+    assert refinalize_document(doc, tmp_path, skipped=skipped) == []
+    assert sum(skipped.values()) == 1
