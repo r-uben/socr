@@ -2926,6 +2926,14 @@ def structure_class_floor_text(
     tables can be enumerated independently of the parser that produced them;
     otherwise the whole page becomes the marker and no native byte ships.
 
+    #1266 B1: it serves TWO endings. The S1 structure-class ending, and the TR-3 D3
+    regional ending (``SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE``), whose
+    ``splice_all_table_regions`` / ``splice_failed_table_regions`` calls it replaced. That
+    ending is born-digital only, so it always takes the geometry floor below; each caller
+    records the recovery on its own ``PageOutput`` (``scanned_prose_recovered`` plus the
+    audit note) from the banner in what this returns. The GH-520 history that follows is
+    the S1 ending's; on born-digital pages the splice it describes is retired (#1266).
+
     Why the guard is what it is
     ---------------------------
     Cold review rounds 1 and 2, finding 1. Round 1 shipped a regional splice via
@@ -4835,68 +4843,46 @@ def _select_page_output_tagged(
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
                 ), SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT
 
-            # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts
-            # are available; fall back to whole-page marker if isolation is
-            # unprovable.
+            # TR-3: D3 fail-closed floor. #1266 B1 (owner ruling 2026-11-05): this ending
+            # takes the SAME born-digital geometry floor as the structure-class ending
+            # (``structure_class_floor_text``), not a text splice.
             #
-            # GH-375: ``native_table_header_unattributed`` is page-level — there
-            # is no per-table header identity. Regional splice of only TR-3
-            # ordinals would ship a header-destroyed sibling as unmarked GFM.
-            # Refuse isolation and replace every table (GH-90): every table is
-            # untrusted, surrounding prose is not.
-            native_text = p.native_text or ""
-            d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
-            png_ref = getattr(p, "d3_floor_png_ref", "")
-
-            d3_text = None
-            # #1156 round 1: every branch below splices ``native_text`` around the
-            # markers, so on a flagged page the earlier OCR layer's prose ships from here
-            # too -- the same shape as the S1 floor above, reached by a different route
-            # (r-uben, by reading; fixture built in
-            # ``test_gh1156_part_a_interim.py``). Leaving ``d3_text`` None takes the
-            # whole-page marker plus the page image, which this branch already uses
-            # whenever isolation is unprovable, so no new ending is introduced.
-            prior_ocr_suspect = prior_ocr_layer_found(p)
-            header_unattributed = bool(getattr(p, "native_table_header_unattributed", False))
-            if prior_ocr_suspect:
-                pass  # no splice: the whole-page marker and the page image
-            elif header_unattributed:
-                d3_text = splice_all_table_regions(
-                    native_text, marker_line=d3_marker, png_ref=png_ref
-                )
-            else:
-                failed_ordinals = getattr(p, "native_table_unverifiable_ordinals", None)
-                region_count = getattr(p, "native_table_region_count", None)
-                identities = list(getattr(p, "native_table_region_identities", []) or [])
-                # Identities are recorded by ``_verify_regions`` for every
-                # examined region, so a missing or short list means the state
-                # predates GH-375 (stale sidecar) or was never captured. An
-                # ordinal splice without a 1:1 identity match is exactly the
-                # equal-count swap hole — refuse it and take the whole-page
-                # marker instead of an unverified splice.
-                if (
-                    failed_ordinals is not None
-                    and region_count is not None
-                    and len(identities) == region_count
-                ):
-                    d3_text = splice_failed_table_regions(
-                        native_text,
-                        failed_ordinals=failed_ordinals,
-                        expected_count=region_count,
-                        marker_line=d3_marker,
-                        png_ref=png_ref,
-                        region_identities=identities,
-                    )
-
-            if d3_text is None:
-                d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
-
+            # Until #1266 this branch spliced ``native_text`` around the markers --
+            # ``splice_all_table_regions`` on a header-unattributed page (GH-375),
+            # ``splice_failed_table_regions`` over the TR-3 ordinals otherwise. Both replace
+            # only the PARSED GFM blocks they are pointed at, so every un-parsed table line
+            # (header words, rows the parser never grouped) shipped verbatim beside the marker.
+            # Measured on the 539 scored Fed pages of this ending (#1266 PART2): 503 pages
+            # leaked table lines, 4,498 of them bearing a printed value. The geometry floor
+            # withholds by the detected BOXES and the page's own word bands (shared gate,
+            # keep-sentences body): 5 leaking pages and one value line (a footnote) remain.
+            #
+            # Price the owner accepted: the floor withholds EVERY detected box, including a
+            # table TR-3 verified (a VERIFIED sibling's GFM no longer ships), because no
+            # ordinal->box mapping is safe (83/537 pages match by y0 order). Keeping verified
+            # siblings is a separate per-region follow-up, not this ending.
+            #
+            # ``structure_class_floor_text`` also carries the two arms this branch needs:
+            # a POSITIVE prior-OCR finding (#1156) returns the whole-page marker plus image,
+            # exactly what this branch shipped for it before; and a page restored from its
+            # sidecar without ``native_words`` replays its own frozen born-digital recovery
+            # (typed credential + banner) instead of recomputing, and fails closed otherwise.
+            # The chart floor is not offered here (``chart_floor=None``): this ending was
+            # never a chart lane.
+            d3_text = structure_class_floor_text(p, page_num)
+            # Recorded the way the S1 structure-class ending records it, from the same
+            # evidence (the banner in what shipped): without the typed field a restored page
+            # could not replay the recovery (``_is_restored_prose_recovery``) and the
+            # document note and CLI recovery lines would stay silent about this page.
+            prose_recovered = _is_prose_recovery_body(d3_text, page_num)
             return PageOutput(
                 page_num=page_num,
                 text=d3_text,
                 status=PageStatus.ERROR,
                 engine="native",
                 audit_passed=False,
+                audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
+                scanned_prose_recovered=prose_recovered,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
             ), SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE
 
