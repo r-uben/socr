@@ -14,11 +14,14 @@ pair in Python (about 1.4e9 checks). Both ran for more than 60 s on all three pa
 boxes on a grid with cell = gap/2 and unions boxes that share a cell without a check, since such boxes are within gap.
 It checks cross-cell pairs exactly within ±3 cells: 2 cells cover the gap and 1 is a margin for floor() rounding.
 Output order is unchanged, so both callers' results are byte-identical to before. It falls back to the exact pairwise
-loop in four cases: a box inverted, a degenerate cell, coordinates beyond cell·2^50, or exact checks exceeding the
-pairwise count. So exact pair checks stay within twice the old pairwise count; grid registration and union-find add
-O(n²) work and memory on top.
+loop in five cases: a box inverted, a non-finite gap or coordinate, a degenerate cell, coordinates beyond cell·2^50,
+or registration plus exact checks exceeding the pairwise count (follow-up: cell memberships are counted before any is
+allocated and charged to the same budget). A grid attempt therefore never stores more memberships, or does more
+registration-plus-check work, than one pairwise pass; registration plus exact checks total at most two passes
+(union-find and dictionary bookkeeping are not counted in that bound).
 
-**Measured** (Rorqual, 674 pages: the 550 checks345 diagnostic pages plus every page of the three Tealbook documents;
+**Measured** (Rorqual, 674 pages: the 550 checks345 diagnostic pages plus the other 124 pages of the three Tealbook
+documents, 129 Tealbook pages in all, 5 of them already among the 550;
 main 4e170962 against the grid commit, 60 s alarm per call):
 
 | | main | grid |
