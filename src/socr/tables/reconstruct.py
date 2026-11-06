@@ -1747,6 +1747,13 @@ def chart_region_bboxes(page) -> list[object]:
     The margin is derived from the page's word geometry — no fixed pt constant.
     Returns ``[]`` when there are no qualifying chart clusters or on error.
 
+    Framed thin-stroke clusters that ``has_chart_marks`` accepts through
+    ``_has_framed_data_cluster`` are deliberately not boxed here. #1269 measured 6 Fed
+    pages where the two differ: the chart reader refused every region even when given
+    the census boxes, and on one page the census frames were text boxes, so widening
+    this would delete prose. The difference is recorded per page as
+    ``chart_floor_abstention.census_chart_marks``.
+
     Never raises.
     """
     try:
