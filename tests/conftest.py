@@ -222,25 +222,32 @@ def p6_old_orthogonal_buckets():
     return old_orthogonal_assemble_buckets
 
 
-def zero_attempt_d3_pages(state) -> set[int]:
-    """#1266 commit 3: the ONE permitted departure from :func:`old_disposition_buckets`.
+def no_model_reading_d3_pages(state) -> set[int]:
+    """#1266: the ONE permitted departure from :func:`old_disposition_buckets`.
 
-    The D3 floor no longer requires an OCR attempt, so ``d3_floor_pages`` now also holds a
-    page that carries the D3 conjunction with NO attempt -- exactly the pages the pre-P6
-    predicate's ``bool(p.attempts)`` excluded, and nothing else. (No attempt also means no
-    kept model: ``d3_floor_kept_model_output`` requires attempts.) The oracle itself stays
-    verbatim; the difference is stated here, where Rule 1 consumes it.
+    The D3 floor no longer requires an OCR attempt (commit 3), and a failed native table
+    with NO model reading enters it even without the unverifiable/header flag (merge gate,
+    Finding 18, option (b): box-backed only). So ``d3_floor_pages`` may also hold a
+    born-digital page carrying ``native_table_structure_failed`` on which no model reading ran
+    and which either carries the old unverifiable/header flag or has complete detector boxes
+    -- and nothing else: a page WITH a model attempt is held to the verbatim pre-P6
+    predicate. (No model attempt
+    also means no kept model: ``d3_floor_kept_model_output`` needs one.) The oracle itself
+    stays verbatim; the difference is stated here, where Rule 1 consumes it.
     """
+    from socr.core import manifest
+
     return {
         n
         for n, p in sorted(state.pages.items())
         if p.is_born_digital
         and p.native_table_structure_failed
+        and not manifest._model_attempt_ran(p)
         and (
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
+            or manifest.d3_no_model_reading(p)
         )
-        and not p.attempts
     }
 
 
@@ -252,12 +259,12 @@ def assert_stage_c_disposition_buckets(state, records, new: dict[str, set[int]])
     old = old_disposition_buckets(state)
 
     # Rule 1: The three flag-derived buckets must match old_disposition_buckets(state) exactly,
-    # with ONE explicit carve-out: ``d3_floor_pages`` may also hold the zero-attempt D3 pages
-    # (#1266 commit 3, :func:`zero_attempt_d3_pages`). Every other membership is exact.
+    # with ONE explicit carve-out: ``d3_floor_pages`` may also hold the no-model-reading D3
+    # pages (#1266, :func:`no_model_reading_d3_pages`). Every other membership is exact.
     for name in FLAG_DERIVED_BUCKET_NAMES:
         expected = old[name]
         if name == "d3_floor_pages":
-            expected = expected | zero_attempt_d3_pages(state)
+            expected = expected | no_model_reading_d3_pages(state)
         actual = new.get(name, set())
         if actual != expected:
             raise AssertionError(

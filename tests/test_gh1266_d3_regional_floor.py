@@ -792,3 +792,130 @@ def test_d3_and_the_withheld_floor_record_no_chart_floor_abstention(tmp_path: Pa
     )
     _apply_ladder_disposition_guard(winner, 1, wh_ps)
     assert wh_ps.chart_floor_abstention is None
+
+
+# ---------------------------------------------------------------------------
+# merge gate (Finding 18): a failed native table with NO model reading takes D3 too
+# ---------------------------------------------------------------------------
+
+
+def _structure_failed_only(ps, *, model_attempt: bool):
+    """``native_table_structure_failed`` WITHOUT the unverifiable/header flags; the page's
+    attempts are the native one only, or the native one plus a rejected model reading."""
+    ps.native_table_structure_failed = True
+    ps.native_table_unverifiable = False
+    ps.native_table_header_unattributed = False
+    native = PageOutput(
+        page_num=1,
+        text=ps.native_text,
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=False,
+        failure_mode=FailureMode.MODEL_UNAVAILABLE,
+    )
+    ps.attempts = [native]
+    ps.best_output = native
+    if model_attempt:
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="The table could not be read.",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+            )
+        )
+    return ps
+
+
+def test_a_failed_table_with_no_model_reading_takes_the_d3_floor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DIFFERENCE: the widening toggled off (``d3_no_model_reading`` -> False) ships the
+    failed native grid; on, the page takes D3. A page WITH a model attempt routes the same
+    either way (no page with a model attempt changes)."""
+    from socr.core import manifest as manifest_mod
+
+    def _select(ps_state, *, widen: bool):
+        with monkeypatch.context() as mp:
+            if not widen:
+                mp.setattr(manifest_mod, "d3_no_model_reading", lambda p: False)
+            return _select_page_output_tagged(ps_state, 1)
+
+    nomodel, nm_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="nm.pdf")
+    _structure_failed_only(nm_ps, model_attempt=False)
+    on, on_prov = _select(nomodel, widen=True)
+    off, off_prov = _select(nomodel, widen=False)
+    _assert_d3_ending(on, on_prov)
+    assert off_prov is not D3
+    assert any(tok in off.text for tok in GRID_TOKENS), "premise: the old route shipped the grid"
+    for tok in GRID_TOKENS:
+        assert tok not in on.text, f"table content {tok!r} shipped"
+    assert SENTENCE_WITH_YEAR in on.text
+    _assert_recorded(on, True)
+
+    model, m_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="m.pdf")
+    _structure_failed_only(m_ps, model_attempt=True)
+    m_on, m_on_prov = _select(model, widen=True)
+    m_off, m_off_prov = _select(model, widen=False)
+    assert m_on_prov is m_off_prov and m_on_prov is not D3
+    assert m_on.text == m_off.text, "the widening changed a page with a model attempt"
+
+
+def test_process_finding_18_page_both_provider_states(tmp_path: Path, monkeypatch) -> None:
+    """process() over the Finding-18 shape (a lined grid with unboxed numeric rows below),
+    ``native_first`` on, in BOTH provider states, the widening toggled.
+
+    Empty ladder: with the widening the page ends at D3 (no grid token, no welded
+    ``Series`` line); without it the failed native grid and the welded line shipped at
+    WARNING (premise). Populated ladder: a model reading runs, and the fragment is
+    byte-identical with the widening on and off -- the route is unchanged.
+    """
+    from socr.core import manifest as manifest_mod
+
+    pdf = _gated_process_pdf(tmp_path / "doc.pdf")
+    frags = {}
+    for ladder in (True, False):
+        for widen in (True, False):
+            tag = f"{'ladder' if ladder else 'empty'}-{'on' if widen else 'off'}"
+            with monkeypatch.context() as mp:
+                if not widen:
+                    mp.setattr(manifest_mod, "d3_no_model_reading", lambda p: False)
+                frags[tag] = _run_route(
+                    tmp_path, pdf, monkeypatch, ladder=ladder, native_first=True, tag=tag
+                )
+    on_frag, on_meta, _ = frags["empty-on"]
+    off_frag, off_meta, _ = frags["empty-off"]
+    assert "Series0" in off_frag and "Real GDP" in off_frag, "premise: the old route leaked"
+    assert off_meta["status"] == "warning"
+    assert on_meta["failure_mode"] == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value
+    assert on_meta["status"] == "error"
+    for tok in ("Series", "Real GDP", "Final sales", "2.6", "4.1"):
+        assert tok not in on_frag, f"table content {tok!r} shipped"
+    assert MARKER_PREFIX_D3 in on_frag
+    assert frags["ladder-on"][0] == frags["ladder-off"][0], "the widening changed a model page"
+    assert frags["ladder-on"][1]["failure_mode"] == frags["ladder-off"][1]["failure_mode"]
+
+
+MARKER_PREFIX_D3 = "failed: unverifiable table"
+
+
+def test_a_boxless_failed_table_with_no_model_reading_keeps_todays_route(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Option (b): the widening needs a detector box. A box-less page flagged only by the
+    ``has_tables`` heuristic (the providerless loop stamps ``native_table_structure_failed``
+    on every such page; GH-655 measured 400 false flags on prose) routes exactly as before
+    -- its prose is not wiped to a bare marker. DIFFERENCE: widening on vs off identical."""
+    from socr.core import manifest as manifest_mod
+
+    state, ps = _build(tmp_path, _draw_p10, [], name="nobox.pdf")
+    _structure_failed_only(ps, model_attempt=False)
+    assert not manifest_mod.detector_boxes_complete(ps), "premise: no detector box"
+    on, on_prov = _select_page_output_tagged(state, 1)
+    with monkeypatch.context() as mp:
+        mp.setattr(manifest_mod, "d3_no_model_reading", lambda p: False)
+        off, off_prov = _select_page_output_tagged(state, 1)
+    assert on_prov is off_prov and on_prov is not D3
+    assert on.text == off.text
+    assert SENTENCE_WITH_YEAR in on.text, "a box-less page lost its prose"

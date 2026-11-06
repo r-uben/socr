@@ -707,6 +707,7 @@ def _derive_disposition_buckets(
     """
     from socr.core.manifest import (
         d3_floor_kept_model_output,
+        d3_no_model_reading,
         flagged_model_page_output,
     )
 
@@ -736,6 +737,8 @@ def _derive_disposition_buckets(
         and (
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
+            # #1266 merge gate: mirrors the D3 entry's no-model-reading widening.
+            or d3_no_model_reading(p)
         )
         # #1266 commit 3: the D3 floor no longer requires an attempt, so neither does the
         # bucket that surfaces it (document status, audit event, CLI line).
@@ -11425,6 +11428,18 @@ class UnifiedPipeline:
                 ps = state.pages[page_num]
                 if self._page_has_tables(page_num, ps):
                     ps.native_table_structure_failed = True
+                    # #1266 merge gate: with no model reading a BOX-BACKED page now takes the
+                    # D3 floor (``d3_no_model_reading``), whose marker says "see image";
+                    # render the page image the other D3 routes render, so the marker is true.
+                    from socr.core.manifest import detector_boxes_complete
+
+                    if detector_boxes_complete(ps) and not getattr(ps, "d3_floor_png_ref", ""):
+                        _, _providerless_figs = self._doc_and_figures_dir(
+                            state.handle.path, output_dir
+                        )
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path, page_num, _providerless_figs
+                        )
                 fallback = PageOutput(
                     page_num=page_num,
                     text=ps.native_text or "",
@@ -19142,6 +19157,8 @@ class UnifiedPipeline:
         # non-S1/non-D3/non-flagged-model reason and native bytes ultimately shipped
         # demoted; it is intentionally not equivalent to the DEMOTED_NATIVE ending
         # or the old NATIVE_FALLBACK provenance.
+        from socr.core.manifest import d3_no_model_reading as _d3_no_model_reading
+
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -19189,6 +19206,8 @@ class UnifiedPipeline:
                 and (
                     getattr(p, "native_table_unverifiable", False)
                     or getattr(p, "native_table_header_unattributed", False)  # GH-200
+                    # #1266 merge gate: the D3 entry's no-model-reading widening.
+                    or _d3_no_model_reading(p)
                 )
             )
             # GH-211: pages distrusted under --native-only never had an OCR

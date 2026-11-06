@@ -1093,6 +1093,37 @@ def _model_attempt_ran(p) -> bool:
     return any((a.engine or "") and not a.engine.startswith(_NATIVE_TEXT_LANES) for a in p.attempts)
 
 
+def detector_boxes_complete(p) -> bool:
+    """A positive ``detected_table_count`` with one usable box per detected table.
+
+    ``find_tables()`` evidence, taken before reconstruction. The #1144 recovery gate in
+    ``table_floor_text_for_source`` reads exactly this (count == boxes, count > 0); factored
+    out so the D3 widening reads the same predicate rather than a second copy.
+    """
+    boxes = getattr(p, "detected_table_bboxes", None) or []
+    count = getattr(p, "detected_table_count", 0)
+    return type(count) is int and count > 0 and len(boxes) == count
+
+
+def d3_no_model_reading(p) -> bool:
+    """#1266 merge gate (Finding 18, option (b)): a BOX-BACKED failed table, no model reading.
+
+    Widens the D3 floor's conjunction: a page whose native table structure FAILED with no
+    model attempt (empty ladder plus ``native_first``, ``--native-only``, a provider outage)
+    otherwise declined D3 (no unverifiable/header flag) and S1 (no non-native attempt) and
+    shipped the failed native grid at WARNING.
+
+    Only with a detector box (``detector_boxes_complete``). A ``find_tables()`` box is
+    independent geometric evidence that a table is there; the ``has_tables`` lane heuristic
+    alone is not (GH-655 census: 400 false flags across 68 Fed documents), and the providerless
+    loop stamps ``native_table_structure_failed`` on every ``has_tables`` page. A page with a
+    box takes the geometry floor, which keeps its sentences; a box-less page would fail closed
+    to the bare marker and lose its prose, so it keeps today's route exactly. A page WITH a
+    model attempt is untouched. One named predicate for the D3 entry and every mirror of it.
+    """
+    return not _model_attempt_ran(p) and detector_boxes_complete(p)
+
+
 def garbled_math_suspect(p) -> bool:
     """#960: the native text layer garbled the page's mathematics, or the scan for that
     failed (unknown is not clean)."""
@@ -1469,10 +1500,12 @@ def _reaches_structure_class_branch(p) -> bool:
     # never reached for this page -- a different, earlier return ships.
     if not (p.is_born_digital and p.native_text):
         return False
-    # #1266 commit 3: mirrors the D3 entry, which no longer requires an attempt.
+    # #1266 commit 3 / merge gate: mirrors the D3 entry (no attempt needed; a failed table
+    # with no model reading enters too).
     if p.native_table_structure_failed and (
         getattr(p, "native_table_unverifiable", False)
         or getattr(p, "native_table_header_unattributed", False)
+        or d3_no_model_reading(p)
     ):
         return False
     if getattr(p, "native_rotated_text_shredded", False):
@@ -3488,7 +3521,7 @@ def table_floor_text_for_source(
         # covers.
         _boxes = getattr(p, "detected_table_bboxes", None) or []
         _count = getattr(p, "detected_table_count", 0)
-        if not (type(_count) is int and _count > 0 and len(_boxes) == _count):
+        if not detector_boxes_complete(p):
             # #1155: a page with no usable table box withheld EVERYTHING --
             # prose, pictures and the chart reading alike -- and 9 Fed SEP pages
             # shipped 103 characters of marker and nothing else. When the chart
@@ -4984,6 +5017,10 @@ def _select_page_output_tagged(
                 # through to the native_is_fallback WARNING branch below and
                 # SHIPPED the header-destroyed native table text.
                 or getattr(p, "native_table_header_unattributed", False)
+                # #1266 merge gate (Finding 18): a failed native table with NO model
+                # reading takes this floor too, instead of shipping the failed grid through
+                # the native fallback. Pages with a model attempt route exactly as before.
+                or d3_no_model_reading(p)
             )
             # #1266 commit 3: deliberately NOT gated on ``bool(p.attempts)``, following
             # GH-195 and #263's shredded floor below. The defect is found during native
