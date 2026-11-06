@@ -3118,17 +3118,37 @@ class UnifiedPipeline:
                 # #881: a page that never loaded has no words to cache, and
                 # reading it would raise and cost every later page its words.
                 if not getattr(pa, "load_error", "")
-                and (
-                    pa.detected_table_count > 0
-                    or not pa.is_born_digital
-                    # #1266 merge gate round 2: a born-digital page the lane heuristic
-                    # flags as table-bearing but with no detector box. If its table then
-                    # fails with no model reading, ``boxless_failed_table_text`` builds the
-                    # KEEP-SENTENCES body from these words; without them it can only fail
-                    # closed to the bare marker and the page's prose is lost.
-                    or bool(getattr(pa, "has_tables", False))
+                and (pa.detected_table_count > 0 or not pa.is_born_digital)
+            ]
+            # #1266 merge gate: a born-digital page the lane heuristic flags as
+            # table-bearing but with no complete detector box gets its words in a
+            # SEPARATE live-only field, read only by ``boxless_failed_table_text`` (the
+            # box-less failed-table route). ``native_words`` above keeps its exact
+            # population, so every other consumer (``_truncated_grid_reading_ids``, the
+            # chart floor, ``_table_bbox_sane``, the #1144 recovery) sees what it saw.
+            pages_needing_boxless_words = [
+                pa.page_num
+                for pa in assessment.pages
+                if not getattr(pa, "load_error", "")
+                and pa.is_born_digital
+                and bool(getattr(pa, "has_tables", False))
+                and not (
+                    type(pa.detected_table_count) is int
+                    and pa.detected_table_count > 0
+                    and len(getattr(pa, "detected_table_bboxes", None) or [])
+                    == pa.detected_table_count
                 )
             ]
+            if pages_needing_boxless_words:
+                doc = open_pdf(state.handle.path)
+                try:
+                    for page_num in pages_needing_boxless_words:
+                        ps = state.pages.get(page_num)
+                        if ps is None or not (0 <= page_num - 1 < len(doc)):
+                            continue
+                        ps.boxless_table_words = doc[page_num - 1].get_text("words")
+                finally:
+                    doc.close()
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)
                 try:

@@ -3230,7 +3230,8 @@ def boxless_failed_table_text(p, page_num: int) -> str:
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "") or ""
     whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
-    if not (getattr(p, "native_words", None) or []):
+    boxless_words = getattr(p, "boxless_table_words", None) or []
+    if not boxless_words:
         bo = getattr(p, "best_output", None)
         if bo is not None and getattr(bo, "table_floor_body", False):
             if _is_restored_prose_recovery(p, page_num):
@@ -3242,6 +3243,7 @@ def boxless_failed_table_text(p, page_num: int) -> str:
         marker_line=d3_marker,
         png_ref=png_ref,
         keep_sentences=bool(getattr(p, "is_born_digital", False)),
+        words=boxless_words,
     )
     if not body or not _prose_follows_native_order(body, getattr(p, "native_text", "") or ""):
         return whole_page
@@ -3793,7 +3795,11 @@ def _prose_follows_native_order(body: str, native_text: str) -> bool:
 
 
 def _page_prose_partition(
-    p, *, extra_boxes: list | None = None, keep_sentences: bool = False
+    p,
+    *,
+    extra_boxes: list | None = None,
+    keep_sentences: bool = False,
+    words: list | None = None,
 ) -> list:
     """The prose/table partition of a page's native words, whole page.
 
@@ -3811,7 +3817,8 @@ def _page_prose_partition(
     """
     from socr.tables.row_corroboration import partition_prose_bands
 
-    words = getattr(p, "native_words", None) or []
+    # #1266: ``words`` is passed only by the box-less route (``boxless_table_words``).
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
     if not words:
         return []
     # #1144: the page's DETECTED table boxes withhold the bands inside them
@@ -4171,6 +4178,7 @@ def native_prose_floor_text(
     png_ref: str,
     extra_withheld_boxes: list | None = None,
     keep_sentences: bool = False,
+    words: list | None = None,
 ) -> str | None:
     """The page's own prose, flagged, around a withheld table -- or ``None``.
 
@@ -4246,12 +4254,14 @@ def native_prose_floor_text(
     if prior_ocr_layer_found(p):
         return None
 
-    words = getattr(p, "native_words", None) or []
+    # #1266: ``words`` is passed only by the box-less route; every other caller reads
+    # ``native_words`` exactly as before.
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
     if not words:
         return None
 
     bands = _page_prose_partition(
-        p, extra_boxes=extra_withheld_boxes, keep_sentences=keep_sentences
+        p, extra_boxes=extra_withheld_boxes, keep_sentences=keep_sentences, words=words
     )
     prose_bands = [band for is_prose, band in bands if is_prose]
     if not prose_bands:

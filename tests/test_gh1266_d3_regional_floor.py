@@ -910,8 +910,7 @@ def test_a_boxless_failed_table_does_not_take_d3_and_keeps_its_sentences(
     gives this route the KEEP-SENTENCES body; see the tests below.)"""
     from socr.core import manifest as manifest_mod
 
-    state, ps = _build(tmp_path, _draw_p10, [], name="nobox.pdf")
-    _structure_failed_only(ps, model_attempt=False)
+    state, ps = _boxless(tmp_path, name="nobox.pdf")
     assert not manifest_mod.detector_boxes_complete(ps), "premise: no detector box"
     on, on_prov = _select_page_output_tagged(state, 1)
     with monkeypatch.context() as mp:
@@ -928,8 +927,12 @@ def test_a_boxless_failed_table_does_not_take_d3_and_keeps_its_sentences(
 
 
 def _boxless(tmp_path: Path, *, born_digital: bool = True, name: str = "bl.pdf"):
+    """A box-less failed-table page as analysis leaves it: ``native_words`` empty (its cache
+    population is unchanged by #1266), the words in ``boxless_table_words``."""
     state, ps = _build(tmp_path, _draw_p10, [], born_digital=born_digital, name=name)
     _structure_failed_only(ps, model_attempt=False)
+    ps.boxless_table_words = list(ps.native_words)
+    ps.native_words = []
     return state, ps
 
 
@@ -992,7 +995,7 @@ def test_a_wordsless_boxless_page_replays_only_a_credentialed_recovery(tmp_path:
 
     def _restored(credential: bool, name: str):
         _st, ps = _boxless(tmp_path, name=name)
-        ps.native_words = []
+        ps.boxless_table_words = []
         frozen = PageOutput(
             page_num=1,
             text=body,
@@ -1068,3 +1071,55 @@ def test_process_boxless_failed_table_both_provider_states(tmp_path: Path, monke
         assert tok not in new_frag, f"table content {tok!r} shipped"
     assert SENTENCE_WITH_YEAR in new_frag and TAIL_SENTENCE in new_frag
     assert frags["ladder-new"][0] == frags["ladder-old"][0], "a model page changed"
+
+
+# ---------------------------------------------------------------------------
+# word cache scoped: the box-less route has its own live-only words
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_fills_boxless_words_and_leaves_native_words_as_before(tmp_path: Path) -> None:
+    """``native_words`` keeps its pre-#1266 population (detector boxes, or not born-digital);
+    a born-digital ``has_tables`` page without a complete box gets ``boxless_table_words``
+    instead. DIFFERENCE: the box-less page vs the boxed page through the same analysis."""
+    from test_gh1144_prose_survives_the_table_floor import _pipeline
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    def _analyzed(pdf: Path):
+        pipe = _pipeline()
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        pipe._phase_analyze(state)
+        return state.pages[1]
+
+    boxless = _analyzed(_boxless_process_pdf(tmp_path / "nobox.pdf"))
+    boxed = _analyzed(_gated_process_pdf(tmp_path / "box.pdf"))
+    assert boxless.is_born_digital and boxless.has_tables, "premise: flagged by the heuristic"
+    assert not boxless.detected_table_bboxes, "premise: no detector box"
+    assert boxless.native_words == [], "native_words population changed"
+    assert boxless.boxless_table_words, "the box-less route got no words"
+    assert boxed.detected_table_bboxes and boxed.native_words
+    assert boxed.boxless_table_words == []
+
+
+def test_the_boxless_words_change_nothing_but_the_boxless_route(tmp_path: Path) -> None:
+    """A box-less ``has_tables`` page with two grid candidates, one of them truncated (the
+    gh671 fixture): selection is identical with ``boxless_table_words`` present or absent --
+    the field is read by the box-less route only."""
+    import test_gh671_truncated_best_output_short_circuit as g671
+
+    def _select(words: list, sub: str):
+        truncated = g671._truncated_best_output()
+        complete = g671._complete_wide_pool_attempt()
+        p = g671._page(best_output=truncated, attempts=[truncated, complete])
+        p.detected_table_bboxes = []
+        p.native_words = []
+        p.boxless_table_words = list(words)
+        (tmp_path / sub).mkdir()
+        return _select_page_output_tagged(g671._state_with_page(tmp_path / sub, p), 1)
+
+    absent, absent_prov = _select([], "a")
+    present, present_prov = _select(g671.NATIVE_WORDS, "p")
+    assert present_prov is absent_prov
+    assert present.text == absent.text and present.engine == absent.engine

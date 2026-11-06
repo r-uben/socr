@@ -326,6 +326,11 @@ class PageState:
     #: a resumed page's fallback simply has no native-words evidence to
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
+    #: #1266 merge gate: ``page.get_text("words")`` for a born-digital page the lane
+    #: heuristic flags as table-bearing but with no complete detector box. Read ONLY by
+    #: ``manifest.boxless_failed_table_text``; kept apart from ``native_words`` so no other
+    #: consumer's input changes. RUNTIME-ONLY like ``native_words``: never persisted.
+    boxless_table_words: list[tuple] = field(default_factory=list)
     #: #1074: the page's paragraphs from its geometry, matched to the shipped lines at
     #: emit time (``native_paragraphs.reflow_native_prose``). RUNTIME-ONLY like
     #: ``native_words``: analyze runs on every run, resume included, and a replay that
