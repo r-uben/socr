@@ -2716,7 +2716,7 @@ def _record_chart_floor_probe(p, record: dict) -> None:
     try:
         p.chart_floor_probe = record
     except Exception:  # pragma: no cover - a read-only stand-in in tests
-        pass
+        logger.debug("#1269: could not record the chart-floor probe", exc_info=True)
 
 
 def _record_chart_floor_abstention(p, *, empty_body: bool = False) -> None:
@@ -2747,7 +2747,7 @@ def _record_chart_floor_abstention(p, *, empty_body: bool = False) -> None:
             record = {"outcome": CHART_FLOOR_PROBE_NOT_RUN}
         p.chart_floor_abstention = record
     except Exception:  # pragma: no cover - a read-only stand-in in tests
-        pass
+        logger.debug("#1269: could not record the chart-floor abstention", exc_info=True)
 
 
 def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_ref: str):

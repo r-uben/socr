@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+import tracemalloc
 
 import fitz
 import pytest
@@ -336,14 +337,65 @@ def test_overflow_and_underflow_inputs_match_reference():
     _assert_equals_reference([(0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0)], 5e-324)
 
 
-def _cubic_layout(n):
-    return [(0.0, 0.0, (n - 1) * 1.5, 0.1)] * (n // 2) + [(0.0, 4.6, (n - 1) * 1.5, 4.7)] * (n // 2)
+def _cubic_layout(n, span_cells=None):
+    """Two bands of n/2 copies, each spanning `span_cells` cells (default n) at gap 3."""
+    width = ((span_cells or n) - 1) * 1.5
+    return [(0.0, 0.0, width, 0.1)] * (n // 2) + [(0.0, 4.6, width, 4.7)] * (n // 2)
 
 
-def test_failed_cross_cell_products_are_budgeted(monkeypatch):
+@pytest.mark.parametrize("span_divisor", [1, 4])
+def test_failed_cross_cell_products_are_budgeted(monkeypatch, span_divisor):
+    # span_divisor 1: memberships alone exceed the budget. span_divisor 4: memberships fit
+    # but the failed cross-cell products would be cubic, so the check budget must trigger.
     n = 160
-    boxes = _cubic_layout(n)
+    boxes = _cubic_layout(n, n // span_divisor)
     got, checks = _count_pair_checks(monkeypatch, box_clusters.cluster_box_indices, boxes, 3.0)
     assert checks <= 2 * (n * (n - 1) // 2), checks
     assert got == _groups(_reference_union_find_clusters, boxes, 3.0)
     assert len(got) == 2
+
+
+def _heavy_overlap_layout(n, gap=30.0):
+    """Fable's worst case: each box spans (side + 1)^2 cells, just under n (so not "large")."""
+    cell = gap / 2.0
+    side = math.isqrt(n) - 2
+    assert (side + 1) ** 2 < n
+    boxes = []
+    for i in range(n):
+        x0 = (i % 37) * 0.01  # inside the first cell, so x1 floors to cell `side`
+        y0 = (i // 37) * 0.0001
+        boxes.append((x0, y0, x0 + side * cell, y0 + side * cell))
+    return boxes
+
+
+def test_grid_refuses_before_registering_when_memberships_exceed_budget(monkeypatch):
+    n = 2000
+    boxes = _heavy_overlap_layout(n)
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise AssertionError("grid allocated state before checking its membership budget")
+
+    monkeypatch.setattr(box_clusters, "_Components", _Boom)
+    assert box_clusters._grid(boxes, 30.0) is None
+    monkeypatch.undo()
+    assert box_clusters.cluster_box_indices(boxes, 30.0) == _groups(
+        _reference_union_find_clusters, boxes, 30.0
+    )
+
+
+def test_worst_case_registration_memory_is_bounded_by_pairwise():
+    boxes = _heavy_overlap_layout(2000)
+    fns = (box_clusters._pairwise, lambda b, g: box_clusters.cluster_box_indices(b, g))
+    # Warm both first: the first call in a process pays one-time allocator and import
+    # costs, which would make the measured peaks depend on test order (cubic review).
+    for fn in fns:
+        fn(boxes, 30.0)
+    peaks = []
+    for fn in fns:
+        tracemalloc.start()
+        fn(boxes, 30.0)
+        peaks.append(tracemalloc.get_traced_memory()[1])
+        tracemalloc.stop()
+    pairwise_peak, cluster_peak = peaks
+    assert cluster_peak <= 2 * pairwise_peak, (cluster_peak, pairwise_peak)
