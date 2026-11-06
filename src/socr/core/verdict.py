@@ -732,6 +732,8 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         # numbers, so reprocessing it on every resume would never converge (#1192's
         # argument). A changed model or prompt changes the fingerprint and re-reads it.
         FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
+        # #1218: the same page and config re-read give the same omission.
+        FailureMode.NUMBERS_DROPPED_FROM_READING,
     }
 )
 
@@ -740,6 +742,18 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
 TEXT_LAYER_NUMBERS_MODES: dict[FailureMode, Check] = {
     FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER: Check.TEXT_LAYER_NUMBERS,
     FailureMode.NUMBERS_UNCHECKED: Check.TEXT_LAYER_NUMBERS,
+}
+
+#: #1218: the demotion mode of the ``text_layer_drops`` clause. Kept apart from
+#: ``TEXT_LAYER_NUMBERS_MODES`` because the two checks say different things (a number the
+#: reading SHIPS vs a number it OMITS); every consumer that must treat the three modes alike
+#: (the resume WARNING guard, the status-explained test) reads ``NUMBER_CHECK_MODES``.
+TEXT_LAYER_DROPS_MODES: dict[FailureMode, Check] = {
+    FailureMode.NUMBERS_DROPPED_FROM_READING: Check.TEXT_LAYER_DROPS,
+}
+NUMBER_CHECK_MODES: dict[FailureMode, Check] = {
+    **TEXT_LAYER_NUMBERS_MODES,
+    **TEXT_LAYER_DROPS_MODES,
 }
 
 
@@ -920,6 +934,96 @@ def numbers_disagree_note(pages: list[int]) -> str:
     )
 
 
+#: The audit event a document records for each page ``text_layer_drops`` FAILs (#1218).
+#: Its own kind and wording: it states an OMISSION, never that the reading "ships a number
+#: the layer does not hold" (#1185's kind), which would be false of these pages.
+NUMBERS_DROPPED_KIND = "numbers_dropped_from_reading"
+NUMBERS_DROPPED_EVENT_DETAIL = (
+    "the model reading omits numbers this page's own text layer prints in table rows; the "
+    "mark gives their count and this event's data lists them. This check adds and withholds "
+    "nothing (other checks on the page may do either), and the page is never counted "
+    "CHECKED (#1218)"
+)
+
+
+#: #1218 re-finalize parity. A run appends its document events in one block and its document
+#: notes in one sequence; ``socr-refinalize-own-text`` must put #1185's and #1218's at the
+#: position the run gives them, not after everything the document already carries. These name
+#: what a run records AFTER them. Pinned against the orchestrator's source by
+#: ``test_the_after_lists_cover_what_the_orchestrator_appends_later``.
+EVENT_KINDS_AFTER_NUMBERS_DROPPED = (
+    "native_garbled_math_retained",
+    "table_not_reconstructed_retained",
+    "figure_words_unread_retained",
+    "text_coverage_unknown_retained",
+    "text_ink_unread_retained",
+    "blank_page_retained",
+    "native_only_table_distrusted",
+    "flagged_model_table_kept",
+    "d3_floor_model_table_kept",
+    "table_region_unverifiable",
+    "structure_class_model_table_kept",
+    "judge_timeout_ladder_accepted",
+    "page_judge_timeout_floor",
+    "row_shape_not_reconcilable_text_table_floor",
+    "structure_class_ladder_exhausted_floor",
+    "figure_phase_failed",
+    "figure_description_failed",
+    "chart_region_duplicate_suppressed",
+    "figure_cap_reached",
+)
+#: ``table_structure_failed`` is recorded earlier too; only the exact-final-body site follows.
+FINAL_BODY_EVENT_SITE = "final_body"
+
+
+def event_follows_numbers_dropped(event: dict) -> bool:
+    """Whether a run records this event (as a dict) after its ``numbers_dropped`` one."""
+    kind = event.get("kind")
+    if kind in EVENT_KINDS_AFTER_NUMBERS_DROPPED:
+        return True
+    return (
+        kind == "table_structure_failed"
+        and (event.get("data") or {}).get("site") == FINAL_BODY_EVENT_SITE
+    )
+
+
+def event_follows_numbers_disagree(event: dict) -> bool:
+    """The same for #1185's event, which a run records just before #1218's."""
+    return event.get("kind") == NUMBERS_DROPPED_KIND or event_follows_numbers_dropped(event)
+
+
+#: The document note a run appends AFTER the numbers notes (``process``, exact-final-body
+#: validation). Built from this constant at both ends.
+INVALID_FINAL_EMISSION_NOTE_PREFIX = "invalid final table emission on page(s) "
+NUMBERS_DROPPED_NOTE_PREFIX = "model reading omits numbers the page's own text layer prints"
+
+
+def numbers_dropped_event_data(page_num: int, dropped) -> dict:
+    """The audit event's ``data``: the page and its omitted numbers (written forms, reference
+    order). One definition, so a run and ``socr-refinalize-own-text`` write the same."""
+    return {"page": page_num, "dropped": list(dropped or ())}
+
+
+def numbers_dropped_cli_line(pages: list[int]) -> str:
+    """The CLI summary line for the pages ``text_layer_drops`` FAILs. The page carries the
+    count only; the numbers are in the audit log, and this line must not say otherwise."""
+    return (
+        f"{len(pages)} model-read page(s) omit numbers the page's own text layer prints in "
+        f"table rows (count on each page; numbers in the audit log): {pages}"
+    )
+
+
+def numbers_dropped_note(pages: list[int]) -> str:
+    """The document's ``error`` note naming the pages ``text_layer_drops`` FAILs: written by
+    a run and by ``socr-refinalize-own-text`` alike, so the two cannot word it differently."""
+    return (
+        NUMBERS_DROPPED_NOTE_PREFIX
+        + " in table rows on page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " (count on each page; numbers in the audit log)"
+    )
+
+
 NO_OWN_TEXT_REASON = "this page has no text layer of its own to check the reading's numbers against"
 NO_NUMBER_REASON = "the reading ships no number to check against the page's text layer"
 #: The same, on a page whose own layer DOES print numbers: the reading may have dropped
@@ -927,7 +1031,8 @@ NO_NUMBER_REASON = "the reading ships no number to check against the page's text
 #: drops is issue #1218 (owner/orchestrator ruling, 2026-10-20).
 NO_NUMBER_LAYER_HAS_SOME_REASON = (
     "the reading ships no number, while the page's text layer prints {count} "
-    "(numbers a reading drops are not checked yet: #1218)"
+    "(table-row numbers it omits are named by the text_layer_drops check; other numbers a "
+    "reading drops are not checked: #1218)"
 )
 DAMAGED_LAYER_PREFIX = "this page's text layer is damaged, and it does not confirm: "
 #: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
@@ -1092,6 +1197,82 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     return None
 
 
+#: #1218: the reason of a ``text_layer_drops`` FAIL. COUNT ONLY, never the numbers: a mark
+#: that printed layer numbers would ship values socr withheld (a table refused for a dropped
+#: minus) and loose table text (owner ruling: table regions never ship loose text). The
+#: numbers are in the document audit event's ``data`` (``NUMBERS_DROPPED_KIND``). "At least":
+#: the comparison is a multiset over a generous reading, so it can hide a drop and never
+#: invent one.
+TEXT_LAYER_DROPS_REASON = (
+    "at least {count} number(s) printed in table rows on this page's own text layer are "
+    "missing from this reading (listed in the audit log, #1218)"
+)
+
+
+def drops_count_from_reason(reason: str) -> int | None:
+    """The count a ``text_layer_drops`` clause's reason states, or ``None`` if it states none.
+
+    The inverse of :data:`TEXT_LAYER_DROPS_REASON`, built from it so the two cannot drift.
+    ``socr-refinalize-own-text`` holds a persisted event to this count before it will repair
+    or replace the event's numbers."""
+    head, tail = TEXT_LAYER_DROPS_REASON.split("{count}")
+    m = re.fullmatch(re.escape(head) + r"(\d+)" + re.escape(tail), str(reason or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def page_dropped_numbers(output: PageOutput, p: Any) -> tuple[str, ...]:
+    """#1218: the written forms, in reference order, of the table-row numbers the page's own
+    layer prints and a model reading omits. ``()`` when the check does not apply.
+
+    Same preconditions as :func:`text_layer_numbers_clause` (a model reading with text, not a
+    page-failed marker, not an earlier OCR layer), and ``()`` -- never UNKNOWN -- when:
+
+    * there is no own layer, or the layer is damaged (``_layer_is_damaged``): a damaged layer
+      has fewer or wrong numbers, the wrong direction for counting omissions;
+    * the page's drop reference is EMPTY. Empty means NOT CHECKED (the assessment could not
+      classify the layer, or no table row qualified), never "zero dropped".
+
+    The cosmetic-layer flag does NOT suppress it (orchestrator decision, 2026-11-06): a fused
+    pair can hide a layer number from the reference, which makes the count lower, not higher.
+    Uses ``tables.reading_agreement.dropped_numbers`` over ``reading_numbers_text``, with the
+    page's running heads and folios taken out of the reading's side so a transcribed head
+    cannot stand in for a dropped body number.
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.tables.reading_agreement import dropped_numbers
+
+    if (output.engine or "") not in model_reading_engines() or not (output.text or "").strip():
+        return ()
+    if is_page_failed_marker(output.text):
+        return ()
+    if _flag(p, "prior_ocr_layer_suspect") or _layer_is_damaged(p):
+        return ()
+    own = getattr(p, "own_layer_text", "")
+    reference = getattr(p, "own_layer_drop_reference", "")
+    if not isinstance(own, str) or not own.strip():
+        return ()
+    if not isinstance(reference, str) or not reference.strip():
+        return ()
+    record = dropped_numbers(
+        reference,
+        reading_numbers_text(output.text, output.page_num),
+    )
+    return tuple(record.dropped)
+
+
+def text_layer_drops_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """#1218: FAIL (count only) when :func:`page_dropped_numbers` finds any; else nothing."""
+    dropped = page_dropped_numbers(output, p)
+    if not dropped:
+        return None
+    return VerdictClause(
+        Check.TEXT_LAYER_DROPS,
+        CheckResult.FAIL,
+        SCOPE_PAGE,
+        TEXT_LAYER_DROPS_REASON.format(count=len(dropped)),
+    )
+
+
 #: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
 #: Named here, beside the function that defines it, so the two cannot drift.
 #:
@@ -1105,6 +1286,9 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     (Check.PRIOR_OCR_LAYER, SCOPE_PAGE),
     (Check.FIGURE_TEXT, "figure"),
     (Check.TEXT_LAYER_NUMBERS, SCOPE_PAGE),
+    # #1218: LAST, so ``with_text_layer_numbers_clause``'s count of the clauses ahead of
+    # #1185's slot is unchanged.
+    (Check.TEXT_LAYER_DROPS, SCOPE_PAGE),
 )
 
 
@@ -1144,9 +1328,11 @@ def silent_success_clauses(
     the hole confirmed at the seam -- see the slice-2 log).
     """
     numbers = text_layer_numbers_clause(output, p)
+    drops = text_layer_drops_clause(output, p)
     return (
         *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
         *((numbers,) if numbers is not None else ()),
+        *((drops,) if drops is not None else ()),
     )
 
 
@@ -1380,7 +1566,7 @@ def _status_is_explained(
     # Two independent early returns, deliberately: a page can carry BOTH a figure it does not
     # show and numbers its layer disputes, and the mode records only the one that demoted it
     # first. Each asks about its own clause, so neither lane's answer depends on the other's.
-    check = TEXT_LAYER_NUMBERS_MODES.get(output.failure_mode)
+    check = NUMBER_CHECK_MODES.get(output.failure_mode)
     if check is not None and any(c.check is check for c in clauses):
         return True
     status_free = set(silent_success_clauses(output, p, event_kinds))

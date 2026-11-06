@@ -150,7 +150,14 @@ from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
+    INVALID_FINAL_EMISSION_NOTE_PREFIX,
+    NUMBERS_DROPPED_EVENT_DETAIL,
+    NUMBERS_DROPPED_KIND,
     numbers_disagree_note,
+    numbers_dropped_cli_line,
+    numbers_dropped_event_data,
+    numbers_dropped_note,
+    page_dropped_numbers,
 )
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
@@ -17392,14 +17399,14 @@ class UnifiedPipeline:
             # ever on the strength of its mode alone).
             if is_permanently_unverifiable:
                 from socr.core.result import FailureMode as _FM
-                from socr.core.verdict import TEXT_LAYER_NUMBERS_MODES
+                from socr.core.verdict import NUMBER_CHECK_MODES
 
                 try:
                     _mode = _FM(str(winning.get("failure_mode") or ""))
                 except ValueError:
                     _mode = None
                 if (
-                    _mode in TEXT_LAYER_NUMBERS_MODES
+                    _mode in NUMBER_CHECK_MODES
                     and winning.get("status") != PageStatus.WARNING.value
                 ):
                     is_permanently_unverifiable = False
@@ -19274,6 +19281,19 @@ class UnifiedPipeline:
                 for c in r.verdict.clauses
             )
         )
+        # #1218: and the pages whose reading OMITS numbers the layer prints in table rows.
+        # Its own list, event and note: "ships a number the layer does not hold" would be
+        # false of them. FAIL only (the clause emits nothing else).
+        numbers_dropped_by_page = {
+            r.output.page_num: page_dropped_numbers(r.output, state.pages[r.output.page_num])
+            for r in pre_records
+            if r.verdict is not None
+            and any(
+                c.check is _Check.TEXT_LAYER_DROPS and c.result is _CheckResult.FAIL
+                for c in r.verdict.clauses
+            )
+        }
+        numbers_dropped_pages = sorted(numbers_dropped_by_page)
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -19497,6 +19517,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not invisible_retained_pages
         pages_ok = pages_ok and not prior_ocr_retained_pages
         pages_ok = pages_ok and not numbers_disagree_pages
+        pages_ok = pages_ok and not numbers_dropped_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -19826,6 +19847,7 @@ class UnifiedPipeline:
             or invisible_retained_pages
             or prior_ocr_retained_pages
             or numbers_disagree_pages
+            or numbers_dropped_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -20010,6 +20032,19 @@ class UnifiedPipeline:
                             state.pages[n].best_output.engine if state.pages[n].best_output else ""
                         ),
                         detail=NUMBERS_DISAGREE_EVENT_DETAIL,
+                    )
+                )
+            for n in numbers_dropped_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=NUMBERS_DROPPED_KIND,
+                        engine=(
+                            state.pages[n].best_output.engine if state.pages[n].best_output else ""
+                        ),
+                        detail=NUMBERS_DROPPED_EVENT_DETAIL,
+                        # The numbers live HERE, never on the page (#1218 ruling).
+                        data=numbers_dropped_event_data(n, numbers_dropped_by_page[n]),
                     )
                 )
             for n in garbled_math_retained_pages:
@@ -20386,6 +20421,10 @@ class UnifiedPipeline:
                         f"  [yellow]{len(numbers_disagree_pages)} model-read page(s) ship a "
                         "number the page's own text layer does not hold (named on the page): "
                         f"{numbers_disagree_pages}[/yellow]"
+                    )
+                if numbers_dropped_pages:
+                    console.print(
+                        f"  [yellow]{numbers_dropped_cli_line(numbers_dropped_pages)}[/yellow]"
                     )
                 if garbled_math_retained_pages:
                     console.print(
@@ -20977,6 +21016,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_numbers_note}"
             else:
                 final_result.error = _numbers_note
+        # #1218: and the pages whose reading omits numbers the layer prints in table rows.
+        if numbers_dropped_pages:
+            _dropped_note = numbers_dropped_note(numbers_dropped_pages)
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_dropped_note}"
+            else:
+                final_result.error = _dropped_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
@@ -21185,7 +21231,7 @@ class UnifiedPipeline:
                     final_result.audit_passed = False
                     state.status = DocumentStatus.AUDIT_FAILED
                     failed_nums = [page.page_num for page in emission_failures]
-                    note = "invalid final table emission on page(s) " + ", ".join(
+                    note = INVALID_FINAL_EMISSION_NOTE_PREFIX + ", ".join(
                         str(page_num) for page_num in failed_nums
                     )
                     final_result.error = (

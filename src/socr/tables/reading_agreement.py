@@ -526,6 +526,70 @@ def compare_numbers(reference: str, reading: str, *, provenance: str) -> Agreeme
     )
 
 
+@dataclass(frozen=True)
+class DropRecord:
+    """#1218: numbers the page prints that the reading does not hold."""
+
+    #: written forms of the missing reference numbers, in reference order
+    dropped: tuple[str, ...]
+    #: their positions among ``numeric_tokens(reference_text)``
+    dropped_positions: tuple[int, ...]
+    #: how many numbers the reference holds
+    body_count: int
+    #: how many numbers the (generous) reading holds
+    reading_count: int
+
+
+#: a markdown link whose URL is kept as text: a DOI or an id the model wrote only as a link
+#: target is still the number's presence. An image (``![..](..)``) is not a link.
+_LINK_KEEP_URL_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]*)\)")
+#: where a reading's mathematics glues a digit to a name: ``R^2``, ``x_t``, ``\tag{14}``,
+#: ``10^{15}``. Split so each digit run stands alone, as the layer's own splits do.
+_MATH_GLUE_RE = re.compile(r"[\^_{}]")
+
+
+def _generous_counter(reading: str) -> Counter:
+    text = _MATH_GLUE_RE.sub(" ", _LINK_KEEP_URL_RE.sub(r"\1 \2", reading or ""))
+    return Counter(value for value, _ in numeric_tokens(text))
+
+
+def dropped_numbers(reference_text: str, reading: str) -> DropRecord:
+    """Numbers in ``reference_text`` that ``reading`` does not hold, counted as a multiset.
+
+    ``reference_text`` is ``layer_body.DropReference.text``. The reading side is GENEROUS, so
+    a number the model wrote anywhere counts as present: the reference-side tokeniser
+    (``reading=False``) is applied, so mathematics is kept, with link URLs kept and
+    ``^ _ { }`` split so ``$R^2$`` and ``\\tag{14}`` yield their digits. Generosity can hide
+    a drop (a lower bound), never invent one. A minus is part of a number: ``-0.04`` is never
+    held by ``0.04``. The opposite direction, a number the reading ships that the layer
+    lacks, is :func:`compare_numbers`.
+
+    The reading's numbers are NOT reduced by the page's running heads or folios. That would
+    stop a transcribed ``January 25, 2018 Page 36 of 40`` absorbing a dropped body ``2018``,
+    but deciding that a reading line transcribes a furniture line invented drops (a faithful
+    ``| Year | 2020 | ...`` row against the head ``Year 2020``) and hid others (a head wrapped
+    over two reading lines). Without the subtraction the count is a true lower bound, which
+    is what "at least N" states. The documented limitation: a transcribed head's number MAY
+    absorb a dropped body copy of the same value. Running heads and folios are still not
+    candidates on the layer side (``layer_body``).
+    """
+    reference = numeric_tokens(reference_text)
+    remaining = _generous_counter(reading)
+    reading_count = sum(remaining.values())
+    missing: list[int] = []
+    for pos, (value, _) in enumerate(reference):
+        if remaining[value] > 0:
+            remaining[value] -= 1
+        else:
+            missing.append(pos)
+    return DropRecord(
+        dropped=tuple(reference[pos][1] for pos in missing),
+        dropped_positions=tuple(missing),
+        body_count=len(reference),
+        reading_count=reading_count,
+    )
+
+
 def describe_disputes(record: AgreementRecord) -> str:
     """The disputed numbers as one mark reason: every one is named, none is dropped.
 
