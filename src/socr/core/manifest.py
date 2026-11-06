@@ -7342,26 +7342,31 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
 _IMAGE_ONLY_LINE_RE = re.compile(r"!\[[^\]\d]*\]\(figures/[^)\s]+\)")
 
 
+def _writer_bodies(page, page_num: int) -> tuple[str, ...]:
+    """The bodies socr's post-selection writers produced from the page's current certified
+    floor: all of them, in order, while the chain's base still equals that floor."""
+    certified = getattr(page, "certified_floor_text", "")
+    chain = getattr(page, "floor_writer_chain", ("", ()))
+    if not (isinstance(certified, str) and certified and isinstance(chain, tuple)):
+        return ()
+    if len(chain) != 2 or not chain[0] or not isinstance(chain[1], tuple):
+        return ()
+    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
+    if not _same_body_modulo_marks(chain[0], certified, page_num, own_ref):
+        return ()
+    return chain[1]
+
+
 def _certified_floor_bodies(page, page_num: int) -> list[str]:
     """The bodies a socr floor writer certified for *page*: the last fresh finalize's, and
-    the body a post-selection writer produced from it (only while that base still equals the
-    fresh floor, so a page that changed underneath it keeps nothing stale)."""
+    every body a post-selection writer produced from it (only while that base still equals
+    the fresh floor, so a page that changed underneath it keeps nothing stale). All of them,
+    not the last: assemble's crash handlers fall back to an earlier writer's output."""
     if page is None:
         return []
-    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
     certified = getattr(page, "certified_floor_text", "")
     bodies = [certified] if isinstance(certified, str) and certified else []
-    chain = getattr(page, "floor_writer_chain", ("", ""))
-    if (
-        bodies
-        and isinstance(chain, tuple)
-        and len(chain) == 2
-        and chain[0]
-        and chain[1]
-        and _same_body_modulo_marks(chain[0], certified, page_num, own_ref)
-    ):
-        bodies.append(chain[1])
-    return bodies
+    return bodies + list(_writer_bodies(page, page_num)) if bodies else []
 
 
 def recertify_floor_body(page, before: str, after: str, page_num: int) -> bool:
@@ -7380,7 +7385,11 @@ def recertify_floor_body(page, before: str, after: str, page_num: int) -> bool:
     own_ref = getattr(page, "d3_floor_png_ref", "") or ""
     if not any(_same_body_modulo_marks(before, b, page_num, own_ref) for b in bodies):
         return False
-    page.floor_writer_chain = (page.certified_floor_text, after)
+    kept = _writer_bodies(page, page_num)
+    page.floor_writer_chain = (
+        page.certified_floor_text,
+        kept if after in kept else kept + (after,),
+    )
     return True
 
 

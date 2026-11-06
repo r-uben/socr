@@ -342,13 +342,14 @@ class PageState:
     #: #1266 round 5: the floor body this page's last FRESH finalize certified (its shipped
     #: text), so the saved-body pass can tell its own bytes from altered ones. RUNTIME-ONLY.
     certified_floor_text: str = ""
-    #: #1266 round 6: ``(base, body)``: the body a socr post-selection writer
-    #: (``_preserve_chart_regions``, ``_describe_crop_refs``) produced from a certified floor
-    #: body, and the certified body it started from. A later fresh finalize (the sidecar
-    #: flush) overwrites ``certified_floor_text`` with the recomputed floor, so the writers'
-    #: result lives apart and counts only while its base still equals that floor.
-    #: RUNTIME-ONLY.
-    floor_writer_chain: tuple[str, str] = ("", "")
+    #: #1266 round 6-8: ``(base, bodies)``: every body a socr post-selection writer
+    #: (``_preserve_chart_regions``, ``_describe_and_embed_figures``, ``_describe_crop_refs``)
+    #: produced from a certified floor body, in order, and the certified body they started
+    #: from. All of them count, because assemble's crash handlers fall back to an earlier
+    #: writer's output. A later fresh finalize (the sidecar flush) overwrites
+    #: ``certified_floor_text`` with the recomputed floor, so the writers' results live apart
+    #: and count only while their base still equals that floor. RUNTIME-ONLY.
+    floor_writer_chain: tuple[str, tuple[str, ...]] = ("", ())
     #: #1074: the page's paragraphs from its geometry, matched to the shipped lines at
     #: emit time (``native_paragraphs.reflow_native_prose``). RUNTIME-ONLY like
     #: ``native_words``: analyze runs on every run, resume included, and a replay that

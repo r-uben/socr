@@ -377,6 +377,202 @@ def test_the_same_caption_ships_on_a_page_that_is_not_a_floor(tmp_path: Path, mo
     assert DIGIT_CAPTION not in floor_frag, "the floor page withheld it"
 
 
+def _two_page_pdf(work: Path, *, raster: bool) -> Path:
+    """Two copies of the chart-floor page; page 2 gets a second bar so its crop differs."""
+    fitz = pytest.importorskip("fitz")
+    one = _chart_floor_pdf(work / "doc.pdf", anchored=True, raster=raster)
+    doc = fitz.open()
+    for n in range(2):
+        with fitz.open(str(one)) as src:
+            doc.insert_pdf(src)
+        if n == 1:
+            doc[1].draw_rect(fitz.Rect(395, 320, 425, 470), color=(0, 0, 0), fill=(0.6, 0.2, 0.2))
+    path = work / "two.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("crash_in", ["crop_describer", "figure_embed"])
+def test_a_later_writer_that_crashes_does_not_lose_the_earlier_writers_body(
+    tmp_path: Path, monkeypatch, crash_in: str
+) -> None:
+    """Assemble's crash handlers revert ``final_text`` to the previous writer's output. That
+    earlier body must still be certified, or the saved pass rejects it and the crop leaves the
+    fragment, the .md and the sidecar while ``chart_region_preserved`` still claims it. Two
+    floor pages; the later writer succeeds on page 1 and raises on page 2. Fails on 1a212425,
+    whose chain kept only the last writer's body."""
+    from socr.pipeline import orchestrator as orch
+
+    work = tmp_path / "w"
+    work.mkdir()
+    pdf = _two_page_pdf(work, raster=crash_in == "figure_embed")
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+    pipe.config.describe_figure_crops = True
+    pipe.config.save_figures = crash_in == "figure_embed"
+
+    def ask(path, prompt):
+        if crash_in == "crop_describer" and "p2_" in str(path):
+            raise RuntimeError("describer failed on the second crop")
+        return DESCRIPTION
+
+    ask.model = "stub-describer"
+    pipe._figure_description_ask = lambda: ask
+    if crash_in == "figure_embed":
+        real_blocks = orch.UnifiedPipeline._build_figure_blocks
+
+        def blocks(figures, doc_dir):
+            if any(f.page_num == 2 for f in figures):
+                raise RuntimeError("figure block failed on page 2")
+            return real_blocks(figures, doc_dir)
+
+        monkeypatch.setattr(orch.UnifiedPipeline, "_build_figure_blocks", staticmethod(blocks))
+    out = work / "out"
+    pipe.process(pdf, output_dir=out)
+
+    pages = next(iter(out.rglob("pages/00001.md"))).parent
+    md = next(p for p in out.rglob("*.md") if p.parent.name != "pages").read_text()
+    for n in (1, 2):
+        frag = (pages / f"{n:05d}.md").read_text()
+        meta = json.loads((pages / f"{n:05d}.json").read_text())
+        winning = meta["winning_output"]
+        kinds = [e.get("kind") for e in meta.get("audit_events") or []]
+        ref = f"![chart region {1}](figures/chart_region_p{n}_1.png)"
+        assert "chart_region_preserved" in kinds, "premise: the region was claimed"
+        assert "floor_saved_body_rejected" not in kinds, f"p{n}: the saved body was rejected"
+        assert winning.get("table_floor_body") is True
+        assert winning.get("table_floor_digest") == table_floor_digest_of(winning["text"])
+        assert winning["text"] == frag
+        assert ref in frag and ref in md, f"p{n} lost the crop its event claims"
+
+
+def _five_page_floor_pdf(tmp_path: Path) -> Path:
+    """Five pages; pages 3-4 are the gated table pages and page 3 carries a raster."""
+    fitz = pytest.importorskip("fitz")
+    from test_gh1266_floor_geometry import _gated_process_pdf, _process_pdf
+
+    parts = [
+        _process_pdf(tmp_path / "a.pdf"),
+        _gated_process_pdf(tmp_path / "b.pdf"),
+        _process_pdf(tmp_path / "c.pdf"),
+        _gated_process_pdf(tmp_path / "d.pdf"),
+    ]
+    doc = fitz.open()
+    for part in parts:
+        with fitz.open(str(part)) as src:
+            doc.insert_pdf(src)
+    doc.new_page().insert_text((72, 72), "An ordinary page of prose closes the document.")
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 120, 80), False)
+    pix.set_rect(pix.irect, (200, 30, 30))
+    png = tmp_path / "blob.png"
+    pix.save(str(png))
+    doc[2].insert_image(fitz.Rect(400, 620, 520, 700), filename=str(png))
+    path = tmp_path / "five.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_a_true_page_restore_of_a_floor_page_with_figure_writers_is_byte_identical(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A page-level restore (root index and the last page's artifacts removed, so the document
+    is not SKIPPED and page 3 is restored, not reprocessed) of a regional-D3 floor page
+    carrying a figure block: fragment, sidecar text, digest and the .md section are
+    byte-identical, no block is duplicated, and the digit caption is absent in both runs.
+    This pins existing behaviour (it also passes on 1a212425); it closes the gap that the
+    resume test above reprocesses its non-SUCCESS floor page."""
+    import dataclasses
+    import re
+    from ocr_output_contract import RootIndex
+
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import DocumentStatus, FailureMode
+    from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
+    from socr.tables import native_verifier
+
+    real_verify = native_verifier.verify_native_table_region
+
+    def verify(page, text, rect):
+        result = real_verify(page, text, rect)
+        if page.number in (2, 3):
+            result.hard_fail = True
+            result.reason = "forced"
+        return result
+
+    monkeypatch.setattr(native_verifier, "verify_native_table_region", verify)
+    pdf = _five_page_floor_pdf(tmp_path)
+    out = tmp_path / "out"
+    real_assemble = UnifiedPipeline._phase_assemble
+
+    def process() -> object:
+        monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+        pipe = _pipeline()
+        pipe.config = dataclasses.replace(
+            pipe.config,
+            native_first=False,
+            save_figures=True,
+            describe_figures=True,
+            describe_figure_crops=False,
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL]
+        pipe._get_vision_engine = lambda: _Vision(DIGIT_CAPTION)
+
+        def assemble(self, state, output_dir):
+            ps = state.pages.get(3)
+            if ps is not None and ps.table_ladder_disposition is None:
+                ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+            return real_assemble(self, state, output_dir)
+
+        monkeypatch.setattr(UnifiedPipeline, "_phase_assemble", assemble)
+        try:
+            return pipe.process(pdf, output_dir=out)
+        finally:
+            monkeypatch.setattr(UnifiedPipeline, "_phase_assemble", real_assemble)
+
+    def snapshot():
+        pages = next(iter(out.rglob("pages/00001.md"))).parent
+        frag = (pages / "00003.md").read_text()
+        meta = json.loads((pages / "00003.json").read_text())
+        final = [p for p in out.rglob("*.md") if p.parent.name != "pages"]
+        assert len(final) == 1
+        parts = re.split(r"(?m)^## Page (\d+)\s*$", final[0].read_text())
+        sections = {int(parts[i]): parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+        return pages, frag, meta["winning_output"], sections[3]
+
+    process()
+    pages, frag, winning, section = snapshot()
+    assert "![Figure" in frag, "premise: a figure block on the floor page"
+    assert winning.get("table_floor_body") is True, "premise: a certified floor page"
+    assert "2.6 percent" not in frag
+
+    RootIndex(out).path.unlink()
+    (pages / "00005.md").unlink()
+    (pages / "00005.json").unlink()
+    restored: list[int] = []
+    real_restore = UnifiedPipeline._restore_terminal_page_state
+
+    def restore(self, state, page_num, page_out, output_dir):
+        restored.append(page_num)
+        return real_restore(self, state, page_num, page_out, output_dir)
+
+    monkeypatch.setattr(UnifiedPipeline, "_restore_terminal_page_state", restore)
+    result = process()
+    monkeypatch.setattr(UnifiedPipeline, "_restore_terminal_page_state", real_restore)
+    assert result.status is not DocumentStatus.SKIPPED
+    assert 3 in restored, f"page 3 was not restored (restored: {restored})"
+
+    _pages, frag2, winning2, section2 = snapshot()
+    assert frag2 == frag, "fragment changed on restore"
+    assert winning2.get("text") == winning.get("text")
+    assert winning2.get("table_floor_digest") == winning.get("table_floor_digest")
+    assert section2 == section, "the .md section changed on restore"
+    assert frag2.count("![Figure") == frag.count("![Figure"), "a block was duplicated"
+    assert "2.6 percent" not in frag2 and "2.6 percent" not in winning2.get("text", "")
+
+
 # ---------------------------------------------------------------------------
 # the saved pass: only socr's own writers certify a changed body
 # ---------------------------------------------------------------------------
