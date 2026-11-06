@@ -270,6 +270,10 @@ def _run(
         # The ladder clamps the whole-page candidate. An exact-pass native
         # grid would ship before that candidate exists.
         patch.object(pipeline, "_plan_native_table_first", return_value=None),
+        # #1267: the row-binding check withholds a row-shifted page on its own. These scenarios
+        # pin the LADDER's terminals and the native-contradiction withhold; the check has its own
+        # tests (test_gh1267_row_binding_*).
+        patch.object(pipeline, "_run_row_binding_check", return_value=False),
     ]
     if ladder_on:
         patches.append(patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs or []))

@@ -353,6 +353,9 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
         # native-first lane would settle it before the stubbed whole-page
         # read, and this case is the flagged model reading that read produces.
         patch.object(pipeline, "_plan_native_table_first", return_value=None),
+        # #1267: scope narrowed. The flagged model table here has a genuinely shifted row, which
+        # the row-binding check would withhold; this test pins how the KEPT page surfaces.
+        patch.object(pipeline, "_run_row_binding_check", return_value=False),
         patch("socr.pipeline.orchestrator.route_page", side_effect=_rejecting_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
     ):

@@ -248,6 +248,9 @@ def _process(tmp_path, name, text_by_page, make_rungs, **cfg):
             # text contradicts that page, so the #1022 native-contradiction withhold would end it
             # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
             patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
+            # #1267: the row-binding check withholds the same shifted page; this file pins the
+            # ladder's own clamp, and the check has its own tests (test_gh1267_row_binding_*).
+            patch.object(pipeline, "_run_row_binding_check", return_value=False),
             patch.object(pipeline, "_plan_native_table_first", return_value=None),
         ):
             stack.enter_context(p)

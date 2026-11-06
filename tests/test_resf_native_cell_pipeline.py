@@ -116,6 +116,10 @@ def _run_page(
             stack.enter_context(patch.object(pipeline, "_page_has_tables", return_value=False))
         if locate_tables_empty:
             stack.enter_context(patch("socr.tables.locate.locate_tables", return_value=[]))
+        # #1267: these tests are about the per-cell check's ADVISORY semantics. The row-binding
+        # check demotes (it is not advisory), so it is switched off here and has its own tests
+        # (test_gh1267_row_binding_pipeline.py).
+        stack.enter_context(patch.object(pipeline, "_run_row_binding_check", lambda *a, **k: False))
         if skip_native_cell_check:
             stack.enter_context(
                 patch.object(pipeline, "_run_native_cell_binding_check", lambda *a, **k: None)

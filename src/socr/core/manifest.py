@@ -56,6 +56,7 @@ from socr.core.marks import (
     UNACCEPTED_OUTPUT_MARK_RE,
     UNVERIFIED_TABLE_MARK,
     UNVERIFIED_TABLE_MARK_RE,
+    row_binding_unverifiable_table_mark,
     Check,
     CheckResult,
     is_canonical_mark,
@@ -2291,6 +2292,10 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         # completed". Nothing retires it today, so it blocks; when an explicit
         # applicable resolution exists, retire it there rather than exempting the kind.
         "table_crop_repair_unverifiable",
+        # #1267: row labels proven not to bind to the page's text-layer values; a stand-in
+        # credential must not say every table was accepted over it.
+        "table_row_binding_contradicted",
+        "table_row_binding_unverifiable",
         "native_table_verifier_warn",
         "native_table_verifier_hard_fail",
         "table_value_drift_unadjudicated",
@@ -5551,6 +5556,36 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
         text = output.text or ""
         from socr.tables.reconcile import find_table_blocks
 
+        # #1267 (owner ruling 2026-11-05): a withhold owned ONLY by the row-binding check removes
+        # just the tables whose row labels do not bind; the page's other tables and its prose ship.
+        # Idempotent on an already-spliced text (re-finalize, resume). Anything the splice cannot
+        # place falls through to the page-granular floor below: fail closed.
+        _ords = [int(i) for i in (getattr(p, "row_binding_contradicted_tables", None) or [])]
+        _n_orig = int(getattr(p, "row_binding_table_count", 0) or 0)
+        if _ords and getattr(p, "row_binding_withhold_only", False) and _n_orig > 0:
+            _marker = f"[page {page_num} failed: unverifiable table — see image]"
+            _blocks_now = find_table_blocks(text)
+            _spliced: str | None = None
+            if _marker in text and len(_blocks_now) == _n_orig - len(_ords):
+                _spliced = text
+            elif len(_blocks_now) == _n_orig:
+                _png = getattr(p, "d3_floor_png_ref", "")
+                _spliced = splice_failed_table_regions(
+                    text,
+                    failed_ordinals=sorted(_ords),
+                    expected_count=_n_orig,
+                    marker_line=_marker,
+                    png_ref=_png,
+                )
+            if _spliced is not None:
+                return replace(
+                    output,
+                    text=_spliced,
+                    status=PageStatus.ERROR,
+                    audit_passed=False,
+                    failure_mode=disposition,
+                )
+
         already_withheld = f"failed: unverifiable table" in text and not find_table_blocks(text)
         # A page that ALREADY shipped the fail-closed floor (the structure-class
         # floor reached the same page first) carries no table bytes and may have
@@ -5971,10 +6006,36 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
         return output
     lines = output.text.splitlines(keepends=True)
     changed = False
+    # #1267: a table whose row binding the text layer could not settle says so in its own mark.
+    # Ordinals are the checked text's (before any withheld table was spliced out), so they are
+    # mapped onto the blocks that remain.
+    from socr.tables.reconcile import find_table_blocks as _find_blocks
+
+    _blocks = _find_blocks(output.text)
+    _row_binding_unverifiable = (
+        {int(i) for i in (getattr(p, "row_binding_unverifiable_tables", None) or [])}
+        if kind != "disputed"
+        else set()
+    )
+    _ordinals = list(range(len(_blocks)))
+    _withheld = {int(i) for i in (getattr(p, "row_binding_contradicted_tables", None) or [])}
+    if _withheld and getattr(p, "row_binding_withhold_only", False):
+        _remaining = [
+            i
+            for i in range(int(getattr(p, "row_binding_table_count", 0) or 0))
+            if i not in _withheld
+        ]
+        if len(_remaining) == len(_blocks):
+            _ordinals = _remaining
+    _md_index = {b.start: _ordinals[k] for k, b in enumerate(_blocks)}
     for start in reversed(_table_start_lines(output.text, lines)):
         if start >= 2 and mark_re.match(lines[start - 2]) and not lines[start - 1].strip():
             continue
-        insert = [mark + "\n", "\n"]
+        _k = _md_index.get(start)
+        _mark = (
+            row_binding_unverifiable_table_mark(_k + 1) if _k in _row_binding_unverifiable else mark
+        )
+        insert = [_mark + "\n", "\n"]
         if start > 0 and lines[start - 1].strip():
             insert.insert(0, "\n")
         lines[start:start] = insert

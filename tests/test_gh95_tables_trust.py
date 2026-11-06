@@ -271,6 +271,10 @@ def test_watched_kinds_are_real_emitted_kinds():
         # ``TABLE_LADDER_WITHHELD_KIND`` constant, exactly like the two
         # terminals above, so it is not a ``kind="..."`` literal in the source.
         "table_ladder_withheld",
+        # #1267: emitted by ``UnifiedPipeline._run_row_binding_check`` through a local ``kind``
+        # chosen from the shared ``TABLE_ROW_BINDING_*_KIND`` constants, like the per-cell kinds.
+        "table_row_binding_contradicted",
+        "table_row_binding_unverifiable",
         # GH-609 round 3: emitted by
         # ``UnifiedPipeline._record_unresolved_binding_boundary`` through the
         # shared ``TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND`` constant, same

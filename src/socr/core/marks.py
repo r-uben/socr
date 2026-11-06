@@ -51,6 +51,18 @@ UNVERIFIED_TABLE_MARK: str = (
     "verify it against the page image before citing]"
 )
 UNVERIFIED_TABLE_MARK_RE = re.compile(r"^> \[table unverified: ", re.MULTILINE)
+
+
+def row_binding_unverifiable_table_mark(table_number: int) -> str:
+    """#1267 (owner ruling 2026-11-05): the unverified mark of a table whose row binding the page's
+    text layer could not settle.  Claims no contradiction; a PROVEN contradiction withholds the
+    table instead.  Still matches ``UNVERIFIED_TABLE_MARK_RE``."""
+    return (
+        "> [table unverified: row binding not verified on the page's text layer for table "
+        f"{table_number}; verify it against the page image before citing]"
+    )
+
+
 #: #1048 (owner ruling 2026-10-12): the stronger mark for a scanned table whose numbers or
 #: labels a second reading disputes.
 DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)

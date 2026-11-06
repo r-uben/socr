@@ -583,6 +583,21 @@ class PageState:
     #: Default-on per-cell native binding outcomes by ``table_id`` (see
     #: ``tables.native_cell_check`` and ``native_cell_check_*`` audit events).
     native_cell_binding: dict = field(default_factory=dict)
+    #: #1267: per-``table_id`` outcome of the focused row-binding check
+    #: (``tables.row_binding_check``), BOUND tables included; restored from the sidecar.
+    row_binding: dict = field(default_factory=dict)
+    #: #1267: 0-based indices of the page's tables whose row labels were PROVEN not to bind;
+    #: those tables are WITHHELD (owner ruling 2026-11-05). Persisted.
+    row_binding_contradicted_tables: list = field(default_factory=list)
+    #: #1267: how many markdown tables the checked text held (the ordinals above index them).
+    row_binding_table_count: int = 0
+    #: #1267: the page's WITHHELD disposition was set by the row-binding check ALONE, so only the
+    #: tables in ``row_binding_contradicted_tables`` are withheld (siblings ship). False when
+    #: another withhold already owned the page (the page-granular floor then stands).
+    row_binding_withhold_only: bool = False
+    #: #1267: tables whose row binding the text layer could not settle (the mark says so, and
+    #: does not claim a contradiction). Persisted.
+    row_binding_unverifiable_tables: list = field(default_factory=list)
     #: P1 retry latch: transient external state absent from the run fingerprint.
     #: Set when at least one table on this page reached an UNVERIFIED terminal
     #: caused by an unavailable table judge rung (transport failure, missing
