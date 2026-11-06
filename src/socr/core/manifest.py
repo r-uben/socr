@@ -6216,6 +6216,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.FIGURE_RENDER_FAILED,
         FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         FailureMode.NUMBERS_UNCHECKED,
+        FailureMode.NUMBERS_DROPPED_FROM_READING,
     }
 )
 
@@ -6298,6 +6299,8 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         # would need its own key, not this row.
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+        # #1218: FAIL is the only result the clause emits, so the check alone maps it.
+        Check.TEXT_LAYER_DROPS: FailureMode.NUMBERS_DROPPED_FROM_READING,
     }
     #: #1187: the one place two silent-success classes share a CHECK and must not share a
     #: mode. The chart lane's clause is page-scoped and means "a picture shipped without its

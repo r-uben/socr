@@ -29,6 +29,10 @@ clause, so its mark, status and failure mode are what a run of this code writes.
   when a page comes out FAIL, as a run of this code records it (its document rule counts
   those pages). UNKNOWN stays at the page, as it does in a run.
 
+#1218 adds a second clause the same way, ``text_layer_drops``
+(``core.verdict.text_layer_drops_clause``), keyed on its own check: a page whose reading
+omits numbers the layer prints in table rows gets it, its own mode, event and document note.
+
 Idempotent: a page whose verdict already carries the clause is left alone, and the counts
 are recomputed for every document, so a run interrupted anywhere is completed by running
 the tool again. Write order: fragments, document ``.md``, manifest and cache, sidecars,
@@ -63,6 +67,8 @@ PRIOR_OCR_UNMARKED_REASON = (
 #: ``PageState`` fields the clause reads, copied from the page analysis.
 _ANALYSIS_FIELDS = (
     "own_layer_text",
+    # #1218: the drop clause's reference, from the same analysis a run reads it from.
+    "own_layer_drop_reference",
     "is_born_digital",
     "control_byte_digit_hits",
     "control_byte_scan_failed",
@@ -73,6 +79,9 @@ _ANALYSIS_FIELDS = (
 )
 
 
+_DROP_FIELDS = ("own_layer_drop_reference",)
+
+
 @dataclass(frozen=True)
 class PageChange:
     doc: str
@@ -80,6 +89,8 @@ class PageChange:
     before: str
     after: str
     result: str
+    #: #1218: the ``text_layer_drops`` result this pass added ("" when it added none).
+    drops: str = ""
 
 
 def _read_json(path: Path):
@@ -134,7 +145,12 @@ def _page_state(sidecar: dict, pa):
 
     p = PageState(page_num=int(sidecar["page_num"]))
     for name in _ANALYSIS_FIELDS:
-        setattr(p, name, getattr(pa, name))
+        if name in _DROP_FIELDS:
+            # Empty is "not checked", never "nothing dropped": an analysis without the
+            # reference (a stand-in, or one older than #1218) simply gets no drop clause.
+            setattr(p, name, getattr(pa, name, "") or "")
+        else:
+            setattr(p, name, getattr(pa, name))
     p.prior_ocr_layer_suspect = bool(
         sidecar.get("prior_ocr_layer_suspect")
     ) or _analysis_finds_prior_ocr(pa)
@@ -152,6 +168,8 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
     from socr.core.state import PageState
     from socr.core.verdict import (
         PageVerdict,
+        in_fresh_run_order,
+        text_layer_drops_clause,
         text_layer_numbers_clause,
         with_text_layer_numbers_clause,
     )
@@ -159,27 +177,41 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
     if sidecar.get("terminal") is not True:
         return None
     published = PageVerdict.from_dict(sidecar.get("verdict") or {})
-    if any(c.check is Check.TEXT_LAYER_NUMBERS for c in published.clauses):
-        return None  # already re-finalized, or written by a run of this code
     output = PageOutput.from_dict(sidecar.get("winning_output") or {})
     p = _page_state(sidecar, pa)
-    if p.prior_ocr_layer_suspect and not sidecar.get("prior_ocr_layer_suspect"):
-        # Only the analysis finds the earlier OCR layer, so no clause of the run marks the
-        # page: the clause's no-own-text UNKNOWN (the same guards: a failed marker or an
-        # empty reading still gets none), with the reason that says why.
-        p.prior_ocr_layer_suspect = False
-        p.own_layer_text = ""
-        clause = text_layer_numbers_clause(output, p)
-        if clause is not None:
-            clause = replace(clause, reason=PRIOR_OCR_UNMARKED_REASON)
-    else:
-        clause = text_layer_numbers_clause(output, p)
-    if clause is None:
+    # #1218: the drop clause is its own check, so it is applied (and its idempotence keyed)
+    # on its own: a page already carrying a ``text_layer_drops`` clause is left alone. A
+    # page of a run of this code that the clause does not fire on recomputes to None every
+    # time, so nothing changes. Taken BEFORE the prior-OCR branch below mutates ``p``: the
+    # clause already emits nothing for ``prior_ocr_layer_suspect`` (#1156: that layer never
+    # votes), whether the run or only the analysis found it.
+    drops = None
+    if not any(c.check is Check.TEXT_LAYER_DROPS for c in published.clauses):
+        drops = text_layer_drops_clause(output, p)
+    clause = None
+    if not any(c.check is Check.TEXT_LAYER_NUMBERS for c in published.clauses):
+        # (a page carrying the clause: already re-finalized, or written by a run of this code)
+        if p.prior_ocr_layer_suspect and not sidecar.get("prior_ocr_layer_suspect"):
+            # Only the analysis finds the earlier OCR layer, so no clause of the run marks
+            # the page: the clause's no-own-text UNKNOWN (the same guards: a failed marker
+            # or an empty reading still gets none), with the reason that says why.
+            p.prior_ocr_layer_suspect = False
+            p.own_layer_text = ""
+            clause = text_layer_numbers_clause(output, p)
+            if clause is not None:
+                clause = replace(clause, reason=PRIOR_OCR_UNMARKED_REASON)
+        else:
+            clause = text_layer_numbers_clause(output, p)
+    if clause is None and drops is None:
         return None
     as_run = slot_reference_state(sidecar, output.page_num)
-    extended = with_text_layer_numbers_clause(
-        replace(published, page_num=output.page_num), clause, output, as_run, event_kinds
-    )
+    extended = replace(published, page_num=output.page_num)
+    if clause is not None:
+        extended = with_text_layer_numbers_clause(extended, clause, output, as_run, event_kinds)
+    if drops is not None:
+        # By the fresh-run order, which puts it last of the silent-success clauses; a count
+        # of the clauses ahead would be a second definition of that order.
+        extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
 
@@ -224,7 +256,153 @@ def _page_event_kinds(doc_dir: Path) -> dict[int, frozenset[str]]:
     return {n: frozenset(k) for n, k in kinds.items()}
 
 
-def _updated_sidecar(sidecar: dict, output, verdict) -> dict:
+def _insert_event(events: list[dict], event: dict, follows) -> list[dict]:
+    """*events* with *event* where a run records it: before the first event *follows* says a
+    run records after it, else last. ``audit_log``'s sort cannot do this: unlisted kinds all
+    share one rank, so it keeps their order of arrival."""
+    at = next((n for n, e in enumerate(events) if follows(e)), len(events))
+    return [*events[:at], event, *events[at:]]
+
+
+def _persisted_dropped(events: list[dict]) -> list[str] | None:
+    """The numbers of the first ``numbers_dropped`` event that lists any, else ``None``."""
+    from socr.core.verdict import NUMBERS_DROPPED_KIND
+
+    for e in events:
+        dropped = (e.get("data") or {}).get("dropped")
+        if e.get("kind") == NUMBERS_DROPPED_KIND and isinstance(dropped, list) and dropped:
+            return list(dropped)
+    return None
+
+
+def _drops_clause_count(sidecar: dict) -> int | None:
+    from socr.core.marks import Check
+    from socr.core.verdict import drops_count_from_reason
+
+    for c in (sidecar.get("verdict") or {}).get("clauses") or []:
+        if c.get("check") == Check.TEXT_LAYER_DROPS.value:
+            return drops_count_from_reason(c.get("reason") or "")
+    return None
+
+
+def resolve_dropped(sidecar: dict, recomputed, document_data: dict | None = None):
+    """``(numbers, "")`` for the page's ``numbers_dropped`` event, or ``(None, why not)``.
+
+    A persisted list is NEVER replaced: the first of (1) the sidecar's own event, (2) the
+    document's audit event for the page, (3) a recomputation from the analysis. (2) and (3)
+    are accepted only when their count equals the count the page's own clause states, so a
+    reassessment that failed (an empty reference reads as ``()``) or came out different can
+    neither erase nor rewrite evidence. Otherwise nothing is written and the reason is
+    returned, for the caller to surface."""
+    persisted = _persisted_dropped(list(sidecar.get("audit_events") or []))
+    if persisted is not None:
+        return persisted, ""
+    stated = _drops_clause_count(sidecar)
+    if stated is None:
+        return None, "the page's clause states no count to hold a list to"
+    doc = (document_data or {}).get("dropped")
+    if isinstance(doc, list) and len(doc) == stated:
+        return list(doc), ""
+    recomputed = list(recomputed or ())
+    if not recomputed:
+        return None, f"the clause states {stated} number(s) and the reassessment found none"
+    if len(recomputed) != stated:
+        return (
+            None,
+            f"the clause states {stated} number(s), the reassessment found {len(recomputed)}",
+        )
+    return recomputed, ""
+
+
+def _reposition(events: list[dict], kind: str, make, follows) -> list[dict]:
+    """*events* with the one event of *kind* at the position a run gives it: the existing
+    event itself when there is one (its data untouched), else ``make()`` (``None``: none)."""
+    existing = next((e for e in events if e.get("kind") == kind), None)
+    event = existing if existing is not None else make()
+    if event is None:
+        return events
+    return _insert_event([e for e in events if e.get("kind") != kind], event, follows)
+
+
+def _with_number_events(sidecar: dict, engine: str, recomputed, document_data=None):
+    """``(audit_events, why a dropped list could not be written or "")`` for the page sidecar.
+
+    #1185's and #1218's events, each once, at the position a run gives it
+    (``verdict.event_follows_numbers_*``) -- the EXISTING ones too, so an artifact the earlier
+    tool wrote in another order converges, and the sidecar and the document cannot disagree.
+    The dropped numbers are the event's data (see :func:`resolve_dropped`)."""
+    from socr.core.verdict import (
+        NUMBERS_DISAGREE_EVENT_DETAIL,
+        NUMBERS_DISAGREE_KIND,
+        NUMBERS_DROPPED_EVENT_DETAIL,
+        NUMBERS_DROPPED_KIND,
+        event_follows_numbers_disagree,
+        event_follows_numbers_dropped,
+        numbers_dropped_event_data,
+    )
+
+    events = list(sidecar.get("audit_events") or [])
+    why = ""
+    if _has_disagreement(sidecar):
+        events = _reposition(
+            events,
+            NUMBERS_DISAGREE_KIND,
+            lambda: {
+                "data": {},
+                "detail": NUMBERS_DISAGREE_EVENT_DETAIL,
+                "engine": engine,
+                "kind": NUMBERS_DISAGREE_KIND,
+            },
+            event_follows_numbers_disagree,
+        )
+    if _has_drops(sidecar):
+        dropped, why = resolve_dropped(sidecar, recomputed, document_data)
+        events = _reposition(
+            events,
+            NUMBERS_DROPPED_KIND,
+            lambda: (
+                None
+                if dropped is None
+                else {
+                    "data": numbers_dropped_event_data(int(sidecar["page_num"]), dropped),
+                    "detail": NUMBERS_DROPPED_EVENT_DETAIL,
+                    "engine": engine,
+                    "kind": NUMBERS_DROPPED_KIND,
+                }
+            ),
+            event_follows_numbers_dropped,
+        )
+        # an existing event with no list is completed, never one that has a list replaced
+        if dropped is not None and _persisted_dropped(events) is None:
+            events = [
+                {**e, "data": numbers_dropped_event_data(int(sidecar["page_num"]), dropped)}
+                if e.get("kind") == NUMBERS_DROPPED_KIND
+                else e
+                for e in events
+            ]
+    return events, why
+
+
+def _repaired_number_events(sidecar: dict, recomputed, document_data=None):
+    """``(sidecar with its number events whole and in a run's order or None if it is, why a
+    list could not be written or "")``, for a page that already carries the clauses.
+
+    Such a page is not re-finalized, so an interrupted or earlier-tool pass is repaired
+    here, from :func:`resolve_dropped`'s evidence only."""
+    if sidecar.get("terminal") is not True or not (
+        _has_drops(sidecar) or _has_disagreement(sidecar)
+    ):
+        return None, ""
+    engine = (sidecar.get("winning_output") or {}).get("engine") or ""
+    events, why = _with_number_events(sidecar, engine, recomputed, document_data)
+    if events == (sidecar.get("audit_events") or []):
+        return None, why
+    return {**sidecar, "audit_events": events}, why
+
+
+def _updated_sidecar(
+    sidecar: dict, output, verdict, dropped=(), document_data=None, why_sink=None
+) -> dict:
     from socr.core.manifest import is_page_failed_marker
     from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
 
@@ -240,23 +418,11 @@ def _updated_sidecar(sidecar: dict, output, verdict) -> dict:
     )
     out["socr_version"] = _socr_version()
     out["socr_source_digest"] = _socr_source_digest()
-    if _has_disagreement(out):
-        # The page's copy of the event a run of this code records for it (at assemble,
-        # after the lanes' own events, so last).
-        from socr.core.verdict import NUMBERS_DISAGREE_EVENT_DETAIL, NUMBERS_DISAGREE_KIND
-
-        events = [
-            e for e in out.get("audit_events") or [] if e.get("kind") != NUMBERS_DISAGREE_KIND
-        ]
-        events.append(
-            {
-                "data": {},
-                "detail": NUMBERS_DISAGREE_EVENT_DETAIL,
-                "engine": winning.get("engine") or "",
-                "kind": NUMBERS_DISAGREE_KIND,
-            }
-        )
-        out["audit_events"] = events
+    out["audit_events"], why = _with_number_events(
+        out, winning.get("engine") or "", dropped, document_data
+    )
+    if why and why_sink is not None:
+        why_sink[int(sidecar["page_num"])] = why
     return out
 
 
@@ -295,20 +461,58 @@ def _recount_tables(doc_dir: Path, meta_path: Path, meta: dict) -> None:
             _write_json(root_path, root)
 
 
-def _has_disagreement(sidecar: dict) -> bool:
-    """The page's published verdict carries this clause's FAIL."""
-    from socr.core.marks import Check
+def _has_fail(sidecar: dict, check) -> bool:
     from socr.core.verdict import CheckResult
 
     return any(
-        c.get("check") == Check.TEXT_LAYER_NUMBERS.value
-        and c.get("result") == CheckResult.FAIL.value
+        c.get("check") == check.value and c.get("result") == CheckResult.FAIL.value
         for c in (sidecar.get("verdict") or {}).get("clauses") or []
     )
 
 
+def _has_disagreement(sidecar: dict) -> bool:
+    """The page's published verdict carries this clause's FAIL."""
+    from socr.core.marks import Check
+
+    return _has_fail(sidecar, Check.TEXT_LAYER_NUMBERS)
+
+
+def _has_drops(sidecar: dict) -> bool:
+    """#1218: the page's published verdict carries a ``text_layer_drops`` FAIL."""
+    from socr.core.marks import Check
+
+    return _has_fail(sidecar, Check.TEXT_LAYER_DROPS)
+
+
+def _place_note(error: str, note: str, later_notes: tuple[str, ...]) -> str:
+    """*error* with *note* once, where a run puts it: before the first of the notes a run
+    appends after it (*later_notes*, by prefix), else last. A note already present is moved
+    there, so an artifact the earlier tool wrote in another order converges."""
+    if note in error:
+        if error == note:
+            return error
+        for old in (note + "; ", "; " + note):
+            if old in error:
+                error = error.replace(old, "", 1)
+                break
+    if not error:
+        return note
+    if error.startswith(later_notes):
+        return f"{note}; {error}"
+    at = min((i for i in (error.find("; " + p) for p in later_notes) if i >= 0), default=-1)
+    if at >= 0:
+        return f"{error[:at]}; {note}{error[at:]}"
+    return f"{error}; {note}"
+
+
 def _record_disagreement(
-    doc_dir: Path, meta_path: Path, meta: dict, pages: list[tuple[int, str]]
+    doc_dir: Path,
+    meta_path: Path,
+    meta: dict,
+    pages: list[tuple[int, str]],
+    *,
+    drops: bool = False,
+    data_by_page: dict[int, dict] | None = None,
 ) -> None:
     """What a run of this code records for a document with FAIL *pages* (``(page, engine)``):
     a clean status becomes ``partial`` (a worse one is left as the run wrote it), the
@@ -316,13 +520,30 @@ def _record_disagreement(
     holds one event per page. Each step checks before writing, so a rerun adds nothing."""
     from ocr_output_contract import Status
 
+    from socr.core.audit_log import event_rank
     from socr.core.verdict import (
+        INVALID_FINAL_EMISSION_NOTE_PREFIX,
         NUMBERS_DISAGREE_EVENT_DETAIL,
         NUMBERS_DISAGREE_KIND,
+        NUMBERS_DROPPED_EVENT_DETAIL,
+        NUMBERS_DROPPED_KIND,
+        NUMBERS_DROPPED_NOTE_PREFIX,
+        event_follows_numbers_disagree,
+        event_follows_numbers_dropped,
         numbers_disagree_note,
+        numbers_dropped_note,
     )
 
-    note = numbers_disagree_note([n for n, _engine in pages])
+    # ``drops`` (#1218): the same document-level record, with the wording of an OMISSION.
+    if drops:
+        kind, detail = NUMBERS_DROPPED_KIND, NUMBERS_DROPPED_EVENT_DETAIL
+        note = numbers_dropped_note([n for n, _engine in pages])
+        follows, later_notes = event_follows_numbers_dropped, (INVALID_FINAL_EMISSION_NOTE_PREFIX,)
+    else:
+        kind, detail = NUMBERS_DISAGREE_KIND, NUMBERS_DISAGREE_EVENT_DETAIL
+        note = numbers_disagree_note([n for n, _engine in pages])
+        follows = event_follows_numbers_disagree
+        later_notes = (NUMBERS_DROPPED_NOTE_PREFIX, INVALID_FINAL_EMISSION_NOTE_PREFIX)
 
     def recorded(record: dict) -> bool:
         changed = False
@@ -330,8 +551,9 @@ def _record_disagreement(
             record["status"] = Status.PARTIAL.value
             changed = True
         error = record.get("error") or ""
-        if note not in error:
-            record["error"] = f"{error}; {note}" if error else note
+        placed = _place_note(error, note, later_notes)
+        if placed != error:
+            record["error"] = placed
             changed = True
         return changed
 
@@ -357,28 +579,99 @@ def _record_disagreement(
         }
     )
     events = audit.get("events") or []
-    have = {e.get("page_num") for e in events if e.get("kind") == NUMBERS_DISAGREE_KIND}
-    added = False
+    before = json.dumps(events)
     for page_num, engine in pages:
-        if page_num in have:
-            continue
-        event = {
-            "page_num": page_num,
-            "kind": NUMBERS_DISAGREE_KIND,
-            "engine": engine,
-            "detail": NUMBERS_DISAGREE_EVENT_DETAIL,
-            "data": {},
-        }
-        # After the page's last event, so the log still reads page by page.
-        at = sum(1 for e in events if (e.get("page_num") or 0) <= page_num)
+        data = (data_by_page or {}).get(page_num) or {}
+        held = next(
+            (
+                n
+                for n, e in enumerate(events)
+                if e.get("kind") == kind and e.get("page_num") == page_num
+            ),
+            None,
+        )
+        if held is not None:
+            # The existing event, moved to where a run has it. Its numbers are never
+            # replaced; an event with none (an interrupted pass) is completed.
+            event = events.pop(held)
+            if drops and data and not (event.get("data") or {}).get("dropped"):
+                event["data"] = data
+        elif drops and not data:
+            continue  # no persisted or confirmed list to write (surfaced by the caller)
+        else:
+            event = {
+                "page_num": page_num,
+                "kind": kind,
+                "engine": engine,
+                "detail": detail,
+                "data": data,
+            }
+        # Where a run's sorted log has it: among the page's unranked kinds, before the first
+        # one a run records after it; else after the page's last event.
+        page_at = [i for i, e in enumerate(events) if e.get("page_num") == page_num]
+        end = (
+            (page_at[-1] + 1)
+            if page_at
+            else sum(1 for e in events if (e.get("page_num") or 0) <= page_num)
+        )
+        at = next(
+            (i for i in page_at if event_rank(events[i]["kind"]) == 9 and follows(events[i])),
+            end,
+        )
         events.insert(at, event)
-        added = True
-    if added:
+    if json.dumps(events) != before:
         counts: dict[str, int] = {}
         for e in events:
             counts[e["kind"]] = counts.get(e["kind"], 0) + 1
         audit.update(event_count=len(events), counts=counts, events=events)
         _write_json(audit_path, audit)
+
+
+def _document_drops_data(doc_dir: Path) -> dict[int, dict]:
+    """Each page's ``numbers_dropped`` event data in the document's ``audit_log.json``."""
+    from socr.core.verdict import NUMBERS_DROPPED_KIND
+
+    path = doc_dir / "audit_log.json"
+    if not path.is_file():
+        return {}
+    return {
+        e["page_num"]: e.get("data") or {}
+        for e in _read_json(path).get("events") or []
+        if e.get("kind") == NUMBERS_DROPPED_KIND and isinstance(e.get("page_num"), int)
+    }
+
+
+def _surface_unwritten(
+    doc_dir: Path, sidecar_paths, why_by_page: dict, skipped: Counter, *, write: bool
+) -> None:
+    """Say which pages carry the ``text_layer_drops`` clause with no list of numbers behind it.
+
+    From the sidecars as they now are. Never silent: each page is counted under the tool's
+    "not checked" lines (printed by ``main``) and, when writing, recorded in the document's
+    ``refinalized_own_text.json`` under ``unwritten_drops_events`` (removed again when a later
+    pass writes them). Nothing about the page is changed."""
+    unwritten = {}
+    for path in sidecar_paths:
+        sidecar = _read_json(path)
+        if (
+            _has_drops(sidecar)
+            and _persisted_dropped(list(sidecar.get("audit_events") or [])) is None
+        ):
+            n = int(sidecar["page_num"])
+            unwritten[str(n)] = why_by_page.get(n, "no persisted list and none could be confirmed")
+    for n, why in unwritten.items():
+        skipped[f"page {n}: numbers_dropped event has no list of numbers ({why})"] += 1
+    log_path = doc_dir / LOG_NAME
+    if not write or not (unwritten or log_path.is_file()):
+        return
+    log = _read_json(log_path) if log_path.is_file() else {"tool": "socr-refinalize-own-text"}
+    if unwritten:
+        log["unwritten_drops_events"] = unwritten
+    elif "unwritten_drops_events" in log:
+        del log["unwritten_drops_events"]
+    elif log_path.is_file():
+        return
+    _write_json(log_path, log)
 
 
 def refinalize_document(
@@ -387,7 +680,8 @@ def refinalize_document(
     """Re-finalize one document's model-read pages. Nothing is written until every page of
     the document has been decided, so an inconsistency leaves the document untouched."""
     from socr.core.marks import Check
-    from socr.core.verdict import model_reading_engines
+    from socr.core.result import PageOutput
+    from socr.core.verdict import model_reading_engines, page_dropped_numbers
 
     skipped = Counter() if skipped is None else skipped
     pages_dir = doc_dir / "pages"
@@ -424,12 +718,31 @@ def refinalize_document(
     doc_md = md_paths[0].read_text(encoding="utf-8")
     changes: list[PageChange] = []
     writes: list[tuple[Path, str, Path, dict]] = []
+    repairs: list[tuple[Path, dict]] = []
+    # What the document's own audit log already lists for a page, and why a list could not
+    # be written for a page (both feed :func:`resolve_dropped`; neither is ever overwritten).
+    held_by_document = _document_drops_data(doc_dir)
+    why_by_page: dict[int, str] = {}
     for path, sidecar in candidates:
         page_num = int(sidecar["page_num"])
         done = refinalize_page(
             sidecar, assessment.pages[page_num - 1], event_kinds.get(page_num, frozenset())
         )
         if done is None:
+            # A page that already carries the clause: make its events whole and in a run's
+            # order (see ``_repaired_number_events``). No page text changes.
+            whole, why = _repaired_number_events(
+                sidecar,
+                page_dropped_numbers(
+                    PageOutput.from_dict(sidecar.get("winning_output") or {}),
+                    _page_state(sidecar, assessment.pages[page_num - 1]),
+                ),
+                held_by_document.get(page_num),
+            )
+            if why:
+                why_by_page[page_num] = why
+            if whole is not None:
+                repairs.append((path, whole))
             continue
         output, verdict = done
         fragment_path = path.with_suffix(".md")
@@ -439,7 +752,14 @@ def refinalize_document(
             raise RuntimeError(f"{fragment_path}: fragment is not its sidecar's text")
         heading = f"## Page {page_num}\n\n"
         doc_md = _swap_once(doc_md, heading + old_text, heading + output.text, md_paths[0])
-        new_sidecar = _updated_sidecar(sidecar, output, verdict)
+        new_sidecar = _updated_sidecar(
+            sidecar,
+            output,
+            verdict,
+            page_dropped_numbers(output, _page_state(sidecar, assessment.pages[page_num - 1])),
+            held_by_document.get(page_num),
+            why_by_page,
+        )
         writes.append((fragment_path, output.text, path, new_sidecar))
         changes.append(
             PageChange(
@@ -448,7 +768,16 @@ def refinalize_document(
                 before=str(sidecar.get("status")),
                 after=new_sidecar["status"],
                 result=next(
-                    c.result.value for c in verdict.clauses if c.check is Check.TEXT_LAYER_NUMBERS
+                    (
+                        c.result.value
+                        for c in verdict.clauses
+                        if c.check is Check.TEXT_LAYER_NUMBERS
+                    ),
+                    "",
+                ),
+                drops=next(
+                    (c.result.value for c in verdict.clauses if c.check is Check.TEXT_LAYER_DROPS),
+                    "",
                 ),
             )
         )
@@ -466,6 +795,7 @@ def refinalize_document(
         if missing:
             raise RuntimeError(f"{manifest_path}: no entry for page(s) {', '.join(missing)}")
     if dry_run:
+        _surface_unwritten(doc_dir, [p for p, _s in candidates], why_by_page, skipped, write=False)
         return changes
     if writes:
         for fragment_path, text, _p, _s in writes:
@@ -486,12 +816,19 @@ def refinalize_document(
         for change, (_f, _t, _p, data) in zip(changes, writes):
             pages[str(change.page_num)] = {
                 "before": {"status": change.before},
-                "after": {"status": change.after, "text_layer_numbers": change.result},
+                "after": {
+                    "status": change.after,
+                    "text_layer_numbers": change.result,
+                    **({"text_layer_drops": change.drops} if change.drops else {}),
+                },
                 "socr_source_digest": data["socr_source_digest"],
             }
         _write_json(log_path, log)
         for _f, _t, path, data in writes:
             _write_json(path, data)
+    for path, data in repairs:
+        _write_json(path, data)
+    _surface_unwritten(doc_dir, [p for p, _s in candidates], why_by_page, skipped, write=True)
     # From the sidecars as they now are, not from this pass's changes, so a run interrupted
     # between the sidecars and this line is completed by the next one.
     disagreeing = [
@@ -501,6 +838,27 @@ def refinalize_document(
     ]
     if disagreeing:
         _record_disagreement(doc_dir, meta_path, meta, disagreeing)
+    # #1218: after #1185's, the order a run records them in.
+    dropping = [
+        (int(sc["page_num"]), (sc.get("winning_output") or {}).get("engine") or "")
+        for sc in map(_read_json, sidecar_paths)
+        if _has_drops(sc)
+    ]
+    if dropping:
+        # The numbers come from the page sidecars' own events (written with the clause), so
+        # an interrupted run's later pass writes the same data a run does.
+        from socr.core.verdict import NUMBERS_DROPPED_KIND
+
+        data_by_page = {
+            int(sc["page_num"]): e.get("data") or {}
+            for sc in map(_read_json, sidecar_paths)
+            if _has_drops(sc)
+            for e in sc.get("audit_events") or []
+            if e.get("kind") == NUMBERS_DROPPED_KIND
+        }
+        _record_disagreement(
+            doc_dir, meta_path, meta, dropping, drops=True, data_by_page=data_by_page
+        )
     _recount_tables(doc_dir, meta_path, meta)
     return changes
 
@@ -526,9 +884,10 @@ def main(argv: list[str] | None = None) -> int:
             failed.append((doc_dir, f"{type(exc).__name__}: {exc}"))
             continue
         for change in changes:
-            counts[(change.before, change.after, change.result)] += 1
-    for (before, after, result), n in sorted(counts.items()):
-        print(f"{n:6d}  {before} -> {after}  (text_layer_numbers={result})")
+            counts[(change.before, change.after, change.result, change.drops)] += 1
+    for (before, after, result, drops), n in sorted(counts.items()):
+        extra = f", text_layer_drops={drops}" if drops else ""
+        print(f"{n:6d}  {before} -> {after}  (text_layer_numbers={result}{extra})")
     print(f"{sum(counts.values()):6d}  pages re-finalized")
     for reason, n in sorted(skipped.items()):
         print(f"{n:6d}  not checked: {reason}")

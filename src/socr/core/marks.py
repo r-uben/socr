@@ -274,6 +274,10 @@ class Check(str, Enum):
     PRIOR_OCR_LAYER = "prior_ocr_layer"
     #: #1185: whether the numbers a model reading ships occur in the page's own text layer.
     TEXT_LAYER_NUMBERS = "text_layer_numbers"
+    #: #1218: numbers the page's own text layer prints in table rows that the model reading
+    #: does not hold. Its own check, not a result of ``TEXT_LAYER_NUMBERS``: that one is about
+    #: numbers the reading SHIPS, and the mode, event and note of each must say what is true.
+    TEXT_LAYER_DROPS = "text_layer_drops"
     UNREADABLE_INPUT = "unreadable_input"
     #: The fail-closed fallback: the page is not CHECKED and nothing more specific named
     #: the reason. Never silence it -- a page with no clause at all ships unmarked, which
