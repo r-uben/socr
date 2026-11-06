@@ -26,13 +26,17 @@ Algorithm: a uniform grid with cell side ``cell = gap / 2``.
   instead, which costs ``n`` and is cheaper than registering more than ``n``
   cells.
 * Work budget. Failed cross-cell checks can repeat for the same box pair in
-  many neighbouring cell pairs, so the grid has no O(n^2) bound on its own. The
-  grid path counts its exact checks against the pairwise count
-  ``n * (n - 1) // 2``. When that count would be exceeded, the grid result is
-  abandoned and the exact pairwise loop runs from scratch. Exact checks are then
-  at most 2 * pairwise (at most the budget spent in the grid, plus a full
-  pairwise pass); registration adds at most O(n^2) cell memberships (each box
-  meets at most ``n`` cells).
+  many neighbouring cell pairs, and registering boxes can cost up to ``n`` cells
+  each, so the grid has no O(n^2) bound on its own. Registration and exact
+  checks are charged to ONE shared budget, the pairwise pair count
+  ``B = n * (n - 1) // 2``. Before allocating anything, the grid sums the
+  memberships it would register (the cell-count sum over non-large boxes, O(n),
+  same int spans); if that exceeds ``B`` it returns None without registering. The
+  exact checks may then use only ``B - memberships``; when they would exceed it,
+  the grid result is abandoned. A grid attempt therefore never stores more
+  memberships, and never does more registration-plus-check work, than one
+  pairwise pass (``B``), and on abandonment the exact pairwise loop runs from
+  scratch: total work is at most 2 pairwise passes.
 * Fallback to the exact pairwise loop, with no grid, when the grid's premises
   fail: ``gap`` or any coordinate non-finite; ``cell`` not a positive finite
   float (``gap <= 0``, or ``gap / 2`` underflowing to 0); any inverted box
@@ -96,6 +100,11 @@ def _pairwise(boxes: list[Box], gap: float) -> _Components:
     return comps
 
 
+def _pairwise_budget(n: int) -> int:
+    """The pairwise pass's pair count, ``n * (n - 1) // 2``: the grid's total work budget."""
+    return n * (n - 1) // 2
+
+
 def _grid_usable(boxes: list[Box], gap: float) -> bool:
     if not math.isfinite(gap) or gap <= 0:
         return False
@@ -115,21 +124,31 @@ def _grid_usable(boxes: list[Box], gap: float) -> bool:
 
 
 def _grid(boxes: list[Box], gap: float) -> _Components | None:
-    """Grid clustering, or None when its exact checks would exceed the pairwise count."""
+    """Grid clustering, or None when registration plus exact checks would exceed the pairwise count."""
     n = len(boxes)
-    budget = n * (n - 1) // 2
-    checks = 0
-    comps = _Components(n)
     cell = gap / 2.0
     reach = 3
-    cells: dict[tuple[int, int], list[int]] = {}
+    spans = []
     large: list[int] = []
+    memberships = 0
     for i, (x0, y0, x1, y1) in enumerate(boxes):
         cx0, cx1 = math.floor(x0 / cell), math.floor(x1 / cell)
         cy0, cy1 = math.floor(y0 / cell), math.floor(y1 / cell)
-        if (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > n:
+        count = (cx1 - cx0 + 1) * (cy1 - cy0 + 1)
+        if count > n:
             large.append(i)
-            continue
+        else:
+            spans.append((i, cx0, cx1, cy0, cy1))
+            memberships += count
+    # One shared budget: registration (memberships) and exact checks together.
+    budget = _pairwise_budget(n)
+    if memberships > budget:
+        return None
+    budget -= memberships
+    checks = 0
+    comps = _Components(n)
+    cells: dict[tuple[int, int], list[int]] = {}
+    for i, cx0, cx1, cy0, cy1 in spans:
         for cx in range(cx0, cx1 + 1):
             for cy in range(cy0, cy1 + 1):
                 cells.setdefault((cx, cy), []).append(i)
