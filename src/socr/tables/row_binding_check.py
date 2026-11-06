@@ -541,16 +541,13 @@ def _labels_exact(shipped: str, native: str, *, strict: bool = False) -> bool:
 
 
 def _bound_exactly(label: str, printed: list[str], lines: list[_Line]) -> bool:
-    """BOUND gate: *label* equals the label printed on every candidate line. When that equality needed
-    the one-sided footnote allowance, no other line may print *label* exactly with its mark (`Total` and
-    `Total*` are two rows on one page: round 5, a real FSR page has `Commercial real estate` and
-    `Commercial real estate**`)."""
-    if not all(_labels_exact(label, t) for t in printed):
-        return False
-    if all(_labels_exact(label, t, strict=True) for t in printed):
-        return True
-    homes = {" ".join(w.text for w in _own_label(ln)) for ln in lines}
-    return not any(_labels_exact(label, h, strict=True) for h in homes if h not in printed)
+    """BOUND gate: *label* equals the label printed on every candidate line, footnote marks included.
+
+    Round 6 (top-orchestrator decision): no footnote tolerance on the BOUND path at all. Any footnote
+    difference (`Total` / `Total*`, `2020 Total` / `2020 Total*`, `Receipts` / `Receipts¹`) leaves the
+    row UNVERIFIABLE. The conviction rules never used this gate, so convictions are unaffected."""
+    del lines  # kept in the signature: callers pass the page lines
+    return bool(printed) and all(_labels_exact(label, t, strict=True) for t in printed)
 
 
 def _printed_label(cand: _Cand, first_value_word: int) -> str:
@@ -770,7 +767,7 @@ def _judge_empty(
         else:
             header_like += 1
             exact_header = exact_header or _labels_exact(
-                row.label, " ".join(w.text for w in ln.words)
+                row.label, " ".join(w.text for w in ln.words), strict=True
             )
     if header_like and exact_valued:
         # Round 5 (Fable P2): a line printing exactly this label WITH values is also in range, so the
@@ -921,7 +918,18 @@ def check_row_binding(
     # four-digit years (frame-1 live boxes convicted a `(March 24 - April 24)` heading before the
     # numbers-only condition). Any other conviction is downgraded to UNVERIFIABLE.
     for h in shipped:
-        if not h.is_header or not h.has_content:
+        if not h.is_header:
+            continue
+        if not h.has_content:
+            # Round 6: a header-position row with a label and no values (`| Exports | | | |`) is judged
+            # like a valueless body row; it binds only on an exact valueless line and never convicts.
+            if h.label_tokens:
+                v, why, _ = _judge_empty(h, lines, -1, len(lines))
+                if v is not RowVerdict.BOUND:
+                    v, why = RowVerdict.UNVERIFIABLE, f"header-position row without values: {why}"
+                evidence.insert(
+                    0, RowEvidence(h.line_index, v, why, h.label, "", h.cell_texts, None)
+                )
             continue
         has_decimal = any("." in n for n in h.numbers)
         all_years = bool(h.numbers) and all(re.fullmatch(r"\d{4}", n) for n in h.numbers)

@@ -693,3 +693,23 @@ def test_a_table_the_ladder_never_witnessed_keeps_its_mark_beside_a_row_binding_
     tail_on = frag_on[frag_on.index("Prose between the tables.") :]
     tail_off = frag_off[frag_off.index("Prose between the tables.") :]
     assert tail_on == tail_off  # the bound sibling and its generic mark, identical in both arms
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_withheld_table_never_fires_the_text_layer_drops_check(tmp_path, rotation):
+    """#1218 merged beside #1267: the numbers of a table the row check withholds are missing BY
+    DESIGN, so the drops clause must not call them omitted (gated on TABLE_WITHHELD, the ladder
+    disposition and the withheld marker). Checked on the real pipeline output, both arms."""
+    from socr.core.table_counts import carries_withheld_marker
+    from socr.core.verdict import NUMBERS_DROPPED_KIND
+
+    _, _, _, on, pdf = _run(tmp_path, SHIFTED_ROWS, rotation, check_runs=True, out_name="on")
+    frag = _fragment(on)
+    assert MARKER in frag and carries_withheld_marker(frag)
+    assert _events(on, NUMBERS_DROPPED_KIND) == []
+    assert "missing from this reading" not in frag
+    # a document whose only page is withheld may write no assembled .md; check every one there is
+    for doc in (p for p in on.rglob("*.md") if p.parent.name != "pages"):
+        assert "missing from this reading" not in doc.read_text(encoding="utf-8")
+    side = _sidecar(on)
+    assert side["table_ladder_disposition"] == "table_withheld"

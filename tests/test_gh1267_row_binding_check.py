@@ -664,12 +664,13 @@ def test_a_footnote_mark_is_not_part_of_the_label(rotation):
         ("Consumer prices (4)", ["2.1", "2.2", "2.3"]),
         ("Real GDP¹", ["1.5", "2.5", "3.5"]),
     ]
-    assert run(native, footnoted, rotation).outcome is TableOutcome.BOUND
+    # round 6: any footnote difference is UNVERIFIABLE (marked), never BOUND, never convicted
+    assert run(native, footnoted, rotation).outcome is TableOutcome.UNVERIFIABLE
     latex = [
         ("**Consumer prices**$^{2}$", ["2.1", "2.2", "2.3"]),
         ("Real GDP", ["1.5", "2.5", "3.5"]),
     ]
-    assert run(native, latex, rotation).outcome is TableOutcome.BOUND
+    assert run(native, latex, rotation).outcome is TableOutcome.UNVERIFIABLE
     swapped = [("Real GDP (4)", ["2.1", "2.2", "2.3"]), ("Consumer prices¹", ["1.5", "2.5", "3.5"])]
     assert run(native, swapped, rotation).outcome is TableOutcome.CONTRADICTED
 
@@ -1026,6 +1027,9 @@ def test_minimal_normalisation_keeps_the_same_label(shipped, printed):
     from socr.tables.row_binding_check import _labels_exact
 
     assert _labels_exact(shipped, printed)
+    # round 6: the BOUND path compares strictly; only the footnote cases differ there
+    footnote = shipped in ("Receipts¹", "United Kingdom (4)", "Consumer prices$^{2}$")
+    assert _labels_exact(shipped, printed, strict=True) is (not footnote)
 
 
 SWAP_PAIRS = [
@@ -1249,3 +1253,36 @@ def test_a_wrapped_label_first_line_on_correct_values_is_not_withheld(rotation):
     ]
     rows = [("Exports", native[1][1]), native[2], native[3]]
     assert run(native, rows, rotation).outcome is TableOutcome.UNVERIFIABLE
+
+
+def test_a_numeric_leading_footnote_pair_never_binds_swapped():
+    """Round 6 (Astra P0): `2020 Total` / `2020 Total*` swapped was BOUND (footnote home blind to a
+    numeric-leading label). Label and values set tightly, as one panel. The BOUND path now has no
+    footnote tolerance at all."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    def line(y, words):
+        out, x = [], 40.0
+        for w in words:
+            out.append((x, y, x + 6 * len(w), y + 9, w))
+            x += 6 * len(w) + 4
+        return out
+
+    native = [("2020 Total", ["1.1", "1.2", "1.3"]), ("2020 Total*", ["2.1", "2.2", "2.3"])]
+    words = [
+        w for i, (lab, vals) in enumerate(native) for w in line(100 + 14 * i, [*lab.split(), *vals])
+    ]
+    swapped = [("2020 Total*", native[0][1]), ("2020 Total", native[1][1])]
+    assert check_row_binding(words, None, md(native)).outcome is TableOutcome.BOUND
+    assert check_row_binding(words, None, md(swapped)).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_an_emptied_header_row_is_judged(rotation):
+    """Round 6 (Astra P0): `| Exports | | | |` in the header position while the page prints Exports'
+    values: a labelled header row without values is judged; never BOUND."""
+    native = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
+    res, _ = check_page_row_binding(
+        build_page(native, rotation), _with_header(("Exports", ["", "", ""]), [native[1]])
+    )
+    assert res[0].outcome is not TableOutcome.BOUND
