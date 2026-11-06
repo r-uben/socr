@@ -45,6 +45,7 @@ import statistics
 from collections import defaultdict
 
 from socr.core.born_digital import ALIGNED_RUN_GAP_MAX_WORD_SPACES
+from socr.core.box_clusters import cluster_box_indices
 from socr.core.table_grid import NUM_TOKEN_RE as _NUM_TOKEN_RE
 from socr.tables.column_gutter import (
     detect_column_gutter as _detect_column_gutter,
@@ -1533,37 +1534,8 @@ def _union_find_clusters(
 
     Returns the merged bbox for each cluster as (x0, y0, x1, y1).
     """
-    if not boxes:
-        return []
-    n = len(boxes)
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for i in range(n):
-        ax0, ay0, ax1, ay1 = boxes[i]
-        for j in range(i + 1, n):
-            bx0, by0, bx1, by1 = boxes[j]
-            h_gap = max(0.0, bx0 - ax1) if ax1 < bx0 else max(0.0, ax0 - bx1)
-            v_gap = max(0.0, by0 - ay1) if ay1 < by0 else max(0.0, ay0 - by1)
-            if h_gap <= gap and v_gap <= gap:
-                union(i, j)
-
-    clusters: dict[int, list[int]] = {}
-    for i in range(n):
-        clusters.setdefault(find(i), []).append(i)
-
     merged: list[tuple[float, float, float, float]] = []
-    for indices in clusters.values():
+    for indices in cluster_box_indices(boxes, gap):
         x0 = min(boxes[i][0] for i in indices)
         y0 = min(boxes[i][1] for i in indices)
         x1 = max(boxes[i][2] for i in indices)
