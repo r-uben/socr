@@ -64,7 +64,24 @@ MAX_FOOTNOTE_DIGITS = 1
 
 _SUPERSCRIPT_TRANSLATE = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _UNICODE_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-", "‒": "-"})
-_MD_DECORATION = re.compile(r"[*_`]|<br\s*/?>")
+_MD_DECORATION = re.compile(r"[*_`]|<br\s*/?>")  # value cells only (`**1.2**` is 1.2)
+# Structural markdown in a SHIPPED label (round 5, R1): paired emphasis and code spans, line breaks,
+# HTML entities. An unpaired `*` or backtick is a literal character of the label (`A*` != `A**`).
+_PAIRED_MARKUP = (
+    re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*"),
+    re.compile(r"(?<![*\w])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![*\w])"),
+    re.compile(r"`([^`]+)`"),
+)
+
+
+def _strip_markup(text: str) -> str:
+    """Remove structural markdown from a shipped label; literal characters stay."""
+    s = re.sub(r"<br\s*/?>", " ", text)
+    for pat in _PAIRED_MARKUP:
+        s = pat.sub(r"\1", s)
+    return html.unescape(s)
+
+
 # A footnote mark after a label: in parentheses ('United Kingdom (4)'), superscript ('Contributions¹')
 # or LaTeX ('Consumer prices$^{2}$'). Its digit is glued to the label word before it ('kingdom4'), on
 # both sides, so ``_token_eq``'s trailing-footnote rule applies: a side that omits the mark still
@@ -141,8 +158,8 @@ def _footnote_digits(mark: str) -> str:
 
 
 def _label_tokens(text: str) -> list[str]:
-    text = _FOOTNOTE_AFTER_WORD.sub(lambda m: _footnote_digits(m.group(1)), text)
-    text = _MD_DECORATION.sub(" ", text)
+    text = _FOOTNOTE_AFTER_WORD.sub(lambda m: _footnote_digits(m.group(1)), _strip_markup(text))
+    # Same per-word normalisation as a text-layer word (`Series_A` is one word on both sides).
     return [t for t in (_alnum(w) for w in text.split()) if t]
 
 
@@ -343,13 +360,14 @@ def _shipped_rows(markdown: str) -> list[_Row]:
     lines = markdown.splitlines()
     rows: list[_Row] = []
     for block in find_table_blocks(markdown):
-        first = True
         for li in range(block.start, block.end + 1):
             grid = _parse_grid([lines[li]])
             if not grid:
-                continue  # separator
+                continue  # separator (or an all-empty heading line)
             cells = grid[0]
-            is_header, first = first, False
+            # The header is the block's first line by position: an all-empty heading line parses to no
+            # grid, and the first DATA row must not be taken for the header in its place.
+            is_header = li == block.start
             label = cells[0] if cells else ""
             numbers: list[str] = []
             cats: list[str] = []
@@ -496,28 +514,43 @@ def _same_label(a: list[str], b: list[str]) -> bool:
 # rule (token pools, adjacency bands, subsets, trailing digits, dropped symbols, header skips) declared
 # the same. A row is BOUND only when its shipped label IS the label printed before its values on the
 # same text-layer line, under the minimal normalisation of ``_exact_label``.
-_FOOTNOTE_TAIL = re.compile(rf"\s*(?:{_PAREN_FOOTNOTE.pattern})$")
+_FOOTNOTE_TAIL = re.compile(rf"\s*(?:{_PAREN_FOOTNOTE.pattern}|\*+)$")
 
 
-def _exact_label(text: str) -> str:
-    """Markup removed (``**``, ``*``, backticks, ``<br>``, HTML entities), NFC, casefold, whitespace
-    collapsed. Every letter, digit and symbol (%, $, &, (), -, /) is kept."""
-    s = html.unescape(re.sub(r"<br\s*/?>", " ", text)).replace("*", "").replace("`", "")
+def _exact_label(text: str, *, shipped: bool) -> str:
+    """NFC, casefold, whitespace collapsed; on the SHIPPED side structural markdown is removed first
+    (round 5, R1: asymmetric; the text layer has no markdown, so its `*` is a character). Every letter,
+    digit and symbol (%, $, &, (), -, /, a literal *) is kept."""
+    s = _strip_markup(text) if shipped else text
     return " ".join(unicodedata.normalize("NFC", s).casefold().split())
 
 
-def _labels_exact(shipped: str, native: str) -> bool:
-    """The same label string. A trailing footnote mark is dropped only from the side that has one
-    when the other has none; then one trailing period or colon is dropped from each side."""
-    a, b = _exact_label(shipped), _exact_label(native)
-    fa, fb = _FOOTNOTE_TAIL.search(a), _FOOTNOTE_TAIL.search(b)
-    if fa and not fb:
+def _labels_exact(shipped: str, native: str, *, strict: bool = False) -> bool:
+    """The same label string. A trailing footnote mark (incl. a run of `*`) is dropped only from the
+    side that has one when the other has none, and never when it is the whole label; then one
+    trailing period or colon is dropped from each side."""
+    a, b = _exact_label(shipped, shipped=True), _exact_label(native, shipped=False)
+    fa, fb = (None, None) if strict else (_FOOTNOTE_TAIL.search(a), _FOOTNOTE_TAIL.search(b))
+    if fa and not fb and a[: fa.start()].strip():
         a = a[: fa.start()]
-    elif fb and not fa:
+    elif fb and not fa and b[: fb.start()].strip():
         b = b[: fb.start()]
     a = a[:-1].rstrip() if a[-1:] in ".:" else a
     b = b[:-1].rstrip() if b[-1:] in ".:" else b
     return a == b
+
+
+def _bound_exactly(label: str, printed: list[str], lines: list[_Line]) -> bool:
+    """BOUND gate: *label* equals the label printed on every candidate line. When that equality needed
+    the one-sided footnote allowance, no other line may print *label* exactly with its mark (`Total` and
+    `Total*` are two rows on one page: round 5, a real FSR page has `Commercial real estate` and
+    `Commercial real estate**`)."""
+    if not all(_labels_exact(label, t) for t in printed):
+        return False
+    if all(_labels_exact(label, t, strict=True) for t in printed):
+        return True
+    homes = {" ".join(w.text for w in _own_label(ln)) for ln in lines}
+    return not any(_labels_exact(label, h, strict=True) for h in homes if h not in printed)
 
 
 def _printed_label(cand: _Cand, first_value_word: int) -> str:
@@ -656,8 +689,10 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
                 "label on the matched line and its adjoining label band",
                 native_label,
             )
+        # Round 5 (Fable P2): the values ARE on this line; a band label above it may be the first line
+        # of a wrapped label continued here (`Exports` / `of goods 1.1 2.2 3.3`). Not a conviction.
         return (
-            RowVerdict.DISPLACED,
+            RowVerdict.UNVERIFIABLE,
             "shipped label is the adjoining band's; the line prints another label",
             native_label,
         )
@@ -690,7 +725,7 @@ def _judge_empty(
     order is the reading order, and repeated section labels ('Industrial Countries' in two blocks)
     are told apart by it."""
     header_like = valued = single = split = 0
-    exact_header = False
+    exact_header = exact_valued = False
     for ln in lines:
         if not lo <= ln.index <= hi:
             continue
@@ -727,6 +762,7 @@ def _judge_empty(
             split += 1
         elif len(ln.nums) >= EMPTIED_MIN_VALUES:
             valued += 1
+            exact_valued = exact_valued or _labels_exact(row.label, " ".join(w.text for w in own))
         elif ln.nums:
             single += (
                 1  # post-held-out (Argon d): one number is a value or a footnote, not a header
@@ -736,6 +772,14 @@ def _judge_empty(
             exact_header = exact_header or _labels_exact(
                 row.label, " ".join(w.text for w in ln.words)
             )
+    if header_like and exact_valued:
+        # Round 5 (Fable P2): a line printing exactly this label WITH values is also in range, so the
+        # row may be a data row whose values were dropped; an exact valueless line does not settle it.
+        return (
+            RowVerdict.UNVERIFIABLE,
+            "label matches a valueless line and a line with values",
+            None,
+        )
     if header_like:
         if exact_header:
             return (
@@ -860,33 +904,37 @@ def check_row_binding(
                 )
             )
             continue
-        if v is RowVerdict.BOUND and not all(
-            _labels_exact(r.label, _printed_label(c2, wi2)) for c2, wi2 in opts
+        if v is RowVerdict.BOUND and not _bound_exactly(
+            r.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines
         ):
             v, why = (
                 RowVerdict.UNVERIFIABLE,
                 "label not printed exactly before these values on their line",
             )
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
-    # Header-position rows (adversarial pass F1; rounds 3-4). The markdown header row is usually column
-    # headings, but the model can put a data row there. Every header row whose value cells hold numbers
-    # only is judged like a body row, outside the assignment (a heading line cannot reorder the data
-    # rows), and BOUND only on the exact rule above. It may CONVICT only when it is a data row by its own
-    # content: a decimal value, or a label word over values that are not all four-digit years (a year
-    # heading next to a labelled line cannot be told from a shifted row: frame-1 live boxes convicted a
-    # `(March 24 - April 24)` heading before the numbers-only condition). Otherwise a conviction is
-    # downgraded to UNVERIFIABLE. A value cell with words in it is a heading cell and is not judged.
+    # Header-position rows (adversarial pass F1; rounds 3-5). Round 5 (R2, COMPLETE JUDGEMENT): a table
+    # is BOUND only if every markdown row was judged by the exact gate, so EVERY header row with a
+    # non-empty data cell (numbers, mixed text and numbers, or words) is judged like a body row, outside
+    # the assignment (a heading line cannot reorder the data rows), and binds only on the exact rule. A
+    # header row that cannot be located is UNVERIFIABLE. It may CONVICT only when it is a data row by its
+    # own content: numbers-only cells with a decimal value, or a label word over values that are not all
+    # four-digit years (frame-1 live boxes convicted a `(March 24 - April 24)` heading before the
+    # numbers-only condition). Any other conviction is downgraded to UNVERIFIABLE.
     for h in shipped:
-        if not h.is_header or not h.numbers or not h.values_only:
+        if not h.is_header or not h.has_content:
             continue
         has_decimal = any("." in n for n in h.numbers)
-        all_years = all(re.fullmatch(r"\d{4}", n) for n in h.numbers)
-        may_convict = has_decimal or (_has_letter(h.label_tokens) and not all_years)
+        all_years = bool(h.numbers) and all(re.fullmatch(r"\d{4}", n) for n in h.numbers)
+        may_convict = (
+            bool(h.numbers)
+            and h.values_only
+            and (has_decimal or (_has_letter(h.label_tokens) and not all_years))
+        )
         opts = _options(h, cands)
         if not opts:
             v, why, nat, line_no = (
                 RowVerdict.UNVERIFIABLE,
-                "header-position row; no native line carries these values",
+                "header-position row; no native line carries these cells",
                 "",
                 None,
             )
@@ -906,12 +954,12 @@ def check_row_binding(
                     RowVerdict.UNVERIFIABLE,
                     "header-position row: a heading cannot be convicted",
                 )
-            elif v is RowVerdict.BOUND and not all(
-                _labels_exact(h.label, _printed_label(c2, wi2)) for c2, wi2 in opts
+            elif v is RowVerdict.BOUND and not _bound_exactly(
+                h.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines
             ):
                 v, why = (
                     RowVerdict.UNVERIFIABLE,
-                    "header-position row: label not printed exactly before these values",
+                    "header-position row: label not printed exactly before these cells",
                 )
         evidence.insert(0, RowEvidence(h.line_index, v, why, h.label, nat, h.cell_texts, line_no))
     if any(e.verdict in CONVICTING for e in evidence):

@@ -46,7 +46,13 @@ def build_page(lines: list[tuple[str, list[str]]], rotation: int) -> fitz.Page:
     return page
 
 
-def md(rows: list[tuple[str, list[str]]], header: str = "| Item | A | B | C |") -> str:
+# Round 5 (R2): every markdown row with content is judged, the header row included, and these synthetic
+# pages print no column-heading line. The default header is therefore an empty heading row (nothing to
+# judge); tests about header rows pass their own header.
+EMPTY_HEADER = "|  |  |  |  |"
+
+
+def md(rows: list[tuple[str, list[str]]], header: str = EMPTY_HEADER) -> str:
     out = [header, "|---|---|---|---|"]
     for label, values in rows:
         cells = list(values) + [""] * (3 - len(values)) if values else ["", "", ""]
@@ -317,8 +323,8 @@ def test_twin_panels_on_shared_baselines_bind_in_reading_order():
         words += [word(160 + 40 * k, y, f"{i + 1}.{k + 1}") for k in range(3)]
         words.append(word(400, y, right))
         words += [word(520 + 40 * k, y, f"{i + 5}.{k + 1}") for k in range(3)]
-    good = "| a | b | c | d |\n|---|---|---|---|\n| Treasury | 1.1 | 1.2 | 1.3 |\n| Agency | 5.1 | 5.2 | 5.3 |\n"
-    swapped = "| a | b | c | d |\n|---|---|---|---|\n| Agency | 1.1 | 1.2 | 1.3 |\n| Treasury | 5.1 | 5.2 | 5.3 |\n"
+    good = "|  |  |  |  |\n|---|---|---|---|\n| Treasury | 1.1 | 1.2 | 1.3 |\n| Agency | 5.1 | 5.2 | 5.3 |\n"
+    swapped = "|  |  |  |  |\n|---|---|---|---|\n| Agency | 1.1 | 1.2 | 1.3 |\n| Treasury | 5.1 | 5.2 | 5.3 |\n"
     assert check_row_binding(words, None, good).outcome is TableOutcome.BOUND
     assert check_row_binding(words, None, swapped).outcome is not TableOutcome.BOUND
 
@@ -357,8 +363,10 @@ def test_argon_b_header_shifted_onto_first_data_row(rotation):
     ]
     rows = [("Exports", ["1.0", "2.0", "3.0"]), ("Services", ["4.0", "5.0", "6.0"])]
     res = run(native, rows, rotation)
-    assert res.outcome is TableOutcome.CONTRADICTED
-    assert res.rows[0].verdict is RowVerdict.DISPLACED
+    # Round 5 (Fable P2): a band label on a line whose values are right may be a wrapped label's first
+    # line, so the band rule marks instead of convicting (no false withhold). Never BOUND.
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -488,7 +496,7 @@ def test_duplicate_shipped_row_against_one_native_line_is_never_bound(rotation):
     native = [("Alpha", ["1", "2"])]
     rows = [("Alpha", ["1", "2"]), ("Alpha", ["1", "2"])]
     page = build_page(native, rotation)
-    markdown = "| Item | A | B |\n|---|---|---|\n| Alpha | 1 | 2 |\n| Alpha | 1 | 2 |\n"
+    markdown = "|  |  |  |\n|---|---|---|\n| Alpha | 1 | 2 |\n| Alpha | 1 | 2 |\n"
     results, _ = check_page_row_binding(page, markdown, None)
     res = results[0]
     assert res.outcome is not TableOutcome.BOUND
@@ -511,8 +519,11 @@ def test_labelled_empty_row_with_no_native_line_is_unverifiable(rotation):
 def test_a_table_with_no_data_rows_has_nothing_to_bind():
     from socr.tables.row_binding_check import check_row_binding
 
-    res = check_row_binding([], None, "| a | b |\n|---|---|\n")
+    res = check_row_binding([], None, "|  |  |\n|---|---|\n")
     assert res.rows == () and res.outcome is TableOutcome.BOUND
+    # Round 5 (R2): a header row with content is a row to judge; one the layer does not print is not BOUND
+    headed = check_row_binding([], None, "| a | b |\n|---|---|\n")
+    assert headed.outcome is TableOutcome.UNVERIFIABLE
 
 
 @pytest.mark.parametrize(
@@ -930,7 +941,9 @@ def test_a_heading_with_numbers_inside_words_is_not_a_data_row(rotation):
     ]
     markdown = _with_header(("Institution Name", ["(March 24 -", "April 24)", ""]), native[1:])
     res, _ = check_page_row_binding(build_page(native, rotation), markdown)
-    assert res[0].outcome is TableOutcome.BOUND
+    # never convicted; under R2 (round 5) it is judged and binds only exactly, so it may be marked
+    assert res[0].outcome is not TableOutcome.CONTRADICTED
+    assert res[0].rows[0].verdict not in CONVICT
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -978,6 +991,15 @@ REVIEWER_PAIRS = [
     ("FY2019", "FY201"),
     ("Total¹", "Total1"),
     ("Exports less", "Exports less imports"),
+    # round 5
+    ("A**", "A*"),
+    ("A`", "A"),
+    ("Total*", "Total**"),
+    ("", "(1)"),
+    ("", "¹"),
+    ("", "*"),
+    ("Series_A", "Series A"),
+    ("A*B", "A B"),
 ]
 
 
@@ -1074,29 +1096,44 @@ def test_exact_label_rule_over_all_pairs_of_reviewer_labels():
         | {"**Real GDP**", "Real GDP", "Receipts:", "Receipts", "Receipts¹", "real  gdp"}
         | {"United Kingdom (4)", "United Kingdom", "Consumer prices$^{2}$", "Consumer prices"}
     )
-    foot = _re.compile(r"(\(\d\)|\$\^\{?\d\}?\$|[¹²³⁰⁴-⁹])$")
+    foot = _re.compile(r"(\(\d\)|\$\^\{?\d\}?\$|[¹²³⁰⁴-⁹]|\*+)$")
 
-    def base(s):
-        s = _html.unescape(_re.sub(r"<br\s*/?>", " ", s)).replace("*", "").replace("`", "")
+    def base(s, shipped):
+        # round 5: only PAIRED markup, only on the shipped side; a lone * or ` is a character
+        if shipped:
+            s = _re.sub(r"<br\s*/?>", " ", s)
+            s = _re.sub(r"\*\*(\S.*?\S|\S)\*\*", r"\1", s)
+            s = _re.sub(r"(?<![*\w])\*([^\s*].*?[^\s*]|[^\s*])\*(?![*\w])", r"\1", s)
+            s = _html.unescape(_re.sub(r"`([^`]+)`", r"\1", s))
         return _re.sub(r"\s+", "", _ud.normalize("NFC", s).casefold())
 
     def allowed(a, b):
-        x, y = base(a), base(b)
+        x, y = base(a, True), base(b, False)
         for xs in {x, x[:-1] if x[-1:] in ".:" else x}:
             for ys in {y, y[:-1] if y[-1:] in ".:" else y}:
                 fx, fy = foot.search(xs), foot.search(ys)
                 if xs == ys:
                     return True
-                if fx and not fy and xs[: fx.start()].rstrip(".:") == ys.rstrip(".:"):
+                if (
+                    fx
+                    and not fy
+                    and xs[: fx.start()]
+                    and xs[: fx.start()].rstrip(".:") == ys.rstrip(".:")
+                ):
                     return True
-                if fy and not fx and ys[: fy.start()].rstrip(".:") == xs.rstrip(".:"):
+                if (
+                    fy
+                    and not fx
+                    and ys[: fy.start()]
+                    and ys[: fy.start()].rstrip(".:") == xs.rstrip(".:")
+                ):
                     return True
         return False
 
     bad = [
         (a, b)
-        for a, b in itertools.combinations(labels, 2)
-        if (_labels_exact(a, b) or _labels_exact(b, a)) and not allowed(a, b)
+        for a, b in itertools.permutations(labels, 2)
+        if _labels_exact(a, b) and not allowed(a, b)
     ]
     assert bad == []
 
@@ -1127,3 +1164,88 @@ def test_a_header_row_binds_only_on_its_exact_printed_label(rotation):
     )
     assert res[0].outcome is TableOutcome.UNVERIFIABLE
     assert res[0].rows[0].verdict is RowVerdict.UNVERIFIABLE
+
+
+# Round 5 (Astra / Fable), each pinned at the check level.
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("a, b", [("A**", "A*"), ("Total*", "Total**"), ("Total", "Total*")])
+def test_literal_asterisks_never_let_a_swap_bind(rotation, a, b):
+    native = [
+        (a, ["1.1", "1.2", "1.3"]),
+        (b, ["2.1", "2.2", "2.3"]),
+        ("Other", ["3.1", "3.2", "3.3"]),
+    ]
+    swapped = [(b, native[0][1]), (a, native[1][1]), native[2]]
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_mixed_header_cell_is_judged(rotation):
+    """Round 5 (Astra P0): header `Imports | 1.1 million | 1.2 | 1.3` (Exports' values) over the
+    faithful Imports row; a mixed text/number header was skipped and the table bound."""
+    native = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
+    md_text = (
+        "| Imports | 1.1 million | 1.2 | 1.3 |\n|---|---|---|---|\n| Imports | 2.1 | 2.2 | 2.3 |\n"
+    )
+    res, _ = check_page_row_binding(build_page(native, rotation), md_text)
+    assert res[0].outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_categorical_header_row_is_judged(rotation):
+    """Round 5 (Fable P2): `| UK | Small | Moderate | Large |` (US's cells) in the header position."""
+    native = [
+        ("US", ["Small", "Moderate", "Large"]),
+        ("UK", ["Large", "Small", "Moderate"]),
+        ("EA", ["Moderate", "Large", "Small"]),
+    ]
+    res, _ = check_page_row_binding(
+        build_page(native, rotation), _with_header(("UK", native[0][1]), native[1:])
+    )
+    assert res[0].outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_label_that_is_only_a_footnote_mark_is_never_erased(rotation):
+    """Round 5 (Astra P0): native row `(1)` shipped with an empty label is not BOUND."""
+    native = [("(1)", ["1.1", "1.2", "1.3"]), ("(2)", ["2.1", "2.2", "2.3"])]
+    res = run(native, [("", native[0][1]), ("", native[1][1])], rotation)
+    assert res.outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("a, b", [("Series_A", "Series A"), ("A*B", "A B")])
+def test_punctuation_inside_a_label_never_convicts_a_faithful_table(rotation, a, b):
+    """Round 5 (Astra P2): shipped and native labels are tokenised the same way."""
+    native = [(a, ["1.1", "1.2", "1.3"]), (b, ["2.1", "2.2", "2.3"])]
+    assert run(native, native, rotation).outcome is not TableOutcome.CONTRADICTED
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_an_emptied_row_is_not_bound_by_a_valueless_twin_line(rotation):
+    """Round 5 (Fable P2): a valueless `Total` line and a `Total` line with values both in range;
+    shipping the second Total EMPTY must not bind."""
+    native = [
+        ("Receipts", []),
+        ("Individual", ["1.1", "1.2", "1.3"]),
+        ("Total", []),
+        ("Total", ["2.1", "2.2", "2.3"]),
+        ("Outlays", []),
+        ("Defense", ["3.1", "3.2", "3.3"]),
+    ]
+    rows = [native[0], native[1], native[2], ("Total", []), native[4], native[5]]
+    assert run(native, rows, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_wrapped_label_first_line_on_correct_values_is_not_withheld(rotation):
+    """Round 5 (Fable P2): `Exports` printed above `of goods 1.1 2.2 3.3`; shipping `Exports` with the
+    right values is a mark, not a withhold."""
+    native = [
+        ("Exports", []),
+        ("of goods", ["1.1", "2.2", "3.3"]),
+        ("Imports", ["4.1", "4.2", "4.3"]),
+        ("Other", ["5.1", "5.2", "5.3"]),
+    ]
+    rows = [("Exports", native[1][1]), native[2], native[3]]
+    assert run(native, rows, rotation).outcome is TableOutcome.UNVERIFIABLE

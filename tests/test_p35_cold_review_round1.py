@@ -212,6 +212,10 @@ def _run_pipeline(
         # Exact-pass native grids ship before route_page. These cases measure
         # the judged whole-page candidate and the crop signal after it, so
         # the native-first lane defers here.
+        # #1267 round 5 (R2): the row-binding check judges every table row, the header included, and
+        # this fixture's text layer does not print its column headings, so it would mark the page.
+        # This test pins the judged/crop bytes path, not row binding (tests/test_gh1267_*).
+        patch.object(pipeline, "_run_row_binding_check", return_value=False),
         patch.object(pipeline, "_plan_native_table_first", return_value=None),
         patch.object(pipeline, "_probe_backend_idle", return_value=True),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
