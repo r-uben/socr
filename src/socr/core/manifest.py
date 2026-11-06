@@ -7444,23 +7444,29 @@ def _select_and_finalize_page(
         except Exception:  # pragma: no cover - a read-only stand-in in tests
             pass
         _selected_text = output.text or ""
-        output = replace(output, text=saved_text)
-        output = _recovery_facts_of_saved_body(output, saved_text, page_num)
-        # #1266 merge gate: ``table_floor_body`` vouches for the bytes a floor WROTE. The
-        # saved body keeps it only when it is that same body plus socr's own mark lines;
-        # any other saved text (a reading finalized before the state changed) loses it, so
-        # the TABLE_WITHHELD guard withholds it instead of keeping it as is.
-        if output.table_floor_body and _same_body_modulo_marks(
-            saved_text, _selected_text, page_num
-        ):
-            # #1266 round 3: the credential now certifies the saved bytes, which are the
-            # floor's own body plus socr's own marks and re-flow.
-            output = replace(output, table_floor_digest=table_floor_digest_of(saved_text))
-        elif output.table_floor_body:
-            # Credential only: on this path the recovery FACTS belong to the saved bytes and
-            # ``_recovery_facts_of_saved_body`` (#1155 round 4) already derived them; the
-            # words-less replay needs the credential, so a flag alone grants nothing.
-            output = replace(output, table_floor_body=False, table_floor_digest="")
+        _shipped_text = saved_text
+        if output.table_floor_body:
+            # #1266 round 5: this page's selection is a floor. The saved bytes keep the
+            # credential only when they ARE a certified floor body: the freshly selected one
+            # (``_same_body_modulo_marks``), or the body this page's last fresh finalize
+            # certified (``certified_floor_text`` -- the #1155 chart floor declines under a
+            # saved body, so its recomputation is not the chart body). Anything else is not a
+            # body a floor wrote, and the recomputed floor ships instead: never the saved text.
+            _certified = getattr(_floor_page, "certified_floor_text", "") if _floor_page else ""
+            if _same_body_modulo_marks(saved_text, _selected_text, page_num) or (
+                isinstance(_certified, str)
+                and _certified
+                and _same_body_modulo_marks(saved_text, _certified, page_num)
+            ):
+                output = replace(
+                    output, text=saved_text, table_floor_digest=table_floor_digest_of(saved_text)
+                )
+                output = _recovery_facts_of_saved_body(output, saved_text, page_num)
+            else:
+                _shipped_text = _selected_text
+        else:
+            output = replace(output, text=saved_text)
+            output = _recovery_facts_of_saved_body(output, saved_text, page_num)
         # #1269: the abstention must describe the bytes that ship. A saved body keeps
         # an existing record only when it is still the bare floor body (see
         # ``_is_bare_floor_body``) and the chart floor did not replace the page in the
@@ -7471,7 +7477,7 @@ def _select_and_finalize_page(
         # itself recorded nothing on this path.
         if _floor_page is not None and getattr(_floor_page, "chart_floor_abstention", None):
             if not _is_bare_floor_body(
-                saved_text, page_num, getattr(_floor_page, "d3_floor_png_ref", "") or ""
+                _shipped_text, page_num, getattr(_floor_page, "d3_floor_png_ref", "") or ""
             ) or getattr(_floor_page, "chart_floor_body_this_selection", False):
                 try:
                     _floor_page.chart_floor_abstention = None
@@ -7625,6 +7631,13 @@ def _select_and_finalize_page(
     # re-bound to the bytes that actually ship -- the bytes the sidecar and the fragment carry.
     if output.table_floor_body:
         output = replace(output, table_floor_digest=table_floor_digest_of(output.text))
+    # #1266 round 5: remember the floor body this FRESH pass certified, so the saved-body pass
+    # that follows can recognise its own bytes (runtime only, like ``native_words``).
+    if saved_text is None and p is not None:
+        try:
+            p.certified_floor_text = output.text if output.table_floor_body else ""
+        except Exception:  # pragma: no cover - a read-only stand-in in tests
+            pass
 
     return _FinalizedPageRecord(
         output=output,

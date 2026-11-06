@@ -13,6 +13,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_gh520_regional_floor_splice import _floored_page  # noqa: E402
@@ -332,3 +334,84 @@ def test_an_altered_recovered_body_is_not_replayed(tmp_path: Path) -> None:
     altered = replace(certified, text=certified.text + "\n\nLoose 7.7 8.8\n")
     out = _winning_page_output(_restored(altered, "al.pdf"), 1, None)
     assert "Loose" not in out.text and "7.7" not in out.text, out.text
+
+
+# ---------------------------------------------------------------------------
+# round 5: the saved-body pass keeps certified floor bodies, and only those
+# ---------------------------------------------------------------------------
+
+
+def _chart_floor_state(tmp_path: Path, *, words: bool = True):
+    """A #1155 chart-floor page (born-digital, count 0, no box, a real chart with prose
+    outside it, the native winner plus a soft-rejected model attempt)."""
+    import fitz
+    from test_gh1155_chart_witness import _chart_page_with_prose, _floor_document_state
+
+    pdf, _bboxes = _chart_page_with_prose(tmp_path)
+    state = _floor_document_state(pdf)
+    ps = state.pages[1]
+    with fitz.open(str(pdf)) as doc:
+        ps.native_text = doc[0].get_text()
+        ps.native_words = list(doc[0].get_text("words")) if words else []
+    ps.detected_table_count = 0
+    ps.detected_table_bboxes = []
+    return state, ps
+
+
+@pytest.mark.parametrize("withheld", [False, True], ids=["plain", "table_withheld"])
+def test_the_saved_pass_keeps_a_certified_chart_floor_and_replays_it(
+    tmp_path: Path, withheld: bool
+) -> None:
+    """Astra/Fable round 5: the chart floor declines under a saved body, so its recomputation
+    is not the chart body. The fresh pass (the final .md) and the saved pass (the fragment and
+    the sidecar's winning output) must be the same bytes with the credential bound to them,
+    and a words-less replay of the sidecar record must reproduce them. Fails on 4357e273."""
+    from socr.core.manifest import _select_and_finalize_page, table_floor_digest_of
+
+    (tmp_path / "live").mkdir()
+    state, ps = _chart_floor_state(tmp_path / "live")
+    if withheld:
+        ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+    fresh = _select_and_finalize_page(state, 1).output
+    assert "chart_region" in fresh.text and "ordinary prose" in fresh.text, "premise: chart floor"
+    assert fresh.table_floor_body
+    saved = _select_and_finalize_page(state, 1, saved_text=fresh.text).output
+    assert saved.text == fresh.text
+    assert saved.table_floor_body is True
+    assert saved.table_floor_digest == table_floor_digest_of(saved.text)
+
+    (tmp_path / "rs").mkdir()
+    restored_state, rps = _chart_floor_state(tmp_path / "rs", words=False)
+    record = PageOutput.from_dict(saved.to_dict())
+    assert record.table_floor_body is True, "premise: the sidecar record keeps the credential"
+    # the winner is the sidecar record; the attempts keep the rejected model reading, as the
+    # #1155 replay fixture does, so the structure-class ending (and its replay arm) is reached
+    rps.best_output = record
+    replay = _select_and_finalize_page(restored_state, 1).output
+    assert replay.text == fresh.text
+
+
+def test_the_saved_pass_never_ships_an_altered_floor_body(tmp_path: Path) -> None:
+    """Astra round 5 P0: a saved body that is a certified floor body plus an appended row is
+    no body any floor wrote; the recomputed floor ships instead. Fails on 4357e273."""
+    from test_gh1266_d3_regional_floor import _d3
+    from test_gh1266_floor_geometry import GRID_BOX, _build, _draw_p10
+
+    from socr.core.manifest import _select_and_finalize_page
+
+    state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="al.pdf")
+    _d3(ps)
+    fresh = _select_and_finalize_page(state, 1).output
+    assert fresh.table_floor_body, "premise: a certified floor body"
+    again = _select_and_finalize_page(state, 1, saved_text=fresh.text).output
+    assert again.text == fresh.text, "control: the floor's own saved body is kept"
+    altered = _select_and_finalize_page(
+        state, 1, saved_text=fresh.text + "\n\nLoose 7.7 8.8\n"
+    ).output
+    assert "Loose" not in altered.text and "7.7" not in altered.text, altered.text
+    assert altered.text == fresh.text
+    ps.native_words = []
+    wordless = _select_and_finalize_page(
+        state, 1, saved_text=fresh.text + "\n\nLoose 7.7 8.8\n"
+    ).output
+    assert "Loose" not in wordless.text, wordless.text

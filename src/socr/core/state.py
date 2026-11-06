@@ -339,6 +339,9 @@ class PageState:
     #: ``manifest.boxless_failed_table_text``; kept apart from ``native_words`` so no other
     #: consumer's input changes. RUNTIME-ONLY like ``native_words``: never persisted.
     boxless_table_words: list[tuple] = field(default_factory=list)
+    #: #1266 round 5: the floor body this page's last FRESH finalize certified (its shipped
+    #: text), so the saved-body pass can tell its own bytes from altered ones. RUNTIME-ONLY.
+    certified_floor_text: str = ""
     #: #1074: the page's paragraphs from its geometry, matched to the shipped lines at
     #: emit time (``native_paragraphs.reflow_native_prose``). RUNTIME-ONLY like
     #: ``native_words``: analyze runs on every run, resume included, and a replay that
