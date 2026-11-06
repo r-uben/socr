@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from socr.tables.binding import BindingResult, UnboundCell, bind, parse_grid
+from socr.tables.binding import (
+    BindingResult,
+    UnboundCell,
+    _cell_binding_numeric_tokens,
+    bind,
+    parse_grid,
+)
 from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
@@ -35,9 +41,14 @@ from socr.tables.native_verifier import (
 )
 
 _YEAR_HEADER_RE = re.compile(r"^20\d{2}$")
+_YEAR_AXIS_LABEL_RE = re.compile(r"ann[eé]e\s+de\s+base", re.IGNORECASE)
 _FOOTNOTE_PAREN_NUM_RE = re.compile(r"^\(\d{1,2}\)$")
 _LABEL_FOOTNOTE_MARK_RE = re.compile(r"\(\d{1,2}\)\s*$")
 _STUB_HEADER_LABELS = frozenset({"libellé", "libelle", "label", "poste"})
+_LATEX_TABULAR_BEGIN_RE = re.compile(r"\\begin\{(?:tabular\*?|array)\}", re.IGNORECASE)
+_LATEX_TABULAR_END_RE = re.compile(r"\\end\{(?:tabular\*?|array)\}", re.IGNORECASE)
+
+
 _FOOTNOTE_LABEL_PREFIXES = (
     "Source :",
     "Source:",
@@ -145,10 +156,18 @@ def _header_year_mismatch(result: BindingResult, markdown: str) -> bool:
     return list(model_years) != list(native_years)
 
 
+def _strip_label_footnote_decorations(label: str) -> str:
+    s = label.strip()
+    s = re.sub(r"\*+$", "", s).strip()
+    return _LABEL_FOOTNOTE_MARK_RE.sub("", s).strip()
+
+
 def _soft_row_label_mismatch(candidate_label: str, native_path: tuple[str, ...]) -> bool:
     """Wrapped/truncated native labels or unverifiable columns → doubt, not contradiction."""
     native_text = " ".join(p.strip() for p in native_path if p.strip())
-    cand_k = normalize_label(candidate_label)
+    if not native_text and len(native_path) > 1:
+        native_text = " ".join(p.strip() for p in native_path[:-1] if p.strip())
+    cand_k = normalize_label(_strip_label_footnote_decorations(candidate_label))
     native_k = normalize_label(native_text)
     last_k = normalize_label(native_path[-1].strip()) if native_path else ""
     if not cand_k or not (native_k or last_k):
@@ -156,9 +175,27 @@ def _soft_row_label_mismatch(candidate_label: str, native_path: tuple[str, ...])
     keys = [k for k in (native_k, last_k) if k]
     if any(cand_k == k for k in keys):
         return False
-    for nk in keys:
-        if nk.startswith(cand_k) or cand_k.startswith(nk):
-            return True
+    if native_path and not native_path[-1].strip() and len(native_path) > 1:
+        parent_k = normalize_label(
+            _strip_label_footnote_decorations(
+                " ".join(p.strip() for p in native_path[:-1] if p.strip()).rstrip("-")
+            )
+        )
+        if parent_k and len(parent_k) >= 10:
+            if cand_k.startswith(parent_k) or parent_k.startswith(
+                cand_k[: min(len(cand_k), len(parent_k))]
+            ):
+                return True
+    if len(native_path) >= 2 and native_path[-1].strip():
+        cont = native_path[-1].strip()
+        if cont and cont[0].islower():
+            joined = normalize_label(
+                _strip_label_footnote_decorations(
+                    " ".join(p.strip() for p in native_path if p.strip())
+                )
+            )
+            if joined and cand_k and (joined == cand_k or cand_k.startswith(joined[:40])):
+                return True
     return False
 
 
@@ -189,14 +226,23 @@ def _bound_rows_requiring_coverage(result: BindingResult, cand_rows: list[list[s
     return out
 
 
+def _model_cell_numeric_values(cell: str) -> list[str]:
+    raw = cell.strip()
+    if not raw or raw == "-":
+        return []
+    merged = _cell_binding_numeric_tokens(raw)
+    if merged:
+        return merged
+    cell = _prepare_numeric_cell(raw)
+    if cell and is_numeric_token(cell):
+        return [cell]
+    return []
+
+
 def _model_row_numeric_tokens(cand_row: list[str]) -> list[str]:
     out: list[str] = []
     for cell in cand_row[1:]:
-        cell = _prepare_numeric_cell(cell)
-        if not cell or cell == "-":
-            continue
-        if is_numeric_token(cell):
-            out.append(cell)
+        out.extend(_model_cell_numeric_values(cell))
     return out
 
 
@@ -212,13 +258,21 @@ def _native_row_numeric_tokens(native_row, *, include_ambiguous_lanes: bool = Fa
 def _model_row_slots(cand_row: list[str]) -> list[str | None]:
     slots: list[str | None] = []
     for cell in cand_row[1:]:
-        cell = _prepare_numeric_cell(cell)
-        if not cell or cell == "-":
+        merged = _model_cell_numeric_values(cell)
+        if not cell.strip() or cell.strip() == "-":
             slots.append(None)
-        elif is_numeric_token(cell):
-            slots.append(cell)
-        else:
+        elif len(merged) == 1:
+            slots.append(merged[0])
+        elif merged:
             slots.append("__non_numeric__")
+        else:
+            cell = _prepare_numeric_cell(cell)
+            if not cell:
+                slots.append(None)
+            elif is_numeric_token(cell):
+                slots.append(cell)
+            else:
+                slots.append("__non_numeric__")
     return slots
 
 
@@ -412,12 +466,84 @@ def _bbox_outside_region(
     return cx < x0 - margin or cx > x1 + margin or cy < y0 - margin or cy > y1 + margin
 
 
+def _native_row_is_year_column_header(result: BindingResult, row_path: tuple[str, ...]) -> bool:
+    """Year tokens only in a row — column header band, not a dropped data row."""
+    leaf = row_path[-1].strip() if row_path else ""
+    if leaf and _YEAR_AXIS_LABEL_RE.search(leaf):
+        return False
+    for nr in result.native_rows:
+        if nr.row_path != row_path:
+            continue
+        multiset = getattr(nr, "multiset", None)
+        if not multiset:
+            continue
+        elems = [str(v).replace(".0", "") for v in multiset.elements()]
+        if not elems or not all(_YEAR_HEADER_RE.match(e) for e in elems):
+            continue
+        if leaf and normalize_label(leaf) in _STUB_HEADER_LABELS:
+            return True
+        if not leaf or _YEAR_HEADER_RE.match(_prepare_numeric_cell(leaf)):
+            return True
+        return True
+    return False
+
+
+def _latex_tabular_to_markdown(markdown: str) -> str:
+    """Best-effort 1:1 conversion of a model LaTeX tabular block to markdown."""
+    begin = _LATEX_TABULAR_BEGIN_RE.search(markdown)
+    end = _LATEX_TABULAR_END_RE.search(markdown)
+    if not begin or not end or end.start() <= begin.start():
+        raise ValueError("unclosed or missing LaTeX tabular environment")
+    body = markdown[begin.end() : end.start()]
+    rows: list[list[str]] = []
+    for chunk in re.split(r"\\\\", body):
+        line = chunk.strip()
+        if not line:
+            continue
+        line = re.sub(r"\\hline", "", line)
+        line = re.sub(r"\\(top|mid|bottom)rule", "", line)
+        if "&" not in line:
+            continue
+        cells = []
+        for cell in line.split("&"):
+            cell = re.sub(r"\\textbf\{([^}]*)\}", r"\1", cell)
+            cell = re.sub(r"\\textit\{([^}]*)\}", r"\1", cell)
+            cell = cell.replace("\\%", "%").replace("$", "").strip()
+            cells.append(cell)
+        if cells:
+            rows.append(cells)
+    if not rows:
+        raise ValueError("LaTeX tabular contained no rows")
+    width = max(len(r) for r in rows)
+    norm = [r + [""] * (width - len(r)) for r in rows]
+    lines = [
+        "| " + " | ".join(norm[0]) + " |",
+        "| " + " | ".join("---" for _ in norm[0]) + " |",
+    ]
+    for r in norm[1:]:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def _prepare_markdown_for_cell_check(markdown: str) -> tuple[str, str | None]:
+    if not _LATEX_TABULAR_BEGIN_RE.search(markdown):
+        return markdown, None
+    try:
+        return _latex_tabular_to_markdown(markdown), "latex_tabular_converted"
+    except (ValueError, re.error) as exc:
+        return markdown, f"latex_tabular_unparsed: {exc}"
+
+
 def _native_unbound_cell_is_excludable(
     cell: UnboundCell,
     result: BindingResult,
     region: tuple[float, float, float, float] | None,
 ) -> bool:
     """Position-only: margin/outside region, header band, or footnote band below data."""
+    if _native_row_is_year_column_header(result, cell.row_path):
+        tok = _prepare_numeric_cell(cell.token)
+        if _YEAR_HEADER_RE.match(tok):
+            return True
     bbox = cell.token_bbox
     if bbox is None:
         return False
@@ -620,11 +746,14 @@ def classify_binding_for_cell_check(
         if not footnote_only:
             return NativeCellOutcome.CONTRADICTED
     if result.row_label_contradictions and not result.column_binding_unverifiable:
-        return NativeCellOutcome.CONTRADICTED
+        if not _row_label_contradictions_are_soft(result):
+            return NativeCellOutcome.CONTRADICTED
     if _header_year_mismatch(result, markdown):
         return NativeCellOutcome.CONTRADICTED
 
     if result.structural_agreement:
+        if result.row_label_contradictions and _row_label_contradictions_are_soft(result):
+            return NativeCellOutcome.AMBIGUOUS
         if not _model_covers_native_data_rows(result, markdown):
             return NativeCellOutcome.AMBIGUOUS
         return NativeCellOutcome.VERIFIED
@@ -673,6 +802,13 @@ def check_table_cell_binding(
             table_id=table_id,
             outcome=NativeCellOutcome.AMBIGUOUS,
             detail="no native words in region",
+        )
+    markdown, latex_note = _prepare_markdown_for_cell_check(markdown)
+    if latex_note and latex_note.startswith("latex_tabular_unparsed"):
+        return TableCellCheckResult(
+            table_id=table_id,
+            outcome=NativeCellOutcome.AMBIGUOUS,
+            detail=latex_note,
         )
     region_tuple: tuple[float, float, float, float] | None = None
     if region_bbox is not None:
@@ -752,6 +888,8 @@ def check_table_cell_binding(
         f"contradicted={len(binding.contradicted_cells)}; "
         f"matched={len(binding.matched_cells)}; ambiguous={binding.ambiguous_count}"
     )
+    if latex_note:
+        detail = f"{latex_note}; {detail}"
     return TableCellCheckResult(
         table_id=table_id,
         outcome=outcome,
