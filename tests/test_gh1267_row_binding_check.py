@@ -748,3 +748,189 @@ def test_a_parent_emptied_under_a_shorter_child_label_is_still_convicted(rotatio
     res = run(native, rows, rotation)
     assert res.outcome is TableOutcome.CONTRADICTED
     assert res.rows[2].verdict is RowVerdict.EMPTIED
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_footnote_digits_on_both_sides_must_agree(rotation):
+    """Merge gate round 3 (Fable P2): `Previous¹` / `Previous²` differ only by the footnote digit.
+    Stripping the marks made a swap between them bind; the digits are part of the label when both
+    sides carry one."""
+    native = [("Previous¹", ["2.1", "2.2", "2.3"]), ("Previous²", ["1.5", "2.5", "3.5"])]
+    swapped = [("Previous²", ["2.1", "2.2", "2.3"]), ("Previous¹", ["1.5", "2.5", "3.5"])]
+    assert run(native, native, rotation).outcome is TableOutcome.BOUND
+    assert run(native, swapped, rotation).outcome is TableOutcome.CONTRADICTED
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_parenthesised_footnote_on_the_text_layer_is_not_a_value(rotation):
+    """Merge gate round 3 (Fable P2): the layer prints `Model (1)` as two words and `(1)` reads as -1,
+    so a faithful table was CONTRADICTED. The mark joins the label word on the native side too."""
+    native = [("Model (1)", ["2.1", "2.2", "2.3"]), ("Model (2)", ["1.5", "2.5", "3.5"])]
+    swapped = [("Model (2)", ["2.1", "2.2", "2.3"]), ("Model (1)", ["1.5", "2.5", "3.5"])]
+    assert run(native, native, rotation).outcome is TableOutcome.BOUND
+    assert run(native, swapped, rotation).outcome is TableOutcome.CONTRADICTED
+    uk = [("United Kingdom (4)", ["2.1", "2.2", "2.3"]), ("Japan", ["1.5", "2.5", "3.5"])]
+    assert run(uk, uk, rotation).outcome is TableOutcome.BOUND
+
+
+def _words(rows):
+    """fitz-style word tuples in the upright frame for (label, values) lines; no PDF font needed."""
+    out = []
+    for i, (lab, vals) in enumerate(rows):
+        y = V0 + i * LINE_PITCH
+        if lab:
+            out.append((LABEL_U, y, LABEL_U + 60, y + FONT, lab))
+        for k, v in enumerate(vals):
+            x = VALUE_U0 + k * VALUE_STEP
+            out.append((x, y, x + 18, y + FONT, v))
+    return out
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_superscript_footnotes_never_merge_numbered_labels(rotation):
+    """Merge gate round 3 (Astra P0): native `Q1` / `Q2`, shipped `Q²` / `Q¹` swapped."""
+    native = [("Q1", ["1.1", "2.2", "3.3"]), ("Q2", ["4.4", "5.5", "6.6"])]
+    swapped = [("Q²", ["1.1", "2.2", "3.3"]), ("Q¹", ["4.4", "5.5", "6.6"])]
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+def test_combining_marks_are_part_of_the_label():
+    """Merge gate round 3 (Astra P0): `कुल` and `काल` differ only in a vowel sign."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    native = [("कुल", ["1.1", "1.2", "1.3"]), ("काल", ["2.1", "2.2", "2.3"])]
+    swapped = [("काल", ["1.1", "1.2", "1.3"]), ("कुल", ["2.1", "2.2", "2.3"])]
+    assert check_row_binding(_words(native), None, md(native)).outcome is TableOutcome.BOUND
+    assert check_row_binding(_words(native), None, md(swapped)).outcome is not TableOutcome.BOUND
+
+
+def _with_header(first, body):
+    def cells(lab, vals):
+        return "| " + " | ".join([lab, *vals]) + " |"
+
+    return cells(*first) + "\n|---|---|---|---|\n" + "\n".join(cells(*r) for r in body) + "\n"
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_whole_number_data_row_in_the_header_is_judged(rotation):
+    """Merge gate round 3 (Astra P0): `Imports | 11 | 12 | 13` in the header carries the Exports
+    values, over the correct Imports row. Judged like a body row: CONTRADICTED."""
+    native = [("Exports", ["11", "12", "13"]), ("Imports", ["21", "22", "23"])]
+    page = build_page(native, rotation)
+    bad, _ = check_page_row_binding(page, _with_header(("Imports", native[0][1]), [native[1]]))
+    assert bad[0].outcome is TableOutcome.CONTRADICTED
+    good, _ = check_page_row_binding(page, _with_header(native[0], [native[1]]))
+    assert good[0].outcome is TableOutcome.BOUND
+    # a year heading is not a data row: it is not judged
+    years = [("Item", ["2008", "2009", "2010"]), *native]
+    heading, _ = check_page_row_binding(
+        build_page(years, rotation), _with_header(years[0], years[1:])
+    )
+    assert heading[0].outcome is TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_displaced_row_in_the_header_is_convicted(rotation):
+    """Merge gate round 3 (Astra P1): the same mislabelled row is CONTRADICTED in the body and in
+    the header position."""
+    native = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
+    page = build_page(native, rotation)
+    body, _ = check_page_row_binding(page, md([("Imports", native[0][1]), native[1]]))
+    head, _ = check_page_row_binding(page, _with_header(("Imports", native[0][1]), [native[1]]))
+    assert body[0].outcome is TableOutcome.CONTRADICTED
+    assert head[0].outcome is TableOutcome.CONTRADICTED
+
+
+ADVERSARIAL_LABEL_PAIRS = [
+    ("Q1", "Q2"),
+    ("Q¹", "Q²"),
+    ("Q1", "Q²"),
+    ("CO²", "CO³"),
+    ("कुल", "काल"),
+    ("US government", "UK government"),
+    ("Line 1", "Line 2"),
+    ("Model (1)", "Model (2)"),
+    ("Previous¹", "Previous²"),
+    ("Tier 1 capital", "Tier 2 capital"),
+    ("Café", "Cafe"),
+    ("Εξαγωγές", "Εισαγωγές"),
+    ("Total", "Subtotal"),
+    ("Net exports", "Exports"),
+    ("Inflation", "Infation"),
+    ("2019:Q2", "2019:Q3"),
+    ("Exports less imports", "Imports less exports"),
+    ("Projected", "Projected Projected"),
+]
+
+
+@pytest.mark.parametrize("a, b", ADVERSARIAL_LABEL_PAIRS)
+def test_label_identity_never_merges_labels_that_differ_in_a_letter_digit_or_mark(a, b):
+    """Merge gate round 3 (Astra): the CLASS rule. Labels whose letters, digits or combining marks
+    differ (after case folding and NFKC) are never the same label, in either direction."""
+    import unicodedata
+
+    from socr.tables.row_binding_check import _label_tokens, _same_label
+
+    def key(s):
+        s = unicodedata.normalize("NFKC", s).lower()
+        return "".join(c for c in s if unicodedata.category(c)[0] in "LNM")
+
+    assert key(a) != key(b)
+    ta, tb = _label_tokens(a), _label_tokens(b)
+    assert ta != tb
+    assert not _same_label(ta, tb)
+
+
+@pytest.mark.parametrize(
+    "shipped, native",
+    [
+        ("Receipts", "Receipts2"),
+        ("United Kingdom", "United Kingdom (4)"),
+        ("Real GDP¹", "Real GDP"),
+    ],
+)
+def test_a_footnote_on_one_side_only_still_matches(shipped, native):
+    from socr.tables.row_binding_check import _label_tokens, _same_label
+
+    assert _same_label(_label_tokens(shipped), _label_tokens(native))
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_word_order_is_part_of_the_label(rotation):
+    """Corpus label property check (round 3): set equality merged `Exports less imports` with
+    `Imports less exports`. Swapped, they must not bind."""
+    native = [
+        ("Exports less imports", ["1.1", "1.2", "1.3"]),
+        ("Imports less exports", ["2.1", "2.2", "2.3"]),
+    ]
+    swapped = [
+        ("Imports less exports", ["1.1", "1.2", "1.3"]),
+        ("Exports less imports", ["2.1", "2.2", "2.3"]),
+    ]
+    assert run(native, native, rotation).outcome is TableOutcome.BOUND
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_heading_with_numbers_inside_words_is_not_a_data_row(rotation):
+    """Frame-1 live boxes: a heading `Institution Name | (March 24 - | April 24)` was judged as a data
+    row and convicted. A value cell with words in it is a heading cell."""
+    native = [
+        ("Institution Name", ["(March", "24", "-", "April", "24)"]),
+        ("Exports", ["1.1", "1.2", "1.3"]),
+        ("Imports", ["2.1", "2.2", "2.3"]),
+    ]
+    markdown = _with_header(("Institution Name", ["(March 24 -", "April 24)", ""]), native[1:])
+    res, _ = check_page_row_binding(build_page(native, rotation), markdown)
+    assert res[0].outcome is TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_an_empty_row_is_not_emptied_by_a_line_differing_in_a_short_token(rotation):
+    """Short tokens in the EMPTIED search too: an empty `UK government` row is not the `US government`
+    line's row, so the table is not convicted."""
+    native = [("US government", ["1.1", "1.2", "1.3"]), ("Other", ["2.1", "2.2", "2.3"])]
+    rows = [("UK government", []), ("Other", ["2.1", "2.2", "2.3"])]
+    res = run(native, rows, rotation)
+    assert res.rows[0].verdict is not RowVerdict.EMPTIED
+    assert res.outcome is not TableOutcome.CONTRADICTED

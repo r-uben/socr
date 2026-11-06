@@ -65,8 +65,10 @@ _SUPERSCRIPT_TRANSLATE = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "012345678
 _UNICODE_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-", "‒": "-"})
 _MD_DECORATION = re.compile(r"[*_`]|<br\s*/?>")
 # A footnote mark after a label: in parentheses ('United Kingdom (4)'), superscript ('Contributions¹')
-# or LaTeX ('Consumer prices$^{2}$'). The text layer prints it apart from the label or not at all, so it
-# is not part of the label's identity. A bare digit is ('Tier 1' / 'Tier 2').
+# or LaTeX ('Consumer prices$^{2}$'). Its digit is glued to the label word before it ('kingdom4'), on
+# both sides, so ``_token_eq``'s trailing-footnote rule applies: a side that omits the mark still
+# matches, and when BOTH sides carry one the digits must agree (`Previous¹` / `Previous²`, `Model (1)` /
+# `Model (2)` are different rows). A bare digit stays a token of its own ('Tier 1' / 'Tier 2').
 _PAREN_FOOTNOTE = re.compile(
     rf"\(\d{{1,{MAX_FOOTNOTE_DIGITS}}}\)"
     rf"|\$\^\{{?\d{{1,{MAX_FOOTNOTE_DIGITS}}}\}}?\$"
@@ -119,20 +121,27 @@ class RowBindingResult:
 
 
 def _alnum(text: str) -> str:
-    """Case-folded letters and digits.  NFKC turns '²' into '2' and expands ligatures; the layer
-    sometimes keeps only the first letter of fi/fl/ff, so those digraphs collapse on both sides."""
+    """Lower-cased letters, digits and combining marks of any script; everything else (spaces,
+    punctuation, symbols) is dropped.  NFKC turns '²' into '2' and expands ligature glyphs.
+
+    Label identity rule (merge gate round 3, Astra): two labels that differ in any letter, digit or
+    combining mark never normalise to the same token.  Categories L*, N*, M* are kept: a filter on
+    ``\\w`` dropped Devanagari vowel signs (`कुल` and `काल` both became `कल`).  An earlier rule that
+    collapsed fi/fl/ff on both sides merged labels differing in a letter and is gone."""
     s = unicodedata.normalize("NFKC", text.translate(_SUPERSCRIPT_TRANSLATE)).lower()
-    s = re.sub(r"f[filf]", "f", s)
-    # Letters and digits of any script (adversarial pass: an ASCII-only filter left a Greek label with
-    # no tokens at all, and a label with no tokens binds anything).
-    return re.sub(r"[\W_]", "", s)
+    return "".join(c for c in s if unicodedata.category(c)[0] in "LNM")
+
+
+_FOOTNOTE_AFTER_WORD = re.compile(rf"(?<=[^\s|])[\s*_`]*({_PAREN_FOOTNOTE.pattern})")
+
+
+def _footnote_digits(mark: str) -> str:
+    return re.sub(r"\D", "", mark.translate(_SUPERSCRIPT_TRANSLATE))
 
 
 def _label_tokens(text: str) -> list[str]:
+    text = _FOOTNOTE_AFTER_WORD.sub(lambda m: _footnote_digits(m.group(1)), text)
     text = _MD_DECORATION.sub(" ", text)
-    bare = _PAREN_FOOTNOTE.sub(" ", text)
-    if any(c.isalpha() for c in bare):
-        text = bare
     return [t for t in (_alnum(w) for w in text.split()) if t]
 
 
@@ -252,26 +261,30 @@ def build_native_lines(
                 g["hs"].append(h)
                 continue
         groups.append({"words": [w], "cs": [c], "hs": [h]})
+    widths = [w[2] - w[0] for w in kept]
+    med = statistics.median(widths) if widths else 1.0
     lines: list[_Line] = []
     for i, g in enumerate(groups):
         ws = sorted(g["words"], key=lambda w: w[0])
-        lines.append(
-            _Line(
-                index=i,
-                words=[
-                    _Word(
-                        w[0],
-                        w[1],
-                        w[2],
-                        w[3],
-                        str(w[4]),
-                        _canon_number(str(w[4])),
-                        "" if _PAREN_FOOTNOTE.fullmatch(str(w[4]).strip()) else _alnum(str(w[4])),
-                    )
-                    for w in ws
-                ],
-            )
-        )
+        out: list[_Word] = []
+        for w in ws:
+            text = str(w[4])
+            prev = out[-1] if out else None
+            # Round 3 (Fable P2): a footnote mark printed as its own word right after a label word
+            # (`Model` `(1)`; no panel gap between them) is not a value (`(1)` reads as -1): its digit
+            # joins the label word, exactly as on the shipped side.
+            if (
+                prev is not None
+                and _PAREN_FOOTNOTE.fullmatch(text.strip())
+                and prev.num is None
+                and _has_letter([prev.tok])
+                and w[0] - prev.x1 <= SEGMENT_GAP_WIDTHS * med
+            ):
+                prev.tok += _footnote_digits(text.strip())
+                out.append(_Word(w[0], w[1], w[2], w[3], text, None, ""))
+                continue
+            out.append(_Word(w[0], w[1], w[2], w[3], text, _canon_number(text), _alnum(text)))
+        lines.append(_Line(index=i, words=out))
     return lines
 
 
@@ -317,7 +330,8 @@ class _Row:
     numbers: tuple[str, ...]  # canonical numeric values of the data cells
     categories: tuple[str, ...]  # alnum of non-numeric data cells (used when there are no numbers)
     cell_texts: tuple[str, ...]
-    is_header: bool = False  # the markdown header row (judged apart; never convicts)
+    is_header: bool = False  # the markdown header row (judged apart, see check_row_binding)
+    values_only: bool = True  # every value cell holds numbers only (no words beside them)
 
     @property
     def has_content(self) -> bool:
@@ -339,10 +353,13 @@ def _shipped_rows(markdown: str) -> list[_Row]:
             numbers: list[str] = []
             cats: list[str] = []
             texts: list[str] = []
+            values_only = True
             for cell in cells[1:]:
                 toks = _MD_DECORATION.sub(" ", cell.translate(_UNICODE_MINUS)).split()
                 nums = [n for n in (_canon_number(t) for t in toks) if n is not None]
                 if nums:  # '± 0.8' is the value 0.8
+                    if any(_canon_number(t) is None and t != "±" for t in toks):
+                        values_only = False  # `(March 24 -`: a number inside heading words
                     numbers.extend(nums)
                     texts.extend(t for t in toks if _canon_number(t) is not None)
                 else:
@@ -359,6 +376,7 @@ def _shipped_rows(markdown: str) -> list[_Row]:
                     categories=tuple(cats),
                     cell_texts=tuple(texts),
                     is_header=is_header,
+                    values_only=values_only,
                 )
             )
     return rows
@@ -461,8 +479,12 @@ def _pool(lines: list[_Line], line: _Line, own: list[_Word]) -> list[str]:
 
 
 def _same_label(a: list[str], b: list[str]) -> bool:
-    """Equal content-token sets under the same normalisation as the containment tests."""
-    return _tokens_in_pool(a, b) and _tokens_in_pool(b, a)
+    """The same label: the same tokens in the same order (each pair equal under ``_token_eq``, which
+    allows only a one-sided trailing footnote digit).
+
+    Merge gate round 3: set equality merged labels that differ in word order or repetition
+    (`Exports less imports` / `Imports less exports`), found by the corpus label property check."""
+    return bool(a) and len(a) == len(b) and all(_token_eq(x, y) for x, y in zip(a, b))
 
 
 def _band_tokens(lines: list[_Line], line: _Line) -> list[str]:
@@ -778,31 +800,50 @@ def check_row_binding(
             )
             continue
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
-    # Adversarial pass (F1): the markdown header row is column headings, but the model can put a data
-    # row there. Headings are whole numbers (years, dates): of 333 shipped frame-1 + held-out tables,
-    # 213 header rows carry numbers and none carries a decimal. A header row with a decimal value is
-    # therefore judged like a data row, on its own (outside the assignment, so it cannot reorder the
-    # data rows), and can only bind or stay unverifiable. A data row of whole numbers in the header
-    # position is not checked (logged gap).
+    # Header-position rows (adversarial pass F1; merge gate round 3, Astra). The markdown header row
+    # is usually column headings, but the model can put a data row there. It is judged EXACTLY like a
+    # body row (convictions included), on its own (outside the assignment, so a heading line cannot
+    # reorder the data rows), when it is a data row by its own content:
+    #   * it carries a decimal value (none of the 213 numeric header rows in the 333 shipped frame-1 +
+    #     held-out tables does), or
+    #   * its first cell has a letter and its values are not all year headings (four-digit whole
+    #     numbers: `Item | 2008 | 2009 | 2010` is a heading, `Imports | 11 | 12 | 13` is not),
+    # and in both cases every value cell holds numbers only.
+    # Gap (logged): a data row of four-digit whole numbers in the header position.
     for h in shipped:
-        if not h.is_header or not any("." in n for n in h.numbers):
+        # A value cell with words in it (`(March 24 - April 24)`) is a heading, not a data cell
+        # (frame 1 live boxes: a date-range heading was convicted before this condition).
+        if not h.is_header or not h.numbers or not h.values_only:
             continue
-        judged = {_judge(h, c, wi, lines, None)[0] for c, wi in _options(h, cands)}
-        bound = judged == {RowVerdict.BOUND} and len(h.numbers) >= MIN_VALUES_TO_CONVICT
-        evidence.insert(
-            0,
-            RowEvidence(
-                h.line_index,
-                RowVerdict.BOUND if bound else RowVerdict.UNVERIFIABLE,
-                "header-position data row bound to its line"
-                if bound
-                else "header-position data row; binding not shown",
-                h.label,
+        has_decimal = any("." in n for n in h.numbers)
+        all_years = all(re.fullmatch(r"\d{4}", n) for n in h.numbers)
+        if not (has_decimal or (_has_letter(h.label_tokens) and not all_years)):
+            continue
+        opts = _options(h, cands)
+        if not opts:
+            v, why, nat, line_no = (
+                RowVerdict.UNVERIFIABLE,
+                "header-position data row; no native line carries these values",
                 "",
-                h.cell_texts,
                 None,
-            ),
-        )
+            )
+        else:
+            judged = [(_judge(h, c, wi, lines, None), c) for c, wi in opts]
+            classes = {j[0] for j, _ in judged}
+            (v, why, nat), c = judged[0]
+            line_no = c.line.index
+            if len(classes) > 1:
+                v, why, nat, line_no = (
+                    RowVerdict.UNVERIFIABLE,
+                    f"header-position data row: ambiguous assignment ({len(opts)} lines)",
+                    "",
+                    None,
+                )
+            elif v in CONVICTING and len(h.numbers) < MIN_VALUES_TO_CONVICT:
+                v, why = RowVerdict.UNVERIFIABLE, "a single value does not identify its line"
+            else:
+                why = f"header-position data row: {why}"
+        evidence.insert(0, RowEvidence(h.line_index, v, why, h.label, nat, h.cell_texts, line_no))
     if any(e.verdict in CONVICTING for e in evidence):
         outcome = TableOutcome.CONTRADICTED
     # (a table with no data rows has nothing shipped to bind; the empty-table checks own it)
