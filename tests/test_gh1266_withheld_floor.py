@@ -122,3 +122,62 @@ def test_re_finalizing_a_withheld_floor_body_is_byte_identical(tmp_path: Path) -
     ps.native_words = []
     thrice = _apply_ladder_disposition_guard(once, 1, ps)
     assert thrice.text == once.text
+
+
+# ---------------------------------------------------------------------------
+# round 2 (Astra P0-2): the keep-as-is shortcut needs the typed floor credential
+# ---------------------------------------------------------------------------
+
+#: A model reading that echoes the floor's marker line beside an un-parsed numeric row.
+FORGED = f"{MARKER}\n\nLoose 7.7 8.8\n"
+
+
+def test_a_reading_that_echoes_the_marker_is_withheld(tmp_path: Path) -> None:
+    """The shortcut used to trust the marker SUBSTRING, so this body skipped all withholding
+    (fails on 53ba3b78). Without the typed credential it is withheld like any reading."""
+    ps, _winner = _withheld_page(tmp_path)
+    forged = PageOutput(
+        page_num=1, text=FORGED, status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+    out = _apply_ladder_disposition_guard(forged, 1, ps)
+    assert "Loose" not in out.text and "7.7" not in out.text, out.text
+    assert TAIL_SENTENCE in out.text
+    assert out.table_floor_body is True
+
+
+def test_a_credentialed_floor_body_is_kept_and_round_trips_the_sidecar(tmp_path: Path) -> None:
+    """DIFFERENCE: the same bytes with and without the credential. The guard's own output
+    (credentialed) is kept byte-identical, also after a ``to_dict``/``from_dict`` round trip
+    (the sidecar's winning output); an old record without the key carries no credential."""
+    ps, winner = _withheld_page(tmp_path)
+    once = _apply_ladder_disposition_guard(winner, 1, ps)
+    restored = PageOutput.from_dict(once.to_dict())
+    assert restored.table_floor_body is True
+    assert _apply_ladder_disposition_guard(restored, 1, ps).text == once.text
+    legacy = once.to_dict()
+    legacy.pop("table_floor_body")
+    assert PageOutput.from_dict(legacy).table_floor_body is False
+    forged_dict = {**legacy, "table_floor_body": "true"}  # not a JSON boolean
+    assert PageOutput.from_dict(forged_dict).table_floor_body is False
+
+
+def test_a_saved_body_keeps_the_credential_only_when_it_is_the_floors_own(
+    tmp_path: Path,
+) -> None:
+    """Re-finalize with a saved body (``_select_and_finalize_page``): the floor's own
+    finalized bytes keep the credential and come back byte-identical; a different saved body
+    (a reading that echoes the marker) loses it and is withheld."""
+    from test_gh1266_d3_regional_floor import _d3
+    from test_gh1266_floor_geometry import GRID_BOX, _build, _draw_p10
+
+    from socr.core.manifest import _select_and_finalize_page
+
+    state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="sv.pdf")
+    _d3(ps)
+    ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+    first = _select_and_finalize_page(state, 1).output
+    assert first.table_floor_body is True
+    again = _select_and_finalize_page(state, 1, saved_text=first.text).output
+    assert again.text == first.text and again.table_floor_body is True
+    forged = _select_and_finalize_page(state, 1, saved_text=FORGED).output
+    assert "Loose" not in forged.text, forged.text

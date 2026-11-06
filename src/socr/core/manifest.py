@@ -3212,6 +3212,42 @@ def withheld_table_floor_text(
     return body if _is_prose_recovery_body(body, page_num) else whole_page
 
 
+def boxless_failed_table_text(p, page_num: int) -> str:
+    """#1266 merge gate round 2 (Astra P0, orchestrator's middle path): the body for a page
+    whose native table FAILED, with no model reading and no complete detector box.
+
+    Such a page used to ship ``_native_text_with_appends`` -- the failed native grid -- at
+    WARNING. It is NOT whole-paged (the ``has_tables`` heuristic stamps prose pages too,
+    gh881), so it gets the KEEP-SENTENCES body: bands from the page's own words, a band whose
+    numerals are at least its words withheld under the marker (plus page image if there is
+    one), sentences shipped, the reading-order gate as everywhere else. With no box every
+    band is "outside" (``native_prose_floor_text`` with the page's own, empty or partial,
+    box list); no lanes whole-page clause here, so a real box-less table ships its labels
+    with few numbers and withholds its numeric rows -- the owner's accepted KEEP-SENTENCES
+    class. A scan keeps the any-digit rule. Words absent: the page's own credentialed
+    recovery replays, else the whole-page marker (fail closed).
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "") or ""
+    whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    if not (getattr(p, "native_words", None) or []):
+        bo = getattr(p, "best_output", None)
+        if bo is not None and getattr(bo, "table_floor_body", False):
+            if _is_restored_prose_recovery(p, page_num):
+                return bo.text or whole_page
+        return whole_page
+    body = native_prose_floor_text(
+        p,
+        page_num,
+        marker_line=d3_marker,
+        png_ref=png_ref,
+        keep_sentences=bool(getattr(p, "is_born_digital", False)),
+    )
+    if not body or not _prose_follows_native_order(body, getattr(p, "native_text", "") or ""):
+        return whole_page
+    return body
+
+
 def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
     """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
     return _body_has_born_digital_banner(text, page_num)
@@ -4979,6 +5015,8 @@ def _select_page_output_tagged(
             # ``_is_restored_prose_recovery``). The note above is for readers;
             # this is for the machine, and only this module sets it.
             scanned_prose_recovered=prose_recovered,
+            # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+            table_floor_body=True,
             # #658: this branch REBUILDS the shipped output from scratch, so a
             # fixed HALLUCINATION here overwrote the honest attempt-level reason
             # and the sidecar the corpus actually reads still said the model
@@ -5096,6 +5134,8 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
                 scanned_prose_recovered=prose_recovered,
+                # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+                table_floor_body=True,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
             ), SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE
 
@@ -5551,6 +5591,8 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
                 scanned_prose_recovered=prose_recovered,
+                # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+                table_floor_body=True,
                 failure_mode=(
                     FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
                     if not (timed_out or text_table_declined)
@@ -5635,8 +5677,23 @@ def _select_page_output_tagged(
         # Reading ``best_output`` here instead would drop the sidecar on the
         # deterministic --native-only path, which is exactly the path this
         # ticket is about.
-        fallback_text = _native_text_with_appends(p)
-        if text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p):
+        # #1266 merge gate round 2: a FAILED native table with no model reading and no
+        # complete detector box no longer ships its native grid here; it ships the
+        # KEEP-SENTENCES body (``boxless_failed_table_text``). Box-backed pages took D3.
+        boxless_failed = bool(
+            p.native_table_structure_failed
+            and not _model_attempt_ran(p)
+            and not detector_boxes_complete(p)
+        )
+        fallback_text = (
+            boxless_failed_table_text(p, page_num)
+            if boxless_failed
+            else _native_text_with_appends(p)
+        )
+        boxless_recovered = boxless_failed and _is_prose_recovery_body(fallback_text, page_num)
+        if boxless_failed:
+            native_demoted = True
+        if not boxless_failed and (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p)):
             from socr.core.text_coverage import (
                 uncovered_text_marker,
                 uncovered_text_marker_no_image,
@@ -5669,7 +5726,11 @@ def _select_page_output_tagged(
             text=fallback_text,
             status=PageStatus.WARNING if native_demoted else PageStatus.SUCCESS,
             engine="native",
-            audit_passed=not (native_is_fallback or grid_rejected),
+            audit_passed=not (native_is_fallback or grid_rejected or boxless_failed),
+            # #1266: the box-less route's floor body is recorded like the endings' bodies.
+            audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if boxless_recovered else []),
+            scanned_prose_recovered=boxless_recovered,
+            table_floor_body=boxless_failed,
             # GH-151 B1: the attempt-level PageOutput this synthetic page
             # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
             # (set at ``_score_per_page`` / the native ship sites) -- but that
@@ -5681,7 +5742,7 @@ def _select_page_output_tagged(
                 FailureMode.NATIVE_UNTRUSTED_JUDGE_TIMEOUT
                 if judge_timeout_native
                 else FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                if native_table_defect and native_is_fallback
+                if native_table_defect and (native_is_fallback or boxless_failed)
                 # #1027: the invisible-scan cause outranks the minus-as-digit one;
                 # the "2"-for-minus scan fires on that same garbage layer, so
                 # naming it first misreports why the page is not trusted.
@@ -5791,30 +5852,21 @@ def _select_page_output_tagged(
     #
     # #1266 merge gate: B1 / #591 kept ``native_text`` prose here behind the GH-520 text
     # splice, which ships every line outside the parsed GFM blocks (Fable/Astra, PR #1273:
-    # 0 firings on the Fed run, so no measured corpus change). The splice is gone: this
-    # ending calls the shared withheld-table floor with ``recovery=False`` -- what the
-    # splice's own refusal already shipped -- so every page the splice fired on now ships
-    # the whole-page marker. Recovery stays off on purpose: a page that reaches this
-    # ending has no native text a born-digital floor could recover (the native branch
-    # returns first), and this ending was never a recovery lane.
+    # 0 firings on the Fed run). The splice is gone and this ending ships the whole-page
+    # marker, always. Round 2 (Fable P2) removed the inert recovery call that replaced it:
+    # this ending is reached with native text only on a NON-born-digital page (the native
+    # branch returns first otherwise), and the withheld-table floor whole-pages those, so
+    # the "prose kept" branch could never be taken.
     whole_page_marker = page_failed_marker(page_num)
-    native_text = getattr(p, "native_text", "") or ""
-    floor_text = withheld_table_floor_text(
-        p, page_num, recovery=False, fallback_marker=whole_page_marker
-    )
-    # R7: the cascade must be single-return-per-ending (test_r7_winner_kind_tags.py),
-    # so both outcomes share ONE return, differing only in which values they carry
-    # -- not two returns tagged with the same SelectionProvenance member.
-    prose_kept = floor_text != whole_page_marker and bool(native_text.strip())
     # #881: a page MuPDF could not load has no text because it was never read,
     # which is a different fact from "every engine failed" and must say so on
     # the page itself, not only in a log.
     _load_error = getattr(p, "load_error", "") or ""
     return PageOutput(
         page_num=page_num,
-        text=floor_text if prose_kept else whole_page_marker,
+        text=whole_page_marker,
         status=PageStatus.ERROR,
-        engine="native" if prose_kept else "",
+        engine="",
         failure_mode=FailureMode.UNREADABLE_INPUT if _load_error else FailureMode.NONE,
         error=f"page could not be loaded: {_load_error}" if _load_error else "",
         audit_passed=False,
@@ -5938,12 +5990,20 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
         text = output.text or ""
         from socr.tables.reconcile import find_table_blocks
 
-        already_withheld = f"failed: unverifiable table" in text and not find_table_blocks(text)
         # A page that ALREADY shipped the fail-closed floor (an ending reached the same
         # page first, or this guard on an earlier finalize) carries no table bytes; its
         # body is final. Re-deriving it would recompute from state a resumed page may no
         # longer carry (transform once, from source, before marks), so only the label
         # changes.
+        #
+        # #1266 merge gate (Astra round 2, P0): the shortcut used to trust the marker
+        # SUBSTRING, so a selected model reading that printed the marker line beside an
+        # un-parsed ``Loose 7.7 8.8`` row skipped all withholding. It now requires the
+        # typed credential ``table_floor_body``, which only socr's floor writers set and no
+        # text can carry. Marker text without it is withheld like any other reading.
+        already_withheld = bool(getattr(output, "table_floor_body", False)) and not (
+            find_table_blocks(text)
+        )
         if already_withheld:
             return replace(
                 output,
@@ -5965,6 +6025,8 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
             failure_mode=disposition,
             audit_notes=notes,
             scanned_prose_recovered=prose_recovered,
+            # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+            table_floor_body=True,
         )
 
     if output.audit_passed:
@@ -7120,6 +7182,25 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
     return replace(output, scanned_prose_recovered=True, audit_notes=notes)
 
 
+def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
+    """#1266: is *saved* the *selected* body with only socr's own canonical mark lines added?
+
+    This page's canonical mark lines (``is_canonical_mark``) are dropped on both sides and
+    the rest compared as a token sequence: finalization may add marks and re-flow line
+    breaks (#1074 joins a paragraph's lines), but it adds no word.
+    """
+
+    def _content(text: str) -> list[str]:
+        return [
+            tok
+            for ln in (text or "").splitlines()
+            if ln.strip() and not is_canonical_mark(ln.strip(), page_num)
+            for tok in ln.split()
+        ]
+
+    return _content(saved) == _content(selected)
+
+
 def _is_bare_floor_body(text: str, page_num: int, png_ref: str) -> bool:
     """#1269: is ``text`` exactly the bare whole-page floor body?
 
@@ -7199,8 +7280,17 @@ def _select_and_finalize_page(
                 _floor_page.chart_floor_abstention = _prior_abstention
         except Exception:  # pragma: no cover - a read-only stand-in in tests
             pass
+        _selected_text = output.text or ""
         output = replace(output, text=saved_text)
         output = _recovery_facts_of_saved_body(output, saved_text, page_num)
+        # #1266 merge gate: ``table_floor_body`` vouches for the bytes a floor WROTE. The
+        # saved body keeps it only when it is that same body plus socr's own mark lines;
+        # any other saved text (a reading finalized before the state changed) loses it, so
+        # the TABLE_WITHHELD guard withholds it instead of keeping it as is.
+        if output.table_floor_body and not _same_body_modulo_marks(
+            saved_text, _selected_text, page_num
+        ):
+            output = replace(output, table_floor_body=False)
         # #1269: the abstention must describe the bytes that ship. A saved body keeps
         # an existing record only when it is still the bare floor body (see
         # ``_is_bare_floor_body``) and the chart floor did not replace the page in the

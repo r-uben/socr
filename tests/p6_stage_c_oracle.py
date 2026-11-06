@@ -96,6 +96,7 @@ __all__ = [
     "VERDICT_SIDECAR_1145_DIFFERENCES",
     "CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES",
     "CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES",
+    "TABLE_FLOOR_BODY_1266_DIFFERENCES",
     "NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES",
 ]
 
@@ -1391,6 +1392,32 @@ CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES: list[ExpectedDiff] = [
     ),
 ]
 
+#: #1266 merge gate round 2: the typed ``table_floor_body`` credential on a floor-written
+#: winning output (omit-when-unset). MEASURED: the oracle named exactly two leaves, both on
+#: page 10 (the structure-class floor page): the sidecar's ``winning_output`` gains the key,
+#: and the manifest blob that serialises that output gets a new content address. Every other
+#: page keeps its bytes.
+TABLE_FLOOR_BODY_1266_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "winning_output", "table_floor_body"),
+        old_value=None,
+        new_value=True,
+        description=(
+            "#1266: page 10's structure-class floor output carries the typed table_floor_body "
+            "credential that the TABLE_WITHHELD guard's keep-as-is shortcut now requires."
+        ),
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "10", "blob_ref"),
+        old_value="bc40160e2abf779b6bd49e99b5c6fecda5e0c7a7890268bd8308669f6556496e",
+        new_value="1dc4cd8f71e16cc4d08f287f0217fda543bbae20d2659739a60ef081ec93a957",
+        description=(
+            "#1266: page 10's winning-output blob gains table_floor_body, so its content "
+            "address changes; the shipped bytes do not."
+        ),
+    ),
+]
+
 # ---------------------------------------------------------------------------
 # Complete Unified EXPECTED_STAGE_C_DIFFERENCES Mapping
 # ---------------------------------------------------------------------------
@@ -1764,6 +1791,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *VERDICT_SIDECAR_1145_DIFFERENCES,
     *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
     *CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES,
+    *TABLE_FLOOR_BODY_1266_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
     *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
 ]

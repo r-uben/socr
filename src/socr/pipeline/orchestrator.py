@@ -3118,7 +3118,16 @@ class UnifiedPipeline:
                 # #881: a page that never loaded has no words to cache, and
                 # reading it would raise and cost every later page its words.
                 if not getattr(pa, "load_error", "")
-                and (pa.detected_table_count > 0 or not pa.is_born_digital)
+                and (
+                    pa.detected_table_count > 0
+                    or not pa.is_born_digital
+                    # #1266 merge gate round 2: a born-digital page the lane heuristic
+                    # flags as table-bearing but with no detector box. If its table then
+                    # fails with no model reading, ``boxless_failed_table_text`` builds the
+                    # KEEP-SENTENCES body from these words; without them it can only fail
+                    # closed to the bare marker and the page's prose is lost.
+                    or bool(getattr(pa, "has_tables", False))
+                )
             ]
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)

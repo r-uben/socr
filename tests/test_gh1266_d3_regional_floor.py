@@ -31,6 +31,7 @@ from test_gh1266_floor_geometry import (  # noqa: E402
     GRID_BOX,
     GRID_TOKENS,
     MARKER,
+    NUMBERS_ONLY,
     P94_BOX,
     PNG,
     SENTENCE_WITH_YEAR,
@@ -900,13 +901,13 @@ def test_process_finding_18_page_both_provider_states(tmp_path: Path, monkeypatc
 MARKER_PREFIX_D3 = "failed: unverifiable table"
 
 
-def test_a_boxless_failed_table_with_no_model_reading_keeps_todays_route(
+def test_a_boxless_failed_table_does_not_take_d3_and_keeps_its_sentences(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Option (b): the widening needs a detector box. A box-less page flagged only by the
-    ``has_tables`` heuristic (the providerless loop stamps ``native_table_structure_failed``
-    on every such page; GH-655 measured 400 false flags on prose) routes exactly as before
-    -- its prose is not wiped to a bare marker. DIFFERENCE: widening on vs off identical."""
+    """Option (b): the D3 widening needs a detector box. A box-less page flagged only by the
+    ``has_tables`` heuristic (GH-655: 400 false flags on prose) does not take D3, so its prose
+    is not wiped to a bare marker. DIFFERENCE: widening on vs off identical. (Round 2 then
+    gives this route the KEEP-SENTENCES body; see the tests below.)"""
     from socr.core import manifest as manifest_mod
 
     state, ps = _build(tmp_path, _draw_p10, [], name="nobox.pdf")
@@ -919,3 +920,151 @@ def test_a_boxless_failed_table_with_no_model_reading_keeps_todays_route(
     assert on_prov is off_prov and on_prov is not D3
     assert on.text == off.text
     assert SENTENCE_WITH_YEAR in on.text, "a box-less page lost its prose"
+
+
+# ---------------------------------------------------------------------------
+# round 2 (Astra P0-1): the box-less failed-table route ships KEEP-SENTENCES, not the grid
+# ---------------------------------------------------------------------------
+
+
+def _boxless(tmp_path: Path, *, born_digital: bool = True, name: str = "bl.pdf"):
+    state, ps = _build(tmp_path, _draw_p10, [], born_digital=born_digital, name=name)
+    _structure_failed_only(ps, model_attempt=False)
+    return state, ps
+
+
+def test_the_boxless_route_ships_keep_sentences_not_the_native_grid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DIFFERENCE: the route's old body (``_native_text_with_appends``) shipped the failed
+    grid; the new body ships the page's sentences and withholds every numeral-dense band.
+    The route's surfaces stay (NATIVE_FALLBACK, WARNING, NATIVE_TABLE_STRUCTURE_FAILED) and
+    the recovery is recorded with the typed floor credential."""
+    from socr.core import manifest as manifest_mod
+
+    state, ps = _boxless(tmp_path)
+    out, prov = _select_page_output_tagged(state, 1)
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            manifest_mod,
+            "boxless_failed_table_text",
+            lambda p, n: manifest_mod._native_text_with_appends(p),
+        )
+        old, old_prov = _select_page_output_tagged(state, 1)
+    assert old_prov is prov is SelectionProvenance.NATIVE_FALLBACK
+    assert any(tok in old.text for tok in GRID_TOKENS), "premise: the old route shipped the grid"
+    for tok in (*GRID_TOKENS, NUMBERS_ONLY):
+        assert tok not in out.text, f"table content {tok!r} shipped"
+    assert SENTENCE_WITH_YEAR in out.text and TAIL_SENTENCE in out.text
+    assert out.status is PageStatus.WARNING
+    assert out.failure_mode is FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+    assert out.audit_passed is False
+    assert out.scanned_prose_recovered is True
+    assert SCANNED_PROSE_RECOVERED_NOTE in out.audit_notes
+    assert out.table_floor_body is True
+
+
+def test_the_boxless_body_is_keep_sentences_on_born_digital_and_any_digit_on_a_scan(
+    tmp_path: Path,
+) -> None:
+    """DIFFERENCE: the same printed page, born-digital vs scan, through the box-less body.
+    Born-digital keeps the sentence carrying a year (KEEP-SENTENCES); a scan withholds it
+    (today's any-digit rule)."""
+    from socr.core.manifest import boxless_failed_table_text
+
+    _bs, born = _boxless(tmp_path, name="bb.pdf")
+    _ss, scan = _boxless(tmp_path, born_digital=False, name="bs.pdf")
+    born_body = boxless_failed_table_text(born, 1)
+    scan_body = boxless_failed_table_text(scan, 1)
+    assert SENTENCE_WITH_YEAR in born_body
+    assert SENTENCE_WITH_YEAR not in scan_body
+    assert TAIL_SENTENCE in scan_body
+    for tok in GRID_TOKENS:
+        assert tok not in born_body and tok not in scan_body
+
+
+def test_a_wordsless_boxless_page_replays_only_a_credentialed_recovery(tmp_path: Path) -> None:
+    from socr.core.manifest import boxless_failed_table_text
+
+    live_state, live_ps = _boxless(tmp_path, name="lv.pdf")
+    body = boxless_failed_table_text(live_ps, 1)
+    assert SENTENCE_WITH_YEAR in body
+
+    def _restored(credential: bool, name: str):
+        _st, ps = _boxless(tmp_path, name=name)
+        ps.native_words = []
+        frozen = PageOutput(
+            page_num=1,
+            text=body,
+            status=PageStatus.WARNING,
+            engine="native",
+            audit_passed=False,
+            scanned_prose_recovered=True,
+            table_floor_body=credential,
+        )
+        ps.attempts = [frozen]
+        ps.best_output = frozen
+        return ps
+
+    assert boxless_failed_table_text(_restored(True, "r1.pdf"), 1) == body
+    assert _whole_page(boxless_failed_table_text(_restored(False, "r2.pdf"), 1))
+
+
+def _boxless_process_pdf(path: Path) -> Path:
+    """The Finding-18 shape WITHOUT ruling lines: the detector finds no box, the lane
+    heuristic flags a table, unboxed numeric rows below it."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), SENTENCE_WITH_YEAR)
+    rows = [["Real GDP", "2.6", "4.1"], ["Previous", "2.9", "3.9"], ["Final sales", "2.4", "4.0"]]
+    for r, cells in enumerate(rows):
+        for c, cell in enumerate(cells):
+            page.insert_text((80 + c * 110, 130 + r * 22), cell, fontsize=9)
+    for i in range(8):
+        y = 260 + i * 16
+        page.insert_text((72, y), f"Series{i}", fontsize=9)
+        for c, v in enumerate(("1.1", "2.2", "3.3")):
+            page.insert_text((200 + c * 70, y), f"{v}{i}", fontsize=9)
+    page.insert_text((72, 420), TAIL_SENTENCE)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_process_boxless_failed_table_both_provider_states(tmp_path: Path, monkeypatch) -> None:
+    """process(), ``native_first``, both provider states, the new body toggled.
+
+    Empty ladder: the box-less route ships the KEEP-SENTENCES body (sentences, no grid value,
+    no welded ``Series`` row), recorded, WARNING; with the old body the grid and the welded
+    rows shipped (premise). Populated ladder: a model reading runs, and the fragment is
+    byte-identical with the new body on and off -- the route is not reached."""
+    from socr.core import manifest as manifest_mod
+
+    pdf = _boxless_process_pdf(tmp_path / "doc.pdf")
+    frags = {}
+    for ladder in (True, False):
+        for new in (True, False):
+            tag = f"{'ladder' if ladder else 'empty'}-{'new' if new else 'old'}"
+            with monkeypatch.context() as mp:
+                if not new:
+                    mp.setattr(
+                        manifest_mod,
+                        "boxless_failed_table_text",
+                        lambda p, n: manifest_mod._native_text_with_appends(p),
+                    )
+                frags[tag] = _run_route(
+                    tmp_path, pdf, monkeypatch, ladder=ladder, native_first=True, tag=tag
+                )
+    new_frag, new_meta, _ = frags["empty-new"]
+    old_frag, old_meta, _ = frags["empty-old"]
+    assert "Series0" in old_frag or "2.6" in old_frag, "premise: the old route leaked"
+    assert new_meta["failure_mode"] == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value
+    assert new_meta["status"] == "warning"
+    assert new_meta["winning_output"]["scanned_prose_recovered"] is True
+    assert new_meta["winning_output"]["table_floor_body"] is True
+    for tok in ("Series", "Real GDP", "Final sales", "2.6", "4.1", "1.1"):
+        assert tok not in new_frag, f"table content {tok!r} shipped"
+    assert SENTENCE_WITH_YEAR in new_frag and TAIL_SENTENCE in new_frag
+    assert frags["ladder-new"][0] == frags["ladder-old"][0], "a model page changed"

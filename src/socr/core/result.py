@@ -520,6 +520,14 @@ class PageOutput:
     #: and future formatter is not a credential. Nothing but this module sets
     #: this field, and free text cannot reach it.
     scanned_prose_recovered: bool = False
+    #: #1266 merge gate (Astra round 2, P0): this body was WRITTEN BY one of socr's table
+    #: floors (the structure-class floor, the D3 ending, the GH-90 scanned floor, the
+    #: withheld-table floor, the box-less failed-table route). The TABLE_WITHHELD guard keeps
+    #: such a body as it is (transform once) instead of re-deriving it; marker TEXT alone
+    #: proved nothing, because a model reading can carry the marker line. Typed for the same
+    #: reason as ``scanned_prose_recovered``: only ``core.manifest`` sets it, and no free
+    #: text can reach it. Absent (old sidecars) means no credential.
+    table_floor_body: bool = False
     #: #1156 Part B: how many numbers of an earlier OCR layer this body withheld. Set
     #: only by the masked-layer ending, from the retained original, so a re-finalisation
     #: or a resume recomputes the same count rather than re-masking finalised text.
@@ -674,6 +682,9 @@ class PageOutput:
         # Its absence and ``False`` mean the same thing to ``from_dict``.
         if self.scanned_prose_recovered:
             d["scanned_prose_recovered"] = True
+        # #1266: omit-when-unset, the same convention and reason as above.
+        if self.table_floor_body:
+            d["table_floor_body"] = True
         # #1156 Part B: omit-when-unset, the same convention and reason as above.
         if self.numbers_withheld:
             d["numbers_withheld"] = self.numbers_withheld
@@ -729,6 +740,9 @@ class PageOutput:
                 d.get("scanned_prose_recovered")
                 if type(d.get("scanned_prose_recovered")) is bool
                 else False
+            ),
+            table_floor_body=(
+                d.get("table_floor_body") if type(d.get("table_floor_body")) is bool else False
             ),
             numbers_withheld=(
                 d.get("numbers_withheld") if type(d.get("numbers_withheld")) is int else 0

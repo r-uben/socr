@@ -2218,8 +2218,21 @@ class TestNativeOnlyRouting:
         assert eng.process_pages.call_args.kwargs["page_nums"] == [2]
 
     def test_agentic_no_provider_table_fallback_is_audit_failed(self, tmp_path) -> None:
-        """No-provider table fallback is visible, not a clean native success."""
+        """No-provider table fallback is visible, not a clean native success.
+
+        #1266 merge gate round 2: a born-digital page whose table check failed with no model
+        reading and no detector box no longer ships its native table text; it ships the
+        KEEP-SENTENCES body built from the page's own words (sentences ship, numeral-dense
+        bands withheld), still WARNING, so the document is still AUDIT_FAILED. The old pin
+        asserted the native text shipped verbatim -- for a table page that is the failed
+        grid. The assessment's ``native_text`` is now the page's own text layer: the stub
+        string ("Native text for page 1") is not what the PDF prints, so the floor's
+        reading-order gate (rightly) refused it and failed closed."""
+        import fitz
+
         pdf = self._real_pdf(tmp_path, 1)
+        with fitz.open(str(pdf)) as doc:
+            own_text = doc[0].get_text()
         config = _make_config(
             agentic=True,
             native_first=True,
@@ -2228,14 +2241,14 @@ class TestNativeOnlyRouting:
         )
         pipeline = UnifiedPipeline(config)
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            1, born_digital_pages={1}, table_pages={1}
-        )
+        assessment = _make_bd_assessment(1, born_digital_pages={1}, table_pages={1})
+        assessment.pages[0].native_text = own_text
+        pipeline.bd_detector.detect.return_value = assessment
 
         result = pipeline.process(pdf, tmp_path)
 
         assert result.status == DocumentStatus.AUDIT_FAILED
-        assert "Native text for page 1" in result.markdown
+        assert "economic analysis of monetary policy" in result.markdown
 
     def test_agentic_table_judge_reject_all_rungs_is_fail_closed(self, tmp_path) -> None:
         """Provenance-masking guard: provider available, OCR returns SUCCESS+non-empty
