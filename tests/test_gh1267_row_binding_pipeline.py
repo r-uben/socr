@@ -67,6 +67,7 @@ def _run(
     pdf: Path | None = None,
     ladder_replaces: list | None = None,
     patch_replaces: list | None = None,
+    ladder_silent: bool = False,
     native=None,
     markdown: str | None = None,
 ):
@@ -80,7 +81,7 @@ def _run(
         strict_local=True,
         judge_backend="heuristic",
         enabled_engines=[EngineType.QWEN],
-        table_judge_ladder=ladder_replaces is not None,
+        table_judge_ladder=ladder_replaces is not None or ladder_silent,
         quiet=True,
         save_figures=False,
         write_manifest=True,
@@ -145,6 +146,17 @@ def _run(
                         bo, "text", new_text
                     ),
                 )
+            )
+            stack.enter_context(
+                patch.object(
+                    pipeline, "_withhold_contradicted_unverified_tables", lambda *a, **k: None
+                )
+            )
+        if ladder_silent:
+            # The ladder runs but its gate records no terminal (an infra miss): the assemble
+            # completeness backfill then marks the page's tables unwitnessed.
+            stack.enter_context(
+                patch.object(pipeline, "_run_table_judge_gate", lambda *a, **k: None)
             )
             stack.enter_context(
                 patch.object(
@@ -355,35 +367,57 @@ def test_a_withheld_table_and_an_unverifiable_sibling_each_keep_their_own_outcom
         assert line in frag
 
 
+THIRD_NATIVE = [*TWO_NATIVE, ("Wages", ["5.1", "5.2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
+THIRD_TABLE = [("Wages", ["5.1", "5.2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
+SLIP_ROWS = [*SECOND_TABLE[:2], ("Servxces", SECOND_TABLE[2][1])]
+# contradicted, unverifiable and bound tables on one page, prose between them
+THREE_TABLES = (
+    md(SHIFTED_ROWS) + "\nProse A.\n\n" + md(SLIP_ROWS) + "\nProse B.\n\n" + md(THIRD_TABLE)
+)
+
+
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_withheld_page_rerun_and_resume_are_byte_identical(tmp_path, rotation):
-    _, _, _, first, pdf = _run(tmp_path, SHIFTED_ROWS, rotation, check_runs=True, out_name="out")
-    keys = (
-        "table_ladder_disposition",
-        "row_binding",
-        "row_binding_contradicted_tables",
-        "row_binding_table_count",
-        "row_binding_withhold_only",
-        "d3_floor_png_ref",
-    )
+def test_withheld_page_resume_through_the_page_level_restore_is_byte_identical(tmp_path, rotation):
+    """Merge gate round 2 (Fable P0/P1). A two-page document: page 1 withholds one table and ships
+    an unverifiable sibling, a bound sibling and prose. Deleting the document index and page 2 forces
+    the PAGE-level path (page 1 restored from its sidecar, re-finalized, re-assembled) rather than the
+    document-level skip. Page 1 must come back byte for byte, prose and siblings included."""
+    from ocr_output_contract import RootIndex
 
-    def view(out):
-        side = _sidecar(out)
-        win = side["winning_output"]
-        # (the restored sidecar text is read back from the fragment, which has no trailing newline)
-        return (
-            {k: side.get(k) for k in keys}
-            | {k: win.get(k) for k in ("status", "failure_mode")}
-            | {"text": (win.get("text") or "").strip()}
-        )
+    from test_gh1267_row_binding_check import build_page
 
-    frag, side = _fragment(first), view(first)
-    # a withheld page is a content terminal: the second run restores it instead of re-reading it
-    _run(tmp_path, SHIFTED_ROWS, rotation, check_runs=True, out_name="out", pdf=pdf)
-    assert _fragment(first) == frag
-    assert view(first) == side
-    assert frag.count(MARKER) == 1 and frag.count(LINK) == 1
-    assert len(_events(first, CONTRADICTED_KIND)) == 1 and len(_events(first, WITHHELD_KIND)) == 1
+    doc = build_page(THIRD_NATIVE, rotation).parent
+    doc.insert_pdf(build_page(THIRD_NATIVE, rotation).parent)
+    pdf = tmp_path / f"two_{rotation}.pdf"
+    doc.save(pdf)
+    kw = dict(native=THIRD_NATIVE, markdown=THREE_TABLES, pdf=pdf)
+    _, _, _, out, _ = _run(tmp_path, None, rotation, check_runs=True, out_name="out", **kw)
+    frag1, doc1 = _fragment(out), _assembled(out)
+    page1 = doc1.split("## Page 2")[0]
+    side1 = _sidecar(out)
+    # what run 1 shipped on page 1: one table withheld, the other two and the prose kept
+    assert frag1.count(MARKER) == 1
+    assert "| Wages |" in frag1 and "| Servxces |" in frag1 and "Prose B." in frag1
+    assert side1["row_binding_contradicted_tables"] == [0]
+
+    Path(RootIndex(out).path).unlink()
+    for name in ("pages/00002.json", "pages/00002.md"):
+        next(out.rglob(name)).unlink()
+    restored = {"n": 0}
+    original = UnifiedPipeline._restore_terminal_page_state
+
+    def _spy(self, *a, **k):
+        restored["n"] += 1
+        return original(self, *a, **k)
+
+    with patch.object(UnifiedPipeline, "_restore_terminal_page_state", _spy):
+        _run(tmp_path, None, rotation, check_runs=True, out_name="out", **kw)
+    assert restored["n"] >= 1  # the page-level restore really ran
+    assert _fragment(out) == frag1
+    assert _assembled(out).split("## Page 2")[0] == page1
+    side2 = _sidecar(out)
+    for key in ("status", "failure_mode", "engine", "audit_passed"):
+        assert side2["winning_output"][key] == side1["winning_output"][key], key
 
 
 @pytest.mark.parametrize("rotation", [0, 90])
@@ -635,3 +669,27 @@ def test_stale_row_binding_state_is_cleared_when_the_check_does_not_run(tmp_path
     assert ps.row_binding_unverifiable_tables == [] and ps.row_binding_table_count == 0
     assert ps.row_binding_mark_only is False
     assert [e for e in state.events if e.kind == UNVERIFIABLE_KIND] == []
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_table_the_ladder_never_witnessed_keeps_its_mark_beside_a_row_binding_mark(
+    tmp_path, rotation
+):
+    """Merge gate round 2 (Fable P2): the completeness backfill makes the page unverified for its own
+    reason after the row check ran; the bound sibling then carries the same mark it carries with the
+    check off."""
+    first_slip = [*GROUP[:3], ("Net xprts", GROUP[3][1])]
+    markdown = md(first_slip) + "\nProse between the tables.\n\n" + md(SECOND_TABLE)
+    kw = dict(native=TWO_NATIVE, markdown=markdown, ladder_silent=True)
+    _, _, _, on, pdf = _run(tmp_path, None, rotation, check_runs=True, out_name="on", **kw)
+    _, _, _, off, _ = _run(
+        tmp_path, None, rotation, check_runs=False, out_name="off", pdf=pdf, **kw
+    )
+    assert _sidecar(on)["table_ladder_incomplete"] is True
+    frag_on, frag_off = _fragment(on), _fragment(off)
+    assert frag_off.count("[table unverified") == 2
+    assert frag_on.count("[table unverified") == 2
+    assert frag_on.count(UNVERIFIABLE_MARK) == 1
+    tail_on = frag_on[frag_on.index("Prose between the tables.") :]
+    tail_off = frag_off[frag_off.index("Prose between the tables.") :]
+    assert tail_on == tail_off  # the bound sibling and its generic mark, identical in both arms

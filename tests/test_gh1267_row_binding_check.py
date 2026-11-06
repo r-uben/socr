@@ -563,8 +563,8 @@ def test_argon_1a_partial_label_on_a_longer_native_label(rotation):
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_short_categorical_label_lost_is_not_vacuously_bound(rotation):
-    """Merge gate P1 (#1271): the native label `US` is shorter than MIN_LABEL_TOKEN_LEN. Dropping it
-    from the shipped categorical row must not leave an empty token list that `all()` accepts."""
+    """Merge gate P1 (#1271): the native label `US` is short. Dropping it from the shipped
+    categorical row must not leave an empty token list that `all()` accepts."""
     native = [("US", ["Small", "Moderate", "Large"]), ("Percent of loans", ["25", "21", "54"])]
     dropped = [("", ["Small", "Moderate", "Large"]), ("Percent of loans", ["25", "21", "54"])]
     res = run(native, dropped, rotation)
@@ -614,3 +614,137 @@ def test_best_label_home_a_distant_home_is_unverifiable_not_convicted(rotation):
 def test_best_label_home_an_equal_label_stays_bound(rotation):
     native = [("Exports", ["2.1", "2.2", "2.3"]), ("Net exports", ["1.5", "2.5", "3.5"])]
     assert run(native, native, rotation).outcome is TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_short_qualifiers_are_part_of_the_label(rotation):
+    """Merge gate round 2 (Astra P0): `US government` and `UK government` swapped must not bind."""
+    native = [("US government", ["2.1", "2.2", "2.3"]), ("UK government", ["1.5", "2.5", "3.5"])]
+    swapped = [("UK government", ["2.1", "2.2", "2.3"]), ("US government", ["1.5", "2.5", "3.5"])]
+    assert run(native, native, rotation).outcome is TableOutcome.BOUND
+    res = run(native, swapped, rotation)
+    assert res.outcome is TableOutcome.CONTRADICTED
+    assert verdicts(res) == [RowVerdict.DISPLACED, RowVerdict.DISPLACED]
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_bare_digit_in_a_label_never_lets_a_swap_bind(rotation):
+    """`Tier 1` / `Tier 2` swapped. The digit is also a number on the text-layer line, so the check
+    cannot place these rows: UNVERIFIABLE (marked), never BOUND."""
+    native = [("Tier 1 capital", ["2.1", "2.2", "2.3"]), ("Tier 2 capital", ["1.5", "2.5", "3.5"])]
+    swapped = [("Tier 2 capital", ["2.1", "2.2", "2.3"]), ("Tier 1 capital", ["1.5", "2.5", "3.5"])]
+    assert run(native, swapped, rotation).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_footnote_mark_is_not_part_of_the_label(rotation):
+    """`(4)`, `¹` and `$^{2}$` after a label are footnote marks the layer prints apart or not at all;
+    the label still binds, and a swap under footnote marks is still convicted."""
+    native = [("Consumer prices", ["2.1", "2.2", "2.3"]), ("Real GDP", ["1.5", "2.5", "3.5"])]
+    footnoted = [
+        ("Consumer prices (4)", ["2.1", "2.2", "2.3"]),
+        ("Real GDP¹", ["1.5", "2.5", "3.5"]),
+    ]
+    assert run(native, footnoted, rotation).outcome is TableOutcome.BOUND
+    latex = [
+        ("**Consumer prices**$^{2}$", ["2.1", "2.2", "2.3"]),
+        ("Real GDP", ["1.5", "2.5", "3.5"]),
+    ]
+    assert run(native, latex, rotation).outcome is TableOutcome.BOUND
+    swapped = [("Real GDP (4)", ["2.1", "2.2", "2.3"]), ("Consumer prices¹", ["1.5", "2.5", "3.5"])]
+    assert run(native, swapped, rotation).outcome is TableOutcome.CONTRADICTED
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize(
+    "label, cells",
+    [("US", ["Business", "Moderate", "Large"]), ("Total", ["Subtotal", "Moderate", "Large"])],
+)
+def test_a_lost_label_inside_a_word_cell_is_not_bound(rotation, label, cells):
+    """Merge gate round 2 (Astra P1 / Fable P2): `us` inside `business`, `total` inside `subtotal` are
+    substrings, not the label. Token equality only."""
+    native = [(label, cells), ("Percent of loans", ["25", "21", "54"])]
+    dropped = [("", cells), ("Percent of loans", ["25", "21", "54"])]
+    res = run(native, dropped, rotation)
+    assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    assert run(native, native, rotation).outcome is TableOutcome.BOUND
+
+
+def _v(a: int) -> list[str]:
+    return [f"{a}.1", f"{a}.2", f"{a}.3"]
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("label", ["", "Net exports"])
+def test_a_data_row_in_the_header_position_is_checked(rotation, label):
+    """Adversarial pass F1: the model put the first data row in the markdown header position, with a
+    lost or wrong label. A header row with decimal values is judged; never BOUND."""
+    first = "| " + " | ".join([label, *GROUP[0][1]]) + " |"
+    body = "\n".join("| " + " | ".join([lab, *vals]) + " |" for lab, vals in GROUP[1:])
+    markdown = first + "\n|---|---|---|---|\n" + body + "\n"
+    results, _ = check_page_row_binding(build_page(GROUP, rotation), markdown)
+    assert results[0].outcome is not TableOutcome.BOUND
+    faithful = "| " + " | ".join([GROUP[0][0], *GROUP[0][1]]) + " |"
+    results, _ = check_page_row_binding(
+        build_page(GROUP, rotation), faithful + "\n|---|---|---|---|\n" + body + "\n"
+    )
+    assert results[0].outcome is TableOutcome.BOUND
+
+
+def test_non_latin_labels_take_part_in_label_identity():
+    """Adversarial pass F2: an ASCII-only filter left Greek labels with no tokens, and a label with no
+    tokens bound anything. Words given directly (no PDF font needed), upright frame."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    labels = ["Εξαγωγές", "Εισαγωγές", "Ισοζύγιο"]
+
+    def words(rows):
+        out = []
+        for i, (lab, vals) in enumerate(rows):
+            y = V0 + i * LINE_PITCH
+            out.append((LABEL_U, y, LABEL_U + 60, y + FONT, lab))
+            for k, v in enumerate(vals):
+                x = VALUE_U0 + k * VALUE_STEP
+                out.append((x, y, x + 18, y + FONT, v))
+        return out
+
+    native = [(lab, _v(i + 1)) for i, lab in enumerate(labels)]
+    assert check_row_binding(words(native), None, md(native)).outcome is TableOutcome.BOUND
+    shifted = [(labels[1], _v(1)), (labels[2], _v(2)), ("", _v(3))]
+    assert check_row_binding(words(native), None, md(shifted)).outcome is not TableOutcome.BOUND
+
+
+SPLIT_NATIVE = [
+    ("Gross saving less gross investment", _v(1)),
+    ("Net lending", _v(2)),
+    ("Other", _v(3)),
+]
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [("Gross saving less gross", []), ("investment", _v(1))],
+        [("Gross saving less gross", _v(1)), ("investment", [])],
+        [("Gross", []), ("saving less gross investment", _v(1))],
+        [("Gross saving less gross investment", []), ("Gross saving less gross investment", _v(1))],
+    ],
+    ids=["values_on_second", "values_on_first", "first_word_row", "label_repeated"],
+)
+def test_a_label_split_over_two_rows_is_not_convicted(rotation, rows):
+    """Adversarial pass F3: one printed row shipped as two markdown rows, values under the right
+    label. Not CONTRADICTED (UNVERIFIABLE is fine)."""
+    res = run(SPLIT_NATIVE, [*rows, *SPLIT_NATIVE[1:]], rotation)
+    assert res.outcome is not TableOutcome.CONTRADICTED
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_parent_emptied_under_a_shorter_child_label_is_still_convicted(rotation):
+    """The frame-1 shape the split rule must not excuse: `Net exports` ships empty and the next row,
+    `Exports` (a shorter piece of the parent's label), carries the parent's values."""
+    native = [("Exports", _v(1)), ("Imports", _v(2)), ("Net exports", _v(3)), ("Other", _v(4))]
+    rows = [("Exports", _v(1)), ("Imports", _v(2)), ("Net exports", []), ("Exports", _v(3))]
+    res = run(native, rows, rotation)
+    assert res.outcome is TableOutcome.CONTRADICTED
+    assert res.rows[2].verdict is RowVerdict.EMPTIED

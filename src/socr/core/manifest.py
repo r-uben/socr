@@ -5509,6 +5509,26 @@ _LADDER_TERMINAL_FAILURE_MODES: frozenset[FailureMode] = frozenset(
 )
 
 
+def _row_binding_withhold_splice(
+    text: str, page_num: int, p, ordinals: list[int], expected_count: int, marker: str
+) -> str | None:
+    """#1267: the ONE seam where a row-binding withhold removes its tables from the page text.
+
+    TODO(#1266 cross-issue note, MERGE-GATE.md): this ordinal splice works on the markdown alone,
+    without the detected table geometry, which is the leak shape #1266 retires (loose rows outside
+    the parsed GFM blocks ship). Replace the body with #1266's shared geometry helper once it is
+    named in scratch/army/1266/STATUS.md; ``None`` keeps meaning "cannot place: fail closed to the
+    page floor".
+    """
+    return splice_failed_table_regions(
+        text,
+        failed_ordinals=ordinals,
+        expected_count=expected_count,
+        marker_line=marker,
+        png_ref=getattr(p, "d3_floor_png_ref", ""),
+    )
+
+
 def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> PageOutput:
     """Enforce the table-judge ladder's page-level disposition (GH-353 C3).
 
@@ -5569,20 +5589,17 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
             if _marker in text and len(_blocks_now) == _n_orig - len(_ords):
                 _spliced = text
             elif len(_blocks_now) == _n_orig:
-                _png = getattr(p, "d3_floor_png_ref", "")
-                _spliced = splice_failed_table_regions(
-                    text,
-                    failed_ordinals=sorted(_ords),
-                    expected_count=_n_orig,
-                    marker_line=_marker,
-                    png_ref=_png,
+                _spliced = _row_binding_withhold_splice(
+                    text, page_num, p, sorted(_ords), _n_orig, _marker
                 )
             if _spliced is not None:
+                # ``audit_passed`` is winner selection, not a verdict (#252): it stays as it was.
+                # Flipping it made a resumed page's restored winner read as failed, and the
+                # selector then floored the whole page (merge gate round 2, Fable P0).
                 return replace(
                     output,
                     text=_spliced,
                     status=PageStatus.ERROR,
-                    audit_passed=False,
                     failure_mode=disposition,
                 )
 
@@ -6031,8 +6048,13 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     _md_index = {b.start: _ordinals[k] for k, b in enumerate(_blocks)}
     # Merge gate (Fable P2): when the row-binding check alone made the page unverified, a table it
     # BOUND carries no mark.  Fail closed: any table whose ordinal cannot be placed is marked.
+    # Round 2 (Fable P2): a table the ladder never witnessed (``table_ladder_incomplete``, set
+    # later by the completeness backfill) makes the page unverified for its own reason.
     _only_listed = (
-        kind != "disputed" and _mapped and bool(getattr(p, "row_binding_mark_only", False))
+        kind != "disputed"
+        and _mapped
+        and bool(getattr(p, "row_binding_mark_only", False))
+        and not getattr(p, "table_ladder_incomplete", False)
     )
     for start in reversed(_table_start_lines(output.text, lines)):
         if start >= 2 and mark_re.match(lines[start - 2]) and not lines[start - 1].strip():

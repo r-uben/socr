@@ -57,9 +57,6 @@ EMPTIED_MIN_VALUES = 2
 # header bands (`2010`, `H2`, `Four-quarter changes`) were the only control convictions left on frame 1
 # after change 1 (measure/CHANGELOG.md, change 2).  Same floor as EMPTIED_MIN_VALUES, same reason.
 MIN_VALUES_TO_CONVICT = 2
-# Label tokens shorter than this ('in', 'of', 'to') are function words the layer often drops or moves
-# to a wrapped line (comparator MIN_LABEL_TOKEN_LEN).
-MIN_LABEL_TOKEN_LEN = 3
 # A footnote mark glued to a label ('Receipts2' vs 'Receipts') is at most this many trailing digits
 # (frame 1: 'Receipts2', 'Previous2', 'Other3', 'Gross saving less gross investment4': one digit).
 MAX_FOOTNOTE_DIGITS = 1
@@ -67,6 +64,14 @@ MAX_FOOTNOTE_DIGITS = 1
 _SUPERSCRIPT_TRANSLATE = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _UNICODE_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-", "‒": "-"})
 _MD_DECORATION = re.compile(r"[*_`]|<br\s*/?>")
+# A footnote mark after a label: in parentheses ('United Kingdom (4)'), superscript ('Contributions¹')
+# or LaTeX ('Consumer prices$^{2}$'). The text layer prints it apart from the label or not at all, so it
+# is not part of the label's identity. A bare digit is ('Tier 1' / 'Tier 2').
+_PAREN_FOOTNOTE = re.compile(
+    rf"\(\d{{1,{MAX_FOOTNOTE_DIGITS}}}\)"
+    rf"|\$\^\{{?\d{{1,{MAX_FOOTNOTE_DIGITS}}}\}}?\$"
+    rf"|[\u00b9\u00b2\u00b3\u2070\u2074-\u2079]{{1,{MAX_FOOTNOTE_DIGITS}}}"
+)
 
 
 class RowVerdict(str, Enum):
@@ -118,15 +123,21 @@ def _alnum(text: str) -> str:
     sometimes keeps only the first letter of fi/fl/ff, so those digraphs collapse on both sides."""
     s = unicodedata.normalize("NFKC", text.translate(_SUPERSCRIPT_TRANSLATE)).lower()
     s = re.sub(r"f[filf]", "f", s)
-    return re.sub(r"[^a-z0-9]", "", s)
+    # Letters and digits of any script (adversarial pass: an ASCII-only filter left a Greek label with
+    # no tokens at all, and a label with no tokens binds anything).
+    return re.sub(r"[\W_]", "", s)
 
 
 def _label_tokens(text: str) -> list[str]:
-    return [t for t in (_alnum(w) for w in _MD_DECORATION.sub(" ", text).split()) if t]
+    text = _MD_DECORATION.sub(" ", text)
+    bare = _PAREN_FOOTNOTE.sub(" ", text)
+    if any(c.isalpha() for c in bare):
+        text = bare
+    return [t for t in (_alnum(w) for w in text.split()) if t]
 
 
 def _has_letter(tokens: list[str]) -> bool:
-    return any(re.search(r"[a-z]", t) for t in tokens)
+    return any(c.isalpha() for t in tokens for c in t)
 
 
 def _token_eq(a: str, b: str) -> bool:
@@ -143,9 +154,11 @@ def _token_eq(a: str, b: str) -> bool:
 
 
 def _tokens_in_pool(tokens: list[str], pool: list[str]) -> bool:
-    """Every label token (function words excepted when something longer remains) occurs in *pool*."""
-    wanted = [t for t in tokens if len(t) >= MIN_LABEL_TOKEN_LEN] or tokens
-    return bool(wanted) and all(any(_token_eq(t, p) for p in pool) for t in wanted)
+    """Every label token occurs in *pool*, short ones included.
+
+    Merge gate round 2 (#1271, Astra P0): short tokens are often the whole identity of a row
+    (`US government` / `UK government`); filtering them out bound swapped rows."""
+    return bool(tokens) and all(any(_token_eq(t, p) for p in pool) for t in tokens)
 
 
 def _canon_number(text: str) -> str | None:
@@ -253,7 +266,7 @@ def build_native_lines(
                         w[3],
                         str(w[4]),
                         _canon_number(str(w[4])),
-                        _alnum(str(w[4])),
+                        "" if _PAREN_FOOTNOTE.fullmatch(str(w[4]).strip()) else _alnum(str(w[4])),
                     )
                     for w in ws
                 ],
@@ -304,6 +317,7 @@ class _Row:
     numbers: tuple[str, ...]  # canonical numeric values of the data cells
     categories: tuple[str, ...]  # alnum of non-numeric data cells (used when there are no numbers)
     cell_texts: tuple[str, ...]
+    is_header: bool = False  # the markdown header row (judged apart; never convicts)
 
     @property
     def has_content(self) -> bool:
@@ -320,9 +334,7 @@ def _shipped_rows(markdown: str) -> list[_Row]:
             if not grid:
                 continue  # separator
             cells = grid[0]
-            if first:
-                first = False  # markdown header row
-                continue
+            is_header, first = first, False
             label = cells[0] if cells else ""
             numbers: list[str] = []
             cats: list[str] = []
@@ -346,6 +358,7 @@ def _shipped_rows(markdown: str) -> list[_Row]:
                     numbers=tuple(numbers),
                     categories=tuple(cats),
                     cell_texts=tuple(texts),
+                    is_header=is_header,
                 )
             )
     return rows
@@ -520,11 +533,10 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
         if _has_letter(native_tokens) and not row.numbers:
             # post-held-out (Argon c2): a categorical row with no label; BOUND only when the native
             # label text sits in one of its word cells, otherwise it cannot be told from a lost label.
-            # Merge gate P1 (#1271): the same function-word rule as ``_tokens_in_pool`` (short tokens
-            # count when nothing longer remains), so a short label (`US`) is never filtered to an
-            # empty list that ``all()`` accepts.
-            wanted = [t for t in native_tokens if len(t) >= MIN_LABEL_TOKEN_LEN] or native_tokens
-            if wanted and all(any(t in c for c in row.categories) for t in wanted):
+            # Merge gate (#1271): token equality, never substring (`us` is inside `business`), and
+            # never an empty token list.
+            cell_tokens = [t for c in row.cell_texts for t in _label_tokens(c)]
+            if _tokens_in_pool(native_tokens, cell_tokens):
                 return RowVerdict.BOUND, "native label sits in a word cell of the row", native_label
             return (
                 RowVerdict.UNVERIFIABLE,
@@ -604,23 +616,46 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
     )
 
 
-def _judge_empty(row: _Row, lines: list[_Line], lo: int, hi: int):
+def _judge_empty(
+    row: _Row,
+    lines: list[_Line],
+    lo: int,
+    hi: int,
+    neighbours: tuple[tuple[int, list[str]], ...] = (),
+):
     """Row with a label and no values: BOUND when a native line with that label carries no values
     (group header), EMPTIED when exactly one carries a full set of values.  Only native lines between
     the lines of the neighbouring uniquely-assigned rows (*lo*, *hi*, inclusive: a shifted row sits on its
     parent's line) are candidates: the shipped
     order is the reading order, and repeated section labels ('Industrial Countries' in two blocks)
     are told apart by it."""
-    header_like = valued = single = 0
+    header_like = valued = single = split = 0
     for ln in lines:
         if not lo <= ln.index <= hi:
             continue
         own = _own_label(ln)
         if not own:
             continue
-        if not _tokens_in_pool(row.label_tokens, _pool(lines, ln, own)):
+        line_pool = _pool(lines, ln, own)
+        if not _tokens_in_pool(row.label_tokens, line_pool):
             continue
-        if len(ln.nums) >= EMPTIED_MIN_VALUES:
+        own_tokens = [w.tok for w in own if w.tok]
+        if len(ln.nums) >= EMPTIED_MIN_VALUES and any(
+            # Adversarial pass (F3): an adjacent shipped row already carries this line's values, and
+            # the two labels together are the line's label: the model split one printed row over two
+            # markdown rows (`Gross saving less gross` + `investment`) or repeated the label. The
+            # values were not dropped. The neighbour must ADD a word or repeat the label exactly: a
+            # neighbour whose label is a shorter piece of this one (`Exports` under `Net exports`) is
+            # the shift defect, measured on frame 1, and stays EMPTIED.
+            anchor == ln.index
+            and toks
+            and _tokens_in_pool(toks, line_pool)
+            and _tokens_in_pool(own_tokens, row.label_tokens + toks)
+            and (not _tokens_in_pool(toks, row.label_tokens) or _same_label(toks, row.label_tokens))
+            for anchor, toks in neighbours
+        ):
+            split += 1
+        elif len(ln.nums) >= EMPTIED_MIN_VALUES:
             valued += 1
         elif ln.nums:
             single += (
@@ -630,6 +665,12 @@ def _judge_empty(row: _Row, lines: list[_Line], lo: int, hi: int):
             header_like += 1
     if header_like:
         return RowVerdict.BOUND, "label is a native header line without a full set of values", None
+    if split:
+        return (
+            RowVerdict.UNVERIFIABLE,
+            "label split over two shipped rows; an adjacent row carries the line's values",
+            None,
+        )
     if valued == 1:
         return RowVerdict.EMPTIED, "label ships without values; native line prints them", None
     if valued > 1:
@@ -649,7 +690,8 @@ def check_row_binding(
     *words* are fitz word tuples in the reading frame; *region* is the table box in the same frame
     (None = whole page)."""
     lines = build_native_lines(words, region)
-    rows = _shipped_rows(table_markdown)
+    shipped = _shipped_rows(table_markdown)
+    rows = [r for r in shipped if not r.is_header]
     cands = _candidates(lines)
     optioned = [(r, _options(r, cands)) for r in rows if r.has_content]
     optioned = [(r, o) for r, o in optioned if o]
@@ -673,7 +715,12 @@ def check_row_binding(
                 continue  # blank row
             lo = next((a for a in reversed(anchors[:pos]) if a is not None), -1)
             hi = next((a for a in anchors[pos + 1 :] if a is not None), len(lines))
-            v, why, _ = _judge_empty(r, lines, lo, hi)
+            neighbours = tuple(
+                (anchors[q], rows[q].label_tokens)
+                for q in (pos - 1, pos + 1)
+                if 0 <= q < len(rows) and anchors[q] is not None
+            )
+            v, why, _ = _judge_empty(r, lines, lo, hi, neighbours)
             evidence.append(RowEvidence(r.line_index, v, why, r.label, "", values, None))
             continue
         if r.line_index in infeasible:
@@ -731,6 +778,31 @@ def check_row_binding(
             )
             continue
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
+    # Adversarial pass (F1): the markdown header row is column headings, but the model can put a data
+    # row there. Headings are whole numbers (years, dates): of 333 shipped frame-1 + held-out tables,
+    # 213 header rows carry numbers and none carries a decimal. A header row with a decimal value is
+    # therefore judged like a data row, on its own (outside the assignment, so it cannot reorder the
+    # data rows), and can only bind or stay unverifiable. A data row of whole numbers in the header
+    # position is not checked (logged gap).
+    for h in shipped:
+        if not h.is_header or not any("." in n for n in h.numbers):
+            continue
+        judged = {_judge(h, c, wi, lines, None)[0] for c, wi in _options(h, cands)}
+        bound = judged == {RowVerdict.BOUND} and len(h.numbers) >= MIN_VALUES_TO_CONVICT
+        evidence.insert(
+            0,
+            RowEvidence(
+                h.line_index,
+                RowVerdict.BOUND if bound else RowVerdict.UNVERIFIABLE,
+                "header-position data row bound to its line"
+                if bound
+                else "header-position data row; binding not shown",
+                h.label,
+                "",
+                h.cell_texts,
+                None,
+            ),
+        )
     if any(e.verdict in CONVICTING for e in evidence):
         outcome = TableOutcome.CONTRADICTED
     # (a table with no data rows has nothing shipped to bind; the empty-table checks own it)
