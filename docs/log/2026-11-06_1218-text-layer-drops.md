@@ -292,7 +292,11 @@ Astra blocked on three P0s; Fable said merge with P2s. New commits on top of 763
 
 ## Mutation results
 
-`scratch/army/1218/mutants/RESULTS.md`. Round 2, on the final commit 6f926249 (copies built
+`scratch/army/1218/mutants/RESULTS.md`. Round 3, on the merge-gate tree f2e12081 (control 86
+passed): 16 mutants, 14 killed at once (M1, M4, M5, M9, M11, M18 resume evidence, M20 withheld gate,
+M21-M23 axis evidence, M24-M26 writing forms, M27a); the two holes, M19 (an unconfirmable list must be
+recorded as `unresolved`, never `dropped: []`) and M27b (one space-thousands group satisfies one layer
+number), were closed by tests in cfd877e0, each shown to fail under its mutant. Round 2, on the final commit 6f926249 (copies built
 with `git archive HEAD`, `socr.__file__` asserted inside each copy, uncapped anchor count 1, same
 collected count as the control; control 74 passed): 16 mutants applied, 15 killed (M1-M6, M8-M14,
 M16, M17); M11b (only the persisted-list rule of the P0-A repair removed) survives because the
