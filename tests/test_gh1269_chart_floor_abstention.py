@@ -149,13 +149,18 @@ _REPLACEMENT = "A replacement body with no chart floor marker."
 
 
 def test_saved_text_that_is_not_the_bare_floor_body_clears_the_abstention(tmp_path):
-    """Astra 3 (P1): the abstention must describe the bytes that ship."""
+    """Astra 3 (P1): the abstention must describe the bytes that ship.
+
+    #1266 round 5: on a floor page a saved text that no floor certified no longer ships --
+    the recomputed floor does -- so the bytes that ship ARE the bare floor body and the
+    abstention, which describes them, stays. (The name is kept for history.)"""
     state = _chart_floor_document_state(_framed_thin_chart(tmp_path))
     ps = state.pages[1]
-    m._select_and_finalize_page(state, 1)
+    body = m._select_and_finalize_page(state, 1).output.text
     assert ps.chart_floor_abstention is not None, "premise: the floor declined"
-    m._select_and_finalize_page(state, 1, saved_text=_REPLACEMENT)
-    assert ps.chart_floor_abstention is None
+    shipped = m._select_and_finalize_page(state, 1, saved_text=_REPLACEMENT).output.text
+    assert _REPLACEMENT not in shipped and shipped == body
+    assert ps.chart_floor_abstention is not None
 
 
 def test_saved_text_on_a_fresh_state_invents_no_abstention(tmp_path):
@@ -219,8 +224,13 @@ def test_bare_floor_body_plus_appended_prose_clears_the_abstention(tmp_path):
     body = m._select_and_finalize_page(state, 1).output.text
     m._select_and_finalize_page(state, 1, saved_text=body)
     assert ps.chart_floor_abstention is not None, "control: the bare body keeps it"
-    m._select_and_finalize_page(state, 1, saved_text=body + "\n\nProse nobody checked.")
-    assert ps.chart_floor_abstention is None
+    # #1266 round 5: the appended prose is no body a floor certified, so it does not ship;
+    # the bare floor body does, and the abstention describing it stays.
+    shipped = m._select_and_finalize_page(
+        state, 1, saved_text=body + "\n\nProse nobody checked."
+    ).output.text
+    assert "Prose nobody checked" not in shipped and shipped == body
+    assert ps.chart_floor_abstention is not None
 
 
 def test_bare_floor_shape_is_the_marker_and_the_page_image_only():

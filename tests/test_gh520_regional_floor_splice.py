@@ -68,16 +68,91 @@ TWO_PARSEABLE_TABLES = (
 )
 
 
-def _floored_page(tmp_path: Path, native_text: str, *, detected: int, bboxes: int | None = None):
-    """A case-(iii) page carrying the detection-level signal from #570."""
-    state = _state(_born_digital_pdf(tmp_path), native_text=native_text)
+def _laid_out_pdf(tmp_path: Path, native_text: str):
+    """A PDF whose real word geometry is ``native_text`` laid out top to bottom (#1266).
+
+    Prose lines sit at x=72; each run of GFM rows becomes a grid (cells at x=80+110*c)
+    and yields one box around its words. Returns ``(pdf_path, boxes, words)``. This is what
+    a live born-digital page carries (``native_words`` from ``get_text("words")`` and
+    boxes from the detector), which the one-line synthetic PDF did not.
+    """
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / "gh1266_laid_out.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 60.0
+    boxes: list[tuple[float, float, float, float]] = []
+    run: list[float] = []
+    right = 0.0
+
+    def _close_run() -> None:
+        nonlocal run, right
+        if run:
+            boxes.append((76.0, min(run) - 12.0, right + 6.0, max(run) + 4.0))
+        run, right = [], 0.0
+
+    for line in native_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            if set(stripped) <= set("|-: "):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            for c, cell in enumerate(cells):
+                page.insert_text((80 + c * 110, y), cell, fontsize=9)
+                right = max(right, 80 + c * 110 + 9 * 0.5 * len(cell))
+            run.append(y)
+        else:
+            _close_run()
+            if stripped:
+                page.insert_text((72, y), stripped, fontsize=9)
+            else:
+                y += 6
+                continue
+        y += 18
+    _close_run()
+    words = page.get_text("words")
+    doc.save(str(path))
+    doc.close()
+    return path, boxes, words
+
+
+def _floored_page(
+    tmp_path: Path,
+    native_text: str,
+    *,
+    detected: int,
+    bboxes: int | None = None,
+    geometry: bool = False,
+):
+    """A case-(iii) page carrying the detection-level signal from #570.
+
+    ``geometry=True`` (#1266) gives the page REAL word geometry and real boxes, which the
+    born-digital floor now needs: it recovers prose from ``native_words`` around the
+    detected boxes and no longer splices ``native_text``. The default keeps the synthetic
+    page, whose missing words make that lane fail closed to the whole-page marker.
+    """
+    if geometry:
+        pdf, real_boxes, words = _laid_out_pdf(tmp_path, native_text)
+        state = _state(pdf, native_text=native_text)
+        state.pages[1].native_words = words
+    else:
+        state = _state(_born_digital_pdf(tmp_path), native_text=native_text)
+        real_boxes = None
     ps = state.pages[1]
     ps.d3_floor_png_ref = "![Failed table page 1](figures/failed_table_p1.png)"
     ps.detected_table_count = detected
     boxes = detected if bboxes is None else bboxes
-    ps.detected_table_bboxes = [
-        (72.0, 100.0 + i * 200.0, 520.0, 250.0 + i * 200.0) for i in range(boxes)
-    ]
+    if real_boxes is not None:
+        # real boxes first; any beyond what the text laid out are synthetic boxes below the
+        # content, so ``count == len(boxes)`` holds and a test can vary the COUNT alone.
+        padded = list(real_boxes) + [
+            (72.0, 700.0 + 30.0 * i, 520.0, 720.0 + 30.0 * i) for i in range(boxes)
+        ]
+        ps.detected_table_bboxes = padded[:boxes]
+    else:
+        ps.detected_table_bboxes = [
+            (72.0, 100.0 + i * 200.0, 520.0, 250.0 + i * 200.0) for i in range(boxes)
+        ]
     # #652 P2a: stand in for the verdict the live run records. These bboxes and
     # this native text are both synthetic and share no geometry (the fixture
     # PDF carries one title line), so ``_table_bbox_sane`` has nothing real to
@@ -86,6 +161,36 @@ def _floored_page(tmp_path: Path, native_text: str, *, detected: int, bboxes: in
     # has its words cached and its verdict recorded before selection runs.
     ps.table_bbox_sane = True
     return state, ps
+
+
+def _guard_outcome(ps, text: str) -> str:
+    """``"spliced"`` or ``"refused"``: which way the GH-520 guard sent THIS page.
+
+    The splice path is ``table_floor_text_for_source`` without ``geometry_floor`` (scans and
+    the other floor callers); the born-digital structure-class floor no longer reaches it
+    (#1266). With real words, a refusal is no longer the bare marker -- it is the #1144
+    recovery lane, which stamps its banner and, under the any-digit rule, withholds
+    ``PROSE_BEFORE`` ("4.2"); a splice ships ``PROSE_BEFORE`` and no banner. So the two
+    outcomes are distinguishable by bytes, and a test can prove the NAMED condition is what
+    refused the page, by running the same page with the condition removed.
+    """
+    from socr.core.manifest import BORN_DIGITAL_PROSE_RECOVERED_FLAG, table_floor_text_for_source
+
+    body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+    banner = BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1)
+    if banner in body:
+        assert PROSE_BEFORE not in body, "a refused page shipped a digit-bearing sentence"
+        return "refused"
+    assert PROSE_BEFORE in body and MARKER in body, f"neither a splice nor a recovery: {body!r}"
+    return "spliced"
+
+
+def _control_splices(tmp_path: Path) -> None:
+    """The premise every refusal test leans on: same machinery, condition satisfied -> splices."""
+    sub = tmp_path / "control"
+    sub.mkdir(exist_ok=True)
+    _state_, ps = _floored_page(sub, TWO_PARSEABLE_TABLES, detected=2, geometry=True)
+    assert _guard_outcome(ps, TWO_PARSEABLE_TABLES) == "spliced"
 
 
 def test_both_regions_parse_so_the_prose_survives(tmp_path: Path) -> None:
@@ -102,7 +207,7 @@ def test_both_regions_parse_so_the_prose_survives(tmp_path: Path) -> None:
         "fixture premise: both regions must parse as GFM tables"
     )
 
-    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2, geometry=True)
     out = _winning_page_output(state, 1)
 
     assert out.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
@@ -126,17 +231,21 @@ def test_a_collapsed_sibling_floors_the_whole_page(tmp_path: Path) -> None:
     Two tables detected, one parsed. The parser cannot see the collapsed
     region, so a splice keyed off it would replace the good grid and ship the
     collapsed one as prose -- round 1's bug exactly. The counts disagree and
-    the whole page floors, which is what P2 does today.
+    the guard refuses the splice. Real geometry (#1266): the refusal is observable as the
+    recovery lane's banner, and the same machinery splices when the counts agree.
     """
     from socr.tables.reconcile import find_table_blocks
 
     assert len(find_table_blocks(MIXED_VALIDITY_NATIVE_TEXT)) == 1, (
         "fixture premise: exactly one of the two regions parses"
     )
+    _control_splices(tmp_path)
 
-    state, _ps = _floored_page(tmp_path, MIXED_VALIDITY_NATIVE_TEXT, detected=2)
+    _state_, ps = _floored_page(tmp_path, MIXED_VALIDITY_NATIVE_TEXT, detected=2, geometry=True)
+    assert _guard_outcome(ps, MIXED_VALIDITY_NATIVE_TEXT) == "refused"
+
+    state, _ps = _floored_page(tmp_path, MIXED_VALIDITY_NATIVE_TEXT, detected=2, geometry=True)
     out = _winning_page_output(state, 1)
-
     assert out.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
     assert MARKER in out.text
     assert COLLAPSED_UNIQUE_TOKEN not in out.text, (
@@ -144,10 +253,6 @@ def test_a_collapsed_sibling_floors_the_whole_page(tmp_path: Path) -> None:
         "no splice can prove it was withheld"
     )
     assert UNIQUE_NATIVE_ROW not in out.text
-    assert PROSE_BEFORE not in out.text, (
-        "prose survived on a page whose coverage is unprovable; the guard let "
-        "the round-1 bug back in"
-    )
 
 
 def test_no_detected_table_is_no_evidence(tmp_path: Path) -> None:
@@ -207,10 +312,12 @@ def test_the_parser_derived_count_still_cannot_reopen_the_splice(tmp_path: Path)
 def test_the_floor_still_ships_the_png_when_it_splices(tmp_path: Path) -> None:
     """The image is how a human recovers the table, so it must survive the
     splice as well as the whole-page floor."""
-    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
-    out = _winning_page_output(state, 1)
+    from socr.core.manifest import table_floor_text_for_source
 
-    assert "figures/failed_table_p1.png" in out.text, (
+    _state_, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2, geometry=True)
+    assert _guard_outcome(ps, TWO_PARSEABLE_TABLES) == "spliced", "premise: this page splices"
+    body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+    assert "figures/failed_table_p1.png" in body, (
         "the spliced floor dropped the page image, so the table is recoverable from nothing"
     )
 
@@ -219,12 +326,14 @@ def test_the_floor_still_ships_the_png_when_it_splices(tmp_path: Path) -> None:
 def test_a_count_that_disagrees_with_the_blocks_floors(tmp_path: Path, detected: int) -> None:
     """Either direction. Fewer detected than parsed means the parser invented a
     block boundary; more means a detected table is missing from its list. Both
-    are unprovable coverage."""
-    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=detected)
-    out = _winning_page_output(state, 1)
+    are unprovable coverage, so the splice is refused (observable with real words)."""
+    _control_splices(tmp_path)
+    _state_, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=detected, geometry=True)
+    assert _guard_outcome(ps, TWO_PARSEABLE_TABLES) == "refused"
+    from socr.core.manifest import table_floor_text_for_source
 
-    assert PROSE_BEFORE not in out.text
-    assert UNIQUE_NATIVE_ROW not in out.text
+    body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+    assert UNIQUE_NATIVE_ROW not in body
 
 
 def test_an_empty_native_layer_floors(tmp_path: Path) -> None:
@@ -255,7 +364,7 @@ def test_the_detection_signal_survives_a_resume(tmp_path: Path) -> None:
     from socr.core.result import PageOutput, PageStatus
     from socr.pipeline.orchestrator import UnifiedPipeline
 
-    state, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    state, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2, geometry=True)
     first = _winning_page_output(state, 1)
     assert PROSE_BEFORE in first.text, "run 1 did not splice, so there is nothing to preserve"
 
@@ -276,11 +385,14 @@ def test_the_detection_signal_survives_a_resume(tmp_path: Path) -> None:
     )
     assert len(meta.get("detected_table_bboxes") or []) == 2
 
-    resumed, resumed_ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=0)
+    # #1266 review: the resumed page is NOT seeded with words (a real resume has none; the
+    # words are a live-run cache) and is restored from the REAL sidecar, winner included.
+    resumed, resumed_ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=0, geometry=True)
     resumed_ps.detected_table_bboxes = []
-    page_out = PageOutput(
-        page_num=1, text="body", status=PageStatus.SUCCESS, engine="native", audit_passed=True
-    )
+    resumed_ps.native_words = []  # same PDF path as run 1, so the sidecar is found; no words
+    assert not resumed_ps.native_words, "premise: a resumed page carries no native words"
+    sidecar_meta = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+    page_out = PageOutput.from_dict(sidecar_meta["winning_output"])
     pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
 
     assert resumed.pages[1].detected_table_count == 2, (
@@ -294,6 +406,9 @@ def test_the_detection_signal_survives_a_resume(tmp_path: Path) -> None:
     # still ship a different page than run 1 did -- which is the whole claim
     # this test's name makes.
     resumed_out = _winning_page_output(resumed, 1)
+    assert resumed_out.text == first.text, (
+        "the resumed page is not byte-identical to run 1 (it floored whole or changed)"
+    )
     assert PROSE_BEFORE in resumed_out.text, (
         "the resumed page floored whole where run 1 kept its prose"
     )
@@ -386,31 +501,37 @@ def test_equal_block_counts_are_not_correspondence(tmp_path: Path) -> None:
         "decoy), so the counts coincide"
     )
     assert COLLAPSED_UNIQUE_TOKEN in COINCIDENT_COUNT_TEXT, "fixture premise: the collapsed region"
+    _control_splices(tmp_path)
 
-    state, ps = _floored_page(tmp_path, COINCIDENT_COUNT_TEXT, detected=2)
+    # DIFFERENCE: the same page, only ``native_table_region_count`` changes.
+    (tmp_path / "agree").mkdir()
+    _s1, agree = _floored_page(tmp_path / "agree", COINCIDENT_COUNT_TEXT, detected=2, geometry=True)
+    agree.native_table_region_count = 2
+    assert _guard_outcome(agree, COINCIDENT_COUNT_TEXT) == "spliced", (
+        "premise: with reconstruction agreeing the coincident-count page splices"
+    )
+    _s2, ps = _floored_page(tmp_path, COINCIDENT_COUNT_TEXT, detected=2, geometry=True)
     ps.native_table_region_count = 1  # what the verifier records: one region reconstructed
+    assert _guard_outcome(ps, COINCIDENT_COUNT_TEXT) == "refused"
 
-    out = _winning_page_output(state, 1)
+    from socr.core.manifest import table_floor_text_for_source
 
-    assert COLLAPSED_UNIQUE_TOKEN not in out.text, (
+    body = table_floor_text_for_source(ps, 1, ps.native_text, prose_recovery=True)
+    assert COLLAPSED_UNIQUE_TOKEN not in body, (
         "the collapsed table shipped as preserved prose because an unrelated "
         "pipe block made the counts agree"
     )
-    assert PROSE_BEFORE not in out.text, "prose survived on a page with unprovable coverage"
-    assert MARKER in out.text
+    assert MARKER in body
 
 
 def test_reconstruction_short_of_detection_floors(tmp_path: Path) -> None:
     """The same guard without the decoy: a page where reconstruction produced
     fewer regions than the detector found tables has an unaccounted-for table,
     whatever the parser's block list happens to say."""
-    state, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    _control_splices(tmp_path)
+    _state_, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2, geometry=True)
     ps.native_table_region_count = 1
-
-    out = _winning_page_output(state, 1)
-
-    assert PROSE_BEFORE not in out.text
-    assert MARKER in out.text
+    assert _guard_outcome(ps, TWO_PARSEABLE_TABLES) == "refused"
 
 
 def test_a_restored_degenerate_bbox_is_not_usable_evidence(tmp_path: Path) -> None:

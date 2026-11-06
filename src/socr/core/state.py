@@ -334,6 +334,22 @@ class PageState:
     #: a resumed page's fallback simply has no native-words evidence to
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
+    #: #1266 merge gate: ``page.get_text("words")`` for a born-digital page the lane
+    #: heuristic flags as table-bearing but with no complete detector box. Read ONLY by
+    #: ``manifest.boxless_failed_table_text``; kept apart from ``native_words`` so no other
+    #: consumer's input changes. RUNTIME-ONLY like ``native_words``: never persisted.
+    boxless_table_words: list[tuple] = field(default_factory=list)
+    #: #1266 round 5: the floor body this page's last FRESH finalize certified (its shipped
+    #: text), so the saved-body pass can tell its own bytes from altered ones. RUNTIME-ONLY.
+    certified_floor_text: str = ""
+    #: #1266 round 6-8: ``(base, bodies)``: every body a socr post-selection writer
+    #: (``_preserve_chart_regions``, ``_describe_and_embed_figures``, ``_describe_crop_refs``)
+    #: produced from a certified floor body, in order, and the certified body they started
+    #: from. All of them count, because assemble's crash handlers fall back to an earlier
+    #: writer's output. A later fresh finalize (the sidecar flush) overwrites
+    #: ``certified_floor_text`` with the recomputed floor, so the writers' results live apart
+    #: and count only while their base still equals that floor. RUNTIME-ONLY.
+    floor_writer_chain: tuple[str, tuple[str, ...]] = ("", ())
     #: #1074: the page's paragraphs from its geometry, matched to the shipped lines at
     #: emit time (``native_paragraphs.reflow_native_prose``). RUNTIME-ONLY like
     #: ``native_words``: analyze runs on every run, resume included, and a replay that
@@ -616,10 +632,6 @@ class PageState:
     row_binding_contradicted_tables: list = field(default_factory=list)
     #: #1267: how many markdown tables the checked text held (the ordinals above index them).
     row_binding_table_count: int = 0
-    #: #1267: the page's WITHHELD disposition was set by the row-binding check ALONE, so only the
-    #: tables in ``row_binding_contradicted_tables`` are withheld (siblings ship). False when
-    #: another withhold already owned the page (the page-granular floor then stands).
-    row_binding_withhold_only: bool = False
     #: #1267: tables whose row binding the text layer could not settle (the mark says so, and
     #: does not claim a contradiction). Persisted.
     row_binding_unverifiable_tables: list = field(default_factory=list)

@@ -756,9 +756,29 @@ class TestTask4_NativeD3RegionalSplice:
         png_ref: str = "![p1](figures/p1.png)",
         region_identities: list[str] | None = None,
         header_unattributed: bool = False,
+        geometry_dir: Path | None = None,
     ) -> DocumentState:
-        state = DocumentState(handle=_make_handle(1))
-        ps = state.pages[1]
+        """A TR-3 D3 page.
+
+        ``geometry_dir`` (#1266 B1) lays ``native_text`` out in a real PDF there and gives the
+        page its REAL ``native_words`` and one detected box per GFM run, which a live
+        born-digital page carries. Since B1 the D3 ending takes the born-digital geometry floor
+        (it reads words and boxes, not the GFM text), so a page without words fails closed to
+        the whole-page marker; the default (no ``geometry_dir``) keeps that synthetic page.
+        """
+        if geometry_dir is not None:
+            from test_gh520_regional_floor_splice import _laid_out_pdf
+
+            geometry_dir.mkdir(parents=True, exist_ok=True)
+            pdf, boxes, words = _laid_out_pdf(geometry_dir, native_text)
+            state = DocumentState(handle=DocumentHandle.from_path(pdf))
+            ps = state.pages[1]
+            ps.native_words = words
+            ps.detected_table_count = len(boxes)
+            ps.detected_table_bboxes = list(boxes)
+        else:
+            state = DocumentState(handle=_make_handle(1))
+            ps = state.pages[1]
         ps.is_born_digital = True
         ps.native_text = native_text
         ps.has_tables = True
@@ -793,7 +813,10 @@ class TestTask4_NativeD3RegionalSplice:
         ps.native_table_header_unattributed = header_unattributed
         return state
 
-    def test_native_d3_regional_splice_preserves_surrounding_prose(self) -> None:
+    def test_native_d3_regional_splice_preserves_surrounding_prose(self, tmp_path: Path) -> None:
+        """#1266 B1: the prose now survives through the geometry floor, from the page's own
+        words around the detected box, so the page carries real geometry; the table's tokens
+        are checked one by one, not only as a GFM row."""
         table = _md_table(["Metric", "Val"], [["GDP", "2.1"], ["CPI", "3.4"]])
         native_text = f"Introduction to economic indicators.\n\n{table}\n\nConclusion of section."
         state = self._build_d3_page_state(
@@ -801,6 +824,7 @@ class TestTask4_NativeD3RegionalSplice:
             failed_ordinals=[0],
             region_count=1,
             png_ref="![Failed Table](figures/failed_p1.png)",
+            geometry_dir=tmp_path,
         )
 
         winner = _winning_page_output(state, 1, None)
@@ -814,11 +838,21 @@ class TestTask4_NativeD3RegionalSplice:
         # Rejected table rows do not
         assert "| GDP | 2.1 |" not in winner.text
         assert "| CPI | 3.4 |" not in winner.text
+        for tok in ("Metric", "GDP", "2.1", "CPI", "3.4"):
+            assert tok not in winner.text, f"table content {tok!r} shipped as loose text"
         # Marker and PNG present
         assert "[page 1 failed: unverifiable table — see image]" in winner.text
         assert "![Failed Table](figures/failed_p1.png)" in winner.text
+        # The recovery is recorded where resume and the surfaces read it (#1266 B1).
+        assert winner.scanned_prose_recovered is True
 
-    def test_native_d3_two_tables_preserves_good_table(self) -> None:
+    def test_native_d3_two_tables_withholds_the_verified_sibling_too(self, tmp_path: Path) -> None:
+        """#1266 B1 (owner ruling 2026-11-05): the D3 ending takes the geometry floor, which
+        withholds EVERY detected box -- the sibling TR-3 verified included -- because no
+        ordinal->box mapping is safe. This used to pin the sibling's GFM surviving; that was
+        the regional splice, whose un-parsed remainder leaked on 503 of 539 Fed pages. The
+        owner accepted the price; keeping verified siblings is a separate per-region
+        follow-up, and this test is the pin that follow-up must change deliberately."""
         t1 = _md_table(["GoodH1", "GoodH2"], [["1.0", "2.0"]])
         t2 = _md_table(["BadH1", "BadH2"], [["3.0", "4.0"]])
         native_text = f"Top prose\n\n{t1}\n\nMiddle prose\n\n{t2}\n\nBottom prose"
@@ -827,23 +861,32 @@ class TestTask4_NativeD3RegionalSplice:
             native_text=native_text,
             failed_ordinals=[1],
             region_count=2,
+            geometry_dir=tmp_path,
         )
         winner = _winning_page_output(state, 1, None)
 
         assert "Top prose" in winner.text
         assert "Middle prose" in winner.text
         assert "Bottom prose" in winner.text
-        # Good table survives
-        assert "| GoodH1 | GoodH2 |" in winner.text
-        assert "| 1.0 | 2.0 |" in winner.text
+        # The verified sibling is withheld too (owner-accepted price of B1)
+        for tok in ("GoodH1", "GoodH2", "1.0", "2.0"):
+            assert tok not in winner.text, f"verified sibling content {tok!r} shipped"
         # Bad table removed
         assert "| BadH1 | BadH2 |" not in winner.text
+        for tok in ("BadH1", "BadH2", "3.0", "4.0"):
+            assert tok not in winner.text, f"failed table content {tok!r} shipped"
         assert "[page 1 failed: unverifiable table — see image]" in winner.text
 
-    def test_header_unattributed_mixed_page_does_not_ship_header_table(self) -> None:
+    def test_header_unattributed_mixed_page_does_not_ship_header_table(
+        self, tmp_path: Path
+    ) -> None:
         """GH-375: table 0 header-unattributed + table 1 TR-3 must not ship table 0.
 
         Measured at ``_winning_page_output``, not only the tagged helper.
+
+        #1266 B1: both routes (header-unattributed, failed ordinals) now take the same
+        geometry floor, which withholds every detected box; the geometry-only arm no longer
+        keeps table 0 (owner-accepted price), so the two arms are byte-identical.
         """
         t0 = _md_table(["HeaderDestroyed", "Col"], [["bad", "1.11"]])
         t1 = _md_table(["GeoFail", "Col"], [["geo", "2.22"]])
@@ -854,12 +897,14 @@ class TestTask4_NativeD3RegionalSplice:
             failed_ordinals=[1],
             region_count=2,
             header_unattributed=True,
+            geometry_dir=tmp_path / "mixed",
         )
         geometry_only = self._build_d3_page_state(
             native_text=native_text,
             failed_ordinals=[1],
             region_count=2,
             header_unattributed=False,
+            geometry_dir=tmp_path / "geometry",
         )
 
         mixed_winner = _winning_page_output(mixed, 1, None)
@@ -878,10 +923,15 @@ class TestTask4_NativeD3RegionalSplice:
         assert mixed_winner.audit_passed is False
         assert is_page_failed_marker(mixed_winner.text) is False
 
-        # Geometry-only (the GH-371 case) still keeps the good sibling.
-        assert "| HeaderDestroyed | Col |" in geometry_winner.text
-        assert "| bad | 1.11 |" in geometry_winner.text
+        for tok in ("HeaderDestroyed", "bad", "1.11", "GeoFail", "geo", "2.22"):
+            assert tok not in mixed_winner.text, f"table content {tok!r} shipped"
+        assert mixed_winner.scanned_prose_recovered is True
+
+        # Geometry-only (the GH-371 case): since #1266 B1 the TR-3-verified sibling is
+        # withheld too, and the header flag no longer selects a different route.
+        assert "| HeaderDestroyed | Col |" not in geometry_winner.text
         assert "| GeoFail | Col |" not in geometry_winner.text
+        assert geometry_winner.text == mixed_winner.text
 
         canonical = canonical_page_texts(mixed)
         assert len(canonical) == 1
@@ -889,7 +939,11 @@ class TestTask4_NativeD3RegionalSplice:
         assert "| HeaderDestroyed | Col |" not in canonical[0]
 
     def test_identity_swap_at_winner_falls_back_to_whole_page(self) -> None:
-        """Equal-count permutation of region identities refuses regional splice."""
+        """Equal-count permutation of region identities refuses regional splice.
+
+        #1266 B1: the D3 ending no longer consults identities; this words-less page reaches
+        the whole-page marker because the geometry floor fails closed without words.
+        ``test_missing_identities_refuse_regional_splice`` pins identities as irrelevant."""
         from socr.tables.reconcile import find_table_blocks, table_grid_identity
 
         t0 = _md_table(["GoodH1", "GoodH2"], [["1.0", "2.0"]])
@@ -910,10 +964,14 @@ class TestTask4_NativeD3RegionalSplice:
         assert "| GoodH1 | GoodH2 |" not in winner.text
         assert "| BadH1 | BadH2 |" not in winner.text
 
-    def test_missing_identities_refuse_regional_splice(self) -> None:
+    def test_missing_identities_refuse_regional_splice(self, tmp_path: Path) -> None:
         """GH-375: ordinals + count without identities (stale pre-fix sidecar) must
-        take the whole-page marker, not the unguarded legacy splice. Pinned as a
-        difference: the same state with identities present splices regionally."""
+        not take the unguarded legacy splice.
+
+        #1266 B1: the D3 ending no longer splices at all, so no state can reach the legacy
+        splice: identities are not consulted and the page ships the geometry floor either
+        way. Pinned as a difference: the same page with and without identities ships the
+        same bytes, and neither arm ships any table content."""
         t0 = _md_table(["GoodH1", "GoodH2"], [["1.0", "2.0"]])
         t1 = _md_table(["BadH1", "BadH2"], [["3.0", "4.0"]])
         native_text = f"Top prose\n\n{t0}\n\nMiddle prose\n\n{t1}\n\nBottom prose"
@@ -922,25 +980,33 @@ class TestTask4_NativeD3RegionalSplice:
             native_text=native_text,
             failed_ordinals=[1],
             region_count=2,
+            geometry_dir=tmp_path / "with",
         )
         without_identities = self._build_d3_page_state(
             native_text=native_text,
             failed_ordinals=[1],
             region_count=2,
             region_identities=[],
+            geometry_dir=tmp_path / "without",
         )
 
-        spliced = _winning_page_output(with_identities, 1, None)
+        with_ids = _winning_page_output(with_identities, 1, None)
         refused = _winning_page_output(without_identities, 1, None)
 
-        assert "| GoodH1 | GoodH2 |" in spliced.text
-        assert is_page_failed_marker(refused.text) is True
-        assert "| GoodH1 | GoodH2 |" not in refused.text
-        assert "| BadH1 | BadH2 |" not in refused.text
+        assert refused.text == with_ids.text, "region identities changed the D3 floor"
+        for body in (with_ids.text, refused.text):
+            assert "| GoodH1 | GoodH2 |" not in body
+            assert "| BadH1 | BadH2 |" not in body
+            for tok in ("GoodH1", "BadH1", "1.0", "3.0"):
+                assert tok not in body
+            assert "Top prose" in body
 
     def test_fallback_to_whole_page_marker_when_provenance_missing(self) -> None:
         """When no ordinals or counts exist (e.g. pre-GH-371 state or header-only GH-200),
-        winner selection falls back to the whole-page failure marker byte-for-byte."""
+        winner selection falls back to the whole-page failure marker byte-for-byte.
+
+        #1266 B1: ordinals are no longer consulted; the whole page comes from the geometry
+        floor failing closed on a page without native words."""
         table = _md_table(["H1", "H2"], [["1", "2"]])
         native_text = f"Prose\n\n{table}\n\nProse"
 
@@ -989,7 +1055,12 @@ class TestTask4_NativeD3RegionalSplice:
     def test_assemble_events_regional_vs_whole_page_fallback(self, tmp_path: Path) -> None:
         """Regional D3 output stays in d3_floor_pages and emits table_region_unverifiable
         (AUDIT_FAILED document), but does NOT emit page_failed ('no usable OCR output').
-        Whole-page fallback emits BOTH."""
+        Whole-page fallback emits BOTH.
+
+        #1266 B1: the regional body is the geometry floor's recovered prose, built from the
+        page's words, so the regional arm carries real geometry; the fallback arm is the same
+        page WITHOUT words, which fails closed to the whole-page marker (ordinals are no
+        longer what decides it)."""
         pipeline = _make_pipeline()
         out_dir = tmp_path / "out"
 
@@ -999,6 +1070,7 @@ class TestTask4_NativeD3RegionalSplice:
             native_text=f"Prose before\n\n{table}\n\nProse after",
             failed_ordinals=[0],
             region_count=1,
+            geometry_dir=tmp_path,
         )
         with (
             patch.object(pipeline, "_save_markdown", return_value=out_dir / "out.md"),
@@ -1019,8 +1091,9 @@ class TestTask4_NativeD3RegionalSplice:
         # 2. Whole-page fallback state
         fallback_state = self._build_d3_page_state(
             native_text=f"Prose before\n\n{table}\n\nProse after",
-            failed_ordinals=None,  # Force whole-page fallback
+            failed_ordinals=None,
             region_count=None,
+            # no geometry_dir: no native words, so the floor fails closed (whole page)
         )
         with (
             patch.object(pipeline, "_save_markdown", return_value=out_dir / "out.md"),
@@ -1039,7 +1112,9 @@ class TestTask4_NativeD3RegionalSplice:
         assert "page_failed" in fallback_kinds
 
     def test_assemble_mixed_header_page_does_not_ship_header_table(self, tmp_path: Path) -> None:
-        """Assemble seam: header-destroyed grid must not appear in shipped texts."""
+        """Assemble seam: header-destroyed grid must not appear in shipped texts.
+
+        #1266 B1: real geometry, because the prose now comes from the page's words."""
         t0 = _md_table(["HeaderDestroyed", "Col"], [["bad", "1.11"]])
         t1 = _md_table(["GeoFail", "Col"], [["geo", "2.22"]])
         state = self._build_d3_page_state(
@@ -1047,6 +1122,7 @@ class TestTask4_NativeD3RegionalSplice:
             failed_ordinals=[1],
             region_count=2,
             header_unattributed=True,
+            geometry_dir=tmp_path / "geometry",
         )
         pipeline = _make_pipeline()
         out_dir = tmp_path / "out"
@@ -1067,22 +1143,28 @@ class TestTask4_NativeD3RegionalSplice:
         shipped = canonical_page_texts(state)[0]
         assert "| HeaderDestroyed | Col |" not in shipped
         assert "| bad | 1.11 |" not in shipped
+        for tok in ("HeaderDestroyed", "1.11", "GeoFail", "2.22"):
+            assert tok not in shipped
         assert "Top prose" in shipped
 
     def test_table_rejected_resume_skips_regional_d3_body(self, tmp_path: Path) -> None:
-        """Regional D3 body + TABLE_REJECTED is skip-and-kept (not a page-failure marker)."""
-        pdf_path = tmp_path / "doc.pdf"
-        doc = fitz.open()
-        doc.new_page().insert_text((72, 72), "page 1 text " * 10)
-        doc.save(str(pdf_path))
-        doc.close()
+        """Regional D3 body + TABLE_REJECTED is skip-and-kept (not a page-failure marker).
+
+        #1266 B1: the regional body is the geometry floor's recovered prose, so the document
+        is a real PDF of this page's text with its words and detected box."""
+        from test_gh520_regional_floor_splice import _laid_out_pdf
+
+        table = _md_table(["H1", "H2"], [["1", "2"]])
+        native_text = f"Intro prose.\n\n{table}\n\nOutro prose."
+        pdf_path, boxes, words = _laid_out_pdf(tmp_path, native_text)
 
         pipeline = _make_pipeline()
         pipeline._scan_root = pdf_path.parent
         state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
-        table = _md_table(["H1", "H2"], [["1", "2"]])
-        native_text = f"Intro prose.\n\n{table}\n\nOutro prose."
         ps = state.pages[1]
+        ps.native_words = words
+        ps.detected_table_count = len(boxes)
+        ps.detected_table_bboxes = list(boxes)
         ps.is_born_digital = True
         ps.native_text = native_text
         ps.has_tables = True

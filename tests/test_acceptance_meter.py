@@ -293,7 +293,8 @@ def test_every_prose_recovery_banner_is_recognised_as_a_mark() -> None:
     from socr.core.manifest import NATIVE_TEXT_FLAGS, PROSE_RECOVERED_FLAGS
 
     flags = (*PROSE_RECOVERED_FLAGS, *NATIVE_TEXT_FLAGS)
-    assert len(flags) == 4, "two banners x two page kinds; update this pin deliberately"
+    # #1266 merge gate: a fifth form, the born-digital KEEP-SENTENCES withholding banner.
+    assert len(flags) == 5, "two banners x two page kinds + keep-sentences; update deliberately"
     for flag in flags:
         line = flag.format(page_num=7)
         # #1145 moved the family out of ``benchmark`` into ``core.marks``, because ``core``

@@ -1059,7 +1059,7 @@ def _grid_state(tmp_path: Path, *, flags: str, attempt: str, lane: str):
 
         sub = tmp_path / f"{lane}-{flags}-{attempt}"
         sub.mkdir(parents=True, exist_ok=True)
-        state, p = _floored_page(sub, f"{layer}\n{TWO_PARSEABLE_TABLES}", detected=2)
+        state, p = _floored_page(sub, f"{layer}\n{TWO_PARSEABLE_TABLES}", detected=2, geometry=True)
         if lane == "tr3_splice":
             p.native_table_structure_failed = True
             p.native_table_unverifiable = True
@@ -1599,7 +1599,7 @@ def test_the_s1_floor_and_the_tr3_splice_withhold_the_layers_prose(tmp_path: Pat
         for flagged in (False, True):
             sub = tmp_path / f"s1-{tr3}-{flagged}"
             sub.mkdir(parents=True, exist_ok=True)
-            state, ps = _floored_page(sub, text, detected=2)
+            state, ps = _floored_page(sub, text, detected=2, geometry=True)
             ps.prior_ocr_layer = flagged
             ps.prior_ocr_layer_suspect = flagged
             if tr3:

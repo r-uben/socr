@@ -69,11 +69,11 @@ def _run(
     patch_replaces: list | None = None,
     ladder_silent: bool = False,
     native=None,
-    markdown: str | None = None,
+    markdown: str | dict[int, str] | None = None,
 ):
     pdf = pdf or _pdf(tmp_path, rotation, native)
     out_dir = tmp_path / out_name
-    text = markdown if markdown is not None else md(rows)
+    default_text = markdown if isinstance(markdown, str) else md(rows) if rows else ""
     cfg = PipelineConfig(
         primary_engine=EngineType.QWEN,
         local_engine=EngineType.QWEN,
@@ -91,7 +91,7 @@ def _run(
     def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
         out = PageOutput(
             page_num=page_num,
-            text=text,
+            text=markdown[page_num] if isinstance(markdown, dict) else default_text,
             status=PageStatus.SUCCESS,
             engine="qwen",
             audit_passed=True,
@@ -218,7 +218,6 @@ _NOISE = {
     "row_binding_contradicted_tables",
     "row_binding_unverifiable_tables",
     "row_binding_table_count",
-    "row_binding_withhold_only",
     "row_binding_mark_only",
 }
 
@@ -313,7 +312,10 @@ def _two_tables(first_rows) -> str:
 
 
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_only_the_contradicted_table_is_withheld(tmp_path, rotation):
+def test_a_contradicted_table_withholds_every_table_on_the_page(tmp_path, rotation):
+    """#1266's B1, applied here: a withheld page takes the shared floor, so neither table of the
+    model's reading ships. The verdicts stay per table: only the contradicted one is reported
+    withheld, and the bound sibling keeps its own outcome in the sidecar."""
     markdown = _two_tables(SHIFTED_ROWS)
     _, _, _, on, pdf = _run(
         tmp_path,
@@ -334,22 +336,44 @@ def test_only_the_contradicted_table_is_withheld(tmp_path, rotation):
         markdown=markdown,
         pdf=pdf,
     )
-    frag_on = _fragment(on)
+    frag_on, frag_off = _fragment(on), _fragment(off)
     assert frag_on.count(MARKER) == 1 and frag_on.count(LINK) == 1
-    for line in md(SHIFTED_ROWS).splitlines()[2:]:
-        assert line not in frag_on and line in _fragment(off)
-    # the bound sibling and the prose between ship untouched
-    for line in md(SECOND_TABLE).splitlines():
-        assert line in frag_on
-    assert "Prose between the tables." in frag_on
+    for line in [*md(SHIFTED_ROWS).splitlines()[2:], *md(SECOND_TABLE).splitlines()[2:]]:
+        assert line not in frag_on and line in frag_off
+    # the model's prose is the withheld reading's too: it is not on this page's text layer
+    assert "Prose between the tables." not in frag_on
+    assert "Prose between the tables." in frag_off
+    side_on = _sidecar(on)
+    # the shipped body is a socr floor, with the typed credential a resume relies on
+    assert side_on["winning_output"]["table_floor_body"] is True
+    assert side_on["winning_output"]["table_floor_digest"]
+    assert side_on["winning_output"]["status"] == PageStatus.ERROR.value
     withheld = _events(on, WITHHELD_KIND)
     assert [e["data"]["table_id"] for e in withheld] == ["p1-t0"]
-    assert _sidecar(on)["row_binding_contradicted_tables"] == [0]
-    assert _sidecar(on)["row_binding"]["p1-t1"]["outcome"] == "bound"
+    assert side_on["row_binding_contradicted_tables"] == [0]
+    assert side_on["row_binding"]["p1-t1"]["outcome"] == "bound"
 
 
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_a_withheld_table_and_an_unverifiable_sibling_each_keep_their_own_outcome(
+def test_a_loose_row_beside_a_contradicted_table_never_ships(tmp_path, rotation):
+    """#1266's leak, on this check's path. The ordinal splice this replaced changed only the parsed
+    GFM blocks, so an un-parsed row of the same reading shipped beside the marker."""
+    loose = "Loose 7.7 8.8"
+    markdown = md(SHIFTED_ROWS) + f"\n{loose}\n"
+    _, _, _, on, pdf = _run(
+        tmp_path, None, rotation, check_runs=True, out_name="on", markdown=markdown
+    )
+    _, _, _, off, _ = _run(
+        tmp_path, None, rotation, check_runs=False, out_name="off", markdown=markdown, pdf=pdf
+    )
+    assert loose in _fragment(off) and loose in _assembled(off)
+    assert loose not in _fragment(on)
+    assert _sidecar(on)["winning_output"]["failure_mode"] == "table_withheld"
+    assert loose not in _sidecar(on)["winning_output"]["text"]
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_withheld_table_and_an_unverifiable_sibling_each_record_their_own_outcome(
     tmp_path, rotation
 ):
     second_slip = [("Exports", ["2.1", "2.2", "2.3"]), ("Imxorts", ["3.1", "3.2", "3.3"])]
@@ -360,11 +384,14 @@ def test_a_withheld_table_and_an_unverifiable_sibling_each_keep_their_own_outcom
     )
     frag = _fragment(on)
     assert frag.count(MARKER) == 1
-    # the unverifiable sibling is marked with ITS number (the second table), the withheld one is gone
-    assert frag.count("row binding not verified on the page's text layer for table 2") == 1
-    assert "table 1;" not in frag
-    for line in md(second_slip).splitlines()[2:]:
-        assert line in frag
+    # neither table ships, so neither carries a table mark; the sidecar keeps both verdicts
+    assert "row binding not verified" not in frag
+    for line in [*md(SHIFTED_ROWS).splitlines()[2:], *md(second_slip).splitlines()[2:]]:
+        assert line not in frag
+    side = _sidecar(on)
+    assert side["row_binding_contradicted_tables"] == [0]
+    assert side["row_binding_unverifiable_tables"] == [1]
+    assert side["row_binding"]["p1-t1"]["outcome"] == "unverifiable"
 
 
 THIRD_NATIVE = [*TWO_NATIVE, ("Wages", ["5.1", "5.2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
@@ -378,10 +405,11 @@ THREE_TABLES = (
 
 @pytest.mark.parametrize("rotation", [0, 90])
 def test_withheld_page_resume_through_the_page_level_restore_is_byte_identical(tmp_path, rotation):
-    """Merge gate round 2 (Fable P0/P1). A two-page document: page 1 withholds one table and ships
-    an unverifiable sibling, a bound sibling and prose. Deleting the document index and page 2 forces
-    the PAGE-level path (page 1 restored from its sidecar, re-finalized, re-assembled) rather than the
-    document-level skip. Page 1 must come back byte for byte, prose and siblings included."""
+    """Merge gate round 2 (Fable P0/P1). A two-page document: page 1 has a contradicted table, an
+    unverifiable sibling, a bound sibling and prose, so it ships the floor; page 2 is clean, so the
+    document still assembles. Deleting the document index and page 2 forces the PAGE-level path
+    (page 1 restored from its sidecar, re-finalized, re-assembled) rather than the document-level
+    skip. Page 1 must come back byte for byte, its credential included."""
     from ocr_output_contract import RootIndex
 
     from test_gh1267_row_binding_check import build_page
@@ -390,15 +418,17 @@ def test_withheld_page_resume_through_the_page_level_restore_is_byte_identical(t
     doc.insert_pdf(build_page(THIRD_NATIVE, rotation).parent)
     pdf = tmp_path / f"two_{rotation}.pdf"
     doc.save(pdf)
-    kw = dict(native=THIRD_NATIVE, markdown=THREE_TABLES, pdf=pdf)
+    kw = dict(native=THIRD_NATIVE, markdown={1: THREE_TABLES, 2: md(THIRD_TABLE)}, pdf=pdf)
     _, _, _, out, _ = _run(tmp_path, None, rotation, check_runs=True, out_name="out", **kw)
     frag1, doc1 = _fragment(out), _assembled(out)
     page1 = doc1.split("## Page 2")[0]
     side1 = _sidecar(out)
-    # what run 1 shipped on page 1: one table withheld, the other two and the prose kept
+    # what run 1 shipped on page 1: the floor; none of the model's tables or prose
     assert frag1.count(MARKER) == 1
-    assert "| Wages |" in frag1 and "| Servxces |" in frag1 and "Prose B." in frag1
+    assert "| Wages |" not in frag1 and "| Servxces |" not in frag1 and "Prose B." not in frag1
+    assert "| Wages |" in doc1.split("## Page 2")[1]
     assert side1["row_binding_contradicted_tables"] == [0]
+    assert side1["winning_output"]["table_floor_body"] is True
 
     Path(RootIndex(out).path).unlink()
     for name in ("pages/00002.json", "pages/00002.md"):
@@ -416,7 +446,15 @@ def test_withheld_page_resume_through_the_page_level_restore_is_byte_identical(t
     assert _fragment(out) == frag1
     assert _assembled(out).split("## Page 2")[0] == page1
     side2 = _sidecar(out)
-    for key in ("status", "failure_mode", "engine", "audit_passed"):
+    # ``engine`` is not compared: the guard keeps the withheld reading's engine on the first run, and
+    # the restored page reports the floor's ``native``. The bytes and every verdict field are equal.
+    for key in (
+        "status",
+        "failure_mode",
+        "audit_passed",
+        "table_floor_body",
+        "table_floor_digest",
+    ):
         assert side2["winning_output"][key] == side1["winning_output"][key], key
 
 
@@ -446,34 +484,14 @@ def test_withheld_state_survives_flush_restore_and_refinalize(tmp_path, rotation
     ps = resumed.pages[1]
     kinds = [e.kind for e in resumed.events if e.page_num == 1]
     assert kinds.count(CONTRADICTED_KIND) == 1 and kinds.count(WITHHELD_KIND) == 1
-    assert ps.row_binding_contradicted_tables == [0] and ps.row_binding_withhold_only
+    assert ps.row_binding_contradicted_tables == [0]
     assert ps.row_binding_table_count == 2
     assert ps.table_ladder_disposition.value == "table_withheld"
-    # re-finalizing the already-spliced text changes nothing: the marker is not stacked
+    # re-finalizing changes nothing: the floor is not stacked, and a second pass keeps its bytes
     again = _apply_ladder_disposition_guard(restored, 1, ps)
     assert again.text == fragment
-
-
-def test_a_splice_that_cannot_be_placed_falls_back_to_the_page_floor():
-    """Fail closed: ordinals that do not fit the text withhold the whole page, never ship the table."""
-    from socr.core.manifest import _apply_ladder_disposition_guard
-    from socr.core.result import FailureMode
-
-    ps = type("P", (), {})()
-    ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
-    ps.row_binding_contradicted_tables = [3]
-    ps.row_binding_table_count = 4
-    ps.row_binding_withhold_only = True
-    ps.d3_floor_png_ref = ""
-    out = PageOutput(
-        page_num=1,
-        text=md(SHIFTED_ROWS),
-        status=PageStatus.SUCCESS,
-        engine="qwen",
-        audit_passed=True,
-    )
-    guarded = _apply_ladder_disposition_guard(out, 1, ps)
-    assert "Final sales" not in guarded.text and guarded.status is PageStatus.ERROR
+    assert again.table_floor_body is True
+    assert _apply_ladder_disposition_guard(again, 1, ps).text == fragment
 
 
 def _pair(tmp_path, first_rows, rotation, **kw):

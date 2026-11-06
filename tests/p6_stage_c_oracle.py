@@ -96,6 +96,7 @@ __all__ = [
     "VERDICT_SIDECAR_1145_DIFFERENCES",
     "CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES",
     "CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES",
+    "TABLE_FLOOR_BODY_1266_DIFFERENCES",
     "NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES",
 ]
 
@@ -1391,6 +1392,62 @@ CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES: list[ExpectedDiff] = [
     ),
 ]
 
+#: #1266 merge gate round 2: the typed ``table_floor_body`` credential on a floor-written
+#: winning output (omit-when-unset). MEASURED: the oracle named exactly two leaves, both on
+#: page 10 (the structure-class floor page): the sidecar's ``winning_output`` gains the key,
+#: and the manifest blob that serialises that output gets a new content address. Every other
+#: page keeps its bytes.
+TABLE_FLOOR_BODY_1266_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "winning_output", "table_floor_body"),
+        old_value=None,
+        new_value=True,
+        description=(
+            "#1266: page 10's structure-class floor output carries the typed table_floor_body "
+            "credential that the TABLE_WITHHELD guard's keep-as-is shortcut now requires."
+        ),
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "10", "blob_ref"),
+        old_value="bc40160e2abf779b6bd49e99b5c6fecda5e0c7a7890268bd8308669f6556496e",
+        new_value="29b5749d113a73fc62f67bfb91f5a3cd49cb629738e1374dcc99586977e28215",
+        description=(
+            "#1266: page 10's winning-output blob gains table_floor_body and its digest, so "
+            "its content address changes; the shipped bytes do not."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "winning_output", "table_floor_body"),
+        old_value=None,
+        new_value=True,
+        description=(
+            "#1266 round 5: page 2's D3 floor keeps its credential through assemble's saved "
+            "pass (its saved body differs from the fresh selection only by a phantom image "
+            "line socr's writer stripped)."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "winning_output", "table_floor_digest"),
+        old_value=None,
+        new_value="3e790875859f78f22383f41d7b4e9d76feb233e06dd9b2f7c05f13af8b7d2c69",
+        description="#1266 round 5: the digest of page 2's shipped text.",
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "2", "blob_ref"),
+        old_value="7fefaf5a0e883a6d8244c7f5f05c4bdbeac61a33f5a1a1fbeca6dec43b6f5a81",
+        new_value="44b4e910bfb0b561e33f2ab404db019899cbcf9e6e9ab43f64b5e8878a4a0078",
+        description="#1266 round 5: page 2's winning-output blob gains the credential.",
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "winning_output", "table_floor_digest"),
+        old_value=None,
+        new_value="3d002892f8596fdf9c830cde54adcec02bbc76551481b71016027caa99ea075d",
+        description=(
+            "#1266 round 3: the credential is bound to a sha256 of page 10's shipped text."
+        ),
+    ),
+]
+
 # ---------------------------------------------------------------------------
 # Complete Unified EXPECTED_STAGE_C_DIFFERENCES Mapping
 # ---------------------------------------------------------------------------
@@ -1764,6 +1821,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *VERDICT_SIDECAR_1145_DIFFERENCES,
     *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
     *CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES,
+    *TABLE_FLOOR_BODY_1266_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
     *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
 ]
