@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from socr.core.box_clusters import cluster_box_indices
+
 if TYPE_CHECKING:
     from PIL import Image
 
@@ -741,44 +743,13 @@ def _cluster_drawings(
     if not valid:
         return []
 
-    # Union-Find
-    parent = {i: i for i, _ in valid}
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for i, (idx_i, box_i) in enumerate(valid):
-        for j, (idx_j, box_j) in enumerate(valid):
-            if i >= j:
-                continue
-            x0_i, y0_i, x1_i, y1_i = box_i
-            x0_j, y0_j, x1_j, y1_j = box_j
-
-            h_gap = (
-                max(0, x0_j - x1_i) if x1_i < x0_j else max(0, x0_i - x1_j) if x1_j < x0_i else 0
-            )
-            v_gap = (
-                max(0, y0_j - y1_i) if y1_i < y0_j else max(0, y0_i - y1_j) if y1_j < y0_i else 0
-            )
-
-            if h_gap <= cluster_gap and v_gap <= cluster_gap:
-                union(idx_i, idx_j)
-
-    clusters: dict[int, list[int]] = {}
-    for idx, _ in valid:
-        root = find(idx)
-        clusters.setdefault(root, []).append(idx)
+    clusters = [
+        [valid[k][0] for k in group]
+        for group in cluster_box_indices([box for _, box in valid], cluster_gap)
+    ]
 
     results = []
-    for indices in clusters.values():
+    for indices in clusters:
         cboxes = [boxes[i] for i in indices if boxes[i] is not None]
         if not cboxes:
             continue

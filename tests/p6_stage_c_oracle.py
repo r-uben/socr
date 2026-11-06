@@ -75,6 +75,7 @@ __all__ = [
     "STAGE_C_PAGE_COUNT",
     "VOLATILE_KEYS",
     "ADDITIVE_SIDECAR_KEYS",
+    "SPARSE_SIDECAR_KEYS_BY_PAGE",
     "LeafPath",
     "ExpectedDiff",
     "normalize_capture",
@@ -94,8 +95,17 @@ __all__ = [
     "PAGE_TOP_MARK_1145_DIFFERENCES",
     "VERDICT_SIDECAR_1145_DIFFERENCES",
     "CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES",
+    "CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES",
     "NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES",
 ]
+
+#: #1269: sidecar keys that are SPARSE by design and so must not join the every-page
+#: ``ADDITIVE_SIDECAR_KEYS`` (the A/B test requires those on every page). Each is
+#: allowed on exactly the named page and required there; pinned by
+#: CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES.
+SPARSE_SIDECAR_KEYS_BY_PAGE: dict[str, frozenset[str]] = {
+    "p6_corpus/pages/00010.json": frozenset({"chart_floor_abstention"}),
+}
 
 #: Volatile keys excluded from canonical byte comparison.
 #: Narrowed per cold review round 2: only fields that vary by environmental
@@ -1364,6 +1374,23 @@ VERDICT_SIDECAR_1145_DIFFERENCES: list[ExpectedDiff] = [
 ]
 
 
+#: #1269: the sparse ``chart_floor_abstention`` sidecar key. MEASURED: the oracle named
+#: exactly one leaf, page 10 (the structure-class floor page), ``None -> {...}``. The
+#: page has no drawn chart (census False), so the floor declined for want of any chart
+#: region. Every other page of the corpus keeps its bytes: the key is absent there.
+CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "chart_floor_abstention"),
+        old_value=None,
+        new_value={"outcome": "no_chart_bboxes", "census_chart_marks": False},
+        description=(
+            "#1269: page 10 gains the sparse ``chart_floor_abstention`` sidecar key, "
+            "recording why the chart floor kept the bare marker: the chart-region boxer "
+            "found nothing and the census agrees (no chart marks)."
+        ),
+    ),
+]
+
 # ---------------------------------------------------------------------------
 # Complete Unified EXPECTED_STAGE_C_DIFFERENCES Mapping
 # ---------------------------------------------------------------------------
@@ -1736,6 +1763,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *PAGE_TOP_MARK_1145_DIFFERENCES,
     *VERDICT_SIDECAR_1145_DIFFERENCES,
     *CHART_FLOOR_BODY_SIDECAR_1155_DIFFERENCES,
+    *CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
     *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
 ]
