@@ -588,25 +588,14 @@ def test_a_d3_page_with_no_attempt_takes_the_floor(tmp_path: Path, header_unattr
     _assert_recorded(none_out, True)
 
 
-def test_a_zero_attempt_d3_page_surfaces_at_document_level(tmp_path: Path) -> None:
-    """The bucket behind the D3 audit event, the document status and the CLI line follows the
-    floor: a zero-attempt D3 page is in ``d3_floor_pages`` and emits
-    ``table_region_unverifiable`` at assemble."""
+def _assembled_d3_event(state):
+    """Run ``_phase_assemble`` with writers stubbed; return the page's D3 event detail."""
     from unittest.mock import patch
 
     from test_gh371_d3_region_splice import _make_pipeline
 
-    from socr.pipeline.orchestrator import _derive_disposition_buckets
-
-    state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="z.pdf")
-    _d3(ps)
-    ps.attempts = []
-    ps.best_output = None
-    buckets = _derive_disposition_buckets(state, finalized_page_records(state))
-    assert 1 in buckets["d3_floor_pages"]
-
     pipeline = _make_pipeline()
-    out_dir = tmp_path / "out"
+    out_dir = state.handle.path.parent / "out"
     with (
         patch.object(pipeline, "_save_markdown", return_value=out_dir / "out.md"),
         patch.object(pipeline, "_write_metadata", return_value=None),
@@ -617,7 +606,86 @@ def test_a_zero_attempt_d3_page_surfaces_at_document_level(tmp_path: Path) -> No
         patch.object(pipeline, "_stitch_fragments", return_value=""),
     ):
         pipeline._phase_assemble(state, out_dir)
-    assert "table_region_unverifiable" in [e.kind for e in state.events]
+    details = [e.detail for e in state.events if e.kind == "table_region_unverifiable"]
+    assert len(details) == 1, details
+    return details[0]
+
+
+#: The event text an attempted D3 page has always carried (unchanged by #1266).
+ATTEMPTED_D3_EVENT = (
+    "per-region geometry verifier hard-failed (geometry_impossible_collapse) and OCR ladder"
+    " also failed; D3 fail-closed: explicit failed-table marker shipped"
+    " — no collapsed/ragged table emitted"
+)
+
+
+def test_a_zero_attempt_d3_page_surfaces_at_document_level(tmp_path: Path) -> None:
+    """The bucket behind the D3 audit event, the document status and the CLI line follows the
+    floor: a zero-attempt D3 page is in ``d3_floor_pages`` and emits
+    ``table_region_unverifiable`` at assemble.
+
+    DIFFERENCE (#1266 commit 5): the same page with and without an attempt. The attempted page
+    keeps today's exact event text; the zero-attempt page says no OCR reading was attempted
+    instead of claiming the ladder failed."""
+    from socr.pipeline.orchestrator import _derive_disposition_buckets
+
+    (tmp_path / "with").mkdir()
+    (tmp_path / "none").mkdir()
+    with_state, with_ps = _build(tmp_path / "with", _draw_p10, [GRID_BOX], name="w.pdf")
+    none_state, none_ps = _build(tmp_path / "none", _draw_p10, [GRID_BOX], name="z.pdf")
+    _d3(with_ps)
+    _d3(none_ps)
+    none_ps.attempts = []
+    none_ps.best_output = None
+    buckets = _derive_disposition_buckets(none_state, finalized_page_records(none_state))
+    assert 1 in buckets["d3_floor_pages"]
+
+    with_detail = _assembled_d3_event(with_state)
+    none_detail = _assembled_d3_event(none_state)
+    assert with_detail == ATTEMPTED_D3_EVENT
+    assert "OCR ladder also failed" not in none_detail
+    assert "no OCR reading was attempted" in none_detail
+    assert none_detail == ATTEMPTED_D3_EVENT.replace(
+        "and OCR ladder also failed", "and no OCR reading was attempted"
+    )
+
+
+def test_the_stage_c_carve_out_admits_only_zero_attempt_d3_pages(tmp_path: Path) -> None:
+    """The Stage-C contract keeps the pre-P6 oracle verbatim and admits ONE difference:
+    zero-attempt D3 pages in ``d3_floor_pages``. DIFFERENCE: the real buckets pass; the same
+    buckets with an unrelated page added to ``d3_floor_pages`` fail."""
+    import fitz
+    from conftest import assert_stage_c_disposition_buckets, old_disposition_buckets
+
+    from socr.pipeline.orchestrator import _derive_disposition_buckets
+
+    pdf = tmp_path / "two.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Page one.")
+    doc.new_page().insert_text((72, 72), "Page two, nothing wrong with it.")
+    doc.save(str(pdf))
+    doc.close()
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    ps.is_born_digital = True
+    ps.native_text = "Page one."
+    _d3(ps)
+    ps.attempts = []
+    ps.best_output = None
+    state.pages[2].is_born_digital = True
+    state.pages[2].native_text = "Page two, nothing wrong with it."
+
+    records = finalized_page_records(state)
+    real = _derive_disposition_buckets(state, records)
+    assert 1 not in old_disposition_buckets(state)["d3_floor_pages"], "premise: oracle verbatim"
+    assert real["d3_floor_pages"] == {1}
+    assert_stage_c_disposition_buckets(state, records, real)
+    widened = {**real, "d3_floor_pages": real["d3_floor_pages"] | {2}}
+    with pytest.raises(AssertionError, match="d3_floor_pages"):
+        assert_stage_c_disposition_buckets(state, records, widened)
 
 
 def _two_page_pdf(path: Path, *, gated: bool) -> Path:

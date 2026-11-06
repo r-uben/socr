@@ -447,17 +447,40 @@ def _process_pdf(path: Path) -> Path:
 def test_process_ships_the_sentences_and_no_table_line_and_replays(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Run 2 goes through the PAGE-level path, not the document-level skip.
+
+    Measured before this fix: a second ``process()`` over the untouched output directory was
+    ``DocumentStatus.SKIPPED`` with zero ``_load_terminal_page`` calls, so the replay claim
+    could not fail (#1267 merge gate, Fable P1). The root index is now deleted between the
+    runs, which reopens the document; the premise is asserted. The five-page, both-ending
+    version is ``tests/test_gh1266_page_level_resume.py``.
+    """
+    from ocr_output_contract import RootIndex
     from test_gh1144_prose_survives_the_table_floor import _GridEngine, _pipeline
 
+    from socr.core.result import DocumentStatus
     from socr.pipeline import orchestrator as orch
+    from socr.pipeline.orchestrator import UnifiedPipeline
 
     pdf = _process_pdf(tmp_path / "doc.pdf")
     monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
     out = tmp_path / "out"
     bodies = []
-    for _run in range(2):
-        _pipeline().process(pdf, output_dir=out)
+    loads: list[int] = []
+    real_load = UnifiedPipeline._load_terminal_page
+
+    def _load(self, state, page_num, output_dir):
+        loads.append(page_num)
+        return real_load(self, state, page_num, output_dir)
+
+    for run in range(2):
+        if run == 1:
+            RootIndex(out).path.unlink()
+            monkeypatch.setattr(UnifiedPipeline, "_load_terminal_page", _load)
+        result = _pipeline().process(pdf, output_dir=out)
         bodies.append(next(iter(out.rglob("pages/00001.md"))).read_text())
+    assert result.status is not DocumentStatus.SKIPPED, "run 2 was the document-level skip"
+    assert 1 in loads, "run 2 never consulted the page ledger"
     body = bodies[0]
     assert SENTENCE_WITH_YEAR in body and TAIL_SENTENCE in body
     for tok in ("Real GDP", "Final sales", "2.6", "4.1", "3.9"):

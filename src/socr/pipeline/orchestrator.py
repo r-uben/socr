@@ -20171,6 +20171,14 @@ class UnifiedPipeline:
             # native_fallback for these; they were routed to the image-asset lane
             # (failed-table marker + explicit failure), never the collapsed native.
             for n in d3_floor_pages:
+                # #1266 commit 5: since commit 3 a page with NO attempt reaches this floor
+                # too; its event must not claim a ladder ran. Attempted pages keep the
+                # original text byte for byte.
+                _ladder_clause = (
+                    "and OCR ladder also failed"
+                    if state.pages[n].attempts
+                    else "and no OCR reading was attempted"
+                )
                 state.events.append(
                     AuditEvent(
                         page_num=n,
@@ -20178,7 +20186,7 @@ class UnifiedPipeline:
                         engine="native",
                         detail=(
                             "per-region geometry verifier hard-failed"
-                            " (geometry_impossible_collapse) and OCR ladder also failed;"
+                            f" (geometry_impossible_collapse) {_ladder_clause};"
                             " D3 fail-closed: explicit failed-table marker shipped"
                             " — no collapsed/ragged table emitted"
                         ),

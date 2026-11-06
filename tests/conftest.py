@@ -116,8 +116,7 @@ def old_disposition_buckets(state) -> dict[str, set[int]]:
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
         )
-        # #1266 commit 3: the D3 floor (and the bucket that surfaces it) no longer requires an
-        # attempt; the one deliberate departure from the pre-P6 predicate.
+        and bool(p.attempts)
         and n not in d3_model_table_pages
     }
     flagged_model_pages = {
@@ -223,6 +222,28 @@ def p6_old_orthogonal_buckets():
     return old_orthogonal_assemble_buckets
 
 
+def zero_attempt_d3_pages(state) -> set[int]:
+    """#1266 commit 3: the ONE permitted departure from :func:`old_disposition_buckets`.
+
+    The D3 floor no longer requires an OCR attempt, so ``d3_floor_pages`` now also holds a
+    page that carries the D3 conjunction with NO attempt -- exactly the pages the pre-P6
+    predicate's ``bool(p.attempts)`` excluded, and nothing else. (No attempt also means no
+    kept model: ``d3_floor_kept_model_output`` requires attempts.) The oracle itself stays
+    verbatim; the difference is stated here, where Rule 1 consumes it.
+    """
+    return {
+        n
+        for n, p in sorted(state.pages.items())
+        if p.is_born_digital
+        and p.native_table_structure_failed
+        and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and not p.attempts
+    }
+
+
 def assert_stage_c_disposition_buckets(state, records, new: dict[str, set[int]]) -> None:
     """Raise unless *new* satisfies the stage-C two-rule contract for *state* and *records*."""
     if records is None:
@@ -230,9 +251,13 @@ def assert_stage_c_disposition_buckets(state, records, new: dict[str, set[int]])
 
     old = old_disposition_buckets(state)
 
-    # Rule 1: The three flag-derived buckets must match old_disposition_buckets(state) exactly.
+    # Rule 1: The three flag-derived buckets must match old_disposition_buckets(state) exactly,
+    # with ONE explicit carve-out: ``d3_floor_pages`` may also hold the zero-attempt D3 pages
+    # (#1266 commit 3, :func:`zero_attempt_d3_pages`). Every other membership is exact.
     for name in FLAG_DERIVED_BUCKET_NAMES:
         expected = old[name]
+        if name == "d3_floor_pages":
+            expected = expected | zero_attempt_d3_pages(state)
         actual = new.get(name, set())
         if actual != expected:
             raise AssertionError(
