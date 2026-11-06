@@ -1330,3 +1330,81 @@ def test_symbol_only_labels_are_judged_not_blank():
         [("Exports", ["1.1", "1.2", "1.3"]), ("%", []), ("Imports", ["2.1", "2.2", "2.3"])]
     )
     assert check_row_binding(words3, None, spurious).outcome is not TableOutcome.BOUND
+
+
+def _hdr(n: int) -> str:
+    return "|" + "  |" * n + "\n|" + "---|" * n + "\n"
+
+
+@pytest.mark.parametrize(
+    "line, row",
+    [
+        # round 8 (Astra P0): a symbol second stub
+        (
+            ["Exports", "1.1", "2.2", "3.3", "%", "4.4", "5.5", "6.6"],
+            ["Exports", "1.1", "2.2", "3.3", "4.4", "5.5", "6.6"],
+        ),
+        (
+            ["Exports", "1.1", "2.2", "3.3", "$", "4.4", "5.5", "6.6"],
+            ["Exports", "1.1", "2.2", "3.3", "4.4", "5.5", "6.6"],
+        ),
+        # round 8 (Fable P1): letter-suffixed cells, n.a., categorical words in the right panel
+        (
+            ["Exports", "1.1", "2.2", "Imports", "3.3a", "4.4a"],
+            ["Exports", "1.1", "2.2", "3.3a", "4.4a"],
+        ),
+        (
+            ["Exports", "1.1", "2.2", "Imports", "n.a.", "n.a."],
+            ["Exports", "1.1", "2.2", "n.a.", "n.a."],
+        ),
+        (
+            ["US", "Small", "Moderate", "UK", "Large", "Weak"],
+            ["US", "Small", "Moderate", "Large", "Weak"],
+        ),
+        # round 8 (Fable P2): the right stub carried as a TRAILING cell
+        (
+            ["Exports", "1.1", "2.2", "Imports", "3.3", "4.4"],
+            ["Exports", "1.1", "2.2", "3.3", "4.4", "Imports"],
+        ),
+    ],
+)
+def test_round8_flattened_second_stub_never_binds(line, row):
+    """Round 8 positional rule: between the first and last matched word of the line no native word may
+    go unmatched by a shipped cell in that position."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    markdown = _hdr(len(row)) + "| " + " | ".join(row) + " |\n"
+    assert check_row_binding(_set_line(100, line), None, markdown).outcome is not TableOutcome.BOUND
+
+
+@pytest.mark.parametrize(
+    "line, row",
+    [
+        (
+            ["Exports", "1.1", "to", "2.2", "3.3"],
+            ["Exports", "1.1 to 2.2", "3.3"],
+        ),  # full cell text
+        (["Exports", "1.1", "n.a.", "3.3"], ["Exports", "1.1", "n.a.", "3.3"]),
+        # trailing native words after the last matched value (a running head) are allowed
+        (
+            ["Exports", "1.1", "2.2", "3.3", "continued"],
+            ["Exports", "1.1", "2.2", "3.3"],
+        ),
+    ],
+)
+def test_round8_positional_rule_keeps_faithful_rows_bound(line, row):
+    from socr.tables.row_binding_check import check_row_binding
+
+    markdown = _hdr(len(row)) + "| " + " | ".join(row) + " |\n"
+    assert check_row_binding(_set_line(100, line), None, markdown).outcome is TableOutcome.BOUND
+
+
+def test_round8_a_symbol_label_on_a_word_label_line_is_label_lost():
+    """Round 8 (Fable P2): `•` in place of `Exports` is judged like an empty label."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "2.2"]) + _set_line(114, ["Imports", "3.3", "4.4"])
+    bullet = _hdr(3) + "| • | 1.1 | 2.2 |\n| Imports | 3.3 | 4.4 |\n"
+    res = check_row_binding(words, None, bullet)
+    assert res.rows[0].verdict is RowVerdict.LABEL_LOST
+    assert res.outcome is TableOutcome.CONTRADICTED

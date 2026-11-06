@@ -350,6 +350,7 @@ class _Row:
     cell_texts: tuple[str, ...]
     is_header: bool = False  # the markdown header row (judged apart, see check_row_binding)
     values_only: bool = True  # every value cell holds numbers only (no words beside them)
+    cells_raw: tuple[str, ...] = ()  # full text of every non-empty data cell, in order
 
     @property
     def has_content(self) -> bool:
@@ -396,6 +397,7 @@ def _shipped_rows(markdown: str) -> list[_Row]:
                     cell_texts=tuple(texts),
                     is_header=is_header,
                     values_only=values_only,
+                    cells_raw=tuple(c.strip() for c in cells[1:] if c.strip()),
                 )
             )
     return rows
@@ -556,20 +558,31 @@ def _label_cell_empty(row: _Row) -> bool:
     return not _strip_markup(row.label).strip()
 
 
-def _foreign_stub_after_values(row: _Row, cand: _Cand, first_value_word: int) -> bool:
-    """Round 7 (Fable P1): the matched line carries a second stub after the row's first value
-    (`Exports 1.1 2.2 3.3   Imports 4.4 5.5 6.6` flattened into one shipped row). A letter-bearing word
-    followed by a value means another row starts there; unless the shipped row's own cells carry that
-    word (`n.a.`, `to`), the row cannot be BOUND."""
-    own = {t for c in row.cell_texts for t in _label_tokens(c)}
-    ws = cand.line.words[first_value_word : cand.stop]
-    return any(
-        w.num is None
-        and _has_letter([w.tok])
-        and w.tok not in own
-        and any(x.num is not None for x in ws[i + 1 :])
-        for i, w in enumerate(ws)
-    )
+def _same_word(native: str, shipped: str) -> bool:
+    n = " ".join(unicodedata.normalize("NFC", native).casefold().split())
+    t = " ".join(unicodedata.normalize("NFC", _strip_markup(shipped)).casefold().split())
+    if n == t:
+        return True
+    cn, ct = _canon_number(native), _canon_number(shipped)
+    return cn is not None and cn == ct
+
+
+def _cells_cover_line(row: _Row, cand: _Cand, first_value_word: int) -> bool:
+    """Round 8 positional rule (BOUND path only). The shipped row's data cells, word by word and in
+    order, must match the candidate line's words from the row's first value onward, with NO native
+    word between the first and the last matched one that a shipped cell does not match (a second
+    stub, a symbol, a suffix, `n.a.`, a carried label); native text after the last matched word
+    (running heads, page numbers) is allowed. Cells are compared on their full text (`1.8 to 2.1`)."""
+    shipped = [t for c in row.cells_raw for t in _strip_markup(c).translate(_UNICODE_MINUS).split()]
+    native = cand.line.words[first_value_word : cand.stop]
+    j = 0
+    for w in native:
+        if j == len(shipped):
+            return True  # trailing native text after the last matched word
+        if not _same_word(w.text.translate(_UNICODE_MINUS), shipped[j]):
+            return False
+        j += 1
+    return j == len(shipped)
 
 
 def _printed_label(cand: _Cand, first_value_word: int) -> str:
@@ -615,7 +628,9 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
     own = _label_words_before(cand, first_value_word)
     native_label = " ".join(w.text for w in own)
     native_tokens = [w.tok for w in own if w.tok]
-    if _label_cell_empty(row):
+    # Round 8 (Fable P2): a symbol-only label (`•`, `%`) on a line whose own label has words is judged
+    # exactly like an empty label (LABEL_LOST when the line prints a label).
+    if _label_cell_empty(row) or (not row.label_tokens and _has_letter(native_tokens)):
         # The label text may sit in another cell of the row (bullet rows) or the row may be a
         # header continuation (Q1 Q2 Q3, H1 H2): words in a data cell are not a lost label.
         if _has_letter(native_tokens) and not row.categories:
@@ -935,7 +950,7 @@ def check_row_binding(
             continue
         if v is RowVerdict.BOUND and (
             not _bound_exactly(r.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines)
-            or any(_foreign_stub_after_values(r, c2, wi2) for c2, wi2 in opts)
+            or not all(_cells_cover_line(r, c2, wi2) for c2, wi2 in opts)
         ):
             v, why = (
                 RowVerdict.UNVERIFIABLE,
@@ -997,7 +1012,7 @@ def check_row_binding(
                 )
             elif v is RowVerdict.BOUND and (
                 not _bound_exactly(h.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines)
-                or any(_foreign_stub_after_values(h, c2, wi2) for c2, wi2 in opts)
+                or not all(_cells_cover_line(h, c2, wi2) for c2, wi2 in opts)
             ):
                 v, why = (
                     RowVerdict.UNVERIFIABLE,
