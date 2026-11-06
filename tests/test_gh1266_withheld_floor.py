@@ -85,6 +85,17 @@ def test_a_withheld_scan_is_whole_page(tmp_path: Path) -> None:
     assert scan_out.scanned_prose_recovered is False
     assert SCANNED_PROSE_RECOVERED_NOTE not in scan_out.audit_notes
 
+    # A scan whose GH-520 guard FAILS: the scan floor would ship its own any-digit recovery
+    # (premise), and the withheld floor still ships the whole page -- no native floor on a
+    # scan, whichever way the scan lane would have gone.
+    from socr.core.manifest import structure_class_floor_text
+
+    refused, refused_winner = _withheld_page(tmp_path / "r", born_digital=False)
+    refused.native_table_region_count = 2
+    assert _is_prose_recovery_body(structure_class_floor_text(refused, 1), 1), "premise"
+    refused_out = _apply_ladder_disposition_guard(refused_winner, 1, refused)
+    assert _whole_page(refused_out.text), refused_out.text
+
 
 def test_a_positive_prior_ocr_finding_is_whole_page(tmp_path: Path) -> None:
     clean, _ = _withheld_page(tmp_path / "c")
