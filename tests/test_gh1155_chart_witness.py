@@ -876,15 +876,27 @@ def test_a_saved_body_carries_its_own_recovery_facts(tmp_path):
         + "\n\nNote: The midpoints of the target ranges are shown.\n"
     )
 
-    with_recovery = m._select_and_finalize_page(
-        _floor_document_state(pdf), 1, saved_text=saved_recovery
-    )
+    # #1266 round 5: on a FLOOR page a saved body keeps the last word only when it is a body
+    # a floor certified (the fresh pass's own bytes); this arm makes it one, as assemble does:
+    # a fresh finalize first, whose certified body is the recovery the saved text carries.
+    state = _floor_document_state(pdf)
+    state.pages[1].certified_floor_text = saved_recovery
+    with_recovery = m._select_and_finalize_page(state, 1, saved_text=saved_recovery)
     assert with_recovery.output.text == saved_recovery, "the saved body still has the last word"
     assert with_recovery.output.scanned_prose_recovered is True, (
         "the record states what the shipped bytes are"
     )
     assert m.SCANNED_PROSE_RECOVERED_NOTE in (with_recovery.output.audit_notes or []), (
         "and the note a reader and the corpus see is written too"
+    )
+    # ... and a saved recovery body no floor certified is not shipped on a floor page; the
+    # record still states what DOES ship (the recomputed floor, not a recovery).
+    uncertified = m._select_and_finalize_page(
+        _floor_document_state(pdf), 1, saved_text=saved_recovery
+    )
+    assert uncertified.output.text != saved_recovery
+    assert uncertified.output.scanned_prose_recovered is m._is_prose_recovery_body(
+        uncertified.output.text, 1
     )
 
     without = m._select_and_finalize_page(

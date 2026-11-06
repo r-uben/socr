@@ -1417,6 +1417,28 @@ TABLE_FLOOR_BODY_1266_DIFFERENCES: list[ExpectedDiff] = [
         ),
     ),
     ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "winning_output", "table_floor_body"),
+        old_value=None,
+        new_value=True,
+        description=(
+            "#1266 round 5: page 2's D3 floor keeps its credential through assemble's saved "
+            "pass (its saved body differs from the fresh selection only by a phantom image "
+            "line socr's writer stripped)."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00002.json", "winning_output", "table_floor_digest"),
+        old_value=None,
+        new_value="3e790875859f78f22383f41d7b4e9d76feb233e06dd9b2f7c05f13af8b7d2c69",
+        description="#1266 round 5: the digest of page 2's shipped text.",
+    ),
+    ExpectedDiff(
+        path=("manifest", 0, "entries", "2", "blob_ref"),
+        old_value="7fefaf5a0e883a6d8244c7f5f05c4bdbeac61a33f5a1a1fbeca6dec43b6f5a81",
+        new_value="44b4e910bfb0b561e33f2ab404db019899cbcf9e6e9ab43f64b5e8878a4a0078",
+        description="#1266 round 5: page 2's winning-output blob gains the credential.",
+    ),
+    ExpectedDiff(
         path=("sidecars", "p6_corpus/pages/00010.json", "winning_output", "table_floor_digest"),
         old_value=None,
         new_value="3d002892f8596fdf9c830cde54adcec02bbc76551481b71016027caa99ea075d",

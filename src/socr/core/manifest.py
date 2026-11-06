@@ -7332,6 +7332,10 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
     return replace(output, scanned_prose_recovered=True, audit_notes=notes)
 
 
+#: #1266 round 5: a line that is only a markdown image embed or an image link.
+_IMAGE_ONLY_LINE_RE = re.compile(r"!?\[[^\]]*\]\([^)\s]+\)")
+
+
 def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
     """#1266: is *saved* the *selected* body with only socr's own canonical mark lines added
     and socr's own #1074 re-flow applied?
@@ -7352,6 +7356,11 @@ def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
         pending_join = False
         for ln in (text or "").splitlines():
             if not ln.strip() or is_canonical_mark(ln.strip(), page_num):
+                continue
+            # round 5: an image-only line (a page-image embed or link) carries no text and no
+            # number, and socr's own writers drop phantom ones after finalize
+            # (``strip_phantom_images``), so it is furniture here like a mark.
+            if _IMAGE_ONLY_LINE_RE.fullmatch(ln.strip()):
                 continue
             words = ln.split()
             if pending_join and toks and words:
