@@ -147,7 +147,13 @@ def test_pages_the_tool_cannot_check_are_counted_not_dropped(tmp_path: Path) -> 
         for name, doc in cases.items():
             skipped: Counter = Counter()
             assert tool.refinalize_document(doc, tmp_path, skipped=skipped) == []
-            counted = {reason: n for reason, n in skipped.items() if reason != "no PDF here"}
+            # the native page is counted too, under its own reason (#1218 follow-up)
+            assert skipped["page engine is not a model reading"] == (name == "page not finished")
+            counted = {
+                reason: n
+                for reason, n in skipped.items()
+                if reason not in ("no PDF here", "page engine is not a model reading")
+            }
             assert sum(counted.values()) == 1, (name, skipped)
 
 

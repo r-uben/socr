@@ -5,12 +5,22 @@ page (WARNING, a visible mark, metadata, CLI), never withhold the reading, never
 Scans and earlier-OCR layers are out of scope (#1156: the old layer never votes). Built on
 #1185's normaliser (`docs/log/2026-10-20_1185-text-layer-numbers.md`).
 
-Full suite (6f926249, army suite lock, `socr.__file__` in the worktree): 9,222 passed, 48 skipped,
+Commit hashes. The branch was rebased before merge, so hashes quoted from the PR's first
+history (`4e170962` base, `6f926249`, `3ba517eb`) are the PRE-REBASE commits: `4e170962` is an
+ancestor of main, `6f926249` and `3ba517eb` are not reachable from any local branch and are not on
+main. The merged commits are `763e03f4` (the feature), `6a36dcd8`, `f2e12081`, `cfd877e0`
+(merge-gate fixes and tests), `058998a3` (mutation round 3 log), merged as `d44ae01a` (PR #1277).
+Each measurement below says the tree it was taken on; "6f926249" and "3ba517eb" mean the
+pre-rebase equivalent of `763e03f4`, whose detector the later commits changed as the
+merge-gate section states.
+
+Full suite (pre-rebase 6f926249, army suite lock, `socr.__file__` in the worktree): 9,222 passed, 48 skipped,
 9 xfailed, 1 failed, 8 errors, 405 s. The failure (`test_gh637_nougat_dropped_from_auto`) and the
 8 errors (`test_gemma_cloud_opt_in` 2, `test_gh842_unservable_engines` 3, `test_orchestrator` 3)
 reproduce on a clean export of the base 4e170962 on this machine (`scratch/army/1218/baseline`):
 local engine environment, not this change. Format gate `uvx ruff@0.16.0 format --check .` clean.
-Re-finalize parity (Kimi K5, Astra P0-A/P0-B): fixed and pinned by whole-artifact tests (fresh vs
+Re-finalize parity (Kimi K5, Astra P0-A/P0-B): fixed in `763e03f4` and `6a36dcd8`, pinned by
+whole-artifact tests in `tests/test_gh1218_drops_clause.py` (fresh vs
 re-finalize vs resume: audit_log.json, document and root metadata, sidecars, fragments, document
 .md; an interrupted pass; a failed or different-count reassessment; an artifact in the earlier
 tool's order), guarded by mutants M9, M11-M13, M16 below.
@@ -40,7 +50,8 @@ receive the drop clause.
 - **Candidates** (`tables/layer_body.py`): the numeric TAIL of each LABEL ROW of the page's
   own layer, selected by geometry and independent of any reading. A label row is a line with a
   label (>= 1 word with >= 2 letters) followed by >= `LABEL_ROW_MIN_NUMBERS` words that are all
-  numbers, no math operator on the line, not a constant-step axis run. Removed first:
+  numbers, no math operator on the line, and not an axis (a constant-step tail that is all
+  calendar years or sits at a chart or image box; see the merge-gate round). Removed first:
   furniture (the detector's repeated word slots and folio slots), superscripts (span flag, else
   height ratio), words inside a chart or image box, digits glued to label words. Rotated pages
   are handled (line grouping by reading direction). Computed once at assessment and stored as
@@ -58,9 +69,11 @@ receive the drop clause.
   number can absorb a dropped body copy of the same value; measured at v3 that subtraction
   changed 27 of 2,052 dropped numbers (calibration) and 0 (Fed). A minus is part of the number.
 - **Clause** (`core/verdict.py::text_layer_drops_clause`, `page_dropped_numbers`): FAIL when
-  any number is dropped. Emits nothing (never UNKNOWN) on a non-model reading, an empty
-  reading, a page-failed marker, `prior_ocr_layer_suspect`, a damaged layer
-  (`_layer_is_damaged`), or an empty reference (empty means not checked, not zero dropped).
+  any number is dropped. Emits nothing (never UNKNOWN) on a non-model reading (consensus
+  winners `consensus(<engine>)` count as model readings), an empty reading, a page-failed marker,
+  `prior_ocr_layer_suspect`, a damaged layer (`_layer_is_damaged`), a page whose table socr
+  withheld (`_table_withheld_by_socr`), or an empty reference (empty means not checked, not
+  zero dropped).
   Last in `_SILENT_SUCCESS_ORDER`, so #1185's slot count is unchanged.
 - **Surfaces**:
   - page: status WARNING, never CHECKED;
@@ -81,7 +94,8 @@ receive the drop clause.
 - `NO_NUMBER_LAYER_HAS_SOME_REASON` (a reading that ships no number while the layer prints
   some) now points at this check for table-row numbers; other dropped numbers are still not
   checked.
-- Tests: `tests/test_gh1218_layer_body.py`, `tests/test_gh1218_drops_clause.py`; the pins are
+- Tests: `tests/test_gh1218_layer_body.py`, `tests/test_gh1218_drops_clause.py`,
+  `tests/test_gh1218_followup.py`; the pins are
   DIFFERENCES (same page with and without the dropped row differs only in the clause, in both
   provider states), not values measured locally.
 
@@ -111,7 +125,7 @@ Reason for each step:
 
 - v1 / v2 to v3: geometry BODY filtering (furniture, superscripts) still leaves folios,
   footnote markers, formulas, equation numbers and chart ticks. Only label-row tails are owed.
-  Chart axes are excluded on purpose (see Choices).
+  Chart axes are excluded on purpose, on evidence (see Choices 3).
 - v3 to v4: the adjudication below found chart and figure pages as every Fed false alarm
   (5 of 5) and comparator artifacts on present numbers as the calibration false alarms (minus
   read as `2` on damaged layers, decimal commas, split decimals). Added: chart boxes
@@ -211,7 +225,9 @@ Real drops by drop count at v3 (firing pages only, joined to `pages_v3.jsonl` on
   words. Over 10,642 integer+digits pairs in label-row tails on both corpora, the pair counts
   have no empty valley (closely set integer cells are common). The evidence that a pair is ONE
   number is that its joined decimal occurs in the reading: 171 pairs. That support is 97 of 288
-  pairs below ratio 0.06, 14 of 436 in 0.06-0.10, and zero from 0.10 to 0.54. Max F1 at
+  pairs below ratio 0.06, 14 of 436 in 0.06-0.10, zero from 0.10 to 0.54, and the remaining 60
+  of 171 above 0.54 (`data/fragment_hist.txt`; 97 + 14 + 0 + 60 = 171), where the pairs are
+  ordinary cell pairs and the match is incidental. Max F1 at
   ratio < 0.06 (precision 0.34, recall 0.57, F1 0.42). Two pairs: tails with exactly one close
   pair were supported 1 of 42 times (2%), tails with two or more 96 of 246 (39%). A wrong
   join usually adds a false drop; it can hide a real one when the reading ships the joined
@@ -245,8 +261,12 @@ Real drops by drop count at v3 (firing pages only, joined to `pages_v3.jsonl` on
    #1155). The numbers go to the audit event's `data`. Cost: a reader must open `audit_log.json`
    to see which numbers. Fable's caution agrees: a chart page can print 100 layer numbers under
    a mark.
-3. **Chart axes are excluded** (STATUS.md). The brief says chart axes must not fire and
-   loss of charts belongs to the deferred chart-loss team. This overrides Fable's A2.1 idea
+3. **Chart axes are excluded, on evidence** (STATUS.md; amended by the merge-gate round).
+   The brief says chart axes must not fire and
+   loss of charts belongs to the deferred chart-loss team. Originally any constant-step tail
+   was an axis; Astra (PR #1277) showed `China 10 20 30` is a data row, so a constant step now
+   excludes only calendar years or a tail at a chart or image box (`_is_axis_not_data`). This
+   overrides Fable's A2.1 idea
    (count an axis run as dropped when ALL its members are missing from the reading), which
    rests on a real measurement: 419 of 587 (71%) of the first missing tokens on the 16 worst
    pages sit in a vertical constant-step column. Cost, measured: three Fed chart pages still
@@ -260,7 +280,9 @@ Real drops by drop count at v3 (firing pages only, joined to `pages_v3.jsonl` on
 
 ## Merge-gate round (PR #1277, review in `scratch/army/1218/MERGE-GATE.md`)
 
-Astra blocked on three P0s; Fable said merge with P2s. New commits on top of 763e03f4:
+Astra blocked on three P0s; Fable said merge with P2s. New commits on top of `763e03f4`:
+`6a36dcd8` (resume evidence, withheld tables, event kinds), `f2e12081` (axis evidence, writing
+forms), `cfd877e0` (the two tests mutation round 3 asked for), `058998a3` (this log):
 
 - **Resume kept the evidence (Astra P0-3).** A resumed terminal page recomputed its dropped list,
   and a reassessment that returned an empty reference wrote `dropped: []` beside a FAIL clause. The
@@ -274,7 +296,9 @@ Astra blocked on three P0s; Fable said merge with P2s. New commits on top of 763
 - **Event kinds pinned both ways (Fable P2).** The pin found two kinds missing from
   `EVENT_KINDS_AFTER_NUMBERS_DROPPED` (`figure_description_dropped`, `figure_recoverable_labels`).
 - **Axis rule needs evidence (Astra P0-2).** A constant-step tail is excluded only when every value is
-  a calendar year, or the tail lies within one text height of a chart or image box. `China 10 20 30`
+  a calendar year, or the tail sits at a chart box (given as `chart_region_bboxes` returns it,
+  already grown by the page's row gap) or within one text height of a raw image box (follow-up
+  below: the first version grew chart boxes a second time). `China 10 20 30`
   is checked. Measured (`scratch/army/1218/data/summary_c2_12.txt`, `rescore_c2_12.jsonl`): 0 of 49
   adjudicated clean pages fire, adjudicated real and false-alarm pages unchanged; on the corpus 5
   calibration pages newly fire, all eye-checked false alarms (chart legends and ticks where no chart
@@ -292,11 +316,11 @@ Astra blocked on three P0s; Fable said merge with P2s. New commits on top of 763
 
 ## Mutation results
 
-`scratch/army/1218/mutants/RESULTS.md`. Round 3, on the merge-gate tree f2e12081 (control 86
+`scratch/army/1218/mutants/RESULTS.md`. Round 3, on the merge-gate tree `f2e12081` (control 86
 passed): 16 mutants, 14 killed at once (M1, M4, M5, M9, M11, M18 resume evidence, M20 withheld gate,
 M21-M23 axis evidence, M24-M26 writing forms, M27a); the two holes, M19 (an unconfirmable list must be
 recorded as `unresolved`, never `dropped: []`) and M27b (one space-thousands group satisfies one layer
-number), were closed by tests in cfd877e0, each shown to fail under its mutant. Round 2, on the final commit 6f926249 (copies built
+number), were closed by tests in `cfd877e0`, each shown to fail under its mutant. Round 2, on the pre-rebase `6f926249` (copies built
 with `git archive HEAD`, `socr.__file__` asserted inside each copy, uncapped anchor count 1, same
 collected count as the control; control 74 passed): 16 mutants applied, 15 killed (M1-M6, M8-M14,
 M16, M17); M11b (only the persisted-list rule of the P0-A repair removed) survives because the
@@ -330,7 +354,9 @@ Kimi (`advisors/kimi.md`), on the v3 code:
   221 layer numbers and 0 label rows; a dropped `(2.07)` was found by eye), year-first rows
   (`2004 1.2 2.1 3.0`), side-by-side tables on one line (only the right one is owed), separate
   `%` / `$` cells or a trailing unit, a rotated table inside upright prose, and a genuine
-  constant-step row such as `Revenue 100 200 300`, which `_tail_is_axis` rejects.
+  constant-step row such as `Revenue 100 200 300` was rejected by `_tail_is_axis` when Kimi
+  reported this (v3); since the merge-gate round it is checked unless every value is a calendar
+  year or it sits at a chart or image box.
 - **K2 false-alarm classes left.** Trailing-zero rounding (`2.10` against `2.1`); non-zero
   decimal commas (`1,332` against `1.332`, `1,33` against `1.33`); a glued callout
   (`1431` against `143^1`); chart labels outside the inferred boxes (Andrade p58, eight ticks);
@@ -342,10 +368,11 @@ Kimi (`advisors/kimi.md`), on the v3 code:
   layer rows are already kept (`LayerNumber.row`, `row_label`) but `DropReference` flattens
   them. Not built.
 - **K4** is under Constants.
-- **K5 re-finalize parity** is blocking in Kimi's report: an interrupted pass writes an event
-  with empty data and the `have` guard prevents repair; event order and document `error` note
-  order differ from a fresh run. The fix and whole-artifact parity tests are tracked in the
-  placeholder at the top.
+- **K5 re-finalize parity** was blocking in Kimi's report (v3): an interrupted pass wrote an
+  event with empty data and the `have` guard prevented repair; event order and document `error`
+  note order differed from a fresh run. FIXED in `763e03f4` / `6a36dcd8`; the whole-artifact
+  parity tests are in `tests/test_gh1218_drops_clause.py` (the "parity of a re-finalized or
+  resumed run with a fresh one" section), guarded by mutants M9, M11-M13, M16.
 
 Fable (`advisors/fable.md`):
 
@@ -372,3 +399,57 @@ Adjudicators saw two real defects on pages they called FALSE_ALARM for #1218, bo
 territory: P027 (2012 Krishnamurthy and Vissing-Jorgensen p16), image `[4.33]`, markdown
 `[.433]`; P023, lost minus signs. Neither is flagged by this clause. Kimi's `2.10` against
 `2.1` and decimal-comma false fires live in the same comparator.
+
+## Follow-up to the cubic review of PR #1277 (branch `fix/1218-followup`)
+
+Each cubic claim was checked against the code on `d44ae01a` before it was fixed. Tests are in
+`tests/test_gh1218_followup.py` unless stated; each failed on `d44ae01a` and passes after.
+
+- **Valid, fixed.** `socr-refinalize-own-text` overwrote a page's existing
+  `refinalized_own_text.json` entry (`before` became the already-changed status and
+  `text_layer_numbers` became empty); the #1218 pass now merges into it, keeping the original
+  `before` and numbers result and adding only the drops field.
+- **Valid, fixed.** `_sign_from_rotation`: under the module's own (H - y, x) mapping a line read
+  left to right on a /Rotate 90 page runs toward DECREASING unrotated y, so the sign is -1 for 90
+  and +1 for 270; it was the reverse. The test asserts the row grouping (`line_text`), not the
+  class.
+- **Valid, fixed.** A space-thousands group could start inside a token (`Q1 234` read as 1,234);
+  the leading digits may no longer follow a word character.
+- **Valid, fixed.** `page_dropped_numbers` skipped `consensus(qwen)` winners; it now uses
+  `_is_model_reading`. #1185's own clause (`text_layer_numbers_clause`) still tests the bare
+  engine name; that is #1185's behaviour, not changed here.
+- **Valid, fixed.** The decimal-fragment chain filter compared against candidates, not kept
+  pairs; a chain `1 23 45 67` joined nothing and now joins `1.23` and `45.67`.
+- **Valid, fixed.** Chart boxes were grown twice. `chart_region_bboxes` boxes are used as given;
+  only raw image boxes (new `image_boxes` argument) get the text-height margin.
+- **Test vacuity, fixed.** The `ladder` arm of
+  `test_one_dropped_row_changes_every_level_and_only_with_a_model_reading` now asserts its premise
+  in both provider states; the CLI line is asserted from the run's printed console output (and
+  absent from the run that drops nothing); the rotation test in `test_gh1218_layer_body.py`
+  asserts the grouping.
+- **Docs.** This log: commit hashes, K1, K5, Choices 3, the candidate and clause descriptions,
+  the 60 pairs above 0.54 (97 + 14 + 0 + 60 = 171), and the two docstrings in `verdict.py` (`page_dropped_numbers` no longer
+  says heads and folios are removed from the reading's side; it lists the withheld-table
+  exclusion).
+- **Not changed.** Gating the drop reference on `assessment.is_born_digital` (P3, cost only):
+  not in this follow-up's scope.
+
+### What #1266 (PR #1273) and #1267 (PR #1271) use, for extending `_table_withheld_by_socr`
+
+Both are open; nothing here depends on them. `_table_withheld_by_socr` reads
+`failure_mode in {TABLE_WITHHELD, TABLE_WITHHELD_UNCONFIRMED}`, `table_ladder_disposition`, and
+`carries_withheld_marker(text)`.
+
+- **#1266** adds the typed credential `PageOutput.table_floor_body: bool` (`core/result.py`,
+  set only by `core.manifest` on a body a socr table floor wrote: structure-class floor, D3
+  ending, GH-90 scanned floor, `withheld_table_floor_text`, box-less failed-table route), a new
+  banner `BORN_DIGITAL_KEEP_SENTENCES_FLAG` added to `PROSE_RECOVERED_FLAGS` (so
+  `carries_withheld_marker` matches it without a change), and `withheld_table_floor_text`.
+  A test in the PR builds a floor body with `failure_mode=NATIVE_TABLE_STRUCTURE_FAILED`, which
+  the current mode set does not list: the extension is `output.table_floor_body`.
+- **#1267** sets `failure_mode=disposition` and status ERROR on a spliced page, writes the
+  existing `[page N failed: unverifiable table` marker per withheld table (already matched), the
+  `table_ladder_withheld` event with reason `row_binding_contradiction`, and the page-state
+  fields `row_binding_contradicted_tables` and `row_binding_withhold_only` (the page withheld
+  only some tables). Row-binding UNVERIFIABLE tables ship marked and are not withheld, so they
+  need no exclusion.
