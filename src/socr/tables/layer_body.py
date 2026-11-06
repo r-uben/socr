@@ -228,10 +228,11 @@ def _sign_from_rotation(rotation: int) -> int:
     """Reading direction in unrotated coordinates implied by the page's /Rotate.
 
     /Rotate 90 displays unrotated (x, y) at (H - y, x): a line that reads left to right on
-    screen runs down the unrotated page (+1). /Rotate 270 is the reverse. frame2.py's
-    default for "no evidence" (-1) stays for the other values.
+    screen has its screen x rising, so its unrotated y FALLS: it runs up the unrotated page
+    (-1). /Rotate 270 is the reverse (+1). frame2.py's default for "no evidence" (-1) stays
+    for the other values.
     """
-    return 1 if rotation % 360 == 90 else -1
+    return 1 if rotation % 360 == 270 else -1
 
 
 def _dedupe_overprint(words: Sequence[Sequence]) -> list[Sequence]:
@@ -294,8 +295,14 @@ def _merge_fragments(
         and _FRAGMENT_LEFT_RE.match(tail[k][0])
         and _FRAGMENT_RIGHT_RE.match(tail[k + 1][0])
     ]
-    # a word cannot be the right half of one pair and the left half of the next
-    pairs = [k for k in pairs if k - 1 not in pairs]
+    # a word cannot be the right half of one pair and the left half of the next: walking left
+    # to right, a candidate that overlaps the pair just KEPT is dropped (one that overlaps a
+    # candidate which itself lost the conflict is not)
+    kept_pairs: list[int] = []
+    for k in pairs:
+        if not kept_pairs or kept_pairs[-1] != k - 1:
+            kept_pairs.append(k)
+    pairs = kept_pairs
     if len(pairs) < DECIMAL_FRAGMENT_MIN_PAIRS:
         return tail, {}, set()
     merged: dict[int, str] = {}
@@ -337,26 +344,36 @@ def _tail_is_axis(tail: Sequence[str]) -> bool:
     )
 
 
-def _near_boxes(words: Sequence[_Word], boxes: Sequence[Sequence[float]]) -> bool:
-    """Does any of ``words`` touch a chart or image box grown by one text height?
+def _near_boxes(
+    words: Sequence[_Word],
+    chart_boxes: Sequence[Sequence[float]],
+    image_boxes: Sequence[Sequence[float]] = (),
+) -> bool:
+    """Does any of ``words`` touch a chart box, or an image box grown by one text height?
 
-    The box is the plot's extent; its tick labels sit just outside it, so the box is grown by
-    the tail's own median text height (relative to the type size, not an absolute length).
+    ``chart_boxes`` (``chart_region_bboxes``) arrive ALREADY grown by the page's own row gap
+    so that tick labels fall inside them: they are used as given. An image box is the raster's
+    raw extent, its tick labels sit just outside it, so it is grown by the tail's own median
+    text height (relative to the type size, not an absolute length). Growing a chart box too
+    would count a data row near a chart as the chart's axis.
     """
-    if not boxes:
+    if not chart_boxes and not image_boxes:
         return False
     margin = statistics.median(w.v1 - w.v0 for w in words)
+    grown = [*((b, 0.0) for b in chart_boxes), *((b, margin) for b in image_boxes)]
     return any(
-        w.box[0] <= b[2] + margin
-        and w.box[2] >= b[0] - margin
-        and w.box[1] <= b[3] + margin
-        and w.box[3] >= b[1] - margin
+        w.box[0] <= b[2] + m
+        and w.box[2] >= b[0] - m
+        and w.box[1] <= b[3] + m
+        and w.box[3] >= b[1] - m
         for w in words
-        for b in boxes
+        for b, m in grown
     )
 
 
-def _is_axis_not_data(tail: Sequence[str], words: Sequence[_Word], boxes) -> bool:
+def _is_axis_not_data(
+    tail: Sequence[str], words: Sequence[_Word], chart_boxes, image_boxes=()
+) -> bool:
     """A constant-step tail that is a time axis or header, or a plot's tick labels.
 
     ``China 10 20 30`` is a data row whose values happen to step evenly (Astra, PR #1277),
@@ -367,11 +384,14 @@ def _is_axis_not_data(tail: Sequence[str], words: Sequence[_Word], boxes) -> boo
     if not _tail_is_axis(tail):
         return False
     years = all(_CALENDAR_YEAR_RE.fullmatch(_STARS_RE.sub("", t).strip(_TAIL_EDGE)) for t in tail)
-    return years or _near_boxes(words, boxes)
+    return years or _near_boxes(words, chart_boxes, image_boxes)
 
 
 def _label_row(
-    words: Sequence[_Word], min_numbers: int, axis_boxes: Sequence[Sequence[float]] = ()
+    words: Sequence[_Word],
+    min_numbers: int,
+    axis_boxes: Sequence[Sequence[float]] = (),
+    image_boxes: Sequence[Sequence[float]] = (),
 ) -> tuple[str, set[int], dict[int, str], set[int]] | None:
     """(label, tail word ids, tail texts by word id, consumed ids) if ``words`` form a row.
 
@@ -399,7 +419,7 @@ def _label_row(
         return None
     if not any(_TWO_LETTERS_RE.search(text) for text, _ in label):
         return None
-    if _is_axis_not_data([text for text, _ in tail], [w for _, w in tail], axis_boxes):
+    if _is_axis_not_data([text for text, _ in tail], [w for _, w in tail], axis_boxes, image_boxes):
         return None
     return (
         " ".join(text for text, _ in label),
@@ -418,13 +438,15 @@ def classify_layer_numbers(
     superscripts: Sequence[Sequence[float]] | None = None,
     min_numbers: int = LABEL_ROW_MIN_NUMBERS,
     excluded_boxes: Sequence[Sequence[float]] = (),
+    image_boxes: Sequence[Sequence[float]] = (),
 ) -> list[LayerNumber]:
     """Every numeric token of ``words`` with its class and run; lines in reading order.
 
     ``words`` are ``page.get_text("words")`` tuples ``(x0, y0, x1, y1, text, ...)``.
     ``page_rect`` is accepted for symmetry with the page and is not used (no band by
-    position). ``excluded_boxes`` are chart-region and image boxes, in the words' own
-    coordinates; words centred in one are ignored. ``rotation`` is the page's /Rotate; it decides the reading direction of a
+    position). ``excluded_boxes`` are chart-region boxes and ``image_boxes`` raster image boxes,
+    in the words' own coordinates; words centred in either are ignored. Only an image box is
+    grown when deciding whether a tail is its axis (see :func:`_near_boxes`). ``rotation`` is the page's /Rotate; it decides the reading direction of a
     sideways page only where the words themselves do not. ``superscripts`` are the boxes
     from :func:`superscript_boxes`; when given, FOOTNOTE follows the span flag, otherwise
     the height ratio.
@@ -432,11 +454,8 @@ def classify_layer_numbers(
     # Words inside a chart region or a raster image are chart or figure labels, not the
     # page's body: removed before anything else. Boxes share the words' coordinate convention
     # (``get_text("words")``, unrotated), as do ``chart_region_bboxes`` and ``get_image_info``.
-    kept = [
-        w
-        for w in words
-        if str(w[4]).strip() and not (excluded_boxes and _in_any(w, excluded_boxes))
-    ]
+    out_boxes = [*excluded_boxes, *image_boxes]
+    kept = [w for w in words if str(w[4]).strip() and not (out_boxes and _in_any(w, out_boxes))]
     flags = {id(w): bool(is_furniture is not None and is_furniture(w)) for w in kept}
     sups = {id(w): (_in_any(w, superscripts) if superscripts is not None else None) for w in kept}
     kept = _dedupe_overprint(kept)
@@ -471,7 +490,7 @@ def classify_layer_numbers(
                 else len(line) >= MIN_WORDS_FOR_RATIO and (w.v1 - w.v0) / median_h < FOOT_RATIO
             )
         ]
-        row = _label_row(owed, min_numbers, excluded_boxes)
+        row = _label_row(owed, min_numbers, excluded_boxes, image_boxes)
         if row is not None:
             row_id += 1
         carry = ""
@@ -562,7 +581,7 @@ def drop_reference_from_page(page, *, repeated_slots, folio_slots) -> DropRefere
 
     words = page.get_text("words")
     excluded = [tuple(r) for r in chart_region_bboxes(page)]
-    excluded += [tuple(i["bbox"]) for i in page.get_image_info()]
+    images = [tuple(i["bbox"]) for i in page.get_image_info()]
     is_furniture = slot_predicate(repeated_slots, folio_slots)
     numbers = classify_layer_numbers(
         words,
@@ -571,5 +590,6 @@ def drop_reference_from_page(page, *, repeated_slots, folio_slots) -> DropRefere
         rotation=int(page.rotation or 0),
         superscripts=superscript_boxes(page.get_text("dict")),
         excluded_boxes=excluded,
+        image_boxes=images,
     )
     return DropReference(body_text(numbers))

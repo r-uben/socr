@@ -554,8 +554,10 @@ _MATH_GLUE_RE = re.compile(r"[\^_{}]")
 #: leading ``0`` is a decimal comma.
 _READING_ZERO_COMMA_RE = re.compile(r"(?<![\w.,])([-\u2212]?0),(\d+)(?!\d|,\d)")
 #: Digits grouped by spaces (``1 234``, ``1 234 567.5``): the SPACE-THOUSANDS writing of ``1,234``.
+#: The leading group may not follow a word character: ``Q1 234`` is the token ``Q1`` and the
+#: number 234, not 1,234.
 _SPACED_GROUPS_RE = re.compile(
-    r"(?<![\d.,])\d{1,3}(?:[ \u00a0\u2009\u202f]\d{3})+(?:\.\d+)?(?!\d|[,.]\d)"
+    r"(?<![\w.,])\d{1,3}(?:[ \u00a0\u2009\u202f]\d{3})+(?:\.\d+)?(?!\d|[,.]\d)"
 )
 
 
