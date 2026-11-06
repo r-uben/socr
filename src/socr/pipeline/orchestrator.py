@@ -6033,7 +6033,7 @@ class UnifiedPipeline:
         is what keeps chart-free documents byte-identical.
         """
         from socr.core.audit_log import AuditEvent
-        from socr.core.manifest import is_page_failed_marker
+        from socr.core.manifest import is_page_failed_marker, recertify_floor_body
         from socr.core.pdf import open_pdf
         from socr.figures.chart_regions import (
             NOT_REPRESENTABLE,
@@ -6193,6 +6193,9 @@ class UnifiedPipeline:
                 )
 
             if new_body != body:
+                # #1266 round 6: this writer is socr's own; a floor page's certificate moves
+                # with the body it produced (nothing else may certify a changed body).
+                recertify_floor_body(ps, body, new_body, pn)
                 texts[pn - 1] = new_body
                 changed = True
 
@@ -22532,6 +22535,7 @@ class UnifiedPipeline:
         from ocr_output_contract import assemble_pages, split_native_pages
 
         from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import recertify_floor_body
 
         if "![" not in text:
             return text
@@ -22675,6 +22679,8 @@ class UnifiedPipeline:
 
             new_body = _crop_descriptions.insert_descriptions(body, describe_ref)
             if new_body != body:
+                # #1266 round 6: socr's own writer; see ``_preserve_chart_regions``.
+                recertify_floor_body(state.pages.get(page_num), body, new_body, page_num)
                 bodies[idx] = new_body
                 changed = True
 

@@ -7332,11 +7332,59 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
     return replace(output, scanned_prose_recovered=True, audit_notes=notes)
 
 
-#: #1266 round 5: a line that is only a markdown image embed or an image link.
-_IMAGE_ONLY_LINE_RE = re.compile(r"!?\[[^\]]*\]\([^)\s]+\)")
+#: #1266 round 6: an image-only line that carries no number: an image embed (the leading ``!``
+#: is required, a plain link is ordinary content), an alt text with no digit, and a target
+#: inside the ``figures/`` directory, the only place socr writes crops and page images. A
+#: socr-written ref whose alt text names a page or region number (``Failed table page 3``,
+#: ``chart region 1``) is not matched here: the page's own ``d3_floor_png_ref`` is compared
+#: by exact string, and a chart-region or description line reaches the saved body through
+#: ``recertify_floor_body``, never through line-shape recognition.
+_IMAGE_ONLY_LINE_RE = re.compile(r"!\[[^\]\d]*\]\(figures/[^)\s]+\)")
 
 
-def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
+def _certified_floor_bodies(page, page_num: int) -> list[str]:
+    """The bodies a socr floor writer certified for *page*: the last fresh finalize's, and
+    the body a post-selection writer produced from it (only while that base still equals the
+    fresh floor, so a page that changed underneath it keeps nothing stale)."""
+    if page is None:
+        return []
+    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
+    certified = getattr(page, "certified_floor_text", "")
+    bodies = [certified] if isinstance(certified, str) and certified else []
+    chain = getattr(page, "floor_writer_chain", ("", ""))
+    if (
+        bodies
+        and isinstance(chain, tuple)
+        and len(chain) == 2
+        and chain[0]
+        and chain[1]
+        and _same_body_modulo_marks(chain[0], certified, page_num, own_ref)
+    ):
+        bodies.append(chain[1])
+    return bodies
+
+
+def recertify_floor_body(page, before: str, after: str, page_num: int) -> bool:
+    """#1266 round 6: a socr writer changed a floor page's body after selection; carry the
+    certificate over to the body it produced.
+
+    Called only by socr's own post-selection writers (``_preserve_chart_regions``,
+    ``_describe_crop_refs``). The page must already hold a certified floor body and the
+    body the writer started from must be one of its certified bodies modulo marks; a page
+    that holds no certificate, or whose input was already altered by something else, is not
+    certified. Returns whether it re-certified.
+    """
+    bodies = _certified_floor_bodies(page, page_num)
+    if not bodies or not after or after == before:
+        return False
+    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
+    if not any(_same_body_modulo_marks(before, b, page_num, own_ref) for b in bodies):
+        return False
+    page.floor_writer_chain = (page.certified_floor_text, after)
+    return True
+
+
+def _same_body_modulo_marks(saved: str, selected: str, page_num: int, png_ref: str = "") -> bool:
     """#1266: is *saved* the *selected* body with only socr's own canonical mark lines added
     and socr's own #1074 re-flow applied?
 
@@ -7351,16 +7399,21 @@ def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
 
     letter_hyphen = re.compile(r"(?<=[^\W\d_])-(?=[^\W\d_])")
 
+    # The page's own image lines, by exact string: the embed ``d3_floor_png_ref`` and the
+    # plain link the floor writes to the same file (``page_image_link``).
+    own_image_lines = {x for x in (png_ref.strip(), page_image_link(png_ref)) if x}
+
     def _content(text: str) -> list[str]:
         toks: list[str] = []
         pending_join = False
         for ln in (text or "").splitlines():
             if not ln.strip() or is_canonical_mark(ln.strip(), page_num):
                 continue
-            # round 5: an image-only line (a page-image embed or link) carries no text and no
-            # number, and socr's own writers drop phantom ones after finalize
-            # (``strip_phantom_images``), so it is furniture here like a mark.
-            if _IMAGE_ONLY_LINE_RE.fullmatch(ln.strip()):
+            # round 5: an image-only line carries no text and no number, and socr's own
+            # writers drop phantom ones after finalize (``strip_phantom_images``), so it is
+            # furniture here like a mark -- but only the page's own image ref (exact string)
+            # or a digit-free ``![alt](figures/...)`` embed; a plain link is content.
+            if ln.strip() in own_image_lines or _IMAGE_ONLY_LINE_RE.fullmatch(ln.strip()):
                 continue
             words = ln.split()
             if pending_join and toks and words:
@@ -7371,6 +7424,37 @@ def _same_body_modulo_marks(saved: str, selected: str, page_num: int) -> bool:
         return [letter_hyphen.sub("", t) for t in toks]
 
     return _content(saved) == _content(selected)
+
+
+SAVED_FLOOR_BODY_REJECTED = "floor_saved_body_rejected"
+
+
+def _record_rejected_saved_body(state: DocumentState, page_num: int, saved_text: str) -> None:
+    """#1266 round 6: a floor page refused its saved text and shipped the recomputed floor;
+    say so once (no silent content loss). One event per page and rejected text, however many
+    times finalize repeats; the event holds a digest, never the rejected text."""
+    from socr.core.audit_log import AuditEvent
+
+    digest = table_floor_digest_of(saved_text)
+    for ev in state.events:
+        if (
+            getattr(ev, "kind", "") == SAVED_FLOOR_BODY_REJECTED
+            and getattr(ev, "page_num", None) == page_num
+            and (getattr(ev, "data", None) or {}).get("saved_digest") == digest
+        ):
+            return
+    state.events.append(
+        AuditEvent(
+            page_num=page_num,
+            kind=SAVED_FLOOR_BODY_REJECTED,
+            engine="",
+            detail=(
+                "the saved page text is not a body a floor writer certified; the recomputed "
+                "floor body shipped instead"
+            ),
+            data={"saved_digest": digest},
+        )
+    )
 
 
 def _is_bare_floor_body(text: str, page_num: int, png_ref: str) -> bool:
@@ -7461,11 +7545,10 @@ def _select_and_finalize_page(
             # certified (``certified_floor_text`` -- the #1155 chart floor declines under a
             # saved body, so its recomputation is not the chart body). Anything else is not a
             # body a floor wrote, and the recomputed floor ships instead: never the saved text.
-            _certified = getattr(_floor_page, "certified_floor_text", "") if _floor_page else ""
-            if _same_body_modulo_marks(saved_text, _selected_text, page_num) or (
-                isinstance(_certified, str)
-                and _certified
-                and _same_body_modulo_marks(saved_text, _certified, page_num)
+            _own_ref = getattr(_floor_page, "d3_floor_png_ref", "") or ""
+            if _same_body_modulo_marks(saved_text, _selected_text, page_num, _own_ref) or any(
+                _same_body_modulo_marks(saved_text, b, page_num, _own_ref)
+                for b in _certified_floor_bodies(_floor_page, page_num)
             ):
                 output = replace(
                     output, text=saved_text, table_floor_digest=table_floor_digest_of(saved_text)
@@ -7473,6 +7556,7 @@ def _select_and_finalize_page(
                 output = _recovery_facts_of_saved_body(output, saved_text, page_num)
             else:
                 _shipped_text = _selected_text
+                _record_rejected_saved_body(state, page_num, saved_text)
         else:
             output = replace(output, text=saved_text)
             output = _recovery_facts_of_saved_body(output, saved_text, page_num)
