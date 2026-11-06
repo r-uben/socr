@@ -814,11 +814,20 @@ def refinalize_document(
         log = _read_json(log_path) if log_path.is_file() else {"tool": "socr-refinalize-own-text"}
         pages = log.setdefault("pages", {})
         for change, (_f, _t, _p, data) in zip(changes, writes):
+            # An earlier pass (#1185's) may already have an entry for this page: this one
+            # adds to it. Its `before` is the status the page had BEFORE any pass, and its
+            # numbers result is the one its own clause produced; both are kept.
+            earlier = pages.get(str(change.page_num)) or {}
+            kept_after = earlier.get("after") or {}
             pages[str(change.page_num)] = {
-                "before": {"status": change.before},
+                "before": earlier.get("before") or {"status": change.before},
                 "after": {
                     "status": change.after,
-                    "text_layer_numbers": change.result,
+                    "text_layer_numbers": (
+                        kept_after["text_layer_numbers"]
+                        if "text_layer_numbers" in kept_after
+                        else change.result
+                    ),
                     **({"text_layer_drops": change.drops} if change.drops else {}),
                 },
                 "socr_source_digest": data["socr_source_digest"],

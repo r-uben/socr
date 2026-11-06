@@ -1249,19 +1249,22 @@ def page_dropped_numbers(output: PageOutput, p: Any) -> tuple[str, ...]:
 
     * there is no own layer, or the layer is damaged (``_layer_is_damaged``): a damaged layer
       has fewer or wrong numbers, the wrong direction for counting omissions;
+    * socr itself withheld a table on the page (``_table_withheld_by_socr``): the missing
+      numbers are withheld, not dropped by the model;
     * the page's drop reference is EMPTY. Empty means NOT CHECKED (the assessment could not
       classify the layer, or no table row qualified), never "zero dropped".
 
     The cosmetic-layer flag does NOT suppress it (orchestrator decision, 2026-11-06): a fused
     pair can hide a layer number from the reference, which makes the count lower, not higher.
-    Uses ``tables.reading_agreement.dropped_numbers`` over ``reading_numbers_text``, with the
-    page's running heads and folios taken out of the reading's side so a transcribed head
-    cannot stand in for a dropped body number.
+    Uses ``tables.reading_agreement.dropped_numbers`` over ``reading_numbers_text``. The
+    reading's side is NOT reduced by the page's running heads and folios (see
+    ``dropped_numbers``): the count is a lower bound, and a transcribed head MAY absorb a
+    dropped body number of the same value.
     """
     from socr.core.manifest import is_page_failed_marker
     from socr.tables.reading_agreement import dropped_numbers
 
-    if (output.engine or "") not in model_reading_engines() or not (output.text or "").strip():
+    if not _is_model_reading(output) or not (output.text or "").strip():
         return ()
     if is_page_failed_marker(output.text):
         return ()
