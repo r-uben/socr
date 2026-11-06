@@ -116,7 +116,8 @@ def old_disposition_buckets(state) -> dict[str, set[int]]:
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
         )
-        and bool(p.attempts)
+        # #1266 commit 3: the D3 floor (and the bucket that surfaces it) no longer requires an
+        # attempt; the one deliberate departure from the pre-P6 predicate.
         and n not in d3_model_table_pages
     }
     flagged_model_pages = {

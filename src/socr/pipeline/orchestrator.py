@@ -737,7 +737,8 @@ def _derive_disposition_buckets(
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
         )
-        and bool(p.attempts)
+        # #1266 commit 3: the D3 floor no longer requires an attempt, so neither does the
+        # bucket that surfaces it (document status, audit event, CLI line).
         and n not in d3_model
     }
     flagged_model: set[int] = {

@@ -1469,13 +1469,10 @@ def _reaches_structure_class_branch(p) -> bool:
     # never reached for this page -- a different, earlier return ships.
     if not (p.is_born_digital and p.native_text):
         return False
-    if (
-        p.native_table_structure_failed
-        and (
-            getattr(p, "native_table_unverifiable", False)
-            or getattr(p, "native_table_header_unattributed", False)
-        )
-        and bool(p.attempts)
+    # #1266 commit 3: mirrors the D3 entry, which no longer requires an attempt.
+    if p.native_table_structure_failed and (
+        getattr(p, "native_table_unverifiable", False)
+        or getattr(p, "native_table_header_unattributed", False)
     ):
         return False
     if getattr(p, "native_rotated_text_shredded", False):
@@ -4816,7 +4813,14 @@ def _select_page_output_tagged(
                 # SHIPPED the header-destroyed native table text.
                 or getattr(p, "native_table_header_unattributed", False)
             )
-            and bool(p.attempts)
+            # #1266 commit 3: deliberately NOT gated on ``bool(p.attempts)``, following
+            # GH-195 and #263's shredded floor below. The defect is found during native
+            # extraction, on a page that may never reach the OCR ladder (a providerless run,
+            # ``--native-only``, a provider outage); with the attempt gate such a page fell
+            # past this floor and past S1 to ``_native_text_with_appends`` and shipped the
+            # damaged table's native bytes (Astra review 3, P1 #1). With no attempt there is
+            # no model reading to keep, so the #262 check below returns None and the floor
+            # fires.
         ):
             # #262: unless some attempt did author a grid, in which case the
             # failed-table marker would be the lossier outcome. This D3-specific

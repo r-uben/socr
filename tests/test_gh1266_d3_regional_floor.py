@@ -352,13 +352,15 @@ def test_e_a_words_less_d3_page_replays_its_typed_recovery_and_otherwise_fails_c
     assert _whole_page(scan_out.text)
 
     # A POSITIVE prior-OCR finding outranks the replay too (#1156): the layer's text is not
-    # shipped even when a typed recovery of it is on the page.
-    flagged = _restored_d3(tmp_path, body, typed=True, name="d.pdf")
-    flagged.pages[1].prior_ocr_layer = True
-    flagged_out, flagged_prov = _select_page_output_tagged(flagged, 1)
-    _assert_d3_ending(flagged_out, flagged_prov)
-    assert _whole_page(flagged_out.text)
-    _assert_recorded(flagged_out, False)
+    # shipped even when a typed recovery of it is on the page. BOTH positive routes, each on
+    # its own (Astra review 3, Q7: a bypass for one flag only must not survive).
+    for flag in ("prior_ocr_layer", "invisible_text_over_raster"):
+        flagged = _restored_d3(tmp_path, body, typed=True, name=f"d-{flag}.pdf")
+        setattr(flagged.pages[1], flag, True)
+        flagged_out, flagged_prov = _select_page_output_tagged(flagged, 1)
+        _assert_d3_ending(flagged_out, flagged_prov)
+        assert _whole_page(flagged_out.text), flag
+        _assert_recorded(flagged_out, False)
 
 
 @pytest.fixture
@@ -386,53 +388,91 @@ def _own_lines(body: str) -> list[str]:
     ]
 
 
+def _run_route(tmp_path: Path, pdf: Path, monkeypatch, *, ladder: bool, native_first: bool, tag):
+    """``_run`` with the route knob exposed: ``native_first`` (the CLI default is True) sends a
+    failed native table through the native-table-first refusal; False sends the page through
+    the OCR ladder."""
+    import dataclasses
+    import json
+
+    from test_gh1144_prose_survives_the_table_floor import _GridEngine, _pipeline
+
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+    pipe.config = dataclasses.replace(pipe.config, native_first=native_first)
+    pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL] if ladder else []
+    out = tmp_path / tag
+    pipe.process(pdf, output_dir=out)
+    frag = next(iter(out.rglob("pages/00001.md"))).read_text()
+    meta = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    return frag, meta, out
+
+
+#: (ladder, native_first) routes measured to end at D3. With the OCR route
+#: (``native_first=False``) and an empty ladder the providerless loop never sets
+#: ``native_table_structure_failed`` (orchestrator: only ``native_fallback_pages``, which needs
+#: ``native_first``), so that cell ends at the structure-class floor and is checked separately.
+_D3_ROUTES = [(True, False), (True, True), (False, True)]
+
+
 def test_process_d3_differential_and_both_provider_states(
     tmp_path: Path, monkeypatch, forced_tr3_failure
 ) -> None:
-    """process() over a real PDF whose table hard-fails TR-3.
+    """process() over a real PDF whose table hard-fails TR-3, in BOTH provider states.
 
-    Populated ladder: the page ends at D3 (sidecar ``failure_mode``), and toggling ONLY the
-    geometry floor (``geometry_floor=False`` inside ``table_floor_text_for_source``) changes
-    the bytes. Empty ladder: the D3 page cannot exist -- the ending needs ``p.attempts`` and
-    no rung runs ("no OCR providers available") -- so the page ends at the structure-class
-    floor instead (asserted, not assumed). Both endings now take the same floor, so the
-    page's own lines are identical across the two provider states.
+    Every route in ``_D3_ROUTES`` -- populated ladder via the OCR ladder, populated ladder via
+    the native-table-first refusal, and an EMPTY ladder via that refusal -- ends at D3 (sidecar
+    ``failure_mode``), and in each one toggling ONLY the geometry floor
+    (``geometry_floor=False`` inside ``table_floor_text_for_source``) changes the bytes. The
+    page's own lines are identical across the routes. The fourth cell (empty ladder, OCR
+    route) does not carry the D3 conjunction and ends at the structure-class floor -- the
+    same floor, so the same own lines.
     """
     from socr.core import manifest as manifest_mod
 
     pdf = _process_pdf(tmp_path / "doc.pdf")
-    on = {}
-    for ladder in (True, False):
-        tag = "ladder" if ladder else "empty"
-        frag, meta, out = _run(tmp_path, pdf, monkeypatch, ladder=ladder, tag=f"on-{tag}")
-        on[ladder] = (frag, meta, out)
-    d3_frag, d3_meta, d3_out = on[True]
-    s1_frag, s1_meta, _ = on[False]
-
-    assert d3_meta["failure_mode"] == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value
-    assert s1_meta["failure_mode"] != FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value, (
-        "premise: an empty ladder leaves no attempt, so the D3 ending is not reached"
-    )
-    assert "structure_class" in s1_meta["failure_mode"]
-    assert BANNER in d3_frag
-    for tok in ("Real GDP", "Final sales", "2.6", "4.1"):
-        assert tok not in d3_frag, f"table content {tok!r} shipped"
-    assert d3_meta["winning_output"]["scanned_prose_recovered"] is True
-    assert SCANNED_PROSE_RECOVERED_NOTE in d3_meta["winning_output"]["audit_notes"]
-    meta_doc = next(iter(d3_out.rglob("doc/metadata.json"))).read_text()
-    assert "born-digital table could not be verified" in meta_doc, "surfacing is silent"
-    assert _own_lines(d3_frag) == _own_lines(s1_frag), "the two endings shipped different text"
-
-    with monkeypatch.context() as mp:
-        real = manifest_mod.table_floor_text_for_source
-        mp.setattr(
-            manifest_mod,
-            "table_floor_text_for_source",
-            lambda *a, **k: real(*a, **{**k, "geometry_floor": False}),
+    own = {}
+    for ladder, native_first in _D3_ROUTES:
+        tag = f"{'ladder' if ladder else 'empty'}-{'nf' if native_first else 'ocr'}"
+        frag, meta, out = _run_route(
+            tmp_path, pdf, monkeypatch, ladder=ladder, native_first=native_first, tag=f"on-{tag}"
         )
-        off_frag, off_meta, _ = _run(tmp_path, pdf, monkeypatch, ladder=True, tag="off-ladder")
-    assert off_meta["failure_mode"] == d3_meta["failure_mode"], "route differs between arms"
-    assert off_frag != d3_frag, "the geometry floor changed nothing on the D3 page"
+        assert meta["failure_mode"] == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value, tag
+        assert BANNER in frag, tag
+        for tok in ("Real GDP", "Final sales", "2.6", "4.1"):
+            assert tok not in frag, f"{tag}: table content {tok!r} shipped"
+        assert meta["winning_output"]["scanned_prose_recovered"] is True, tag
+        assert SCANNED_PROSE_RECOVERED_NOTE in meta["winning_output"]["audit_notes"], tag
+        meta_doc = next(iter(out.rglob("doc/metadata.json"))).read_text()
+        assert "born-digital table could not be verified" in meta_doc, f"{tag}: surfacing silent"
+        with monkeypatch.context() as mp:
+            real = manifest_mod.table_floor_text_for_source
+            mp.setattr(
+                manifest_mod,
+                "table_floor_text_for_source",
+                lambda *a, **k: real(*a, **{**k, "geometry_floor": False}),
+            )
+            off_frag, off_meta, _ = _run_route(
+                tmp_path,
+                pdf,
+                monkeypatch,
+                ladder=ladder,
+                native_first=native_first,
+                tag=f"off-{tag}",
+            )
+        assert off_meta["failure_mode"] == meta["failure_mode"], f"{tag}: route differs"
+        assert off_frag != frag, f"{tag}: the geometry floor changed nothing on the D3 page"
+        own[tag] = _own_lines(frag)
+
+    s1_frag, s1_meta, _ = _run_route(
+        tmp_path, pdf, monkeypatch, ladder=False, native_first=False, tag="on-empty-ocr"
+    )
+    assert "structure_class" in s1_meta["failure_mode"], s1_meta["failure_mode"]
+    own["empty-ocr"] = _own_lines(s1_frag)
+    assert len({tuple(v) for v in own.values()}) == 1, own
 
 
 @pytest.mark.parametrize("shape", ["recovered", "whole-page"])
@@ -489,9 +529,8 @@ def test_e_a_real_restore_reproduces_the_live_d3_page_byte_for_byte(
     meta2 = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
     for key in ("status", "failure_mode"):
         assert meta2[key] == meta[key], key
-    assert meta2["winning_output"].get("scanned_prose_recovered") == meta["winning_output"].get(
-        "scanned_prose_recovered"
-    )
+    for key in ("scanned_prose_recovered", "audit_notes"):
+        assert meta2["winning_output"].get(key) == meta["winning_output"].get(key), key
     _, restored_prov = _select_page_output_tagged(state, 1)
     assert restored_prov is SelectionProvenance.BEST_OUTPUT_UNVERIFIED, restored_prov
 
@@ -510,3 +549,147 @@ def test_e_a_real_restore_reproduces_the_live_d3_page_byte_for_byte(
     _, prov = _select_page_output_tagged(again, 1)
     assert prov is D3, prov
     assert finalized_page_records(again)[0].output.text == frag
+
+
+# ---------------------------------------------------------------------------
+# commit 3: the D3 floor no longer needs an OCR attempt (Astra review 3, P1 #1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("header_unattributed", [False, True])
+def test_a_d3_page_with_no_attempt_takes_the_floor(tmp_path: Path, header_unattributed) -> None:
+    """DIFFERENCE: the same page with one rejected attempt and with NONE ship the same floor.
+
+    Before, the zero-attempt page declined D3 and S1 and shipped ``_native_text_with_appends``
+    -- the TR-3-refuted grid's native bytes. With no attempt there is no model to keep."""
+    from socr.core.manifest import (
+        _reaches_structure_class_branch,
+        d3_floor_kept_model_output,
+    )
+
+    one, one_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="one.pdf")
+    none, none_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="none.pdf")
+    _d3(one_ps, header_unattributed=header_unattributed)
+    _d3(none_ps, header_unattributed=header_unattributed)
+    none_ps.attempts = []
+    none_ps.best_output = None
+    assert any(tok in none_ps.native_text for tok in GRID_TOKENS), "premise: grid in native"
+    assert d3_floor_kept_model_output(none_ps) is None
+    assert not _reaches_structure_class_branch(none_ps)
+
+    one_out, one_prov = _select_page_output_tagged(one, 1)
+    none_out, none_prov = _select_page_output_tagged(none, 1)
+    _assert_d3_ending(one_out, one_prov)
+    _assert_d3_ending(none_out, none_prov)
+    assert none_out.text == one_out.text
+    for tok in GRID_TOKENS:
+        assert tok not in none_out.text, f"table content {tok!r} shipped"
+    assert SENTENCE_WITH_YEAR in none_out.text
+    _assert_recorded(none_out, True)
+
+
+def test_a_zero_attempt_d3_page_surfaces_at_document_level(tmp_path: Path) -> None:
+    """The bucket behind the D3 audit event, the document status and the CLI line follows the
+    floor: a zero-attempt D3 page is in ``d3_floor_pages`` and emits
+    ``table_region_unverifiable`` at assemble."""
+    from unittest.mock import patch
+
+    from test_gh371_d3_region_splice import _make_pipeline
+
+    from socr.pipeline.orchestrator import _derive_disposition_buckets
+
+    state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="z.pdf")
+    _d3(ps)
+    ps.attempts = []
+    ps.best_output = None
+    buckets = _derive_disposition_buckets(state, finalized_page_records(state))
+    assert 1 in buckets["d3_floor_pages"]
+
+    pipeline = _make_pipeline()
+    out_dir = tmp_path / "out"
+    with (
+        patch.object(pipeline, "_save_markdown", return_value=out_dir / "out.md"),
+        patch.object(pipeline, "_write_metadata", return_value=None),
+        patch.object(pipeline, "_write_manifest", return_value=None),
+        patch.object(pipeline, "_rewrite_all_fragments", return_value=None),
+        patch.object(pipeline, "_flush_page_fragment", return_value=None),
+        patch.object(pipeline, "_flush_page_sidecar", return_value=None),
+        patch.object(pipeline, "_stitch_fragments", return_value=""),
+    ):
+        pipeline._phase_assemble(state, out_dir)
+    assert "table_region_unverifiable" in [e.kind for e in state.events]
+
+
+def _two_page_pdf(path: Path, *, gated: bool) -> Path:
+    """The D3 page (recovered or whole-page shape) plus an ordinary prose page, so assemble
+    has document text and writes every page's fragment and sidecar afresh."""
+    import fitz
+
+    first = (_gated_process_pdf if gated else _process_pdf)(path.with_name("p1.pdf"))
+    doc = fitz.open(str(first))
+    doc.new_page().insert_text((72, 72), "An ordinary page of prose follows the table page.")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("shape", ["recovered", "whole-page"])
+def test_e_a_restore_regenerates_fragment_and_sidecar_byte_for_byte(
+    tmp_path: Path, monkeypatch, forced_tr3_failure, shape: str
+) -> None:
+    """Astra review 3, P2: FRESH artifacts in both arms. Live process() on a two-page
+    document (the D3 page plus a prose page) -> a fresh pipeline restores both pages from
+    their sidecars -> AFTER the restore has consumed them, every fragment, every sidecar and
+    the final .md are deleted -> assemble. The D3 page's fragment and sidecar must be
+    regenerated and equal to live (status, failure mode, recovery flag, audit notes, text),
+    and the final .md too."""
+    import json
+
+    from test_gh1144_prose_survives_the_table_floor import _pipeline
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _two_page_pdf(tmp_path / "doc.pdf", gated=shape == "whole-page")
+    frag, meta, out = _run(tmp_path, pdf, monkeypatch, ladder=True, tag="live")
+    assert meta["failure_mode"] == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED.value, "premise"
+    recovered = shape == "recovered"
+    assert (BANNER in frag) is recovered, frag
+    pages_dir = next(iter(out.rglob("pages/00001.md"))).parent
+    live = {
+        n: (
+            (pages_dir / f"{n:05d}.md").read_text(),
+            json.loads((pages_dir / f"{n:05d}.json").read_text()),
+        )
+        for n in (1, 2)
+    }
+    finals = [p for p in out.rglob("*.md") if p.parent.name != "pages"]
+    assert len(finals) == 1, finals
+    final_path, final_md = finals[0], finals[0].read_text()
+
+    fresh = _pipeline()
+    fresh._scan_root = pdf.parent
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    for n in (1, 2):
+        fresh._restore_terminal_page_state(
+            state, n, PageOutput.from_dict(live[n][1]["winning_output"]), out
+        )
+    assert not (state.pages[1].native_words or []), "premise: a restored page has no words"
+    for n in (1, 2):
+        (pages_dir / f"{n:05d}.md").unlink()
+        (pages_dir / f"{n:05d}.json").unlink()
+    final_path.unlink()
+
+    assert finalized_page_records(state)[0].output.text == frag
+    fresh._phase_assemble(state, out)
+
+    for n in (1, 2):
+        assert (pages_dir / f"{n:05d}.md").exists(), f"fragment {n} not regenerated"
+        assert (pages_dir / f"{n:05d}.json").exists(), f"sidecar {n} not regenerated"
+    assert (pages_dir / "00001.md").read_text() == frag
+    meta2 = json.loads((pages_dir / "00001.json").read_text())
+    for key in ("status", "failure_mode"):
+        assert meta2[key] == meta[key], key
+    for key in ("scanned_prose_recovered", "audit_notes", "text", "status", "failure_mode"):
+        assert meta2["winning_output"].get(key) == meta["winning_output"].get(key), key
+    assert final_path.exists() and final_path.read_text() == final_md
