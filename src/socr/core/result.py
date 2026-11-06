@@ -262,6 +262,10 @@ class FailureMode(str, Enum):
     #: layer of its own, or the reading ships no number to compare. Until a second,
     #: independent reader exists (#1208) no run can do better, so it is permanent.
     NUMBERS_UNCHECKED = "numbers_unchecked"
+    #: #1218: a model reading omits numbers the page's own text layer prints in table rows
+    #: (``text_layer_drops`` FAIL). The reading is shipped, marked, never CHECKED. In
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: the same config re-reads the same page.
+    NUMBERS_DROPPED_FROM_READING = "numbers_dropped_from_reading"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

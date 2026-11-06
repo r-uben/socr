@@ -526,6 +526,123 @@ def compare_numbers(reference: str, reading: str, *, provenance: str) -> Agreeme
     )
 
 
+@dataclass(frozen=True)
+class DropRecord:
+    """#1218: numbers the page prints that the reading does not hold."""
+
+    #: written forms of the missing reference numbers, in reference order
+    dropped: tuple[str, ...]
+    #: their positions among ``numeric_tokens(reference_text)``
+    dropped_positions: tuple[int, ...]
+    #: how many numbers the reference holds
+    body_count: int
+    #: how many numbers the (generous) reading holds
+    reading_count: int
+
+
+#: a markdown link whose URL is kept as text: a DOI or an id the model wrote only as a link
+#: target is still the number's presence. An image (``![..](..)``) is not a link.
+_LINK_KEEP_URL_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]*)\)")
+#: where a reading's mathematics glues a digit to a name: ``R^2``, ``x_t``, ``\tag{14}``,
+#: ``10^{15}``. Split so each digit run stands alone, as the layer's own splits do.
+_MATH_GLUE_RE = re.compile(r"[\^_{}]")
+
+
+#: ``0,332``: a decimal comma on the READING side, repaired as the layer's own
+#: (``layer_body._ZERO_COMMA_RE``) is, so a faithful ``Korea 0,332 0,471`` reading of a layer
+#: ``0,332`` is not a drop. A thousands group never starts with 0, so a comma after a lone
+#: leading ``0`` is a decimal comma.
+_READING_ZERO_COMMA_RE = re.compile(r"(?<![\w.,])([-\u2212]?0),(\d+)(?!\d|,\d)")
+#: Digits grouped by spaces (``1 234``, ``1 234 567.5``): the SPACE-THOUSANDS writing of ``1,234``.
+_SPACED_GROUPS_RE = re.compile(
+    r"(?<![\d.,])\d{1,3}(?:[ \u00a0\u2009\u202f]\d{3})+(?:\.\d+)?(?!\d|[,.]\d)"
+)
+
+
+def _generous_text(reading: str) -> str:
+    text = _MATH_GLUE_RE.sub(" ", _LINK_KEEP_URL_RE.sub(r"\1 \2", reading or ""))
+    return _READING_ZERO_COMMA_RE.sub(r"\1.\2", text)
+
+
+def _generous_counter(reading: str) -> Counter:
+    return Counter(value for value, _ in numeric_tokens(_generous_text(reading)))
+
+
+def _spaced_groups(reading: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every space-thousands group of the reading as ``(value of the whole, values of its
+    parts)``."""
+    groups = []
+    for match in _SPACED_GROUPS_RE.finditer(_generous_text(reading)):
+        group = match.group(0)
+        whole = numeric_tokens("".join(group.split()))
+        parts = tuple(value for part in group.split() for value, _ in numeric_tokens(part))
+        if len(whole) == 1:
+            groups.append((whole[0][0], parts))
+    return groups
+
+
+def _claim_alternative(value: str, pool: Counter, spaced: list) -> bool:
+    """Is ``value`` held in another WRITING of the same number, from tokens nothing else
+    claimed? ``(1.2)`` against ``-1.2``; ``1,234`` against ``1 234``. Only called for a number
+    its own writing did not find; each reading token is consumed once."""
+    if value[:1] == "(" and value[-1:] == ")":
+        minus = "-" + value[1:-1]
+        if pool[minus] > 0:
+            pool[minus] -= 1
+            return True
+    for k, (whole, parts) in enumerate(spaced):
+        need = Counter(parts)
+        if whole == value and all(pool[v] >= n for v, n in need.items()):
+            pool.subtract(need)
+            del spaced[k]
+            return True
+    return False
+
+
+def dropped_numbers(reference_text: str, reading: str) -> DropRecord:
+    """Numbers in ``reference_text`` that ``reading`` does not hold, counted as a multiset.
+
+    ``reference_text`` is ``layer_body.DropReference.text``. The reading side is GENEROUS, so
+    a number the model wrote anywhere counts as present (a decimal comma repaired; a
+    space-thousands group or a bracket-for-minus accepted as another writing of a number nothing
+    else matched): the reference-side tokeniser
+    (``reading=False``) is applied, so mathematics is kept, with link URLs kept and
+    ``^ _ { }`` split so ``$R^2$`` and ``\\tag{14}`` yield their digits. Generosity can hide
+    a drop (a lower bound), never invent one. A minus is part of a number: ``-0.04`` is never
+    held by ``0.04``. The opposite direction, a number the reading ships that the layer
+    lacks, is :func:`compare_numbers`.
+
+    The reading's numbers are NOT reduced by the page's running heads or folios. That would
+    stop a transcribed ``January 25, 2018 Page 36 of 40`` absorbing a dropped body ``2018``,
+    but deciding that a reading line transcribes a furniture line invented drops (a faithful
+    ``| Year | 2020 | ...`` row against the head ``Year 2020``) and hid others (a head wrapped
+    over two reading lines). Without the subtraction the count is a true lower bound, which
+    is what "at least N" states. The documented limitation: a transcribed head's number MAY
+    absorb a dropped body copy of the same value. Running heads and folios are still not
+    candidates on the layer side (``layer_body``).
+    """
+    reference = numeric_tokens(reference_text)
+    remaining = _generous_counter(reading)
+    reading_count = sum(remaining.values())
+    missing: list[int] = []
+    for pos, (value, _) in enumerate(reference):
+        if remaining[value] > 0:
+            remaining[value] -= 1
+        else:
+            missing.append(pos)
+    # another writing of the same number, only for what its own writing did not find
+    spaced = _spaced_groups(reading)
+    missing = [
+        pos for pos in missing if not _claim_alternative(reference[pos][0], remaining, spaced)
+    ]
+    return DropRecord(
+        dropped=tuple(reference[pos][1] for pos in missing),
+        dropped_positions=tuple(missing),
+        body_count=len(reference),
+        reading_count=reading_count,
+    )
+
+
 def describe_disputes(record: AgreementRecord) -> str:
     """The disputed numbers as one mark reason: every one is named, none is dropped.
 

@@ -143,6 +143,9 @@ class PageState:
     #: #1185: the page's text layer, read on every page (``PageAssessment.own_layer_text``).
     #: The reference a model reading's numbers are compared with; in memory only.
     own_layer_text: str = ""
+    #: #1218: table-row numbers the layer prints; see
+    #: ``PageAssessment.own_layer_drop_reference``. Empty = not checked. In memory only.
+    own_layer_drop_reference: str = ""
     #: #990: control characters before a digit in the native text; see ``PageAssessment``.
     control_byte_digit_hits: int = 0
     control_byte_scan_failed: bool = False
@@ -180,6 +183,11 @@ class PageState:
     #: withheld reading was gone for good. Same shape as ``prior_ocr_layer_text``: written
     #: only where it exists, never read as evidence, never shipped.
     withheld_table_text: str = ""
+    #: #1218 merge gate: the page's ``numbers_dropped_from_reading`` audit events as its
+    #: sidecar recorded them, restored on resume. Assembly holds a recomputed list to these
+    #: (``refinalize_own_text.resolve_dropped``) so a failed reassessment cannot erase the
+    #: original list of a page whose restored verdict still carries the FAIL clause.
+    persisted_numbers_dropped_events: list[dict] = field(default_factory=list)
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -925,6 +933,7 @@ class DocumentState:
                 # #1203: the layer of a page an early return left with no native text.
                 ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
                 ps.own_layer_text = getattr(pa, "own_layer_text", "") or ""
+                ps.own_layer_drop_reference = getattr(pa, "own_layer_drop_reference", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches

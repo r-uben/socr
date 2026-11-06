@@ -123,6 +123,60 @@ class RunAudit:
         return ", ".join(parts)
 
 
+#: The order a page's events are listed in (``derive_audit``); kinds absent here rank 9.
+_EVENT_RANK: dict[str, int] = {
+    "recitation_escalation": 0,
+    "escalation": 1,
+    "judge_reject": 2,
+    "dualpass_patch": 3,
+    "dualpass_flag": 3,
+    "table_value_drift_unadjudicated": 4,
+    "table_region_geometry_hard_fail": 4,
+    "chart_math_arbitration": 4,
+    # GH-271: region evidence/candidate first, final shipped-warning
+    # disposition second.
+    "corrupt_math_region_recovery": 4,
+    # #263: analyze-time detection AND disposition in one -- unlike the
+    # TR-3 pair above there is no second kind, because this flag always
+    # acts (the page is routed to OCR and refuses to ship its fragments).
+    "rotated_text_shredded": 4,
+    "table_region_unverifiable": 5,
+    # #262: the D3 disposition's sibling -- same phase, opposite outcome
+    # (a model grid superseded the floor). Ranked explicitly rather than
+    # falling into the default 9, so a page's story still reads in order.
+    "d3_floor_model_table_kept": 5,
+    "flagged_model_table_kept": 6,
+    "native_fallback": 6,
+    "corrupt_math_hybrid_shipped": 6,
+    # S1/P2 (#269/#317): same disposition rank as the two above -- a
+    # structure-class page's winner is a kept-but-unverified model grid or
+    # a fail-closed floor, either way the last word on its table content.
+    "structure_class_model_table_kept": 6,
+    "structure_class_ladder_exhausted_floor": 6,
+    # TICKET-A1b (#634): same phase/rank as the two lines above -- one
+    # more shape of "the structure-class winner-selection story for this
+    # page", either the row-corroborated candidate that shipped or the
+    # ladder-accepted candidate the floor overrode anyway.
+    "structure_class_row_corroborated": 6,
+    # TICKET-A2 (#645): same phase/rank as the row-corroboration line
+    # above -- one more shape of the S1 winner-selection story, a
+    # candidate dropped from consideration because it ends mid-emission
+    # while another candidate for the page does not.
+    "candidate_truncated": 6,
+    "structure_floor_overrode_ladder": 6,
+    # #1027: a disposition of the same rank as the other fail-closed floors above.
+    "invisible_scan_unread": 6,
+    # #1030: a scanned figure page's image asset; same rank as the other dispositions.
+    "scanned_figure_asset": 6,
+    "page_failed": 7,
+}
+
+
+def event_rank(kind: str) -> int:
+    """The sort rank ``derive_audit`` gives *kind* (9 when unlisted)."""
+    return _EVENT_RANK.get(kind, 9)
+
+
 def build_run_audit(state) -> RunAudit:
     """Derive a ``RunAudit`` from a completed ``DocumentState``.
 
@@ -151,52 +205,7 @@ def build_run_audit(state) -> RunAudit:
     #     rather than shipping a plausible-but-wrong collapsed or ragged table.
     # A D3 page therefore carries both, in that order, and the pair reads as
     # "detected here, acted on there" rather than as one kind counted twice.
-    rank = {
-        "recitation_escalation": 0,
-        "escalation": 1,
-        "judge_reject": 2,
-        "dualpass_patch": 3,
-        "dualpass_flag": 3,
-        "table_value_drift_unadjudicated": 4,
-        "table_region_geometry_hard_fail": 4,
-        "chart_math_arbitration": 4,
-        # GH-271: region evidence/candidate first, final shipped-warning
-        # disposition second.
-        "corrupt_math_region_recovery": 4,
-        # #263: analyze-time detection AND disposition in one -- unlike the
-        # TR-3 pair above there is no second kind, because this flag always
-        # acts (the page is routed to OCR and refuses to ship its fragments).
-        "rotated_text_shredded": 4,
-        "table_region_unverifiable": 5,
-        # #262: the D3 disposition's sibling -- same phase, opposite outcome
-        # (a model grid superseded the floor). Ranked explicitly rather than
-        # falling into the default 9, so a page's story still reads in order.
-        "d3_floor_model_table_kept": 5,
-        "flagged_model_table_kept": 6,
-        "native_fallback": 6,
-        "corrupt_math_hybrid_shipped": 6,
-        # S1/P2 (#269/#317): same disposition rank as the two above -- a
-        # structure-class page's winner is a kept-but-unverified model grid or
-        # a fail-closed floor, either way the last word on its table content.
-        "structure_class_model_table_kept": 6,
-        "structure_class_ladder_exhausted_floor": 6,
-        # TICKET-A1b (#634): same phase/rank as the two lines above -- one
-        # more shape of "the structure-class winner-selection story for this
-        # page", either the row-corroborated candidate that shipped or the
-        # ladder-accepted candidate the floor overrode anyway.
-        "structure_class_row_corroborated": 6,
-        # TICKET-A2 (#645): same phase/rank as the row-corroboration line
-        # above -- one more shape of the S1 winner-selection story, a
-        # candidate dropped from consideration because it ends mid-emission
-        # while another candidate for the page does not.
-        "candidate_truncated": 6,
-        "structure_floor_overrode_ladder": 6,
-        # #1027: a disposition of the same rank as the other fail-closed floors above.
-        "invisible_scan_unread": 6,
-        # #1030: a scanned figure page's image asset; same rank as the other dispositions.
-        "scanned_figure_asset": 6,
-        "page_failed": 7,
-    }
+    rank = _EVENT_RANK
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))
     return RunAudit(pdf_filename=state.handle.filename, events=events)
 

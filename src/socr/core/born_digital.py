@@ -2612,6 +2612,12 @@ class PageAssessment:
     #: shipped. Whether the layer is the document's own characters is decided by the
     #: caller from the #1156 flags, not here.
     own_layer_text: str = ""
+    #: #1218: the printed numbers of the page's table rows (``DropReference.text``), computed
+    #: ONCE here from the page's words and the document's repeated and folio slots (running
+    #: heads and folios are never candidates). EMPTY means "not checked" (no layer, a failed
+    #: computation, or no qualifying row), never "nothing dropped": the drop clause emits
+    #: nothing on an empty reference. In memory only.
+    own_layer_drop_reference: str = ""
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3403,6 +3409,31 @@ class BornDigitalDetector:
             return ""
         return raw
 
+    def _own_layer_drop_reference(self, page: fitz.Page) -> str:
+        """#1218: the table-row numbers the page's layer owes a reading.
+
+        Computed ONCE per page from ``tables.layer_body.drop_reference_from_page``, with the
+        document's repeated and folio slots the detector already holds
+        (``_read_document_furniture``). Guarded like
+        ``_retained_layer_text``: a failure returns ``""``, logged.
+
+        An EMPTY reference means NOT CHECKED, never "zero dropped": the drop clause emits
+        nothing and records nothing for it, so a page whose layer could not be classified is
+        indistinguishable from one with no table rows, and neither is marked.
+        """
+        try:
+            from socr.tables.layer_body import drop_reference_from_page
+
+            ref = drop_reference_from_page(
+                page,
+                repeated_slots=getattr(self, "_repeated_slots", frozenset()),
+                folio_slots=getattr(self, "_doc_folio_slots", frozenset()),
+            )
+            return ref.text or ""
+        except Exception:
+            logger.warning("#1218: the layer's table-row numbers could not be read", exc_info=True)
+            return ""
+
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
 
@@ -3490,6 +3521,7 @@ class BornDigitalDetector:
         detected_count, detected_bboxes = self._detected_regions_this_page
         assessment.detected_table_count = detected_count
         assessment.detected_table_bboxes = list(detected_bboxes)
+        assessment.own_layer_drop_reference = self._own_layer_drop_reference(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two

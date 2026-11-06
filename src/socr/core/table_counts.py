@@ -63,6 +63,12 @@ _PROSE_RECOVERY_RE = re.compile(
 _UNVERIFIED_TRUST_KIND = "table_ladder_unverified"
 
 
+def carries_withheld_marker(text: str) -> bool:
+    """Whether *text* holds a marker socr wrote where it withheld a table (a per-table
+    marker or a prose-recovery banner). One definition for every consumer."""
+    return bool(_WITHHELD_MARKER_RE.search(text or "") or _PROSE_RECOVERY_RE.search(text or ""))
+
+
 @dataclass(frozen=True)
 class TableCounts:
     #: ``None`` means unknown: the evidence for that count was incomplete or unreadable.
