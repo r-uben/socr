@@ -36,7 +36,7 @@ Scripts and data (not in git): `scratch/army/1270/step1/` (`arms.py`, `analyze.p
 | psm 3+6 union, box +15% | 6 | 0 | 2.24 / 6.74 |
 | best union (psm 3+6+11, box +15%) | 8 | 0 | 3.39 / 14.86 |
 
-At most 8 of the 106 refused pages can be recovered by any arm. Timings come from the shared login
+Among the arms tested here, at most 8 of the 106 refused pages are recovered; untested psm/crop/DPI settings are not bounded by this. Timings come from the shared login
 node rorqual1 (load average about 7) and are noisy.
 
 ## Eye check: every gained page, whole table
@@ -63,17 +63,19 @@ is adopted, so they decide nothing.
 
 ## What this shows
 
-- The multiset witness cannot see structure. Dropping rows and shifting labels leave the multiset
-  unchanged, so p40 (a badly misbound table) passes as soon as tesseract reads every digit. Today it
+- The witness is a one-way coverage check: it asks only that every number the reading emits appears in
+  the OCR evidence. Dropped rows remove numbers from the reading and shifted labels move none, so neither
+  trips it, and p40 (a badly misbound table) passes as soon as tesseract reads every digit. Today it
   is refused only because tesseract misreads some of its numbers. Better OCR on this check turns
   luck into wrong passes.
 - So the witness's failure to read numbers is the smaller problem on these pages. A whole-table
   pass/fail on number counts is the wrong unit: a refusal throws away correct tables, and a pass
   certifies misbound ones.
-- This supports the owner-approved parallel design (`scratch/routing-baseline/census1261/parallel-design.pdf`):
+- This supports the owner-approved parallel design (`scratch/routing-baseline/census1261/parallel-design.pdf`, not in git; the owner approved the design in the 2026-11-05 session):
   structure is decided first by mechanical grid and row-label checks (cf. #1267), then each number is
   voted on separately. Under that design p40 and p9 fail on structure, and the 5 correct pages pass
-  per cell. That design needs the owner before it is built.
+  per cell. p44 (right numbers, wrong column-group header) is NOT caught by a row-label check; it needs
+  column-header attribution, which stays unresolved here. That design needs the owner before it is built.
 - Kimi's attack points apply to any future witness change. Padding and full-page reads take in
   titles, footnotes and page numbers as evidence. Padded boxes that overlap are added together, not
   maxed. psm 11 splits `12.4` into `1` and `24` and drops minus signs. A union across modes admits
