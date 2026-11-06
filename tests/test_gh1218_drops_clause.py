@@ -11,6 +11,7 @@ changing only whether the reading omits a row, with the provider ladder in both 
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 from collections import Counter
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from rich.console import Console
 
 import socr
 from socr.core import verdict as verdict_module
@@ -35,6 +37,7 @@ from socr.core.verdict import (
     text_layer_drops_clause,
     with_text_layer_numbers_clause,
 )
+from socr.pipeline import orchestrator as orchestrator_module
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 from test_gh1156_part_a_interim import _FixedJudge
@@ -301,6 +304,7 @@ def _run(
     ladder=True,
     late_defect: bool = False,
     extra: str = "",
+    quiet: bool = True,
 ):
     from socr.core.config import EngineType, PipelineConfig
     from socr.core.providers import PROFILE_QWEN_LOCAL
@@ -311,7 +315,7 @@ def _run(
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
-                quiet=True,
+                quiet=quiet,
                 primary_engine=EngineType.QWEN,
                 local_engine=EngineType.QWEN,
                 enabled_engines=[EngineType.QWEN],
@@ -390,6 +394,10 @@ def test_one_dropped_row_changes_every_level_and_only_with_a_model_reading(
         reads[drop] = read
         levels[drop] = _levels(out, result)
     kept, dropped = levels[False], levels[True]
+    if ladder:
+        assert reads[True], "fixture premise: with a provider the model must read the page"
+    else:
+        assert not reads[True], "fixture premise: with no provider nothing reads the page"
     if reads[True]:
         # a model read the page: the row is the whole difference, at every level
         assert dropped["page"] == ("warning", "numbers_dropped_from_reading")
@@ -718,13 +726,33 @@ def test_the_document_note_and_cli_line_do_not_claim_the_numbers_are_on_the_page
         assert "audit log" in text and "count on each page" in text
     # the run writes that same note, and no dropped value
     out = tmp_path / "out"
-    result = _run(out, _rotated_pdf(tmp_path / "doc.pdf"), monkeypatch, drop=True, pages_read=[])
+    printed = io.StringIO()
+    # not quiet: the summary lines the CLI shows are printed by the orchestrator's console
+    monkeypatch.setattr(
+        orchestrator_module, "console", Console(file=printed, width=10_000, force_terminal=False)
+    )
+    result = _run(
+        out, _rotated_pdf(tmp_path / "doc.pdf"), monkeypatch, drop=True, pages_read=[], quiet=False
+    )
     assert numbers_dropped_note([1, 2]) in (result.error or "")
     dropped = _page_rows(0)[-1].split()[1:] + _page_rows(1)[-1].split()[1:]
     assert not any(n in (result.error or "") for n in dropped)
-    # and the orchestrator prints the shared line, not its own wording
-    source = Path(socr.__file__).with_name("pipeline").joinpath("orchestrator.py").read_text()
-    assert "numbers_dropped_cli_line(numbers_dropped_pages)" in source
+    # and the run PRINTS the shared line, for the pages that dropped, not its own wording
+    assert numbers_dropped_cli_line([1, 2]) in " ".join(printed.getvalue().split())
+    # difference: the run that drops nothing prints no such line
+    quiet_out, kept = tmp_path / "kept", io.StringIO()
+    monkeypatch.setattr(
+        orchestrator_module, "console", Console(file=kept, width=10_000, force_terminal=False)
+    )
+    _run(
+        quiet_out,
+        _rotated_pdf(tmp_path / "doc2.pdf"),
+        monkeypatch,
+        drop=False,
+        pages_read=[],
+        quiet=False,
+    )
+    assert "omit numbers the page's own text layer prints" not in " ".join(kept.getvalue().split())
 
 
 #: The helpers ``process()``'s figure phase calls after the drops event is recorded. Their
