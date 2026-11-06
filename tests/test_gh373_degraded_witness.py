@@ -22,6 +22,8 @@ from unittest.mock import patch
 
 import fitz
 
+import pytest
+
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
@@ -265,6 +267,14 @@ def _unverified(error: str | None) -> bool:
     return "table_unverified" in (error or "")
 
 
+@pytest.fixture
+def _row_binding_check_off(monkeypatch):
+    """These pages' layers do not print the model's values, so #1267's check would mark them.
+    What these tests pin is the ladder or the retry latch, not row binding."""
+    monkeypatch.setattr(UnifiedPipeline, "_run_row_binding_check", lambda *a, **k: False)
+
+
+@pytest.mark.usefixtures("_row_binding_check_off")
 class TestCountMismatchIsJudged:
     def test_rejecting_ladder_on_count_mismatch_is_rejected_not_unverified(
         self, tmp_path: Path

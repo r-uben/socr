@@ -1044,6 +1044,14 @@ def _route_page_returning(text: str, engine: str = "qwen"):
     return _fake_route
 
 
+@pytest.fixture
+def _row_binding_check_off(monkeypatch):
+    """These pages' layers do not print the model's values, so #1267's check would mark them.
+    What these tests pin is the ladder or the retry latch, not row binding."""
+    monkeypatch.setattr(UnifiedPipeline, "_run_row_binding_check", lambda *a, **k: False)
+
+
+@pytest.mark.usefixtures("_row_binding_check_off")
 class TestProcessFlagDifference:
     def test_flag_off_vs_on_with_rejecting_ladder(self, tmp_path: Path) -> None:
         pdf_path = _ruled_pdf(tmp_path / "off", "doc.pdf")

@@ -9536,8 +9536,8 @@ class UnifiedPipeline:
         describes exactly that text.  Returns True when the page's state was changed (a table
         withheld or the page marked).
 
-        Same guards as ``_run_native_cell_binding_check`` (model output with table blocks, not a
-        native/chart/failed candidate, born-digital, admissible layer).  Words are rotated into the
+        Model output with table blocks, not a native/chart/failed candidate, on an admissible layer
+        with at least the classifier's minimum words.  Words are rotated into the
         reading frame inside ``tables.row_binding_check``.  Records ``ps.row_binding`` for every
         table and one audit event per NON-BOUND table; the page policy is
         ``_apply_row_binding_policy``.  A failure of the check itself is recorded as an
@@ -9547,17 +9547,19 @@ class UnifiedPipeline:
         # call that returns without checking.
         self.rollback_row_binding_page_state(state, page_num, ps)
         out = shipped if shipped is not None else bo
-        if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
+        # ``bo`` carries the page policy, so without it nothing may be recorded as withheld.
+        if bo is None or out is None or not out.text:
+            return False
+        if out.engine == "chart_asset" or is_failed_candidate(out):
             return False
         if self.config.native_only:
             return False
         if (out.engine or "") == "native":
             return False
-        if not getattr(ps, "is_born_digital", False):
-            return False
         if not layer_is_admissible_evidence(ps):
             return False
         from socr.core.audit_log import AuditEvent
+        from socr.core.born_digital import BornDigitalDetector
         from socr.tables.reconcile import find_table_blocks
         from socr.tables.row_binding_check import (
             RowVerdict,
@@ -9654,6 +9656,15 @@ class UnifiedPipeline:
                 if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
                     raise LookupError("pdf_page_unavailable")
                 page = doc[page_num - 1]
+                # The born-digital classifier also refuses real layers: dense number tables read
+                # as "excessive spacing" (9 of the 35 convicted held-out pages). Its word floor
+                # still tells a scan with no layer, or only a stamp, from a page that has one.
+                if (
+                    not getattr(ps, "is_born_digital", False)
+                    and len(page.get_text("words")) < BornDigitalDetector.MIN_WORDS_PER_PAGE
+                ):
+                    ps.row_binding_table_count = 0
+                    return False
                 regions = [tuple(b.bbox) for b in locate_tables(page)] or None
                 results, _rotation = check_page_row_binding(page, out.text, regions)
             for idx, result in enumerate(results):
@@ -9692,7 +9703,7 @@ class UnifiedPipeline:
                     error=f"check_error:{type(exc).__name__}",
                 )
             worst = TableOutcome.UNVERIFIABLE.value
-        if worst == TableOutcome.BOUND.value or bo is None:
+        if worst == TableOutcome.BOUND.value:
             return False
         self._apply_row_binding_policy(
             ps,

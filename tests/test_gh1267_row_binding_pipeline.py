@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,7 @@ pytest.importorskip("fitz")
 
 from test_gh1267_row_binding_check import GROUP, build_page, md  # noqa: E402
 
+from socr.core.born_digital import BornDigitalDetector  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.providers import PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import PageOutput, PageStatus  # noqa: E402
@@ -70,6 +72,7 @@ def _run(
     ladder_silent: bool = False,
     native=None,
     markdown: str | dict[int, str] | None = None,
+    classifier_refuses: bool = False,
 ):
     pdf = pdf or _pdf(tmp_path, rotation, native)
     out_dir = tmp_path / out_name
@@ -117,6 +120,16 @@ def _run(
         return original_assemble(state, od)
 
     with contextlib.ExitStack() as stack:
+        if classifier_refuses:
+            # What the classifier returns for a dense table it reads as "excessive spacing".
+            original_assess = BornDigitalDetector._assess_page
+
+            def _refuse(self, page, page_num):
+                return dataclasses.replace(
+                    original_assess(self, page, page_num), is_born_digital=False, native_text=""
+                )
+
+            stack.enter_context(patch.object(BornDigitalDetector, "_assess_page", _refuse))
         stack.enter_context(patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route))
         stack.enter_context(
             patch.object(
@@ -392,6 +405,93 @@ def test_a_withheld_table_and_an_unverifiable_sibling_each_record_their_own_outc
     assert side["row_binding_contradicted_tables"] == [0]
     assert side["row_binding_unverifiable_tables"] == [1]
     assert side["row_binding"]["p1-t1"]["outcome"] == "unverifiable"
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_page_the_classifier_refuses_is_still_withheld_when_its_layer_convicts(
+    tmp_path, rotation
+):
+    """Merge gate round 9 (both reviewers). The classifier refuses real layers on dense tables, and
+    such a page shipped its shifted rows under a page warning because the check never ran."""
+    _, _, _, on, pdf = _run(
+        tmp_path, SHIFTED_ROWS, rotation, check_runs=True, out_name="on", classifier_refuses=True
+    )
+    _, _, _, off, _ = _run(
+        tmp_path,
+        SHIFTED_ROWS,
+        rotation,
+        check_runs=False,
+        out_name="off",
+        pdf=pdf,
+        classifier_refuses=True,
+    )
+    frag_on, frag_off = _fragment(on), _fragment(off)
+    for line in md(SHIFTED_ROWS).splitlines()[2:]:
+        assert line in frag_off and line not in frag_on
+    assert frag_on.count(MARKER) == 1 and frag_on.count(LINK) == 1
+    side = _sidecar(on)
+    assert side["row_binding_contradicted_tables"] == [0]
+    assert side["winning_output"]["failure_mode"] == "table_withheld"
+    assert side["winning_output"]["status"] == PageStatus.ERROR.value
+    assert len(_events(on, WITHHELD_KIND)) == 1 and _events(off, WITHHELD_KIND) == []
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_refused_page_with_only_a_stamp_on_its_layer_is_not_judged(tmp_path, rotation):
+    """A scan with a stamp has no layer to judge against: a mark would only report the stamp."""
+    stamp = [("Confidential", ["1.0", "2.0"])]
+    markdown = md(SHIFTED_ROWS)
+    _, _, _, on, pdf = _run(
+        tmp_path,
+        None,
+        rotation,
+        check_runs=True,
+        out_name="on",
+        native=stamp,
+        markdown=markdown,
+        classifier_refuses=True,
+    )
+    _, _, _, off, _ = _run(
+        tmp_path,
+        None,
+        rotation,
+        check_runs=False,
+        out_name="off",
+        native=stamp,
+        markdown=markdown,
+        pdf=pdf,
+        classifier_refuses=True,
+    )
+    assert _fragment(on) == _fragment(off)
+    assert _stable(_sidecar(on)) == _stable(_sidecar(off))
+    assert "row_binding" not in _sidecar(on)
+    assert _sidecar(on).get("row_binding_table_count") is None
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_refused_page_withheld_by_the_check_resumes_byte_identical(tmp_path, rotation):
+    from ocr_output_contract import RootIndex
+
+    doc = build_page(THIRD_NATIVE, rotation).parent
+    doc.insert_pdf(build_page(THIRD_NATIVE, rotation).parent)
+    pdf = tmp_path / f"two_{rotation}.pdf"
+    doc.save(pdf)
+    kw = dict(
+        native=THIRD_NATIVE,
+        markdown={1: THREE_TABLES, 2: md(THIRD_TABLE)},
+        pdf=pdf,
+        classifier_refuses=True,
+    )
+    _, _, _, out, _ = _run(tmp_path, None, rotation, check_runs=True, out_name="out", **kw)
+    frag1, page1 = _fragment(out), _assembled(out).split("## Page 2")[0]
+    assert frag1.count(MARKER) == 1 and "| Wages |" not in frag1
+    Path(RootIndex(out).path).unlink()
+    for name in ("pages/00002.json", "pages/00002.md"):
+        next(out.rglob(name)).unlink()
+    _run(tmp_path, None, rotation, check_runs=True, out_name="out", **kw)
+    assert _fragment(out) == frag1
+    assert _assembled(out).split("## Page 2")[0] == page1
+    assert _sidecar(out)["winning_output"]["failure_mode"] == "table_withheld"
 
 
 THIRD_NATIVE = [*TWO_NATIVE, ("Wages", ["5.1", "5.2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
