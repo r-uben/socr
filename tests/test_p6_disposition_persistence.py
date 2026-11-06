@@ -349,6 +349,41 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
     assert set(meta.keys()) - expected_pre_keys == {"disposition", "verdict"}
 
 
+def test_sidecar_chart_floor_abstention_is_the_one_sparse_addition(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1269: a page whose chart floor really declines gains exactly that key, only it.
+
+    The abstention is recomputed at every finalize with no saved body, so it is driven
+    by a real decline (a framed thin-stroke chart, no table evidence) and the control
+    changes the one thing that sends the page down another branch: table evidence.
+    """
+    from test_gh1155_chart_witness import _chart_floor_document_state
+    from test_gh1269_chart_floor_abstention import _framed_thin_chart
+
+    monkeypatch.setattr(UnifiedPipeline, "_resolve_judge_model", lambda self, *a, **k: "")
+    pdf_path = _framed_thin_chart(tmp_path)
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+
+    def _meta(name: str, table_evidence: bool):
+        out_dir = tmp_path / name
+        state = _chart_floor_document_state(pdf_path)
+        if table_evidence:
+            state.pages[1].detected_table_count = 1
+        pipeline._flush_page_fragment(state, 1, "x", out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+        return json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+
+    absent = _meta("with_tables", True)
+    present = _meta("declined", False)
+    assert "chart_floor_abstention" not in absent
+    assert present["chart_floor_abstention"]["outcome"] == "no_chart_bboxes"
+    assert set(present) - set(absent) == {"chart_floor_abstention"}
+    # The control's own table evidence adds exactly these two sparse keys, nothing else.
+    assert set(absent) - set(present) == {"detected_table_bboxes", "detected_table_count"}
+
+
 def test_flush_page_sidecar_accepts_record_and_never_serializes_provenance(tmp_path: Path) -> None:
     """_flush_page_sidecar accepts a finalized-page record directly and writes its output
     and public disposition without serializing selection provenance."""

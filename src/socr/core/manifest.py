@@ -2691,6 +2691,62 @@ def _document_witness(pdf_path, page_num: int):
     return witness
 
 
+# #1269: outcome names for ``PageState.chart_floor_probe`` / ``chart_floor_abstention``.
+CHART_FLOOR_NO_BBOXES = "no_chart_bboxes"
+CHART_FLOOR_PROBE_FAILED = "probe_failed"
+CHART_FLOOR_PROBE_UNAVAILABLE = "probe_unavailable"
+CHART_FLOOR_NO_PANELS = "no_panels"
+CHART_FLOOR_PANELS_READ = "panels_read"
+CHART_FLOOR_EMPTY_BODY = "empty_body"
+CHART_FLOOR_PROBE_NOT_RUN = "probe_not_run"
+CHART_FLOOR_PAGE_ROTATED = "page_rotated"
+
+
+def _record_chart_floor_probe(p, record: dict) -> None:
+    """#1269: remember what the last chart-floor probe found on this page.
+
+    Transient (never persisted) and overwritten at every probe exit. It is not a
+    claim that the floor decided the page: the probe also runs for pages that take
+    another branch, so only ``structure_class_floor_text`` promotes it to the
+    persisted ``chart_floor_abstention``.
+    """
+    try:
+        p.chart_floor_probe = record
+    except Exception:  # pragma: no cover - a read-only stand-in in tests
+        pass
+
+
+def _record_chart_floor_abstention(p, *, empty_body: bool = False) -> None:
+    """#1269: the chart floor declined a box-less, table-free page.
+
+    Copies the probe record (``probe_not_run`` when no probe ran in a non-overridden
+    selection). ``empty_body`` marks a builder that ran but returned nothing, keeping
+    the probe's region and panel counts. A /Rotate page is recorded as
+    ``page_rotated``: it is declined for rotation whatever the probe found, and the
+    probe's own outcome is kept beside it as ``probe_outcome``.
+    """
+    try:
+        probe = getattr(p, "chart_floor_probe", None)
+        if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
+            record = {"outcome": CHART_FLOOR_PAGE_ROTATED}
+            if isinstance(probe, dict):
+                record.update({k: v for k, v in probe.items() if k != "outcome"})
+                if "outcome" in probe:
+                    record["probe_outcome"] = probe["outcome"]
+        elif empty_body:
+            record = {"outcome": CHART_FLOOR_EMPTY_BODY}
+            for key in ("regions", "panels"):
+                if isinstance(probe, dict) and key in probe:
+                    record[key] = probe[key]
+        elif isinstance(probe, dict):
+            record = dict(probe)
+        else:
+            record = {"outcome": CHART_FLOOR_PROBE_NOT_RUN}
+        p.chart_floor_abstention = record
+    except Exception:  # pragma: no cover - a read-only stand-in in tests
+        pass
+
+
 def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_ref: str):
     """#1155: a LAZY builder for the chart body a floored page ships.
 
@@ -2738,20 +2794,50 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
 
     pdf_path = getattr(getattr(state, "handle", None), "path", None)
     if pdf_path is None:
+        _record_chart_floor_probe(p, {"outcome": CHART_FLOOR_PROBE_UNAVAILABLE})
         return None
     try:
         with open_pdf(pdf_path) as doc:
             if page_num - 1 >= doc.page_count:
+                _record_chart_floor_probe(p, {"outcome": CHART_FLOOR_PROBE_UNAVAILABLE})
                 return None
             bboxes = list(chart_region_bboxes(doc[page_num - 1]))
             if not bboxes:
+                # #1269: the census can disagree with the production boxer (framed
+                # thin-stroke clusters); record what it said, None if it raised.
+                try:
+                    from socr.figures.extractor import has_chart_marks
+
+                    census = bool(has_chart_marks(doc[page_num - 1]))
+                except Exception:
+                    census = None
+                _record_chart_floor_probe(
+                    p, {"outcome": CHART_FLOOR_NO_BBOXES, "census_chart_marks": census}
+                )
                 return None
             reading = read_chart_page(doc[page_num - 1], bboxes, page_num=page_num)
     except Exception:
         logger.warning("#1155: chart floor probe failed for p%d", page_num, exc_info=True)
+        _record_chart_floor_probe(p, {"outcome": CHART_FLOOR_PROBE_FAILED})
         return None
     if not reading.panels:
+        _record_chart_floor_probe(
+            p,
+            {
+                "outcome": CHART_FLOOR_NO_PANELS,
+                "regions": len(bboxes),
+                "refusals": {str(i): r for i, r in sorted(reading.refusals.items())},
+            },
+        )
         return None
+    _record_chart_floor_probe(
+        p,
+        {
+            "outcome": CHART_FLOOR_PANELS_READ,
+            "regions": len(bboxes),
+            "panels": len(reading.panels),
+        },
+    )
 
     def _build() -> str | None:
         from socr.figures.chart_regions import render_chart_region_crops
@@ -3423,6 +3509,7 @@ def table_floor_text_for_source(
             if _count != 0 or _boxes:
                 return whole_page
             if chart_floor is None:
+                _record_chart_floor_abstention(p)
                 return whole_page
             if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
                 # Same refusal the normal lane makes below, applied before the
@@ -3436,12 +3523,14 @@ def table_floor_text_for_source(
             # and the lane never fires.
             chart_body = chart_floor()
             if not chart_body:
+                _record_chart_floor_abstention(p, empty_body=True)
                 return whole_page
             # Record that this body came from the chart floor, so the generic
             # chart-preservation pass skips it: that pass anchors crops on the
             # in-chart words this lane deliberately withheld (Argon 3).
             try:
                 p.chart_floor_body = True
+                p.chart_floor_body_this_selection = True
             except Exception:  # pragma: no cover - a read-only stand-in in tests
                 pass
             return chart_body
@@ -6982,6 +7071,26 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
     return replace(output, scanned_prose_recovered=True, audit_notes=notes)
 
 
+def _is_bare_floor_body(text: str, page_num: int, png_ref: str) -> bool:
+    """#1269: is ``text`` exactly the bare whole-page floor body?
+
+    That body is the floor's own marker line (``d3_marker`` in
+    ``table_floor_text_for_source``) and, when the page has one, its page-image line.
+    socr's own canonical mark lines (guard and verdict marks) may sit around it.
+    Anything else -- appended prose, a chart body -- is a different decision, and an
+    abstention recorded for the bare body must not describe it.
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    kept = []
+    for line in (ln.strip() for ln in text.splitlines()):
+        if not line or (png_ref and line == png_ref.strip()):
+            continue
+        if line != d3_marker and is_canonical_mark(line, page_num):
+            continue
+        kept.append(line)
+    return kept == [d3_marker]
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -7014,12 +7123,51 @@ def _select_and_finalize_page(
     # then discarded. Telling selection that its text will be overridden lets the
     # chart floor decline before it renders. The override itself is unchanged and
     # still has the last word.
+    # #1269: the chart-floor record describes the bytes of THIS selection. With no saved
+    # body, selection recomputes from source, so a record left by an earlier finalize in
+    # this process (an in-loop flush, before a repair or judge changed the page) may
+    # describe bytes that are no longer there: reset it, and the floor branch sets it
+    # again only if it declines again. With a saved body, selection's floor result is
+    # discarded, so whatever the seam writes on that path is undone: the prior record is
+    # snapshotted and put back after selection (nothing invented, nothing overwritten),
+    # then kept only if the saved bytes are still the bare floor body (below).
+    _floor_page = state.pages.get(page_num)
+    _prior_abstention = getattr(_floor_page, "chart_floor_abstention", None)
+    try:
+        if _floor_page is not None:
+            _floor_page.chart_floor_probe = None
+            if saved_text is None:
+                _floor_page.chart_floor_abstention = None
+                _floor_page.chart_floor_body_this_selection = False
+    except Exception:  # pragma: no cover - a read-only stand-in in tests
+        pass
     output, provenance = _select_page_output_with_provenance(
         state, page_num, whole_doc, text_will_be_overridden=saved_text is not None
     )
     if saved_text is not None:
+        try:
+            if _floor_page is not None:
+                _floor_page.chart_floor_abstention = _prior_abstention
+        except Exception:  # pragma: no cover - a read-only stand-in in tests
+            pass
         output = replace(output, text=saved_text)
         output = _recovery_facts_of_saved_body(output, saved_text, page_num)
+        # #1269: the abstention must describe the bytes that ship. A saved body keeps
+        # an existing record only when it is still the bare floor body (see
+        # ``_is_bare_floor_body``) and the chart floor did not replace the page in the
+        # last selection. ``chart_floor_body_this_selection`` is used, not
+        # ``chart_floor_body``: that #1155 flag is set once and never cleared, so a stale
+        # True would erase a valid abstention. Any other saved text is a different
+        # decision, and the record would describe bytes that are not there. Selection
+        # itself recorded nothing on this path.
+        if _floor_page is not None and getattr(_floor_page, "chart_floor_abstention", None):
+            if not _is_bare_floor_body(
+                saved_text, page_num, getattr(_floor_page, "d3_floor_png_ref", "") or ""
+            ) or getattr(_floor_page, "chart_floor_body_this_selection", False):
+                try:
+                    _floor_page.chart_floor_abstention = None
+                except Exception:  # pragma: no cover - a read-only stand-in in tests
+                    pass
     output = _apply_table_emission_guard(output, page_num)
     p = state.pages.get(page_num)
     if p is not None:

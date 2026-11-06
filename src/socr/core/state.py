@@ -456,6 +456,22 @@ class PageState:
     #: of them (#1155 PR 1 re-review, Astra and Argon both; the page-scoped lines had the
     #: same gap, found in round 3 review).
     chart_floor_clauses: tuple | None = None
+    #: #1269: TRANSIENT, never persisted. What the last ``chart_floor_replacement``
+    #: probe found on this page (``outcome`` plus counts), overwritten at every probe
+    #: exit. It is NOT a claim that the chart floor decided the page: the probe also
+    #: runs eagerly for pages that take another branch (table evidence, rotation,
+    #: ordinary splice, refusals).
+    chart_floor_probe: dict | None = None
+    #: #1269: TRANSIENT, never persisted. True when the LAST selection without a saved
+    #: body replaced this page's bare marker with a chart body. ``chart_floor_body``
+    #: (#1155) is set once and never cleared, so it cannot say what the last selection
+    #: did; the saved-body check on ``chart_floor_abstention`` reads this field instead.
+    chart_floor_body_this_selection: bool = False
+    #: #1269: PERSISTED. Set only where the chart floor actually declined a box-less,
+    #: table-free, unrotated page and it kept its bare whole-page marker: the probe's
+    #: record (or ``probe_not_run`` / ``empty_body``). It travels with the sidecar
+    #: because it explains bytes that carry no other trace of why no chart body shipped.
+    chart_floor_abstention: dict | None = None
     #: GH-189: at least one detected chart region on this mixed chart+table page
     #: could not be rendered to a crop, so the chart ships as a visible marker and
     #: nothing else. Deliberately distinct from ``chart_asset_render_failed``
