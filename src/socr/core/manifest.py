@@ -3000,7 +3000,11 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
 
 
 def structure_class_floor_text(
-    p, page_num: int, *, chart_floor: Callable[[], str | None] | None = None
+    p,
+    page_num: int,
+    *,
+    chart_floor: Callable[[], str | None] | None = None,
+    chart_floor_offered: bool = True,
 ) -> str:
     """P2 / GH-317 / GH-520: fail-closed text for an exhausted structure-class page.
 
@@ -3130,6 +3134,9 @@ def structure_class_floor_text(
         # retired (keeping it for a suspect page would keep the leak #1266 removes), the
         # shared gate applies, and the body is keep-sentences.
         geometry_floor=born_digital,
+        # #1269 x #1266: only the S1 ending offers a chart floor. The D3 ending and the
+        # withheld-table floor never do, so they must not record that one declined.
+        chart_floor_offered=chart_floor_offered,
     )
 
 
@@ -3168,7 +3175,7 @@ def withheld_table_floor_text(
     )
     if not recovery or not getattr(p, "is_born_digital", False) or prior_ocr_layer_found(p):
         return whole_page
-    body = structure_class_floor_text(p, page_num)
+    body = structure_class_floor_text(p, page_num, chart_floor_offered=False)
     return body if _is_prose_recovery_body(body, page_num) else whole_page
 
 
@@ -3364,6 +3371,7 @@ def table_floor_text_for_source(
     prose_recovery: bool = False,
     chart_floor: Callable[[], str | None] | None = None,
     geometry_floor: bool = False,
+    chart_floor_offered: bool = True,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
 
@@ -3509,7 +3517,11 @@ def table_floor_text_for_source(
             if _count != 0 or _boxes:
                 return whole_page
             if chart_floor is None:
-                _record_chart_floor_abstention(p)
+                # #1269 records why the chart floor kept the bare marker. A caller that never
+                # offers a chart floor (``chart_floor_offered=False``: the #1266 D3 ending and
+                # ``withheld_table_floor_text``) has no chart decision to explain.
+                if chart_floor_offered:
+                    _record_chart_floor_abstention(p)
                 return whole_page
             if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
                 # Same refusal the normal lane makes below, applied before the
@@ -5033,7 +5045,7 @@ def _select_page_output_tagged(
             # (typed credential + banner) instead of recomputing, and fails closed otherwise.
             # The chart floor is not offered here (``chart_floor=None``): this ending was
             # never a chart lane.
-            d3_text = structure_class_floor_text(p, page_num)
+            d3_text = structure_class_floor_text(p, page_num, chart_floor_offered=False)
             # Recorded the way the S1 structure-class ending records it, from the same
             # evidence (the banner in what shipped): without the typed field a restored page
             # could not replay the recovery (``_is_restored_prose_recovery``) and the

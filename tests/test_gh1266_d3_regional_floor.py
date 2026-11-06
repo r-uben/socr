@@ -761,3 +761,34 @@ def test_e_a_restore_regenerates_fragment_and_sidecar_byte_for_byte(
     for key in ("scanned_prose_recovered", "audit_notes", "text", "status", "failure_mode"):
         assert meta2["winning_output"].get(key) == meta["winning_output"].get(key), key
     assert final_path.exists() and final_path.read_text() == final_md
+
+
+def test_d3_and_the_withheld_floor_record_no_chart_floor_abstention(tmp_path: Path) -> None:
+    """#1269 x #1266 (merge of origin/main 90bee711): ``chart_floor_abstention`` records why
+    the CHART floor kept a bare marker, and only the S1 ending offers one. Measured right
+    after the merge: a count-0 D3 page and a count-0 withheld-guard page each persisted
+    ``{"outcome": "probe_not_run"}``. DIFFERENCE: the same box-less page through the shared
+    builder with a chart floor offered records one; D3 and the withheld floor do not."""
+    from socr.core.manifest import table_floor_text_for_source
+
+    offered, off_ps = _build(tmp_path, _draw_p10, [], name="off.pdf")
+    table_floor_text_for_source(
+        off_ps, 1, off_ps.native_text, prose_recovery=True, geometry_floor=True
+    )
+    assert off_ps.chart_floor_abstention == {"outcome": "probe_not_run"}, "premise"
+
+    d3, d3_ps = _build(tmp_path, _draw_p10, [], name="d3.pdf")
+    _d3(d3_ps)
+    _out, prov = _select_page_output_tagged(d3, 1)
+    assert prov is D3
+    assert d3_ps.chart_floor_abstention is None
+
+    from socr.core.manifest import _apply_ladder_disposition_guard
+
+    wh, wh_ps = _build(tmp_path, _draw_p10, [], name="wh.pdf")
+    wh_ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+    winner = PageOutput(
+        page_num=1, text="| a |\n|---|\n| 1 |", status=PageStatus.SUCCESS, engine="qwen"
+    )
+    _apply_ladder_disposition_guard(winner, 1, wh_ps)
+    assert wh_ps.chart_floor_abstention is None
