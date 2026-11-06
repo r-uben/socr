@@ -214,9 +214,16 @@ class TestNegativeControlVerifiableTable:
         )
         assert winner.audit_passed is False
 
-    def test_d3_floor_requires_attempts(self) -> None:
-        """D3 floor only fires when p.attempts is non-empty (OCR was tried).
-        A page with no attempts (no OCR tried yet) must NOT hit the floor."""
+    def test_d3_floor_does_not_require_attempts(self) -> None:
+        """#1266 commit 3: the D3 floor fires with NO attempt too.
+
+        This used to pin the opposite ("no OCR tried yet -> fall through to native text"),
+        and the fall-through shipped the TR-3-refuted native grid: past D3, past S1 (which
+        needs a non-native attempt) to ``_native_text_with_appends``. A page that never
+        reaches the ladder (providerless run, ``--native-only``, outage) is exactly where
+        that happens, which is why GH-195 and #263's shredded floor are not attempt-gated
+        either. With no attempt there is no model reading to keep (#262), so the floor fires;
+        this page has no native words, so it is the whole-page marker."""
         state = DocumentState(handle=_make_handle(1))
         ps = state.pages[1]
         ps.is_born_digital = True
@@ -224,12 +231,12 @@ class TestNegativeControlVerifiableTable:
         ps.has_tables = True
         ps.native_table_structure_failed = True
         ps.native_table_unverifiable = True
-        # No attempts — OCR was never tried; should fall through to native text
+        assert not ps.attempts
         winner = _winning_page_output(state, 1, None)
-        assert not is_page_failed_marker(winner.text), (
-            "D3 floor must NOT fire when no OCR attempts were made "
-            "(the page has not been tried yet)"
-        )
+        assert is_page_failed_marker(winner.text), winner.text
+        assert "col1" not in winner.text and "| a | b |" not in winner.text
+        assert winner.status is PageStatus.ERROR
+        assert winner.audit_passed is False
 
 
 # ---------------------------------------------------------------------------

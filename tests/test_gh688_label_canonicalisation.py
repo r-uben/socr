@@ -732,11 +732,11 @@ _BAD_REGION = "| Label | Value |\n| --- | --- |\n| &nbsp;Bad | 1 |\n"
 _HEALTHY_REGION = "| Label | Value |\n| --- | --- |\n| &nbsp;Healthy | 2 |\n"
 
 
-def _d3_page(pdf_path: Path, *, identities: list[str]) -> DocumentState:
+def _d3_page(pdf_path: Path, *, identities: list[str], prose: str = "") -> DocumentState:
     """A born-digital page with two native table regions, the first of which
     the per-region geometry verifier hard-failed, ingested through the real
     ``apply_born_digital`` door with extractor-supplied identities."""
-    raw = _BAD_REGION + "\n" + _HEALTHY_REGION
+    raw = (f"{prose}\n\n" if prose else "") + _BAD_REGION + "\n" + _HEALTHY_REGION
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
     state.apply_born_digital(
         DocumentAssessment(
@@ -764,7 +764,27 @@ def _d3_page(pdf_path: Path, *, identities: list[str]) -> DocumentState:
     return state
 
 
-def test_gh688_the_d3_regional_splice_still_retains_a_healthy_sibling(tmp_path: Path) -> None:
+_D3_PROSE = "Reserves held at the end of the year."
+
+
+def _d3_page_with_words(tmp_path: Path, *, identities: list[str]) -> DocumentState:
+    """#1266 B1: ``_d3_page`` with a line of prose and this page's REAL words and detected
+    boxes, which the D3 ending's geometry floor reads (it no longer splices the GFM text).
+    The PDF is laid out from the canonical text, as the page prints it."""
+    from test_gh520_regional_floor_splice import _laid_out_pdf
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    printed = canonicalize_table_labels(f"{_D3_PROSE}\n\n{_BAD_REGION}\n{_HEALTHY_REGION}")[0]
+    pdf, boxes, words = _laid_out_pdf(tmp_path, printed)
+    state = _d3_page(pdf, identities=identities, prose=_D3_PROSE)
+    ps = state.pages[1]
+    ps.native_words = words
+    ps.detected_table_count = len(boxes)
+    ps.detected_table_bboxes = list(boxes)
+    return state
+
+
+def test_gh688_the_d3_floor_no_longer_depends_on_region_identities(tmp_path: Path) -> None:
     """Round 2 canonicalised the page text at ingestion but copied the
     extractor's region identities unchanged. ``_verify_regions`` computes those
     identities during extraction, so after ingestion they no longer matched the
@@ -772,17 +792,28 @@ def test_gh688_the_d3_regional_splice_still_retains_a_healthy_sibling(tmp_path: 
     and D3's floor shipped only the marker -- dropping a healthy sibling table
     it used to retain. That is content loss, not a resume nuisance.
 
-    Pinned through the real selector: the failed region becomes the marker, the
-    healthy one survives, and its label is canonical."""
-    pdf_path = _pdf(tmp_path)
+    #1266 B1 (owner ruling 2026-11-05): the D3 ending takes the geometry floor, which
+    withholds EVERY detected box (the healthy sibling too -- the accepted price) and keeps
+    the page's prose from its own words. Identities are no longer consulted, so the
+    round-3 mechanism (a mismatch refusing every region and taking the page's content with
+    it) cannot recur. Pinned through the real selector as a DIFFERENCE: provable and
+    unprovable identities ship the same bytes; the prose survives; no region ships."""
     identities = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
 
-    shipped = _winning_page_output(_d3_page(pdf_path, identities=identities), 1).text
+    shipped = _winning_page_output(
+        _d3_page_with_words(tmp_path / "provable", identities=identities), 1
+    ).text
+    unprovable = _winning_page_output(
+        _d3_page_with_words(tmp_path / "unprovable", identities=["x", "y"]), 1
+    ).text
 
     assert _D3_MARKER in shipped
-    assert "| Healthy | 2 |" in shipped, "the healthy sibling table must survive the floor"
+    assert _D3_PROSE in shipped, "the page's prose must survive the floor"
+    assert "Healthy" not in shipped, "B1 withholds every detected box, the sibling included"
     assert "| Bad | 1 |" not in shipped, "the failed region must still be replaced"
+    assert "Bad" not in shipped
     assert "&nbsp;" not in shipped
+    assert unprovable == shipped, "region identities changed what the D3 floor ships"
 
 
 def test_gh688_identities_and_text_are_rebuilt_together_or_not_at_all(tmp_path: Path) -> None:
@@ -826,16 +857,18 @@ def test_gh688_the_regional_floor_page_is_reproducible_and_not_blocked_by_688(
     same directory shape, so a future reader does not mistake it for the
     non-canonical-body refusal."""
     pipeline = _pipeline()
-    pdf_path = _pdf(tmp_path)
     identities = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
 
-    first = pipeline._phase_assemble(
-        _d3_page(pdf_path, identities=identities), tmp_path / "d3run1"
-    ).markdown
+    # #1266 B1: a regional-floor page is now the geometry floor's recovered prose, so the
+    # page carries real words; the premise below is "prose ships, not the bare marker".
+    first_state = _d3_page_with_words(tmp_path / "doc", identities=identities)
+    pdf_path = first_state.handle.path
+    first = pipeline._phase_assemble(first_state, tmp_path / "d3run1").markdown
     second = pipeline._phase_assemble(
-        _d3_page(pdf_path, identities=identities), tmp_path / "d3run2"
+        _d3_page_with_words(tmp_path / "doc", identities=identities), tmp_path / "d3run2"
     ).markdown
-    assert "| Healthy | 2 |" in first
+    assert _D3_PROSE in first
+    assert "Healthy" not in first
     assert second == first
 
     body = next((tmp_path / "d3run1").rglob("pages/00001.md")).read_text(encoding="utf-8")
@@ -1323,7 +1356,7 @@ def _run_phase_agentic_with_precanonical_native(
     return pipeline, state
 
 
-def test_gh719_lifecycle_rewrite_rebuilds_identities_so_the_healthy_sibling_survives(
+def test_gh719_lifecycle_rewrite_rebuilds_identities_with_the_text(
     tmp_path: Path,
 ) -> None:
     """The rewrite of ``ps.native_text`` at the per-page lifecycle seam must
@@ -1332,9 +1365,14 @@ def test_gh719_lifecycle_rewrite_rebuilds_identities_so_the_healthy_sibling_surv
     regions, so the D3 regional splice's 1:1 identity match against the now-
     canonical parsed blocks fails for every region, and the floor drops the
     healthy sibling table it used to retain. Same shape as the round-3 D3
-    content loss ``test_gh688_the_d3_regional_splice_still_retains_a_healthy_sibling``
+    content loss ``test_gh688_the_d3_floor_no_longer_depends_on_region_identities``
     guards at the ingestion boundary; this pins the same invariant at the
-    lifecycle boundary."""
+    lifecycle boundary.
+
+    #1266 B1: the D3 ending no longer splices, so it no longer reads the identities and
+    withholds the healthy sibling whatever they say (owner-accepted price). The identity
+    rebuild is still pinned here directly; the selector half keeps only its no-leak
+    assertions."""
     provable = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
     _pipeline, state = _run_phase_agentic_with_precanonical_native(tmp_path, identities=provable)
     ps = state.pages[1]
@@ -1345,10 +1383,11 @@ def test_gh719_lifecycle_rewrite_rebuilds_identities_so_the_healthy_sibling_surv
         markdown_table_identity(canonicalize_table_labels(_HEALTHY_REGION)[0]),
     ], "the lifecycle rewrite must rebuild the identities alongside the text"
 
+    # #1266 B1: the D3 ending no longer consults the identities (it takes the geometry
+    # floor, which withholds every detected box), so the healthy sibling no longer ships
+    # whatever they say; the identity rebuild itself is pinned directly above.
     shipped = _winning_page_output(state, 1).text
     assert _D3_MARKER in shipped, shipped
-    assert "| Healthy | 2 |" in shipped, (
-        f"the healthy sibling table must survive the lifecycle-rewritten floor: {shipped!r}"
-    )
+    assert "Healthy" not in shipped, shipped
     assert "| Bad | 1 |" not in shipped, shipped
     assert "&nbsp;" not in shipped, shipped

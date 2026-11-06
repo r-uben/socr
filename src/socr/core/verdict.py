@@ -977,6 +977,7 @@ EVENT_KINDS_AFTER_NUMBERS_DROPPED = (
     "figure_description_failed",
     "chart_region_duplicate_suppressed",
     "figure_cap_reached",
+    "figure_caption_withheld_on_floor",
     "figure_description_dropped",
     "figure_recoverable_labels",
 )

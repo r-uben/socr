@@ -714,6 +714,7 @@ def _derive_disposition_buckets(
     """
     from socr.core.manifest import (
         d3_floor_kept_model_output,
+        d3_no_model_reading,
         flagged_model_page_output,
     )
 
@@ -743,8 +744,11 @@ def _derive_disposition_buckets(
         and (
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_header_unattributed", False)
+            # #1266 merge gate: mirrors the D3 entry's no-model-reading widening.
+            or d3_no_model_reading(p)
         )
-        and bool(p.attempts)
+        # #1266 commit 3: the D3 floor no longer requires an attempt, so neither does the
+        # bucket that surfaces it (document status, audit event, CLI line).
         and n not in d3_model
     }
     flagged_model: set[int] = {
@@ -3153,6 +3157,15 @@ class UnifiedPipeline:
             logger.warning(
                 "TICKET-A1b: failed to cache native words for %s", state.handle.path, exc_info=True
             )
+        # #1266 merge gate: a born-digital page the lane heuristic flags as table-bearing but
+        # with no complete detector box gets its words in a SEPARATE live-only field, read
+        # only by ``boxless_failed_table_text`` (the box-less failed-table route).
+        # ``native_words`` above keeps its exact population, so every other consumer
+        # (``_truncated_grid_reading_ids``, the chart floor, ``_table_bbox_sane``, the #1144
+        # recovery) sees what it saw. Runs AFTER the native-words and bbox-verdict loops and
+        # under its own guards, per page: a read failure here costs only that page's box-less
+        # words (the route then fails closed), never another page's ``native_words`` (#881).
+        self._cache_boxless_table_words(state, assessment)
 
         self._emit_native_table_structure_events(state, assessment)
 
@@ -3402,6 +3415,13 @@ class UnifiedPipeline:
             ps = state.pages[page_num]
             if self._page_has_tables(page_num, ps):
                 ps.native_table_structure_failed = True
+                # #1266 round 3: the page now takes the D3 floor or the box-less route,
+                # both of which may ship a "see image" marker; render that image.
+                _figs = getattr(state, "figures_dir", None)
+                if _figs is not None and not getattr(ps, "d3_floor_png_ref", ""):
+                    ps.d3_floor_png_ref = self._render_d3_floor_png(
+                        state.handle.path, page_num, _figs
+                    )
             return PageOutput(
                 page_num=page_num,
                 text=ps.native_text or "",
@@ -3821,6 +3841,49 @@ class UnifiedPipeline:
         if not last_assessment:
             return None
         return next((p for p in last_assessment.pages if p.page_num == page_num), None)
+
+    def _cache_boxless_table_words(self, state: DocumentState, assessment) -> None:
+        """#1266: fill ``PageState.boxless_table_words`` for born-digital ``has_tables`` pages
+        with no complete detector box. Best-effort per page; a failure leaves that page's
+        field empty and touches nothing else."""
+        pages = [
+            pa.page_num
+            for pa in assessment.pages
+            if not getattr(pa, "load_error", "")
+            and pa.is_born_digital
+            and bool(getattr(pa, "has_tables", False))
+            # #1266 round 3: box-less = the detector found nothing (count 0, no box); a
+            # partial box set takes the whole-page marker and needs no words.
+            and type(pa.detected_table_count) is int
+            and pa.detected_table_count == 0
+            and not (getattr(pa, "detected_table_bboxes", None) or [])
+        ]
+        if not pages:
+            return
+        try:
+            from socr.core.pdf import open_pdf
+
+            doc = open_pdf(state.handle.path)
+        except Exception:
+            logger.warning(
+                "#1266: could not open %s for box-less table words",
+                state.handle.path,
+                exc_info=True,
+            )
+            return
+        try:
+            for page_num in pages:
+                ps = state.pages.get(page_num)
+                if ps is None or not (0 <= page_num - 1 < len(doc)):
+                    continue
+                try:
+                    ps.boxless_table_words = doc[page_num - 1].get_text("words")
+                except Exception:
+                    logger.warning(
+                        "#1266: box-less table words unreadable for p%d", page_num, exc_info=True
+                    )
+        finally:
+            doc.close()
 
     def _page_has_tables(self, page_num: int, ps: PageState | None = None) -> bool:
         """Whether the born-digital detector found table-like structure."""
@@ -5970,7 +6033,7 @@ class UnifiedPipeline:
         is what keeps chart-free documents byte-identical.
         """
         from socr.core.audit_log import AuditEvent
-        from socr.core.manifest import is_page_failed_marker
+        from socr.core.manifest import is_page_failed_marker, recertify_floor_body
         from socr.core.pdf import open_pdf
         from socr.figures.chart_regions import (
             NOT_REPRESENTABLE,
@@ -6130,6 +6193,9 @@ class UnifiedPipeline:
                 )
 
             if new_body != body:
+                # #1266 round 6: this writer is socr's own; a floor page's certificate moves
+                # with the body it produced (nothing else may certify a changed body).
+                recertify_floor_body(ps, body, new_body, pn)
                 texts[pn - 1] = new_body
                 changed = True
 
@@ -7128,14 +7194,41 @@ class UnifiedPipeline:
         table, rather than from a corroborated OCR reading, without opening
         the page sidecar. ``None`` on a clean run.
         """
-        pages = UnifiedPipeline._scanned_prose_recovered_pages(records)
-        if not pages:
-            return None
-        return (
-            f"page(s) {', '.join(str(n) for n in pages)}: no OCR attempt could be spliced "
-            "around a withheld table, so the page's own unverified prose bands shipped "
-            "flagged instead -- see scanned_prose_recovered in the page sidecar"
-        )
+        scans, born = UnifiedPipeline._scanned_prose_recovered_by_kind(records)
+        parts = []
+        if scans:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in scans)}: no OCR attempt could be spliced "
+                "around a withheld table, so the page's own unverified prose bands shipped "
+                "flagged instead -- see scanned_prose_recovered in the page sidecar"
+            )
+        if born:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in born)}: a born-digital table could not "
+                "be verified, so the page's own unverified text layer shipped flagged around "
+                "a withheld table -- see scanned_prose_recovered in the page sidecar"
+            )
+        return "; ".join(parts) or None
+
+    @staticmethod
+    def _scanned_prose_recovered_by_kind(records: list) -> tuple[list[int], list[int]]:
+        """#1266 review: the recovered pages split by their OWN banner into (scans, born-digital).
+
+        The kind is read from the shipped bytes' banner (``manifest.prose_recovery_is_born_
+        digital``), the same evidence the restore path uses, so a resumed page keeps its kind.
+        """
+        from socr.core.manifest import prose_recovery_is_born_digital
+
+        scans: list[int] = []
+        born: list[int] = []
+        for rec in records:
+            out = rec.output
+            if not out.scanned_prose_recovered:
+                continue
+            (
+                born if prose_recovery_is_born_digital(out.text or "", out.page_num) else scans
+            ).append(out.page_num)
+        return sorted(set(scans)), sorted(set(born))
 
     @staticmethod
     def _chart_detection_failed_note(state) -> str | None:
@@ -11404,6 +11497,17 @@ class UnifiedPipeline:
                 ps = state.pages[page_num]
                 if self._page_has_tables(page_num, ps):
                     ps.native_table_structure_failed = True
+                    # #1266 merge gate: with no model reading this page takes the D3 floor
+                    # (with a detector box) or the box-less route (without one); both may ship
+                    # a marker that says "see image", so render the page image here for every
+                    # stamped page (round 3, Fable P1: the box-less route had none).
+                    if not getattr(ps, "d3_floor_png_ref", ""):
+                        _, _providerless_figs = self._doc_and_figures_dir(
+                            state.handle.path, output_dir
+                        )
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path, page_num, _providerless_figs
+                        )
                 fallback = PageOutput(
                     page_num=page_num,
                     text=ps.native_text or "",
@@ -17582,6 +17686,20 @@ class UnifiedPipeline:
             # strip from a prior completed assemble) is honoured on resume.
             page_out.text = body
             page_out.page_num = page_num
+            # #1266 round 3 (Astra P0): the floor credential certifies the bytes it was
+            # bound to; a fragment that differs from them does not inherit it.
+            from socr.core.manifest import table_floor_credential_holds
+
+            if page_out.table_floor_body and not table_floor_credential_holds(page_out):
+                from socr.core.manifest import SCANNED_PROSE_RECOVERED_NOTE
+
+                # round 4: the recovery facts go with the credential they relied on.
+                page_out.table_floor_body = False
+                page_out.table_floor_digest = ""
+                page_out.scanned_prose_recovered = False
+                page_out.audit_notes = [
+                    n for n in (page_out.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE
+                ]
             return page_out
         except Exception as exc:  # never let the ledger read break a run
             logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)
@@ -19128,6 +19246,8 @@ class UnifiedPipeline:
         # non-S1/non-D3/non-flagged-model reason and native bytes ultimately shipped
         # demoted; it is intentionally not equivalent to the DEMOTED_NATIVE ending
         # or the old NATIVE_FALLBACK provenance.
+        from socr.core.manifest import d3_no_model_reading as _d3_no_model_reading
+
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -19175,6 +19295,8 @@ class UnifiedPipeline:
                 and (
                     getattr(p, "native_table_unverifiable", False)
                     or getattr(p, "native_table_header_unattributed", False)  # GH-200
+                    # #1266 merge gate: the D3 entry's no-model-reading widening.
+                    or _d3_no_model_reading(p)
                 )
             )
             # GH-211: pages distrusted under --native-only never had an OCR
@@ -20225,6 +20347,14 @@ class UnifiedPipeline:
             # native_fallback for these; they were routed to the image-asset lane
             # (failed-table marker + explicit failure), never the collapsed native.
             for n in d3_floor_pages:
+                # #1266 commit 5: since commit 3 a page with NO attempt reaches this floor
+                # too; its event must not claim a ladder ran. Attempted pages keep the
+                # original text byte for byte.
+                _ladder_clause = (
+                    "and OCR ladder also failed"
+                    if state.pages[n].attempts
+                    else "and no OCR reading was attempted"
+                )
                 state.events.append(
                     AuditEvent(
                         page_num=n,
@@ -20232,7 +20362,7 @@ class UnifiedPipeline:
                         engine="native",
                         detail=(
                             "per-region geometry verifier hard-failed"
-                            " (geometry_impossible_collapse) and OCR ladder also failed;"
+                            f" (geometry_impossible_collapse) {_ladder_clause};"
                             " D3 fail-closed: explicit failed-table marker shipped"
                             " — no collapsed/ragged table emitted"
                         ),
@@ -20412,11 +20542,19 @@ class UnifiedPipeline:
                 # pages`` is computed once, above, so this line is reachable
                 # even when it is the document's ONLY signal.
                 if scanned_prose_recovered_pages:
-                    console.print(
-                        f"  [red]{len(scanned_prose_recovered_pages)} scanned page(s) shipped "
-                        "unverified recovered prose (no OCR attempt could be spliced around a "
-                        f"withheld table): {scanned_prose_recovered_pages}[/red]"
-                    )
+                    _scan_pgs, _born_pgs = self._scanned_prose_recovered_by_kind(pre_records)
+                    if _scan_pgs:
+                        console.print(
+                            f"  [red]{len(_scan_pgs)} scanned page(s) shipped "
+                            "unverified recovered prose (no OCR attempt could be spliced around a "
+                            f"withheld table): {_scan_pgs}[/red]"
+                        )
+                    if _born_pgs:
+                        console.print(
+                            f"  [red]{len(_born_pgs)} born-digital page(s) shipped "
+                            "unverified recovered prose (the page's own text layer; its table "
+                            f"content withheld): {_born_pgs}[/red]"
+                        )
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
@@ -22107,6 +22245,7 @@ class UnifiedPipeline:
         # instead also carries it, and skipping on the ref alone dropped that page's
         # figures (Argon, diff review).
         from socr.core.manifest import page_ships_its_own_page_image
+        from socr.core.manifest import recertify_floor_body
 
         _shipped_bodies = split_native_pages(text)
         _own_image = {
@@ -22197,6 +22336,34 @@ class UnifiedPipeline:
                 description = info.description
                 figure_type = info.figure_type or "extracted"
                 was_described = True
+
+            # #1266 round 7: a page that holds a certified floor body gets this figure's
+            # block certified with it, so the vision model's caption (no number check on this
+            # path) must pass the number-free check first: a caption over a withheld table
+            # box would otherwise ship its numbers under the floor credential. The same
+            # FigureInfo feeds the body, the sidecar's figure_refs and the metadata, so one
+            # blanking covers all three. The image and the header stay.
+            if description and getattr(state.pages.get(fig.page_num), "certified_floor_text", ""):
+                if (
+                    _crop_descriptions.find_number_tokens(description)
+                    or _crop_descriptions.clean_description(description) is None
+                ):
+                    from socr.core.audit_log import AuditEvent as _CapEvent
+
+                    state.events.append(
+                        _CapEvent(
+                            page_num=fig.page_num,
+                            kind="figure_caption_withheld_on_floor",
+                            engine="",
+                            detail=(
+                                f"figure {fig.figure_num}: the caption failed the number-free "
+                                "check on a page that holds a certified floor body; the image "
+                                "ships without it"
+                            ),
+                            data={"figure_num": fig.figure_num},
+                        )
+                    )
+                    description = ""
 
             fig_info = FigureInfo(
                 figure_num=fig.figure_num,
@@ -22296,7 +22463,13 @@ class UnifiedPipeline:
                 continue
 
             # Append figure blocks to this page's body text.
+            before_blocks = page_bodies[idx]
             page_bodies[idx] = page_bodies[idx].rstrip() + "\n\n" + page_figure_blocks
+            # #1266 round 7: socr's own writer; a floor page's certificate moves with the body
+            # it produced (see ``_preserve_chart_regions``).
+            recertify_floor_body(
+                state.pages.get(page_num), before_blocks, page_bodies[idx], page_num
+            )
 
             updated = True
 
@@ -22397,6 +22570,7 @@ class UnifiedPipeline:
         from ocr_output_contract import assemble_pages, split_native_pages
 
         from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import recertify_floor_body
 
         if "![" not in text:
             return text
@@ -22540,6 +22714,8 @@ class UnifiedPipeline:
 
             new_body = _crop_descriptions.insert_descriptions(body, describe_ref)
             if new_body != body:
+                # #1266 round 6: socr's own writer; see ``_preserve_chart_regions``.
+                recertify_floor_body(state.pages.get(page_num), body, new_body, page_num)
                 bodies[idx] = new_body
                 changed = True
 

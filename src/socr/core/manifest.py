@@ -1093,6 +1093,67 @@ def _model_attempt_ran(p) -> bool:
     return any((a.engine or "") and not a.engine.startswith(_NATIVE_TEXT_LANES) for a in p.attempts)
 
 
+def table_floor_digest_of(text: str | None) -> str:
+    """#1266 round 3: sha256 of the exact text a floor writer certifies with ``table_floor_body``."""
+    import hashlib
+
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _without_floor_credential(output):
+    """#1266 round 4: drop the floor credential AND the recovery facts it vouched for.
+
+    A body the credential no longer certifies is not this lane's recovery either, so
+    ``scanned_prose_recovered`` and its note go with it (a stale flag would let a later
+    words-less replay trust the altered bytes)."""
+    notes = [n for n in (output.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE]
+    return replace(
+        output,
+        table_floor_body=False,
+        table_floor_digest="",
+        scanned_prose_recovered=False,
+        audit_notes=notes,
+    )
+
+
+def table_floor_credential_holds(output) -> bool:
+    """#1266 round 3: the floor credential holds only on the bytes it certified."""
+    return bool(getattr(output, "table_floor_body", False)) and getattr(
+        output, "table_floor_digest", ""
+    ) == table_floor_digest_of(getattr(output, "text", "") or "")
+
+
+def detector_boxes_complete(p) -> bool:
+    """A positive ``detected_table_count`` with one usable box per detected table.
+
+    ``find_tables()`` evidence, taken before reconstruction. The #1144 recovery gate in
+    ``table_floor_text_for_source`` reads exactly this (count == boxes, count > 0); factored
+    out so the D3 widening reads the same predicate rather than a second copy.
+    """
+    boxes = getattr(p, "detected_table_bboxes", None) or []
+    count = getattr(p, "detected_table_count", 0)
+    return type(count) is int and count > 0 and len(boxes) == count
+
+
+def d3_no_model_reading(p) -> bool:
+    """#1266 merge gate (Finding 18, option (b)): a BOX-BACKED failed table, no model reading.
+
+    Widens the D3 floor's conjunction: a page whose native table structure FAILED with no
+    model attempt (empty ladder plus ``native_first``, ``--native-only``, a provider outage)
+    otherwise declined D3 (no unverifiable/header flag) and S1 (no non-native attempt) and
+    shipped the failed native grid at WARNING.
+
+    Only with a detector box (``detector_boxes_complete``). A ``find_tables()`` box is
+    independent geometric evidence that a table is there; the ``has_tables`` lane heuristic
+    alone is not (GH-655 census: 400 false flags across 68 Fed documents), and the providerless
+    loop stamps ``native_table_structure_failed`` on every ``has_tables`` page. A page with a
+    box takes the geometry floor, which keeps its sentences; a box-less page would fail closed
+    to the bare marker and lose its prose, so it keeps today's route exactly. A page WITH a
+    model attempt is untouched. One named predicate for the D3 entry and every mirror of it.
+    """
+    return not _model_attempt_ran(p) and detector_boxes_complete(p)
+
+
 def garbled_math_suspect(p) -> bool:
     """#960: the native text layer garbled the page's mathematics, or the scan for that
     failed (unknown is not clean)."""
@@ -1469,13 +1530,12 @@ def _reaches_structure_class_branch(p) -> bool:
     # never reached for this page -- a different, earlier return ships.
     if not (p.is_born_digital and p.native_text):
         return False
-    if (
-        p.native_table_structure_failed
-        and (
-            getattr(p, "native_table_unverifiable", False)
-            or getattr(p, "native_table_header_unattributed", False)
-        )
-        and bool(p.attempts)
+    # #1266 commit 3 / merge gate: mirrors the D3 entry (no attempt needed; a failed table
+    # with no model reading enters too).
+    if p.native_table_structure_failed and (
+        getattr(p, "native_table_unverifiable", False)
+        or getattr(p, "native_table_header_unattributed", False)
+        or d3_no_model_reading(p)
     ):
         return False
     if getattr(p, "native_rotated_text_shredded", False):
@@ -2787,7 +2847,7 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
     # This lane now does the same thing, with the same credential:
     # ``_is_restored_prose_recovery`` requires both the typed field this module sets and
     # this module's own banner in the bytes, neither of which a model attempt can forge.
-    if _is_restored_prose_recovery(p, page_num):
+    if _restored_floor_body_holds(p, page_num):
         frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
         if not frozen:
             # No bytes to keep: fall through to the caller's bare marker rather than
@@ -3003,7 +3063,11 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
 
 
 def structure_class_floor_text(
-    p, page_num: int, *, chart_floor: Callable[[], str | None] | None = None
+    p,
+    page_num: int,
+    *,
+    chart_floor: Callable[[], str | None] | None = None,
+    chart_floor_offered: bool = True,
 ) -> str:
     """P2 / GH-317 / GH-520: fail-closed text for an exhausted structure-class page.
 
@@ -3011,6 +3075,14 @@ def structure_class_floor_text(
     the ``d3_floor_png_ref``. The page's prose survives ONLY when the page's
     tables can be enumerated independently of the parser that produced them;
     otherwise the whole page becomes the marker and no native byte ships.
+
+    #1266 B1: it serves TWO endings. The S1 structure-class ending, and the TR-3 D3
+    regional ending (``SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE``), whose
+    ``splice_all_table_regions`` / ``splice_failed_table_regions`` calls it replaced. That
+    ending is born-digital only, so it always takes the geometry floor below; each caller
+    records the recovery on its own ``PageOutput`` (``scanned_prose_recovered`` plus the
+    audit note) from the banner in what this returns. The GH-520 history that follows is
+    the S1 ending's; on born-digital pages the splice it describes is retired (#1266).
 
     Why the guard is what it is
     ---------------------------
@@ -3097,12 +3169,228 @@ def structure_class_floor_text(
         d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
         png_ref = getattr(p, "d3_floor_png_ref", "")
         return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    # #1266 replay. A page rebuilt from its sidecar has boxes but no ``native_words``
+    # (a live-run cache, #652 P2a), so the geometry below cannot be recomputed and must not
+    # be re-decided. When the persisted winner IS this lane's own born-digital recovery --
+    # the typed credential ``_is_restored_prose_recovery`` checks, not forgeable by a model
+    # attempt -- the frozen body stands, byte for byte. Only the born-digital banner is
+    # replayed here; a scan recovery keeps today's behaviour. With neither words nor a
+    # frozen recovery the call below fails CLOSED (whole-page marker).
+    if not (getattr(p, "native_words", None) or []) and _restored_floor_body_holds(p, page_num):
+        frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
+        if frozen and _body_has_born_digital_banner(frozen, page_num):
+            return frozen
+    born_digital = bool(getattr(p, "is_born_digital", False))
     return table_floor_text_for_source(
         p,
         page_num,
         getattr(p, "native_text", "") or "",
         prose_recovery=True,
         chart_floor=chart_floor,
+        # #1266 review: Argon #4 asked that keep-sentences require ADMISSIBLE layer evidence
+        # (``prior_ocr_layer_suspect``, the union that includes a FAILED scan). That is
+        # OVERRULED by #1156's recorded exception: "unknown is not a finding", so on a failed
+        # scan alone the page keeps its layer's prose under the mark (0 of 318 probe pages).
+        # The owner's keep-sentences scope excludes only POSITIVE prior-OCR pages, which
+        # ``prior_ocr_layer_found`` already sent to the whole-page marker above. So every
+        # other born-digital page, suspect or not, takes the same lane: the GH-520 splice is
+        # retired (keeping it for a suspect page would keep the leak #1266 removes), the
+        # shared gate applies, and the body is keep-sentences.
+        geometry_floor=born_digital,
+        # #1269 x #1266: only the S1 ending offers a chart floor. The D3 ending and the
+        # withheld-table floor never do, so they must not record that one declined.
+        chart_floor_offered=chart_floor_offered,
+    )
+
+
+def withheld_table_floor_text(
+    p, page_num: int, *, recovery: bool = True, fallback_marker: str | None = None
+) -> str:
+    """#1266 merge gate: what ships when a page's table is WITHHELD. Never a text splice.
+
+    The shared floor for every caller that withholds a table outside the two #1266 endings:
+    the TABLE_WITHHELD ladder guard, the nothing-produced ending, and #1271's row-binding
+    early return. Each used ``table_floor_text_for_source`` with ``geometry_floor=False``,
+    i.e. the GH-520 text splice over some text (a model winner's, or ``native_text``): the
+    parsed GFM blocks became markers and every other line shipped, so a parsed grid beside
+    an un-parsed ``Loose 7.7 8.8`` row shipped the loose row (Astra, PR #1273 gate, P0).
+
+    * A born-digital page with no POSITIVE prior-OCR finding, and ``recovery`` True: the
+      #1266 geometry floor, exactly ``structure_class_floor_text`` (shared gate,
+      keep-sentences body, banner, marker plus page image; the frozen typed replay when the
+      words are gone and the winner is this lane's own recovery; otherwise fail closed).
+      This does not substitute the page's text for a model's reading: it WITHHOLDS the
+      reading and ships the page's own words under the floor banner, as ending A does once
+      every rung has failed.
+    * Every other page (a scan, a positive prior-OCR finding, ``recovery`` False) and every
+      page the floor itself refuses: the whole-page marker -- *fallback_marker* when given,
+      else the unverifiable-table marker plus the page image.
+
+    The caller records a recovery on its output from the banner in what this returns
+    (``_is_prose_recovery_body``), as the two endings do.
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "") or ""
+    whole_page = (
+        fallback_marker
+        if fallback_marker is not None
+        else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
+    )
+    if not recovery or not getattr(p, "is_born_digital", False) or prior_ocr_layer_found(p):
+        return whole_page
+    body = structure_class_floor_text(p, page_num, chart_floor_offered=False)
+    return body if _is_prose_recovery_body(body, page_num) else whole_page
+
+
+def no_table_detection(p) -> bool:
+    """#1266 round 3: the detector found NO table at all -- ``detected_table_count == 0`` and no
+    box. Distinct from ``not detector_boxes_complete``: a count above the box list is the
+    detector's fail-closed state for unusable boxes (``born_digital``), not an absence."""
+    count = getattr(p, "detected_table_count", 0)
+    return (
+        type(count) is int and count == 0 and not (getattr(p, "detected_table_bboxes", None) or [])
+    )
+
+
+def boxless_failed_table_text(p, page_num: int) -> str:
+    """#1266 merge gate (rounds 2-3, orchestrator's middle path): the body for a page whose
+    native table FAILED, with no model reading and no complete detector box.
+
+    Such a page used to ship ``_native_text_with_appends`` -- the failed native grid -- at
+    WARNING. It is NOT whole-paged blindly (the ``has_tables`` heuristic stamps prose pages
+    too, gh881). In order:
+
+    0. A PARTIAL box set (count above the box list) is the detector's fail-closed state, so
+       the whole-page marker plus image, exactly as ``_refused`` does.
+    1. No words: the page's own credentialed recovery replays, else the whole page.
+    2. The KEEP-SENTENCES bands body (any-digit on a scan) behind the reading-order gate. A
+       real box-less grid ships its rows with words outnumbering numerals and withholds its
+       numeric rows (the accepted KEEP-SENTENCES class); no structure clause at this step (the
+       lanes predicate fires on gh881's misflagged page too).
+    3. THE ORDER-GATE FALLBACK (born-digital only): when the bands cannot follow the page's
+       reading order (two columns welded by y-banding): TABLE STRUCTURE among the page's words
+       (``_structure_outside_boxes`` with every word outside: numeric column lanes or a
+       categorical row) -> the whole page plus image; otherwise the page's ``native_text``
+       ships IN ITS OWN LINE ORDER with the same KEEP-SENTENCES rule per line
+       (``_native_text_line_body``). Orchestrator decision, round 3: the structure clause sits
+       here only, so a page whose bands body passes the order gate (gh881) is unchanged.
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "") or ""
+    whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    if not no_table_detection(p):
+        return whole_page
+    boxless_words = getattr(p, "boxless_table_words", None) or []
+    if not boxless_words:
+        bo = getattr(p, "best_output", None)
+        if bo is not None and _restored_floor_body_holds(p, page_num):
+            return bo.text or whole_page
+        return whole_page
+    born_digital = bool(getattr(p, "is_born_digital", False))
+    native_text = getattr(p, "native_text", "") or ""
+    body = native_prose_floor_text(
+        p,
+        page_num,
+        marker_line=d3_marker,
+        png_ref=png_ref,
+        keep_sentences=born_digital,
+        words=boxless_words,
+    )
+    if body and _prose_follows_native_order(body, native_text):
+        return body
+    if born_digital:
+        # The order-gate fallback ships ``native_text`` line by line, so it first asks
+        # whether the page's words print TABLE STRUCTURE (the box-backed gate's own
+        # predicate, every word outside): a grid whose bands weld or sit beside prose is
+        # withheld whole rather than shipped in the layer's own order.
+        if _structure_outside_boxes(p, words=boxless_words):
+            return whole_page
+        fallback = _native_text_line_body(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+        if fallback:
+            return fallback
+    return whole_page
+
+
+def _native_text_line_body(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """#1266 round 3, the box-less route's ORDER-GATE FALLBACK: ``native_text`` in its own line
+    order, KEEP-SENTENCES per line.
+
+    Used only when the bands body fails the reading-order gate on a born-digital page (a
+    two-column page drawn column-major: y-banding welds the columns, while
+    ``native_text`` already reads column by column). Each line is judged like a band
+    (``band_is_mostly_numerals`` on its tokens); a numeral-dense line or a GFM table-syntax
+    line is withheld, a run of withheld lines becomes ONE marker (plus page-image link), every
+    other line ships escaped. Same banner and trust check as ``native_prose_floor_text``.
+    Returns None when nothing would ship or the shipped text is not a trusted text layer.
+    """
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.reconcile import table_syntax_line_indices
+    from socr.tables.row_corroboration import band_is_mostly_numerals
+
+    lines = [ln.rstrip() for ln in (getattr(p, "native_text", "") or "").splitlines()]
+    if not any(ln.strip() for ln in lines):
+        return None
+    table_syntax = table_syntax_line_indices(lines)
+    shipped: list[str] = []
+    blocks: list[str] = [prose_recovered_flag(page_num, born_digital=True, keep_sentences=True)]
+    if png_ref:
+        blocks.append(png_ref)
+    page_image = page_image_link(png_ref)
+    marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
+    paragraph: list[str] = []
+    in_withheld_run = False
+
+    def _flush() -> None:
+        if paragraph:
+            blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
+            paragraph.clear()
+
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            _flush()
+            continue
+        pseudo_band = [(0.0, 0.0, 0.0, 0.0, tok) for tok in line.split()]
+        if idx in table_syntax or band_is_mostly_numerals(pseudo_band):
+            if not in_withheld_run:
+                _flush()
+                blocks.append(marker_block)
+                in_withheld_run = True
+            continue
+        in_withheld_run = False
+        paragraph.append(line)
+        shipped.append(line)
+    _flush()
+    if not shipped or not text_layer_trusted("\n".join(shipped)):
+        return None
+    return "\n\n".join(blocks)
+
+
+def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
+    """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
+    return _body_has_born_digital_banner(text, page_num)
+
+
+def _body_has_born_digital_banner(text: str, page_num: int) -> bool:
+    """Whether *text* carries the BORN-DIGITAL form of this lane's banner (#1266).
+
+    Walks past this module's own canonical lines exactly like ``_is_prose_recovery_body``
+    and then requires one of the two born-digital banners, so the replay in
+    ``structure_class_floor_text`` cannot adopt a scan recovery's bytes.
+    """
+    body = text or ""
+    while body:
+        head, sep, rest = body.partition("\n")
+        if not head.strip() or is_canonical_mark(head.strip(), page_num):
+            body = rest if sep else ""
+            continue
+        break
+    return any(
+        body.startswith(flag.format(page_num=page_num))
+        for flag in (
+            BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+            BORN_DIGITAL_KEEP_SENTENCES_FLAG,
+            BORN_DIGITAL_NATIVE_TEXT_FLAG,
+        )
     )
 
 
@@ -3184,6 +3472,83 @@ def table_bbox_sanity_verdict(p) -> bool:
     return _table_bbox_sane(p)
 
 
+def _each_table_box_sane(p) -> bool:
+    """Gate-only box sanity, PER BOX (#1266). ``_table_bbox_sane`` is unchanged.
+
+    ``_table_bbox_sane`` judges the UNION of every box, which is right for the GH-520/D3
+    guards that call it but wrong for the born-digital floor gate: the union swallows
+    whatever is printed BETWEEN two boxes. On ``_p77_like`` (Coca-Cola CDP 2022 p77) the
+    sentence between the numeric grid and the Yes/No grid sits inside the union, the Yes/No
+    rows are zero-numeral bands, so prose bands (6) outnumber numeric bands (4) and a
+    correct pair of boxes reads "too large". Here the same two tests run on each box alone
+    (``row_corroboration.box_band_census``): a box with no table band is too small, a box
+    with more prose bands than table bands is too large. A band carrying a categorical
+    answer token (``bears_categorical_answer``, one Yes/No is enough: p77's Q&A grid prints
+    one per row) counts as a table band in both tests (#1144). Every box must pass. No words, or no box, is no
+    evidence and answers False (fail closed); the persisted union verdict is not consulted
+    because it answers a different question.
+    """
+    from socr.tables.row_corroboration import box_band_census
+
+    words = getattr(p, "native_words", None) or []
+    boxes = getattr(p, "detected_table_bboxes", None) or []
+    if not words or not boxes:
+        return False
+    # #1266 review (Astra P2, Argon #8): validate the boxes themselves, here only --
+    # ``words_in_region`` answers "every word" for an inverted or NaN box, which would read
+    # as a page-wide, perfectly sane box. Non-finite, inverted or zero-area: not sane. Two
+    # boxes with a positive-area intersection (a duplicate is the extreme) double-count the
+    # same words, so the census of each is not a census of a table: not sane.
+    rects = []
+    for box in boxes:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in box[:4])
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or not (x0 < x1 and y0 < y1):
+            return False
+        rects.append((x0, y0, x1, y1))
+    for i, a in enumerate(rects):
+        for b in rects[i + 1 :]:
+            if min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1]):
+                return False
+    for box in boxes:
+        table, prose = box_band_census(words, box)
+        if table == 0 or prose > table:
+            return False
+    return True
+
+
+def _structure_outside_boxes(p, *, words: list | None = None) -> bool:
+    """Whether table structure is printed OUTSIDE every detected table box (#1266).
+
+    True when the native words of the bands that meet no box show recurring numeric
+    column lanes (``structure_check._native_page_has_column_lanes``, the same evidence
+    #703 uses) or any such band is a categorical Yes/No row. A detected box covers only
+    the table the detector drew; on 2002-09-24 greenbook-part2 p94 nine data rows sit
+    below a header-only box, and no band rule can tell them from prose. Measured on the 82
+    Fed floor pages: the lane clause fires on 17 pages (1 overlapping another clause), the
+    categorical clause on 0.
+
+    No words means no evidence, so it answers True (fail closed): a page restored from a
+    sidecar carries boxes but never ``native_words``.
+    """
+    from socr.tables import structure_check
+    from socr.tables.row_corroboration import bands_outside_boxes, bears_categorical_row
+
+    # #1266 round 3: the box-less order-gate fallback passes its own ``boxless_table_words``.
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
+    if not words:
+        return True
+    outside = bands_outside_boxes(words, getattr(p, "detected_table_bboxes", None) or [])
+    if any(bears_categorical_row(band) for band in outside):
+        return True
+    outside_words = [word for band in outside for word in band]
+    return bool(outside_words) and bool(
+        structure_check._native_page_has_column_lanes(outside_words)
+    )
+
+
 def table_floor_text_for_source(
     p,
     page_num: int,
@@ -3192,8 +3557,25 @@ def table_floor_text_for_source(
     fallback_marker: str | None = None,
     prose_recovery: bool = False,
     chart_floor: Callable[[], str | None] | None = None,
+    geometry_floor: bool = False,
+    chart_floor_offered: bool = True,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
+
+    #1266: ``geometry_floor=True`` is the BORN-DIGITAL structure-class floor. It RETIRES the
+    GH-520 text splice: ``splice_all_table_regions`` replaces only the parsed GFM blocks, so
+    every un-parsed table line shipped verbatim (2002-12-10 greenbook-part1 p10: header words
+    and 16 one-token rows inside the box; 2002-09-24 greenbook-part2 p94: 9 data rows below a
+    header-only box). With the flag set this function never splices: it takes the recovery
+    lane (``prose_recovery`` must be True or the page is the whole-page marker), behind the
+    shared geometry gate in ``_refused``. ``source_text`` is not consulted in that mode.
+    The same flag selects the body rule (``keep_sentences``): a band outside every box ships
+    unless it is mostly numerals.
+    Default False keeps every other caller byte-for-byte as before.
+
+    #1266 merge gate: the only remaining caller is ``structure_class_floor_text``. The P1
+    withhold guard and the nothing-produced ending described below no longer splice; they
+    call ``withheld_table_floor_text``. The history is kept for the conditions' rationale.
 
     Factored out of ``structure_class_floor_text`` for P1's withhold path,
     which must splice the SELECTED output's text -- a model winner, not
@@ -3293,7 +3675,7 @@ def table_floor_text_for_source(
         # covers.
         _boxes = getattr(p, "detected_table_bboxes", None) or []
         _count = getattr(p, "detected_table_count", 0)
-        if not (type(_count) is int and _count > 0 and len(_boxes) == _count):
+        if not detector_boxes_complete(p):
             # #1155: a page with no usable table box withheld EVERYTHING --
             # prose, pictures and the chart reading alike -- and 9 Fed SEP pages
             # shipped 103 characters of marker and nothing else. When the chart
@@ -3322,7 +3704,11 @@ def table_floor_text_for_source(
             if _count != 0 or _boxes:
                 return whole_page
             if chart_floor is None:
-                _record_chart_floor_abstention(p)
+                # #1269 records why the chart floor kept the bare marker. A caller that never
+                # offers a chart floor (``chart_floor_offered=False``: the #1266 D3 ending and
+                # ``withheld_table_floor_text``) has no chart decision to explain.
+                if chart_floor_offered:
+                    _record_chart_floor_abstention(p)
                 return whole_page
             if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
                 # Same refusal the normal lane makes below, applied before the
@@ -3374,13 +3760,32 @@ def table_floor_text_for_source(
         # property is the shape that drifts, so the proxy goes and the direct
         # test stays. (It was also only partial: a full-width line makes the
         # gutter detector fail closed by design, so jorda p9 passed it.)
-        recovered = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+        if geometry_floor:
+            # #1266 shared gate, BEFORE recovery. A box whose own content fails the sanity
+            # check is not the table it claims to bound (p94: a header-only box), and table
+            # structure printed OUTSIDE every box is a table no box protects. Both ship the
+            # whole-page marker and the page image, never text. Missing evidence is not a
+            # pass: ``_each_table_box_sane`` and ``_structure_outside_boxes`` both fail closed
+            # without words.
+            if not _each_table_box_sane(p) or _structure_outside_boxes(p):
+                return whole_page
+        recovered = native_prose_floor_text(
+            p,
+            page_num,
+            marker_line=d3_marker,
+            png_ref=png_ref,
+            keep_sentences=geometry_floor,
+        )
         if not recovered:
             return whole_page
         # #1144 round 5: the last word belongs to the page's own reading order.
         if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
             return whole_page
         return recovered
+
+    if geometry_floor:
+        # #1266: the splice is retired on this lane (docstring above).
+        return _refused()
 
     source_text = source_text or ""
     if not source_text.strip():
@@ -3505,7 +3910,13 @@ def _prose_follows_native_order(body: str, native_text: str) -> bool:
     return all(tok in truth for tok in wanted)
 
 
-def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
+def _page_prose_partition(
+    p,
+    *,
+    extra_boxes: list | None = None,
+    keep_sentences: bool = False,
+    words: list | None = None,
+) -> list:
     """The prose/table partition of a page's native words, whole page.
 
     #652 round 9 introduced this because TWO decisions read a page's layout --
@@ -3522,7 +3933,8 @@ def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
     """
     from socr.tables.row_corroboration import partition_prose_bands
 
-    words = getattr(p, "native_words", None) or []
+    # #1266: ``words`` is passed only by the box-less route (``boxless_table_words``).
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
     if not words:
         return []
     # #1144: the page's DETECTED table boxes withhold the bands inside them
@@ -3536,7 +3948,10 @@ def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
     # 2010-04-28 p15, measured in #1155 PR 1 review.
     boxes = list(getattr(p, "detected_table_bboxes", None) or [])
     boxes.extend(extra_boxes or [])
-    return partition_prose_bands(words, table_boxes=boxes or None)
+    # #1266: ``keep_sentences`` is chosen by the CALLER (the born-digital structure-class
+    # floor), never re-derived from the page here: the scan lanes call this too and keep
+    # the any-digit rule.
+    return partition_prose_bands(words, table_boxes=boxes or None, keep_sentences=keep_sentences)
 
 
 #: Banner stamped above prose recovered by ``native_prose_floor_text``. The
@@ -3556,18 +3971,40 @@ _PROSE_RECOVERY_TAIL = (
 )
 SCANNED_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified scan" + _PROSE_RECOVERY_TAIL
 BORN_DIGITAL_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified extraction" + _PROSE_RECOVERY_TAIL
+#: #1266 merge gate (Fable P2): the KEEP-SENTENCES body (owner ruling 2026-11-05) ships a
+#: digit-bearing line whose words outnumber its numerals, so "every numeric row is
+#: withheld" is false under it. That body -- the born-digital geometry floor, the only
+#: caller passing ``keep_sentences=True`` -- gets its own truthful tail. The scan banner and
+#: the born-digital any-digit banner (the #1155 chart floor) keep their bytes, which are
+#: true of their bodies, and every frozen body carrying the old form is still recognised.
+_KEEP_SENTENCES_PROSE_RECOVERY_TAIL = (
+    " — the paragraphs below are this page's own text layer; table boxes and "
+    "numeral-dense lines are withheld, sentences carrying figures ship unchecked]"
+)
+BORN_DIGITAL_KEEP_SENTENCES_FLAG = (
+    "[page {page_num}: unverified extraction" + _KEEP_SENTENCES_PROSE_RECOVERY_TAIL
+)
 #: Every form of the withholding banner. ``core.table_counts`` counts a
 #: prose-recovery page by matching this banner, and it built its pattern from
 #: the scan form's literal text -- so a second form added without touching it
 #: would have gone UNCOUNTED, silently, on exactly the 674 pages #1144 adds.
 #: Enumerated here, matched by an alternation there, and pinned by a test that
 #: every member matches, so a third form cannot be invisible either.
-PROSE_RECOVERED_FLAGS = (SCANNED_PROSE_RECOVERED_FLAG, BORN_DIGITAL_PROSE_RECOVERED_FLAG)
+PROSE_RECOVERED_FLAGS = (
+    SCANNED_PROSE_RECOVERED_FLAG,
+    BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+    BORN_DIGITAL_KEEP_SENTENCES_FLAG,
+)
 
 
-def prose_recovered_flag(page_num: int, *, born_digital: bool) -> str:
-    """The withholding banner for this page's TYPE (#1144)."""
-    template = BORN_DIGITAL_PROSE_RECOVERED_FLAG if born_digital else SCANNED_PROSE_RECOVERED_FLAG
+def prose_recovered_flag(page_num: int, *, born_digital: bool, keep_sentences: bool = False) -> str:
+    """The withholding banner for this page's TYPE (#1144) and body rule (#1266)."""
+    if born_digital and keep_sentences:
+        template = BORN_DIGITAL_KEEP_SENTENCES_FLAG
+    elif born_digital:
+        template = BORN_DIGITAL_PROSE_RECOVERED_FLAG
+    else:
+        template = SCANNED_PROSE_RECOVERED_FLAG
     return template.format(page_num=page_num)
 
 
@@ -3667,6 +4104,24 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     return _is_prose_recovery_body(text, page_num)
 
 
+def _restored_floor_body_holds(p, page_num: int) -> bool:
+    """#1266 round 4 (Astra P0): may a words-less page REUSE its saved floor body as is?
+
+    Only when that body is a typed prose recovery (``_is_restored_prose_recovery``: the
+    recovery flag plus this module's banner) AND the floor credential still certifies those
+    exact bytes (``table_floor_credential_holds``). Flag and banner alone are not enough: an
+    altered body keeps both, so a replay on them would ship the alteration and the writer
+    would then certify bytes it never computed. Otherwise the caller recomputes from source
+    words or fails closed to the whole-page marker.
+    """
+    bo = getattr(p, "best_output", None)
+    return (
+        bo is not None
+        and _is_restored_prose_recovery(p, page_num)
+        and table_floor_credential_holds(bo)
+    )
+
+
 def _is_prose_recovery_body(text: str, page_num: int) -> bool:
     """Whether *text* is a body this module's prose-recovery lane authored.
 
@@ -3761,6 +4216,11 @@ _NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 _NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
 
 
+#: CommonMark's ordered-list opener: one to nine ASCII digits, then ``.`` or ``)``, then
+#: whitespace or end of line (``0.5`` and ``2.2`` are numbers, not list markers).
+_ORDERED_LIST_MARKER_RE = re.compile(r"[0-9]{1,9}[.)](?=\s|$)")
+
+
 def _escaped_native_line(line: str) -> str:
     """A native line that renders as its own characters and nothing else.
 
@@ -3782,8 +4242,19 @@ def _escaped_native_line(line: str) -> str:
     page's characters.
     """
     out: list[str] = []
+    # #1266: the born-digital floor now ships bands that carry digits, so a line can open
+    # with an ORDERED LIST marker ("1. Introduction", "2005) The ..."): up to nine ASCII
+    # digits then ``.`` or ``)``. The delimiter is escaped, which is the CommonMark literal
+    # form. (The note on ``_NATIVE_BLOCK_ACTIVE`` named this as the thing to add if the
+    # any-digit floor were ever loosened.)
+    ordered_marker = _ORDERED_LIST_MARKER_RE.match(line)
+    ordered_delim = ordered_marker.end() - 1 if ordered_marker else -1
     for idx, ch in enumerate(line):
-        if ch in _NATIVE_INLINE_ACTIVE or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE):
+        if (
+            ch in _NATIVE_INLINE_ACTIVE
+            or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE)
+            or idx == ordered_delim
+        ):
             out.append("\\")
         out.append(ch)
     return "".join(out)
@@ -3840,8 +4311,16 @@ def native_prose_floor_text(
     marker_line: str,
     png_ref: str,
     extra_withheld_boxes: list | None = None,
+    keep_sentences: bool = False,
+    words: list | None = None,
 ) -> str | None:
     """The page's own prose, flagged, around a withheld table -- or ``None``.
+
+    #1266: ``keep_sentences=True`` is passed ONLY by the born-digital structure-class
+    floor (see ``table_floor_text_for_source``'s ``geometry_floor``). A band outside every
+    detected table box then ships unless it is mostly numerals
+    (``row_corroboration.band_is_mostly_numerals``); the default is today's any-digit
+    withholding, which every scan caller keeps.
 
     #649 (owner ruling, 2026-09-10). Fed 1989-11-14 p3 reaches
     ``UNVERIFIABLE_TABLE_SCANNED`` with ``detected_table_count == 0`` and a
@@ -3909,11 +4388,15 @@ def native_prose_floor_text(
     if prior_ocr_layer_found(p):
         return None
 
-    words = getattr(p, "native_words", None) or []
+    # #1266: ``words`` is passed only by the box-less route; every other caller reads
+    # ``native_words`` exactly as before.
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
     if not words:
         return None
 
-    bands = _page_prose_partition(p, extra_boxes=extra_withheld_boxes)
+    bands = _page_prose_partition(
+        p, extra_boxes=extra_withheld_boxes, keep_sentences=keep_sentences, words=words
+    )
     prose_bands = [band for is_prose, band in bands if is_prose]
     if not prose_bands:
         return None
@@ -3965,7 +4448,9 @@ def native_prose_floor_text(
     # crop per run is one more render each plus a new way to clip the numbers
     # the floor exists to protect.
     born_digital = bool(getattr(p, "is_born_digital", False))
-    blocks: list[str] = [prose_recovered_flag(page_num, born_digital=born_digital)]
+    blocks: list[str] = [
+        prose_recovered_flag(page_num, born_digital=born_digital, keep_sentences=keep_sentences)
+    ]
     if png_ref:
         blocks.append(png_ref)
     page_image = page_image_link(png_ref)
@@ -4634,7 +5119,7 @@ def _select_page_output_tagged(
         # None whenever it cannot prove what it would be shipping, which
         # leaves the bare marker exactly as before.
         prose_recovered = False
-        if d3_text is None and _is_restored_prose_recovery(p, page_num):
+        if d3_text is None and _restored_floor_body_holds(p, page_num):
             # #649 round 2 (Astra): a page RESTORED from its terminal sidecar
             # has already shipped this recovery, and the words it was built
             # from are gone -- ``native_words`` is a live-run cache the sidecar
@@ -4674,6 +5159,9 @@ def _select_page_output_tagged(
             # ``_is_restored_prose_recovery``). The note above is for readers;
             # this is for the machine, and only this module sets it.
             scanned_prose_recovered=prose_recovered,
+            # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+            table_floor_body=True,
+            table_floor_digest=table_floor_digest_of(d3_text),
             # #658: this branch REBUILDS the shipped output from scratch, so a
             # fixed HALLUCINATION here overwrote the honest attempt-level reason
             # and the sidecar the corpus actually reads still said the model
@@ -4712,8 +5200,19 @@ def _select_page_output_tagged(
                 # through to the native_is_fallback WARNING branch below and
                 # SHIPPED the header-destroyed native table text.
                 or getattr(p, "native_table_header_unattributed", False)
+                # #1266 merge gate (Finding 18): a failed native table with NO model
+                # reading takes this floor too, instead of shipping the failed grid through
+                # the native fallback. Pages with a model attempt route exactly as before.
+                or d3_no_model_reading(p)
             )
-            and bool(p.attempts)
+            # #1266 commit 3: deliberately NOT gated on ``bool(p.attempts)``, following
+            # GH-195 and #263's shredded floor below. The defect is found during native
+            # extraction, on a page that may never reach the OCR ladder (a providerless run,
+            # ``--native-only``, a provider outage); with the attempt gate such a page fell
+            # past this floor and past S1 to ``_native_text_with_appends`` and shipped the
+            # damaged table's native bytes (Astra review 3, P1 #1). With no attempt there is
+            # no model reading to keep, so the #262 check below returns None and the floor
+            # fires.
         ):
             # #262: unless some attempt did author a grid, in which case the
             # failed-table marker would be the lossier outcome. This D3-specific
@@ -4740,68 +5239,49 @@ def _select_page_output_tagged(
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
                 ), SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT
 
-            # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts
-            # are available; fall back to whole-page marker if isolation is
-            # unprovable.
+            # TR-3: D3 fail-closed floor. #1266 B1 (owner ruling 2026-11-05): this ending
+            # takes the SAME born-digital geometry floor as the structure-class ending
+            # (``structure_class_floor_text``), not a text splice.
             #
-            # GH-375: ``native_table_header_unattributed`` is page-level — there
-            # is no per-table header identity. Regional splice of only TR-3
-            # ordinals would ship a header-destroyed sibling as unmarked GFM.
-            # Refuse isolation and replace every table (GH-90): every table is
-            # untrusted, surrounding prose is not.
-            native_text = p.native_text or ""
-            d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
-            png_ref = getattr(p, "d3_floor_png_ref", "")
-
-            d3_text = None
-            # #1156 round 1: every branch below splices ``native_text`` around the
-            # markers, so on a flagged page the earlier OCR layer's prose ships from here
-            # too -- the same shape as the S1 floor above, reached by a different route
-            # (r-uben, by reading; fixture built in
-            # ``test_gh1156_part_a_interim.py``). Leaving ``d3_text`` None takes the
-            # whole-page marker plus the page image, which this branch already uses
-            # whenever isolation is unprovable, so no new ending is introduced.
-            prior_ocr_suspect = prior_ocr_layer_found(p)
-            header_unattributed = bool(getattr(p, "native_table_header_unattributed", False))
-            if prior_ocr_suspect:
-                pass  # no splice: the whole-page marker and the page image
-            elif header_unattributed:
-                d3_text = splice_all_table_regions(
-                    native_text, marker_line=d3_marker, png_ref=png_ref
-                )
-            else:
-                failed_ordinals = getattr(p, "native_table_unverifiable_ordinals", None)
-                region_count = getattr(p, "native_table_region_count", None)
-                identities = list(getattr(p, "native_table_region_identities", []) or [])
-                # Identities are recorded by ``_verify_regions`` for every
-                # examined region, so a missing or short list means the state
-                # predates GH-375 (stale sidecar) or was never captured. An
-                # ordinal splice without a 1:1 identity match is exactly the
-                # equal-count swap hole — refuse it and take the whole-page
-                # marker instead of an unverified splice.
-                if (
-                    failed_ordinals is not None
-                    and region_count is not None
-                    and len(identities) == region_count
-                ):
-                    d3_text = splice_failed_table_regions(
-                        native_text,
-                        failed_ordinals=failed_ordinals,
-                        expected_count=region_count,
-                        marker_line=d3_marker,
-                        png_ref=png_ref,
-                        region_identities=identities,
-                    )
-
-            if d3_text is None:
-                d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
-
+            # Until #1266 this branch spliced ``native_text`` around the markers --
+            # ``splice_all_table_regions`` on a header-unattributed page (GH-375),
+            # ``splice_failed_table_regions`` over the TR-3 ordinals otherwise. Both replace
+            # only the PARSED GFM blocks they are pointed at, so every un-parsed table line
+            # (header words, rows the parser never grouped) shipped verbatim beside the marker.
+            # Measured on the 539 scored Fed pages of this ending (#1266 PART2): 503 pages
+            # leaked table lines, 4,498 of them bearing a printed value. The geometry floor
+            # withholds by the detected BOXES and the page's own word bands (shared gate,
+            # keep-sentences body): 5 leaking pages and one value line (a footnote) remain.
+            #
+            # Price the owner accepted: the floor withholds EVERY detected box, including a
+            # table TR-3 verified (a VERIFIED sibling's GFM no longer ships), because no
+            # ordinal->box mapping is safe (83/537 pages match by y0 order). Keeping verified
+            # siblings is a separate per-region follow-up, not this ending.
+            #
+            # ``structure_class_floor_text`` also carries the two arms this branch needs:
+            # a POSITIVE prior-OCR finding (#1156) returns the whole-page marker plus image,
+            # exactly what this branch shipped for it before; and a page restored from its
+            # sidecar without ``native_words`` replays its own frozen born-digital recovery
+            # (typed credential + banner) instead of recomputing, and fails closed otherwise.
+            # The chart floor is not offered here (``chart_floor=None``): this ending was
+            # never a chart lane.
+            d3_text = structure_class_floor_text(p, page_num, chart_floor_offered=False)
+            # Recorded the way the S1 structure-class ending records it, from the same
+            # evidence (the banner in what shipped): without the typed field a restored page
+            # could not replay the recovery (``_is_restored_prose_recovery``) and the
+            # document note and CLI recovery lines would stay silent about this page.
+            prose_recovered = _is_prose_recovery_body(d3_text, page_num)
             return PageOutput(
                 page_num=page_num,
                 text=d3_text,
                 status=PageStatus.ERROR,
                 engine="native",
                 audit_passed=False,
+                audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
+                scanned_prose_recovered=prose_recovered,
+                # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+                table_floor_body=True,
+                table_floor_digest=table_floor_digest_of(d3_text),
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
             ), SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE
 
@@ -5257,6 +5737,9 @@ def _select_page_output_tagged(
                 audit_passed=False,
                 audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
                 scanned_prose_recovered=prose_recovered,
+                # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+                table_floor_body=True,
+                table_floor_digest=table_floor_digest_of(floor_text),
                 failure_mode=(
                     FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
                     if not (timed_out or text_table_declined)
@@ -5341,8 +5824,23 @@ def _select_page_output_tagged(
         # Reading ``best_output`` here instead would drop the sidecar on the
         # deterministic --native-only path, which is exactly the path this
         # ticket is about.
-        fallback_text = _native_text_with_appends(p)
-        if text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p):
+        # #1266 merge gate round 2: a FAILED native table with no model reading and no
+        # complete detector box no longer ships its native grid here; it ships the
+        # KEEP-SENTENCES body (``boxless_failed_table_text``). Box-backed pages took D3.
+        boxless_failed = bool(
+            p.native_table_structure_failed
+            and not _model_attempt_ran(p)
+            and not detector_boxes_complete(p)
+        )
+        fallback_text = (
+            boxless_failed_table_text(p, page_num)
+            if boxless_failed
+            else _native_text_with_appends(p)
+        )
+        boxless_recovered = boxless_failed and _is_prose_recovery_body(fallback_text, page_num)
+        if boxless_failed:
+            native_demoted = True
+        if not boxless_failed and (text_ink_unread_suspect(p) or text_coverage_unknown_suspect(p)):
             from socr.core.text_coverage import (
                 uncovered_text_marker,
                 uncovered_text_marker_no_image,
@@ -5375,7 +5873,12 @@ def _select_page_output_tagged(
             text=fallback_text,
             status=PageStatus.WARNING if native_demoted else PageStatus.SUCCESS,
             engine="native",
-            audit_passed=not (native_is_fallback or grid_rejected),
+            audit_passed=not (native_is_fallback or grid_rejected or boxless_failed),
+            # #1266: the box-less route's floor body is recorded like the endings' bodies.
+            audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if boxless_recovered else []),
+            scanned_prose_recovered=boxless_recovered,
+            table_floor_body=boxless_failed,
+            table_floor_digest=(table_floor_digest_of(fallback_text) if boxless_failed else ""),
             # GH-151 B1: the attempt-level PageOutput this synthetic page
             # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
             # (set at ``_score_per_page`` / the native ship sites) -- but that
@@ -5387,7 +5890,7 @@ def _select_page_output_tagged(
                 FailureMode.NATIVE_UNTRUSTED_JUDGE_TIMEOUT
                 if judge_timeout_native
                 else FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                if native_table_defect and native_is_fallback
+                if native_table_defect and (native_is_fallback or boxless_failed)
                 # #1027: the invisible-scan cause outranks the minus-as-digit one;
                 # the "2"-for-minus scan fires on that same garbage layer, so
                 # naming it first misreports why the page is not trusted.
@@ -5493,33 +5996,25 @@ def _select_page_output_tagged(
             error=attempt.error or "",
         ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
-    # a silent gap between page headers -- B1 / #591: unless native prose
-    # outside a detected table survives the same GH-520 coverage guard the
-    # structure-class floor and the withhold ending already apply, in which
-    # case that prose ships and only the table region(s) marker.
+    # a silent gap between page headers.
+    #
+    # #1266 merge gate: B1 / #591 kept ``native_text`` prose here behind the GH-520 text
+    # splice, which ships every line outside the parsed GFM blocks (Fable/Astra, PR #1273:
+    # 0 firings on the Fed run). The splice is gone and this ending ships the whole-page
+    # marker, always. Round 2 (Fable P2) removed the inert recovery call that replaced it:
+    # this ending is reached with native text only on a NON-born-digital page (the native
+    # branch returns first otherwise), and the withheld-table floor whole-pages those, so
+    # the "prose kept" branch could never be taken.
     whole_page_marker = page_failed_marker(page_num)
-    native_text = getattr(p, "native_text", "") or ""
-    # #1155 deliberately does NOT offer a chart replacement here: this call leaves
-    # ``prose_recovery`` at False, and the refusal lane returns the whole-page marker
-    # before it reaches the no-box branch. Passing one would be an argument that
-    # silently does nothing. All 9 Fed SEP pages reach the floor through
-    # ``structure_class_floor_text`` instead, which is where the replacement is offered.
-    floor_text = table_floor_text_for_source(
-        p, page_num, native_text, fallback_marker=whole_page_marker
-    )
-    # R7: the cascade must be single-return-per-ending (test_r7_winner_kind_tags.py),
-    # so both outcomes share ONE return, differing only in which values they carry
-    # -- not two returns tagged with the same SelectionProvenance member.
-    prose_kept = floor_text != whole_page_marker and bool(native_text.strip())
     # #881: a page MuPDF could not load has no text because it was never read,
     # which is a different fact from "every engine failed" and must say so on
     # the page itself, not only in a log.
     _load_error = getattr(p, "load_error", "") or ""
     return PageOutput(
         page_num=page_num,
-        text=floor_text if prose_kept else whole_page_marker,
+        text=whole_page_marker,
         status=PageStatus.ERROR,
-        engine="native" if prose_kept else "",
+        engine="",
         failure_mode=FailureMode.UNREADABLE_INPUT if _load_error else FailureMode.NONE,
         error=f"page could not be loaded: {_load_error}" if _load_error else "",
         audit_passed=False,
@@ -5629,31 +6124,56 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
         # Rewritten HERE, in the guard that already runs before
         # ``finalized_page_records`` / ``canonical_page_texts``, so the saved
         # .md, the page fragment, the sidecar's winning_output, the manifest
-        # blob and replay all see the same bytes. The splice reads the
-        # SELECTED output's text -- never ``p.native_text``, which on a model
-        # winner is a different page.
+        # blob and replay all see the same bytes.
         #
-        # Prose survives only under GH-520's four coverage conditions;
-        # otherwise the whole page floors, exactly as the structure-class
-        # floor does, because an unenumerable table cannot be shown to have
-        # been covered by the splice.
+        # #1266 merge gate (Astra, PR #1273, P0): this used to SPLICE the selected
+        # output's text (often a model reading) behind GH-520's coverage conditions, and
+        # the splice ships every line outside the parsed GFM blocks -- a parsed grid plus
+        # an un-parsed ``Loose 7.7 8.8`` row shipped the row. It now takes the shared
+        # withheld-table floor (``withheld_table_floor_text``): the born-digital geometry
+        # floor, else the whole-page marker plus image. That is not a substitution of the
+        # page's text for the reading the selector chose: the reading is WITHHELD, and
+        # what ships is the page's own words under the floor banner, the same floor
+        # ending A ships once every rung has failed. 0 firings on the Fed run (census).
         text = output.text or ""
         from socr.tables.reconcile import find_table_blocks
 
-        already_withheld = f"failed: unverifiable table" in text and not find_table_blocks(text)
-        # A page that ALREADY shipped the fail-closed floor (the structure-class
-        # floor reached the same page first) carries no table bytes and may have
-        # legitimately kept its prose through GH-520's own coverage proof.
-        # Re-running the coverage check over that already-spliced text sees zero
-        # table blocks, fails the count condition, and floors the whole page --
-        # destroying prose the floor was entitled to keep. Nothing is left to
-        # withhold, so only the label changes.
+        # A page that ALREADY shipped the fail-closed floor (an ending reached the same
+        # page first, or this guard on an earlier finalize) carries no table bytes; its
+        # body is final. Re-deriving it would recompute from state a resumed page may no
+        # longer carry (transform once, from source, before marks), so only the label
+        # changes.
+        #
+        # #1266 merge gate (Astra round 2, P0): the shortcut used to trust the marker
+        # SUBSTRING, so a selected model reading that printed the marker line beside an
+        # un-parsed ``Loose 7.7 8.8`` row skipped all withholding. It now requires the
+        # typed credential ``table_floor_body``, which only socr's floor writers set and no
+        # text can carry. Marker text without it is withheld like any other reading.
+        already_withheld = table_floor_credential_holds(output) and not find_table_blocks(text)
+        if already_withheld:
+            return replace(
+                output,
+                status=PageStatus.ERROR,
+                audit_passed=False,
+                failure_mode=disposition,
+            )
+        floor_text = withheld_table_floor_text(p, page_num)
+        # Recorded the way the two #1266 endings record it, from the banner in what ships.
+        prose_recovered = _is_prose_recovery_body(floor_text, page_num)
+        notes = [n for n in (output.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE]
+        if prose_recovered:
+            notes.append(SCANNED_PROSE_RECOVERED_NOTE)
         return replace(
             output,
-            text=text if already_withheld else table_floor_text_for_source(p, page_num, text),
+            text=floor_text,
             status=PageStatus.ERROR,
             audit_passed=False,
             failure_mode=disposition,
+            audit_notes=notes,
+            scanned_prose_recovered=prose_recovered,
+            # #1266: typed provenance for the TABLE_WITHHELD guard's keep-as-is shortcut.
+            table_floor_body=True,
+            table_floor_digest=table_floor_digest_of(floor_text),
         )
 
     if output.audit_passed:
@@ -6812,6 +7332,145 @@ def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num:
     return replace(output, scanned_prose_recovered=True, audit_notes=notes)
 
 
+#: #1266 round 6: an image-only line that carries no number: an image embed (the leading ``!``
+#: is required, a plain link is ordinary content), an alt text with no digit, and a target
+#: inside the ``figures/`` directory, the only place socr writes crops and page images. A
+#: socr-written ref whose alt text names a page or region number (``Failed table page 3``,
+#: ``chart region 1``) is not matched here: the page's own ``d3_floor_png_ref`` is compared
+#: by exact string, and a chart-region or description line reaches the saved body through
+#: ``recertify_floor_body``, never through line-shape recognition.
+_IMAGE_ONLY_LINE_RE = re.compile(r"!\[[^\]\d]*\]\(figures/[^)\s]+\)")
+
+
+def _writer_bodies(page, page_num: int) -> tuple[str, ...]:
+    """The bodies socr's post-selection writers produced from the page's current certified
+    floor: all of them, in order, while the chain's base still equals that floor."""
+    certified = getattr(page, "certified_floor_text", "")
+    chain = getattr(page, "floor_writer_chain", ("", ()))
+    if not (isinstance(certified, str) and certified and isinstance(chain, tuple)):
+        return ()
+    if len(chain) != 2 or not chain[0] or not isinstance(chain[1], tuple):
+        return ()
+    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
+    if not _same_body_modulo_marks(chain[0], certified, page_num, own_ref):
+        return ()
+    return chain[1]
+
+
+def _certified_floor_bodies(page, page_num: int) -> list[str]:
+    """The bodies a socr floor writer certified for *page*: the last fresh finalize's, and
+    every body a post-selection writer produced from it (only while that base still equals
+    the fresh floor, so a page that changed underneath it keeps nothing stale). All of them,
+    not the last: assemble's crash handlers fall back to an earlier writer's output."""
+    if page is None:
+        return []
+    certified = getattr(page, "certified_floor_text", "")
+    bodies = [certified] if isinstance(certified, str) and certified else []
+    return bodies + list(_writer_bodies(page, page_num)) if bodies else []
+
+
+def recertify_floor_body(page, before: str, after: str, page_num: int) -> bool:
+    """#1266 round 6: a socr writer changed a floor page's body after selection; carry the
+    certificate over to the body it produced.
+
+    Called only by socr's own post-selection writers (``_preserve_chart_regions``,
+    ``_describe_crop_refs``). The page must already hold a certified floor body and the
+    body the writer started from must be one of its certified bodies modulo marks; a page
+    that holds no certificate, or whose input was already altered by something else, is not
+    certified. Returns whether it re-certified.
+    """
+    bodies = _certified_floor_bodies(page, page_num)
+    if not bodies or not after or after == before:
+        return False
+    own_ref = getattr(page, "d3_floor_png_ref", "") or ""
+    if not any(_same_body_modulo_marks(before, b, page_num, own_ref) for b in bodies):
+        return False
+    kept = _writer_bodies(page, page_num)
+    page.floor_writer_chain = (
+        page.certified_floor_text,
+        kept if after in kept else kept + (after,),
+    )
+    return True
+
+
+def _same_body_modulo_marks(saved: str, selected: str, page_num: int, png_ref: str = "") -> bool:
+    """#1266: is *saved* the *selected* body with only socr's own canonical mark lines added
+    and socr's own #1074 re-flow applied?
+
+    This page's canonical mark lines (``is_canonical_mark``) are dropped on both sides and
+    the rest compared as a token sequence: finalization adds marks and re-flows line breaks
+    (#1074 joins a paragraph's lines), and at a line-end hyphen it either drops the hyphen or
+    keeps it inside the joined word (``native_paragraphs``). So a line-end ``x-`` is joined to
+    the next line's first token, and a hyphen BETWEEN TWO LETTERS is ignored on both sides;
+    nothing else is: a sign (``-0.4``), a digit, a word or its order must match.
+    """
+    import re
+
+    letter_hyphen = re.compile(r"(?<=[^\W\d_])-(?=[^\W\d_])")
+
+    # The page's own image lines, by exact string: the embed ``d3_floor_png_ref`` and the
+    # plain link the floor writes to the same file (``page_image_link``).
+    own_image_lines = {x for x in (png_ref.strip(), page_image_link(png_ref)) if x}
+
+    def _content(text: str) -> list[str]:
+        toks: list[str] = []
+        pending_join = False
+        for ln in (text or "").splitlines():
+            if not ln.strip() or is_canonical_mark(ln.strip(), page_num):
+                continue
+            # round 5: an image-only line carries no text and no number, and socr's own
+            # writers drop phantom ones after finalize (``strip_phantom_images``), so it is
+            # furniture here like a mark -- but only the page's own image ref (exact string)
+            # or a digit-free ``![alt](figures/...)`` embed; a plain link is content.
+            if ln.strip() in own_image_lines or _IMAGE_ONLY_LINE_RE.fullmatch(ln.strip()):
+                continue
+            words = ln.split()
+            if pending_join and toks and words:
+                toks[-1] = toks[-1] + words[0]
+                words = words[1:]
+            toks.extend(words)
+            pending_join = bool(toks) and toks[-1].endswith("-") and toks[-1][:-1][-1:].isalpha()
+        return [letter_hyphen.sub("", t) for t in toks]
+
+    return _content(saved) == _content(selected)
+
+
+SAVED_FLOOR_BODY_REJECTED = "floor_saved_body_rejected"
+
+
+def _record_rejected_saved_body(state: DocumentState, page_num: int, saved_text: str) -> None:
+    """#1266 round 6: a floor page refused its saved text and shipped the recomputed floor;
+    say so once (no silent content loss). One event per page and rejected text, however many
+    times finalize repeats; the event holds a digest, never the rejected text."""
+    from socr.core.audit_log import AuditEvent
+
+    digest = table_floor_digest_of(saved_text)
+    for ev in state.events:
+        if (
+            getattr(ev, "kind", "") == SAVED_FLOOR_BODY_REJECTED
+            and getattr(ev, "page_num", None) == page_num
+            and (getattr(ev, "data", None) or {}).get("saved_digest") == digest
+        ):
+            return
+    logger.warning(
+        "p%d: the saved page text is not a body a floor writer certified; "
+        "the recomputed floor shipped instead (a writer is missing its re-certification)",
+        page_num,
+    )
+    state.events.append(
+        AuditEvent(
+            page_num=page_num,
+            kind=SAVED_FLOOR_BODY_REJECTED,
+            engine="",
+            detail=(
+                "the saved page text is not a body a floor writer certified; the recomputed "
+                "floor body shipped instead"
+            ),
+            data={"saved_digest": digest},
+        )
+    )
+
+
 def _is_bare_floor_body(text: str, page_num: int, png_ref: str) -> bool:
     """#1269: is ``text`` exactly the bare whole-page floor body?
 
@@ -6891,8 +7550,30 @@ def _select_and_finalize_page(
                 _floor_page.chart_floor_abstention = _prior_abstention
         except Exception:  # pragma: no cover - a read-only stand-in in tests
             pass
-        output = replace(output, text=saved_text)
-        output = _recovery_facts_of_saved_body(output, saved_text, page_num)
+        _selected_text = output.text or ""
+        _shipped_text = saved_text
+        if output.table_floor_body:
+            # #1266 round 5: this page's selection is a floor. The saved bytes keep the
+            # credential only when they ARE a certified floor body: the freshly selected one
+            # (``_same_body_modulo_marks``), or the body this page's last fresh finalize
+            # certified (``certified_floor_text`` -- the #1155 chart floor declines under a
+            # saved body, so its recomputation is not the chart body). Anything else is not a
+            # body a floor wrote, and the recomputed floor ships instead: never the saved text.
+            _own_ref = getattr(_floor_page, "d3_floor_png_ref", "") or ""
+            if _same_body_modulo_marks(saved_text, _selected_text, page_num, _own_ref) or any(
+                _same_body_modulo_marks(saved_text, b, page_num, _own_ref)
+                for b in _certified_floor_bodies(_floor_page, page_num)
+            ):
+                output = replace(
+                    output, text=saved_text, table_floor_digest=table_floor_digest_of(saved_text)
+                )
+                output = _recovery_facts_of_saved_body(output, saved_text, page_num)
+            else:
+                _shipped_text = _selected_text
+                _record_rejected_saved_body(state, page_num, saved_text)
+        else:
+            output = replace(output, text=saved_text)
+            output = _recovery_facts_of_saved_body(output, saved_text, page_num)
         # #1269: the abstention must describe the bytes that ship. A saved body keeps
         # an existing record only when it is still the bare floor body (see
         # ``_is_bare_floor_body``) and the chart floor did not replace the page in the
@@ -6903,7 +7584,7 @@ def _select_and_finalize_page(
         # itself recorded nothing on this path.
         if _floor_page is not None and getattr(_floor_page, "chart_floor_abstention", None):
             if not _is_bare_floor_body(
-                saved_text, page_num, getattr(_floor_page, "d3_floor_png_ref", "") or ""
+                _shipped_text, page_num, getattr(_floor_page, "d3_floor_png_ref", "") or ""
             ) or getattr(_floor_page, "chart_floor_body_this_selection", False):
                 try:
                     _floor_page.chart_floor_abstention = None
@@ -6913,6 +7594,11 @@ def _select_and_finalize_page(
     p = state.pages.get(page_num)
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
+    # #1266 round 3: past the two guards that may rewrite the body, the floor credential
+    # must still certify these exact bytes, or it is dropped.
+    if output.table_floor_body and not table_floor_credential_holds(output):
+        output = _without_floor_credential(output)
+    if p is not None:
         output = _apply_unresolved_math_guard(output, p, provenance)
         output = _apply_math_font_unrecovered_guard(output, p)
     output = _apply_label_unverified_guard(output)
@@ -7046,6 +7732,19 @@ def _select_and_finalize_page(
         )
     else:
         disposition = base
+
+    # #1266 round 3: what remains between the check above and here is socr's own
+    # deterministic finalisation (marks, #1074 re-flow), so a credential that held there is
+    # re-bound to the bytes that actually ship -- the bytes the sidecar and the fragment carry.
+    if output.table_floor_body:
+        output = replace(output, table_floor_digest=table_floor_digest_of(output.text))
+    # #1266 round 5: remember the floor body this FRESH pass certified, so the saved-body pass
+    # that follows can recognise its own bytes (runtime only, like ``native_words``).
+    if saved_text is None and p is not None:
+        try:
+            p.certified_floor_text = output.text if output.table_floor_body else ""
+        except Exception:  # pragma: no cover - a read-only stand-in in tests
+            pass
 
     return _FinalizedPageRecord(
         output=output,
