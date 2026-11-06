@@ -16974,6 +16974,11 @@ class UnifiedPipeline:
         if _coverage:
             payload["text_coverage"] = _coverage
 
+        # #1269: sparse, only on a page whose chart floor declined (key absent otherwise).
+        _abstention = getattr(ps, "chart_floor_abstention", None) if ps else None
+        if isinstance(_abstention, dict) and _abstention:
+            payload["chart_floor_abstention"] = dict(_abstention)
+
         # #1156: sparse for the same reason as ``text_coverage`` -- written only when the
         # page's text layer is a prior OCR reading, so every other sidecar keeps its bytes.
         # The meter needs its own view of this: ``rule_native`` reads the sidecar, and a
@@ -18470,6 +18475,17 @@ class UnifiedPipeline:
             ps.chart_floor_body = bool(getattr(ps, "chart_floor_body", False)) or bool(
                 meta.get("chart_floor_body", False)
             )
+            # #1269: the abstention explains bytes (a bare marker) that carry no other
+            # trace of why; it travels with them. A live value wins over the sidecar.
+            # Reached only for ledger-skipped pages, which require SUCCESS
+            # (``_load_terminal_page``). Floor pages are ERROR and are reprocessed from
+            # source on resume, so a sidecar re-flush that recomputes this record (and
+            # drops it, together with the status, failure mode and winning output that
+            # changed with it) describes a different decision, not a lost reason.
+            if not getattr(ps, "chart_floor_abstention", None) and isinstance(
+                meta.get("chart_floor_abstention"), dict
+            ):
+                ps.chart_floor_abstention = dict(meta["chart_floor_abstention"])
             # GH-674: OR-restore, same reasoning as the three chart-region
             # flags above -- a flag this run already set (e.g. a per-page call
             # that ran before the sidecar existed) must not be cleared by an

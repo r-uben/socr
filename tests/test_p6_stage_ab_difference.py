@@ -60,6 +60,7 @@ from conftest import P6_BUCKET_NAMES, assert_stage_c_disposition_buckets, old_di
 from p6_corpus_fixture import build_corpus_state, capture, make_pdf
 from p6_stage_c_oracle import (
     ADDITIVE_SIDECAR_KEYS,
+    SPARSE_SIDECAR_KEYS_BY_PAGE,
     VOLATILE_KEYS,
     apply_stage_c_patch,
     assert_capture_diff_matches_oracle,
@@ -341,11 +342,18 @@ class TestPreChangeByteIdentity:
         """
         raw = json.loads(PRECHANGE.read_text())
         for name, sidecar in current["sidecars"].items():
+            sparse = SPARSE_SIDECAR_KEYS_BY_PAGE.get(name, frozenset())
             gained = (
-                set(sidecar) - set(raw["sidecars"][name]) - VOLATILE_KEYS - ADDITIVE_SIDECAR_KEYS
+                set(sidecar)
+                - set(raw["sidecars"][name])
+                - VOLATILE_KEYS
+                - ADDITIVE_SIDECAR_KEYS
+                - sparse
             )
             lost = set(raw["sidecars"][name]) - set(sidecar)
             assert not gained and not lost, (name, gained, lost)
+            # #1269: a sparse allowance is exact -- the page it names must carry the key.
+            assert sparse <= set(sidecar), (name, sparse)
             assert "disposition" in sidecar
             # Every enumerated addition must actually BE there, on every page. Subtracting
             # the set without this would turn the allowance into a hole: a key that is
