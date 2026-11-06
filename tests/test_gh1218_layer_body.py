@@ -83,6 +83,10 @@ def test_rotation_decides_when_words_cannot():
     # short sideways words: no multi-character evidence; /Rotate 90 says rotated
     words = [(100.0, 100.0 + 12 * i, 110.0, 110.0 + 12 * i, str(i + 1)) for i in range(4)]
     assert all(n.cls == BODY for n in classify(words, rotation=90))
+    # the grouping is the difference: sideways, the four words share one line (they sit at one
+    # x); upright, the same boxes are four lines
+    assert len({n.line_index for n in classify(words, rotation=90)}) == 1
+    assert len({n.line_index for n in classify(words, rotation=0)}) == 4
 
 
 def test_body_text_is_the_label_row_tails_only():
@@ -137,7 +141,9 @@ def test_a_constant_step_tail_with_no_chart_evidence_is_a_data_row():
 
 def test_a_constant_step_tail_at_a_chart_box_is_an_axis_even_without_signs():
     row = line(["Percent", "0.75", "0.50", "0.25", "0.00"], 100)
-    box = [(40.0, 20.0, 400.0, 90.0)]  # the plot, its tick labels just below
+    box = [
+        (40.0, 20.0, 400.0, 100.0)
+    ]  # the plot as chart_region_bboxes grows it, touching the labels
     assert tails(row, excluded_boxes=box) == []
     # difference: the same row with the plot far away is a data row
     assert len(tails(row, excluded_boxes=[(40.0, 400.0, 400.0, 500.0)])) == 4
