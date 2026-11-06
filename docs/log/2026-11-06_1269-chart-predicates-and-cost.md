@@ -17,7 +17,8 @@ Output order is unchanged, so both callers' results are byte-identical to before
 loop in five cases: a box inverted, a non-finite gap or coordinate, a degenerate cell, coordinates beyond cell·2^50,
 or registration plus exact checks exceeding the pairwise count (follow-up: cell memberships are counted before any is
 allocated and charged to the same budget). A grid attempt therefore never stores more memberships, or does more
-registration-plus-check work, than one pairwise pass, and total work is at most two passes.
+registration-plus-check work, than one pairwise pass; registration plus exact checks total at most two passes
+(union-find and dictionary bookkeeping are not counted in that bound).
 
 **Measured** (Rorqual, 674 pages: the 550 checks345 diagnostic pages plus the other 124 pages of the three Tealbook
 documents, 129 Tealbook pages in all, 5 of them already among the 550;

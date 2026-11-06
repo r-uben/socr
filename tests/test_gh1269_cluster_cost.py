@@ -386,8 +386,13 @@ def test_grid_refuses_before_registering_when_memberships_exceed_budget(monkeypa
 
 def test_worst_case_registration_memory_is_bounded_by_pairwise():
     boxes = _heavy_overlap_layout(2000)
+    fns = (box_clusters._pairwise, lambda b, g: box_clusters.cluster_box_indices(b, g))
+    # Warm both first: the first call in a process pays one-time allocator and import
+    # costs, which would make the measured peaks depend on test order (cubic review).
+    for fn in fns:
+        fn(boxes, 30.0)
     peaks = []
-    for fn in (box_clusters._pairwise, lambda b, g: box_clusters.cluster_box_indices(b, g)):
+    for fn in fns:
         tracemalloc.start()
         fn(boxes, 30.0)
         peaks.append(tracemalloc.get_traced_memory()[1])

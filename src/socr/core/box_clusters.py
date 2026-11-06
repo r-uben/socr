@@ -36,7 +36,8 @@ Algorithm: a uniform grid with cell side ``cell = gap / 2``.
   the grid result is abandoned. A grid attempt therefore never stores more
   memberships, and never does more registration-plus-check work, than one
   pairwise pass (``B``), and on abandonment the exact pairwise loop runs from
-  scratch: total work is at most 2 pairwise passes.
+  scratch: registration plus exact checks total at most 2 pairwise passes
+  (union-find and dictionary bookkeeping are not counted in that bound).
 * Fallback to the exact pairwise loop, with no grid, when the grid's premises
   fail: ``gap`` or any coordinate non-finite; ``cell`` not a positive finite
   float (``gap <= 0``, or ``gap / 2`` underflowing to 0); any inverted box
@@ -124,7 +125,8 @@ def _grid_usable(boxes: list[Box], gap: float) -> bool:
 
 
 def _grid(boxes: list[Box], gap: float) -> _Components | None:
-    """Grid clustering, or None when registration plus exact checks would exceed the pairwise count."""
+    """Grid clustering, or None when registration plus exact checks would exceed the
+    pairwise count."""
     n = len(boxes)
     cell = gap / 2.0
     reach = 3
