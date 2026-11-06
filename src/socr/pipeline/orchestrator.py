@@ -342,7 +342,9 @@ _ESCALATION_LAYER_GRADED_KINDS: frozenset[str] = frozenset(
 _LAYER_CAUSED_LADDER_KINDS: dict[str, tuple[str, frozenset[str]]] = {
     "table_ladder_withheld": (
         "reason",
-        frozenset({"native_contradiction", "sibling_of_contradicted"}),
+        # #1267 merge gate (Fable P2): a row-binding withhold is the text layer's verdict too;
+        # on a page whose layer may no longer serve as evidence it is re-read, not replayed.
+        frozenset({"native_contradiction", "sibling_of_contradicted", "row_binding_contradiction"}),
     ),
     "table_ladder_unverified": ("cause", frozenset({"binding_contradiction", "abstained"})),
     # #1205 round 5 (Argon P1). The one RESOLVING kind here, and the only one whose
@@ -4325,9 +4327,7 @@ class UnifiedPipeline:
         return ROW_BINDING_EVENT_KINDS
 
     @staticmethod
-    def rollback_row_binding_page_state(
-        state: DocumentState, page_num: int, ps: PageState, *, block_count: int
-    ) -> None:
+    def rollback_row_binding_page_state(state: DocumentState, page_num: int, ps: PageState) -> None:
         """Drop row-binding events, sidecar entries and marked tables for one page."""
         from socr.judge.table_verdict import (
             REASON_ROW_BINDING_CONTRADICTION,
@@ -4347,12 +4347,13 @@ class UnifiedPipeline:
             )
 
         state.events = [e for e in state.events if not _ours(e)]
-        for idx in range(block_count):
-            ps.row_binding.pop(f"p{page_num}-t{idx}", None)
+        _prefix = f"p{page_num}-t"
+        ps.row_binding = {k: v for k, v in ps.row_binding.items() if not k.startswith(_prefix)}
         ps.row_binding_contradicted_tables = []
         ps.row_binding_unverifiable_tables = []
         ps.row_binding_table_count = 0
         ps.row_binding_withhold_only = False
+        ps.row_binding_mark_only = False
 
     @staticmethod
     def rollback_native_cell_page_state(
@@ -9395,7 +9396,19 @@ class UnifiedPipeline:
         TABLE_UNVERIFIED unless already REJECTED/WITHHELD, SUCCESS to WARNING, failure mode
         TABLE_UNVERIFIED if empty, and the unverified mark (written by the finalizer seam,
         ``manifest._apply_unverified_table_mark``).  Never CHECKED.
+
+        Merge gate (Fable P2): ``row_binding_mark_only`` records that nothing else had made the
+        page unverified, so the finalizer marks only the unverifiable tables and leaves the bound
+        siblings unmarked.  ``unchecked_table_kind`` is still set: it carries the page-level
+        "page unchecked" line, which without it is replaced by the generic canonical line whose
+        reason ("the table ladder ran out of witnesses") is not what happened here.
         """
+        if unverifiable:
+            ps.row_binding_mark_only = not (
+                ps.unchecked_table_kind
+                or ps.table_ladder_disposition is FailureMode.TABLE_UNVERIFIED
+                or bo.failure_mode is FailureMode.TABLE_UNVERIFIED
+            )
         if contradicted:
             ps.row_binding_withhold_only = (
                 ps.table_ladder_disposition is not FailureMode.TABLE_WITHHELD
@@ -9435,6 +9448,9 @@ class UnifiedPipeline:
         ``_apply_row_binding_policy``.  A failure of the check itself is recorded as an
         unverifiable event with the error, never swallowed.
         """
+        # Merge gate (Fable P2): cleared before every guard, so no earlier verdict outlives a
+        # call that returns without checking.
+        self.rollback_row_binding_page_state(state, page_num, ps)
         out = shipped if shipped is not None else bo
         if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
             return False
@@ -9457,7 +9473,6 @@ class UnifiedPipeline:
         blocks = find_table_blocks(out.text)
         if not blocks:
             return False
-        self.rollback_row_binding_page_state(state, page_num, ps, block_count=len(blocks))
         ps.row_binding_table_count = len(blocks)
         _out_lines = out.text.splitlines()
 
@@ -9572,7 +9587,8 @@ class UnifiedPipeline:
             logger.warning(
                 "row binding check failed on p%d (%s: %s)", page_num, type(exc).__name__, exc
             )
-            self.rollback_row_binding_page_state(state, page_num, ps, block_count=len(blocks))
+            self.rollback_row_binding_page_state(state, page_num, ps)
+            ps.row_binding_table_count = len(blocks)
             for idx, _block in enumerate(blocks):
                 _record(
                     idx,
@@ -16952,6 +16968,8 @@ class UnifiedPipeline:
             payload["row_binding_table_count"] = ps.row_binding_table_count
             if ps.row_binding_withhold_only:
                 payload["row_binding_withhold_only"] = True
+            if ps.row_binding_mark_only:
+                payload["row_binding_mark_only"] = True
         _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
         if _coverage:
             payload["text_coverage"] = _coverage
@@ -18550,6 +18568,7 @@ class UnifiedPipeline:
                 )
                 ps.row_binding_table_count = int(meta.get("row_binding_table_count") or 0)
                 ps.row_binding_withhold_only = bool(meta.get("row_binding_withhold_only"))
+                ps.row_binding_mark_only = bool(meta.get("row_binding_mark_only"))
                 _unv = meta.get("row_binding_unverifiable_tables")
                 ps.row_binding_unverifiable_tables = (
                     [int(i) for i in _unv] if isinstance(_unv, list) else []

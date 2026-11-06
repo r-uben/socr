@@ -547,17 +547,31 @@ def test_wrap_split_exemption_needs_a_real_continuation(rotation):
     assert not CONVICT & set(verdicts(res))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP (Argon 1A, no home): `Government` is only a subset of `Federal government` and "
-    "no line of the page carries `Government` as its own label, so nothing proves the label is wrong; "
-    "requiring both directions costs +9 UNVERIFIABLE control pages on frame 1 (owner decision)",
-)
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_argon_1a_partial_label_on_a_longer_native_label(rotation):
+    """Merge gate P1 (#1271): `Government` is only a subset of `Federal government` and no line of the
+    page prints `Government` as its own label. Nothing proves the label wrong, nothing proves it right:
+    UNVERIFIABLE (marked), never BOUND. The faithful label on the same page stays BOUND."""
     native = [("Federal government", ["2.1", "2.2", "2.3"]), ("Net exports", ["1.5", "2.5", "3.5"])]
     rows = [("Government", ["2.1", "2.2", "2.3"]), ("Net exports", ["1.5", "2.5", "3.5"])]
-    assert run(native, rows, rotation).rows[0].verdict is not RowVerdict.BOUND
+    res = run(native, rows, rotation)
+    assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    faithful = run(native, native, rotation)
+    assert faithful.outcome is TableOutcome.BOUND
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_short_categorical_label_lost_is_not_vacuously_bound(rotation):
+    """Merge gate P1 (#1271): the native label `US` is shorter than MIN_LABEL_TOKEN_LEN. Dropping it
+    from the shipped categorical row must not leave an empty token list that `all()` accepts."""
+    native = [("US", ["Small", "Moderate", "Large"]), ("Percent of loans", ["25", "21", "54"])]
+    dropped = [("", ["Small", "Moderate", "Large"]), ("Percent of loans", ["25", "21", "54"])]
+    res = run(native, dropped, rotation)
+    assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    faithful = run(native, native, rotation)
+    assert faithful.outcome is TableOutcome.BOUND
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)

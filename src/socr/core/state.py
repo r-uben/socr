@@ -598,6 +598,10 @@ class PageState:
     #: #1267: tables whose row binding the text layer could not settle (the mark says so, and
     #: does not claim a contradiction). Persisted.
     row_binding_unverifiable_tables: list = field(default_factory=list)
+    #: #1267 merge gate: the page is unverified ONLY because of the row-binding check, so the
+    #: unverified mark goes on ``row_binding_unverifiable_tables`` alone, not on bound siblings.
+    #: Persisted.
+    row_binding_mark_only: bool = False
     #: P1 retry latch: transient external state absent from the run fingerprint.
     #: Set when at least one table on this page reached an UNVERIFIED terminal
     #: caused by an unavailable table judge rung (transport failure, missing

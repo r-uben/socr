@@ -9,6 +9,7 @@ dependent machinery may legitimately move it (CLAUDE.md, the no-provider trap).
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -206,6 +207,7 @@ _NOISE = {
     "row_binding_unverifiable_tables",
     "row_binding_table_count",
     "row_binding_withhold_only",
+    "row_binding_mark_only",
 }
 
 
@@ -510,6 +512,7 @@ def test_unverifiable_table_is_marked_without_claiming_a_contradiction(tmp_path,
     assert side_off["winning_output"]["status"] != PageStatus.WARNING.value
     assert side_on["winning_output"]["failure_mode"] == "table_unverified"
     assert side_on["unchecked_table_kind"] == "unverified"
+    assert side_on["row_binding_mark_only"] is True
     assert side_on["row_binding_unverifiable_tables"] == [0]
     frag = _fragment(on)
     assert frag.count(UNVERIFIABLE_MARK) == 1 and UNVERIFIABLE_MARK not in _fragment(off)
@@ -534,7 +537,10 @@ def test_unverifiable_state_survives_flush_and_restore(tmp_path, rotation):
     )
     assert pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True) is not None
     resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-    resumed.pages[1] = state.pages[1]
+    resumed.pages[1] = copy.deepcopy(state.pages[1])
+    # start from a page that carries none of the row-binding state, so only the restore supplies it
+    UnifiedPipeline.rollback_row_binding_page_state(resumed, 1, resumed.pages[1])
+    resumed.pages[1].unchecked_table_kind = ""
     restored = PageOutput(
         page_num=1, text="x", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
     )
@@ -542,16 +548,90 @@ def test_unverifiable_state_survives_flush_and_restore(tmp_path, rotation):
     ps = resumed.pages[1]
     assert [e.kind for e in resumed.events if e.page_num == 1].count(UNVERIFIABLE_KIND) == 1
     assert ps.row_binding_unverifiable_tables == [0] and ps.row_binding_contradicted_tables == []
+    assert ps.row_binding_mark_only is True
     assert ps.unchecked_table_kind == "unverified"
 
 
 def test_a_check_that_errors_is_marked_unverifiable(tmp_path):
-    """The check's own failure is not a pass: the page is marked, with the error recorded."""
+    """The check's own failure is not a pass: the page is marked, with the error recorded.
+    Differential (merge gate, Fable P2): the same failing check, run vs not run."""
     with patch(
         "socr.tables.row_binding_check.check_page_row_binding", side_effect=RuntimeError("boom")
     ):
-        _, _, _, out, _ = _run(tmp_path, CLEAN_ROWS, 0, check_runs=True, out_name="err")
-    side = _sidecar(out)
-    assert side["winning_output"]["status"] == PageStatus.WARNING.value
-    assert next(iter(side["row_binding"].values()))["error"] == "check_error:RuntimeError"
-    assert _fragment(out).count(UNVERIFIABLE_MARK) == 1
+        _, _, _, on, pdf = _run(tmp_path, CLEAN_ROWS, 0, check_runs=True, out_name="err")
+        _, _, _, off, _ = _run(tmp_path, CLEAN_ROWS, 0, check_runs=False, out_name="off", pdf=pdf)
+    side_on, side_off = _sidecar(on), _sidecar(off)
+    assert next(iter(side_on["row_binding"].values()))["error"] == "check_error:RuntimeError"
+    assert "row_binding" not in side_off
+    assert side_on["winning_output"]["status"] != side_off["winning_output"]["status"]
+    assert side_on["winning_output"]["failure_mode"] == "table_unverified"
+    assert side_off["winning_output"]["failure_mode"] != "table_unverified"
+    assert _fragment(on).count(UNVERIFIABLE_MARK) == 1
+    assert "[table unverified" not in _fragment(off)
+    assert len(_events(on, UNVERIFIABLE_KIND)) == 1 and _events(off, UNVERIFIABLE_KIND) == []
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_an_unverifiable_table_does_not_mark_its_bound_sibling(tmp_path, rotation):
+    """Merge gate (Fable P2): when the row-binding check alone made the page unverified, only the
+    unverifiable table carries a mark; the table it BOUND ships as it would without the check."""
+    first_slip = [*GROUP[:3], ("Net xprts", GROUP[3][1])]
+    markdown = md(first_slip) + "\nProse between the tables.\n\n" + md(SECOND_TABLE)
+    kw = dict(native=TWO_NATIVE, markdown=markdown)
+    _, _, _, on, pdf = _run(tmp_path, None, rotation, check_runs=True, out_name="on", **kw)
+    _, _, _, off, _ = _run(
+        tmp_path, None, rotation, check_runs=False, out_name="off", pdf=pdf, **kw
+    )
+    side_on = _sidecar(on)
+    assert side_on["row_binding"]["p1-t0"]["outcome"] == "unverifiable"
+    assert side_on["row_binding"]["p1-t1"]["outcome"] == "bound"
+    frag_on, frag_off = _fragment(on), _fragment(off)
+    assert "[table unverified" not in frag_off
+    assert frag_on.count("[table unverified") == 1
+    assert frag_on.count(UNVERIFIABLE_MARK) == 1
+    # the bound sibling's bytes, from the line before it to its end, are the control arm's
+    second = md(SECOND_TABLE).rstrip("\n")  # the fragment ends without the final newline
+    tail_on = frag_on[frag_on.index("Prose between the tables.") :]
+    tail_off = frag_off[frag_off.index("Prose between the tables.") :]
+    assert second in tail_on and tail_on == tail_off
+
+
+def test_a_row_binding_withhold_is_layer_caused():
+    """Merge gate (Fable P2): under a suspect layer at resume, a row-binding withhold is re-read like
+    the native-contradiction withhold, not replayed as a content terminal."""
+    from socr.judge.table_verdict import REASON_ROW_BINDING_CONTRADICTION
+    from socr.pipeline import orchestrator as orch
+
+    def meta(reason):
+        return {"audit_events": [{"kind": WITHHELD_KIND, "data": {"reason": reason}}]}
+
+    assert orch._sidecar_layer_caused_records(meta(REASON_ROW_BINDING_CONTRADICTION)) == [
+        WITHHELD_KIND
+    ]
+    assert orch._sidecar_layer_caused_records(meta("rung_outage")) == []
+
+
+def test_stale_row_binding_state_is_cleared_when_the_check_does_not_run(tmp_path):
+    """Merge gate (Fable P2): the rollback runs before every guard, so a call that returns early
+    (here: a native-engine page) leaves no earlier verdict behind."""
+    from socr.core.audit_log import AuditEvent
+    from socr.core.document import DocumentHandle
+    from socr.core.state import PageState
+
+    pdf = _pdf(tmp_path, 0)
+    pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    ps = PageState(page_num=1)
+    ps.is_born_digital = True
+    ps.row_binding = {"p1-t0": {"outcome": "unverifiable"}}
+    ps.row_binding_unverifiable_tables = [0]
+    ps.row_binding_table_count = 1
+    ps.row_binding_mark_only = True
+    state.pages[1] = ps
+    state.events.append(AuditEvent(page_num=1, kind=UNVERIFIABLE_KIND, detail="stale"))
+    bo = PageOutput(page_num=1, text=md(CLEAN_ROWS), status=PageStatus.SUCCESS, engine="native")
+    assert pipeline._run_row_binding_check(state, 1, ps, bo) is False
+    assert ps.row_binding == {}
+    assert ps.row_binding_unverifiable_tables == [] and ps.row_binding_table_count == 0
+    assert ps.row_binding_mark_only is False
+    assert [e for e in state.events if e.kind == UNVERIFIABLE_KIND] == []

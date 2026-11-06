@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 import statistics
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 
 from socr.tables.native_verifier import _normalize_binding_numeric_token, is_numeric_token
@@ -67,9 +67,6 @@ MAX_FOOTNOTE_DIGITS = 1
 _SUPERSCRIPT_TRANSLATE = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _UNICODE_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-", "‒": "-"})
 _MD_DECORATION = re.compile(r"[*_`]|<br\s*/?>")
-
-
-_PARTIAL_REASON = "label on the matched line (partial)"
 
 
 class RowVerdict(str, Enum):
@@ -523,11 +520,11 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
         if _has_letter(native_tokens) and not row.numbers:
             # post-held-out (Argon c2): a categorical row with no label; BOUND only when the native
             # label text sits in one of its word cells, otherwise it cannot be told from a lost label.
-            if all(
-                any(t in c for c in row.categories)
-                for t in native_tokens
-                if len(t) >= MIN_LABEL_TOKEN_LEN
-            ):
+            # Merge gate P1 (#1271): the same function-word rule as ``_tokens_in_pool`` (short tokens
+            # count when nothing longer remains), so a short label (`US`) is never filtered to an
+            # empty list that ``all()`` accepts.
+            wanted = [t for t in native_tokens if len(t) >= MIN_LABEL_TOKEN_LEN] or native_tokens
+            if wanted and all(any(t in c for c in row.categories) for t in wanted):
                 return RowVerdict.BOUND, "native label sits in a word cell of the row", native_label
             return (
                 RowVerdict.UNVERIFIABLE,
@@ -568,7 +565,13 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
                     "label is the own label of several native lines",
                     native_label,
                 )
-            return RowVerdict.BOUND, _PARTIAL_REASON, native_label
+            # Merge gate P1 (#1271): a partial label with no exact home elsewhere proves nothing
+            # either way (`Government` on `Federal government`): UNVERIFIABLE, never BOUND.
+            return (
+                RowVerdict.UNVERIFIABLE,
+                "shipped label is part of the line's label; no line prints it exactly",
+                native_label,
+            )
         return RowVerdict.BOUND, "label on the matched line", native_label
     pool = _pool(lines, line, own) + on_line
     if _tokens_in_pool(row.label_tokens, pool):
@@ -728,26 +731,6 @@ def check_row_binding(
             )
             continue
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
-    # The same shipped label, partial on two different value lines ('Total demand' on 'Total
-    # domestic demand' and on 'Total foreign demand'): it cannot be both.
-    # Only when the lines' OWN labels differ: the same printed label on two panels is not a conflict.
-    by_label: dict[tuple, set] = {}
-    for e in evidence:
-        if e.reason == _PARTIAL_REASON and e.native_line is not None:
-            by_label.setdefault(tuple(_label_tokens(e.shipped_label)), set()).add(
-                tuple(_label_tokens(e.native_label))
-            )
-    shared = {k for k, v in by_label.items() if len(v) > 1}
-    evidence = [
-        replace(
-            e,
-            verdict=RowVerdict.UNVERIFIABLE,
-            reason="one shipped label is partial on several different value lines",
-        )
-        if e.reason == _PARTIAL_REASON and tuple(_label_tokens(e.shipped_label)) in shared
-        else e
-        for e in evidence
-    ]
     if any(e.verdict in CONVICTING for e in evidence):
         outcome = TableOutcome.CONTRADICTED
     # (a table with no data rows has nothing shipped to bind; the empty-table checks own it)

@@ -5996,11 +5996,17 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     if kind == "disputed":
         mark = disputed_table_mark(mark_values, getattr(p, "d3_floor_png_ref", ""))
         mark_re = DISPUTED_TABLE_MARK_RE
+    _row_binding_unverifiable = (
+        {int(i) for i in (getattr(p, "row_binding_unverifiable_tables", None) or [])}
+        if kind != "disputed"
+        else set()
+    )
     unverified = (
         kind in ("disputed", "unverified")
         or getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_UNVERIFIED
         or output.failure_mode is FailureMode.TABLE_UNVERIFIED
         or (scanned and bool(output.table_unverifiable))
+        or bool(_row_binding_unverifiable)
     )
     if not unverified or not output.text or is_page_failed_marker(output.text):
         return output
@@ -6012,29 +6018,32 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     from socr.tables.reconcile import find_table_blocks as _find_blocks
 
     _blocks = _find_blocks(output.text)
-    _row_binding_unverifiable = (
-        {int(i) for i in (getattr(p, "row_binding_unverifiable_tables", None) or [])}
-        if kind != "disputed"
-        else set()
-    )
-    _ordinals = list(range(len(_blocks)))
     _withheld = {int(i) for i in (getattr(p, "row_binding_contradicted_tables", None) or [])}
-    if _withheld and getattr(p, "row_binding_withhold_only", False):
-        _remaining = [
-            i
-            for i in range(int(getattr(p, "row_binding_table_count", 0) or 0))
-            if i not in _withheld
-        ]
-        if len(_remaining) == len(_blocks):
-            _ordinals = _remaining
+    _withhold_only = bool(_withheld) and bool(getattr(p, "row_binding_withhold_only", False))
+    _ordinals = [
+        i
+        for i in range(int(getattr(p, "row_binding_table_count", 0) or 0))
+        if not (_withhold_only and i in _withheld)
+    ]
+    _mapped = len(_ordinals) == len(_blocks)
+    if not _mapped:
+        _ordinals = list(range(len(_blocks)))
     _md_index = {b.start: _ordinals[k] for k, b in enumerate(_blocks)}
+    # Merge gate (Fable P2): when the row-binding check alone made the page unverified, a table it
+    # BOUND carries no mark.  Fail closed: any table whose ordinal cannot be placed is marked.
+    _only_listed = (
+        kind != "disputed" and _mapped and bool(getattr(p, "row_binding_mark_only", False))
+    )
     for start in reversed(_table_start_lines(output.text, lines)):
         if start >= 2 and mark_re.match(lines[start - 2]) and not lines[start - 1].strip():
             continue
         _k = _md_index.get(start)
-        _mark = (
-            row_binding_unverifiable_table_mark(_k + 1) if _k in _row_binding_unverifiable else mark
-        )
+        if _k in _row_binding_unverifiable:
+            _mark = row_binding_unverifiable_table_mark(_k + 1)
+        elif _only_listed and _k is not None:
+            continue
+        else:
+            _mark = mark
         insert = [_mark + "\n", "\n"]
         if start > 0 and lines[start - 1].strip():
             insert.insert(0, "\n")
