@@ -136,6 +136,36 @@ def test_the_cosmetic_flag_does_not_suppress_it() -> None:
     assert plain is not None and cosmetic == plain
 
 
+_WITHHELD_BODY = "Prose.\n\n[page 1 failed: unverifiable table \u2014 see image]"
+
+
+@pytest.mark.parametrize("status", [PageStatus.WARNING, PageStatus.ERROR])
+@pytest.mark.parametrize(
+    "mode",
+    [FailureMode.TABLE_WITHHELD, FailureMode.TABLE_WITHHELD_UNCONFIRMED],
+)
+def test_a_table_socr_withheld_gets_no_drop_clause(status, mode) -> None:
+    """Merge gate (Fable P2): the numbers of a withheld table are missing BY DESIGN, so the
+    page must not say the model reading omits them. Pinned as a difference: the same page
+    and layer, with and without the withhold."""
+    plain = PageOutput(page_num=1, text=MISSING_ROW, status=status, engine="qwen")
+    held = PageOutput(page_num=1, text=MISSING_ROW, status=status, engine="qwen", failure_mode=mode)
+    assert text_layer_drops_clause(plain, _p()) is not None, "premise: the page drops a row"
+    assert text_layer_drops_clause(held, _p()) is None
+    assert page_dropped_numbers(held, _p()) == ()
+
+
+def test_a_withheld_marker_in_the_body_or_a_ladder_disposition_gets_no_drop_clause() -> None:
+    marker = _out(MISSING_ROW + "\n\n" + _WITHHELD_BODY)
+    assert text_layer_drops_clause(_out(MISSING_ROW), _p()) is not None
+    assert text_layer_drops_clause(marker, _p()) is None
+    disposed = _p(table_ladder_disposition=FailureMode.TABLE_WITHHELD)
+    assert text_layer_drops_clause(_out(MISSING_ROW), disposed) is None
+    # a disposition that is not the withhold does not suppress it
+    other = _p(table_ladder_disposition=FailureMode.TABLE_UNVERIFIED)
+    assert text_layer_drops_clause(_out(MISSING_ROW), other) is not None
+
+
 def test_a_furniture_number_in_the_reading_never_creates_a_drop() -> None:
     """No reading-side furniture subtraction: a faithful row whose number equals a running
     head's or a folio's is not marked, and a transcribed head MAY hide a real drop (the
@@ -697,27 +727,64 @@ def test_the_document_note_and_cli_line_do_not_claim_the_numbers_are_on_the_page
     assert "numbers_dropped_cli_line(numbers_dropped_pages)" in source
 
 
-def test_the_after_lists_cover_what_the_orchestrator_appends_later() -> None:
-    """``EVENT_KINDS_AFTER_NUMBERS_DROPPED`` is a copy of what the orchestrator's event block
-    records after ours; a kind added there and not here would put re-finalized events in the
-    wrong place."""
+#: The helpers ``process()``'s figure phase calls after the drops event is recorded. Their
+#: bodies are part of "what a run records after" and are scanned with the assemble block.
+_FIGURE_PHASE_HELPERS = (
+    "_drop_chart_region_duplicates",
+    "_describe_and_embed_figures",
+    "_describe_crop_refs",
+    "_record_figure_recoverable_labels",
+)
+
+
+def _kinds_in(text: str) -> set[str]:
     import re
 
-    from socr.core.verdict import EVENT_KINDS_AFTER_NUMBERS_DROPPED
+    kinds: set[str] = set()
+    for m in re.finditer(r"\bkind=(.*?)(?:engine=|detail=|data=|\))", text, re.S):
+        kinds |= set(re.findall(r'"([a-z0-9_]+)"', m.group(1)))
+    return kinds
+
+
+def _method_source(source: str, name: str) -> str:
+    head = f"    def {name}("
+    assert source.count(head) == 1, name
+    start = source.index(head)
+    nxt = source.find("\n    def ", start + 1)
+    return source[start : nxt if nxt != -1 else len(source)]
+
+
+def test_the_after_lists_cover_what_the_orchestrator_appends_later() -> None:
+    """``EVENT_KINDS_AFTER_NUMBERS_DROPPED`` is a copy of what the orchestrator records after
+    our event; a kind added there and not here would put re-finalized events in the wrong
+    place. Pinned BOTH ways over every ``kind=`` after the drops event: the rest of the
+    assemble block and ``process()``'s figure phase (including the helpers it calls and the
+    final-body ``table_structure_failed`` site). A new later kind fails the first assertion,
+    a stale constant entry the second."""
+    from socr.core.verdict import (
+        EVENT_KINDS_AFTER_NUMBERS_DROPPED,
+        FINAL_BODY_EVENT_SITE,
+        NUMBERS_DROPPED_KIND,
+    )
 
     source = Path(socr.__file__).with_name("pipeline").joinpath("orchestrator.py").read_text()
     start = source.index("for n in numbers_dropped_pages:")
-    end = source.index("for n in structure_class_floor_pages:")
-    end = source.index("\n\n", end)
-    block = source[start:end]
-    kinds = set()
-    for m in re.finditer(r"kind=(.*?)engine=", block, re.S):
-        kinds |= set(re.findall(r'"([a-z_]+)"', m.group(1)))
-    kinds.discard("numbers_dropped_from_reading")
-    assert kinds, "the scan found nothing"
-    assert kinds <= set(EVENT_KINDS_AFTER_NUMBERS_DROPPED), sorted(
-        kinds - set(EVENT_KINDS_AFTER_NUMBERS_DROPPED)
+    assert source.count("for n in numbers_dropped_pages:") == 1
+    end = source.index("    def _document_handle_for(", start)
+    appended = _kinds_in(source[start:end])
+    for helper in _FIGURE_PHASE_HELPERS:
+        appended |= _kinds_in(_method_source(source, helper))
+    appended.discard(NUMBERS_DROPPED_KIND)
+    assert appended, "the scan found nothing"
+    # table_structure_failed is recorded earlier too; only its final_body site follows,
+    # and that site is pinned separately below.
+    appended.discard("table_structure_failed")
+    listed = set(EVENT_KINDS_AFTER_NUMBERS_DROPPED)
+    assert appended <= listed, (
+        f"appended later, missing from the constant: {sorted(appended - listed)}"
     )
+    assert listed <= appended, f"in the constant, never appended later: {sorted(listed - appended)}"
+    assert f'"site": "{FINAL_BODY_EVENT_SITE}"' in source[start:end]
 
 
 # --- evidence is never erased; existing entries converge (Astra P0-A, P0-B) --------------
@@ -890,3 +957,81 @@ def test_a_faithful_page_with_a_number_dispute_is_byte_preserved_by_refinalize(
     skipped: Counter = Counter()
     assert refinalize_document(_doc_dir(fresh), pdf_dir, skipped=skipped) == []
     assert _tree(fresh) == before and not skipped
+
+
+# --- resume must not erase a persisted list (merge gate, Astra P0-3) ---------------------
+
+
+def _drops_events(out: Path) -> dict[int, list[dict]]:
+    """Page number -> its ``numbers_dropped`` events, from the document audit log."""
+    events = json.loads((_doc_dir(out) / "audit_log.json").read_text())["events"]
+    got: dict[int, list[dict]] = {}
+    for e in events:
+        if e["kind"] == _DROPPED_KIND:
+            got.setdefault(e["page_num"], []).append(e["data"])
+    return got
+
+
+def _resume_page_one(
+    base: Path, dest: Path, pdf: Path, monkeypatch, *, failed_reassessment: bool
+) -> tuple[list[int], list[int]]:
+    """Copy a finished run, drop its document metadata and page 2 (a crash between pages),
+    resume it, and return (pages restored by the page ledger, pages re-read)."""
+    from socr.pipeline import orchestrator as orch
+
+    shutil.copytree(base, dest)
+    _crash_after_page_one(dest)
+    for md in dest.rglob("metadata.json"):
+        md.unlink()
+    restored: list[int] = []
+    original = UnifiedPipeline._restore_terminal_page_state
+
+    def spy(self, state, page_num, page_out, output_dir):
+        restored.append(page_num)
+        return original(self, state, page_num, page_out, output_dir)
+
+    reread: list[int] = []
+    with monkeypatch.context() as m:
+        m.setattr(UnifiedPipeline, "_restore_terminal_page_state", spy)
+        if failed_reassessment:
+            _reassessment(m, "failed")
+        _run(dest, pdf, m, drop=True, pages_read=reread)
+    assert orch  # the module under test is the one imported above
+    return restored, reread
+
+
+def test_a_resumed_page_keeps_its_dropped_list_when_the_reassessment_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    first = tmp_path / "first"
+    _run(first, pdf, monkeypatch, drop=True, pages_read=[])
+    original = _drops_events(first)[1]
+    assert original and original[0]["dropped"], "fixture premise: page 1 lists its numbers"
+
+    arms = {}
+    for name, failed in (("normal", False), ("failed", True)):
+        dest = tmp_path / name
+        restored, reread = _resume_page_one(
+            first, dest, pdf, monkeypatch, failed_reassessment=failed
+        )
+        # the page was RESTORED by the page ledger, not reprocessed
+        assert restored == [1], (name, restored)
+        assert 1 not in reread and 2 in reread, (name, reread)
+        arms[name] = dest
+
+    for name, dest in arms.items():
+        # the dropped page's audit event keeps the original list, never an empty one
+        assert _drops_events(dest)[1] == original, name
+        sidecar = json.loads((_doc_dir(dest) / "pages" / "00001.json").read_text())
+        assert [
+            e["data"] for e in sidecar["audit_events"] if e["kind"] == _DROPPED_KIND
+        ] == original, name
+        assert _drop_clauses(sidecar), name
+    # and page 1's artifacts are byte-identical to the first run's, with or without the failure
+    for name in ("00001.json", "00001.md"):
+        want = (_doc_dir(first) / "pages" / name).read_bytes()
+        for arm, dest in arms.items():
+            assert (_doc_dir(dest) / "pages" / name).read_bytes() == want, (arm, name)
+    # the difference being pinned: the failed reassessment changes nothing about page 1
+    assert _drops_events(arms["failed"])[1] == _drops_events(arms["normal"])[1]

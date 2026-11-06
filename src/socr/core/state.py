@@ -183,6 +183,11 @@ class PageState:
     #: withheld reading was gone for good. Same shape as ``prior_ocr_layer_text``: written
     #: only where it exists, never read as evidence, never shipped.
     withheld_table_text: str = ""
+    #: #1218 merge gate: the page's ``numbers_dropped_from_reading`` audit events as its
+    #: sidecar recorded them, restored on resume. Assembly holds a recomputed list to these
+    #: (``refinalize_own_text.resolve_dropped``) so a failed reassessment cannot erase the
+    #: original list of a page whose restored verdict still carries the FAIL clause.
+    persisted_numbers_dropped_events: list[dict] = field(default_factory=list)
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)

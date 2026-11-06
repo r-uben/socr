@@ -971,6 +971,8 @@ EVENT_KINDS_AFTER_NUMBERS_DROPPED = (
     "figure_description_failed",
     "chart_region_duplicate_suppressed",
     "figure_cap_reached",
+    "figure_description_dropped",
+    "figure_recoverable_labels",
 )
 #: ``table_structure_failed`` is recorded earlier too; only the exact-final-body site follows.
 FINAL_BODY_EVENT_SITE = "final_body"
@@ -1220,6 +1222,24 @@ def drops_count_from_reason(reason: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _table_withheld_by_socr(output: PageOutput, p: Any) -> bool:
+    """Whether socr itself withheld a table on this page (#1218 merge gate, Fable P2).
+
+    The withheld numbers are missing BY DESIGN, so "the model reading omits them" would be a
+    false attribution (and the audit event would list the withheld values). Three witnesses,
+    any one enough: the page's failure mode, the table ladder's disposition, and the marker
+    socr wrote into the body (``table_counts.carries_withheld_marker``)."""
+    from socr.core.result import FailureMode
+    from socr.core.table_counts import carries_withheld_marker
+
+    withheld_modes = {FailureMode.TABLE_WITHHELD, FailureMode.TABLE_WITHHELD_UNCONFIRMED}
+    return (
+        output.failure_mode in withheld_modes
+        or getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_WITHHELD
+        or carries_withheld_marker(output.text)
+    )
+
+
 def page_dropped_numbers(output: PageOutput, p: Any) -> tuple[str, ...]:
     """#1218: the written forms, in reference order, of the table-row numbers the page's own
     layer prints and a model reading omits. ``()`` when the check does not apply.
@@ -1246,6 +1266,8 @@ def page_dropped_numbers(output: PageOutput, p: Any) -> tuple[str, ...]:
     if is_page_failed_marker(output.text):
         return ()
     if _flag(p, "prior_ocr_layer_suspect") or _layer_is_damaged(p):
+        return ()
+    if _table_withheld_by_socr(output, p):
         return ()
     own = getattr(p, "own_layer_text", "")
     reference = getattr(p, "own_layer_drop_reference", "")
