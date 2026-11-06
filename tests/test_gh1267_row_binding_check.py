@@ -1286,3 +1286,47 @@ def test_an_emptied_header_row_is_judged(rotation):
         build_page(native, rotation), _with_header(("Exports", ["", "", ""]), [native[1]])
     )
     assert res[0].outcome is not TableOutcome.BOUND
+
+
+def _set_line(y, words):
+    out, x = [], 40.0
+    for w in words:
+        out.append((x, y, x + 6 * len(w), y + 9, w))
+        x += 6 * len(w) + 4
+    return out
+
+
+def test_a_baseline_with_two_stubs_flattened_into_one_row_never_binds():
+    """Round 7 (Fable P1): `Exports 1.1 2.2 3.3 Imports 4.4 5.5 6.6` on one baseline, shipped as ONE
+    row under `Exports` with all six values."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "2.2", "3.3", "Imports", "4.4", "5.5", "6.6"])
+    flat = "|  |  |  |  |  |  |  |\n|---|---|---|---|---|---|---|\n"
+    flat += "| Exports | 1.1 | 2.2 | 3.3 | 4.4 | 5.5 | 6.6 |\n"
+    assert check_row_binding(words, None, flat).outcome is not TableOutcome.BOUND
+    # a word the shipped row carries itself (`n.a.`) is not another stub
+    words2 = _set_line(100, ["Exports", "1.1", "n.a.", "3.3"])
+    ok = "|  |  |  |  |\n|---|---|---|---|\n| Exports | 1.1 | n.a. | 3.3 |\n"
+    assert check_row_binding(words2, None, ok).outcome is TableOutcome.BOUND
+
+
+def test_symbol_only_labels_are_judged_not_blank():
+    """Round 7 (Astra P1): `%` and `$` labels had no tokens and were skipped as blank rows."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["%", "1.1", "1.2", "1.3"]) + _set_line(114, ["$", "2.1", "2.2", "2.3"])
+    faithful = md([("%", ["1.1", "1.2", "1.3"]), ("$", ["2.1", "2.2", "2.3"])])
+    swapped = md([("$", ["1.1", "1.2", "1.3"]), ("%", ["2.1", "2.2", "2.3"])])
+    assert check_row_binding(words, None, faithful).outcome is TableOutcome.BOUND
+    res = check_row_binding(words, None, swapped)
+    assert res.outcome is not TableOutcome.BOUND
+    assert len(res.rows) == 2  # neither row skipped as blank
+    # a valueless symbol row the page never prints was skipped as a blank row (table BOUND)
+    words3 = _set_line(100, ["Exports", "1.1", "1.2", "1.3"]) + _set_line(
+        114, ["Imports", "2.1", "2.2", "2.3"]
+    )
+    spurious = md(
+        [("Exports", ["1.1", "1.2", "1.3"]), ("%", []), ("Imports", ["2.1", "2.2", "2.3"])]
+    )
+    assert check_row_binding(words3, None, spurious).outcome is not TableOutcome.BOUND

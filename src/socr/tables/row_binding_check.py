@@ -550,6 +550,28 @@ def _bound_exactly(label: str, printed: list[str], lines: list[_Line]) -> bool:
     return bool(printed) and all(_labels_exact(label, t, strict=True) for t in printed)
 
 
+def _label_cell_empty(row: _Row) -> bool:
+    """Round 7 (Astra P1): a label cell is empty only when nothing but whitespace or markup is in it. A
+    symbol label (`%`, `$`) has no letter or digit tokens but is a label, judged by the exact gate."""
+    return not _strip_markup(row.label).strip()
+
+
+def _foreign_stub_after_values(row: _Row, cand: _Cand, first_value_word: int) -> bool:
+    """Round 7 (Fable P1): the matched line carries a second stub after the row's first value
+    (`Exports 1.1 2.2 3.3   Imports 4.4 5.5 6.6` flattened into one shipped row). A letter-bearing word
+    followed by a value means another row starts there; unless the shipped row's own cells carry that
+    word (`n.a.`, `to`), the row cannot be BOUND."""
+    own = {t for c in row.cell_texts for t in _label_tokens(c)}
+    ws = cand.line.words[first_value_word : cand.stop]
+    return any(
+        w.num is None
+        and _has_letter([w.tok])
+        and w.tok not in own
+        and any(x.num is not None for x in ws[i + 1 :])
+        for i, w in enumerate(ws)
+    )
+
+
 def _printed_label(cand: _Cand, first_value_word: int) -> str:
     """The words printed before the row's first value on its candidate line (panel)."""
     return " ".join(w.text for w in cand.words[: first_value_word - cand.start])
@@ -593,7 +615,7 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
     own = _label_words_before(cand, first_value_word)
     native_label = " ".join(w.text for w in own)
     native_tokens = [w.tok for w in own if w.tok]
-    if not row.label_tokens:
+    if _label_cell_empty(row):
         # The label text may sit in another cell of the row (bullet rows) or the row may be a
         # header continuation (Q1 Q2 Q3, H1 H2): words in a data cell are not a lost label.
         if _has_letter(native_tokens) and not row.categories:
@@ -634,6 +656,16 @@ def _judge(row: _Row, cand: _Cand, first_value_word: int, lines: list[_Line], pr
                 native_label,
             )
         return RowVerdict.BOUND, "no label on either side", native_label
+    if not row.label_tokens:
+        # Round 7 (Astra P1): a symbol-only label (`%`, `$`) has no tokens to compare; only the exact
+        # printed label decides, and it never convicts.
+        if _labels_exact(row.label, native_label, strict=True):
+            return (
+                RowVerdict.BOUND,
+                "symbol label printed exactly on the matched line",
+                native_label,
+            )
+        return RowVerdict.UNVERIFIABLE, "symbol label not printed on the matched line", native_label
     on_line = [w.tok for w in own if w.tok] + [
         w.tok for w in cand.words[first_value_word - cand.start :] if w.tok
     ]
@@ -835,7 +867,7 @@ def check_row_binding(
     for pos, r in enumerate(rows):
         values = r.cell_texts
         if not r.has_content:
-            if not r.label_tokens:
+            if _label_cell_empty(r):
                 continue  # blank row
             lo = next((a for a in reversed(anchors[:pos]) if a is not None), -1)
             hi = next((a for a in anchors[pos + 1 :] if a is not None), len(lines))
@@ -901,12 +933,13 @@ def check_row_binding(
                 )
             )
             continue
-        if v is RowVerdict.BOUND and not _bound_exactly(
-            r.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines
+        if v is RowVerdict.BOUND and (
+            not _bound_exactly(r.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines)
+            or any(_foreign_stub_after_values(r, c2, wi2) for c2, wi2 in opts)
         ):
             v, why = (
                 RowVerdict.UNVERIFIABLE,
-                "label not printed exactly before these values on their line",
+                "label not printed exactly before these values, or their line carries another stub",
             )
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
     # Header-position rows (adversarial pass F1; rounds 3-5). Round 5 (R2, COMPLETE JUDGEMENT): a table
@@ -923,7 +956,7 @@ def check_row_binding(
         if not h.has_content:
             # Round 6: a header-position row with a label and no values (`| Exports | | | |`) is judged
             # like a valueless body row; it binds only on an exact valueless line and never convicts.
-            if h.label_tokens:
+            if not _label_cell_empty(h):
                 v, why, _ = _judge_empty(h, lines, -1, len(lines))
                 if v is not RowVerdict.BOUND:
                     v, why = RowVerdict.UNVERIFIABLE, f"header-position row without values: {why}"
@@ -962,8 +995,9 @@ def check_row_binding(
                     RowVerdict.UNVERIFIABLE,
                     "header-position row: a heading cannot be convicted",
                 )
-            elif v is RowVerdict.BOUND and not _bound_exactly(
-                h.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines
+            elif v is RowVerdict.BOUND and (
+                not _bound_exactly(h.label, [_printed_label(c2, wi2) for c2, wi2 in opts], lines)
+                or any(_foreign_stub_after_values(h, c2, wi2) for c2, wi2 in opts)
             ):
                 v, why = (
                     RowVerdict.UNVERIFIABLE,
