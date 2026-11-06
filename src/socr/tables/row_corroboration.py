@@ -417,6 +417,28 @@ _CATEGORICAL_CELL_WORDS = frozenset({"yes", "no"})
 _CATEGORICAL_ROW_MIN_CELLS = 2
 
 
+def _categorical_token_form(word) -> str:
+    """The normalised form of one native word, as ``bears_categorical_row`` compares it."""
+    return str(word[4]).strip().strip(".,;:()[]").casefold()
+
+
+def bears_categorical_answer(band) -> bool:
+    """Whether *band* carries at least ONE categorical answer token (#1266).
+
+    Same vocabulary and normalisation as :func:`bears_categorical_row`, but one token is
+    enough. ``_CATEGORICAL_ROW_MIN_CELLS = 2`` answers "is this line a pure run of cells";
+    this answers "does this line hold a table's answer cell". #1144 p77's Q&A grid prints
+    one Yes/No per row ("generation of electricity ... Yes"), so no band is a cell run, yet
+    every band is a table row. Used only by the per-box census, never to withhold a band.
+
+    Documented residual (#1266 review): one token per band is a weak table signal, so a box
+    of prose that happens to hold a "no"/"yes" can pass the per-box gate. The cost runs one
+    way: every band inside a detected box is withheld by the box rule whatever the gate says,
+    so the failure is over-withholding under a mark, never a silent shipped table line.
+    """
+    return any(_categorical_token_form(w) in _CATEGORICAL_CELL_WORDS for w in band)
+
+
 def bears_categorical_row(band) -> bool:
     """Whether *band* is a row of categorical table CELLS rather than prose.
 
@@ -448,7 +470,7 @@ def bears_categorical_row(band) -> bool:
     """
     run = 0
     for word in band:
-        token = str(word[4]).strip().strip(".,;:()[]").casefold()
+        token = _categorical_token_form(word)
         if token in _CATEGORICAL_CELL_WORDS:
             run += 1
             if run >= _CATEGORICAL_ROW_MIN_CELLS:
@@ -458,13 +480,100 @@ def bears_categorical_row(band) -> bool:
     return False
 
 
+#: #1266: the cut that decides whether a band OUTSIDE every detected table box, on a
+#: BORN-DIGITAL floor page, is a sentence (ships) or numbers (withheld). A band is
+#: withheld iff it bears at least ``MOSTLY_NUMERALS_MIN_NUMERALS`` numeral tokens AND
+#: its numeral tokens number at least ``MOSTLY_NUMERALS_MIN_NUMERALS_PER_WORD`` times
+#: its alphabetic tokens. The first is 1 because a band with no printed numeral has
+#: nothing this rule could withhold (zero numerals >= zero words must not drop a blank
+#: or symbol-only line). The second is 1 -- numerals at least equal words -- which is
+#: the owner's 2026-11-05 ruling ("numeral tokens >= alphabetic tokens"), not a fitted
+#: value. Derivation, measured on all 82 Fed floor pages (60 GH-520 splice + 22
+#: prose-recovered, run aebc444c), oracle-scored over 1,505 non-table lines: withhold
+#: every digit line 1,087 withheld / 142 mid-sentence markers; ship every digit line
+#: outside a box 836 / 41; this cut 919 / 55 (">" instead of ">=": 907 / 53, a 12-line
+#: difference, so the tie is not a sensitive choice). The cut withholds the four
+#: chart-axis lines the ship-all variant leaks (2011 MPR p19 "30 100"; 2014 MPR p44
+#: year rows) and leaks 0 confirmed table values. Bands that meet a box and
+#: categorical rows stay withheld regardless.
+MOSTLY_NUMERALS_MIN_NUMERALS: int = 1
+MOSTLY_NUMERALS_MIN_NUMERALS_PER_WORD: int = 1
+
+
+def band_is_mostly_numerals(band) -> bool:
+    """Whether *band* is numbers rather than a sentence that mentions one (#1266).
+
+    Numeral tokens are the band's words for which :func:`bears_printed_numeral`
+    is True. Alphabetic tokens are words with at least one letter that bear no
+    numeral (``Q1``, ``2.5%`` are numeral tokens; ``growth`` is alphabetic; a lone
+    ``-`` or ``|`` is neither). Withheld iff
+    ``n_num >= MOSTLY_NUMERALS_MIN_NUMERALS`` and
+    ``n_num >= MOSTLY_NUMERALS_MIN_NUMERALS_PER_WORD * n_alpha``; the derivation
+    is on ``MOSTLY_NUMERALS_MIN_NUMERALS``.
+    """
+    tokens = [str(word[4]) for word in band]
+    n_num = sum(1 for tok in tokens if bears_printed_numeral(tok))
+    n_alpha = sum(
+        1 for tok in tokens if any(c.isalpha() for c in tok) and not bears_printed_numeral(tok)
+    )
+    return (
+        n_num >= MOSTLY_NUMERALS_MIN_NUMERALS
+        and n_num >= MOSTLY_NUMERALS_MIN_NUMERALS_PER_WORD * n_alpha
+    )
+
+
+def box_band_census(words: list, box) -> tuple[int, int]:
+    """``(table_bands, prose_bands)`` among the bands of the words inside ONE *box* (#1266).
+
+    A TABLE band carries a genuine numeric token (the test ``baseline_bands`` uses) or is a
+    band carrying a categorical Yes/No answer token (:func:`bears_categorical_answer`; #1144 rules
+    these table content, so a Yes/No-only box is not "too small"). Any other band is prose. Banding and box test are
+    the ones ``_table_bbox_sane`` uses; only the SCOPE differs (one box, not the union).
+    """
+    inside = words_in_region(words, tuple(float(v) for v in box[:4]))
+    table = prose = 0
+    for band in cluster_band_words(inside):
+        ordered = sorted(band, key=lambda w: w[0])
+        if any(_is_genuine_numeric(w[4])[0] for w in ordered) or bears_categorical_answer(ordered):
+            table += 1
+        else:
+            prose += 1
+    return table, prose
+
+
+def bands_outside_boxes(words: list, table_boxes: list | None) -> list[list]:
+    """The page's baseline bands (words left to right) that meet no table box (#1266).
+
+    Same banding and the same box test as :func:`partition_prose_bands`, so the
+    floor's gate and its body can never disagree about which bands are outside.
+
+    Accepted class (owner ruling 2026-11-05): an outside-box row with more words than
+    numerals ships. The gate's lanes and categorical clauses are what catch a table printed
+    outside every box; the gate reason is not recorded in page metadata.
+    """
+    boxes = [tuple(float(v) for v in box[:4]) for box in (table_boxes or []) if len(box) >= 4]
+    out = []
+    for band in cluster_band_words(words):
+        ordered = sorted(band, key=lambda w: w[0])
+        if not _band_meets_a_box(ordered, boxes):
+            out.append(ordered)
+    return out
+
+
 def partition_prose_bands(
     words: list,
     row_shape_min: int | None = None,
     *,
     table_boxes: list | None = None,
+    keep_sentences: bool = False,
 ) -> list[tuple[bool, list]]:
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
+
+    #1266: ``keep_sentences=True`` is the BORN-DIGITAL floor rule. The any-digit
+    count (*row_shape_min*, ignored in this mode) is replaced for bands outside
+    every box by :func:`band_is_mostly_numerals`, so a sentence carrying a year or
+    a percentage ships. Bands meeting a box and categorical rows are withheld
+    exactly as below. The default keeps every existing caller unchanged.
 
     Bands run top of page to bottom, words left to right inside each band --
     page reading order, not the input order of *words*. #649's caller ships
@@ -525,7 +634,9 @@ def partition_prose_bands(
     for band in cluster_band_words(words):
         numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
         ordered = sorted(band, key=lambda w: w[0])
-        is_prose = numeral_count < row_shape_min
+        is_prose = True if keep_sentences else numeral_count < row_shape_min
+        if is_prose and keep_sentences and band_is_mostly_numerals(ordered):
+            is_prose = False
         if is_prose and bears_categorical_row(ordered):
             # #1144: a row of categorical CELLS is table content whatever its
             # digits say and whatever geometry the detector found.

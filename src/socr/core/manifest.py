@@ -3011,12 +3011,59 @@ def structure_class_floor_text(
         d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
         png_ref = getattr(p, "d3_floor_png_ref", "")
         return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    # #1266 replay. A page rebuilt from its sidecar has boxes but no ``native_words``
+    # (a live-run cache, #652 P2a), so the geometry below cannot be recomputed and must not
+    # be re-decided. When the persisted winner IS this lane's own born-digital recovery --
+    # the typed credential ``_is_restored_prose_recovery`` checks, not forgeable by a model
+    # attempt -- the frozen body stands, byte for byte. Only the born-digital banner is
+    # replayed here; a scan recovery keeps today's behaviour. With neither words nor a
+    # frozen recovery the call below fails CLOSED (whole-page marker).
+    if not (getattr(p, "native_words", None) or []) and _is_restored_prose_recovery(p, page_num):
+        frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
+        if frozen and _body_has_born_digital_banner(frozen, page_num):
+            return frozen
+    born_digital = bool(getattr(p, "is_born_digital", False))
     return table_floor_text_for_source(
         p,
         page_num,
         getattr(p, "native_text", "") or "",
         prose_recovery=True,
         chart_floor=chart_floor,
+        # #1266 review: Argon #4 asked that keep-sentences require ADMISSIBLE layer evidence
+        # (``prior_ocr_layer_suspect``, the union that includes a FAILED scan). That is
+        # OVERRULED by #1156's recorded exception: "unknown is not a finding", so on a failed
+        # scan alone the page keeps its layer's prose under the mark (0 of 318 probe pages).
+        # The owner's keep-sentences scope excludes only POSITIVE prior-OCR pages, which
+        # ``prior_ocr_layer_found`` already sent to the whole-page marker above. So every
+        # other born-digital page, suspect or not, takes the same lane: the GH-520 splice is
+        # retired (keeping it for a suspect page would keep the leak #1266 removes), the
+        # shared gate applies, and the body is keep-sentences.
+        geometry_floor=born_digital,
+    )
+
+
+def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
+    """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
+    return _body_has_born_digital_banner(text, page_num)
+
+
+def _body_has_born_digital_banner(text: str, page_num: int) -> bool:
+    """Whether *text* carries the BORN-DIGITAL form of this lane's banner (#1266).
+
+    Walks past this module's own canonical lines exactly like ``_is_prose_recovery_body``
+    and then requires one of the two born-digital banners, so the replay in
+    ``structure_class_floor_text`` cannot adopt a scan recovery's bytes.
+    """
+    body = text or ""
+    while body:
+        head, sep, rest = body.partition("\n")
+        if not head.strip() or is_canonical_mark(head.strip(), page_num):
+            body = rest if sep else ""
+            continue
+        break
+    return any(
+        body.startswith(flag.format(page_num=page_num))
+        for flag in (BORN_DIGITAL_PROSE_RECOVERED_FLAG, BORN_DIGITAL_NATIVE_TEXT_FLAG)
     )
 
 
@@ -3098,6 +3145,82 @@ def table_bbox_sanity_verdict(p) -> bool:
     return _table_bbox_sane(p)
 
 
+def _each_table_box_sane(p) -> bool:
+    """Gate-only box sanity, PER BOX (#1266). ``_table_bbox_sane`` is unchanged.
+
+    ``_table_bbox_sane`` judges the UNION of every box, which is right for the GH-520/D3
+    guards that call it but wrong for the born-digital floor gate: the union swallows
+    whatever is printed BETWEEN two boxes. On ``_p77_like`` (Coca-Cola CDP 2022 p77) the
+    sentence between the numeric grid and the Yes/No grid sits inside the union, the Yes/No
+    rows are zero-numeral bands, so prose bands (6) outnumber numeric bands (4) and a
+    correct pair of boxes reads "too large". Here the same two tests run on each box alone
+    (``row_corroboration.box_band_census``): a box with no table band is too small, a box
+    with more prose bands than table bands is too large. A band carrying a categorical
+    answer token (``bears_categorical_answer``, one Yes/No is enough: p77's Q&A grid prints
+    one per row) counts as a table band in both tests (#1144). Every box must pass. No words, or no box, is no
+    evidence and answers False (fail closed); the persisted union verdict is not consulted
+    because it answers a different question.
+    """
+    from socr.tables.row_corroboration import box_band_census
+
+    words = getattr(p, "native_words", None) or []
+    boxes = getattr(p, "detected_table_bboxes", None) or []
+    if not words or not boxes:
+        return False
+    # #1266 review (Astra P2, Argon #8): validate the boxes themselves, here only --
+    # ``words_in_region`` answers "every word" for an inverted or NaN box, which would read
+    # as a page-wide, perfectly sane box. Non-finite, inverted or zero-area: not sane. Two
+    # boxes with a positive-area intersection (a duplicate is the extreme) double-count the
+    # same words, so the census of each is not a census of a table: not sane.
+    rects = []
+    for box in boxes:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in box[:4])
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or not (x0 < x1 and y0 < y1):
+            return False
+        rects.append((x0, y0, x1, y1))
+    for i, a in enumerate(rects):
+        for b in rects[i + 1 :]:
+            if min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1]):
+                return False
+    for box in boxes:
+        table, prose = box_band_census(words, box)
+        if table == 0 or prose > table:
+            return False
+    return True
+
+
+def _structure_outside_boxes(p) -> bool:
+    """Whether table structure is printed OUTSIDE every detected table box (#1266).
+
+    True when the native words of the bands that meet no box show recurring numeric
+    column lanes (``structure_check._native_page_has_column_lanes``, the same evidence
+    #703 uses) or any such band is a categorical Yes/No row. A detected box covers only
+    the table the detector drew; on 2002-09-24 greenbook-part2 p94 nine data rows sit
+    below a header-only box, and no band rule can tell them from prose. Measured on the 82
+    Fed floor pages: the lane clause fires on 17 pages (1 overlapping another clause), the
+    categorical clause on 0.
+
+    No words means no evidence, so it answers True (fail closed): a page restored from a
+    sidecar carries boxes but never ``native_words``.
+    """
+    from socr.tables import structure_check
+    from socr.tables.row_corroboration import bands_outside_boxes, bears_categorical_row
+
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return True
+    outside = bands_outside_boxes(words, getattr(p, "detected_table_bboxes", None) or [])
+    if any(bears_categorical_row(band) for band in outside):
+        return True
+    outside_words = [word for band in outside for word in band]
+    return bool(outside_words) and bool(
+        structure_check._native_page_has_column_lanes(outside_words)
+    )
+
+
 def table_floor_text_for_source(
     p,
     page_num: int,
@@ -3106,8 +3229,20 @@ def table_floor_text_for_source(
     fallback_marker: str | None = None,
     prose_recovery: bool = False,
     chart_floor: Callable[[], str | None] | None = None,
+    geometry_floor: bool = False,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
+
+    #1266: ``geometry_floor=True`` is the BORN-DIGITAL structure-class floor. It RETIRES the
+    GH-520 text splice: ``splice_all_table_regions`` replaces only the parsed GFM blocks, so
+    every un-parsed table line shipped verbatim (2002-12-10 greenbook-part1 p10: header words
+    and 16 one-token rows inside the box; 2002-09-24 greenbook-part2 p94: 9 data rows below a
+    header-only box). With the flag set this function never splices: it takes the recovery
+    lane (``prose_recovery`` must be True or the page is the whole-page marker), behind the
+    shared geometry gate in ``_refused``. ``source_text`` is not consulted in that mode.
+    The same flag selects the body rule (``keep_sentences``): a band outside every box ships
+    unless it is mostly numerals.
+    Default False keeps every other caller byte-for-byte as before.
 
     Factored out of ``structure_class_floor_text`` for P1's withhold path,
     which must splice the SELECTED output's text -- a model winner, not
@@ -3285,13 +3420,32 @@ def table_floor_text_for_source(
         # property is the shape that drifts, so the proxy goes and the direct
         # test stays. (It was also only partial: a full-width line makes the
         # gutter detector fail closed by design, so jorda p9 passed it.)
-        recovered = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+        if geometry_floor:
+            # #1266 shared gate, BEFORE recovery. A box whose own content fails the sanity
+            # check is not the table it claims to bound (p94: a header-only box), and table
+            # structure printed OUTSIDE every box is a table no box protects. Both ship the
+            # whole-page marker and the page image, never text. Missing evidence is not a
+            # pass: ``_each_table_box_sane`` and ``_structure_outside_boxes`` both fail closed
+            # without words.
+            if not _each_table_box_sane(p) or _structure_outside_boxes(p):
+                return whole_page
+        recovered = native_prose_floor_text(
+            p,
+            page_num,
+            marker_line=d3_marker,
+            png_ref=png_ref,
+            keep_sentences=geometry_floor,
+        )
         if not recovered:
             return whole_page
         # #1144 round 5: the last word belongs to the page's own reading order.
         if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
             return whole_page
         return recovered
+
+    if geometry_floor:
+        # #1266: the splice is retired on this lane (docstring above).
+        return _refused()
 
     source_text = source_text or ""
     if not source_text.strip():
@@ -3416,7 +3570,9 @@ def _prose_follows_native_order(body: str, native_text: str) -> bool:
     return all(tok in truth for tok in wanted)
 
 
-def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
+def _page_prose_partition(
+    p, *, extra_boxes: list | None = None, keep_sentences: bool = False
+) -> list:
     """The prose/table partition of a page's native words, whole page.
 
     #652 round 9 introduced this because TWO decisions read a page's layout --
@@ -3447,7 +3603,10 @@ def _page_prose_partition(p, *, extra_boxes: list | None = None) -> list:
     # 2010-04-28 p15, measured in #1155 PR 1 review.
     boxes = list(getattr(p, "detected_table_bboxes", None) or [])
     boxes.extend(extra_boxes or [])
-    return partition_prose_bands(words, table_boxes=boxes or None)
+    # #1266: ``keep_sentences`` is chosen by the CALLER (the born-digital structure-class
+    # floor), never re-derived from the page here: the scan lanes call this too and keep
+    # the any-digit rule.
+    return partition_prose_bands(words, table_boxes=boxes or None, keep_sentences=keep_sentences)
 
 
 #: Banner stamped above prose recovered by ``native_prose_floor_text``. The
@@ -3672,6 +3831,11 @@ _NATIVE_INLINE_ACTIVE = frozenset("\\`*_[<&|~")
 _NATIVE_BLOCK_ACTIVE = frozenset("#>-+=")
 
 
+#: CommonMark's ordered-list opener: one to nine ASCII digits, then ``.`` or ``)``, then
+#: whitespace or end of line (``0.5`` and ``2.2`` are numbers, not list markers).
+_ORDERED_LIST_MARKER_RE = re.compile(r"[0-9]{1,9}[.)](?=\s|$)")
+
+
 def _escaped_native_line(line: str) -> str:
     """A native line that renders as its own characters and nothing else.
 
@@ -3693,8 +3857,19 @@ def _escaped_native_line(line: str) -> str:
     page's characters.
     """
     out: list[str] = []
+    # #1266: the born-digital floor now ships bands that carry digits, so a line can open
+    # with an ORDERED LIST marker ("1. Introduction", "2005) The ..."): up to nine ASCII
+    # digits then ``.`` or ``)``. The delimiter is escaped, which is the CommonMark literal
+    # form. (The note on ``_NATIVE_BLOCK_ACTIVE`` named this as the thing to add if the
+    # any-digit floor were ever loosened.)
+    ordered_marker = _ORDERED_LIST_MARKER_RE.match(line)
+    ordered_delim = ordered_marker.end() - 1 if ordered_marker else -1
     for idx, ch in enumerate(line):
-        if ch in _NATIVE_INLINE_ACTIVE or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE):
+        if (
+            ch in _NATIVE_INLINE_ACTIVE
+            or (idx == 0 and ch in _NATIVE_BLOCK_ACTIVE)
+            or idx == ordered_delim
+        ):
             out.append("\\")
         out.append(ch)
     return "".join(out)
@@ -3751,8 +3926,15 @@ def native_prose_floor_text(
     marker_line: str,
     png_ref: str,
     extra_withheld_boxes: list | None = None,
+    keep_sentences: bool = False,
 ) -> str | None:
     """The page's own prose, flagged, around a withheld table -- or ``None``.
+
+    #1266: ``keep_sentences=True`` is passed ONLY by the born-digital structure-class
+    floor (see ``table_floor_text_for_source``'s ``geometry_floor``). A band outside every
+    detected table box then ships unless it is mostly numerals
+    (``row_corroboration.band_is_mostly_numerals``); the default is today's any-digit
+    withholding, which every scan caller keeps.
 
     #649 (owner ruling, 2026-09-10). Fed 1989-11-14 p3 reaches
     ``UNVERIFIABLE_TABLE_SCANNED`` with ``detected_table_count == 0`` and a
@@ -3824,7 +4006,9 @@ def native_prose_floor_text(
     if not words:
         return None
 
-    bands = _page_prose_partition(p, extra_boxes=extra_withheld_boxes)
+    bands = _page_prose_partition(
+        p, extra_boxes=extra_withheld_boxes, keep_sentences=keep_sentences
+    )
     prose_bands = [band for is_prose, band in bands if is_prose]
     if not prose_bands:
         return None

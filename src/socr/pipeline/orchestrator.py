@@ -7121,14 +7121,41 @@ class UnifiedPipeline:
         table, rather than from a corroborated OCR reading, without opening
         the page sidecar. ``None`` on a clean run.
         """
-        pages = UnifiedPipeline._scanned_prose_recovered_pages(records)
-        if not pages:
-            return None
-        return (
-            f"page(s) {', '.join(str(n) for n in pages)}: no OCR attempt could be spliced "
-            "around a withheld table, so the page's own unverified prose bands shipped "
-            "flagged instead -- see scanned_prose_recovered in the page sidecar"
-        )
+        scans, born = UnifiedPipeline._scanned_prose_recovered_by_kind(records)
+        parts = []
+        if scans:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in scans)}: no OCR attempt could be spliced "
+                "around a withheld table, so the page's own unverified prose bands shipped "
+                "flagged instead -- see scanned_prose_recovered in the page sidecar"
+            )
+        if born:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in born)}: a born-digital table could not "
+                "be verified, so the page's own unverified text layer shipped flagged around "
+                "a withheld table -- see scanned_prose_recovered in the page sidecar"
+            )
+        return "; ".join(parts) or None
+
+    @staticmethod
+    def _scanned_prose_recovered_by_kind(records: list) -> tuple[list[int], list[int]]:
+        """#1266 review: the recovered pages split by their OWN banner into (scans, born-digital).
+
+        The kind is read from the shipped bytes' banner (``manifest.prose_recovery_is_born_
+        digital``), the same evidence the restore path uses, so a resumed page keeps its kind.
+        """
+        from socr.core.manifest import prose_recovery_is_born_digital
+
+        scans: list[int] = []
+        born: list[int] = []
+        for rec in records:
+            out = rec.output
+            if not out.scanned_prose_recovered:
+                continue
+            (
+                born if prose_recovery_is_born_digital(out.text or "", out.page_num) else scans
+            ).append(out.page_num)
+        return sorted(set(scans)), sorted(set(born))
 
     @staticmethod
     def _chart_detection_failed_note(state) -> str | None:
@@ -20330,11 +20357,19 @@ class UnifiedPipeline:
                 # pages`` is computed once, above, so this line is reachable
                 # even when it is the document's ONLY signal.
                 if scanned_prose_recovered_pages:
-                    console.print(
-                        f"  [red]{len(scanned_prose_recovered_pages)} scanned page(s) shipped "
-                        "unverified recovered prose (no OCR attempt could be spliced around a "
-                        f"withheld table): {scanned_prose_recovered_pages}[/red]"
-                    )
+                    _scan_pgs, _born_pgs = self._scanned_prose_recovered_by_kind(pre_records)
+                    if _scan_pgs:
+                        console.print(
+                            f"  [red]{len(_scan_pgs)} scanned page(s) shipped "
+                            "unverified recovered prose (no OCR attempt could be spliced around a "
+                            f"withheld table): {_scan_pgs}[/red]"
+                        )
+                    if _born_pgs:
+                        console.print(
+                            f"  [red]{len(_born_pgs)} born-digital page(s) shipped "
+                            "unverified recovered prose (the page's own text layer; its table "
+                            f"content withheld): {_born_pgs}[/red]"
+                        )
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
