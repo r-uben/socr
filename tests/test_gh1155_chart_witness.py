@@ -820,6 +820,8 @@ def test_a_restored_prose_recovery_keeps_its_frozen_bytes_through_the_floor(tmp_
         + "\n\nNote: The midpoints of the target ranges are shown.\n\n"
         + "![chart region 1](figures/chart_region_p1_1.png)"
     )
+    # #1266 round 4: a frozen floor body now carries the floor credential its writer set (the
+    # structure-class ending certifies what it ships), and the words-less replay requires it.
     restored = PageOutput(
         page_num=1,
         text=frozen,
@@ -827,6 +829,8 @@ def test_a_restored_prose_recovery_keeps_its_frozen_bytes_through_the_floor(tmp_
         engine="native",
         audit_passed=False,
         scanned_prose_recovered=True,
+        table_floor_body=True,
+        table_floor_digest=m.table_floor_digest_of(frozen),
     )
     assert m._is_restored_prose_recovery(
         _floor_document_state(pdf, best_output=restored).pages[1], 1

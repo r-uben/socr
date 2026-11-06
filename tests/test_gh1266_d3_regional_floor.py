@@ -302,7 +302,11 @@ def test_e_finalize_twice_and_with_the_saved_body_is_byte_identical(tmp_path: Pa
 
 def _restored_d3(tmp_path: Path, body: str, *, typed: bool, name: str):
     """A D3 page whose state was rebuilt WITH ``is_born_digital`` and ``native_text`` but no
-    ``native_words`` (the live-run cache the sidecar does not carry)."""
+    ``native_words`` (the live-run cache the sidecar does not carry). ``typed`` = the frozen
+    body carries what a floor writer sets: the recovery flag AND the floor credential with a
+    digest of these bytes (round 4: the replay needs both)."""
+    from socr.core.manifest import table_floor_digest_of
+
     state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name=name)
     _d3(ps)
     ps.native_words = []
@@ -314,6 +318,8 @@ def _restored_d3(tmp_path: Path, body: str, *, typed: bool, name: str):
         audit_passed=False,
         failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
         scanned_prose_recovered=typed,
+        table_floor_body=typed,
+        table_floor_digest=table_floor_digest_of(body) if typed else "",
     )
     ps.attempts = [out]
     ps.best_output = out
@@ -1369,3 +1375,82 @@ def test_the_order_gate_fallback_whole_pages_real_table_structure(tmp_path: Path
     assert _whole_page(boxless_failed_table_text(ps, 1))
     out, _prov = _select_page_output_tagged(state, 1)
     assert _whole_page(out.text) and out.table_floor_body is True
+
+
+# ---------------------------------------------------------------------------
+# round 4 (Fable P1): the order-gate fallback's own withholding, seen to fail
+# ---------------------------------------------------------------------------
+
+DENSE_LINE = "Growth was 2.6 4.1 3.0 percent"
+
+
+def _two_columns_with_a_dense_line(page) -> None:
+    for i, line in enumerate(TWO_COL_1):
+        page.insert_text((50, 100 + i * 14), line, fontsize=9)
+    for i, line in enumerate((*TWO_COL_2, DENSE_LINE)):
+        page.insert_text((320, 100 + i * 14), line, fontsize=9)
+
+
+def _fallback_page(tmp_path: Path, draw, name: str):
+    state, ps = _build(tmp_path, draw, [], name=name)
+    _structure_failed_only(ps, model_attempt=False)
+    ps.boxless_table_words = list(ps.native_words)
+    ps.native_words = []
+    return state, ps
+
+
+def test_the_fallback_withholds_a_numeral_dense_line_under_one_marker(tmp_path: Path) -> None:
+    """Fable's column-major page with ``Growth was 2.6 4.1 3.0 percent`` in column 2 (3
+    numerals >= 3 words): both columns ship in order, the dense line is withheld under ONE
+    marker plus the page-image link."""
+    import re
+
+    from socr.core.manifest import boxless_failed_table_text
+
+    _state, ps = _fallback_page(tmp_path, _two_columns_with_a_dense_line, "dn.pdf")
+    body = boxless_failed_table_text(ps, 1)
+    flat = re.sub(r"\s+", " ", body)
+    assert " ".join(TWO_COL_1) in flat and " ".join(TWO_COL_2) in flat, body
+    assert flat.index(" ".join(TWO_COL_1)) < flat.index(" ".join(TWO_COL_2))
+    assert "2.6" not in body and "Growth was" not in body, body
+    assert body.count(MARKER) == 1
+    assert "[page image](figures/failed_table_p1.png)" in body
+
+
+def test_the_fallback_withholds_gfm_table_syntax(tmp_path: Path) -> None:
+    """A GFM table in the layer (word cells, so the numeral rule cannot catch it) is withheld
+    by the syntax rule; the prose around it ships."""
+    from socr.core.manifest import _native_text_line_body
+
+    _state, ps = _fallback_page(tmp_path, _draw_two_columns_for_gfm, "gf.pdf")
+    ps.native_text = (
+        "\n".join(TWO_COL_1)
+        + "\n| Region | Outlook |\n| --- | --- |\n| North | firm |\n| South | soft |\n"
+        + "\n".join(TWO_COL_2)
+    )
+    body = _native_text_line_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    for tok in ("Region", "Outlook", "North", "South", "| ---"):
+        assert tok not in body, f"GFM table content {tok!r} shipped"
+    assert TWO_COL_1[0] in body and TWO_COL_2[0] in body
+    assert MARKER in body
+
+
+def _draw_two_columns_for_gfm(page) -> None:
+    for i, line in enumerate(TWO_COL_1):
+        page.insert_text((50, 100 + i * 14), line, fontsize=9)
+    for i, line in enumerate(TWO_COL_2):
+        page.insert_text((320, 100 + i * 14), line, fontsize=9)
+
+
+def test_an_untrusted_layer_gets_no_fallback_body(tmp_path: Path, monkeypatch) -> None:
+    """DIFFERENCE: the same fallback page with the text layer trusted and untrusted
+    (``text_layer_trusted``): trusted ships the line body; untrusted ships the whole page."""
+    from socr.core import born_digital
+    from socr.core.manifest import boxless_failed_table_text
+
+    _state, ps = _fallback_page(tmp_path, _draw_two_columns_for_gfm, "tr.pdf")
+    trusted = boxless_failed_table_text(ps, 1)
+    assert TWO_COL_1[0] in trusted, "premise: the fallback ships on a trusted layer"
+    monkeypatch.setattr(born_digital, "text_layer_trusted", lambda text: False)
+    assert _whole_page(boxless_failed_table_text(ps, 1))

@@ -1100,6 +1100,22 @@ def table_floor_digest_of(text: str | None) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def _without_floor_credential(output):
+    """#1266 round 4: drop the floor credential AND the recovery facts it vouched for.
+
+    A body the credential no longer certifies is not this lane's recovery either, so
+    ``scanned_prose_recovered`` and its note go with it (a stale flag would let a later
+    words-less replay trust the altered bytes)."""
+    notes = [n for n in (output.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE]
+    return replace(
+        output,
+        table_floor_body=False,
+        table_floor_digest="",
+        scanned_prose_recovered=False,
+        audit_notes=notes,
+    )
+
+
 def table_floor_credential_holds(output) -> bool:
     """#1266 round 3: the floor credential holds only on the bytes it certified."""
     return bool(getattr(output, "table_floor_body", False)) and getattr(
@@ -2831,7 +2847,7 @@ def chart_floor_replacement(state, page_num: int, p, *, marker_line: str, png_re
     # This lane now does the same thing, with the same credential:
     # ``_is_restored_prose_recovery`` requires both the typed field this module sets and
     # this module's own banner in the bytes, neither of which a model attempt can forge.
-    if _is_restored_prose_recovery(p, page_num):
+    if _restored_floor_body_holds(p, page_num):
         frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
         if not frozen:
             # No bytes to keep: fall through to the caller's bare marker rather than
@@ -3160,7 +3176,7 @@ def structure_class_floor_text(
     # attempt -- the frozen body stands, byte for byte. Only the born-digital banner is
     # replayed here; a scan recovery keeps today's behaviour. With neither words nor a
     # frozen recovery the call below fails CLOSED (whole-page marker).
-    if not (getattr(p, "native_words", None) or []) and _is_restored_prose_recovery(p, page_num):
+    if not (getattr(p, "native_words", None) or []) and _restored_floor_body_holds(p, page_num):
         frozen = (p.best_output.text or "") if getattr(p, "best_output", None) else ""
         if frozen and _body_has_born_digital_banner(frozen, page_num):
             return frozen
@@ -3267,9 +3283,8 @@ def boxless_failed_table_text(p, page_num: int) -> str:
     boxless_words = getattr(p, "boxless_table_words", None) or []
     if not boxless_words:
         bo = getattr(p, "best_output", None)
-        if bo is not None and table_floor_credential_holds(bo):
-            if _is_restored_prose_recovery(p, page_num):
-                return bo.text or whole_page
+        if bo is not None and _restored_floor_body_holds(p, page_num):
+            return bo.text or whole_page
         return whole_page
     born_digital = bool(getattr(p, "is_born_digital", False))
     native_text = getattr(p, "native_text", "") or ""
@@ -4087,6 +4102,24 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # the next run -- the exact resume loss #649 round 2 closed for the other shape,
     # reopened by adding a second noun.
     return _is_prose_recovery_body(text, page_num)
+
+
+def _restored_floor_body_holds(p, page_num: int) -> bool:
+    """#1266 round 4 (Astra P0): may a words-less page REUSE its saved floor body as is?
+
+    Only when that body is a typed prose recovery (``_is_restored_prose_recovery``: the
+    recovery flag plus this module's banner) AND the floor credential still certifies those
+    exact bytes (``table_floor_credential_holds``). Flag and banner alone are not enough: an
+    altered body keeps both, so a replay on them would ship the alteration and the writer
+    would then certify bytes it never computed. Otherwise the caller recomputes from source
+    words or fails closed to the whole-page marker.
+    """
+    bo = getattr(p, "best_output", None)
+    return (
+        bo is not None
+        and _is_restored_prose_recovery(p, page_num)
+        and table_floor_credential_holds(bo)
+    )
 
 
 def _is_prose_recovery_body(text: str, page_num: int) -> bool:
@@ -5086,7 +5119,7 @@ def _select_page_output_tagged(
         # None whenever it cannot prove what it would be shipping, which
         # leaves the bare marker exactly as before.
         prose_recovered = False
-        if d3_text is None and _is_restored_prose_recovery(p, page_num):
+        if d3_text is None and _restored_floor_body_holds(p, page_num):
             # #649 round 2 (Astra): a page RESTORED from its terminal sidecar
             # has already shipped this recovery, and the words it was built
             # from are gone -- ``native_words`` is a live-run cache the sidecar
@@ -7424,6 +7457,9 @@ def _select_and_finalize_page(
             # floor's own body plus socr's own marks and re-flow.
             output = replace(output, table_floor_digest=table_floor_digest_of(saved_text))
         elif output.table_floor_body:
+            # Credential only: on this path the recovery FACTS belong to the saved bytes and
+            # ``_recovery_facts_of_saved_body`` (#1155 round 4) already derived them; the
+            # words-less replay needs the credential, so a flag alone grants nothing.
             output = replace(output, table_floor_body=False, table_floor_digest="")
         # #1269: the abstention must describe the bytes that ship. A saved body keeps
         # an existing record only when it is still the bare floor body (see
@@ -7448,7 +7484,7 @@ def _select_and_finalize_page(
     # #1266 round 3: past the two guards that may rewrite the body, the floor credential
     # must still certify these exact bytes, or it is dropped.
     if output.table_floor_body and not table_floor_credential_holds(output):
-        output = replace(output, table_floor_body=False, table_floor_digest="")
+        output = _without_floor_credential(output)
     if p is not None:
         output = _apply_unresolved_math_guard(output, p, provenance)
         output = _apply_math_font_unrecovered_guard(output, p)

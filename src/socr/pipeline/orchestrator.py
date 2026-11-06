@@ -17688,8 +17688,15 @@ class UnifiedPipeline:
             from socr.core.manifest import table_floor_credential_holds
 
             if page_out.table_floor_body and not table_floor_credential_holds(page_out):
+                from socr.core.manifest import SCANNED_PROSE_RECOVERED_NOTE
+
+                # round 4: the recovery facts go with the credential they relied on.
                 page_out.table_floor_body = False
                 page_out.table_floor_digest = ""
+                page_out.scanned_prose_recovered = False
+                page_out.audit_notes = [
+                    n for n in (page_out.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE
+                ]
             return page_out
         except Exception as exc:  # never let the ledger read break a run
             logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)

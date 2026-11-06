@@ -384,6 +384,10 @@ def _restored(tmp_path: Path, body: str, *, typed: bool, name: str):
     """A page rebuilt from its sidecar: boxes and count, but no ``native_words``."""
     state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name=name)
     ps.native_words = []
+    # round 4: ``typed`` = what a floor writer sets -- the recovery flag AND the floor
+    # credential with a digest of these bytes; the words-less replay needs both.
+    from socr.core.manifest import table_floor_digest_of
+
     out = PageOutput(
         page_num=1,
         text=body,
@@ -391,6 +395,8 @@ def _restored(tmp_path: Path, body: str, *, typed: bool, name: str):
         engine="native",
         audit_passed=False,
         scanned_prose_recovered=typed,
+        table_floor_body=typed,
+        table_floor_digest=table_floor_digest_of(body) if typed else "",
     )
     ps.attempts = [out]
     ps.best_output = out

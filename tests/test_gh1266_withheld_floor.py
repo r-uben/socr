@@ -297,3 +297,38 @@ def test_a_restored_page_does_not_inherit_the_credential_for_a_changed_fragment(
     changed = pipeline._load_terminal_page(state, 1, out_dir)
     assert changed is not None, "premise: the changed fragment still restores"
     assert changed.table_floor_body is False, "a changed fragment inherited the credential"
+    # round 4: the recovery facts go with the credential they relied on
+    assert same.scanned_prose_recovered is True, "premise: the floor body is a recovery"
+    assert changed.scanned_prose_recovered is False, "a changed fragment kept the recovery flag"
+
+
+def test_an_altered_recovered_body_is_not_replayed(tmp_path: Path) -> None:
+    """Astra round 4 P0: a words-less D3 page whose saved recovered body was ALTERED (a row
+    appended) keeps the recovery flag and the banner, but its credential no longer matches.
+    DIFFERENCE: the intact body replays byte for byte; the altered one is not reused, and with
+    no words the page fails closed -- the appended row never ships."""
+    from dataclasses import replace
+
+    from test_gh1266_d3_regional_floor import _d3
+    from test_gh1266_floor_geometry import GRID_BOX, _build, _draw_p10
+
+    from socr.core.manifest import _winning_page_output
+
+    live, live_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="lv.pdf")
+    _d3(live_ps)
+    certified = _winning_page_output(live, 1, None)
+    assert certified.table_floor_body and certified.scanned_prose_recovered, "premise"
+
+    def _restored(output, name: str):
+        state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name=name)
+        _d3(ps)
+        ps.native_words = []
+        ps.attempts = [output]
+        ps.best_output = output
+        return state
+
+    intact = _winning_page_output(_restored(certified, "in.pdf"), 1, None)
+    assert intact.text == certified.text
+    altered = replace(certified, text=certified.text + "\n\nLoose 7.7 8.8\n")
+    out = _winning_page_output(_restored(altered, "al.pdf"), 1, None)
+    assert "Loose" not in out.text and "7.7" not in out.text, out.text

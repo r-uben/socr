@@ -550,9 +550,13 @@ class PageOutput:
     #: reason as ``scanned_prose_recovered``: only ``core.manifest`` sets it, and no free
     #: text can reach it. Absent (old sidecars) means no credential.
     table_floor_body: bool = False
-    #: #1266 round 3 (Astra P0): sha256 of the exact text the credential certifies. The
-    #: credential holds only while ``text`` still hashes to it (``manifest.
-    #: table_floor_credential_holds``); ``from_dict`` drops both otherwise.
+    #: #1266 round 3: sha256 of the exact text the credential certifies. It binds the
+    #: credential to THAT body against a later rewrite of ``text`` (a guard that changed the
+    #: body, a fragment that differs from the record): the credential holds only while
+    #: ``text`` still hashes to it (``manifest.table_floor_credential_holds``), and
+    #: ``from_dict`` drops both otherwise. It is NOT provenance: a record can carry a digest
+    #: of its own text, so where the bytes came from is checked elsewhere (the saved-body
+    #: comparison against a fresh selection, the fragment check in ``_load_terminal_page``).
     table_floor_digest: str = ""
     #: #1156 Part B: how many numbers of an earlier OCR layer this body withheld. Set
     #: only by the masked-layer ending, from the retained original, so a re-finalisation
