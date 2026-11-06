@@ -3120,35 +3120,6 @@ class UnifiedPipeline:
                 if not getattr(pa, "load_error", "")
                 and (pa.detected_table_count > 0 or not pa.is_born_digital)
             ]
-            # #1266 merge gate: a born-digital page the lane heuristic flags as
-            # table-bearing but with no complete detector box gets its words in a
-            # SEPARATE live-only field, read only by ``boxless_failed_table_text`` (the
-            # box-less failed-table route). ``native_words`` above keeps its exact
-            # population, so every other consumer (``_truncated_grid_reading_ids``, the
-            # chart floor, ``_table_bbox_sane``, the #1144 recovery) sees what it saw.
-            pages_needing_boxless_words = [
-                pa.page_num
-                for pa in assessment.pages
-                if not getattr(pa, "load_error", "")
-                and pa.is_born_digital
-                and bool(getattr(pa, "has_tables", False))
-                and not (
-                    type(pa.detected_table_count) is int
-                    and pa.detected_table_count > 0
-                    and len(getattr(pa, "detected_table_bboxes", None) or [])
-                    == pa.detected_table_count
-                )
-            ]
-            if pages_needing_boxless_words:
-                doc = open_pdf(state.handle.path)
-                try:
-                    for page_num in pages_needing_boxless_words:
-                        ps = state.pages.get(page_num)
-                        if ps is None or not (0 <= page_num - 1 < len(doc)):
-                            continue
-                        ps.boxless_table_words = doc[page_num - 1].get_text("words")
-                finally:
-                    doc.close()
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)
                 try:
@@ -3179,6 +3150,15 @@ class UnifiedPipeline:
             logger.warning(
                 "TICKET-A1b: failed to cache native words for %s", state.handle.path, exc_info=True
             )
+        # #1266 merge gate: a born-digital page the lane heuristic flags as table-bearing but
+        # with no complete detector box gets its words in a SEPARATE live-only field, read
+        # only by ``boxless_failed_table_text`` (the box-less failed-table route).
+        # ``native_words`` above keeps its exact population, so every other consumer
+        # (``_truncated_grid_reading_ids``, the chart floor, ``_table_bbox_sane``, the #1144
+        # recovery) sees what it saw. Runs AFTER the native-words and bbox-verdict loops and
+        # under its own guards, per page: a read failure here costs only that page's box-less
+        # words (the route then fails closed), never another page's ``native_words`` (#881).
+        self._cache_boxless_table_words(state, assessment)
 
         self._emit_native_table_structure_events(state, assessment)
 
@@ -3847,6 +3827,49 @@ class UnifiedPipeline:
         if not last_assessment:
             return None
         return next((p for p in last_assessment.pages if p.page_num == page_num), None)
+
+    def _cache_boxless_table_words(self, state: DocumentState, assessment) -> None:
+        """#1266: fill ``PageState.boxless_table_words`` for born-digital ``has_tables`` pages
+        with no complete detector box. Best-effort per page; a failure leaves that page's
+        field empty and touches nothing else."""
+        pages = [
+            pa.page_num
+            for pa in assessment.pages
+            if not getattr(pa, "load_error", "")
+            and pa.is_born_digital
+            and bool(getattr(pa, "has_tables", False))
+            and not (
+                type(pa.detected_table_count) is int
+                and pa.detected_table_count > 0
+                and len(getattr(pa, "detected_table_bboxes", None) or []) == pa.detected_table_count
+            )
+        ]
+        if not pages:
+            return
+        try:
+            from socr.core.pdf import open_pdf
+
+            doc = open_pdf(state.handle.path)
+        except Exception:
+            logger.warning(
+                "#1266: could not open %s for box-less table words",
+                state.handle.path,
+                exc_info=True,
+            )
+            return
+        try:
+            for page_num in pages:
+                ps = state.pages.get(page_num)
+                if ps is None or not (0 <= page_num - 1 < len(doc)):
+                    continue
+                try:
+                    ps.boxless_table_words = doc[page_num - 1].get_text("words")
+                except Exception:
+                    logger.warning(
+                        "#1266: box-less table words unreadable for p%d", page_num, exc_info=True
+                    )
+        finally:
+            doc.close()
 
     def _page_has_tables(self, page_num: int, ps: PageState | None = None) -> bool:
         """Whether the born-digital detector found table-like structure."""

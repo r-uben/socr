@@ -1123,3 +1123,59 @@ def test_the_boxless_words_change_nothing_but_the_boxless_route(tmp_path: Path) 
     present, present_prov = _select(g671.NATIVE_WORDS, "p")
     assert present_prov is absent_prov
     assert present.text == absent.text and present.engine == absent.engine
+
+
+def test_a_boxless_word_read_failure_costs_no_other_page_its_words(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The box-less word fill runs after the native-words and bbox-verdict loops, under its own
+    per-page guard. DIFFERENCE: the same two-page document (a boxed table page, a box-less
+    flagged page) analysed normally and with ``get_text("words")`` raising for the box-less
+    page during the box-less fill only: the boxed page keeps its ``native_words`` and its
+    bbox verdict either way; only the failing page loses its box-less words."""
+    import fitz
+    from test_gh1144_prose_survives_the_table_floor import _pipeline
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    pdf = tmp_path / "two.pdf"
+    doc = fitz.open()
+    for part in (_gated_process_pdf(tmp_path / "b.pdf"), _boxless_process_pdf(tmp_path / "n.pdf")):
+        with fitz.open(str(part)) as src:
+            doc.insert_pdf(src)
+    doc.save(str(pdf))
+    doc.close()
+
+    def _analyze(*, fail: bool):
+        filling = {"on": False}
+        real_fill = UnifiedPipeline._cache_boxless_table_words
+        real_get_text = fitz.Page.get_text
+
+        def _fill(self, state, assessment):
+            filling["on"] = True
+            try:
+                return real_fill(self, state, assessment)
+            finally:
+                filling["on"] = False
+
+        def _get_text(self, *a, **k):
+            if fail and filling["on"] and self.number == 1 and a and a[0] == "words":
+                raise RuntimeError("forced box-less word read failure")
+            return real_get_text(self, *a, **k)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(UnifiedPipeline, "_cache_boxless_table_words", _fill)
+            mp.setattr(fitz.Page, "get_text", _get_text)
+            state = DocumentState(handle=DocumentHandle.from_path(pdf))
+            _pipeline()._phase_analyze(state)
+        return state.pages[1], state.pages[2]
+
+    ok_boxed, ok_boxless = _analyze(fail=False)
+    bad_boxed, bad_boxless = _analyze(fail=True)
+    assert ok_boxless.boxless_table_words, "premise: the box-less page gets words normally"
+    assert ok_boxed.native_words and ok_boxed.table_bbox_sane is not None, "premise"
+    assert bad_boxless.boxless_table_words == [], "premise: the forced failure happened"
+    assert bad_boxed.native_words == ok_boxed.native_words, "another page lost its words"
+    assert bad_boxed.table_bbox_sane == ok_boxed.table_bbox_sane, "the bbox verdict was lost"
