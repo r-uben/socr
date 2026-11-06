@@ -132,6 +132,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         AGENTIC,
         "hard cap on Gemini OCR pages per run; read in _run_engine_on_pages",
     ),
+    "max_paid_usd": (
+        AGENTIC,
+        "hard cap on token-metered Gemini USD per run; read in _run_engine_on_pages",
+    ),
     "strict_local": (AGENTIC, "read in _phase_agentic"),
     "native_only": (AGENTIC, "read in _phase_agentic"),
     "no_native_first": (AGENTIC, "native_first, read in _phase_agentic"),

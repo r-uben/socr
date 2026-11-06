@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from socr.core.config import EngineType, PipelineConfig
-from socr.core.result import FailureMode, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -33,6 +33,16 @@ def _minimal_state(tmp_path: Path) -> DocumentState:
     return state
 
 
+def _gemini_ok(page_num: int) -> PageOutput:
+    return PageOutput(
+        page_num=page_num,
+        text="ok",
+        status=PageStatus.SUCCESS,
+        failure_mode=FailureMode.NONE,
+        engine="gemini",
+    )
+
+
 def test_max_paid_pages_stops_after_n_gemini_calls(
     pipeline: UnifiedPipeline, tmp_path: Path
 ) -> None:
@@ -40,14 +50,7 @@ def test_max_paid_pages_stops_after_n_gemini_calls(
     engine = MagicMock()
     engine.name = "gemini"
     engine.is_available.return_value = True
-    engine.process_pages.return_value = [
-        MagicMock(
-            page_num=1,
-            status=PageStatus.SUCCESS,
-            failure_mode=FailureMode.NONE,
-            text="ok",
-        )
-    ]
+    engine.process_pages.side_effect = lambda **kwargs: [_gemini_ok(kwargs["page_nums"][0])]
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -98,14 +101,7 @@ def test_paid_counter_resets_each_run(pipeline: UnifiedPipeline, tmp_path: Path)
     engine = MagicMock()
     engine.name = "gemini"
     engine.is_available.return_value = True
-    engine.process_pages.return_value = [
-        MagicMock(
-            page_num=1,
-            status=PageStatus.SUCCESS,
-            failure_mode=FailureMode.NONE,
-            text="ok",
-        )
-    ]
+    engine.process_pages.side_effect = lambda **kwargs: [_gemini_ok(kwargs["page_nums"][0])]
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("socr.pipeline.orchestrator.get_engine", lambda _et: engine)

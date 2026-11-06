@@ -405,6 +405,10 @@ class PipelineConfig:
     # sent to the Gemini engine rung, across every document in a batch.
     max_paid_pages: int | None = None
     max_paid_pages_pinned: bool = False
+    # Hard cap on cumulative token-metered Gemini USD per public run (process scope).
+    # ``None`` / unpinned = unlimited. ``0`` = no paid Gemini API calls.
+    max_paid_usd: float | None = None
+    max_paid_usd_pinned: bool = False
     write_manifest: bool = False  # write reproducibility manifest + blob cache
     # Agentic loop: after every page has run once, run each page that FAILED (its
     # output is an ERROR page: no usable reading, or the fail-closed marker) once
