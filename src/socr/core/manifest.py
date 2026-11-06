@@ -3249,13 +3249,15 @@ def boxless_failed_table_text(p, page_num: int) -> str:
     1. No words: the page's own credentialed recovery replays, else the whole page.
     2. The KEEP-SENTENCES bands body (any-digit on a scan) behind the reading-order gate. A
        real box-less grid ships its rows with words outnumbering numerals and withholds its
-       numeric rows (the accepted KEEP-SENTENCES class); a table-structure whole-page clause
-       is NOT applied here (round 3: the box-backed gate's lanes predicate fires on gh881's
-       misflagged page too -- held for an orchestrator decision).
+       numeric rows (the accepted KEEP-SENTENCES class); no structure clause at this step (the
+       lanes predicate fires on gh881's misflagged page too).
     3. THE ORDER-GATE FALLBACK (born-digital only): when the bands cannot follow the page's
-       reading order (two columns welded by y-banding), the page's ``native_text`` ships IN
-       ITS OWN LINE ORDER with the same KEEP-SENTENCES rule per line
-       (``_native_text_line_body``). Never the bare marker while there is text.
+       reading order (two columns welded by y-banding): TABLE STRUCTURE among the page's words
+       (``_structure_outside_boxes`` with every word outside: numeric column lanes or a
+       categorical row) -> the whole page plus image; otherwise the page's ``native_text``
+       ships IN ITS OWN LINE ORDER with the same KEEP-SENTENCES rule per line
+       (``_native_text_line_body``). Orchestrator decision, round 3: the structure clause sits
+       here only, so a page whose bands body passes the order gate (gh881) is unchanged.
     """
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "") or ""
@@ -3282,6 +3284,12 @@ def boxless_failed_table_text(p, page_num: int) -> str:
     if body and _prose_follows_native_order(body, native_text):
         return body
     if born_digital:
+        # The order-gate fallback ships ``native_text`` line by line, so it first asks
+        # whether the page's words print TABLE STRUCTURE (the box-backed gate's own
+        # predicate, every word outside): a grid whose bands weld or sit beside prose is
+        # withheld whole rather than shipped in the layer's own order.
+        if _structure_outside_boxes(p, words=boxless_words):
+            return whole_page
         fallback = _native_text_line_body(p, page_num, marker_line=d3_marker, png_ref=png_ref)
         if fallback:
             return fallback
@@ -3496,7 +3504,7 @@ def _each_table_box_sane(p) -> bool:
     return True
 
 
-def _structure_outside_boxes(p) -> bool:
+def _structure_outside_boxes(p, *, words: list | None = None) -> bool:
     """Whether table structure is printed OUTSIDE every detected table box (#1266).
 
     True when the native words of the bands that meet no box show recurring numeric
@@ -3513,7 +3521,8 @@ def _structure_outside_boxes(p) -> bool:
     from socr.tables import structure_check
     from socr.tables.row_corroboration import bands_outside_boxes, bears_categorical_row
 
-    words = getattr(p, "native_words", None) or []
+    # #1266 round 3: the box-less order-gate fallback passes its own ``boxless_table_words``.
+    words = (words if words is not None else getattr(p, "native_words", None)) or []
     if not words:
         return True
     outside = bands_outside_boxes(words, getattr(p, "detected_table_bboxes", None) or [])

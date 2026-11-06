@@ -1330,3 +1330,42 @@ def test_the_boxless_word_cache_fills_only_born_digital_pages_with_no_detection(
     assert state.pages[1].boxless_table_words, "the born-digital box-less page got no words"
     assert state.pages[2].boxless_table_words == [], "a scan got box-less words"
     assert state.pages[3].boxless_table_words == [], "a partial box set got box-less words"
+
+
+def _draw_prose_beside_a_grid(page) -> None:
+    """Column 1 prose, column 2 a lane-aligned numeric grid on the same baselines, drawn
+    column-major: y-banding welds each prose line to a grid row, so the order gate refuses
+    the bands body, and the grid's numeric lanes are real table structure."""
+    for i, line in enumerate(TWO_COL_1 + TWO_COL_2):
+        page.insert_text((50, 100 + i * 14), line, fontsize=9)
+    for i in range(len(TWO_COL_1 + TWO_COL_2)):
+        for c, base in enumerate((12.5, 13.1, 14.2)):
+            page.insert_text((330 + c * 50, 100 + i * 14), f"{base + i:.1f}", fontsize=9)
+
+
+def test_the_order_gate_fallback_whole_pages_real_table_structure(tmp_path: Path) -> None:
+    """Orchestrator decision, round 3: the structure clause sits inside the order-gate fallback.
+    DIFFERENCE: a box-less page whose bands body fails the order gate AND prints numeric column
+    lanes ships the whole-page marker plus image; the two-column PROSE page (no lanes) takes the
+    line-wise fallback (``test_a_column_major_two_column_page_ships_both_paragraphs_in_order``)."""
+    from socr.core.manifest import (
+        _prose_follows_native_order,
+        _structure_outside_boxes,
+        boxless_failed_table_text,
+        native_prose_floor_text,
+    )
+
+    state, ps = _build(tmp_path, _draw_prose_beside_a_grid, [], name="pg.pdf")
+    _structure_failed_only(ps, model_attempt=False)
+    ps.boxless_table_words = list(ps.native_words)
+    ps.native_words = []
+    bands = native_prose_floor_text(
+        ps, 1, marker_line=MARKER, png_ref=PNG, keep_sentences=True, words=ps.boxless_table_words
+    )
+    assert not (bands and _prose_follows_native_order(bands, ps.native_text)), (
+        "premise: the order gate refuses the bands body"
+    )
+    assert _structure_outside_boxes(ps, words=ps.boxless_table_words), "premise: lanes"
+    assert _whole_page(boxless_failed_table_text(ps, 1))
+    out, _prov = _select_page_output_tagged(state, 1)
+    assert _whole_page(out.text) and out.table_floor_body is True
