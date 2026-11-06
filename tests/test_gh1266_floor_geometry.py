@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_gh317_structure_class_floor import _state  # noqa: E402
 
 from socr.core.manifest import (  # noqa: E402
+    BORN_DIGITAL_KEEP_SENTENCES_FLAG,
     BORN_DIGITAL_PROSE_RECOVERED_FLAG,
     SCANNED_PROSE_RECOVERED_FLAG,
     _escaped_native_line,
@@ -175,7 +176,7 @@ def test_the_per_box_census_counts_one_answer_token_as_a_table_band() -> None:
 def test_p10_shaped_page_ships_no_table_line_and_ships_the_prose(tmp_path: Path) -> None:
     state, _ps = _build(tmp_path, _draw_p10, [GRID_BOX])
     body = structure_class_floor_text(state.pages[1], 1)
-    assert BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1) in body
+    assert BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1) in body
     assert SENTENCE_WITH_YEAR in body, "a sentence carrying a year was withheld"
     assert TAIL_SENTENCE in body
     assert NUMBERS_ONLY not in body, "a mostly-numerals band outside the box shipped"
@@ -309,7 +310,7 @@ def test_per_box_sanity(tmp_path: Path, draw, box, ships: bool) -> None:
     body = structure_class_floor_text(state.pages[1], 1)
     assert (not _whole_page(body)) is ships, body
     if ships:
-        assert BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1) in body
+        assert BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1) in body
 
 
 def test_the_union_artefact_is_what_the_per_box_clause_removes(tmp_path: Path) -> None:
@@ -412,7 +413,7 @@ def test_a_restored_born_digital_recovery_replays_and_anything_else_fails_closed
     )
     # DIFFERENCE 2: a scan-banner recovery is not replayed by the born-digital lane
     scan_body = body.replace(
-        BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1),
+        BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1),
         SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1),
     )
     assert _whole_page(
@@ -696,7 +697,7 @@ def test_process_differential_the_1266_path_on_and_off(tmp_path: Path, monkeypat
     from socr.core import manifest as M
 
     pdf = _process_pdf(tmp_path / "doc.pdf")
-    banner = BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1)
+    banner = BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1)
     on_by_state = {}
     for ladder in (True, False):
         tag = "ladder" if ladder else "empty"
@@ -793,7 +794,7 @@ def test_a_real_restore_reproduces_the_live_run_byte_for_byte(
     live_final = _final_path(out)
     final_md = live_final.read_text() if live_final else None
     assert (final_md is not None) is (shape == "recovered"), "live final .md presence"
-    banner = BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1)
+    banner = BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1)
     assert (banner in frag) is (shape == "recovered"), frag
     if shape == "whole-page":
         assert "Series" not in frag and "failed: unverifiable table" in frag
@@ -847,3 +848,66 @@ def test_the_restore_guard_bites_when_assemble_writes_no_fragment(
         _restore_and_assemble(pdf, meta, out, monkeypatch, expected_body=frag, neuter=neuter)
         results[neuter] = frag_path.exists()
     assert results == {False: True, True: False}, results
+
+
+# ---------------------------------------------------------------------------
+# merge gate (Fable P2): the keep-sentences banner says what its body does
+# ---------------------------------------------------------------------------
+
+#: The pre-merge-gate banner bytes, written out literally so a change to them is visible.
+OLD_TAIL = " — the paragraphs below are this page's own text layer; every numeric row is withheld]"
+
+
+def test_the_scan_and_any_digit_banners_keep_their_bytes_and_keep_sentences_gets_its_own() -> None:
+    from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG, prose_recovered_flag
+
+    assert SCANNED_PROSE_RECOVERED_FLAG == "[page {page_num}: unverified scan" + OLD_TAIL
+    assert BORN_DIGITAL_PROSE_RECOVERED_FLAG == "[page {page_num}: unverified extraction" + OLD_TAIL
+    assert prose_recovered_flag(1, born_digital=False, keep_sentences=True) == (
+        SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1)
+    ), "a scan never gets the keep-sentences wording"
+    new = prose_recovered_flag(1, born_digital=True, keep_sentences=True)
+    assert new == BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1)
+    assert "every numeric row is withheld" not in new
+    assert "sentences carrying figures ship unchecked" in new
+
+
+def test_the_floor_body_carries_the_keep_sentences_banner(tmp_path: Path) -> None:
+    """DIFFERENCE: the same page as a born-digital floor (keep-sentences body, new banner,
+    and a sentence carrying a year ships) and as a scan (old banner, the year sentence
+    withheld)."""
+    born, _ = _build(tmp_path, _draw_p10, [GRID_BOX], name="kb.pdf")
+    scan, _ = _build(tmp_path, _draw_p10, [GRID_BOX], born_digital=False, name="ks.pdf")
+    born_body = structure_class_floor_text(born.pages[1], 1)
+    scan_body = structure_class_floor_text(scan.pages[1], 1)
+    assert born_body.startswith(BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1))
+    assert SENTENCE_WITH_YEAR in born_body
+    assert scan_body.startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1))
+    assert SENTENCE_WITH_YEAR not in scan_body
+
+
+def test_an_old_form_born_digital_body_still_replays_and_is_still_recognised(
+    tmp_path: Path,
+) -> None:
+    """Frozen bodies written before the merge gate carry the old born-digital banner; the
+    words-less replay, the recovery recogniser, the page-kind split and the meter all still
+    accept it."""
+    from socr.benchmark import acceptance
+    from socr.core.manifest import _is_prose_recovery_body, prose_recovery_is_born_digital
+
+    _live, live_ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="ol.pdf")
+    body = structure_class_floor_text(live_ps, 1)
+    old_body = body.replace(
+        BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1),
+        BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1),
+    )
+    assert old_body != body, "premise: the live body carries the new banner"
+    assert structure_class_floor_text(
+        _restored(tmp_path, old_body, typed=True, name="o.pdf"), 1
+    ) == (old_body)
+    assert _is_prose_recovery_body(old_body, 1) and prose_recovery_is_born_digital(old_body, 1)
+    old_line = BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1)
+    new_line = BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1)
+    for line in (old_line, new_line):
+        assert acceptance.line_is_mark(line, 1), line
+        assert "scanned_flag" in acceptance.families_of(line, 1), line

@@ -3107,7 +3107,11 @@ def _body_has_born_digital_banner(text: str, page_num: int) -> bool:
         break
     return any(
         body.startswith(flag.format(page_num=page_num))
-        for flag in (BORN_DIGITAL_PROSE_RECOVERED_FLAG, BORN_DIGITAL_NATIVE_TEXT_FLAG)
+        for flag in (
+            BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+            BORN_DIGITAL_KEEP_SENTENCES_FLAG,
+            BORN_DIGITAL_NATIVE_TEXT_FLAG,
+        )
     )
 
 
@@ -3674,18 +3678,40 @@ _PROSE_RECOVERY_TAIL = (
 )
 SCANNED_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified scan" + _PROSE_RECOVERY_TAIL
 BORN_DIGITAL_PROSE_RECOVERED_FLAG = "[page {page_num}: unverified extraction" + _PROSE_RECOVERY_TAIL
+#: #1266 merge gate (Fable P2): the KEEP-SENTENCES body (owner ruling 2026-11-05) ships a
+#: digit-bearing line whose words outnumber its numerals, so "every numeric row is
+#: withheld" is false under it. That body -- the born-digital geometry floor, the only
+#: caller passing ``keep_sentences=True`` -- gets its own truthful tail. The scan banner and
+#: the born-digital any-digit banner (the #1155 chart floor) keep their bytes, which are
+#: true of their bodies, and every frozen body carrying the old form is still recognised.
+_KEEP_SENTENCES_PROSE_RECOVERY_TAIL = (
+    " — the paragraphs below are this page's own text layer; table boxes and "
+    "numeral-dense lines are withheld, sentences carrying figures ship unchecked]"
+)
+BORN_DIGITAL_KEEP_SENTENCES_FLAG = (
+    "[page {page_num}: unverified extraction" + _KEEP_SENTENCES_PROSE_RECOVERY_TAIL
+)
 #: Every form of the withholding banner. ``core.table_counts`` counts a
 #: prose-recovery page by matching this banner, and it built its pattern from
 #: the scan form's literal text -- so a second form added without touching it
 #: would have gone UNCOUNTED, silently, on exactly the 674 pages #1144 adds.
 #: Enumerated here, matched by an alternation there, and pinned by a test that
 #: every member matches, so a third form cannot be invisible either.
-PROSE_RECOVERED_FLAGS = (SCANNED_PROSE_RECOVERED_FLAG, BORN_DIGITAL_PROSE_RECOVERED_FLAG)
+PROSE_RECOVERED_FLAGS = (
+    SCANNED_PROSE_RECOVERED_FLAG,
+    BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+    BORN_DIGITAL_KEEP_SENTENCES_FLAG,
+)
 
 
-def prose_recovered_flag(page_num: int, *, born_digital: bool) -> str:
-    """The withholding banner for this page's TYPE (#1144)."""
-    template = BORN_DIGITAL_PROSE_RECOVERED_FLAG if born_digital else SCANNED_PROSE_RECOVERED_FLAG
+def prose_recovered_flag(page_num: int, *, born_digital: bool, keep_sentences: bool = False) -> str:
+    """The withholding banner for this page's TYPE (#1144) and body rule (#1266)."""
+    if born_digital and keep_sentences:
+        template = BORN_DIGITAL_KEEP_SENTENCES_FLAG
+    elif born_digital:
+        template = BORN_DIGITAL_PROSE_RECOVERED_FLAG
+    else:
+        template = SCANNED_PROSE_RECOVERED_FLAG
     return template.format(page_num=page_num)
 
 
@@ -4108,7 +4134,9 @@ def native_prose_floor_text(
     # crop per run is one more render each plus a new way to clip the numbers
     # the floor exists to protect.
     born_digital = bool(getattr(p, "is_born_digital", False))
-    blocks: list[str] = [prose_recovered_flag(page_num, born_digital=born_digital)]
+    blocks: list[str] = [
+        prose_recovered_flag(page_num, born_digital=born_digital, keep_sentences=keep_sentences)
+    ]
     if png_ref:
         blocks.append(png_ref)
     page_image = page_image_link(png_ref)

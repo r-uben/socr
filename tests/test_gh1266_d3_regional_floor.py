@@ -47,7 +47,7 @@ from test_gh1266_floor_geometry import (  # noqa: E402
 )
 
 from socr.core.manifest import (  # noqa: E402
-    BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+    BORN_DIGITAL_KEEP_SENTENCES_FLAG,
     SCANNED_PROSE_RECOVERED_FLAG,
     SCANNED_PROSE_RECOVERED_NOTE,
     SelectionProvenance,
@@ -61,7 +61,7 @@ from socr.core.manifest import (  # noqa: E402
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 
 D3 = SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE
-BANNER = BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1)
+BANNER = BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1)
 
 #: One parseable GFM table, prose above it, and an un-parsed numeric line below it: the
 #: splice replaced the block and shipped ``Loose 7.7 8.8`` verbatim.

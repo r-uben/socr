@@ -1094,7 +1094,8 @@ def test_every_prose_recovery_banner_form_is_skipped_by_the_recovery_gate() -> N
 
     from socr.core.manifest import PROSE_RECOVERY_FLAGS, _is_restored_prose_recovery
 
-    assert len(PROSE_RECOVERY_FLAGS) == 4, (
+    # #1266 merge gate: a fifth form, the born-digital KEEP-SENTENCES withholding banner.
+    assert len(PROSE_RECOVERY_FLAGS) == 5, (
         f"the lane's banner forms changed ({len(PROSE_RECOVERY_FLAGS)}); update this pin "
         "deliberately, and check the gate still covers every one"
     )

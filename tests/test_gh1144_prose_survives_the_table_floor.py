@@ -207,7 +207,7 @@ def test_process_ships_the_prose_and_withholds_both_tables(tmp_path: Path, monke
     On main this page shipped the bare whole-page marker and nothing else.
     """
     from socr.core.manifest import (
-        BORN_DIGITAL_PROSE_RECOVERED_FLAG,
+        BORN_DIGITAL_KEEP_SENTENCES_FLAG,
         SCANNED_PROSE_RECOVERED_FLAG,
     )
 
@@ -226,7 +226,8 @@ def test_process_ships_the_prose_and_withholds_both_tables(tmp_path: Path, monke
     # The fixture is BORN-DIGITAL, so the banner must not call it a scan
     # (#1144 round 4: Herbst-Johannsen p43, a born-digital page of three charts,
     # opened "unverified scan").
-    assert BORN_DIGITAL_PROSE_RECOVERED_FLAG.format(page_num=1) in body
+    # #1266 merge gate: the born-digital floor's KEEP-SENTENCES body has its own truthful tail.
+    assert BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1) in body
     assert SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1) not in body
     assert "unverified scan" not in body
     assert sidecar["status"] == "error"
