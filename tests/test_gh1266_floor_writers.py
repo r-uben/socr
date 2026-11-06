@@ -40,12 +40,13 @@ UNRESOLVED = "> **Unresolved chart placement on page 1**"
 DESCRIPTION_LINE = "Figure description"
 
 
-def _chart_floor_pdf(path: Path, *, anchored: bool) -> Path:
+def _chart_floor_pdf(path: Path, *, anchored: bool, raster: bool = False) -> Path:
     """A born-digital page with two table boxes (the #1144 fixture) and a bar chart below them.
 
     ``anchored``: a prose line below the chart lets the chart region be placed by a source
     anchor. Without it the region has no anchor in the accepted body, so the writer injects
-    the "Unresolved chart placement" blockquote above the crop."""
+    the "Unresolved chart placement" blockquote above the crop. ``raster``: also a raster
+    image the figure extractor finds (a non-chart figure)."""
     fitz = pytest.importorskip("fitz")
     _p77_like(path)
     doc = fitz.open(str(path))
@@ -62,27 +63,78 @@ def _chart_floor_pdf(path: Path, *, anchored: bool) -> Path:
         )
     if anchored:
         page.insert_text((72, 600), "Below the chart the staff noted that risks remained balanced.")
+    if raster:
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 120, 80), False)
+        pix.set_rect(pix.irect, (200, 30, 30))
+        png = path.with_name("blob.png")
+        pix.save(str(png))
+        page.insert_image(fitz.Rect(400, 620, 520, 700), filename=str(png))
     out = path.with_name("chart_floor.pdf")
     doc.save(str(out))
     doc.close()
     return out
 
 
-def _run(tmp_path: Path, monkeypatch, *, anchored: bool, describe: bool = True, again=None):
-    """One hermetic ``process()`` run; returns (fragment, final .md, winning output, out_dir).
+class _Vision:
+    """A stand-in for the ``--describe-figures`` vision engine: no model, a fixed caption."""
 
-    The ladder, the judge model and the crop model are pinned by ``_pipeline``; the figure
-    describer is a stub answering a number-free sentence."""
+    name = "stub-vision"
+
+    def __init__(self, caption: str) -> None:
+        self.caption = caption
+
+    def describe_figure(self, image, context=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(description=self.caption, figure_type="chart")
+
+    def close(self) -> None:
+        pass
+
+
+class _Calls(dict):
+    """What the spies saw on the LAST ``process()`` of a ``_run``."""
+
+
+def _run(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    anchored: bool,
+    describe: bool = True,
+    again=None,
+    resume: bool = False,
+    raster: bool = False,
+    save_figures: bool = False,
+    describe_figures: bool = False,
+    caption: str = "A caption without any figures.",
+):
+    """Hermetic ``process()`` runs; returns ``(runs, calls)``, one ``_read`` per run.
+
+    The ladder, the judge model and the crop model are pinned by ``_pipeline``; the crop
+    describer and the ``--describe-figures`` vision engine are stubs. ``again=1`` runs a second
+    time over the same output directory; with ``resume`` the root ``metadata.json`` indexes are
+    removed first, so the document is not SKIPPED and the page-level resume really runs
+    (``calls`` proves it)."""
     from socr.pipeline import orchestrator as orch
 
     work = tmp_path / "w"
     work.mkdir(parents=True, exist_ok=True)
-    pdf = _chart_floor_pdf(work / "doc.pdf", anchored=anchored)
+    pdf = _chart_floor_pdf(work / "doc.pdf", anchored=anchored, raster=raster)
     monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
     out = work / "out"
     runs = []
-    for _ in range(1 if again is None else 1 + again):
+    calls = _Calls(load_terminal=0, load_restored=0, assemble=0)
+    for n in range(1 if again is None else 1 + again):
+        if n and resume:
+            for index in list(out.rglob("metadata.json")):
+                index.unlink()
+        calls.update(load_terminal=0, load_restored=0, assemble=0)
         pipe = _pipeline()
+        pipe.config.save_figures = save_figures
+        pipe.config.describe_figures = describe_figures
+        pipe.config.describe_figure_crops = describe
+        pipe._get_vision_engine = lambda caption=caption: _Vision(caption)
         if describe:
 
             def ask(path, prompt):
@@ -90,9 +142,26 @@ def _run(tmp_path: Path, monkeypatch, *, anchored: bool, describe: bool = True, 
 
             ask.model = "stub-describer"
             pipe._figure_description_ask = lambda ask=ask: ask
+        real_load = orch.UnifiedPipeline._load_terminal_page
+        real_assemble = orch.UnifiedPipeline._phase_assemble
+
+        def load(self, *a, _real=real_load, **k):
+            calls["load_terminal"] += 1
+            got = _real(self, *a, **k)
+            calls["load_restored"] += got is not None
+            return got
+
+        def assemble(self, *a, _real=real_assemble, **k):
+            calls["assemble"] += 1
+            return _real(self, *a, **k)
+
+        monkeypatch.setattr(orch.UnifiedPipeline, "_load_terminal_page", load)
+        monkeypatch.setattr(orch.UnifiedPipeline, "_phase_assemble", assemble)
         pipe.process(pdf, output_dir=out)
+        monkeypatch.setattr(orch.UnifiedPipeline, "_load_terminal_page", real_load)
+        monkeypatch.setattr(orch.UnifiedPipeline, "_phase_assemble", real_assemble)
         runs.append(_read(out))
-    return runs
+    return runs, calls
 
 
 def _read(out: Path):
@@ -100,7 +169,14 @@ def _read(out: Path):
     meta = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
     mds = [p for p in out.rglob("*.md") if "pages" not in p.parts]
     assert mds, "premise: a final .md was written"
-    return frag, mds[0].read_text(), meta.get("winning_output") or {}, out
+    winning = dict(meta.get("winning_output") or {})
+    winning["_events"] = meta.get("audit_events") or []
+    winning["_figure_refs"] = meta.get("figure_refs") or []
+    return frag, mds[0].read_text(), winning, out
+
+
+def _kinds(winning) -> list[str]:
+    return [e.get("kind") for e in winning["_events"]]
 
 
 @pytest.mark.parametrize("anchored", [True, False], ids=["anchored", "unresolved_placement"])
@@ -110,7 +186,7 @@ def test_the_writers_additions_survive_the_saved_pass(
     """The crop, the description and (unplaced) the blockquote ship in the fragment, the .md
     and the sidecar, with the credential bound to those exact bytes. Fails on fd0ba04c, where
     the saved pass shipped the recomputed floor and dropped all three."""
-    [(frag, md, winning, _out)] = _run(tmp_path, monkeypatch, anchored=anchored)
+    [(frag, md, winning, _out)], _ = _run(tmp_path, monkeypatch, anchored=anchored)
 
     text = winning.get("text") or ""
     assert winning.get("table_floor_body") is True, "premise: a floor page"
@@ -129,8 +205,8 @@ def test_the_describer_only_adds_its_own_lines(tmp_path: Path, monkeypatch) -> N
     """DIFFERENCE: the same page with the describer off ships the crop and no description,
     and with it on ships the same body plus the description (the writer's output, nothing
     else)."""
-    [(off_frag, *_)] = _run(tmp_path / "off", monkeypatch, anchored=True, describe=False)
-    [(on_frag, *_)] = _run(tmp_path / "on", monkeypatch, anchored=True, describe=True)
+    [(off_frag, *_)], _ = _run(tmp_path / "off", monkeypatch, anchored=True, describe=False)
+    [(on_frag, *_)], _ = _run(tmp_path / "on", monkeypatch, anchored=True, describe=True)
     assert CHART_REF in off_frag and DESCRIPTION_LINE not in off_frag
     assert CHART_REF in on_frag and DESCRIPTION_LINE in on_frag
     dropped = [ln for ln in on_frag.splitlines() if DESCRIPTION_LINE not in ln]
@@ -139,16 +215,166 @@ def test_the_describer_only_adds_its_own_lines(tmp_path: Path, monkeypatch) -> N
     ]
 
 
-@pytest.mark.parametrize("anchored", [True, False], ids=["anchored", "unresolved_placement"])
-def test_a_resumed_run_is_byte_identical(tmp_path: Path, monkeypatch, anchored: bool) -> None:
-    """Re-finalizing what the first run wrote (a second ``process()`` over the same output
-    directory restores the terminal page from its sidecar, with no words) changes no byte."""
-    first, second = _run(tmp_path, monkeypatch, anchored=anchored, again=1)
-    assert CHART_REF in first[0], "premise: the first run shipped the crop"
-    assert second[0] == first[0], "fragment changed on re-run"
-    assert second[1] == first[1], "final .md changed on re-run"
-    assert second[2].get("text") == first[2].get("text"), "sidecar text changed on re-run"
+_RESUME_ARMS = [
+    pytest.param(True, False, id="anchored"),
+    pytest.param(False, False, id="unresolved_placement"),
+    pytest.param(True, True, id="save_figures"),
+]
+
+
+@pytest.mark.parametrize(("anchored", "save_figures"), _RESUME_ARMS)
+def test_a_resumed_run_is_byte_identical(
+    tmp_path: Path, monkeypatch, anchored: bool, save_figures: bool
+) -> None:
+    """The page-level resume (the root indexes removed, ``pages/*`` kept, so the document is
+    not SKIPPED) restores the terminal page and reassembles it; fragment, .md and sidecar are
+    byte-identical to run 1. The spies prove the resume really ran: a SKIP would pass the
+    comparison vacuously."""
+    (first, second), calls = _run(
+        tmp_path,
+        monkeypatch,
+        anchored=anchored,
+        again=1,
+        resume=True,
+        raster=save_figures,
+        save_figures=save_figures,
+    )
+    # Run 2 is not the document-level SKIP: the page ledger gate was consulted and assemble ran.
+    # (A floor page here is non-SUCCESS -- the page judge timed out -- so the gate reprocesses
+    # it rather than restoring it; the comparison below is of what run 2 writes on the same
+    # output directory, and ``load_restored`` is recorded in ``calls`` for anyone who changes
+    # that.)
+    assert calls["load_terminal"] >= 1, calls
+    assert calls["assemble"] >= 1, calls
+    assert CHART_REF in first[0] and DESCRIPTION in first[0], "premise: run 1 shipped them"
+    if save_figures:
+        assert "![Figure" in first[0], "premise: run 1 embedded the extracted figure"
+    assert second[0] == first[0], "fragment changed on resume"
+    assert second[1] == first[1], "final .md changed on resume"
+    assert second[2].get("text") == first[2].get("text"), "sidecar text changed on resume"
     assert second[2].get("table_floor_digest") == first[2].get("table_floor_digest")
+    assert second[0].count("![Figure") == first[0].count("![Figure"), "a block was duplicated"
+    assert "floor_saved_body_rejected" not in _kinds(second[2])
+
+
+_MATRIX = [
+    pytest.param(s, d, c, id=f"save{int(s)}-desc{int(d)}-crop{int(c)}")
+    for s in (False, True)
+    for d in (False, True)
+    for c in (False, True)
+]
+
+
+@pytest.mark.parametrize(("save_figures", "describe_figures", "crop"), _MATRIX)
+def test_no_writer_combination_loses_what_the_events_claim(
+    tmp_path: Path, monkeypatch, save_figures: bool, describe_figures: bool, crop: bool
+) -> None:
+    """Guard against an uncovered post-selection writer: in every config combination, on a
+    floor page with a chart region and a raster figure, nothing is rejected, everything the
+    events and ``figure_refs`` claim is in the fragment, the .md and the sidecar, and the
+    fragment equals the sidecar text."""
+    [(frag, md, winning, _out)], _ = _run(
+        tmp_path,
+        monkeypatch,
+        anchored=True,
+        raster=True,
+        save_figures=save_figures,
+        describe_figures=describe_figures,
+        describe=crop,
+    )
+    text = winning.get("text") or ""
+    assert winning.get("table_floor_body") is True, "premise: a floor page"
+    kinds = _kinds(winning)
+    assert "floor_saved_body_rejected" not in kinds
+    assert "chart_region_preserved" in kinds, "premise: the chart region was placed"
+    bodies = {"fragment": frag, "final .md": md, "sidecar": text}
+    for label, body in bodies.items():
+        assert CHART_REF in body, f"{label} lost the chart crop the events claim"
+        if "figure_description_described" in kinds:
+            assert DESCRIPTION in body, f"{label} lost the description the events claim"
+    if crop:
+        assert "figure_description_described" in kinds, "premise: the crop was described"
+    claimed = [r["image_path"] for r in winning["_figure_refs"] if r.get("image_path")]
+    if save_figures or describe_figures:
+        assert claimed, "premise: the extracted figure is claimed in figure_refs"
+    for image_path in claimed:
+        for label, body in bodies.items():
+            assert Path(image_path).name in body, f"{label} lost {image_path}"
+    assert text == frag, "the sidecar and the fragment must carry the same bytes"
+    assert frag.strip() in md
+    assert winning.get("table_floor_digest") == table_floor_digest_of(text)
+
+
+DIGIT_CAPTION = "Real GDP rose 2.6 percent against a forecast of 4.1 percent."
+
+
+def test_a_digit_bearing_caption_never_ships_on_a_floor_page(tmp_path: Path, monkeypatch) -> None:
+    """``--describe-figures`` captions have no number check; on a floor page one over a
+    withheld table box would ship its numbers under the floor credential. The caption is not
+    written into the body, the sidecar's ``figure_refs`` or the metadata; the image and the
+    ``**Figure N**`` header are, and a withheld-caption event is recorded without the text."""
+    [(frag, md, winning, out)], _ = _run(
+        tmp_path,
+        monkeypatch,
+        anchored=True,
+        raster=True,
+        describe_figures=True,
+        caption=DIGIT_CAPTION,
+    )
+    kinds = _kinds(winning)
+    assert "figure_caption_withheld_on_floor" in kinds
+    assert "floor_saved_body_rejected" not in kinds
+    for label, body in (("fragment", frag), ("final .md", md), ("sidecar", winning["text"])):
+        assert "2.6" not in body and "4.1" not in body, f"{label} shipped the caption numbers"
+        assert "![Figure" in body and "**Figure 1** (page 1)" in body, f"{label}: image or header"
+    assert all("2.6" not in (r.get("description") or "") for r in winning["_figure_refs"])
+    for meta_file in out.rglob("metadata.json"):
+        assert DIGIT_CAPTION not in meta_file.read_text()
+    event = next(e for e in winning["_events"] if e["kind"] == "figure_caption_withheld_on_floor")
+    assert "2.6" not in json.dumps(event)
+
+
+def test_the_same_caption_ships_on_a_page_that_is_not_a_floor(tmp_path: Path, monkeypatch) -> None:
+    """DIFFERENCE, one thing changed: the page holds no certified floor body. The identical
+    caption is written as before (non-floor output is unchanged), and the floor arm of the same
+    run withholds it."""
+    fitz = pytest.importorskip("fitz")
+    from socr.pipeline import orchestrator as orch
+
+    work = tmp_path / "plain"
+    work.mkdir()
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 80), "A plain page of prose with no table at all, only a picture.")
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 120, 80), False)
+    pix.set_rect(pix.irect, (200, 30, 30))
+    png = work / "blob.png"
+    pix.save(str(png))
+    page.insert_image(fitz.Rect(400, 620, 520, 700), filename=str(png))
+    pdf = work / "plain.pdf"
+    doc.save(str(pdf))
+    doc.close()
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+    pipe.config.save_figures = True
+    pipe.config.describe_figures = True
+    pipe._get_vision_engine = lambda: _Vision(DIGIT_CAPTION)
+    out = work / "out"
+    pipe.process(pdf, output_dir=out)
+    plain_frag = next(iter(out.rglob("pages/00001.md"))).read_text()
+    plain_meta = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    assert (plain_meta.get("winning_output") or {}).get("table_floor_body") is not True
+    assert DIGIT_CAPTION in plain_frag, "the non-floor page lost its caption"
+
+    [(floor_frag, *_)], _ = _run(
+        tmp_path / "floor",
+        monkeypatch,
+        anchored=True,
+        raster=True,
+        describe_figures=True,
+        caption=DIGIT_CAPTION,
+    )
+    assert DIGIT_CAPTION not in floor_frag, "the floor page withheld it"
 
 
 # ---------------------------------------------------------------------------

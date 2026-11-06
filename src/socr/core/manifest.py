@@ -7443,6 +7443,11 @@ def _record_rejected_saved_body(state: DocumentState, page_num: int, saved_text:
             and (getattr(ev, "data", None) or {}).get("saved_digest") == digest
         ):
             return
+    logger.warning(
+        "p%d: the saved page text is not a body a floor writer certified; "
+        "the recomputed floor shipped instead (a writer is missing its re-certification)",
+        page_num,
+    )
     state.events.append(
         AuditEvent(
             page_num=page_num,

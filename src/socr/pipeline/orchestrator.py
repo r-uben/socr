@@ -22245,6 +22245,7 @@ class UnifiedPipeline:
         # instead also carries it, and skipping on the ref alone dropped that page's
         # figures (Argon, diff review).
         from socr.core.manifest import page_ships_its_own_page_image
+        from socr.core.manifest import recertify_floor_body
 
         _shipped_bodies = split_native_pages(text)
         _own_image = {
@@ -22335,6 +22336,34 @@ class UnifiedPipeline:
                 description = info.description
                 figure_type = info.figure_type or "extracted"
                 was_described = True
+
+            # #1266 round 7: a page that holds a certified floor body gets this figure's
+            # block certified with it, so the vision model's caption (no number check on this
+            # path) must pass the number-free check first: a caption over a withheld table
+            # box would otherwise ship its numbers under the floor credential. The same
+            # FigureInfo feeds the body, the sidecar's figure_refs and the metadata, so one
+            # blanking covers all three. The image and the header stay.
+            if description and getattr(state.pages.get(fig.page_num), "certified_floor_text", ""):
+                if (
+                    _crop_descriptions.find_number_tokens(description)
+                    or _crop_descriptions.clean_description(description) is None
+                ):
+                    from socr.core.audit_log import AuditEvent as _CapEvent
+
+                    state.events.append(
+                        _CapEvent(
+                            page_num=fig.page_num,
+                            kind="figure_caption_withheld_on_floor",
+                            engine="",
+                            detail=(
+                                f"figure {fig.figure_num}: the caption failed the number-free "
+                                "check on a page that holds a certified floor body; the image "
+                                "ships without it"
+                            ),
+                            data={"figure_num": fig.figure_num},
+                        )
+                    )
+                    description = ""
 
             fig_info = FigureInfo(
                 figure_num=fig.figure_num,
@@ -22434,7 +22463,13 @@ class UnifiedPipeline:
                 continue
 
             # Append figure blocks to this page's body text.
+            before_blocks = page_bodies[idx]
             page_bodies[idx] = page_bodies[idx].rstrip() + "\n\n" + page_figure_blocks
+            # #1266 round 7: socr's own writer; a floor page's certificate moves with the body
+            # it produced (see ``_preserve_chart_regions``).
+            recertify_floor_body(
+                state.pages.get(page_num), before_blocks, page_bodies[idx], page_num
+            )
 
             updated = True
 
