@@ -3408,6 +3408,13 @@ class UnifiedPipeline:
             ps = state.pages[page_num]
             if self._page_has_tables(page_num, ps):
                 ps.native_table_structure_failed = True
+                # #1266 round 3: the page now takes the D3 floor or the box-less route,
+                # both of which may ship a "see image" marker; render that image.
+                _figs = getattr(state, "figures_dir", None)
+                if _figs is not None and not getattr(ps, "d3_floor_png_ref", ""):
+                    ps.d3_floor_png_ref = self._render_d3_floor_png(
+                        state.handle.path, page_num, _figs
+                    )
             return PageOutput(
                 page_num=page_num,
                 text=ps.native_text or "",
@@ -3838,11 +3845,11 @@ class UnifiedPipeline:
             if not getattr(pa, "load_error", "")
             and pa.is_born_digital
             and bool(getattr(pa, "has_tables", False))
-            and not (
-                type(pa.detected_table_count) is int
-                and pa.detected_table_count > 0
-                and len(getattr(pa, "detected_table_bboxes", None) or []) == pa.detected_table_count
-            )
+            # #1266 round 3: box-less = the detector found nothing (count 0, no box); a
+            # partial box set takes the whole-page marker and needs no words.
+            and type(pa.detected_table_count) is int
+            and pa.detected_table_count == 0
+            and not (getattr(pa, "detected_table_bboxes", None) or [])
         ]
         if not pages:
             return
@@ -11480,12 +11487,11 @@ class UnifiedPipeline:
                 ps = state.pages[page_num]
                 if self._page_has_tables(page_num, ps):
                     ps.native_table_structure_failed = True
-                    # #1266 merge gate: with no model reading a BOX-BACKED page now takes the
-                    # D3 floor (``d3_no_model_reading``), whose marker says "see image";
-                    # render the page image the other D3 routes render, so the marker is true.
-                    from socr.core.manifest import detector_boxes_complete
-
-                    if detector_boxes_complete(ps) and not getattr(ps, "d3_floor_png_ref", ""):
+                    # #1266 merge gate: with no model reading this page takes the D3 floor
+                    # (with a detector box) or the box-less route (without one); both may ship
+                    # a marker that says "see image", so render the page image here for every
+                    # stamped page (round 3, Fable P1: the box-less route had none).
+                    if not getattr(ps, "d3_floor_png_ref", ""):
                         _, _providerless_figs = self._doc_and_figures_dir(
                             state.handle.path, output_dir
                         )
@@ -17670,6 +17676,13 @@ class UnifiedPipeline:
             # strip from a prior completed assemble) is honoured on resume.
             page_out.text = body
             page_out.page_num = page_num
+            # #1266 round 3 (Astra P0): the floor credential certifies the bytes it was
+            # bound to; a fragment that differs from them does not inherit it.
+            from socr.core.manifest import table_floor_credential_holds
+
+            if page_out.table_floor_body and not table_floor_credential_holds(page_out):
+                page_out.table_floor_body = False
+                page_out.table_floor_digest = ""
             return page_out
         except Exception as exc:  # never let the ledger read break a run
             logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)

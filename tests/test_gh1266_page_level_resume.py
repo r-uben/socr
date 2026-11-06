@@ -63,7 +63,14 @@ ROUTES = {
     "empty-ocr": (False, False, {1: "A", 2: "A", 3: "A", 4: "A"}),
     "empty-nf": (False, True, {3: "D3", 4: "D3"}),
 }
-WINNER_KEYS = ("scanned_prose_recovered", "audit_notes", "text")
+#: Round 3 (Astra P2): the floor credential and its digest are compared too.
+WINNER_KEYS = (
+    "scanned_prose_recovered",
+    "audit_notes",
+    "text",
+    "table_floor_body",
+    "table_floor_digest",
+)
 
 
 @pytest.fixture

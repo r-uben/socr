@@ -181,3 +181,119 @@ def test_a_saved_body_keeps_the_credential_only_when_it_is_the_floors_own(
     assert again.text == first.text and again.table_floor_body is True
     forged = _select_and_finalize_page(state, 1, saved_text=FORGED).output
     assert "Loose" not in forged.text, forged.text
+
+
+# ---------------------------------------------------------------------------
+# round 3 (Astra P0): the credential is bound to a digest of the body it certifies
+# ---------------------------------------------------------------------------
+
+
+def test_a_forged_record_credential_is_dropped() -> None:
+    """``from_dict`` accepts the credential only as a JSON ``true`` with a digest of the
+    record's own text. DIFFERENCE: the same record with a matching digest keeps it."""
+    from socr.core.manifest import table_floor_digest_of
+
+    base = PageOutput(page_num=1, text=FORGED, status=PageStatus.ERROR, engine="native").to_dict()
+    assert PageOutput.from_dict({**base, "table_floor_body": True}).table_floor_body is False
+    wrong = {**base, "table_floor_body": True, "table_floor_digest": table_floor_digest_of("x")}
+    assert PageOutput.from_dict(wrong).table_floor_body is False
+    right = {**base, "table_floor_body": True, "table_floor_digest": table_floor_digest_of(FORGED)}
+    assert PageOutput.from_dict(right).table_floor_body is True
+
+
+def test_a_certified_body_with_one_changed_token_loses_the_credential(tmp_path: Path) -> None:
+    """DIFFERENCE: the guard's own credentialed output is kept as is; the same output with one
+    token changed no longer matches its digest and is withheld again."""
+    from dataclasses import replace
+
+    ps, winner = _withheld_page(tmp_path)
+    once = _apply_ladder_disposition_guard(winner, 1, ps)
+    assert _apply_ladder_disposition_guard(once, 1, ps).text == once.text
+    tampered = replace(once, text=once.text + "\n\nLoose 7.7 8.8\n")
+    out = _apply_ladder_disposition_guard(tampered, 1, ps)
+    assert "Loose" not in out.text, out.text
+
+
+def test_socr_s_own_hyphen_reflow_keeps_the_credential_and_nothing_else_does() -> None:
+    from socr.core.manifest import _same_body_modulo_marks
+
+    selected = "The committee judged that mone-\ntary conditions stayed loose."
+    assert _same_body_modulo_marks(
+        "The committee judged that monetary conditions stayed loose.", selected, 1
+    )
+    assert _same_body_modulo_marks(
+        "The committee judged that mone-tary conditions stayed loose.", selected, 1
+    )
+    assert not _same_body_modulo_marks(
+        "The committee judged that money conditions stayed loose.", selected, 1
+    )
+    signed = "Net exports -0.4"
+    assert not _same_body_modulo_marks("Net exports 0.4", signed, 1), "a sign change survived"
+
+
+def _hyphen_pdf(path: Path) -> Path:
+    """Ending A's process() page plus a prose line split at a line-end hyphen (Probe D)."""
+    import fitz
+    from test_gh1266_floor_geometry import _process_pdf
+
+    src = _process_pdf(path.with_name("base.pdf"))
+    doc = fitz.open(str(src))
+    page = doc[0]
+    page.insert_text((72, 320), "The committee judged that mone-")
+    page.insert_text((72, 334), "tary conditions remained accommodative overall.")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_the_credential_survives_the_reflow_into_the_sidecar(tmp_path: Path, monkeypatch) -> None:
+    """Fable round 3 P2: on a page whose floor body carries a line-end hyphen, the #1074 re-flow
+    joins it; the sidecar's winning output still carries the credential, with a digest of the
+    shipped text."""
+    import json
+
+    from test_gh1266_floor_geometry import _run
+
+    from socr.core.manifest import table_floor_digest_of
+
+    pdf = _hyphen_pdf(tmp_path / "doc.pdf")
+    _frag, meta, _out = _run(tmp_path, pdf, monkeypatch, ladder=False, tag="hy")
+    wo = meta["winning_output"]
+    assert wo.get("scanned_prose_recovered") is True, "premise: a recovered floor body"
+    assert "mone-\ntary" not in wo["text"], "premise: the re-flow joined the hyphen"
+    assert wo.get("table_floor_body") is True
+    assert wo.get("table_floor_digest") == table_floor_digest_of(wo["text"])
+    del json
+
+
+def test_a_restored_page_does_not_inherit_the_credential_for_a_changed_fragment(
+    tmp_path: Path,
+) -> None:
+    """``_load_terminal_page`` replaces the record's text with the fragment on disk. A D3 floor
+    page made content-terminal (TABLE_REJECTED) restores with its credential when the fragment
+    is the certified body, and WITHOUT it when the fragment differs."""
+    from test_gh371_d3_region_splice import _make_pipeline
+    from test_gh1266_d3_regional_floor import _d3
+    from test_gh1266_floor_geometry import GRID_BOX, _build, _draw_p10
+
+    from socr.core.manifest import _winning_page_output
+
+    state, ps = _build(tmp_path, _draw_p10, [GRID_BOX], name="rs.pdf")
+    _d3(ps)
+    ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+    winner = _winning_page_output(state, 1, None)
+    assert winner.table_floor_body is True, "premise: a credentialed floor body"
+    pipeline = _make_pipeline()
+    pipeline._resolve_judge_model = lambda *a, **k: ""  # hermetic: no judge probe
+    pipeline._scan_root = state.handle.path.parent
+    out_dir = tmp_path / "out"
+    pipeline._flush_page_fragment(state, 1, winner.text, out_dir)
+    sidecar = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    same = pipeline._load_terminal_page(state, 1, out_dir)
+    assert same is not None, "premise: the page restores"
+    assert same.table_floor_body is True
+    frag = sidecar.with_suffix(".md")
+    frag.write_text(frag.read_text().replace("Growth", "Grwth"))
+    changed = pipeline._load_terminal_page(state, 1, out_dir)
+    assert changed is not None, "premise: the changed fragment still restores"
+    assert changed.table_floor_body is False, "a changed fragment inherited the credential"

@@ -1410,10 +1410,18 @@ TABLE_FLOOR_BODY_1266_DIFFERENCES: list[ExpectedDiff] = [
     ExpectedDiff(
         path=("manifest", 0, "entries", "10", "blob_ref"),
         old_value="bc40160e2abf779b6bd49e99b5c6fecda5e0c7a7890268bd8308669f6556496e",
-        new_value="1dc4cd8f71e16cc4d08f287f0217fda543bbae20d2659739a60ef081ec93a957",
+        new_value="29b5749d113a73fc62f67bfb91f5a3cd49cb629738e1374dcc99586977e28215",
         description=(
-            "#1266: page 10's winning-output blob gains table_floor_body, so its content "
-            "address changes; the shipped bytes do not."
+            "#1266: page 10's winning-output blob gains table_floor_body and its digest, so "
+            "its content address changes; the shipped bytes do not."
+        ),
+    ),
+    ExpectedDiff(
+        path=("sidecars", "p6_corpus/pages/00010.json", "winning_output", "table_floor_digest"),
+        old_value=None,
+        new_value="3d002892f8596fdf9c830cde54adcec02bbc76551481b71016027caa99ea075d",
+        description=(
+            "#1266 round 3: the credential is bound to a sha256 of page 10's shipped text."
         ),
     ),
 ]

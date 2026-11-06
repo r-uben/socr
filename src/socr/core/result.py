@@ -488,6 +488,24 @@ class FigureInfo:
         )
 
 
+def _floor_credential_from_record(d: dict) -> bool:
+    """#1266 round 3: whether a serialised output's ``table_floor_body`` credential holds.
+
+    Only a real JSON ``true`` with a ``table_floor_digest`` equal to the sha256 of the
+    record's own ``text``; anything else (absent, a string, a stale or missing digest) is no
+    credential.
+    """
+    import hashlib
+
+    if d.get("table_floor_body") is not True:
+        return False
+    digest = d.get("table_floor_digest")
+    if not isinstance(digest, str) or not digest:
+        return False
+    text = d.get("text", "") or ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() == digest
+
+
 @dataclass
 class PageOutput:
     """Structured output for a single page.
@@ -528,6 +546,10 @@ class PageOutput:
     #: reason as ``scanned_prose_recovered``: only ``core.manifest`` sets it, and no free
     #: text can reach it. Absent (old sidecars) means no credential.
     table_floor_body: bool = False
+    #: #1266 round 3 (Astra P0): sha256 of the exact text the credential certifies. The
+    #: credential holds only while ``text`` still hashes to it (``manifest.
+    #: table_floor_credential_holds``); ``from_dict`` drops both otherwise.
+    table_floor_digest: str = ""
     #: #1156 Part B: how many numbers of an earlier OCR layer this body withheld. Set
     #: only by the masked-layer ending, from the retained original, so a re-finalisation
     #: or a resume recomputes the same count rather than re-masking finalised text.
@@ -685,6 +707,7 @@ class PageOutput:
         # #1266: omit-when-unset, the same convention and reason as above.
         if self.table_floor_body:
             d["table_floor_body"] = True
+            d["table_floor_digest"] = self.table_floor_digest
         # #1156 Part B: omit-when-unset, the same convention and reason as above.
         if self.numbers_withheld:
             d["numbers_withheld"] = self.numbers_withheld
@@ -741,8 +764,11 @@ class PageOutput:
                 if type(d.get("scanned_prose_recovered")) is bool
                 else False
             ),
-            table_floor_body=(
-                d.get("table_floor_body") if type(d.get("table_floor_body")) is bool else False
+            # #1266 round 3: a real JSON boolean AND a digest of this record's own text, or
+            # neither survives -- a sidecar cannot grant floor authority to bytes it carries.
+            table_floor_body=_floor_credential_from_record(d),
+            table_floor_digest=(
+                d.get("table_floor_digest", "") if _floor_credential_from_record(d) else ""
             ),
             numbers_withheld=(
                 d.get("numbers_withheld") if type(d.get("numbers_withheld")) is int else 0

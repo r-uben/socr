@@ -987,7 +987,7 @@ def test_the_boxless_body_is_keep_sentences_on_born_digital_and_any_digit_on_a_s
 
 
 def test_a_wordsless_boxless_page_replays_only_a_credentialed_recovery(tmp_path: Path) -> None:
-    from socr.core.manifest import boxless_failed_table_text
+    from socr.core.manifest import boxless_failed_table_text, table_floor_digest_of
 
     live_state, live_ps = _boxless(tmp_path, name="lv.pdf")
     body = boxless_failed_table_text(live_ps, 1)
@@ -1004,6 +1004,7 @@ def test_a_wordsless_boxless_page_replays_only_a_credentialed_recovery(tmp_path:
             audit_passed=False,
             scanned_prose_recovered=True,
             table_floor_body=credential,
+            table_floor_digest=(table_floor_digest_of(body) if credential else ""),
         )
         ps.attempts = [frozen]
         ps.best_output = frozen
@@ -1179,3 +1180,153 @@ def test_a_boxless_word_read_failure_costs_no_other_page_its_words(
     assert bad_boxless.boxless_table_words == [], "premise: the forced failure happened"
     assert bad_boxed.native_words == ok_boxed.native_words, "another page lost its words"
     assert bad_boxed.table_bbox_sane == ok_boxed.table_bbox_sane, "the bbox verdict was lost"
+
+
+# ---------------------------------------------------------------------------
+# round 3: the box-less route's image, partial box sets, the order-gate fallback
+# ---------------------------------------------------------------------------
+
+TWO_COL_1 = (
+    "The committee reviewed the outlook for the coming",
+    "quarters and judged that growth would remain",
+    "moderate across the major regions this year.",
+)
+TWO_COL_2 = (
+    "Members agreed that inflation pressures had eased",
+    "somewhat, although the labour market stayed",
+    "tight and wage growth remained firm overall.",
+)
+
+
+def _two_column_pdf(path: Path) -> Path:
+    """Two columns of prose drawn column-major (column 1 in full, then column 2), so the
+    text layer reads column by column while y-banding welds the two columns together."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    for i, line in enumerate(TWO_COL_1):
+        page.insert_text((50, 100 + i * 14), line, fontsize=9)
+    for i, line in enumerate(TWO_COL_2):
+        page.insert_text((320, 100 + i * 14), line, fontsize=9)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _run_flagged(tmp_path: Path, pdf: Path, monkeypatch, *, tag: str):
+    """process() with an empty ladder and ``native_first``, every page stamped ``has_tables``
+    on the assessment (a GH-655 false flag), the way the providerless lane meets it."""
+    import dataclasses
+    import json
+
+    from test_gh1144_prose_survives_the_table_floor import _GridEngine, _pipeline
+
+    from socr.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "get_engine", lambda engine_type: _GridEngine())
+    pipe = _pipeline()
+    pipe.config = dataclasses.replace(pipe.config, native_first=True)
+    pipe._available_engines_for_agentic = lambda: []
+    real_detect = pipe.bd_detector.detect
+
+    def _detect(path):
+        assessment = real_detect(path)
+        for pa in assessment.pages:
+            pa.has_tables = True
+        return assessment
+
+    pipe.bd_detector.detect = _detect
+    out = tmp_path / tag
+    pipe.process(pdf, output_dir=out)
+    frag = next(iter(out.rglob("pages/00001.md"))).read_text()
+    meta = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    return frag, meta, out
+
+
+def test_a_column_major_two_column_page_ships_both_paragraphs_in_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Fable round 3 P1: y-banding welds the two columns, the reading-order gate refuses the
+    bands body, and the page used to collapse to a bare "see image" marker with no image.
+    The order-gate fallback now ships ``native_text`` in its own line order (KEEP-SENTENCES
+    per line), and the page image exists."""
+    import re
+
+    pdf = _two_column_pdf(tmp_path / "two.pdf")
+    frag, meta, out = _run_flagged(tmp_path, pdf, monkeypatch, tag="two")
+    flat = re.sub(r"\s+", " ", frag)
+    col1 = " ".join(TWO_COL_1)
+    col2 = " ".join(TWO_COL_2)
+    assert col1 in flat and col2 in flat, frag
+    assert flat.index(col1) < flat.index(col2), "the columns shipped out of order"
+    assert meta["winning_output"]["scanned_prose_recovered"] is True
+    assert meta["winning_output"]["table_floor_body"] is True
+    pngs = list(out.rglob("failed_table_p1.png"))
+    assert pngs, "the box-less route's page image was not rendered"
+    assert "failed_table_p1.png" in frag
+
+
+def test_a_partial_box_set_takes_the_whole_page_marker(tmp_path: Path) -> None:
+    """Astra/Fable round 3: a detector count above its box list is the detector's fail-closed
+    state, not an absence. DIFFERENCE: count 2 with one box -> whole page (+ image); count 0
+    and no box -> the KEEP-SENTENCES body."""
+    partial, pp = _build(tmp_path, _draw_p10, [GRID_BOX], name="pa.pdf")
+    _structure_failed_only(pp, model_attempt=False)
+    pp.detected_table_count = 2
+    pp.boxless_table_words = list(pp.native_words)
+    out, prov = _select_page_output_tagged(partial, 1)
+    assert prov is SelectionProvenance.NATIVE_FALLBACK
+    assert _whole_page(out.text), out.text
+    assert out.table_floor_body is True
+
+    _none_state, none_ps = _boxless(tmp_path, name="pn.pdf")
+    none_out, _ = _select_page_output_tagged(_none_state, 1)
+    assert SENTENCE_WITH_YEAR in none_out.text
+
+
+def _assessment_page(n: int, *, born: bool, count: int, boxes: list):
+    import types
+
+    return types.SimpleNamespace(
+        page_num=n,
+        is_born_digital=born,
+        has_tables=True,
+        detected_table_count=count,
+        detected_table_bboxes=boxes,
+        load_error="",
+    )
+
+
+def test_the_boxless_word_cache_fills_only_born_digital_pages_with_no_detection(
+    tmp_path: Path,
+) -> None:
+    """R3-4 (Fable m5) and R3-2: born-digital, ``has_tables``, count 0 and no box gets words;
+    the same page as a scan, or with a partial box set, gets none."""
+    import types
+
+    import fitz
+    from test_gh1144_prose_survives_the_table_floor import _pipeline
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = tmp_path / "three.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        with fitz.open(str(_boxless_process_pdf(tmp_path / "src.pdf"))) as src:
+            doc.insert_pdf(src)
+    doc.save(str(pdf))
+    doc.close()
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    assessment = types.SimpleNamespace(
+        pages=[
+            _assessment_page(1, born=True, count=0, boxes=[]),
+            _assessment_page(2, born=False, count=0, boxes=[]),
+            _assessment_page(3, born=True, count=2, boxes=[GRID_BOX]),
+        ]
+    )
+    _pipeline()._cache_boxless_table_words(state, assessment)
+    assert state.pages[1].boxless_table_words, "the born-digital box-less page got no words"
+    assert state.pages[2].boxless_table_words == [], "a scan got box-less words"
+    assert state.pages[3].boxless_table_words == [], "a partial box set got box-less words"
