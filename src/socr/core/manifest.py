@@ -3047,6 +3047,45 @@ def structure_class_floor_text(
     )
 
 
+def withheld_table_floor_text(
+    p, page_num: int, *, recovery: bool = True, fallback_marker: str | None = None
+) -> str:
+    """#1266 merge gate: what ships when a page's table is WITHHELD. Never a text splice.
+
+    The shared floor for every caller that withholds a table outside the two #1266 endings:
+    the TABLE_WITHHELD ladder guard, the nothing-produced ending, and #1271's row-binding
+    early return. Each used ``table_floor_text_for_source`` with ``geometry_floor=False``,
+    i.e. the GH-520 text splice over some text (a model winner's, or ``native_text``): the
+    parsed GFM blocks became markers and every other line shipped, so a parsed grid beside
+    an un-parsed ``Loose 7.7 8.8`` row shipped the loose row (Astra, PR #1273 gate, P0).
+
+    * A born-digital page with no POSITIVE prior-OCR finding, and ``recovery`` True: the
+      #1266 geometry floor, exactly ``structure_class_floor_text`` (shared gate,
+      keep-sentences body, banner, marker plus page image; the frozen typed replay when the
+      words are gone and the winner is this lane's own recovery; otherwise fail closed).
+      This does not substitute the page's text for a model's reading: it WITHHOLDS the
+      reading and ships the page's own words under the floor banner, as ending A does once
+      every rung has failed.
+    * Every other page (a scan, a positive prior-OCR finding, ``recovery`` False) and every
+      page the floor itself refuses: the whole-page marker -- *fallback_marker* when given,
+      else the unverifiable-table marker plus the page image.
+
+    The caller records a recovery on its output from the banner in what this returns
+    (``_is_prose_recovery_body``), as the two endings do.
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "") or ""
+    whole_page = (
+        fallback_marker
+        if fallback_marker is not None
+        else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
+    )
+    if not recovery or not getattr(p, "is_born_digital", False) or prior_ocr_layer_found(p):
+        return whole_page
+    body = structure_class_floor_text(p, page_num)
+    return body if _is_prose_recovery_body(body, page_num) else whole_page
+
+
 def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
     """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
     return _body_has_born_digital_banner(text, page_num)
@@ -3248,6 +3287,10 @@ def table_floor_text_for_source(
     The same flag selects the body rule (``keep_sentences``): a band outside every box ships
     unless it is mostly numerals.
     Default False keeps every other caller byte-for-byte as before.
+
+    #1266 merge gate: the only remaining caller is ``structure_class_floor_text``. The P1
+    withhold guard and the nothing-produced ending described below no longer splice; they
+    call ``withheld_table_floor_text``. The history is kept for the conditions' rationale.
 
     Factored out of ``structure_class_floor_text`` for P1's withhold path,
     which must splice the SELECTED output's text -- a model winner, not
@@ -5578,19 +5621,20 @@ def _select_page_output_tagged(
             error=attempt.error or "",
         ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
-    # a silent gap between page headers -- B1 / #591: unless native prose
-    # outside a detected table survives the same GH-520 coverage guard the
-    # structure-class floor and the withhold ending already apply, in which
-    # case that prose ships and only the table region(s) marker.
+    # a silent gap between page headers.
+    #
+    # #1266 merge gate: B1 / #591 kept ``native_text`` prose here behind the GH-520 text
+    # splice, which ships every line outside the parsed GFM blocks (Fable/Astra, PR #1273:
+    # 0 firings on the Fed run, so no measured corpus change). The splice is gone: this
+    # ending calls the shared withheld-table floor with ``recovery=False`` -- what the
+    # splice's own refusal already shipped -- so every page the splice fired on now ships
+    # the whole-page marker. Recovery stays off on purpose: a page that reaches this
+    # ending has no native text a born-digital floor could recover (the native branch
+    # returns first), and this ending was never a recovery lane.
     whole_page_marker = page_failed_marker(page_num)
     native_text = getattr(p, "native_text", "") or ""
-    # #1155 deliberately does NOT offer a chart replacement here: this call leaves
-    # ``prose_recovery`` at False, and the refusal lane returns the whole-page marker
-    # before it reaches the no-box branch. Passing one would be an argument that
-    # silently does nothing. All 9 Fed SEP pages reach the floor through
-    # ``structure_class_floor_text`` instead, which is where the replacement is offered.
-    floor_text = table_floor_text_for_source(
-        p, page_num, native_text, fallback_marker=whole_page_marker
+    floor_text = withheld_table_floor_text(
+        p, page_num, recovery=False, fallback_marker=whole_page_marker
     )
     # R7: the cascade must be single-return-per-ending (test_r7_winner_kind_tags.py),
     # so both outcomes share ONE return, differing only in which values they carry
@@ -5714,31 +5758,47 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
         # Rewritten HERE, in the guard that already runs before
         # ``finalized_page_records`` / ``canonical_page_texts``, so the saved
         # .md, the page fragment, the sidecar's winning_output, the manifest
-        # blob and replay all see the same bytes. The splice reads the
-        # SELECTED output's text -- never ``p.native_text``, which on a model
-        # winner is a different page.
+        # blob and replay all see the same bytes.
         #
-        # Prose survives only under GH-520's four coverage conditions;
-        # otherwise the whole page floors, exactly as the structure-class
-        # floor does, because an unenumerable table cannot be shown to have
-        # been covered by the splice.
+        # #1266 merge gate (Astra, PR #1273, P0): this used to SPLICE the selected
+        # output's text (often a model reading) behind GH-520's coverage conditions, and
+        # the splice ships every line outside the parsed GFM blocks -- a parsed grid plus
+        # an un-parsed ``Loose 7.7 8.8`` row shipped the row. It now takes the shared
+        # withheld-table floor (``withheld_table_floor_text``): the born-digital geometry
+        # floor, else the whole-page marker plus image. That is not a substitution of the
+        # page's text for the reading the selector chose: the reading is WITHHELD, and
+        # what ships is the page's own words under the floor banner, the same floor
+        # ending A ships once every rung has failed. 0 firings on the Fed run (census).
         text = output.text or ""
         from socr.tables.reconcile import find_table_blocks
 
         already_withheld = f"failed: unverifiable table" in text and not find_table_blocks(text)
-        # A page that ALREADY shipped the fail-closed floor (the structure-class
-        # floor reached the same page first) carries no table bytes and may have
-        # legitimately kept its prose through GH-520's own coverage proof.
-        # Re-running the coverage check over that already-spliced text sees zero
-        # table blocks, fails the count condition, and floors the whole page --
-        # destroying prose the floor was entitled to keep. Nothing is left to
-        # withhold, so only the label changes.
+        # A page that ALREADY shipped the fail-closed floor (an ending reached the same
+        # page first, or this guard on an earlier finalize) carries no table bytes; its
+        # body is final. Re-deriving it would recompute from state a resumed page may no
+        # longer carry (transform once, from source, before marks), so only the label
+        # changes.
+        if already_withheld:
+            return replace(
+                output,
+                status=PageStatus.ERROR,
+                audit_passed=False,
+                failure_mode=disposition,
+            )
+        floor_text = withheld_table_floor_text(p, page_num)
+        # Recorded the way the two #1266 endings record it, from the banner in what ships.
+        prose_recovered = _is_prose_recovery_body(floor_text, page_num)
+        notes = [n for n in (output.audit_notes or []) if n != SCANNED_PROSE_RECOVERED_NOTE]
+        if prose_recovered:
+            notes.append(SCANNED_PROSE_RECOVERED_NOTE)
         return replace(
             output,
-            text=text if already_withheld else table_floor_text_for_source(p, page_num, text),
+            text=floor_text,
             status=PageStatus.ERROR,
             audit_passed=False,
             failure_mode=disposition,
+            audit_notes=notes,
+            scanned_prose_recovered=prose_recovered,
         )
 
     if output.audit_passed:

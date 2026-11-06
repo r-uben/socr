@@ -175,16 +175,22 @@ def _tagged(ps: PageState):
 # ---------------------------------------------------------------------------
 
 
-def test_guard_satisfied_keeps_prose_around_the_table():
+def test_guard_satisfied_no_longer_splices_the_page():
+    """#1266 merge gate (PR #1273, Astra/Fable): the nothing-produced ending no longer
+    splices. This used to pin the GH-520 splice keeping prose around the table when the
+    guard held -- the splice that ships every line outside the parsed GFM blocks. The
+    ending now ships the whole-page marker on every page the splice fired on (decision:
+    ``withheld_table_floor_text(..., recovery=False)``). DIFFERENCE: the old splice, called
+    directly on the same state, still keeps the prose (premise); the ending does not."""
     ps = _no_text_marker_state()
+    old = table_floor_text_for_source(ps, 1, ps.native_text, fallback_marker=page_failed_marker(1))
+    assert PROSE_BEFORE in old, "premise: the GH-520 splice keeps prose on this state"
 
     output, provenance = _tagged(ps)
 
     assert provenance is SelectionProvenance.NO_TEXT_MARKER
-    assert PROSE_BEFORE in output.text
-    assert PROSE_AFTER in output.text
-    assert "[page 1 failed:" in output.text  # the D3-style per-table marker
-    assert page_failed_marker(1) not in output.text  # not the whole-page marker
+    assert output.text == page_failed_marker(1)
+    assert PROSE_BEFORE not in output.text
     assert "Decrease" not in output.text  # the table region itself is withheld
     assert output.status is PageStatus.ERROR
     assert output.audit_passed is False
