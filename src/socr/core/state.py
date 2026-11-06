@@ -468,8 +468,9 @@ class PageState:
     #: did; the saved-body check on ``chart_floor_abstention`` reads this field instead.
     chart_floor_body_this_selection: bool = False
     #: #1269: PERSISTED. Set only where the chart floor actually declined a box-less,
-    #: table-free, unrotated page and it kept its bare whole-page marker: the probe's
-    #: record (or ``probe_not_run`` / ``empty_body``). It travels with the sidecar
+    #: table-free page and it kept its bare whole-page marker: the probe's record (or
+    #: ``probe_not_run`` / ``empty_body``; ``page_rotated`` on a /Rotate page, with the
+    #: probe's own outcome kept as ``probe_outcome``). It travels with the sidecar
     #: because it explains bytes that carry no other trace of why no chart body shipped.
     chart_floor_abstention: dict | None = None
     #: GH-189: at least one detected chart region on this mixed chart+table page
