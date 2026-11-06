@@ -258,6 +258,38 @@ Real drops by drop count at v3 (firing pages only, joined to `pages_v3.jsonl` on
    drops were recovered and 3 false alarms added. `boxes_without_table_recovery` is the shipped
    behaviour. The cost is the real tables the chart-as-table boxes hide, tracked as #1268.
 
+## Merge-gate round (PR #1277, review in `scratch/army/1218/MERGE-GATE.md`)
+
+Astra blocked on three P0s; Fable said merge with P2s. New commits on top of 763e03f4:
+
+- **Resume kept the evidence (Astra P0-3).** A resumed terminal page recomputed its dropped list,
+  and a reassessment that returned an empty reference wrote `dropped: []` beside a FAIL clause. The
+  page's persisted `numbers_dropped` events are now restored with the page and resolved through the
+  same `refinalize_own_text.resolve_dropped` the tool uses; an unconfirmable list is written as
+  `unresolved`, never as an empty list. Pinned through the page-level resume path (metadata.json and
+  a sibling page deleted, `_restore_terminal_page_state` spied).
+- **Withheld tables (Fable P2).** The clause emits nothing on a page whose table socr withheld
+  (`TABLE_WITHHELD` / `TABLE_WITHHELD_UNCONFIRMED`, the ladder disposition, or socr's withheld marker
+  in the body), so the mark never calls a withhold a model drop.
+- **Event kinds pinned both ways (Fable P2).** The pin found two kinds missing from
+  `EVENT_KINDS_AFTER_NUMBERS_DROPPED` (`figure_description_dropped`, `figure_recoverable_labels`).
+- **Axis rule needs evidence (Astra P0-2).** A constant-step tail is excluded only when every value is
+  a calendar year, or the tail lies within one text height of a chart or image box. `China 10 20 30`
+  is checked. Measured (`scratch/army/1218/data/summary_c2_12.txt`, `rescore_c2_12.jsonl`): 0 of 49
+  adjudicated clean pages fire, adjudicated real and false-alarm pages unchanged; on the corpus 5
+  calibration pages newly fire, all eye-checked false alarms (chart legends and ticks where no chart
+  box was detected: Du p13, Fortier p15, p19, p24, p37; `data/adj3/out0.jsonl`). Dropping the rule
+  entirely, or excluding only near a box, also fired on an adjudicated clean page (a year axis).
+- **Writing forms (Astra/Fable P2).** The reading gets the layer's decimal-comma repair
+  (`0,332`); a space-thousands group (`1 234`) and a bracketed negative written with a minus
+  (`-1.2` for `(1.2)`) match only a layer number nothing else matched, each reading token once.
+- **Row-local comparison (Astra P0-1) tried and not shipped.** Pairing layer rows with reading rows
+  caught Astra's input (a dropped `China 32.7 32.2 32.9` row whose values prose repeats) but on the
+  corpus added 5 pages that are all eye-checked false alarms (a reference year, a page number, a
+  table written as a column of values, a prose list of maturities) and caught no real drop the
+  multiset missed. Known recall gap, pinned by
+  `test_known_gap_prose_repeating_a_dropped_rows_values_hides_it`; this check can only add marks.
+
 ## Mutation results
 
 `scratch/army/1218/mutants/RESULTS.md`. Round 2, on the final commit 6f926249 (copies built

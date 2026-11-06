@@ -5,7 +5,8 @@ layer number is mostly noise (running heads, footnote callouts, formulas typed a
 chart labels), so the layer's numbers are first selected by GEOMETRY, independent of any
 reading. Only the numeric TAIL of a LABEL ROW is owed to the reading: a line that is a
 label (words, one with >= 2 letters) followed by at least ``LABEL_ROW_MIN_NUMBERS`` words
-that are all numbers, with no math operator on the line and not a constant-step axis.
+that are all numbers, with no math operator on the line and not a constant-step axis (a
+run of calendar years, or a tail at a chart or image box).
 
 The pure core takes ``get_text("words")`` tuples; :func:`drop_reference_from_page` is the
 one adapter that reads a PyMuPDF page. Ported from the precision team's
@@ -122,6 +123,9 @@ _TWO_LETTERS_RE = re.compile(r"[^\W\d_]{2}")
 DECIMAL_GAP_FRACTION = 0.06
 DECIMAL_FRAGMENT_MIN_PAIRS = 2
 
+#: A calendar year, with the footnote callout digit a layer glues on (``2008`` + ``1`` is
+#: ``20081``): a constant-step run of these is a time axis or a header of years, never data.
+_CALENDAR_YEAR_RE = re.compile(r"(?:19|20)\d\d[1-9]?")
 _FRAGMENT_LEFT_RE = re.compile(r"^[-\u2212]?\d+$")
 _FRAGMENT_RIGHT_RE = re.compile(r"^:?(\d+)([*\u2217\u2020\u2021\u00a7]*)$")
 #: ``0,332``: a thousands group never starts with 0, so a leading ``0,`` is a decimal comma
@@ -157,6 +161,8 @@ class _Word:
     text: str
     furniture: bool
     superscript: bool | None
+    #: the word's own box in page coordinates (unrotated), for box-proximity tests
+    box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
 
 def slot_predicate(repeated_slots, folio_slots) -> Predicate:
@@ -241,11 +247,12 @@ def _dedupe_overprint(words: Sequence[Sequence]) -> list[Sequence]:
 
 def _to_uv(w: Sequence, rotated: bool, sign: int, furniture: bool, sup: bool | None) -> _Word:
     x0, y0, x1, y1, text = w[:5]
+    box = (x0, y0, x1, y1)
     if not rotated:
-        return _Word(x0, x1, y0, y1, str(text), furniture, sup)
+        return _Word(x0, x1, y0, y1, str(text), furniture, sup, box)
     if sign > 0:
-        return _Word(y0, y1, x0, x1, str(text), furniture, sup)
-    return _Word(-y1, -y0, x0, x1, str(text), furniture, sup)
+        return _Word(y0, y1, x0, x1, str(text), furniture, sup, box)
+    return _Word(-y1, -y0, x0, x1, str(text), furniture, sup, box)
 
 
 def _build_lines(words: list[_Word]) -> list[list[_Word]]:
@@ -330,8 +337,41 @@ def _tail_is_axis(tail: Sequence[str]) -> bool:
     )
 
 
+def _near_boxes(words: Sequence[_Word], boxes: Sequence[Sequence[float]]) -> bool:
+    """Does any of ``words`` touch a chart or image box grown by one text height?
+
+    The box is the plot's extent; its tick labels sit just outside it, so the box is grown by
+    the tail's own median text height (relative to the type size, not an absolute length).
+    """
+    if not boxes:
+        return False
+    margin = statistics.median(w.v1 - w.v0 for w in words)
+    return any(
+        w.box[0] <= b[2] + margin
+        and w.box[2] >= b[0] - margin
+        and w.box[1] <= b[3] + margin
+        and w.box[3] >= b[1] - margin
+        for w in words
+        for b in boxes
+    )
+
+
+def _is_axis_not_data(tail: Sequence[str], words: Sequence[_Word], boxes) -> bool:
+    """A constant-step tail that is a time axis or header, or a plot's tick labels.
+
+    ``China 10 20 30`` is a data row whose values happen to step evenly (Astra, PR #1277),
+    so a constant step alone excludes nothing. The step must come with evidence: every value
+    is a calendar year (a time axis or a column header of years), or the tail sits at a chart
+    or image box (:func:`_near_boxes`).
+    """
+    if not _tail_is_axis(tail):
+        return False
+    years = all(_CALENDAR_YEAR_RE.fullmatch(_STARS_RE.sub("", t).strip(_TAIL_EDGE)) for t in tail)
+    return years or _near_boxes(words, boxes)
+
+
 def _label_row(
-    words: Sequence[_Word], min_numbers: int
+    words: Sequence[_Word], min_numbers: int, axis_boxes: Sequence[Sequence[float]] = ()
 ) -> tuple[str, set[int], dict[int, str], set[int]] | None:
     """(label, tail word ids, tail texts by word id, consumed ids) if ``words`` form a row.
 
@@ -359,7 +399,7 @@ def _label_row(
         return None
     if not any(_TWO_LETTERS_RE.search(text) for text, _ in label):
         return None
-    if _tail_is_axis([text for text, _ in tail]):
+    if _is_axis_not_data([text for text, _ in tail], [w for _, w in tail], axis_boxes):
         return None
     return (
         " ".join(text for text, _ in label),
@@ -431,7 +471,7 @@ def classify_layer_numbers(
                 else len(line) >= MIN_WORDS_FOR_RATIO and (w.v1 - w.v0) / median_h < FOOT_RATIO
             )
         ]
-        row = _label_row(owed, min_numbers)
+        row = _label_row(owed, min_numbers, excluded_boxes)
         if row is not None:
             row_id += 1
         carry = ""

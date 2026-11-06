@@ -124,11 +124,36 @@ def test_label_row_negative_formula_line():
     assert tails(line(["Growth", "+", "2", "7", "3", "9"], 100)) == []
 
 
-def test_label_row_negative_constant_step_axis_even_without_signs():
-    assert tails(line(["Percent", "0.75", "0.50", "0.25", "0.00"], 100)) == []
+def test_a_constant_step_tail_with_no_chart_evidence_is_a_data_row():
+    """Astra, PR #1277: ``China 10 20 30`` is a table row whose values step evenly."""
+    assert tails(line(["China", "10", "20", "30"], 100)) == ["10", "20", "30"]
+    assert tails(line(["Percent", "0.75", "0.50", "0.25", "0.00"], 100)) == [
+        "0.75",
+        "0.50",
+        "0.25",
+        "0.00",
+    ]
+
+
+def test_a_constant_step_tail_at_a_chart_box_is_an_axis_even_without_signs():
+    row = line(["Percent", "0.75", "0.50", "0.25", "0.00"], 100)
+    box = [(40.0, 20.0, 400.0, 90.0)]  # the plot, its tick labels just below
+    assert tails(row, excluded_boxes=box) == []
+    # difference: the same row with the plot far away is a data row
+    assert len(tails(row, excluded_boxes=[(40.0, 400.0, 400.0, 500.0)])) == 4
+    # a non-constant tail is a row beside the same box
+    assert (
+        len(tails(line(["Percent", "0.75", "0.50", "0.30", "0.00"], 100), excluded_boxes=box)) == 4
+    )
+
+
+def test_a_constant_step_run_of_calendar_years_is_a_header_or_axis():
     assert tails(line(["Year", "1996", "1998", "2000", "2002"], 100)) == []
-    # a non-constant tail is a row
+    # a year with its footnote callout run on (2008 + 1)
+    assert tails(line(["Item", "20071", "20081", "20091"], 100)) == []
+    # difference: a non-constant run of years, or constant-step numbers that are not years
     assert len(tails(line(["Year", "1996", "1998", "2001", "2002"], 100))) == 4
+    assert len(tails(line(["Count", "1000", "1100", "1200"], 100))) == 3
 
 
 def test_label_row_needs_a_label_with_two_letters():
@@ -347,3 +372,64 @@ def test_adapter_image_box_shares_the_words_space_on_a_rotated_page():
     bare = _page_with_row()
     bare.set_rotation(90)
     assert drop_reference_from_page(bare, **kw).text == "5.1 4.9 4.8"
+
+
+def test_a_decimal_comma_read_back_as_written_is_not_a_drop():
+    """Astra P2: the layer's ``0,332`` is repaired to ``0.332``; so is the reading's."""
+    row = line(["Korea", "0,332", "0,471", "0,913"], 100)
+    reference = body_text(classify(row))
+    assert reference == "0.332 0.471 0.913"
+    assert dropped_numbers(reference, "| Korea | 0,332 | 0,471 | 0,913 |").dropped == ()
+    assert dropped_numbers(reference, "Korea 0,332 0,471 0,913").dropped == ()
+    # difference: a different value still drops, and a thousands comma is not a decimal
+    assert dropped_numbers(reference, "| Korea | 0,332 | 0,471 | 0,914 |").dropped == ("0.913",)
+    assert dropped_numbers("1,332 2 3", "| Count | 1,332 | 2 | 3 |").dropped == ()
+    assert dropped_numbers("1,332 2 3", "| Count | 1.332 | 2 | 3 |").dropped == ("1,332",)
+
+
+def test_space_thousands_is_an_alternative_writing_never_a_second_claim():
+    reference = "1,234 2,345 3,456"
+    assert dropped_numbers(reference, "| Total | 1 234 | 2 345 | 3 456 |").dropped == ()
+    assert dropped_numbers(reference, "Total 1 234, 2 345 and 3 456").dropped == ()
+    # a different value still drops
+    assert dropped_numbers(reference, "| Total | 1 235 | 2 345 | 3 456 |").dropped == ("1,234",)
+    # the parts of ``1 234`` are claimed once: a layer ``234`` takes the reading's ``234``
+    # first, so the layer's ``1,234`` is not also satisfied by it
+    assert dropped_numbers("1,234 234 5", "| Total | 1 234 | 5 |").dropped == ("1,234",)
+    # two reading cells ``1`` and ``234`` in separate cells are not ``1 234``
+    assert dropped_numbers("1,234 7 8", "| Total | 1 | 234 | 7 | 8 |").dropped == ("1,234",)
+
+
+def test_bracket_for_minus_is_an_alternative_writing_never_a_second_claim():
+    reference = "(1.2) (3.4) (5.6)"
+    assert dropped_numbers(reference, "| Net | -1.2 | -3.4 | -5.6 |").dropped == ()
+    assert dropped_numbers(reference, "| Net | \u22121.2 | \u22123.4 | \u22125.6 |").dropped == ()
+    # a different value, or the sign lost, still drops
+    assert dropped_numbers(reference, "| Net | -1.2 | -3.5 | -5.6 |").dropped == ("(3.4)",)
+    assert dropped_numbers(reference, "| Net | 1.2 | 3.4 | 5.6 |").dropped == (
+        "(1.2)",
+        "(3.4)",
+        "(5.6)",
+    )
+    # one reading ``-1.2`` cannot stand for two layer ``(1.2)``
+    assert dropped_numbers("(1.2) (1.2) 7", "| Net | -1.2 | 7 |").dropped == ("(1.2)",)
+
+
+def test_known_gap_prose_repeating_a_dropped_rows_values_hides_it():
+    """DOCUMENTED RECALL GAP (#1277 P0-1, Astra), pinned so it is not mistaken for coverage.
+
+    The comparison is a multiset over the WHOLE reading, not row by row. Source row
+    ``China 32.7 32.2 32.9``; a reading that drops the China row but whose prose repeats the
+    three values reports nothing dropped. A row-local comparison was built and measured
+    (+5 false alarms, 0 real drops gained on the corpus) and not shipped. If this test starts
+    failing, the semantics changed: update the decision log with the new measurement.
+    """
+    reference = body_text(classify(line(["China", "32.7", "32.2", "32.9"], 100)))
+    assert reference == "32.7 32.2 32.9"
+    faithful = "| China | 32.7 | 32.2 | 32.9 |"
+    prose = "Growth was 32.7, 32.2 and 32.9 in China."
+    assert dropped_numbers(reference, faithful).dropped == ()
+    # the gap: the row is gone, the prose answers for it
+    assert dropped_numbers(reference, "| Korea | 1.5 |\n\n" + prose).dropped == ()
+    # difference: without the prose the same reading is caught
+    assert dropped_numbers(reference, "| Korea | 1.5 |").dropped == ("32.7", "32.2", "32.9")
