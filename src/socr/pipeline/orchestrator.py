@@ -9651,6 +9651,7 @@ class UnifiedPipeline:
         from socr.tables.row_binding_check import (
             TableOutcome,
             check_page_row_binding,
+            effective_outcome,
             row_evidence_dicts,
             table_payload,
         )
@@ -9660,18 +9661,25 @@ class UnifiedPipeline:
             return False
         _out_lines = out.text.splitlines()
 
+        def _valid_repairs(table_index: int) -> list[dict] | None:
+            """#1282: the cells restored in this table, if the table that ships still carries
+            them.  Matched inside THIS table's block (by its index), by content: the marks the
+            finalizer puts above the body shift line numbers, and another table of the page must
+            never vouch for this one."""
+            reps = ps.point_repairs.get(f"p{page_num}-t{table_index}")
+            if not reps or table_index >= len(blocks):
+                return None
+            _b = blocks[table_index]
+            block_lines = _out_lines[_b.start : _b.end + 1]
+            return reps if all(r["row_after"] in block_lines for r in reps) else None
+
         def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
             table_id = f"p{page_num}-t{table_index}"
             payload = table_payload(page_num, table_index, outcome, rows, error)
             counts = payload["counts"]
-            _repairs = ps.point_repairs.get(table_id)
+            _repairs = _valid_repairs(table_index)
             if _repairs and outcome != TableOutcome.CONTRADICTED.value:
-                # #1282: only if the table that ships still carries the repaired rows (the
-                # finalizer may have replaced the text since the repair).
-                # (marks the finalizer puts above the body shift the line numbers, so the
-                # rows are matched by content).
-                if all(r["row_after"] in _out_lines for r in _repairs):
-                    payload["repairs"] = _repairs
+                payload["repairs"] = _repairs
             if outcome == TableOutcome.CONTRADICTED.value:
                 # The model's table is withheld, not lost: it stays in the sidecar, unshipped,
                 # beside the evidence, for the re-read that follows.
@@ -9750,11 +9758,13 @@ class UnifiedPipeline:
                 results, _rotation = check_page_row_binding(page, out.text, regions)
             for idx, result in enumerate(results):
                 rows = row_evidence_dicts(result)
-                _record(idx, result.outcome.value, rows)
-                if result.outcome is TableOutcome.CONTRADICTED:
+                # #1282: a table with a repaired row is never recorded BOUND (no mark lifts)
+                outcome = effective_outcome(result.outcome.value, bool(_valid_repairs(idx)))
+                _record(idx, outcome, rows)
+                if outcome == TableOutcome.CONTRADICTED.value:
                     worst = TableOutcome.CONTRADICTED.value
                 elif (
-                    result.outcome is TableOutcome.UNVERIFIABLE
+                    outcome == TableOutcome.UNVERIFIABLE.value
                     and worst != TableOutcome.CONTRADICTED.value
                 ):
                     worst = TableOutcome.UNVERIFIABLE.value
