@@ -9537,7 +9537,8 @@ class UnifiedPipeline:
         withheld or the page marked).
 
         Model output with table blocks, not a native/chart/failed candidate, on an admissible layer
-        (on a refused page, ``BornDigitalDetector.refused_layer_can_judge``).  Words are rotated into the
+        of a born-digital page or of a page refused for spacing alone that
+        ``BornDigitalDetector.refused_layer_can_judge`` admits.  Words are rotated into the
         reading frame inside ``tables.row_binding_check``.  Records ``ps.row_binding`` for every
         table and one audit event per NON-BOUND table; the page policy is
         ``_apply_row_binding_policy``.  A failure of the check itself is recorded as an
@@ -9547,10 +9548,7 @@ class UnifiedPipeline:
         # call that returns without checking.
         self.rollback_row_binding_page_state(state, page_num, ps)
         out = shipped if shipped is not None else bo
-        # ``bo`` carries the page policy, so without it nothing may be recorded as withheld.
-        if bo is None or out is None or not out.text:
-            return False
-        if out.engine == "chart_asset" or is_failed_candidate(out):
+        if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
             return False
         if self.config.native_only:
             return False
@@ -9656,12 +9654,12 @@ class UnifiedPipeline:
                 if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
                     raise LookupError("pdf_page_unavailable")
                 page = doc[page_num - 1]
-                # The classifier also refuses real layers (9 of the 35 convicted held-out pages), so
-                # a refusal alone does not stop the check; a stamp or an earlier OCR layer does.
-                if not getattr(ps, "is_born_digital", False) and (
-                    not BornDigitalDetector().refused_layer_can_judge(page)
+                # The classifier also refuses real layers as excessively spaced (9 of the 35
+                # convicted held-out pages). Every other refusal doubts the layer's characters.
+                if not getattr(ps, "is_born_digital", False) and not (
+                    getattr(ps, "refused_for_spacing_alone", False)
+                    and BornDigitalDetector().refused_layer_can_judge(page)
                 ):
-                    ps.row_binding_table_count = 0
                     return False
                 regions = [tuple(b.bbox) for b in locate_tables(page)] or None
                 results, _rotation = check_page_row_binding(page, out.text, regions)

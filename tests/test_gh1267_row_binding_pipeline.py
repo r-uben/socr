@@ -86,6 +86,7 @@ def _run(
     native=None,
     markdown: str | dict[int, str] | None = None,
     classifier_refuses: bool = False,
+    spacing_alone: bool = True,
 ):
     pdf = pdf or _pdf(tmp_path, rotation, native)
     out_dir = tmp_path / out_name
@@ -139,7 +140,10 @@ def _run(
 
             def _refuse(self, page, page_num):
                 return dataclasses.replace(
-                    original_assess(self, page, page_num), is_born_digital=False, native_text=""
+                    original_assess(self, page, page_num),
+                    is_born_digital=False,
+                    native_text="",
+                    refused_for_spacing_alone=spacing_alone,
                 )
 
             stack.enter_context(patch.object(BornDigitalDetector, "_assess_page", _refuse))
@@ -449,6 +453,45 @@ def test_a_page_the_classifier_refuses_is_still_withheld_when_its_layer_convicts
     assert len(_events(on, WITHHELD_KIND)) == 1 and _events(off, WITHHELD_KIND) == []
 
 
+def _text_page(lines: list[str]) -> fitz.Page:
+    page = fitz.open().new_page(width=WIDTH, height=HEIGHT)
+    for i, line in enumerate(lines):
+        page.insert_text((LABEL_U, V0 + i * LINE_PITCH), line, fontsize=6, fontname="helv")
+    return page
+
+
+SPACED = (" " * 20).join(["Exports"] * 6)
+
+
+@pytest.mark.parametrize(
+    "lines, alone",
+    [
+        ([SPACED] * 4, True),
+        ([SPACED] * 3 + ["In (/997) the rate"], False),  # eaten digit
+        ([(" " * 5).join("a" * 20)] * 4, False),  # words too short
+    ],
+    ids=["spacing", "spacing-and-damaged-digits", "spacing-and-short-words"],
+)
+def test_only_a_refusal_for_spacing_alone_earns_the_flag(lines, alone):
+    page = _text_page(lines)
+    assessment = BornDigitalDetector()._assess_page(page, 1)
+    assert assessment.is_born_digital is False
+    assert "excessive spacing" in " ".join(assessment.notes)
+    assert assessment.refused_for_spacing_alone is alone
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_page_refused_for_doubting_its_layer_is_not_judged(tmp_path, rotation):
+    """Merge gate round 12 (both reviewers). Damaged characters on a refused layer convicted a correct
+    reading: a CID, encoding, digit or word-length refusal questions the very words the check reads."""
+    kw = dict(rows=SHIFTED_ROWS, rotation=rotation, classifier_refuses=True, spacing_alone=False)
+    _, _, _, on, pdf = _run(tmp_path, check_runs=True, out_name="on", **kw)
+    _, _, _, off, _ = _run(tmp_path, check_runs=False, out_name="off", pdf=pdf, **kw)
+    assert "row_binding" not in _sidecar(on)
+    assert _fragment(on) == _fragment(off)
+    assert _sidecar(on)["winning_output"]["failure_mode"] != "table_withheld"
+
+
 @pytest.mark.parametrize("render_mode, can_judge", [(0, True), (3, False)])
 def test_a_refused_page_with_no_image_judges_only_on_visible_text(render_mode, can_judge):
     doc = fitz.open()
@@ -505,7 +548,8 @@ def test_an_earlier_ocr_layer_on_a_refused_page_never_judges_a_correct_reading(
         assert assessment.is_born_digital is False
         assert assessment.invisible_text_over_raster is False
         assert assessment.prior_ocr_layer is False
-    kw = dict(rows=GROUP, rotation=0, pdf=pdf)
+    # past the classifier, so that what is tested here is the image and visibility rules
+    kw = dict(rows=GROUP, rotation=0, pdf=pdf, classifier_refuses=True)
     _, res_on, _, on, _ = _run(tmp_path, check_runs=True, out_name="on", **kw)
     _, res_off, _, off, _ = _run(tmp_path, check_runs=False, out_name="off", **kw)
     assert "row_binding" not in _sidecar(on)

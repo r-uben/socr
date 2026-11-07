@@ -1361,6 +1361,36 @@ def test_symbol_only_cells_are_judged_not_skipped(header, extra):
     assert [e for e in res.rows if e.verdict is RowVerdict.UNVERIFIABLE]
 
 
+@pytest.mark.parametrize("dash", ["—", "-", "..."])
+def test_symbols_where_the_page_prints_numbers_stay_a_conviction(dash):
+    """Round 12 (Fable P2): the symbol rule must only stop a pass, never soften EMPTIED."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Final", "sales", "4.4", "5.5", "6.6"]) + _set_line(
+        114, ["Exports", "1.1", "1.2", "1.3"]
+    )
+    res = check_row_binding(
+        words, None, md([("Final sales", [dash, dash, dash]), ("Exports", ["1.1", "1.2", "1.3"])])
+    )
+    assert res.outcome is TableOutcome.CONTRADICTED
+    assert RowVerdict.EMPTIED in verdicts(res)
+
+
+@pytest.mark.parametrize("heading", ["|  | - | - |  |", "| - | - | - | - |"])
+def test_a_dash_only_heading_above_the_separator_is_judged(heading):
+    """Round 12 (Astra P1): the parser reads this line as a separator, so it was never judged."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "1.2", "1.3"]) + _set_line(
+        114, ["Imports", "2.1", "2.2", "2.3"]
+    )
+    rows = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
+    assert check_row_binding(words, None, md(rows)).outcome is TableOutcome.BOUND
+    assert check_row_binding(words, None, md(rows, header=heading)).outcome is (
+        TableOutcome.UNVERIFIABLE
+    )
+
+
 def _hdr(n: int) -> str:
     return "|" + "  |" * n + "\n|" + "---|" * n + "\n"
 

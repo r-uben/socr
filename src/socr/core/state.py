@@ -115,6 +115,9 @@ class PageState:
     #: recoverable when the two differ.
     native_text_raw: str | None = None
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
+    #: #1267: see ``PageAssessment.refused_for_spacing_alone``. Runtime only: the check that reads
+    #: it does not run again on a restored page.
+    refused_for_spacing_alone: bool = False
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
@@ -938,6 +941,7 @@ class DocumentState:
                 ps.native_paragraphs = tuple(getattr(pa, "native_paragraphs", ()) or ())
                 ps.load_error = getattr(pa, "load_error", "") or ""
                 ps.is_born_digital = pa.is_born_digital
+                ps.refused_for_spacing_alone = getattr(pa, "refused_for_spacing_alone", False)
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations

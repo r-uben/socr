@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from socr.tables.native_verifier import _normalize_binding_numeric_token, is_numeric_token
-from socr.tables.reconcile import _parse_grid, find_table_blocks
+from socr.tables.reconcile import _parse_grid, _split_row, find_table_blocks
 
 # ---------------------------------------------------------------------------
 # Named constants.  Every one is taken from the frame-1 comparator measurements in
@@ -364,7 +364,18 @@ def _shipped_rows(markdown: str) -> list[_Row]:
         for li in range(block.start, block.end + 1):
             grid = _parse_grid([lines[li]])
             if not grid:
-                continue  # separator (or an all-empty heading line)
+                # Separator, or an all-empty heading line. A dash-only line ABOVE the real separator
+                # is a heading the parser cannot tell from one (Astra P1, round 12), so it is judged.
+                raw = _split_row(lines[li])
+                if not (
+                    li == block.start
+                    and li < block.end
+                    and any(raw)
+                    and any(_split_row(lines[li + 1]))
+                    and not _parse_grid([lines[li + 1]])
+                ):
+                    continue
+                grid = [raw]
             cells = grid[0]
             # The header is the block's first line by position: an all-empty heading line parses to no
             # grid, and the first DATA row must not be taken for the header in its place.
@@ -888,20 +899,20 @@ def check_row_binding(
     for pos, r in enumerate(rows):
         values = r.cell_texts
         if not r.has_content:
-            if _symbol_cells_only(r):
-                evidence.append(
-                    RowEvidence(
-                        r.line_index,
-                        RowVerdict.UNVERIFIABLE,
-                        "cells hold only symbols, which the check cannot bind",
-                        r.label,
-                        "",
-                        r.cells_raw,
-                        None,
-                    )
-                )
-                continue
+            _symbols = _symbol_cells_only(r)
             if _label_cell_empty(r):
+                if _symbols:
+                    evidence.append(
+                        RowEvidence(
+                            r.line_index,
+                            RowVerdict.UNVERIFIABLE,
+                            "cells hold only symbols, which the check cannot bind",
+                            r.label,
+                            "",
+                            r.cells_raw,
+                            None,
+                        )
+                    )
                 continue  # blank row
             lo = next((a for a in reversed(anchors[:pos]) if a is not None), -1)
             hi = next((a for a in anchors[pos + 1 :] if a is not None), len(lines))
@@ -911,6 +922,13 @@ def check_row_binding(
                 if 0 <= q < len(rows) and anchors[q] is not None
             )
             v, why, _ = _judge_empty(r, lines, lo, hi, neighbours)
+            # Symbols must not let a row pass as valueless, and `—` where the page prints numbers
+            # stays the EMPTIED conviction it is.
+            if _symbols and v is RowVerdict.BOUND:
+                v, why = (
+                    RowVerdict.UNVERIFIABLE,
+                    "cells hold only symbols, which the check cannot bind",
+                )
             evidence.append(RowEvidence(r.line_index, v, why, r.label, "", values, None))
             continue
         if r.line_index in infeasible:

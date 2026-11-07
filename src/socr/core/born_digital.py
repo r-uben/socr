@@ -2562,6 +2562,8 @@ class PageAssessment:
     #: damage class. This is the flag the #140 audit gates on, never the union.
     has_math_font_typesetting: bool = False
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
+    #: #1267: refused only for excessive spacing, which dense number tables trigger on real layers.
+    refused_for_spacing_alone: bool = False
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     #: #217: the page's symbol font had no ToUnicode map and at least one glyph
@@ -3768,6 +3770,12 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                # The checks below this return would have passed: spacing is the only doubt.
+                refused_for_spacing_alone=(
+                    self.MIN_AVG_WORD_LENGTH <= avg_word_len <= self.MAX_AVG_WORD_LENGTH
+                    and count_digit_corruption(raw_text) < self.MAX_DIGIT_CORRUPTION_HITS
+                    and self._encoding_corruption_ratio(raw_text) <= self.MAX_ENCODING_CORRUPTION
+                ),
             )
 
         # Abnormal word lengths: garbled text fuses or fragments words
@@ -5126,9 +5134,10 @@ class BornDigitalDetector:
     def refused_layer_can_judge(self, page: fitz.Page) -> bool:
         """#1267: may a page this classifier refused have its layer used to judge a reading?
 
-        The classifier also refuses real layers: dense number tables read as excessive spacing.
-        Its prior-OCR findings are incomplete after a refusal, and each of them can miss a layer
-        over an inset or non-opaque raster, so this does not ask them. An earlier OCR run needs a
+        Asked only of a page refused for excessive spacing alone (``refused_for_spacing_alone``):
+        dense number tables read that way on real layers, while every other refusal doubts the
+        layer's characters. The prior-OCR findings are incomplete after a refusal, and each of them
+        can miss a layer over an inset or non-opaque raster, so this does not ask them. An earlier OCR run needs a
         scan to read, so a refused page judges only when it holds no image at all and its text is
         mostly visible. Its own minimums tell a real layer from a stamp. Fails closed: an unreadable
         page cannot judge.
