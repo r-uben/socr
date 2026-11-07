@@ -1164,11 +1164,13 @@ def table_payload(
 # ---------------------------------------------------------------------------
 
 # A repair needs this many OTHER values of the row to agree exactly (same position) with the
-# candidate line.  Same floor, same reason as MIN_VALUES_TO_CONVICT: one value identifies no line.
-# Measured on the 308-page corpus (scratch/army/decimals, 175 repairs): the smallest count of
-# agreeing values on any repaired row was 3, so the floor never decided a case there; it guards
-# the single-value rows that corpus does not contain.
-MIN_AGREEING_VALUES = 1
+# candidate line.  One agreeing value identifies no line (the same argument as
+# MIN_VALUES_TO_CONVICT), so two are required: with one, a two-value row `-7 | 1.5` would be
+# repaired on the strength of a single `1.5` (review of #1282, case A).  Measured on the 308-page
+# corpus (scratch/army/decimals, 175 repairs): the smallest count of agreeing values on any
+# repaired row was 3, so this floor loses no measured repair; it only refuses rows too short to
+# corroborate themselves.
+MIN_AGREEING_VALUES = 2
 
 # Refusal reasons (named, so a test and a sidecar can quote them).
 REFUSE_CONTRADICTED = "table_contradicted"
@@ -1181,6 +1183,34 @@ REFUSE_WORSENS = "repair_worsens_table"
 REFUSE_NOT_BOUND = "gate_does_not_bind_repaired_row"
 REFUSE_LABEL = "label_not_exact"
 REFUSE_NO_AGREEING = "no_agreeing_value"
+REFUSE_AFFIX = "token_affix_differs"
+
+# A numeric token split into what stands before the number, the number and what follows it
+# (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
+# equal: a repair changes the point and nothing else (review of #1282, case E: `-7` for `-.7%`).
+_NUMBER_AFFIX = re.compile(
+    r"(?P<pre>[^\d.\-+\u2212\u2013\u2014\u2012]*)"
+    r"(?P<num>[-+\u2212\u2013\u2014\u2012]?(?:\d[\d.,]*|\.\d[\d.,]*))"
+    r"(?P<post>.*)",
+    re.S,
+)
+
+
+def _affixes(token: str) -> tuple[str, str] | None:
+    m = _NUMBER_AFFIX.fullmatch(token)
+    return (m.group("pre"), m.group("post")) if m else None
+
+
+def effective_outcome(outcome: str, repaired: bool) -> str:
+    """The outcome a table is RECORDED with.  A table with a repaired row is never recorded BOUND:
+    the table ladder judged the unrepaired bytes (it runs before the repair's text ships), so the
+    shipped text was not the judged text, and a repair lifts no mark (#1282 ruling 2).  The check
+    itself says BOUND (every row sits on its line); the record says UNVERIFIABLE, with no rows."""
+    return (
+        TableOutcome.UNVERIFIABLE.value
+        if repaired and outcome == TableOutcome.BOUND.value
+        else outcome
+    )
 
 
 def _digit_run(canon: str) -> str:
@@ -1271,6 +1301,9 @@ def propose_point_repairs(
         return table_markdown, [], [PointRefusal(-1, "", (REFUSE_CONTRADICTED,))]
     lines = build_native_lines(words, region)
     cands = _candidates(lines)
+    # condition 1 looks at the WHOLE page: the table's box may miss the row's own line (and hold
+    # another table's line with the same label), so "no exact line" is asked of every line.
+    page_cands = _candidates(build_native_lines(words, None))
     rows = [r for r in _shipped_rows(table_markdown) if not r.is_header]
     claimed: set[int] = set()
     row_opts: dict[int, list] = {}
@@ -1289,7 +1322,7 @@ def propose_point_repairs(
     repairs: list[PointRepair] = []
     refusals: list[PointRefusal] = []
     for pos, r in enumerate(rows):
-        if not r.numbers or row_opts.get(r.line_index):  # condition 1
+        if not r.numbers or row_opts.get(r.line_index) or _options(r, page_cands):  # condition 1
             continue
         hits: list[dict] = []
         near: list[dict] = []
@@ -1370,7 +1403,7 @@ def propose_point_repairs(
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_DECORATED,)))
             continue
         targets = {m[0]: m for m in h["mism"]}
-        k, ok, subs, new_cells = 0, True, [], [cells[0]]
+        k, ok, affix_ok, subs, new_cells = 0, True, True, [], [cells[0]]
         for cell in cells[1:]:
             out_toks = []
             for t in cell.split():
@@ -1381,12 +1414,17 @@ def propose_point_repairs(
                     _, _, n, printed_text = targets[k]
                     if _canon_number(printed_text.translate(_UNICODE_MINUS)) != n:
                         ok = False
+                    if _affixes(t) != _affixes(printed_text):
+                        affix_ok = False
                     subs.append((t, printed_text, k))
                     out_toks.append(printed_text)
                 else:
                     out_toks.append(t)
                 k += 1
             new_cells.append(" ".join(out_toks))
+        if not affix_ok:
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_AFFIX,)))
+            continue
         if not ok or k != len(r.numbers):
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_TOKEN_MAP,)))
             continue
