@@ -9537,7 +9537,7 @@ class UnifiedPipeline:
         withheld or the page marked).
 
         Model output with table blocks, not a native/chart/failed candidate, on an admissible layer
-        with at least the classifier's minimum words.  Words are rotated into the
+        (on a refused page, ``BornDigitalDetector.refused_layer_can_judge``).  Words are rotated into the
         reading frame inside ``tables.row_binding_check``.  Records ``ps.row_binding`` for every
         table and one audit event per NON-BOUND table; the page policy is
         ``_apply_row_binding_policy``.  A failure of the check itself is recorded as an
@@ -9656,12 +9656,10 @@ class UnifiedPipeline:
                 if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
                     raise LookupError("pdf_page_unavailable")
                 page = doc[page_num - 1]
-                # The born-digital classifier also refuses real layers: dense number tables read
-                # as "excessive spacing" (9 of the 35 convicted held-out pages). Its word floor
-                # still tells a scan with no layer, or only a stamp, from a page that has one.
-                if (
-                    not getattr(ps, "is_born_digital", False)
-                    and len(page.get_text("words")) < BornDigitalDetector.MIN_WORDS_PER_PAGE
+                # The classifier also refuses real layers (9 of the 35 convicted held-out pages), so
+                # a refusal alone does not stop the check; a stamp or an earlier OCR layer does.
+                if not getattr(ps, "is_born_digital", False) and (
+                    not BornDigitalDetector().refused_layer_can_judge(page)
                 ):
                     ps.row_binding_table_count = 0
                     return False

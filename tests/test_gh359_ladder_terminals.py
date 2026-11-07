@@ -20,8 +20,6 @@ from unittest.mock import patch
 
 import fitz
 
-import pytest
-
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
@@ -258,14 +256,6 @@ def _unverified(error: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def _row_binding_check_off(monkeypatch):
-    """These pages' layers do not print the model's values, so #1267's check would mark them.
-    What these tests pin is the ladder or the retry latch, not row binding."""
-    monkeypatch.setattr(UnifiedPipeline, "_run_row_binding_check", lambda *a, **k: False)
-
-
-@pytest.mark.usefixtures("_row_binding_check_off")
 class TestRuling1LastRungPassLow:
     def test_pass_high_vs_pass_low_difference(self, tmp_path: Path) -> None:
         """Same process(), only the last-rung confidence changes."""
@@ -295,7 +285,6 @@ class TestRuling1LastRungPassLow:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_row_binding_check_off")
 class TestRuling2Cli2MayOverruleFail:
     def test_cli2_high_pass_vs_cli2_fail_difference(self, tmp_path: Path) -> None:
         pdf_over = _ruled_pdf(tmp_path / "over", "doc.pdf")
@@ -380,7 +369,6 @@ class TestRuling4NoFindingsPayload:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_row_binding_check_off")
 class TestRuling5MechanicalUnverified:
     def test_incomplete_coverage_does_not_demote(self, tmp_path: Path) -> None:
         """``fully_checked is False`` with no contradiction is NEUTRAL."""
@@ -431,7 +419,6 @@ class TestRuling5MechanicalUnverified:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_row_binding_check_off")
 class TestRuling6ChokePoint:
     def test_skipped_helper_cannot_ship_success_with_assemble_live(self, tmp_path: Path) -> None:
         """An emitted table that never produced a ladder event cannot ship

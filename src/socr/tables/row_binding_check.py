@@ -558,6 +558,12 @@ def _label_cell_empty(row: _Row) -> bool:
     return not _strip_markup(row.label).strip()
 
 
+def _symbol_cells_only(row: _Row) -> bool:
+    """Round 10 (Astra P1): a row with no numbers or words can still print `$` or `%` in its data
+    cells. Those cells count as neither, so such a row must not pass as blank or valueless."""
+    return not row.has_content and any(_strip_markup(c).strip() for c in row.cells_raw)
+
+
 def _same_word(native: str, shipped: str) -> bool:
     n = " ".join(unicodedata.normalize("NFC", native).casefold().split())
     t = " ".join(unicodedata.normalize("NFC", _strip_markup(shipped)).casefold().split())
@@ -882,6 +888,19 @@ def check_row_binding(
     for pos, r in enumerate(rows):
         values = r.cell_texts
         if not r.has_content:
+            if _symbol_cells_only(r):
+                evidence.append(
+                    RowEvidence(
+                        r.line_index,
+                        RowVerdict.UNVERIFIABLE,
+                        "cells hold only symbols, which the check cannot bind",
+                        r.label,
+                        "",
+                        r.cells_raw,
+                        None,
+                    )
+                )
+                continue
             if _label_cell_empty(r):
                 continue  # blank row
             lo = next((a for a in reversed(anchors[:pos]) if a is not None), -1)
@@ -969,6 +988,20 @@ def check_row_binding(
         if not h.is_header:
             continue
         if not h.has_content:
+            if _symbol_cells_only(h):
+                evidence.insert(
+                    0,
+                    RowEvidence(
+                        h.line_index,
+                        RowVerdict.UNVERIFIABLE,
+                        "header-position row: cells hold only symbols, which the check cannot bind",
+                        h.label,
+                        "",
+                        h.cells_raw,
+                        None,
+                    ),
+                )
+                continue
             # Round 6: a header-position row with a label and no values (`| Exports | | | |`) is judged
             # like a valueless body row; it binds only on an exact valueless line and never convicts.
             if not _label_cell_empty(h):

@@ -19,7 +19,20 @@ import pytest
 
 pytest.importorskip("fitz")
 
-from test_gh1267_row_binding_check import GROUP, build_page, md  # noqa: E402
+import fitz  # noqa: E402
+from test_gh1267_row_binding_check import (  # noqa: E402
+    FONT,
+    GROUP,
+    HEIGHT,
+    LABEL_U,
+    LINE_PITCH,
+    V0,
+    VALUE_STEP,
+    VALUE_U0,
+    WIDTH,
+    build_page,
+    md,
+)
 
 from socr.core.born_digital import BornDigitalDetector  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
@@ -436,10 +449,64 @@ def test_a_page_the_classifier_refuses_is_still_withheld_when_its_layer_convicts
     assert len(_events(on, WITHHELD_KIND)) == 1 and _events(off, WITHHELD_KIND) == []
 
 
+def _prior_ocr_scan(path: Path) -> Path:
+    """A real early refusal: an invisible earlier OCR layer, labels swapped, under a page-sized raster
+    with an alpha channel, and enough one-letter noise to fail the classifier's word-length test."""
+    doc = fitz.open()
+    page = doc.new_page(width=WIDTH, height=HEIGHT)
+    raster = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 260), True)
+    raster.clear_with(255)
+    page.insert_image(page.rect, pixmap=raster)
+    swapped = [(GROUP[1][0], GROUP[0][1]), (GROUP[0][0], GROUP[1][1]), *GROUP[2:]]
+    for i, (label, values) in enumerate(swapped):
+        y = V0 + i * LINE_PITCH
+        page.insert_text((LABEL_U, y), label, fontsize=FONT, fontname="helv", render_mode=3)
+        for k, value in enumerate(values):
+            page.insert_text(
+                (VALUE_U0 + k * VALUE_STEP, y), value, fontsize=FONT, fontname="helv", render_mode=3
+            )
+    page.insert_text((40, 600), " ".join("x" * 120), fontsize=6, fontname="helv", render_mode=3)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_an_earlier_ocr_layer_on_a_refused_page_never_judges_a_correct_reading(tmp_path):
+    """Merge gate round 10 (both reviewers). The invisible-text route runs only on the born-digital
+    path, so a refused page does not carry its finding, and this layer convicted a correct table."""
+    pdf = _prior_ocr_scan(tmp_path / "prior_ocr.pdf")
+    detector = BornDigitalDetector()
+    with fitz.open(pdf) as doc:
+        assessment = detector._assess_page(doc[0], 1)
+        # the premises: a real refusal that leaves both prior-OCR findings unset
+        assert assessment.is_born_digital is False
+        assert assessment.invisible_text_over_raster is False
+        assert assessment.prior_ocr_layer is False
+        assert detector._has_invisible_text_over_raster(doc[0]) is True
+    kw = dict(rows=GROUP, rotation=0, pdf=pdf)
+    _, res_on, _, on, _ = _run(tmp_path, check_runs=True, out_name="on", **kw)
+    _, res_off, _, off, _ = _run(tmp_path, check_runs=False, out_name="off", **kw)
+    assert "row_binding" not in _sidecar(on)
+    assert _fragment(on) == _fragment(off)
+    assert "| Real GDP |" in _fragment(on)
+    assert res_on.status == res_off.status
+    assert _sidecar(on)["winning_output"]["failure_mode"] != "table_withheld"
+
+
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_a_refused_page_with_only_a_stamp_on_its_layer_is_not_judged(tmp_path, rotation):
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        [("Confidential", ["1.0", "2.0"])],
+        # at least the classifier's minimum words, under its minimum characters
+        [(str(i), ["1", "2", "3"]) for i in range(4)],
+    ],
+    ids=["few-words", "few-characters"],
+)
+def test_a_refused_page_with_only_a_stamp_on_its_layer_is_not_judged(tmp_path, rotation, stamp):
     """A scan with a stamp has no layer to judge against: a mark would only report the stamp."""
-    stamp = [("Confidential", ["1.0", "2.0"])]
+    layer = build_page(stamp, 0).get_text("text")
+    assert len(layer) < BornDigitalDetector.MIN_CHARS_FOR_TEXT_LAYER
     markdown = md(SHIFTED_ROWS)
     _, _, _, on, pdf = _run(
         tmp_path,

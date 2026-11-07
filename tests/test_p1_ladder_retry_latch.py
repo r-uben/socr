@@ -310,14 +310,6 @@ def _process_run(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def _row_binding_check_off(monkeypatch):
-    """These pages' layers do not print the model's values, so #1267's check would mark them.
-    What these tests pin is the ladder or the retry latch, not row binding."""
-    monkeypatch.setattr(UnifiedPipeline, "_run_row_binding_check", lambda *a, **k: False)
-
-
-@pytest.mark.usefixtures("_row_binding_check_off")
 class TestSingleFileRetryLatch:
     def test_unavailable_then_available_re_judges_the_pending_page(self, tmp_path: Path) -> None:
         """C-then-low-PASS (latching) run first with the rung unreachable, then

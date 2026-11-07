@@ -5123,6 +5123,26 @@ class BornDigitalDetector:
         invisible, total = text_layer_invisible_char_counts(page)
         return invisible * 2 > total
 
+    def refused_layer_can_judge(self, page: fitz.Page) -> bool:
+        """#1267: may a page this classifier refused have its layer used to judge a reading?
+
+        The classifier also refuses real layers: dense number tables read as excessive spacing.
+        Two of its answers are not available after a refusal, so they are asked here. Its own
+        minimums tell a real layer from a stamp, and #961's invisible-text route runs only on the
+        born-digital path, so an earlier OCR layer under a non-opaque raster is not flagged on a
+        refused page. Fails closed: an unreadable page cannot judge.
+        """
+        try:
+            text, _zw, _spaces = clean_native_text(page.get_text("text"))
+            if len(text) < self.MIN_CHARS_FOR_TEXT_LAYER:
+                return False
+            if len(text.split()) < self.MIN_WORDS_PER_PAGE:
+                return False
+            return not self._has_invisible_text_over_raster(page)
+        except Exception:
+            logger.warning("#1267: refused-layer scan failed", exc_info=True)
+            return False
+
     def _read_document_furniture(self, doc) -> None:
         """#1156: read this document's repetition evidence onto the detector, once.
 

@@ -1332,6 +1332,31 @@ def test_symbol_only_labels_are_judged_not_blank():
     assert check_row_binding(words3, None, spurious).outcome is not TableOutcome.BOUND
 
 
+@pytest.mark.parametrize(
+    "header, extra",
+    [
+        ("|  | $ | % |  |", []),
+        ("| Item | $ | % |  |", []),
+        (EMPTY_HEADER, [("", ["$", "%"])]),
+        (EMPTY_HEADER, [("Units", ["$", "%"])]),
+    ],
+    ids=["heading-no-stub", "heading-with-stub", "body-no-stub", "body-with-stub"],
+)
+def test_symbol_only_cells_are_judged_not_skipped(header, extra):
+    """Round 10 (Astra P1): `$` and `%` cells counted as neither numbers nor words, so these rows
+    were skipped and the table came out BOUND with units the layer does not print."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "1.2", "1.3"]) + _set_line(
+        114, ["Imports", "2.1", "2.2", "2.3"]
+    )
+    rows = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
+    assert check_row_binding(words, None, md(rows)).outcome is TableOutcome.BOUND
+    res = check_row_binding(words, None, md([*rows, *extra], header=header))
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    assert [e for e in res.rows if e.verdict is RowVerdict.UNVERIFIABLE]
+
+
 def _hdr(n: int) -> str:
     return "|" + "  |" * n + "\n|" + "---|" * n + "\n"
 
