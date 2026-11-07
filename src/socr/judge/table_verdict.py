@@ -739,6 +739,11 @@ TABLE_ROW_BINDING_UNVERIFIABLE_KIND = "table_row_binding_unverifiable"
 ROW_BINDING_EVENT_KINDS: frozenset[str] = frozenset(
     {TABLE_ROW_BINDING_CONTRADICTED_KIND, TABLE_ROW_BINDING_UNVERIFIABLE_KIND}
 )
+#: #1282: cells whose decimal point the model dropped, restored from the page's own text layer
+#: before the page is finalized (``tables.row_binding_check.propose_point_repairs``).  One event
+#: per repaired table.  Informational: it is NOT a distrust kind and NOT in
+#: ``ROW_BINDING_EVENT_KINDS`` (the check's rollback must never drop it).
+TABLE_POINT_REPAIRED_KIND = "table_point_repaired"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.

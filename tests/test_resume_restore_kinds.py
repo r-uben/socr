@@ -100,6 +100,9 @@ EXPECTED_RESUME_KINDS = frozenset(
         "native_cell_check_verified",
         "table_row_binding_contradicted",
         "table_row_binding_unverifiable",
+        # #1282: emitted by _repair_dropped_points, which a terminal resumed page skips; the
+        # only record of which cells the model read differently from the shipped text.
+        "table_point_repaired",
         "blank_page",
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
@@ -148,4 +151,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # behaviour when every page the lane acts on became MARKED (Argon P0-1).
     # 65 with #1225's unshipped_figure_chart_skeleton.
     # 67 with #1267's two row-binding kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 67
+    # 68 with #1282's table_point_repaired.
+    assert len(EXPECTED_RESUME_KINDS) == 68

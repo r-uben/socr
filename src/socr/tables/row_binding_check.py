@@ -1090,6 +1090,76 @@ def check_row_binding(
 
 
 # ---------------------------------------------------------------------------
+# Shared by the pipeline step and the offline re-finalize tool
+# ---------------------------------------------------------------------------
+
+
+def layer_can_judge_tables(ps, out, page=None, *, native_only: bool = False) -> bool:
+    """The ONE predicate for "the text layer may judge this page's model-read tables" (#1267, #1282).
+
+    Called by ``UnifiedPipeline._run_row_binding_check`` and ``_repair_dropped_points`` and by the
+    offline ``socr-refinalize-point-drops``, so none of them can touch a page another would not.
+    Without *page*: the cheap guards (text present, not a chart asset / failed candidate / native
+    engine, not ``native_only``, and an admissible layer: an old OCR layer never votes, #1156).
+    With *page* (a fitz page): also the layer must be born-digital, or refused for spacing alone and
+    admitted by ``BornDigitalDetector.refused_layer_can_judge`` (the classifier also refuses real
+    layers as excessively spaced: 9 of the 35 convicted held-out pages).  Every other refusal
+    doubts the layer's characters."""
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.state import layer_is_admissible_evidence
+    from socr.pipeline.agentic import is_failed_candidate
+
+    if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
+        return False
+    if native_only or (out.engine or "") == "native":
+        return False
+    if not layer_is_admissible_evidence(ps):
+        return False
+    if page is None:
+        return True
+    return bool(getattr(ps, "is_born_digital", False)) or bool(
+        getattr(ps, "refused_for_spacing_alone", False)
+        and BornDigitalDetector().refused_layer_can_judge(page)
+    )
+
+
+def row_evidence_dicts(result: RowBindingResult) -> list[dict]:
+    """The sidecar/event rows of one table's result: every row that is not BOUND."""
+    return [
+        {
+            "md_line": e.line_index,
+            "verdict": e.verdict.value,
+            "reason": e.reason,
+            "shipped_label": e.shipped_label,
+            "native_label": e.native_label,
+            "values": list(e.values),
+            "native_line": e.native_line,
+        }
+        for e in result.rows
+        if e.verdict is not RowVerdict.BOUND
+    ]
+
+
+def table_payload(
+    page_num: int, table_index: int, outcome: str, rows: list[dict], error: str = ""
+) -> dict:
+    """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``)."""
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    payload = {
+        "table_id": f"p{page_num}-t{table_index}",
+        "table_index": table_index,
+        "outcome": outcome,
+        "counts": counts,
+        "rows": rows,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
+# ---------------------------------------------------------------------------
 # Decimal-point repair (#1282)
 # ---------------------------------------------------------------------------
 
