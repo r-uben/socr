@@ -9587,7 +9587,7 @@ class UnifiedPipeline:
             start = blocks[table_index].start
             rows = [
                 {
-                    "md_line": start + r.md_line,
+                    "table_line": r.md_line,  # within the table block: stable across the marks above the page
                     "label": r.label,
                     "col": r.col,
                     "old": r.old,
